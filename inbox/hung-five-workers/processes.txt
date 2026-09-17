@@ -1,0 +1,61 @@
+# captured 2026-09-17T01:24:00Z (local 22:24 -03)
+
+## arbos processes (ps -o pid,ppid,lstart,stat,%cpu,rss,command; no env)
+ 1883     1 Wed Sep 16 07:04:42 2026     S      4.9  39184 /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Code2
+88260     1 Wed Sep 16 22:19:53 2026     S      0.9  67072 /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/.arbos
+88261     1 Wed Sep 16 22:19:53 2026     S      0.4  33712 /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Code/Agent
+88278     1 Wed Sep 16 22:20:01 2026     R     23.4 228496 /Applications/Arbos.app/Contents/MacOS/Arbos
+88697 88278 Wed Sep 16 22:21:55 2026     S      0.4  49904 /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/ArbosClaw
+95992     1 Wed Sep 16 05:55:55 2026     S      0.7  19104 /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Bdisco
+
+## children of the Code2 kernel (pid 1883) — model/tool processes
+(count: 0)
+
+## python jobs from the workers (pids in jobs/j1/meta.json)
+worker 1 job pid 88405: Z    <defunct>
+worker 2 job pid 88376: Z    <defunct>
+worker 3 job pid 88442: Z    <defunct>
+worker 4 job pid 88420: Z    <defunct>
+worker 5 job pid 88375: Z    <defunct>
+
+## all python3 processes with 'random' in the command
+none
+
+## which binary each kernel is actually executing (lsof txt)
+pid 1883: /Applications/.Arbos.app.arbos-old/Contents/MacOS/arbos-kernel 
+pid 88260: /Applications/.Arbos.app.arbos-old/Contents/MacOS/arbos-kernel 
+pid 88261: /Applications/.Arbos.app.arbos-old/Contents/MacOS/arbos-kernel 
+pid 88697: /Applications/Arbos.app/Contents/MacOS/arbos-kernel 
+pid 95992: /Applications/.Arbos.app.arbos-old/Contents/MacOS/arbos-kernel 
+
+## kernel binary on disk vs running
+total 141416
+drwx------  4 const  staff       128 Sep 16 21:29:05 2026 .
+drwx------  7 const  staff       224 Sep 16 21:29:41 2026 ..
+-rwx------  1 const  staff  50181808 Sep 16 21:29:05 2026 Arbos
+-rwx------  1 const  staff  22220112 Sep 16 21:29:05 2026 arbos-kernel
+arbos-kernel 0.2.0 5017ef45404d protocol 1
+Info.plist CFBundleVersion: 1185
+
+## Code2 kernel attach socket
+COMMAND PID TYPE NODE NAME 
+arbos-ker 1883 IPv4 TCP 127.0.0.1:61104 (LISTEN)
+
+## open network connections of the Code2 kernel (model calls in flight?)
+
+## the bundle the four old kernels run from
+drwxr-xr-x   2 const  admin    64 Sep 16 22:20 .Arbos.app.arbos-new
+drwx------@  3 const  staff    96 Sep 16 21:28 Arbos.app
+Print: Entry, "CFBundleVersion", Does Not Exist
+File Doesn't Exist, Will Create: /Applications/.Arbos.app.arbos-old/Contents/Info.plist
+(eval):2: no such file or directory: /Applications/.Arbos.app.arbos-old/Contents/MacOS/arbos-kernel
+
+## running app binary (pid 88278) — which file, and its build stamp
+/Applications/Arbos.app/Contents/MacOS/Arbos
+
+## job zombies: parent of the defunct python pids
+88405  1883 Z   
+88376  1883 Z   
+88442  1883 Z   
+88420  1883 Z   
+88375  1883 Z   

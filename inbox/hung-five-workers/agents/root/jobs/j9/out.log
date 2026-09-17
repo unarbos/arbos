@@ -1,0 +1,7 @@
+/Users/const/.bash_profile: line 14: basilica: command not found
+[64, 34, 25, 12, 22, 11, 90]                  -> [11, 12, 22, 25, 34, 64, 90]
+[5, 1, 4, 2, 8]                               -> [1, 2, 4, 5, 8]
+[3, -1, 0, -7, 3, 2]                          -> [-7, -1, 0, 2, 3, 3]
+[1, 2, 3, 4, 5]                               -> [1, 2, 3, 4, 5]
+[]                                            -> []
+['pear', 'apple', 'fig', 'banana']            -> ['apple', 'banana', 'fig', 'pear']

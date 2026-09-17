@@ -1,0 +1,1 @@
+{"command":"python3 -c \"import random; print(random.randint(0,100))\"","cwd":"/Users/const/Code2","pid":88375,"started_ms":1789608049907}

@@ -1,0 +1,21 @@
+Walking /Users/const/Code2...
+arbos-kernel serve /Users/const/Code2 at 127.0.0.1:61104
+Found 133 text files (1 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Skipped 16 additional binary files (detected by content)
+Writing index (70322 trigrams, 117 files, 0 spill segment(s))...
+Index built successfully at /Users/const/.cache/arbos/tgrep/137cdd853742f4b7
+tools root: 2 calls, wall 1200289ms, sum 1200288ms, speedup 1.0x
+tools root: 2 calls, wall 1200112ms, sum 1200112ms, speedup 1.0x
+tools root: 2 calls, wall 7ms, sum 11ms, speedup 1.6x
+tools write-and-run-bubble-sort: 3 calls, wall 601239ms, sum 600211ms, speedup 1.0x
+tools write-and-run-bubble-sort: 2 calls, wall 5981ms, sum 99ms, speedup 0.0x
+tools simple-bubble-sort: 2 calls, wall 4805ms, sum 81ms, speedup 0.0x
+tools simple-bubble-sort: 2 calls, wall 600437ms, sum 600070ms, speedup 1.0x
+tools write-and-run-bubble-sort: 2 calls, wall 600522ms, sum 600015ms, speedup 1.0x
+tools write-and-run-bubble-sort: 2 calls, wall 5076ms, sum 3ms, speedup 0.0x
+tools root: 2 calls, wall 4ms, sum 4ms, speedup 1.0x
+frame_rejected: unknown frame type "feedback"
+frame_rejected: unknown frame type "feedback"
+frame_rejected: unknown frame type "feedback"
+frame_rejected: unknown frame type "feedback"

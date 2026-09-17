@@ -1,0 +1,261 @@
+{"ts":1789607909046,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789607909048,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607911634,"level":"warn","event":"frame_rejected","detail":"unknown frame type \"feedback\""}
+{"ts":1789607918086,"level":"warn","event":"frame_rejected","detail":"unknown frame type \"feedback\""}
+{"ts":1789607939050,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789607939053,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607969056,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789607969057,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991028,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789607991029,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991135,"level":"info","event":"attach_open","detail":"clients=3 who=local role=owner"}
+{"ts":1789607991137,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991238,"level":"info","event":"attach_open","detail":"clients=4 who=local role=owner"}
+{"ts":1789607991240,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991345,"level":"info","event":"attach_open","detail":"clients=5 who=local role=owner"}
+{"ts":1789607991346,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991444,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789607991446,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991551,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789607991553,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991655,"level":"info","event":"attach_open","detail":"clients=8 who=local role=owner"}
+{"ts":1789607991656,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991761,"level":"info","event":"attach_open","detail":"clients=9 who=local role=owner"}
+{"ts":1789607991762,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991867,"level":"info","event":"attach_open","detail":"clients=10 who=local role=owner"}
+{"ts":1789607991869,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607991973,"level":"info","event":"attach_open","detail":"clients=11 who=local role=owner"}
+{"ts":1789607991974,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992076,"level":"info","event":"attach_open","detail":"clients=12 who=local role=owner"}
+{"ts":1789607992078,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992182,"level":"info","event":"attach_open","detail":"clients=13 who=local role=owner"}
+{"ts":1789607992184,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992289,"level":"info","event":"attach_open","detail":"clients=14 who=local role=owner"}
+{"ts":1789607992291,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992391,"level":"info","event":"attach_open","detail":"clients=15 who=local role=owner"}
+{"ts":1789607992393,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992498,"level":"info","event":"attach_open","detail":"clients=16 who=local role=owner"}
+{"ts":1789607992499,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992600,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789607992601,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992707,"level":"info","event":"attach_open","detail":"clients=3 who=local role=owner"}
+{"ts":1789607992708,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992809,"level":"info","event":"attach_open","detail":"clients=4 who=local role=owner"}
+{"ts":1789607992811,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607992913,"level":"info","event":"attach_open","detail":"clients=5 who=local role=owner"}
+{"ts":1789607992915,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993019,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789607993020,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993119,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789607993120,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993224,"level":"info","event":"attach_open","detail":"clients=8 who=local role=owner"}
+{"ts":1789607993225,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993330,"level":"info","event":"attach_open","detail":"clients=9 who=local role=owner"}
+{"ts":1789607993332,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993436,"level":"info","event":"attach_open","detail":"clients=10 who=local role=owner"}
+{"ts":1789607993438,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993543,"level":"info","event":"attach_open","detail":"clients=11 who=local role=owner"}
+{"ts":1789607993544,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993647,"level":"info","event":"attach_open","detail":"clients=12 who=local role=owner"}
+{"ts":1789607993648,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993752,"level":"info","event":"attach_open","detail":"clients=13 who=local role=owner"}
+{"ts":1789607993753,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993858,"level":"info","event":"attach_open","detail":"clients=14 who=local role=owner"}
+{"ts":1789607993859,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607993964,"level":"info","event":"attach_open","detail":"clients=15 who=local role=owner"}
+{"ts":1789607993964,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994070,"level":"info","event":"attach_open","detail":"clients=16 who=local role=owner"}
+{"ts":1789607994071,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994174,"level":"info","event":"attach_open","detail":"clients=17 who=local role=owner"}
+{"ts":1789607994175,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994279,"level":"info","event":"attach_open","detail":"clients=18 who=local role=owner"}
+{"ts":1789607994281,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994384,"level":"info","event":"attach_open","detail":"clients=19 who=local role=owner"}
+{"ts":1789607994385,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994490,"level":"info","event":"attach_open","detail":"clients=20 who=local role=owner"}
+{"ts":1789607994491,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994591,"level":"info","event":"attach_open","detail":"clients=21 who=local role=owner"}
+{"ts":1789607994592,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994694,"level":"info","event":"attach_open","detail":"clients=22 who=local role=owner"}
+{"ts":1789607994696,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994802,"level":"info","event":"attach_open","detail":"clients=23 who=local role=owner"}
+{"ts":1789607994804,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607994903,"level":"info","event":"attach_open","detail":"clients=24 who=local role=owner"}
+{"ts":1789607994905,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995006,"level":"info","event":"attach_open","detail":"clients=25 who=local role=owner"}
+{"ts":1789607995007,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995109,"level":"info","event":"attach_open","detail":"clients=26 who=local role=owner"}
+{"ts":1789607995110,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995209,"level":"info","event":"attach_open","detail":"clients=27 who=local role=owner"}
+{"ts":1789607995210,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995315,"level":"info","event":"attach_open","detail":"clients=28 who=local role=owner"}
+{"ts":1789607995316,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995420,"level":"info","event":"attach_open","detail":"clients=29 who=local role=owner"}
+{"ts":1789607995421,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995524,"level":"info","event":"attach_open","detail":"clients=30 who=local role=owner"}
+{"ts":1789607995526,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995631,"level":"info","event":"attach_open","detail":"clients=31 who=local role=owner"}
+{"ts":1789607995632,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995738,"level":"info","event":"attach_open","detail":"clients=32 who=local role=owner"}
+{"ts":1789607995739,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995842,"level":"info","event":"attach_open","detail":"clients=33 who=local role=owner"}
+{"ts":1789607995843,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607995948,"level":"info","event":"attach_open","detail":"clients=34 who=local role=owner"}
+{"ts":1789607995950,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996054,"level":"info","event":"attach_open","detail":"clients=35 who=local role=owner"}
+{"ts":1789607996058,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996161,"level":"info","event":"attach_open","detail":"clients=36 who=local role=owner"}
+{"ts":1789607996162,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996263,"level":"info","event":"attach_open","detail":"clients=37 who=local role=owner"}
+{"ts":1789607996264,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996372,"level":"info","event":"attach_open","detail":"clients=38 who=local role=owner"}
+{"ts":1789607996373,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996475,"level":"info","event":"attach_open","detail":"clients=39 who=local role=owner"}
+{"ts":1789607996476,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996582,"level":"info","event":"attach_open","detail":"clients=40 who=local role=owner"}
+{"ts":1789607996583,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996683,"level":"info","event":"attach_open","detail":"clients=41 who=local role=owner"}
+{"ts":1789607996685,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996788,"level":"info","event":"attach_open","detail":"clients=42 who=local role=owner"}
+{"ts":1789607996789,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607996894,"level":"info","event":"attach_open","detail":"clients=43 who=local role=owner"}
+{"ts":1789607996895,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997001,"level":"info","event":"attach_open","detail":"clients=44 who=local role=owner"}
+{"ts":1789607997002,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997104,"level":"info","event":"attach_open","detail":"clients=45 who=local role=owner"}
+{"ts":1789607997106,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997209,"level":"info","event":"attach_open","detail":"clients=46 who=local role=owner"}
+{"ts":1789607997211,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997310,"level":"info","event":"attach_open","detail":"clients=47 who=local role=owner"}
+{"ts":1789607997311,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997411,"level":"info","event":"attach_open","detail":"clients=48 who=local role=owner"}
+{"ts":1789607997412,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997514,"level":"info","event":"attach_open","detail":"clients=49 who=local role=owner"}
+{"ts":1789607997515,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997616,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789607997617,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997720,"level":"info","event":"attach_open","detail":"clients=3 who=local role=owner"}
+{"ts":1789607997721,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997827,"level":"info","event":"attach_open","detail":"clients=4 who=local role=owner"}
+{"ts":1789607997828,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607997929,"level":"info","event":"attach_open","detail":"clients=5 who=local role=owner"}
+{"ts":1789607997930,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998033,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789607998034,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998140,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789607998142,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998245,"level":"info","event":"attach_open","detail":"clients=8 who=local role=owner"}
+{"ts":1789607998246,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998352,"level":"info","event":"attach_open","detail":"clients=9 who=local role=owner"}
+{"ts":1789607998354,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998457,"level":"info","event":"attach_open","detail":"clients=10 who=local role=owner"}
+{"ts":1789607998458,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998561,"level":"info","event":"attach_open","detail":"clients=11 who=local role=owner"}
+{"ts":1789607998562,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998665,"level":"info","event":"attach_open","detail":"clients=12 who=local role=owner"}
+{"ts":1789607998666,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998770,"level":"info","event":"attach_open","detail":"clients=13 who=local role=owner"}
+{"ts":1789607998772,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998870,"level":"info","event":"attach_open","detail":"clients=14 who=local role=owner"}
+{"ts":1789607998871,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607998974,"level":"info","event":"attach_open","detail":"clients=15 who=local role=owner"}
+{"ts":1789607998975,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999055,"level":"info","event":"attach_open","detail":"clients=16 who=local role=owner"}
+{"ts":1789607999056,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999078,"level":"info","event":"attach_open","detail":"clients=17 who=local role=owner"}
+{"ts":1789607999079,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999183,"level":"info","event":"attach_open","detail":"clients=18 who=local role=owner"}
+{"ts":1789607999184,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999288,"level":"info","event":"attach_open","detail":"clients=19 who=local role=owner"}
+{"ts":1789607999289,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999389,"level":"info","event":"attach_open","detail":"clients=20 who=local role=owner"}
+{"ts":1789607999390,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999495,"level":"info","event":"attach_open","detail":"clients=21 who=local role=owner"}
+{"ts":1789607999495,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999598,"level":"info","event":"attach_open","detail":"clients=22 who=local role=owner"}
+{"ts":1789607999599,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999701,"level":"info","event":"attach_open","detail":"clients=23 who=local role=owner"}
+{"ts":1789607999702,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999803,"level":"info","event":"attach_open","detail":"clients=24 who=local role=owner"}
+{"ts":1789607999804,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789607999905,"level":"info","event":"attach_open","detail":"clients=25 who=local role=owner"}
+{"ts":1789607999906,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000009,"level":"info","event":"attach_open","detail":"clients=26 who=local role=owner"}
+{"ts":1789608000010,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000110,"level":"info","event":"attach_open","detail":"clients=27 who=local role=owner"}
+{"ts":1789608000110,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000215,"level":"info","event":"attach_open","detail":"clients=28 who=local role=owner"}
+{"ts":1789608000215,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000320,"level":"info","event":"attach_open","detail":"clients=29 who=local role=owner"}
+{"ts":1789608000320,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000423,"level":"info","event":"attach_open","detail":"clients=30 who=local role=owner"}
+{"ts":1789608000425,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000529,"level":"info","event":"attach_open","detail":"clients=31 who=local role=owner"}
+{"ts":1789608000530,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000634,"level":"info","event":"attach_open","detail":"clients=32 who=local role=owner"}
+{"ts":1789608000634,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000735,"level":"info","event":"attach_open","detail":"clients=33 who=local role=owner"}
+{"ts":1789608000736,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608000841,"level":"info","event":"attach_open","detail":"clients=34 who=local role=owner"}
+{"ts":1789608000842,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608001020,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608002147,"level":"info","event":"attach_open","detail":"clients=35 who=local role=owner"}
+{"ts":1789608002148,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608002150,"level":"info","event":"attach_open","detail":"clients=36 who=local role=owner"}
+{"ts":1789608002150,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608002250,"level":"info","event":"attach_open","detail":"clients=37 who=local role=owner"}
+{"ts":1789608002251,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608002397,"level":"info","event":"attach_open","detail":"clients=38 who=local role=owner"}
+{"ts":1789608011351,"level":"info","event":"turn_start","agent":"root","detail":"wake=user"}
+{"ts":1789608011411,"level":"info","event":"prompt_size","agent":"root","detail":"model=inception/mercury-2.5 system=4522 tools=6293 conversation=4690 total=15505 (estimated tokens)"}
+{"ts":1789608013674,"level":"info","event":"turn_end","agent":"root","detail":"2.3s"}
+{"ts":1789608013791,"level":"info","event":"snapshot","detail":"bbc1b6516ad2 root turn L85: Hey! The bubble sort is done and tested. What's next?"}
+{"ts":1789608015022,"level":"warn","event":"frame_rejected","detail":"unknown frame type \"feedback\""}
+{"ts":1789608019330,"level":"warn","event":"frame_rejected","detail":"unknown frame type \"feedback\""}
+{"ts":1789608032150,"level":"info","event":"attach_open","detail":"clients=2 who=local role=owner"}
+{"ts":1789608032151,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608042593,"level":"info","event":"turn_start","agent":"root","detail":"wake=user"}
+{"ts":1789608042652,"level":"info","event":"prompt_size","agent":"root","detail":"model=inception/mercury-2.5 system=4522 tools=6293 conversation=4724 total=15539 (estimated tokens)"}
+{"ts":1789608044865,"level":"info","event":"turn_start","agent":"random-number-1","detail":"wake=plan"}
+{"ts":1789608044904,"level":"info","event":"prompt_size","agent":"random-number-1","detail":"model=anthropic/claude-fable-5.1 system=2872 tools=6164 conversation=235 total=9271 (estimated tokens)"}
+{"ts":1789608044905,"level":"info","event":"turn_start","agent":"random-number-2","detail":"wake=plan"}
+{"ts":1789608044906,"level":"info","event":"turn_start","agent":"random-number-3","detail":"wake=plan"}
+{"ts":1789608044927,"level":"info","event":"prompt_size","agent":"random-number-2","detail":"model=anthropic/claude-fable-5.1 system=2893 tools=6164 conversation=235 total=9292 (estimated tokens)"}
+{"ts":1789608044931,"level":"info","event":"prompt_size","agent":"random-number-3","detail":"model=anthropic/claude-fable-5.1 system=2893 tools=6164 conversation=235 total=9292 (estimated tokens)"}
+{"ts":1789608045277,"level":"info","event":"turn_start","agent":"random-number-4","detail":"wake=plan"}
+{"ts":1789608045282,"level":"info","event":"turn_start","agent":"random-number-5","detail":"wake=plan"}
+{"ts":1789608045315,"level":"info","event":"prompt_size","agent":"random-number-4","detail":"model=anthropic/claude-fable-5.1 system=2915 tools=6164 conversation=235 total=9314 (estimated tokens)"}
+{"ts":1789608045316,"level":"info","event":"prompt_size","agent":"random-number-5","detail":"model=anthropic/claude-fable-5.1 system=2915 tools=6164 conversation=235 total=9314 (estimated tokens)"}
+{"ts":1789608045555,"level":"info","event":"attach_open","detail":"clients=4 who=local role=owner"}
+{"ts":1789608045556,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608045557,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789608045557,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789608045557,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789608045557,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608045558,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608045558,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608045558,"level":"info","event":"attach_open","detail":"clients=6 who=local role=owner"}
+{"ts":1789608045559,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608045808,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608045808,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608045809,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608045810,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608045812,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608062158,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608062159,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608092161,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608092162,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608122166,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608122168,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608148490,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608148491,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608148491,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608148491,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608148491,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608148491,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608152171,"level":"info","event":"attach_open","detail":"clients=7 who=local role=owner"}
+{"ts":1789608152172,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608182174,"level":"info","event":"attach_open","detail":"clients=1 who=local role=owner"}
+{"ts":1789608182175,"level":"info","event":"attach_close","detail":"who=local"}
+{"ts":1789608212178,"level":"info","event":"attach_open","detail":"clients=1 who=local role=owner"}
+{"ts":1789608212180,"level":"info","event":"attach_close","detail":"who=local"}
