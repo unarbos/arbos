@@ -2462,6 +2462,13 @@ impl Arbos {
         draft: &crate::feedback::Draft,
         cx: &mut Context<Self>,
     ) {
+        // The host as well as the path: a remote place's path is not a local
+        // path, and staging a report inside one is what stranded his.
+        let host = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .and_then(|project| project.host.clone());
         let Some(place) = self
             .workspace
             .read(cx)
@@ -2475,7 +2482,13 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let written = match crate::feedback::write(&place, draft, &id, arbos_core::now_ms()) {
+        let written = match crate::feedback::write(
+            &place,
+            host.as_deref(),
+            draft,
+            &id,
+            arbos_core::now_ms(),
+        ) {
             Ok(written) => written,
             Err(e) => {
                 // Every outbox refused it. His words are still in the field and
