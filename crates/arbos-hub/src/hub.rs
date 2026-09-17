@@ -459,8 +459,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         return;
     }
     if protocol > arbos_core::hub::HUB_PROTOCOL {
-        eprintln!(
-            "hub: {machine} speaks hub protocol {protocol}, this hub {}; carrying on",
+        log!(
+            "{machine} speaks hub protocol {protocol}, this hub {}; carrying on",
             arbos_core::hub::HUB_PROTOCOL
         );
     }
@@ -549,8 +549,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         g.generation += 1;
         reg
     };
-    eprintln!(
-        "hub: registered {} {} project={} from {peer}",
+    log!(
+        "registered {} {} project={} from {peer}",
         kind.as_str(),
         machine,
         project.as_deref().unwrap_or("-")
@@ -618,7 +618,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                             tokio::spawn(async move {
                                 for d in hub2.push.notify(&address, &user, &notice).await {
                                     if d.status != 200 {
-                                        eprintln!("hub: push {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
+                                        log!("push {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
                                     }
                                 }
                             });
@@ -632,7 +632,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                             tokio::spawn(async move {
                                 for d in hub2.push.seen(&address, &user, unseen).await {
                                     if d.status != 200 {
-                                        eprintln!("hub: badge {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
+                                        log!("badge {address} → {}…: {} {}", &d.token[..d.token.len().min(8)], d.status, d.detail.trim());
                                     }
                                 }
                             });
@@ -681,8 +681,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         }
         g.generation += 1;
     }
-    eprintln!(
-        "hub: unregistered {} {} project={}",
+    log!(
+        "unregistered {} {} project={}",
         kind.as_str(),
         machine,
         project.as_deref().unwrap_or("-")
@@ -723,8 +723,8 @@ pub async fn attach(
     );
     if access == "none" {
         let (name, _) = who.as_client();
-        eprintln!(
-            "hub: {name} refused on {}/{}: the project is not shared with them",
+        log!(
+            "{name} refused on {}/{}: the project is not shared with them",
             kernel.machine,
             kernel.project.as_deref().unwrap_or("-")
         );
@@ -733,7 +733,7 @@ pub async fn attach(
             &Frame::Error {
                 agent: None,
                 detail: format!(
-                    "hub: no access to {}/{}: the project is not shared with you",
+                    "no access to {}/{}: the project is not shared with you",
                     kernel.machine,
                     kernel.project.as_deref().unwrap_or("-")
                 ),
@@ -760,8 +760,8 @@ async fn proxy(
     let (name, _) = who.as_client();
     let role = role.to_string();
     let chan = kernel.open(to_client, &name, &role);
-    eprintln!(
-        "hub: {name} ({role}) attached to {}/{} chan {chan}",
+    log!(
+        "{name} ({role}) attached to {}/{} chan {chan}",
         kernel.machine,
         kernel.project.as_deref().unwrap_or("-")
     );
@@ -825,7 +825,7 @@ async fn proxy(
         }
     }
     kernel.close(chan, "client left");
-    eprintln!("hub: {name} left {} chan {chan}", kernel.machine);
+    log!("{name} left {} chan {chan}", kernel.machine);
 }
 
 /// A client's line as the JSON the kernel will read: an object with a
@@ -903,8 +903,8 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     let (tx, rx) = oneshot::channel();
     hub.inner.lock().unwrap().claims.insert(id.clone(), tx);
     let from = if from.is_empty() { name.clone() } else { from };
-    eprintln!(
-        "hub: {name} claims {} for {project} (isolate={isolate}) id {id}",
+    log!(
+        "{name} claims {} for {project} (isolate={isolate}) id {id}",
         worker.machine
     );
     if !worker.send(HubFrame::Claim {

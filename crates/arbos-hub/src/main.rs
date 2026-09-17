@@ -3,6 +3,21 @@
 //! message by that name. Listens on loopback; a tunnel or reverse proxy
 //! in front does TLS.
 
+/// One line on stderr, stamped with the moment it happened
+/// (`2026-09-17T04:46:44Z hub: …`). Without the stamp the log could list a
+/// kernel leaving and coming back but never say when, which is what made the
+/// 2026-09-17 outage windows unmeasurable. Defined before the modules so they
+/// can use it.
+macro_rules! log {
+    ($($arg:tt)*) => {
+        eprintln!(
+            "{} hub: {}",
+            arbos_core::inbox::rfc3339(arbos_core::now_ms()),
+            format_args!($($arg)*)
+        )
+    };
+}
+
 mod auth;
 mod http;
 mod hub;
@@ -65,8 +80,8 @@ async fn serve(auth: Arc<auth::Auth>, bind: String, config_dir: PathBuf) -> Resu
     } else {
         // Loud, and the hub serves anyway: a wrong key path must not take
         // the hub down for everyone. GET /push says the same.
-        eprintln!(
-            "arbos-hub: push disabled — {} ({} device(s) registered and waiting)",
+        log!(
+            "push disabled — {} ({} device(s) registered and waiting)",
             push.reason().unwrap_or("no key"),
             push.device_count()
         );
@@ -88,7 +103,7 @@ async fn serve(auth: Arc<auth::Auth>, bind: String, config_dir: PathBuf) -> Resu
         let hub = Arc::clone(&hub);
         tokio::spawn(async move {
             if let Err(e) = handle(auth, hub, stream, peer.to_string()).await {
-                eprintln!("hub: {peer}: {e:#}");
+                log!("{peer}: {e:#}");
             }
         });
     }
@@ -115,7 +130,7 @@ async fn handle(
     let who = auth::token_from_request(&req.query, req.header("authorization"))
         .and_then(|t| auth.authenticate(&t));
     let Some(who) = who else {
-        eprintln!("hub: {peer}: refused {} (no or unknown token)", req.path);
+        log!("{peer}: refused {} (no or unknown token)", req.path);
         if req.wants_websocket() {
             // Finish the upgrade so the peer reads a reason, then close.
             let mut ws = http::upgrade(stream, &req).await?;
