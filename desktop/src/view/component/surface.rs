@@ -7,6 +7,7 @@
 use crate::{
     kernel,
     model::{
+        panel::OpenedBy,
         place::Place,
         surface::{Bind, Surface},
     },
@@ -109,10 +110,14 @@ pub fn state_word(surface: &Surface, link: Link) -> Option<&'static str> {
         // claiming to be the person's: a label that is wrong from birth is
         // worse than no label. A page of the person's own needs a frame the
         // kernel does not have yet (`docs/side-panels-design.md`, handover 2).
-        Bind::Terminal { .. } => match (surface.owner, link) {
+        // Whose shell: read from who asked, which the kernel's board frame
+        // says. `owner` cannot answer it — a shell the person asked for still
+        // docks under an agent, so keying on that labelled his own terminal
+        // "agent's" the moment the tile could open one.
+        Bind::Terminal { .. } => match (surface.by, link) {
             (_, Link::Lost) => Some("link lost"),
-            (Some(_), Link::Live) => Some("agent's"),
-            (None, Link::Live) => Some("yours"),
+            (OpenedBy::User, Link::Live) => Some("yours"),
+            (OpenedBy::Agent, Link::Live) => Some("agent's"),
         },
         Bind::Browser { .. } | Bind::Url(_) | Bind::Path(_) | Bind::Empty => None,
     }

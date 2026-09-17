@@ -3162,6 +3162,11 @@ impl Workspace {
         // asked for this in prose or the agent needed it for itself, so the
         // window does not guess.
         let by_user = by == OpenedBy::User;
+        // Who asked is a fact about the row, not only about this call: the
+        // terminal's own label reads it.
+        if let Some(surface) = self.projects[ix].surface_mut(id) {
+            surface.by = by;
+        }
         self.projects[ix].panel.add_surface(id, by_user, by_user);
         self.push_snapshot(ix);
         cx.notify();
