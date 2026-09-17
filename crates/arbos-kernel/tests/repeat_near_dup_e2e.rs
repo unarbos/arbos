@@ -73,9 +73,13 @@ fn a_reworded_final_reply_that_repeats_this_turn_is_not_said_again() {
     let _ = k.child.kill();
 }
 
+// The worker pauses before reporting, so its report lands after root's
+// turn and opens the done wake this test is about; answering at once, it
+// folded into root's running turn and no done turn came.
 const REPLIES_DONE: &str = concat!(
     "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"first\",\"task\":\"say sentence one\"}}]}\n",
     "{\"agent\":\"root\",\"content\":\"I have started the worker on the sentence; it will report back here when it is finished.\"}\n",
+    "{\"agent\":\"first\",\"content\":\"pausing\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 3\",\"description\":\"Wait a moment\"}}]}\n",
     "{\"agent\":\"first\",\"content\":\"Sentence one.\"}\n",
     "{\"agent\":\"root\",\"content\":\"I have started the worker on the sentence — it will report back here when it has finished.\"}\n",
 );
