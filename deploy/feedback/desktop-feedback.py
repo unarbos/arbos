@@ -328,7 +328,7 @@ def take_one(
     # must not be spent on a report that was not taken — waiting twice used to
     # make the first report `2026-09-16-3`.
     shot = None
-    if report.get("included", {}).get("screenshot"):
+    if (report.get("included") or {}).get("screenshot"):
         shot = fetch_screenshot(src, report_id)
         if shot is None:
             waited = state["waiting"].get(report_id, 0) + 1
@@ -378,8 +378,8 @@ def take_one(
         "sent_ms": sent_ms,
     }
 
-    included = report.get("included", {})
-    chosen = report.get("chose", included)
+    included = (report.get("included") or {})
+    chosen = (report.get("chose") or included)
     kept = ", ".join(k for k, v in sorted(included.items()) if v) or "words only"
     # What he took out, and what went missing although he kept it. The second
     # is a fault worth chasing; the first is none of the loop's business.
@@ -434,7 +434,7 @@ def fetch_screenshot(src: Transport, report_id: str) -> Optional[tuple[bytes, st
 
 
 def build_label(report: dict) -> str:
-    app = report.get("app", {})
+    app = (report.get("app") or {})
     version = app.get("version", "?")
     build = app.get("build", "?")
     return f"{version} ({build})"
@@ -463,12 +463,12 @@ def plural(n: int, one: str, many: str = "") -> str:
 
 def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     """What a person reads first. The machine-readable form is beside it."""
-    app = report.get("app", {})
+    app = (report.get("app") or {})
     kernel = report.get("kernel") or {}
-    turn = report.get("turn", {})
-    red = report.get("redacted", {})
-    inc = report.get("included", {})
-    chosen = report.get("chose", {})
+    turn = (report.get("turn") or {})
+    red = (report.get("redacted") or {})
+    inc = (report.get("included") or {})
+    chosen = (report.get("chose") or {})
     events = report.get("events") or []
     tools = [e for e in events if e.get("kind") == "tool"]
     failed = [e for e in tools if e.get("error")]
@@ -554,7 +554,7 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     # bundle over, and the app counts what it took from its own additions on the
     # way out; a reader should not have to add them up to know whether anything
     # was in this report that should not have been.
-    out = report.get("redacted_on_the_way_out", {})
+    out = report.get("redacted_on_the_way_out") or {}
     kinds = ("secrets", "tokens", "values", "blocks")
     total = sum(int(red.get(k) or 0) for k in kinds) + sum(int(out.get(k) or 0) for k in kinds)
     if total:
