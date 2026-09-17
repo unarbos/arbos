@@ -4,8 +4,10 @@
 use crate::{
     kernel,
     model::{
+        panel::{Panel, PanelTab},
         permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
+        surface::SurfaceId,
         settings::Settings,
         state::{self, State},
         workspace::{PaneRequest, Reloaded, Workspace},
@@ -57,6 +59,7 @@ actions!(
         ShowPermissions,
         ReportProblem,
         TogglePanel,
+        ZoomPanel,
         ShowChat,
         ShowProject,
         SearchChats,
@@ -102,6 +105,10 @@ const WINDOW_CONTEXT: &str = "ArbosWindow";
 
 /// Claimed on the rename field so `enter` files the name and `escape` drops it.
 const RENAME_CONTEXT: &str = "ArbosSessionName";
+
+/// The side panel's key context. Nothing is bound on it: it exists so the
+/// panel's own focus is a fact the tab chords can read.
+pub(crate) const PANEL_CONTEXT: &str = "ArbosPanel";
 
 fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField> {
     cx.new(|cx| {
@@ -283,6 +290,7 @@ pub fn init(cx: &mut App) {
         // before the window is offered it, and the editor's own `cmd-b` —
         // bold — is not reached while this one is on the bar.
         KeyBinding::new("cmd-b", TogglePanel, None),
+        KeyBinding::new("cmd-\\", ZoomPanel, None),
         // Call the project in front: a full-duplex conversation with its
         // main agent through the speech server. ⇧⌘C again hangs up.
         KeyBinding::new("cmd-shift-c", StartCall, None),
@@ -319,6 +327,11 @@ pub fn init(cx: &mut App) {
         // A context menu closes on Escape wherever the focus rests; the
         // composer forwards its own Escape here when it has nothing to close.
         KeyBinding::new("escape", DismissMenu, Some(WINDOW_CONTEXT)),
+        // And in the side panel, where Escape is one of its three ways back.
+        // An action reaches a handler only through the focused element's own
+        // ancestors, and the panel's focus is not under `WINDOW_CONTEXT`, so
+        // without this line Escape in the drawer went nowhere at all.
+        KeyBinding::new("escape", DismissMenu, Some(PANEL_CONTEXT)),
         KeyBinding::new("enter", CommitName, Some(RENAME_CONTEXT)),
         KeyBinding::new("escape", DismissName, Some(RENAME_CONTEXT)),
     ]);
@@ -694,8 +707,12 @@ pub struct Arbos {
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
     active_terminal: Option<String>,
-    /// Whether the right-hand panel is out. ⌘B folds it away.
-    pub(crate) panel_open: bool,
+    /// The side panel's own focus. Two rows of tabs are on screen and one
+    /// pair of chords drives both — `⌘T`, `⌘⇧{`, `⌘⇧}` act on the panel's
+    /// tabs while this holds the focus and on the window's projects
+    /// otherwise — so which row is lit and which row moves are the same
+    /// fact, read from here.
+    pub(crate) panel_focus: FocusHandle,
     /// The panel's "N archived" row is unfolded: finished workers the
     /// kernel moved to `archive/agents/` are listed, faint.
     pub(crate) archived_open: bool,
@@ -794,18 +811,36 @@ impl Arbos {
                     .any(|surface| surface.terminal_id() == Some(id.as_str()))
             })
         });
-        let active = workspace.active_surface().and_then(|surface| {
-            Some((
-                surface.terminal_id()?.to_owned(),
-                workspace.active_project()?.place(),
-            ))
-        });
+        // Which terminal wants a live pane: the one the side panel is showing,
+        // or the one in the column when a tab has been zoomed there. Before
+        // the drawer existed only the column could hold one, and a terminal
+        // opened into the panel drew "This terminal has no session" for ever.
+        let in_panel = match workspace.panel().map(Panel::active_tab) {
+            Some(PanelTab::Surface(id)) => workspace
+                .active_project()
+                .and_then(|project| project.surface(id))
+                .and_then(|surface| surface.terminal_id())
+                .map(str::to_owned),
+            Some(PanelTab::Project | PanelTab::New(_)) | None => None,
+        };
+        let active = in_panel
+            .or_else(|| {
+                workspace
+                    .active_surface()
+                    .and_then(|surface| surface.terminal_id())
+                    .map(str::to_owned)
+            })
+            .zip(workspace.active_project().map(|project| project.place()));
         let active_id = active.as_ref().map(|(id, _)| id.clone());
+        let zoomed = self.pane == Pane::Surface;
         if let Some((id, place)) = active {
             let terminal = self.terminals.entry(id.clone()).or_insert_with(|| {
                 cx.new(|cx| crate::view::terminal::TerminalPane::new(place, id, cx))
             });
-            if self.active_terminal != active_id {
+            // The column takes the caret with it, since zooming a terminal is
+            // an act of sitting down at it. In the drawer nothing takes the
+            // focus but a click, as everywhere else here.
+            if zoomed && self.active_terminal != active_id {
                 window.focus(&terminal.focus_handle(cx), cx);
             }
         }
@@ -1026,7 +1061,7 @@ impl Arbos {
             notifications_posted: Vec::new(),
             touched: false,
             launched_at: std::time::Instant::now(),
-            panel_open: true,
+            panel_focus: cx.focus_handle(),
             archived_open: false,
             agents_card_open: None,
             composer,
@@ -1291,14 +1326,22 @@ impl Arbos {
         self.focus_composer_after_create(window, cx);
     }
 
-    /// ⌘T: a new tab, which is a project — pick the machine, then the
-    /// folder. Same picker as ⌘O.
+    /// ⌘T: a new tab. Which row of tabs it lands in follows the focus — the
+    /// side panel's when the panel has it, the window's projects otherwise.
+    /// The lit tab row is the one that answers, and it is lit off the same
+    /// focus this reads, so what the chord will do is on screen before it is
+    /// pressed.
     pub(crate) fn new_tab_action(
         &mut self,
         _: &NewTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.panel_focused(window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
+            return;
+        }
         self.open_project_action(&OpenProject, window, cx);
     }
 
@@ -1311,9 +1354,16 @@ impl Arbos {
     }
 
     /// Step to the neighbouring tab, wrapping at either end as a browser
-    /// does. The ring is the strip: the projects in their order, then Settings
-    /// when it is open, because a tab the cycle cannot reach is not a tab.
+    /// does — the side panel's own row when the panel has the focus, and the
+    /// window's strip otherwise. That strip's ring is the projects in their
+    /// order, then Settings when it is open, because a tab the cycle cannot
+    /// reach is not a tab.
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_focused(window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.step_panel_tab(step, cx));
+            return;
+        }
         let projects = self.workspace.read(cx).projects.len();
         // The Settings slot's index, when the strip holds one: past the last
         // project, which is where the strip draws it.
@@ -1472,6 +1522,22 @@ impl Arbos {
             self.dismiss_menu(cx);
             return;
         }
+        // The side panel is the next thing Escape closes: it is the one of
+        // the three ways back that needs no keystroke to be learned first
+        // (the Project page shipped without one, and he told us he could not
+        // close it).
+        if self.panel_focused(window, cx)
+            && self
+                .workspace
+                .read(cx)
+                .panel()
+                .is_some_and(|panel| panel.open)
+        {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.set_panel_open(false, cx));
+            self.focus_composer(window, cx);
+            return;
+        }
         // Nothing to close: Escape leaves the Settings tab, the Project page or
         // a document for the chat, as ⌘1 does. The pane binds `escape` on its
         // own key context as well, and both are wanted: this one answers when
@@ -1509,11 +1575,37 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.select_session(id, cx));
     }
 
-    pub(crate) fn select_surface(
+    /// A click on a surface, wherever it was clicked: it comes to the front
+    /// of the side panel and the drawer opens with it.
+    pub(crate) fn show_surface(
         &mut self,
-        id: crate::model::surface::SurfaceId,
+        id: SurfaceId,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.show_surface(id, true, cx));
+        self.focus_panel(window, cx);
+    }
+
+    /// ⌘\\: the tab in front takes the window, and the same key gives the chat
+    /// back — "let me really work in this one" without a grid to arrange.
+    /// Only a surface can be zoomed; the project tab and an empty tab have
+    /// nothing the column would draw.
+    pub(crate) fn zoom_panel_action(
+        &mut self,
+        _: &ZoomPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane == Pane::Surface {
+            self.show_chat(&ShowChat, window, cx);
+            return;
+        }
+        let Some(PanelTab::Surface(id)) = self.workspace.read(cx).panel().map(Panel::active_tab)
+        else {
+            return;
+        };
         self.show_pane(Pane::Surface, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_surface(id, cx));
@@ -1589,13 +1681,39 @@ impl Arbos {
         });
     }
 
+    /// ⌘B: open or close the side panel of the project in front. Opening it
+    /// gives it the focus, so the tab chords act on its row at once — he
+    /// asked for the drawer, so the drawer is what he is driving.
     pub(crate) fn toggle_panel_action(
         &mut self,
         _: &TogglePanel,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.panel_open = !self.panel_open;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.toggle_panel(cx));
+        let open = self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_some_and(|panel| panel.open);
+        if open {
+            self.focus_panel(window, cx);
+        } else {
+            self.focus_composer(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the side panel holds the focus — which row of tabs `⌘T` and
+    /// `⌘⇧{ }` act on, and which row is drawn lit.
+    pub(crate) fn panel_focused(&self, window: &Window, cx: &App) -> bool {
+        self.panel_focus.contains_focused(window, cx)
+    }
+
+    /// Give the panel the focus. Only a person's own action calls this.
+    pub(crate) fn focus_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.panel_focus, cx);
         cx.notify();
     }
 
@@ -1701,7 +1819,7 @@ impl Arbos {
     }
 
     /// The composer takes the keyboard back, when there is one to take it.
-    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let composer = self
             .workspace
             .read(cx)
@@ -1715,12 +1833,10 @@ impl Arbos {
         self.show_pane(Pane::Project, cx);
     }
 
+    /// ⌘1: the chat, whatever else is open — the way back from the Settings
+    /// tab as much as from the Project page or the side panel, and the one
+    /// that always works.
     pub(crate) fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
-        // ⌘1 and Escape are the way back from the Settings tab as much as from
-        // the Project page. `show_pane` below leaves the tab; it stays in the
-        // strip, where its close mark is, and the composer takes the keyboard
-        // so the next keystroke lands in the chat.
-        let leaving_settings = self.front() == Front::Settings;
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
                 if let Some(focus) = &mut project.focus {
@@ -1729,9 +1845,12 @@ impl Arbos {
             }
         });
         self.show_pane(Pane::Chat, cx);
-        if leaving_settings {
-            self.focus_composer(window, cx);
-        }
+        // The composer takes the keyboard either way, so the next keystroke
+        // lands in the chat: the Settings tab stays in the strip where its
+        // close mark is, and the side panel gives the tab chords back to the
+        // window's own strip. Unconditional because "⌘1 goes to the chat" has
+        // to mean the caret too, or the drawer keeps answering ⌘T.
+        self.focus_composer(window, cx);
     }
 
     /// ⌘, the gear, and the menu item: open the Settings tab on `section`, or
@@ -2550,8 +2669,9 @@ impl Arbos {
         } else if refused.is_some() {
             // The kernel said it does not know the frame, which means it
             // predates it. Certain, not guessed.
-            self.feedback_sheet
-                .update(cx, |sheet, cx| sheet.no_bundle(Unavailable::KernelTooOld, cx));
+            self.feedback_sheet.update(cx, |sheet, cx| {
+                sheet.no_bundle(Unavailable::KernelTooOld, cx)
+            });
         }
     }
 

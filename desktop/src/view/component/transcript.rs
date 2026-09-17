@@ -8,6 +8,7 @@
 use crate::{
     model::{
         attachment::{MessageImage, Prompt, UserMessage},
+        panel::OpenedBy,
         session::{Artifact, ArtifactKind, ChatItem, ChatSession, PlanNode, ToolStatus},
         workspace::Workspace,
     },
@@ -1906,7 +1907,19 @@ fn prose(
                         .trim_start_matches("file://")
                         .trim_start_matches("place:")
                         .to_owned();
-                    workspace.open_shown(id, path, String::new(), "doc".into(), None, None, cx);
+                    // His click on a link in the reply: the person's own route, so it
+                    // fills the side panel's tab and brings it to the front
+                    // (report 2026-09-17-16 was this link doing nothing).
+                    workspace.open_shown(
+                        id,
+                        path,
+                        String::new(),
+                        "doc".into(),
+                        None,
+                        None,
+                        OpenedBy::User,
+                        cx,
+                    );
                 }
                 Some(url) => cx.open_url(&url),
                 None => {}

@@ -12,6 +12,8 @@ use crate::{
     },
 };
 use anyhow::{Result, anyhow};
+pub use arbos_core::wire::Surface as KernelSurface;
+
 use arbos_core::wire::Frame;
 use cacp::{
     Error,
@@ -66,6 +68,10 @@ pub enum Event {
         /// (empty on lines from before the kernel wrote it).
         channel: String,
     },
+    /// What the kernel holds, in answer to `surfaces`: every job, shell and
+    /// page it has, and nothing it does not. A row the window holds that is
+    /// absent here has no process behind it.
+    Surfaces(Vec<KernelSurface>),
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
@@ -690,6 +696,23 @@ impl Session {
         });
     }
 
+    /// Ask for a shell of this person's own: their `$SHELL`, interactive, in
+    /// `cwd`. The kernel answers with a `board` frame carrying `by: user`, so
+    /// the row arrives already knowing whose it is and the drawer opens for it
+    /// (#461).
+    pub fn shell(&self, cwd: Option<String>) {
+        let _ = self.send_frame(&Frame::Shell { owner: None, cwd });
+    }
+
+    /// Ask the kernel what it holds — its jobs, shells and pages, with their
+    /// states. Sent when a connection comes back, because the kernel that
+    /// answers may not be the one that opened those rows: a kernel that died
+    /// is replaced, and the replacement knows nothing of its shells. The
+    /// answer arrives on this connection only.
+    pub fn surfaces(&self, agent: Option<String>) {
+        let _ = self.send_frame(&Frame::Surfaces { agent });
+    }
+
     /// Move a plan node from the window: `cancel`, `run`, `reopen`, `answer`.
     pub fn plan_op(&self, node: u64, op: &str, text: &str) {
         let _ = self.send_frame(&Frame::PlanOp {
@@ -760,6 +783,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                 )))]
             }
         }
+        // Not filtered by agent: the list is the place's, and the connection
+        // it arrives on is the one that asked.
+        Frame::SurfaceList { surfaces, .. } => vec![Event::Surfaces(surfaces)],
         Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
             vec![Event::Working(secs)]
         }
