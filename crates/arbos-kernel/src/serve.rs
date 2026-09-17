@@ -412,6 +412,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let mut exit_code = 0;
     // Consecutive five-second looks that found the store missing.
     let mut store_gone = 0u8;
+    // `binary_gone` said once; re-exec tried at most once a minute.
+    let mut binary_gone_said = false;
+    let mut reexec_backoff_until: i64 = 0;
     if let Some(u) = &until_idle {
         klog::info(
             "until_idle",
@@ -629,6 +632,35 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     }
                 } else {
                     store_gone = 0;
+                }
+                // The binary replaced under this kernel (an update, an
+                // install into the shared PATH): it serves stale code until
+                // something restarts it, and a kernel started detached with
+                // init as its parent (subnet120) has nothing that will.
+                // Under `idle::update_verdict`'s gate — no turn, no
+                // question waiting, no run in flight, no remote child
+                // mid-turn — it execs onto the file at its own path: same
+                // pid, same place lock (flock, released at exec and taken
+                // again by the new image), clients reconnect. An exec that
+                // fails returns, and the old image serves on and says so.
+                if arbos_core::binary_gone() && !binary_gone_said {
+                    binary_gone_said = true;
+                    klog::warn(
+                        "binary_gone",
+                        None,
+                        "this kernel's file was replaced or moved under it; it runs an old image and will restart onto the new one when idle",
+                    );
+                }
+                if binary_gone_said
+                    && arbos_core::binary_gone()
+                    && reexec_backoff_until <= arbos_core::now_ms()
+                    && matches!(
+                        idle::update_verdict_quiet(&hooks, REEXEC_HORIZON_MS),
+                        idle::Verdict::Idle
+                    )
+                {
+                    reexec_backoff_until = arbos_core::now_ms() + REEXEC_RETRY_MS;
+                    reexec_onto_new_binary(&place, &hooks);
                 }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
@@ -2302,6 +2334,66 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
                 _ => (false, "none".into()),
             }
         }
+    }
+}
+
+/// How far ahead the re-exec gate looks for due work (a subscription
+/// about to fire is a reason to wait), and how long between attempts.
+const REEXEC_HORIZON_MS: i64 = 60_000;
+const REEXEC_RETRY_MS: i64 = 60_000;
+
+/// Replace this process with the arbos-kernel now at its own path, same
+/// arguments, same environment. Returns only when the exec failed — the
+/// old image then serves on. Set `ARBOS_NO_REEXEC=1` to keep a kernel on
+/// its old image (a test of the notice alone, or a person who wants to
+/// choose the moment).
+fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
+    if std::env::var_os("ARBOS_NO_REEXEC").is_some() {
+        return;
+    }
+    let chosen = match crate::binary::kernel_binary() {
+        Ok(c) => c,
+        Err(e) => {
+            klog::warn(
+                "reexec_failed",
+                None,
+                format!("no binary to restart onto: {e:#}"),
+            );
+            return;
+        }
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    klog::info(
+        "reexec",
+        None,
+        format!(
+            "restarting onto {} (git {} was serving); clients reconnect",
+            chosen.path.display(),
+            klog::git_sha()
+        ),
+    );
+    let _ = arbos_core::append_event(
+        &Layout::new(place, arbos_core::ROOT_ID).transcript(),
+        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+            text: format!(
+                "The kernel's program file was replaced under it (an update); restarting onto the new build now, nothing in flight. Windows reconnect on their own."
+            ),
+            failed: false,
+        }),
+    );
+    hooks.broadcast(Frame::Error {
+        agent: None,
+        detail: "kernel restarting onto its new build; reconnecting".into(),
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&chosen.path).args(&args).exec();
+        klog::warn(
+            "reexec_failed",
+            None,
+            format!("{}: {err}; the old image serves on", chosen.path.display()),
+        );
     }
 }
 
