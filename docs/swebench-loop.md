@@ -548,9 +548,30 @@ Checked the same afternoon, before any next measurement. Two questions, two answ
 
 G has now been seen twice — once declining a ticket on its upstream history, once overriding a request's explicit statement with its own reading — and gets a name: **the agent argues with the request.** Two cases are not a pattern; they are a candidate, recorded so the third is noticed. Twin and producer together are 14 of 24 out of sample against 25 of 79 in sample — the same shape, on different instances and an older agent. The claim stands, with the same qualifier as before: some of C is consistent-with, not evident.
 
-## Next (cycle 20)
+## Cycle 20 (2026-09-17) — the last three rules landed; the read of whether the step is taken, the line written, and the choice changed
 
-1. A, F and B are not in the contract yet. When they land, the same read: five rollouts each on 11728, 24870, 14182 (A), 13236 (F), 14629 (B), with the same first question — could the old choice still have been made?
-2. The G candidate: if a third case appears in any read, it becomes a pattern and gets a rule of its own; until then it is a note.
-3. #477 should merge before the next measured run of any kind; from here the loop's run scripts pass `kernel-sha` and a run that cannot prove its kernel does not start.
-4. Old regression 20 per-base check stays, band ≥ 8 of 40, for a 20-point collapse only.
+**Conditions.** A (the twin), F (the checkout decides the stage) and B (producer, not consumer) reached `main` in 0245425e and 7bf12e68, each written with a two-part mark: a visible step (a grep for the twin; a version read; the sibling opened) and a line in the reply ("twin: none found (grepped …)" / "checkout is at <version>, so I implemented <step>" / "producer: <Class>.<attr> added the way <Sibling> has it"). Kernel `2c8d8791f6af` = `main` head with #477 in — built in the loop's worktree, named by its sha, read-only, and proving its label in every artifact. Network cut, egress 0.0 on all 25, sweep clean. Pre-registered as a read ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-20-preregistration.md)): five rollouts on each carrying instance, three questions per rollout. $13.52. Twenty-three of 25 graded solved — reported, not the finding.
+
+**Could the old choice still have been made?** Yes, everywhere. The issue texts are what they were; the twin is still off the request's page; astropy-13236 still describes two stages; scikit-learn-14629's issue still points at the consumer. And the old choice *was* made once: astropy-14182 `92ed2f61` (11 tool calls) fixed the writer only, ran a round-trip it called correct, and failed — the pattern can still show itself, so the read means something.
+
+| Rule, instance | The step (seen in the transcript) | The line (in the reply) | The choice | The same choice, cycles 14–16 |
+|---|---|---|---|---|
+| **F**, astropy-13236 | version read with bash **5/5**, before the edit in every case | "checkout is at 5.2.dev64, so I implemented the 5.2 behavior" **4/5** | removed the auto-view (the 5.2 step) **5/5**; no `FutureWarning` in any patch | 1 of 12 |
+| **B**, scikit-learn-14629 | `ClassifierChain` / `multioutput.py` opened before the fix **4/5** | "producer: …" **0/5** | `classes_` added to `MultiOutputClassifier` **5/5**; no fallback in `_validation.py` | 8 of 12 |
+| **A**, django-11728 | greps for the pattern in all five; a step described as looking for the twin **3/5** | "twin: …" **0/5** | `replace_unnamed_groups` fixed too **5/5** | 8 of 12 (4 of 8 in the split pairs) |
+| **A**, matplotlib-24870 | greps in all five (4–16 each) | "twin: `TriContourSet._contour_args` … also calls `_process_contour_level_args`" **2/5**, mid-reply | `tri/_tricontour.py` changed **5/5** | 5 of 12 |
+| **A**, astropy-14182 | greps in four of five | **0/5** | the reader handled (`data.start_line` from the header count) **4/5** | 7 of 12 |
+
+**What the read establishes, and what it does not.** The *choice* the five rules were written for is present in 24 of 25 transcripts on instances where, across 60 earlier rollouts on the same five instances (cycles 14–16), it was present in 29 — and in the one instance the rules were most needed for, astropy-13236, in 1 of 12. The *step* is visible in most: every 13236 rollout read the version before it chose, four of five 14629 rollouts opened the sibling before they fixed, and the twin was found by grep on both other instances. The *line* is the part the agent mostly ignores — written in 4 of 5 for the stage rule, 2 of 15 for the twin, 0 of 5 for the producer — and where it appears it is in the agent's own words, not the template's. None of this is a measurement: five rollouts per instance cannot carry a rate, and 23 of 25 is reported as a count. What it is: the behaviour the rules ask for, seen at the point where it used to be absent, in transcripts where the old choice was still available and was taken once.
+
+**A note for the rule-writers, from the read.** The visible step is the reliable mark; the reply line is not. The features agent pinned the line wordings in tests so a rewording could not make the rules unevaluable — a sound instinct — but the agent evaluates them by taking the step and skipping the sentence. Future reads should look for the step (the grep described as looking for the twin, the version read, the sibling opened) and treat the line as a bonus; a rule whose only mark is a sentence in the reply would not be readable at all.
+
+**Two smaller things.** The one 14182 failure tested a round-trip and wrote "Round-trip read/write works correctly" with the reader unfixed — its round trip did not pass `header_rows` on the read side, so it compared the fix against a reference that could not fail: E2's shape, on a rule that landed two cycles ago; recorded. No third case of the agent arguing with the request in 25 rollouts.
+
+Spend $13.52. Cycles 17–20 together: $20.90, against $87 for cycle 16 alone.
+
+## Next (cycle 21)
+
+1. The five rules are in; the reads are done. The loop's standing work is reading new failures for anything outside A/B/E1/E2/F — the completeness claim is the thing to try to break. Material: any new instances the loop runs for other reasons, and the cycle 1–5 pool (65 non-fetching failures not yet read).
+2. If a measured comparison is ever wanted again, the door is: 40 instances at `-r 2` per arm, band ≥ 8 of 40 stated first, kernel proving its label, both arms interleaved.
+3. Old regression 20 per-base check, band ≥ 8 of 40, when the kernel base next moves for a reason other than these rules.
