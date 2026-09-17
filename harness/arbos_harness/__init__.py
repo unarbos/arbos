@@ -78,6 +78,10 @@ class ArbosHarnessConfig(HarnessConfig):
     at $4 the cap cut three hard rollouts that had solved at $6 before (cycle 9), so $8."""
     changes_before_done: bool = False
     """Nudge a final reply after edits to run `changes` first (`ARBOS_CHANGES_BEFORE_DONE`)."""
+    critique: bool = False
+    """One fresh model call on the first final reply after an edit: request plus diff,
+    no history; the agent is nudged once with the gap it names (`ARBOS_CRITIQUE`).
+    Cycle 11's lever for the wrong-mechanism class; off until it measures."""
     artifacts: str = "outputs/arbos"
     """Host folder that receives each rollout's `/logs/artifacts/arbos` (patch,
     rollout bundle, kernel log, result.json) under `<task>--<trace id>/`. Empty = keep
@@ -140,6 +144,7 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "ARBOS_MECHANISM_REQUIRED": "1" if self.config.mechanism_required else "0",
             "ARBOS_MAX_TURN_COST": str(self.config.max_turn_cost_usd),
             "ARBOS_CHANGES_BEFORE_DONE": "1" if self.config.changes_before_done else "0",
+            "ARBOS_CRITIQUE": "1" if self.config.critique else "0",
             "ARBOS_OUT": OUT_DIR,
             "ARBOS_KERNEL_BIN": KERNEL_BIN,
             "XDG_CONFIG_HOME": f"/tmp/vf-arbos/{trace.id}/config",

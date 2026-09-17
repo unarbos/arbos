@@ -6,6 +6,7 @@ mod batch;
 pub mod blocked;
 pub mod compact;
 mod control;
+pub mod critique;
 pub mod describe;
 pub mod envprobe;
 mod evict;
