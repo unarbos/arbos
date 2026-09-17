@@ -82,7 +82,9 @@ struct ProjectChatView: View {
                         micEnabled: settings.isConfigured,
                         focus: $composing,
                         attachments: $attachments,
-                        dictation: dictation
+                        dictation: dictation,
+                        busy: chat.busy,
+                        onStop: { chat.stopTurn() }
                     )
                 }
                 // Scrolled text passes under the inset; the pill and the

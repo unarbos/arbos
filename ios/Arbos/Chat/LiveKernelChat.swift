@@ -71,6 +71,10 @@ final class LiveKernelChat: ChatSource {
         try client.send(text: text, steer: steer, attachments: paths)
     }
 
+    func interrupt() async throws {
+        try client.stop()
+    }
+
     func stop() {
         pump?.cancel()
         client.detach()

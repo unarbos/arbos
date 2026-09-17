@@ -133,9 +133,12 @@ protocol ChatSource: AnyObject {
     func registerPush(token: String, sandbox: Bool)
     /// The user's answer to a pending `ask`.
     func answer(text: String, id: String?)
+    /// Stop the running turn (the kernel's `stop`): what ran so far stands.
+    func interrupt() async throws
 }
 
 extension ChatSource {
+    func interrupt() async throws {}
     func history(agent: String) async -> [ChatItem] { [] }
     func earlier(before seq: Int, limit: Int) async -> HistoryPage? { nil }
     func markSeen(through: Int) {}
