@@ -1,0 +1,28 @@
+# The desktop has another folder open than the one the gateway was started for (two tabs, one
+# gateway on the Mac). The call names that folder by its path; a kernel is running there. The
+# gateway attaches to it directly (no hub) and the caller's words land in THAT kernel's inbox,
+# never in the gateway's own. This is the ArbosLife bug: a name-only attach fell back to the
+# gateway's own kernel.
+title = "Path binding: a call for another folder on this host attaches to that folder's kernel"
+path = "local"
+
+[[steps]]
+say = "Send an agent to tidy the release notes."
+model = { ack = "On it." }
+[steps.kernel]
+reply = "I sent the agent tidy-release-notes to clean up the release notes."
+[steps.kernel.spawn]
+name = "tidy-release-notes"
+done_after = 2.0
+last_words = "Release notes tidied: 14 entries grouped by area, typos fixed."
+
+[[steps]]
+wait_spoken = "tidy release notes is done"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+spoken_contains = ["I sent the agent tidy-release-notes", "tidy release notes is done"]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]
+done_files = 1

@@ -59,13 +59,20 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     <binary>                       microphone audio
           "instructions": "..."  system prompt for the speech model (duplex engine)
           "answerer": "auto"|"kernel"|"model"  duplex call mode: who answers a spoken turn (see Engines)
-          "project": {"machine":"arboslife","project":"demo"}   SCOPE THE CALL: attach to that
-                kernel through the hub (--hub) for the life of this call instead of the server's
-                default kernel. Also accepted: "kernel":"arboslife/demo" or an "arbos://…/" store
-                address. If the project is not on the roster, not live, or does not answer, the
+          "project": {"machine":"arboslife","project":"demo","path":"/Users/j/demo","host":null,
+                      "name":"demo","context":{...}}   SCOPE THE CALL to the folder the client has
+                open. The path decides: the server's own kernel when it serves that very folder;
+                else, for a folder on the server's machine with a live kernel, a direct attach to
+                it; else the hub (--hub), matched by the roster's `place` when known, by
+                machine/project otherwise. Also accepted: "project":"arboslife/demo",
+                "kernel":"arboslife/demo" or an "arbos://…/" store address (name only; no path).
+                If the folder has no running kernel, is not on the roster, or does not answer, the
                 server sends {"type":"error","code":"project_unknown"|"project_offline"|
                 "project_unreachable"|"no_hub","project":"machine/project","message":…} and
                 closes the socket with code 4404. It never answers from another project.
+                "context" (optional): what the client shows when the call starts, so the narrator
+                and the speech model know the chat: {"recent":[{"role":"user"|"assistant"|"worker"|
+                "tool","text":"..."}], "agents":[{"name","state","step"}], "running":bool}.
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
           "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
           "project": "<machine>/<project>"  which project the call is for. A hub name, when the gateway has --hub:
@@ -89,9 +96,12 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"session.ready","rate":24000,"engine":"duplex"|"pipeline","asr":"...","tts":"...",
      "reply":"...","text":"...","tools":["send_agent","agent_status","ask_arbos"],"kernel":true,
      "answerer":"auto","project":{"machine":"arboslife","project":"demo","name":"demo",
-     "icon":"folder","store":"arbos://arboslife/demo/","kind":"project"} | null}
-                                   project is null when the call uses the server's default kernel;
-                                   name/icon come from the hub roster (the project's identity)
+     "icon":"folder","store":"arbos://arboslife/demo/","kind":"project","path":"/Users/j/demo",
+     "via":"own"|"local"|"hub"} | null, "project_path":"/Users/j/demo"}
+                                   project is null when the call uses the server's default kernel
+                                   and the client named none; name/icon come from the hub roster.
+                                   project_path is the folder the call is bound to: a client
+                                   compares it with the folder it asked for and hangs up on a mismatch.
     {"type":"speech.started"}      server VAD heard the user start talking. If a
                                    reply was playing it is cancelled at the same
                                    moment (barge-in) and response.done follows.
@@ -101,8 +111,11 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"transcript.final","text":"Whole cleaned-up utterance."}
                                    REPLACES the open user line and closes it.
                                    May be "" when the audio held no words.
-    {"type":"response.started"}    only when the server answers on its own
-                                   (--reply openrouter); never for "speak"
+    {"type":"response.started","speaker":"narrator"?}
+                                   only when the server answers on its own
+                                   (--reply openrouter); never for "speak". In call mode
+                                   speaker="narrator" marks the narrator's lines (already sent
+                                   as narrator.say); absent = the speech model's own words.
     <binary>                       reply audio, sent as fast as it is synthesised;
                                    the client buffers and plays it
     {"type":"response.transcript","text":"..."}

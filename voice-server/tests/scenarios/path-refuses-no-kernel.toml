@@ -1,0 +1,6 @@
+# The call names a folder on this host that has no running kernel. The gateway must refuse
+# (error project_offline, close 4404) — not answer from its own kernel, which is another project.
+title = "Path binding: a folder with no kernel is refused, never rerouted"
+path = "missing"
+
+[expect]

@@ -293,6 +293,23 @@ class Narrator:
         self.kernel.listeners.append(self.on_frame)
         self._task = asyncio.create_task(self._speaker(), name="narrator")
 
+    def seed(self, context: dict) -> None:
+        """What the caller's screen showed when the call began: the last lines and the sub-agents,
+        into the rolling summary so `agent_status` and drill-down can answer about them before the
+        first new turn. Nothing is spoken."""
+        for line in context.get("recent", []) or []:
+            if not isinstance(line, dict):
+                continue
+            text = " ".join(str(line.get("text", "")).split())
+            if not text:
+                continue
+            role = {"user": "user", "assistant": "arbos", "worker": "worker", "tool": "tool"}.get(str(line.get("role", "")), "screen")
+            self.summary.append(f"{role} (before the call): {clip(text, 300)}")
+        for agent in context.get("agents", []) or []:
+            if isinstance(agent, dict) and agent.get("name"):
+                step = f", {agent['step']}" if agent.get("step") else ""
+                self.summary.append(f"{agent['name']} is {agent.get('state', 'listed')}{step} (before the call)")
+
     def close(self) -> None:
         if self.on_frame in self.kernel.listeners:
             self.kernel.listeners.remove(self.on_frame)
@@ -772,9 +789,13 @@ class Narrator:
         return str(data["choices"][0]["message"]["content"]).strip()
 
     def status_text(self) -> str:
+        """For the speech model's agent_status: the kernel's own status line, then the last few
+        things that happened (the agent's and the workers' lines and what the screen showed when
+        the call began; not the caller's own words, which the model already has)."""
         parts = [self.kernel.status_text()]
-        if self.summary:
-            parts.append("Most recently: " + clip(self.summary[-1], 160))
+        recent = [l for l in self.summary if not l.startswith("voice ")][-3:]
+        if recent:
+            parts.append("Most recently: " + " | ".join(clip(l, 160) for l in recent))
         return " ".join(parts)
 
 

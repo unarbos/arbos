@@ -154,6 +154,10 @@ class Gateway:
                 self.proc.kill()
 
 
+class _Refused(Exception):
+    """The gateway refused the call, as the scenario expected: nothing more to drive."""
+
+
 async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
     name = sc["name"]
     res = Result(name=name, title=sc.get("title", name), ok=False)
@@ -182,10 +186,28 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
     hub: MockHub | None = None
     own: MockKernel | None = None
     extra = [*opts.gateway_args, *sc.get("gateway_args", [])]
-    project = ""
+    project: "str | dict" = ""
+    # `path = "own" | "local" | "missing"`: the call names a folder by its path, as the desktop does.
+    # own: the gateway's kernel serves that very folder. local: the scripted kernel serves another
+    # folder on this host and the gateway's own kernel is a second one — the call must attach to the
+    # folder named. missing: a folder with no kernel — the call must be refused, never rerouted.
+    path_mode = sc.get("path")
     try:
         duplex_url = await duplex.start()
         kernel_url = opts.kernel or await kernel.start()
+        if path_mode in ("local", "missing"):
+            own_place = out / "own-place"
+            own_place.mkdir()
+            own = MockKernel(own_place)
+            own_url = await own.start()
+            kernel_url = own_url
+            folder = place if path_mode == "local" else (out / "no-kernel-here")
+            folder.mkdir(exist_ok=True)
+            project = {"machine": "", "project": folder.name, "path": str(folder.resolve()), "name": folder.name,
+                       "context": sc.get("context") or {}}
+        elif path_mode == "own":
+            project = {"machine": "", "project": place.name, "path": str(place.resolve()), "name": place.name,
+                       "context": sc.get("context") or {}}
         if hub_cfg:
             own_place = out / "own-place"
             own_place.mkdir()
@@ -205,7 +227,22 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             url, token = gateway.url, TOKEN
         caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=project)
         ready = await caller.connect()
+        if path_mode == "missing":
+            errors = [f.msg for f in caller.rec.frames if f.msg.get("type") == "error"]
+            code = errors[-1].get("code") if errors else None
+            res.checks.append((not ready, f"no session.ready for a folder with no kernel (got {bool(ready)})"))
+            res.checks.append((code == "project_offline", f"the refusal names the cause: error.code = project_offline (got {code})"))
+            res.checks.append((caller.closed is not None and caller.closed[0] == 4404, f"the socket closed with 4404 ({caller.closed})"))
+            res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
+            raise _Refused()
         res.checks.append((ready.get("mode") == "call" and ready.get("narrator") is True, f"session.ready says call mode with a narrator ({ready.get('mode')}, narrator={ready.get('narrator')})"))
+        if path_mode in ("own", "local"):
+            want = str((place if path_mode in ("own", "local") else place).resolve())
+            got = str(ready.get("project_path") or "")
+            same = got and os.path.realpath(got) == os.path.realpath(want)
+            via = ready.get("via")
+            res.checks.append((bool(same), f"session.ready.project_path is the folder the call asked for ({got})"))
+            res.checks.append((via == path_mode, f"session.ready.via = {path_mode} (got {via})"))
         if hub_cfg:
             res.checks.append((ready.get("via") == "hub" and ready.get("project") == project, f"session.ready says the call is attached through the hub to {project} (via={ready.get('via')}, project={ready.get('project')})"))
         await asyncio.sleep(0.4)  # the speech model's session.update lands
@@ -215,6 +252,11 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
         if hub_cfg and own is not None and hub is not None:
             res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
             res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
+        if path_mode == "local" and own is not None:
+            res.checks.append((len(own.users) == 0, f"the gateway's own kernel (another folder) received no user frames ({len(own.users)})"))
+            res.checks.append((len(kernel.users) >= 1, f"the kernel at the named folder received the caller's words ({len(kernel.users)})"))
+    except _Refused:
+        pass  # the refusal was the expected outcome; its checks are recorded
     except Exception as exc:
         res.error = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
