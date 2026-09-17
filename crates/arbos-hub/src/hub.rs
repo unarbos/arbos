@@ -219,6 +219,17 @@ impl MachineEntry {
     }
 }
 
+/// The place already registered as `machine/key` by a *different* place
+/// than `place`, when there is one. Same place, or a side that did not
+/// say its place: no collision.
+fn collision(g: &Inner, machine: &str, key: &str, place: Option<&str>) -> Option<String> {
+    let standing = g.machines.get(machine)?.kernels.get(key)?;
+    match (standing.place.as_deref(), place) {
+        (Some(old), Some(new)) if old != new => Some(old.to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     next_id: u64,
@@ -476,6 +487,31 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         refuse_close(&mut ws).await;
         return;
     }
+    // One name, one place. A second kernel registering the same
+    // `machine/project` from a *different* place is refused: silently
+    // preferring the newest sent every attach to whichever registered
+    // last, and the roster showed one healthy entry throughout
+    // (arboslife/demo, served from two folders at once, 2026-09-17). A
+    // kernel from the *same* place is a reconnect and replaces its old
+    // link below. A kernel that did not say its place (an older build)
+    // cannot be told apart and replaces, as before.
+    if kind == RegistrantKind::Kernel {
+        let key = project.clone().unwrap_or_default();
+        let collision = {
+            let g = hub.inner.lock().unwrap();
+            collision(&g, &machine, &key, place.as_deref())
+        };
+        if let Some(old_place) = collision {
+            let new_place = place.clone().unwrap_or_default();
+            let detail = format!(
+                "{machine}/{key} is already registered by the kernel serving {old_place}; this one serves {new_place}. One name, one place: register this place under another project name (`--project`), or stop the other kernel. If that kernel is gone, its registration clears when its link drops."
+            );
+            eprintln!("hub: register refused — {detail}");
+            let _ = send_json(&mut ws, &HubFrame::Error { detail }).await;
+            refuse_close(&mut ws).await;
+            return;
+        }
+    }
     let (to_socket, mut from_hub) = mpsc::unbounded_channel::<HubFrame>();
     let reg = {
         let mut g = hub.inner.lock().unwrap();
@@ -541,9 +577,17 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                 entry.worker_projects = projects;
             }
             RegistrantKind::Kernel => {
-                entry
-                    .kernels
-                    .insert(project.clone().unwrap_or_default(), Arc::clone(&reg));
+                let key = project.clone().unwrap_or_default();
+                // One name, one place. A second kernel registering the same
+                // `machine/project` from a *different* place is refused:
+                // silently preferring the newest sent every attach to
+                // whichever registered last, and the roster showed one
+                // healthy entry throughout (arboslife/demo, served from
+                // two folders at once, 2026-09-17). A kernel from the
+                // *same* place is a reconnect and replaces its old link.
+                // A kernel that did not say its place (an older build)
+                // cannot be told apart and replaces, as before.
+                entry.kernels.insert(key, Arc::clone(&reg));
             }
         }
         g.generation += 1;
@@ -1008,6 +1052,66 @@ mod roster_face_tests {
     use super::*;
 
     /// A phone's list draws each project's face from the roster: a live
+    /// arboslife/demo, served from two folders at once: an attach reached
+    /// whichever registered last, and the roster showed one entry. One
+    /// name, one place — a second place is refused; the same place (a
+    /// reconnect) and a kernel that named no place are not.
+    #[test]
+    fn a_second_place_under_the_same_name_is_a_collision_a_reconnect_is_not() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reg = |place: Option<&str>| {
+            Arc::new(Registrant {
+                id: 1,
+                machine: "arboslife".into(),
+                user: "owner".into(),
+                project: Some("demo".into()),
+                place: place.map(str::to_string),
+                to_socket: tx.clone(),
+                chans: Mutex::new(HashMap::new()),
+                next_chan: AtomicU64::new(1),
+            })
+        };
+        let mut g = Inner::default();
+        let entry = g.machines.entry("arboslife".into()).or_default();
+        entry
+            .kernels
+            .insert("demo".into(), reg(Some("/home/c/arbos-hub/projects/demo")));
+        assert_eq!(
+            collision(
+                &g,
+                "arboslife",
+                "demo",
+                Some("/home/c/arbos-qa/cycle-11/demo")
+            ),
+            Some("/home/c/arbos-hub/projects/demo".to_string()),
+            "a different place under the same name"
+        );
+        assert_eq!(
+            collision(
+                &g,
+                "arboslife",
+                "demo",
+                Some("/home/c/arbos-hub/projects/demo")
+            ),
+            None,
+            "the same place is a reconnect"
+        );
+        assert_eq!(
+            collision(&g, "arboslife", "demo", None),
+            None,
+            "no place given: as before"
+        );
+        assert_eq!(collision(&g, "arboslife", "other", Some("/x")), None);
+        assert_eq!(collision(&g, "elsewhere", "demo", Some("/x")), None);
+        let entry = g.machines.get_mut("arboslife").unwrap();
+        entry.kernels.insert("demo".into(), reg(None));
+        assert_eq!(
+            collision(&g, "arboslife", "demo", Some("/x")),
+            None,
+            "the standing kernel named no place: cannot be told apart"
+        );
+    }
+
     /// kernel's project and a worker's checkout alike, as their
     /// registrants read `project.toml`; a project no one read has none.
     #[test]
