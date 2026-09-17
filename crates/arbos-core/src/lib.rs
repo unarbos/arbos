@@ -94,7 +94,6 @@ pub fn is_stop_word(text: &str) -> bool {
 /// kernel writes comes from [`now_ms`], so they all shift together.
 pub const NOW_ENV: &str = "ARBOS_NOW";
 
-/// Unix millis, on the shifted clock when `ARBOS_NOW` is set.
 pub mod binary_identity {
     //! Whether the file this process was started from is still the file
     //! it is running.
@@ -228,6 +227,7 @@ pub fn binary_gone() -> bool {
     binary_identity::gone()
 }
 
+/// Unix millis, on the shifted clock when `ARBOS_NOW` is set.
 pub fn now_ms() -> i64 {
     real_now_ms() + clock_offset_ms()
 }
