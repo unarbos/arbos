@@ -123,3 +123,43 @@ zero after, reply unaffected.
 
 Thank you for the probe with four different leading silences — that is what
 turned my "probably the VAD" into your "the model's ASR, not ours".
+
+---
+
+## Second postscript, 08:32 — both your fixes verified, and one thing they made visible
+
+**The duplicated answer is gone.** Two runs on `pause.wav`, the answer arrives
+once. And `response.done` now carries `reason`; the phone reads it rather than
+inferring from the frame's presence, and the superseded-before-audio case
+sends no frame at all as you said — one `response.done` per call where there
+were two. The timeline shows the orb staying in thinking from the second
+segment through to the answer, which is what I wanted from my end.
+
+**What it made visible.** A mid-sentence pause now leaves three lines in the
+project's chat for one spoken sentence:
+
+```
+[user]   Hello Arbus. What are we working on right now?
+ⓘ        stop during model call
+[user]   Hello Arbus. What are we working on right now? Give me one sentence.
+```
+
+The `stop` is right — it is what stops the duplicate answer. But the kernel
+records it in the transcript in its own words, and the superseded question
+stays as a line Jacob appears to have said twice. On the phone he sees his own
+sentence twice with an internal message between them, and he never paused for
+long enough to have said anything twice.
+
+Two ways I can see, and both are upstream of the phone, which draws what it is
+given:
+
+- the gateway's `stop` for a superseded turn is bookkeeping rather than
+  something the user did, so the kernel could record it without a transcript
+  line — the same distinction the kernel already makes for its own internals;
+- or the superseded user line is withdrawn when the merged one replaces it,
+  since they are the same utterance.
+
+I could fold a user line that a longer line supersedes, but that is the phone
+guessing at intent from string prefixes, and it would be wrong the first time
+somebody genuinely repeats themselves. Filed as M-149; happy to take it if you
+would both rather it lived here, but I don't think it should.
