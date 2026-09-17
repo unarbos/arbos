@@ -5,16 +5,15 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-17 22:26 UTC.
+Last checked 2026-09-17 22:36 UTC.
 
 ## Click Update. You will get build 1657.
 
-**1657** — signed, notarised, stapled, on the feed since 22:19 UTC. It is
-the tip of `main`.
+**1657** — signed, notarised, stapled, on the feed since 22:19 UTC.
 
-It carries everything 1624 had, and 1624's contents are still in it:
+It contains everything you were waiting for:
 
-- **#490** — voice lines drawn in the project chat (first in 1616)
+- **#490** — voice lines drawn in the project chat
 - **#500** — GPT-Live sees the project, the on-screen chat and live workers
 - **#501** — Live voice rows stay in the attached project's chat
 - **#499** — a store is a folder, not a path
@@ -33,35 +32,41 @@ It carries everything 1624 had, and 1624's contents are still in it:
 The ticket was read out of `Arbos-0.2.0-1657-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
-## The channel sat still between 21:37 and 22:19
+## The channel is behind `main` again, and the cause is known
 
-Worth recording, because it looked like a fault and mostly was not.
+`main` is on build 1662; the feed is on 1657. The publisher is waiting
+rather than failing, and it is waiting on the wrong thing — the same
+fault that held it from 21:37 to 22:19. It recurred at 22:29:
 
-`main` merged eleven builds in that window — 1624 to 1657 — faster than CI
-could finish. Each commit gets two CI runs about forty seconds apart, so
-when the publisher asked "is anything newer still deciding" the answer was
-almost always yes, and it waited. It published the moment it caught a tip
-whose CI had settled.
+> `8d0688d is newer and still running. Its run decides, and comes back
+> here whichever way it goes.`
 
-That is not new behaviour: the old rule skipped a run whose commit was no
-longer the tip, which under the same churn published just as rarely. But
-it is now visible, and one part of it is mine to tighten — a run can wait
-on the very commit whose CI completion triggered it, which is a wait for
-an event that has already happened. That is being fixed.
+`8d0688d` is that run's **own** triggering commit. Every commit gets two
+CI runs about forty seconds apart; the first to finish fires the event,
+the second is still going when the publisher asks the API, so it reads
+"still deciding" and waits for an event that has already happened.
 
-The good news from the same window: [#504](https://github.com/unarbos/arbos/pull/504)
-is live and the first-parent walk is what published 1657, and the two-tier
-retention is visibly working — ten releases kept, seven of them kernel-only.
+[#517](https://github.com/unarbos/arbos/pull/517) is the fix and is in
+review: the commit that started a run takes its conclusion from the event
+rather than re-asking, so it can never block. A green sibling still
+counts; the answer for that one commit is simply never "wait".
 
-Two flake fixes are in review, both of which cost the channel time today:
+Until it lands the channel still moves — it publishes whenever it catches
+a tip whose CI has settled — but it can sit for half an hour while `main`
+merges faster than CI finishes. 1657 is current enough to click; nothing
+merged since changes what you are testing.
 
-- [#507](https://github.com/unarbos/arbos/pull/507) — a test read the
-  transcript once, the instant the reply arrived, while the file is
-  written as the turn runs.
-- [#510](https://github.com/unarbos/arbos/pull/510) — a binary that was
-  only just written is briefly unrunnable (`ETXTBSY`) when another
-  thread's fork holds a descriptor to it. Retried, and only for that
-  error.
+## Also since the last note
+
+- The transcript-race flake that took `main` red earlier is **fixed on
+  `main`** (`87bedb25`), by its owner and better than my version: it waits
+  through the shared `common::wait_for` and prints both the transcript and
+  the kernel log on failure. My [#507](https://github.com/unarbos/arbos/pull/507)
+  stays closed rather than landing a worse duplicate.
+- [#510](https://github.com/unarbos/arbos/pull/510) is **merged** — a
+  binary that was only just written is briefly unrunnable when another
+  thread's fork holds a descriptor to it. That was a product fault, not
+  only a test one: the installer runs a binary moments after copying it.
 
 ## How to check for yourself
 
