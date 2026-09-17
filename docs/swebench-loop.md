@@ -7,6 +7,8 @@ cursor:
 
 # SWE-bench improvement loop — living doc
 
+> **CORRECTION (2026-09-17, cycle 12).** Every number in this document from cycle 1 through cycle 11 was measured with the container on the Docker host network. The agent used it: in 133 of 948 rollouts it downloaded the newer release of the package under repair — the one carrying the fix — and 114 of those were graded solved. The score board below is left as it was written, as the record of what was claimed; none of those figures is a measure of the agent. The per-cycle count is in [`swebench-open-network-audit.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-open-network-audit.md). **The baseline is the cycle-12 figure: 21 of 36 rollouts (58%) on the regression 20 at `-r 2`, network cut, kernel `864d6b00`.** The 74% that cycles 10–11 reported was wrong and is not to be compared against.
+
 One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every loss, fix the top cause in the agent, re-run, record the delta. Model: Claude Sonnet 5 via OpenRouter (cache breakpoints on). Grader: `primeintellect/swebench-verified` (Harbor). Data: [`media/swebench/loop/`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop/) (`loop-state.json` = stratified order and slices; `cycle-N/` = traces, A-vs-B table, scripts), history in [`media/swebench/loop-history.jsonl`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop-history.jsonl). Failing bundles for QA: `internal/qa/rollouts/swebench/loop-cycle-N/`.
 
 ## Score board
@@ -31,7 +33,7 @@ One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every l
 
 Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; Codex $1.72 on the same 24. Wall time per instance (median): Arbos 139–157 s; Codex 56 s.
 
-**Baseline to beat (set 2026-09-13 after cycle 1): parity with Codex on the 24-set, 22/24 each.** The next cycles count as a win only when Arbos passes 22 on that set, or holds 22 while the slice score rises.
+~~**Baseline to beat (set 2026-09-13 after cycle 1): parity with Codex on the 24-set, 22/24 each.**~~ Withdrawn 2026-09-17: both harnesses ran on the open network; neither 22 is verified. The baseline is cycle 12's 21/36 (58%) under the cut; see the correction at the top.
 
 ## Cause histogram (losses on the cycle slices, before the fix)
 
@@ -206,7 +208,7 @@ One kernel (`main` `90a33cb`, before #349's cap-ordering fix), regression 20 at 
 
 On the nine instances with two rollouts in both arms: **N=1 14/18, N=2 14/18.** A tie, at 1.8× the cost per rollout — N=2 spent its whole budget on the first nine instances (django-15252 $8.85, astropy-13398 $8.32, one rollout capped) while N=1 covered eighteen. Across cycles, N=2 on those first nine: 17/18, 15/18, 12/18, 14/18; N=1: 13/18, 13/18, 14/18. Cycles 7–8's gap has closed on the cleanest comparison so far, and what remains is the cost.
 
-**Plainly: two reproductions does not hold at the $8 cap.** The harness default stays at **one** reproduction — it turns out it was never changed on `main` (#314 was merged from the branch state before the N=2-default commit landed), so this is a decision not to adopt, recorded here and in the history file, rather than a revert. `repro_required=2` stays available as a knob. The N=1 arm's 26/35 (74%) is above the cycle-6 floor of 70% on a kernel two bases newer, which is the loop's real current baseline.
+**Plainly: two reproductions does not hold at the $8 cap.** The harness default stays at **one** reproduction — it turns out it was never changed on `main` (#314 was merged from the branch state before the N=2-default commit landed), so this is a decision not to adopt, recorded here and in the history file, rather than a revert. `repro_required=2` stays available as a knob. ~~The N=1 arm's 26/35 (74%) is above the cycle-6 floor of 70% on a kernel two bases newer, which is the loop's real current baseline.~~ Wrong — see the correction at the top: 6 of those 26 solves downloaded the upstream fix; the run was on the open network.
 
 **Notes**: the kernel predates #349, so the one capped N=2 rollout has its cap-crossing step missing from the transcript (the grade is from git and unaffected). The VM froze during an idle gap (19:40–21:00 UTC), so this cycle's wall times are inflated again. Spend $59.44, both arms under their own caps.
 
@@ -242,9 +244,47 @@ Two smaller things the smoke showed: a failed `pip download` was recorded as the
 
 Spend $55.75 (A $27.07, B $27.96, smokes $0.72). Two idle containers were left behind after each arm's SIGINT stop (`sleep infinity`, no agent process, eval exited); removed by ID after checking, not swept.
 
-## Next (cycle 12)
+## Cycle 12 (2026-09-17) — the baseline, measured with the network cut
 
-1. **Re-baseline under the network cut.** The regression 20 at `-r 2`, one reproduction, $8 cap, `--env.agent.runtime.block '["*"]'`, on the current `main`. That number replaces 74% as the figure to beat. Expect it lower; the hard instances lose their shortcut.
-2. Count upstream fetches in the cycle 1–9 bundles in the store, so the loop's history has a clean/assisted column throughout.
-3. Then the wrong-mechanism class again, against a baseline that means what it says. The critique in its history-free form is spent; a reviewer that can *run* the failing test rather than read a diff is the untested shape.
-4. Still open: Django `runtests.py` to the 1800 s timeout; `bash_wait_ms` 600 s for headless runs.
+One arm, no lever. Pre-registered before the run ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop/cycle-12/preregistration.md)): the graded rate on the regression 20 at `-r 2` under the cut *is* the baseline, unadjusted; soundness checks that had to hold: `arbos_egress_open` 0.0 on every rollout, zero fetches in a transcript audit, no setup errors.
+
+**Kernel `864d6b00`** — the head of [#380](https://github.com/unarbos/arbos/pull/380) (`main` `fa17987e` + #380: a failed command is a reproduction only if it ran code; harness instructions layer under the headless rules). #380 was not merged at run time; both behaviours are fully in, none half. One reproduction, mechanism gate on, $8 cap, 2400 s, Sonnet 5, concurrency 3, `--env.agent.runtime.block '["*"]'`. Cap $40 (the cycle had spent $19 finding two faults first, below); the watcher stopped the run at $37.14.
+
+| | Rollouts | Solved | Instances reached | Cost | Per rollout |
+|---|---|---|---|---|---|
+| Regression 20 at `-r 2`, network cut | 36 of 40 | **21 (58%)** | 18 of 20 | $37.14 | $1.03 |
+
+Not reached: sympy-20590 and sympy-13878 (both solved 2/2 in every earlier cycle; they would likely have made it 25/40 = 62%, but that is a guess and the number stands at 21/36). Soundness: `arbos_egress_open` = 0.0 on all 36; the transcript audit finds no fetch; five rollouts tried pip or git and were refused; no rollout capped or timed out.
+
+| Instance | Result | Cost | | Instance | Result | Cost |
+|---|---|---|---|---|---|---|
+| astropy-12907 | SS | $0.28 | | pytest-5787 | SS | $1.74 |
+| django-11099 | SS | $0.18 | | sphinx-7590 | .. | $2.69 |
+| django-11133 | SS | $0.57 | | scikit-learn-25102 | SS | $3.04 |
+| pytest-7432 | SS | $0.41 | | django-13449 | SS | $1.77 |
+| requests-2317 | .. | $1.13 | | django-15022 | .. | $3.59 |
+| scikit-learn-13142 | SS | $0.23 | | django-15252 | .S | $10.60 |
+| pylint-6903 | SS | $0.38 | | django-14017 | SS | $1.52 |
+| astropy-13398 | .. | $4.72 | | django-14792 | .. | $2.86 |
+| xarray-6992 | .. | $0.31 | | pylint-8898 | .. | $1.12 |
+
+**What the cut took away.** The six instances that used to fetch upstream: astropy-13398 0/2, django-14792 0/2, django-15022 0/2, pylint-8898 0/2, django-15252 1/2 (at $10.60 — one rollout ran to the $8 cap's neighbourhood), django-13449 2/2. Compared with cycle 10's open-network N=1 arm on the same instances: 13398 1/2→0/2, 14792 2/2→0/2, 15022 1/2→0/2, 8898 2/2→0/2, 15252 0/2→1/2, 13449 2/2→2/2. Six rollouts lost on the instances that used to fetch, one gained; that is most of the gap between 74% and 58%, and the rest is variance on a set this size.
+
+**Supporting run, not the number.** Before the grading fault below was found, a run on the same kernel under the same cut produced 16 rollouts whose patches verifiers graded 0 for the wrong reason. They were re-graded afterwards with each task's own `tests/test.sh` in a fresh container (`regrade_run.sh`, `regrade-of-ungraded-cut-run.json`): **10/16 (63%)**, with 13398 0/2, 14792 0/2, 15022 0/1, 15252 0/1 and everything else 2/2. Same shape as the counted run. It is not pooled into the baseline because the grading was mine, not verifiers'.
+
+**Two faults found on the way, both fixed on the branch:**
+1. The first launch ran on `main` `fa17987e`, before #380 — a baseline across a behaviour change would not have been usable. Stopped after 2 rollouts ($0.49) when Jacob flagged it; set aside as `c12-reg-aborted-pre380`.
+2. Under the cut, **every rollout graded 0 with a patch in place.** verifiers grades in the agent's container; the SWE-bench verifier's `uv run parser.py` fetches `swebench` from PyPI, the proxy denied it, `set -e` ended the script, reward 0. The harness now reopens egress after the agent has exited and before the grader runs (`prepare_execution(None)`; the agent phase stays cut). Found after 19 rollouts ($18.55); those are the re-graded 16 above.
+
+**The harness now refuses an open network.** `setup()` raises unless the runtime's egress is restricted; the rollout errors with no score and no model spend (smoke: `ok=False`, `$0.00`). `allow_open_egress=true` overrides for debugging and the `arbos_egress_open` metric marks the rollout. A run cannot quietly produce a number on the open network any more.
+
+**How far back it goes.** All eleven earlier cycles are counted in [`swebench-open-network-audit.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-open-network-audit.md): 133 of 948 rollouts fetched the package under repair, 114 graded solved; three instances (14792, 13398, 15252) were never solved without it. Every bundle from cycle 1 on was still on the VM, so nothing had to be estimated.
+
+Spend $56.29 (aborted pre-#380 run $0.49, ungraded run $18.55, smokes $0.11, the counted run $37.14). Orphaned containers after each SIGINT stop (2 + 2, `sleep infinity`, no agent) removed by ID.
+
+## Next (cycle 13)
+
+1. Finish the baseline: sympy-20590 and sympy-13878 at `-r 2` under the cut on `864d6b00` (or `main` once #380 merges, noting the commit), so the figure is on 40 rollouts.
+2. Then the first lever against the honest baseline. The clean failures are now concentrated and legible: 13398, 14792, 15022, 8898, 7590, xarray-6992 (requests-2317 is the grader hang). Read those twelve rollouts first; the class may not be "wrong mechanism" once the copied fixes are gone.
+3. The Codex comparison (22/24) is unverified; if parity is still the question, re-run Codex under the cut too.
+4. Still open: Django `runtests.py` to the timeout; `bash_wait_ms` 600 s for headless runs.

@@ -7,6 +7,8 @@ Written by the QA loop, which keeps an off-store mirror of this store and restor
 
 ## Summary
 
+Three phenomena, recorded separately below: selective file loss (six episodes), partial listings, and — live as this is written — one client of the store seeing it empty and unwritable while two others read and write it normally.
+
 Six times in twenty hours, a set of files and directories vanished from this store while the rest of it stayed intact and writable. The set is not random: it is the same set each time, growing between episodes (every file lost in one episode is lost again in the next, plus more), and inside one directory it separates files by name pattern while leaving files written the same way by the same client untouched. Three independent clients saw the same picture at the same time, stable across repeated reads for minutes. We can restore from our mirror; we cannot see why the files go. The server-side journal for this store id over the windows below should show it.
 
 ## The six episodes
@@ -75,6 +77,18 @@ The first question a service engineer will ask, so we asked it of ourselves firs
 Also checked and set aside: the four files that vanished between consecutive snapshots *outside* the episode windows are two deliberate moves by their authors (`internal/kernel-self-update-design.md`, twice — the second was our own re-deletion of a duplicate), one file of ours that reappeared unchanged on the next pass, and one report folder moved by the desktop loop. None coincides with an episode.
 
 So: nothing in the record fits a client write. The losses are absences of files and of whole directories, at times when no client of ours wrote to those paths, seen identically from three machines. That is what we are asking about.
+
+## A third phenomenon: the same store answers differently to different clients at the same moment (09-17, from ~05:35 UTC, live as this is written)
+
+Distinct from the deletions (§episodes) and from the partial listings (§partial views), and recorded while it was happening rather than reconstructed.
+
+- **Client A** (the benchmark loop's VM, its own mount of this store id): from about **05:35 UTC** the mount lists empty and refuses writes. Its whole cycle's output is staged locally under `/tmp/swe/store-pending/` with a script to apply it when the mount returns.
+- **Client B** (the coordinator's machine): writes to the root `notes.md` succeeded throughout that window — the file's modification time read from Client C is 05:56:56 UTC, 51,333 bytes.
+- **Client C** (the QA loop's VM, `fuse.agent-store` mount, this report's author): read three times at **05:57:33, 05:57:38, 05:57:43 UTC** — `docs/` present with 25 documents, `internal/mirror-docs.sh` present, 234 files in `internal/qa/bugs/`, `notes.md` as above; at **05:57:48** a write, read-back and delete under `internal/qa/` all succeeded. The mirror passes at **05:23:42** and **05:41:09** UTC — inside Client A's blackout — each pushed a whole store (24 documents, 651 K → 654 K).
+
+So at one moment the service told one client the store was empty and unwritable, and told two others it was whole and writable, including the very files the first could not list. This is not a deletion (nothing was lost; the mirror kept pushing the full tree) and not a settling listing (Client A's view held for over twenty minutes). Where a service engineer might look: per-connection or per-session state — a mount whose session with the service failed or expired and now answers from nothing, while other sessions on the same store id are served normally.
+
+A limitation of ours this exposes: the mirror and its alarm run on Client C. They can only refuse or alarm on what **that** client sees; a fault that leaves Client C's view intact is invisible to them, which is why nothing fired between 05:35 and 05:57. The remedy on our side is a second reader on another machine, or each writing client checking that its own mount lists a known file before trusting a write — the benchmark loop's stage-locally-and-apply-later pattern is the right one and we are adopting it.
 
 ## Partial views — a second phenomenon, kept separate
 

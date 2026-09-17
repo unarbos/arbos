@@ -116,11 +116,35 @@ reads the build the process wrote about itself into its place's `kernel.json`
 (not the file on disk), and shows the mtime of the file at the start path so
 "gone since" is on the same line.
 
+**Two ways a binary goes, and the test must catch both.**
+
+- *Moved away*: the file at the start path is renamed or removed and nothing
+  takes its place. The path no longer exists. This is what people assume.
+- *Replaced in place*: a new build is staged and **renamed over the same
+  path**. The path exists and holds the new file; the process still runs the
+  old one. **This is what our own updater does** (`arbos-update`, Linux and
+  macOS alike), so it is the case that matters, and it is the one a "does
+  the path exist" test gets wrong — at exactly the moment the answer matters,
+  the path exists and the test says "not gone".
+
+Both scripts below test the **identity** of the running file against the
+file now at the path, never the path's existence. Do not "simplify" either
+into `[ -e "$path" ]`; that would pass every update our installer performs.
+[#385](https://github.com/unarbos/arbos/pull/385) went through the same
+correction: its first `binary_gone` was a path check and now compares device,
+inode, size and mtime taken at start.
+
 ### Linux (ArbosLife, Templar, the pod, cloud VMs)
 
-Needs bash, `pgrep`, and `/proc`; the kernel appends ` (deleted)` to
-`/proc/<pid>/exe` when the running file is gone, so that is the test. Save as
-`/tmp/sweep.sh` and pipe it over ssh.
+Needs bash, `pgrep`, and `/proc`. The test is the ` (deleted)` suffix the
+kernel appends to `readlink /proc/<pid>/exe` when the inode the process runs
+has no name left in the filesystem. That is an identity test, not a path test:
+it fires for a file moved away *and* for a file replaced in place, because in
+both cases the old inode has lost its name (the updater's rename gives the
+name to the new inode). Tonight's ArbosLife and Templar lines were all the
+replaced-in-place kind — `~/arbos-hub/bin/arbos-kernel` existed and was newer
+the whole time — and `(deleted)` caught every one. Save as `/tmp/sweep.sh` and
+pipe it over ssh.
 
 ```bash
 # Linux. One line per arbos process: state, pid, since, running build, the file it started from, and what is on disk now.
@@ -151,11 +175,18 @@ in two seconds, and showed the parity loop had already relaunched its kernel
 This is the machine where the fault hurt a person: the desktop's in-app
 updates replaced the kernel binary under running kernels several times on
 2026-09-16, which left five workers hanging and the feedback sheet empty.
-macOS has no `/proc` and does not mark a deleted executable anywhere, so the
-test is different: **compare the inode of the file the process is running
+macOS has no `/proc` and **does not mark a replaced or deleted executable
+anywhere**: `ps -o comm=` and `proc_pidpath` return the start *path*, and
+after an in-app update that path exists and holds the new build. So on macOS
+the path is never "gone" in the case we care about, and the test must be
+identity-based: **compare the inode of the file the process is running
 (`lsof`, the `txt` entry) with the inode of the file now at its start path
-(`stat`)**. An update that unlinks and rewrites, or renames a new file into
-place, always changes the inode; the same inode means the same file.
+(`stat -f %i`)**. An update that stages a build and renames it over the path,
+or unlinks and rewrites, always gives the path a new inode; the same inode
+means the same file. A missing path (moved away) is also `GONE`, as the lesser
+case. What the command tests, precisely: "is the file this process executes
+the same inode as the file now at its start path" — nothing about whether the
+path exists.
 
 Run it as the user who owns the kernels (Jacob's, for his), because `lsof`
 shows only your own processes without `sudo`. Not yet run on a Mac: the AWS
