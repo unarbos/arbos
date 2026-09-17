@@ -134,6 +134,19 @@ impl Tool for Bash {
             if let Some(why) = moves_a_delivered_file(&cx, cmd) {
                 bail!("{why}");
             }
+            // `kill <pid>` on a pid `jobs` showed: the kernel ends that
+            // job — its whole process group, with a `killed` line that
+            // says so — instead of the shell signalling the leash alone.
+            // QA's 164 GB writer was exactly this: the model did the
+            // obvious thing with the pid it was shown, the leash forwarded
+            // the signal to the wrapper shell only, and the loop under it
+            // lived on with no supervisor. (The leash now ends its group
+            // on a signal too; this is the clean path with the clean
+            // record.)
+            if let Some(text) = kill_jobs_by_pid(&JobsRoot::for_agent(&cx.place, &cx.agent.id), cmd)
+            {
+                return Ok(ToolOut::text(text));
+            }
             // Before the approval prompt: a refused command is not a
             // question for the user.
             {
@@ -256,9 +269,15 @@ impl Tool for Bash {
                             steered = true;
                             break false;
                         }
-                        // The command ended and the runtime did not say:
-                        // the wrapper's `exit` file did. Reap the wrapper
-                        // ourselves so no zombie is left under the kernel.
+                        // The command's own end is the `exit` file, and
+                        // the truth about it when the runtime never says
+                        // (a Mac deaf to its children). The leash stays
+                        // behind the file for a moment (its 250 ms look),
+                        // or for as long as children of the command still
+                        // run in its group (a server the command
+                        // backgrounded), so the wait ends here and the
+                        // leash is reaped when it does end, not only if
+                        // it already has.
                         if root.load(&job.id).is_ok_and(|j| !j.running()) {
                             reap_by_pid(job_pid);
                             waiter.abort();
@@ -895,6 +914,128 @@ pub fn looks_like_server(cmd: &str) -> bool {
 /// with an owed path) is refused with the reason. Only then: the
 /// guard is for the one shape that lost a user's file, not for every
 /// move a worker makes.
+/// `kill`, an optional signal, and one or more positive pids, nothing
+/// else: the pids. `kill -- -123` (a group) and anything compound are
+/// left to the shell.
+fn kill_of_pids(cmd: &str) -> Option<Vec<u32>> {
+    let mut words = cmd.split_whitespace();
+    if words.next()? != "kill" {
+        return None;
+    }
+    let mut pids = Vec::new();
+    for (i, w) in words.enumerate() {
+        if i == 0 && w.starts_with('-') && !w.starts_with("--") {
+            // `-9`, `-TERM`, `-s`… a signal; `-s SIG` would leave SIG as
+            // a non-number below and bail out.
+            continue;
+        }
+        pids.push(w.parse::<u32>().ok().filter(|&p| p > 1)?);
+    }
+    (!pids.is_empty()).then_some(pids)
+}
+
+/// `kill <pid…>` where every pid is a running job of this agent: the
+/// kernel's kill on each (the whole group, a `killed` line in the folder)
+/// and the result's text. None when the command is anything else, or any
+/// pid is not a job: the shell runs it as written.
+pub(crate) fn kill_jobs_by_pid(root: &JobsRoot, cmd: &str) -> Option<String> {
+    let pids = kill_of_pids(cmd)?;
+    let jobs: Vec<Job> = root
+        .list()
+        .into_iter()
+        .filter(|j| j.running() && pids.contains(&j.meta.pid))
+        .collect();
+    if jobs.len() != pids.len() {
+        return None;
+    }
+    let lines: Vec<String> = jobs
+        .iter()
+        .map(|j| {
+            root.kill(j);
+            format!(
+                "job {} (pid {}) ended — the whole process group, not only its shell: `{}`",
+                j.id,
+                j.meta.pid,
+                arbos_core::text::clip(j.meta.command.trim(), 80)
+            )
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod kill_by_pid_tests {
+    use super::{kill_jobs_by_pid, kill_of_pids};
+    use std::time::Duration;
+
+    #[test]
+    fn the_parser_takes_kill_and_pids_only() {
+        assert_eq!(kill_of_pids("kill 123"), Some(vec![123]));
+        assert_eq!(kill_of_pids("kill -9 123 456"), Some(vec![123, 456]));
+        assert_eq!(kill_of_pids("kill -TERM 123"), Some(vec![123]));
+        assert_eq!(kill_of_pids("kill -- -123"), None, "a group: the shell's");
+        assert_eq!(kill_of_pids("kill 1"), None, "never pid 1");
+        assert_eq!(kill_of_pids("kill $(cat pid)"), None);
+        assert_eq!(kill_of_pids("kill 123; echo done"), None);
+        assert_eq!(kill_of_pids("pkill yes"), None);
+    }
+
+    #[tokio::test]
+    async fn a_kill_on_a_jobs_pid_ends_its_whole_group_with_a_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-kill-by-pid-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root/jobs")).unwrap();
+        let root = crate::JobsRoot::new(dir.join(".arbos/agents/root/jobs"));
+        let (job, mut child) = root
+            .spawn(
+                "(while :; do sleep 0.1; done) & sleep 300",
+                &dir,
+                None,
+                None,
+                vec![],
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            kill_jobs_by_pid(&root, "kill 999999").is_none(),
+            "not a job"
+        );
+        assert!(
+            kill_jobs_by_pid(&root, &format!("kill {} 999999", job.meta.pid)).is_none(),
+            "one of them is not a job: the shell's"
+        );
+        let text = kill_jobs_by_pid(&root, &format!("kill {}", job.meta.pid)).expect("routed");
+        assert!(text.contains("the whole process group"), "{text}");
+        // The leash is our child: reaped here, or it counts as alive.
+        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let members = std::process::Command::new("pgrep")
+                .args(["-g", &job.meta.pid.to_string()])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter_map(|l| l.trim().parse::<u32>().ok())
+                        .filter(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == 0)
+                        .count()
+                })
+                .unwrap_or(0);
+            if members == 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the group lived on");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let killed = std::fs::read_to_string(job.dir.join("killed")).unwrap();
+        assert!(killed.contains("killed by the kernel"), "{killed}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 fn moves_a_delivered_file(cx: &RunCx, cmd: &str) -> Option<String> {
     let toks: Vec<&str> = cmd.split_whitespace().collect();
     let moving = toks.iter().any(|t| matches!(*t, "mv" | "rm" | "unlink"));
@@ -948,7 +1089,21 @@ pub fn reap_by_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
         let mut status: libc::c_int = 0;
-        let _ = libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+        let r = libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+        if r == 0 {
+            // Still running: the leash outlives the command's `exit` file
+            // by one look, or by the life of what the command left in
+            // its group. A plain thread waits it out and reaps it the
+            // instant it ends; the runtime's own reaper, when it is
+            // awake, may get there first (ECHILD here, harmless).
+            std::thread::Builder::new()
+                .name(format!("reap-{pid}"))
+                .spawn(move || {
+                    let mut status: libc::c_int = 0;
+                    let _ = libc::waitpid(pid as libc::pid_t, &mut status, 0);
+                })
+                .ok();
+        }
     }
     #[cfg(not(unix))]
     let _ = pid;
