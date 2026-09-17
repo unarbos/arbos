@@ -105,16 +105,28 @@ fn an_area_coordinator_child_runs_its_own_worker_and_reports_once() {
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "run the voice area"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(60)));
     let area = "run-the-voice-area";
+    // The worker's report reaches the area coordinator once. Whether it
+    // opens a second turn or folds into the first depends on whether the
+    // worker finishes before the area's own turn ends — a loaded runner
+    // decides that, so the turn count is not the fact to wait for.
     assert!(
         common::wait_for(Duration::from_secs(60), || {
-            transcript(&k.place, area)
-                .iter()
-                .filter(|e| e["kind"] == "turn_complete")
-                .count()
-                >= 2
+            let t = transcript(&k.place, area);
+            t.iter()
+                .any(|e| e["kind"] == "say" && e["from"] == "write-the-echo-gate")
+                && t.last().is_some_and(|e| e["kind"] == "turn_complete")
         }),
-        "the area coordinator ran its own turn and then the done turn: {:?}",
+        "the worker's report reached the area coordinator, and the turn holding it ended: {:?}",
         transcript(&k.place, area)
+    );
+    let area_t = transcript(&k.place, area);
+    assert_eq!(
+        area_t
+            .iter()
+            .filter(|e| e["kind"] == "say" && e["from"] == "write-the-echo-gate")
+            .count(),
+        1,
+        "once, not once per turn: {area_t:?}"
     );
     let agent_md =
         std::fs::read_to_string(k.place.join(".arbos/agents").join(area).join("agent.md")).unwrap();
