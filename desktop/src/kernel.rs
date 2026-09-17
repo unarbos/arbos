@@ -3422,6 +3422,9 @@ fn ssh_put_kernel_from_feed(
 
     step(arbos_core::remote_kernel::Progress::Installing {
         version: offered.version.human(),
+        // #462 installs from the feed: the payload's size is the feed's
+        // word (#467's line says what is crossing the wire).
+        bytes: offered.download.size,
     });
     eprintln!(
         "remote {}: install: {} {} for {remote_arch} from the {} channel",
