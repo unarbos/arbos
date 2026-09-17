@@ -1,19 +1,22 @@
 //! The general section: what this copy of the app is.
 
 use crate::{
-    assets, build,
+    build,
     kernel::{self, KernelBuild},
     model::workspace::Workspace,
     update,
     update::Updates,
-    view::{settings::SettingsPane, status_bar},
+    view::{
+        settings::{self, Line, SettingsPane},
+        status_bar,
+    },
 };
 use arbos_update::Channel;
 use bezel::{
-    gpui::{AnyElement, Context, SharedString, div, img, prelude::*, px},
+    gpui::{AnyElement, Context, div, prelude::*, px},
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{ButtonStyle, Buttons, Content, Scaffolding},
+    ui::widgets::{ButtonStyle, Buttons, Content},
 };
 
 /// What this build is, read at compile time from `Cargo.toml` — the same
@@ -25,70 +28,63 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// can know: the app that ships has no repository to ask.
 const COMMIT: &str = build::COMMIT;
 
-/// The mark over the rows. An About panel's measure — big enough to be the
-/// picture of the app, small enough that the two lines under it are still what
-/// the section is.
-const MARK: f32 = 72.;
-
 impl SettingsPane {
+    /// No mark, no product name, no tagline. A person in Settings knows which
+    /// app they are in; the hero was the widest thing on the page and said the
+    /// least (Jacob, 09-17, against Cursor's own General).
     pub(super) fn general_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         div()
             .flex()
             .flex_col()
-            .gap(px(super::GROUP_GAP))
+            .gap(px(settings::GROUP_GAP))
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(10.))
-                    .children(assets::mark().map(|path| img(path).size(px(MARK))))
-                    .child(
-                        div()
-                            .text_style(TextStyle::Title)
-                            .text_color(theme.text)
-                            .child("Arbos"),
-                    )
-                    .child(
-                        div()
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child("A chat with the agent that lives here."),
-                    ),
-            )
-            .child(
-                theme
-                    .group_box()
-                    .child(
-                        theme
-                            .card_row(true)
-                            .child(div().flex_1().min_w_0().child(theme.row_title("Version")))
-                            .child(theme.badge(VERSION)),
-                    )
-                    // The one line to read out when asked "which build": the
-                    // same badge the settings gear's tooltip carries.
-                    .child(
-                        theme
-                            .card_row(false)
-                            .child(div().flex_1().min_w_0().child(theme.row_title("Build")))
-                            .child(theme.badge(build::badge())),
-                    )
-                    .child(
-                        theme
-                            .card_row(false)
-                            .child(div().flex_1().min_w_0().child(theme.row_title("Commit")))
-                            .child(match commit_url() {
-                                Some(url) => div()
-                                    .id("commit")
-                                    .cursor_pointer()
-                                    .hover(|el| el.text_color(theme.accent))
-                                    .child(theme.badge(COMMIT))
-                                    .on_click(move |_, _, cx| cx.open_url(&url))
-                                    .into_any_element(),
-                                None => theme.badge(COMMIT).into_any_element(),
-                            }),
-                    ),
+                settings::group("This app", &theme).child(
+                    settings::rows()
+                        .child(
+                            settings::row(true, &theme)
+                                .child(settings::label_block(
+                                    "Version",
+                                    vec![Line::say("Which release this app is.")],
+                                    &theme,
+                                ))
+                                .child(theme.badge(VERSION)),
+                        )
+                        // The one line to read out when asked "which build": the
+                        // same badge the settings gear's tooltip carries.
+                        .child(
+                            settings::row(false, &theme)
+                                .child(settings::label_block(
+                                    "Build",
+                                    vec![Line::say(
+                                        "The window's own commit, and the kernel version it ships.",
+                                    )],
+                                    &theme,
+                                ))
+                                .child(theme.badge(build::badge())),
+                        )
+                        .child(
+                            settings::row(false, &theme)
+                                .child(settings::label_block(
+                                    "Commit",
+                                    vec![Line::say(match commit_url() {
+                                        Some(_) => "The commit it was built from. Opens on GitHub.",
+                                        None => "This build recorded no commit to open.",
+                                    })],
+                                    &theme,
+                                ))
+                                .child(match commit_url() {
+                                    Some(url) => div()
+                                        .id("commit")
+                                        .cursor_pointer()
+                                        .hover(|el| el.text_color(theme.accent))
+                                        .child(theme.badge(COMMIT))
+                                        .on_click(move |_, _, cx| cx.open_url(&url))
+                                        .into_any_element(),
+                                    None => theme.badge(COMMIT).into_any_element(),
+                                }),
+                        ),
+                ),
             )
             .child(self.updates_group(cx))
             .child(self.machine_group(cx))
@@ -124,7 +120,7 @@ impl SettingsPane {
                 )
             })
             .collect();
-        let mut group = theme.group_box().child(match front {
+        let mut group = settings::rows().child(match front {
             Some(project) => kernel_row(
                 &Workspace::tab_label(project),
                 project.kernel_build(),
@@ -166,11 +162,7 @@ impl SettingsPane {
         {
             group = group.child(path_row(n, title, what, path, &theme, cx));
         }
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(super::LABEL_GAP))
-            .child(theme.field_label("This machine"))
+        settings::group("This machine", &theme)
             .child(group)
             .into_any_element()
     }
@@ -200,23 +192,15 @@ impl SettingsPane {
     fn updates_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let chosen = update::channel_of(&self.workspace.read(cx).settings);
-        theme
-            .group_box()
+        settings::group("Updates", &theme).child(
+            settings::rows()
             .child(
-                theme
-                    .card_row(true)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(theme.row_title("Updates"))
-                            .child(
-                                div()
-                                    .text_style(TextStyle::Caption)
-                                    .text_color(theme.text_muted)
-                                    .child(chosen.describe()),
-                            ),
-                    )
+                settings::row(true, &theme)
+                    .child(settings::label_block(
+                        "Channel",
+                        vec![Line::say(chosen.describe())],
+                        &theme,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -263,21 +247,15 @@ impl SettingsPane {
             // driving the app, and out of mind for anybody who is not already
             // suspicious that updates have stopped arriving.
             .child(
-                theme
-                    .card_row(false)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(theme.row_title("Last checked"))
-                            .children(self.update_failure(cx).map(|why| {
-                                div()
-                                    .id("update-last-check-why")
-                                    .text_style(TextStyle::Caption)
-                                    .text_color(theme.text_muted)
-                                    .child(why)
-                            })),
-                    )
+                settings::row(false, &theme)
+                    .child(settings::label_block(
+                        "Last checked",
+                        self.update_failure(cx)
+                            .map(Line::warn)
+                            .into_iter()
+                            .collect(),
+                        &theme,
+                    ))
                     .child(
                         div()
                             .id("update-last-checked")
@@ -285,62 +263,30 @@ impl SettingsPane {
                     ),
             )
             .child(
-                theme
-                    .card_row(false)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(theme.row_title("This build"))
-                            .child(
-                                div()
-                                    .text_style(TextStyle::Caption)
-                                    .text_color(theme.text_muted)
-                                    .child(match update::built_in_key_present() {
-                                        true => SharedString::from(
-                                            "Updates are checked against Arbos's signing key.",
-                                        ),
-                                        // A build made before anybody set the
-                                        // key up. It can never install an
-                                        // update, and saying so here is kinder
-                                        // than a button that fails.
-                                        false => SharedString::from(
-                                            "This build carries no update key, so it cannot \
-                                             install an update.",
-                                        ),
-                                    }),
+                settings::row(false, &theme)
+                    .child(settings::label_block(
+                        "This build",
+                        vec![match update::built_in_key_present() {
+                            true => Line::say("Updates are checked against Arbos's signing key."),
+                            // A build made before anybody set the key up. It can
+                            // never install an update, and saying so here is
+                            // kinder than a button that fails.
+                            false => Line::warn(
+                                "This build carries no update key, so it cannot install an update.",
                             ),
-                    )
+                        }],
+                        &theme,
+                    ))
                     .child(theme.badge(build::version_label())),
-            )
-            .into_any_element()
+            ),
+        )
+        .into_any_element()
     }
 }
 
-/// A line under a row's title. `warn` is the row's only styling decision, and
-/// it means *something is wrong here*, not *this is interesting*.
-struct Line {
-    text: String,
-    warn: bool,
-}
-
-impl Line {
-    fn say(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            warn: false,
-        }
-    }
-
-    fn warn(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            warn: true,
-        }
-    }
-}
-
-/// One row: a title with its lines under it, and whatever goes on the right.
+/// One machine row: the label with what is known about it under it, and the
+/// version on the right. The shape is [`settings::row`]'s, like every other row
+/// in every other section.
 fn row(
     title: &str,
     value: Option<AnyElement>,
@@ -348,25 +294,8 @@ fn row(
     first: bool,
     theme: &Theme,
 ) -> AnyElement {
-    theme
-        .card_row(first)
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(theme.row_title(title.to_string()))
-                .children(lines.into_iter().map(|line| {
-                    div()
-                        .mt(px(2.))
-                        .text_style(TextStyle::Caption)
-                        .text_color(if line.warn {
-                            theme.warning
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(line.text)
-                })),
-        )
+    settings::row(first, theme)
+        .child(settings::label_block(title.to_string(), lines, theme))
         .children(value)
         .into_any_element()
 }
