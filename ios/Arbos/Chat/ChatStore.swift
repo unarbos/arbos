@@ -84,6 +84,9 @@ final class ChatStore: ObservableObject {
     private var pump: Task<Void, Never>?
     private var sentAt: Date?
     private var reconnectTask: Task<Void, Never>?
+    /// The last refusal said out loud. Retrying every ten seconds against an
+    /// offline machine must not fill the chat with the same sentence.
+    private var lastRefusal: String?
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
     private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
@@ -203,17 +206,38 @@ final class ChatStore: ObservableObject {
         do {
             try await live.start()
             mode = .live
+            lastRefusal = nil
             registerPushIfLive()
             return true
         } catch {
             #if DEBUG
             print("attach \(endpoint.url): \(error)")
             #endif
+            // A refusal the hub explained is said once, in its words. The
+            // silent case keeps the waiting card ("… is not answering —
+            // waiting"), which is the honest thing to show when nobody has
+            // told us anything; saying more than we know is how a client
+            // ends up describing its own plumbing to the user.
+            if let reason = refusal(from: error), reason != lastRefusal {
+                lastRefusal = reason
+                items.append(ChatItem(.notice(reason, failed: true)))
+            }
         }
         live.stop()
         pump?.cancel()
         source = nil
         return false
+    }
+
+    /// The other end's own words, when the failure carries them. Transport
+    /// errors are not refusals and are left to the waiting card.
+    private func refusal(from error: Error) -> String? {
+        guard case KernelClientError.failed(let reason) = error else { return nil }
+        let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.hasPrefix("The operation couldn"),
+              !text.contains("Socket is not connected"), text != "closed"
+        else { return nil }
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
 
     /// Stop, as the kernel's stall notice offers it: the turn ends, what
