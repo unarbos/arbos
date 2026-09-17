@@ -80,8 +80,12 @@ echo "kernel $(head -1 $O/kernel-version.txt)" | tee -a $O/run.txt
 xcrun simctl terminate $U $B 2>/dev/null; sleep 1
 xcrun simctl launch --console-pty $U $B -hubURL "$H" -hubToken "$T" -dictateWav ~/mobile-clips/note.wav -injectWav ~/mobile-clips/ask.wav > $O/console.log 2>&1 &
 sleep 7; shot J1-list
-Y=$(python3 ~/find_row.py $O/J1-list.png $ROW); [ "$Y" != "0" ] || { score J1 FAIL "no $ROW row"; Y=234; }
-idb ui tap 120 $Y --udid $U; sleep 5; shot J1-open
+# By name, not by measuring the still. `find_row.py` knew project names by
+# glyph colour and divided by 3 for a screenshot that is 1.2x the point
+# size, and cycle 49 opened `pod` twice while believing it had opened a
+# fixture project. A run that opens the wrong project scores the wrong one.
+ui tap "$ROW" || score J1 FAIL "no $ROW row on the list"
+sleep 5; shot J1-open
 # seed the failing project (QA's rig seeds a folder; the phone asks the kernel to)
 type_send "$ID setup, do this yourself without workers: create $DIR/ with mathlib.py defining area(w, h) that wrongly returns w + h, tests/test_math.py (unittest) asserting area(3, 4) == 12, and git init with one commit on main containing both. No CHANGELOG. Reply 'seeded' when done."
 wait_hist J1 "user +$ID setup" 30; AFTER=$(seq_of "user +$ID setup"); echo "anchor $AFTER" | tee -a $O/run.txt
@@ -177,7 +181,8 @@ if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v erro
 V=$(grep "PUSH verdict" $O/push-check.txt | head -1); case "$V" in *PASS*) score PUSH PASS "$V";; *OFF*) score PUSH U "$V";; *) score PUSH U "$(grep -m1 'PUSH status' $O/push-check.txt)";; esac
 # J6' — kill and reopen: nothing lost
 xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
-Y=$(python3 ~/find_row.py $O/J6k-list.png $ROW); [ "$Y" = "0" ] && Y=234; idb ui tap 120 $Y --udid $U; sleep 6; shot J6k-reopened
+ui tap "$ROW" || score J6k FAIL "no $ROW row after the relaunch"
+sleep 6; shot J6k-reopened
 score J6k EYE "reopened chat ends where it ended; no pending cards"
 python3 ~/kernel.py $TARGET history 150 > $O/transcript-tail.txt 2>/dev/null
 # Again, now the run is over: a kernel replaced under a run has happened
