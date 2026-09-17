@@ -48,6 +48,11 @@ struct KernelJson {
     /// the kernel was started from. `check` warns about them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stray_secret_env: Vec<String>,
+    /// Whether `git` is on this kernel's PATH: without it checkpoints,
+    /// rewind and undo are off (said once on root's transcript). Absent
+    /// from older kernels; read as unknown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    git_missing: bool,
     version: String,
     git_sha: String,
     log: String,
@@ -373,6 +378,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     arbos_core::remember_opened(store_id);
     let host = Host::load()?;
     host.remember_place(place.path());
+    let git_present = say_if_git_missing(&place);
     match (host.api_key(), host.config.api_base()) {
         (Some(key), Ok(base)) => {
             // bash inherits this process's environment, so the model's key is
@@ -406,7 +412,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         .await
         .with_context(|| format!("bind attach {bind}"))?;
     let addr = listener.local_addr()?;
-    write_kernel_json(&place, addr, open, &access)?;
+    write_kernel_json(&place, addr, open, &access, git_present)?;
     if open {
         klog::info(
             "attach_open_bind",
@@ -2035,6 +2041,60 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     });
 }
 
+/// The marker that the missing-git notice was said for this place; in
+/// `runtime/`, so a reinstall of the machine starts the question afresh.
+const GIT_MISSING_SAID: &str = "git-missing.said";
+
+/// A fresh machine without git (a Mac before the command line tools, a
+/// minimal container): the kernel serves, but checkpoints, rewind and
+/// undo have nothing to stand on, and until now nothing said so — the
+/// person met it as a refused rewind with no cause. Said once on root's
+/// transcript, and once more when git appears; `kernel.json` carries
+/// `git: false` meanwhile so a window can show it.
+fn say_if_git_missing(place: &Place) -> bool {
+    let present = std::process::Command::new("git")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    let marker = place.runtime_dir().join(GIT_MISSING_SAID);
+    let said = marker.exists();
+    let transcript = Layout::new(place, arbos_core::ROOT_ID).transcript();
+    if !present && !said {
+        klog::warn(
+            "git_missing",
+            None,
+            "no `git` on PATH: checkpoints, rewind and undo are off until it is installed",
+        );
+        let _ = arbos_core::append_event(
+            &transcript,
+            &arbos_core::Event::new(EventKind::Notice {
+                text: "git is not installed on this machine (or not on the kernel's PATH), so checkpoints, rewind and undo are off: a turn's changes cannot be taken back until git is installed. On a Mac, `xcode-select --install`; on Debian or Ubuntu, `apt install git`.".into(),
+                failed: true,
+            }),
+        );
+        let _ = std::fs::write(&marker, "said\n");
+    } else if present && said {
+        let _ = std::fs::remove_file(&marker);
+        klog::info(
+            "git_found",
+            None,
+            "git is on PATH again: checkpoints, rewind and undo are on",
+        );
+        let _ = arbos_core::append_event(
+            &transcript,
+            &arbos_core::Event::new(EventKind::Notice {
+                text: "git is installed now: checkpoints, rewind and undo are on from this turn."
+                    .into(),
+                failed: false,
+            }),
+        );
+    }
+    present
+}
+
 /// The store is not at its path any more — said on stderr, since the log
 /// lived in it; and into the store itself where it is now, when the
 /// kernel can tell (its cwd followed the folder), so the person opening
@@ -2352,6 +2412,7 @@ fn write_kernel_json(
     addr: SocketAddr,
     open: bool,
     access: &access::Access,
+    git_present: bool,
 ) -> Result<()> {
     arbos_core::check_store(&place.arbos())?;
     let info = KernelJson {
@@ -2366,6 +2427,7 @@ fn write_kernel_json(
         git_sha: klog::git_sha().into(),
         log: klog::log_path_for(&place.arbos()).display().to_string(),
         stray_secret_env: stray_secret_env(place),
+        git_missing: !git_present,
     };
     if !info.stray_secret_env.is_empty() {
         klog::warn(
