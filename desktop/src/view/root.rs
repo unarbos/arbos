@@ -1002,8 +1002,8 @@ impl Arbos {
             &workspace,
             window,
             |this, _, request: &PaneRequest, _, cx| match request {
-                PaneRequest::Surface(_) => this.show_pane(Pane::Surface, cx),
-                PaneRequest::Chat => this.show_pane(Pane::Chat, cx),
+                PaneRequest::Surface(_) => this.set_pane(Pane::Surface, cx),
+                PaneRequest::Chat => this.set_pane(Pane::Chat, cx),
             },
         )
         .detach();
@@ -1444,8 +1444,6 @@ impl Arbos {
     /// before — the way back from the Project page or a document, and the
     /// view a new tab opens on.
     pub(crate) fn select_project(&mut self, ix: usize, cx: &mut Context<Self>) {
-        // A project tab in front means Settings is not, whatever it was.
-        self.leave_settings(cx);
         self.show_pane(Pane::Chat, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_project(ix, cx));
@@ -1488,7 +1486,19 @@ impl Arbos {
         }
     }
 
+    /// Show a pane of the project in front, and leave the Settings tab if it
+    /// was the tab showing. Every caller is a person asking to see something in
+    /// the column — a tab, a chat, a surface, the project page — and none of
+    /// them means it to happen behind Settings.
     pub(crate) fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        self.leave_settings(cx);
+        self.set_pane(pane, cx);
+    }
+
+    /// Set the pane without touching which tab is in front. The kernel's own
+    /// [`PaneRequest`] takes this route: an agent opening a terminal must not
+    /// pull a person out of the settings they are reading.
+    pub(crate) fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         self.pane = pane;
         cx.notify();
     }
@@ -1707,11 +1717,10 @@ impl Arbos {
 
     pub(crate) fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
         // ⌘1 and Escape are the way back from the Settings tab as much as from
-        // the Project page. The tab stays open; its close mark closes it.
-        if self.front() == Front::Settings {
-            self.leave_settings(cx);
-            self.focus_composer(window, cx);
-        }
+        // the Project page. `show_pane` below leaves the tab; it stays in the
+        // strip, where its close mark is, and the composer takes the keyboard
+        // so the next keystroke lands in the chat.
+        let leaving_settings = self.front() == Front::Settings;
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
                 if let Some(focus) = &mut project.focus {
@@ -1720,6 +1729,9 @@ impl Arbos {
             }
         });
         self.show_pane(Pane::Chat, cx);
+        if leaving_settings {
+            self.focus_composer(window, cx);
+        }
     }
 
     /// ⌘, the gear, and the menu item: open the Settings tab on `section`, or
