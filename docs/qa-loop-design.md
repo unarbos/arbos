@@ -115,6 +115,18 @@ Three passes tonight proved something other than what they claimed: 29 scenarios
 
 `ra-01` (the wipe guard, #410) and `rw-08`/`rw-08b`/`rw-08c` (the rewind property, #419) went through this before their results were recorded in `qal-j15` and `qal-j16`.
 
+## #432, the coordinator that slept on its workers — verified 10:45 (`co-01`…`co-05`, kernel `ec34d0e7`)
+
+From Jacob's own report. Five scenarios, replay provider, a real spawned worker each time:
+
+- `co-01` — `sleep 75; echo waited` with a worker running: refused in 0.1 s with *"while 1 worker(s) of yours run. Their reports wake you the moment they land … End the turn now … use await <job>"*; the worker's report starts the next turn and is answered.
+- `co-02` — the refusal is no broader than the fault: `sleep 6` with no workers runs to its output; `sleep 3 && echo` with a worker runs.
+- `co-03` — `for …; do sleep 1; done` with a worker runs, as the PR says. **Observation for the author, not a break:** the same wait spelled `sh -c 'sleep 8'`, `/bin/sleep 8`, `timeout 20 sleep 8`, and `true && sleep 8` all run with a worker. The PR's contract is the bare form and the prompt line carries the rest; if a model reaches for one of these the guard will not be what stops it.
+- `co-04` — the yielding path, the one that can lose work: an attached twelve-second loop yields at 2.6 s when the worker's report lands, with *"Still running as job j1 … A worker's report landed while it ran — it follows this result"*; the job runs to the end (its `out.log` holds the output) and root is woken with *"job j1 exited with code 0 after 12s — `…` — log: …"*. Nothing dropped. (The probe's first version used a bare `sleep 12`, was refused, and never tested the yield; its second version matched the command's own arguments and "found" the result at once. Both caught by reading what the pass proved.)
+- `co-05` — a worker that has reported and is done no longer counts: `sleep 6` runs right after the report and again after the archive.
+
+Not measured: *answer the question in prose first* — a prompt-contract line, needs a live model; left to the kickoff journey's scorer.
+
 ## Rewind, closed out (10:25) — evidenced (`rw-08`…`rw-10c`)
 
 `qal-j16` fixed at `0bceb0df`, its misreport at `5340c0d2`; `qal-j17` (the tree taken after the turn wrote) fixed at the source at `2daa555d` — `rw-10b` five runs, 0 lost, 0 wrong, where `5340c0d2` was 4 of 5 wrong. The fix's new face is `qal-j18`: the wait for the tree shows as the command running and is recorded as the command's time (`rw-10c`, six seconds of `echo`). Nine scenarios now stand on rewind: `rw-01`–`rw-04` (history), `rw-08`/`08b`/`08c` (the property under three failures), `rw-09` (a failed clean is said), `rw-10`/`10b`/`10c` (another git in the repository; the instant; the wait's face). Every one was run against a control that fails, and the failing run's reason read.

@@ -22,7 +22,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — the call was dropping the first third of a second of every caller's words; fixed and measured at the socket ([#402](https://github.com/unarbos/arbos/pull/402))
 - [Stand up QA break-and-fix loop](bc-f2e2f30d-1298-59f1-a24c-55113322de28) — the full journey passes 8 of 8, and six data-loss bugs were found and closed tonight
 - [Match Cursor chat view exactly](bc-2a1318aa-e675-52f4-b3ab-94cb9415aa39) — cycle 32 running on its own timer; every run now records the kernel build it measured
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — `main` `10e11f1` after ten more merges; **build 1270 and later carry the rewind and undo file-deletion fix**, phone build 1315 is on TestFlight, and Jacob is still on 1185
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — `main` `7017eb7`, eight more merged; the file-deletion fix has been on his Update since build 1270, and the plate that did nothing when he clicked it is fixed on `main` now
 </tldr>
 
 ## Voice and phone (end goal)
