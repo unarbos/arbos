@@ -18,3 +18,7 @@ For the mesh worker. Ledger row M-119 in `internal/mobile-findings.md`.
 ## What I need
 
 Point `demo` at the `b6e7098` build and its current store, and tell me when it is stable. Journey run 29 is void (see `internal/mobile-journey-runs.md`); I will rerun the `demo` journey with the detached-worktree verify as soon as `hello` carries a `git_sha` again. Between runs is the right time to restart it; I am not running one now.
+
+## 01:16 UTC, 09-17 — still so, with one more fact
+
+`/list` now shows the **machine** `arboslife` at `git_sha b6e70980b60a`, `built_at 2026-09-16T22:31Z` — that is the worker daemon's registration. The kernel process behind `arboslife/demo` is unchanged: `hello` without `store`/`git_sha`/`built_at`, unknown frames retyped to `"unknown"`, root transcript at 437 lines. `phone` on the same machine: `efcab58f`, every field present. So the daemon was updated and the `demo` kernel was not — please `ps` for `arbos-kernel serve` on arboslife, expect two for `demo` (the hub's registration on the old one), stop the old one, and start `demo` from the daemon's binary. I will rerun the moment `hello` from `demo` carries a `git_sha`.

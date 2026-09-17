@@ -195,6 +195,69 @@ platform is an answer, not an error. Only the last is a non-zero exit.
 Jacob's ruling. A machine on the hub is part of the mesh and is meant to track
 `main`. Automatic is on by default, with the refusals above as the safety.
 
+## The app's update has the same problem, and it has already done harm
+
+*Added 2026-09-17 after an incident on Jacob's Mac. Evidence: `qa-results`
+branch, `inbox/hung-five-workers/`, commit `8b8cf9e5`.*
+
+At 22:20 the in-app updater swapped the bundle and relaunched. **Its kernels
+kept running from the deleted old binary** — one executing
+`/Applications/.Arbos.app.arbos-old/…/arbos-kernel`, 223 commits behind — and
+the new app attached to them anyway. It then sent frames that kernel has never
+heard of: `frame_rejected: unknown frame type "feedback"`. Jacob's feedback
+sheet showed three empty rows, and five workers finished their jobs and never
+reported.
+
+This is the kernel self-update problem arriving from the other side, and the
+design should carry both.
+
+### Why the stop did not stop them
+
+`desktop/src/update.rs` does send `SIGTERM` before the swap. The code is right
+for the places it is *given*, and that is the bug: it is given
+**`workspace.projects` — the tabs open in that window at the moment of the
+click.** A kernel outside that list is never asked to stop:
+
+- a place whose tab was closed, or which was never opened in this window;
+- a kernel another window, the CLI, or a worker started;
+- a kernel that outlived an earlier update and has been accumulating skew since
+  — which the 223 commits suggest is what happened, the path naming whichever
+  swap first orphaned it.
+
+And two further holes even for places it does know about: a kernel that does
+not die inside `KERNEL_STOP_WAIT` is left running *by design*, and
+`Swap::commit` then deletes the backup directory out from under it, which is
+how a live process ends up executing a path that no longer exists.
+
+### The fix is two-layered, because stopping alone cannot be trusted
+
+Stopping is best-effort by nature — the app cannot enumerate every kernel on
+the machine, and a wedged kernel must not block an update. So it needs a
+second layer that does not depend on the first having worked.
+
+1. **Stop more of them.** Every place this app has a kernel for, not only the
+   open tabs — the app knows its recents and its per-place runtime files.
+2. **Never attach silently to a kernel that is not this bundle's.** At attach,
+   compare the running kernel's commit — `kernel.json` carries the `git_sha` of
+   the process that wrote it, and `hello` carries it too since #307 — with the
+   kernel this bundle ships. On a mismatch:
+   - **ask its gate.** `/healthz` carries `update_gate verdict=… reason=…`
+     since [#353](https://github.com/unarbos/arbos/pull/353). Idle means stop
+     it and let the app respawn from the bundle.
+   - **busy means say so and do not proceed silently.** A turn in flight, a
+     parked question or a detached job is exactly what must not be thrown away
+     — the same gate, for the same reason, from the app's side.
+
+The second layer is the one that would have prevented this incident, because
+it holds however the first one fails.
+
+### What the skew display would have done
+
+Nothing about this was subtle: 223 commits behind, on the bar, next to the
+version. The display was designed to make exactly this visible and has not
+been built. This incident moves slice 1b from "worth doing" to the thing
+blocking a safe app update.
+
 ## Slice 4 must be driven, not reasoned
 
 Three claims about what survives a restart were read out of the code and
