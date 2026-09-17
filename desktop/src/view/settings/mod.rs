@@ -11,6 +11,7 @@
 //! to [`crate::view::root`]. This is only what it draws.
 
 use crate::{
+    kernel,
     model::{permission_center::Permissions, workspace::Workspace},
     view::root::{self, ShowChat},
     voice_ws,
@@ -152,6 +153,13 @@ impl SettingsPane {
         // The permission rows are the centre's; follow it.
         let center = cx.global::<Permissions>().0.clone();
         cx.observe(&center, |_, _, cx| cx.notify()).detach();
+        // General compares the kernel it is talking to against the one this app
+        // ships, and reading that runs the binary. Off the window's thread, so
+        // the first paint of the tab does not wait for a subprocess and the row
+        // does not sit on "not read yet".
+        cx.background_executor()
+            .spawn(async { kernel::warm_bundled_commit() })
+            .detach();
         Self {
             workspace,
             section,

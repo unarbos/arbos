@@ -296,17 +296,89 @@ pub struct Skew {
     pub gate: Gate,
 }
 
+/// Which kernel answered, in the kernel's own words from its `hello` frame.
+///
+/// Read off the connection, which is the only thing that can answer it: the
+/// binary this app would *launch* ([`arbos_bin`]) is a different fact, and the
+/// two part company in exactly the case worth knowing about — a kernel that was
+/// already running, from another build, when the app attached.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KernelBuild {
+    /// Semver, as the kernel's own `CARGO_PKG_VERSION`.
+    pub version: String,
+    /// Short git sha. Empty, or the word `unknown`, from a build that recorded
+    /// none — read it through [`Self::commit`] rather than printing it.
+    pub git_sha: String,
+    /// `YYYY-MM-DDTHH:MMZ`; empty from a build that recorded none.
+    pub built_at: String,
+    /// The file this kernel started from is gone — replaced or moved under it —
+    /// so it runs an old image and a restart would run what is on disk now.
+    /// The kernel reports this of itself; nothing here infers it.
+    pub binary_gone: bool,
+}
+
+impl KernelBuild {
+    /// The commit, where the build recorded one. `unknown` is a kernel saying
+    /// it does not know, so it is `None` here rather than a string to print.
+    pub fn commit(&self) -> Option<&str> {
+        let sha = self.git_sha.trim();
+        (!sha.is_empty() && sha != "unknown").then_some(sha)
+    }
+
+    /// Whether this is the kernel this app ships: `None` when that cannot be
+    /// told rather than a guess either way — the bundle has not been read yet,
+    /// or one of the two builds recorded no commit.
+    pub fn is_the_bundled_build(&self) -> Option<bool> {
+        let running = self.commit()?;
+        match bundled_commit() {
+            Bundled::Sha(bundled) => Some(arbos_update::kernel::same_commit(running, bundled)),
+            Bundled::Unread | Bundled::Unreadable => None,
+        }
+    }
+}
+
 /// The commit of the kernel this app ships, asked once.
 ///
 /// The bundled kernel is the one every place on this machine should be served
 /// by; anything else is a survivor of an older bundle.
 fn bundled_kernel_sha() -> Option<&'static str> {
-    static SHA: OnceLock<Option<String>> = OnceLock::new();
-    SHA.get_or_init(|| {
-        let bin = arbos_bin().ok()?;
-        arbos_update::kernel::Running::read(&bin).ok().map(|k| k.sha)
-    })
-    .as_deref()
+    BUNDLED_SHA
+        .get_or_init(|| {
+            let bin = arbos_bin().ok()?;
+            arbos_update::kernel::Running::read(&bin)
+                .ok()
+                .map(|k| k.sha)
+        })
+        .as_deref()
+}
+
+static BUNDLED_SHA: OnceLock<Option<String>> = OnceLock::new();
+
+/// What is known about the bundled kernel's commit *without* reading it.
+/// Reading runs the binary, which is not something a paint may do, so a view
+/// asks this and [`warm_bundled_commit`] does the reading off the window's
+/// thread. Three answers, and `Unread` is one of them.
+pub enum Bundled {
+    /// Nobody has read it yet. Not the same as unreadable.
+    Unread,
+    /// Read, and the binary could not say: none on this machine, or one too
+    /// old to report a commit.
+    Unreadable,
+    Sha(&'static str),
+}
+
+pub fn bundled_commit() -> Bundled {
+    match BUNDLED_SHA.get() {
+        None => Bundled::Unread,
+        Some(None) => Bundled::Unreadable,
+        Some(Some(sha)) => Bundled::Sha(sha.as_str()),
+    }
+}
+
+/// Read the bundled kernel's commit if nobody has. Runs the binary, so call it
+/// from a background task.
+pub fn warm_bundled_commit() {
+    let _ = bundled_kernel_sha();
 }
 
 /// Whether the kernel described by `info` is one to warn about, and why.

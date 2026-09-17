@@ -1069,11 +1069,60 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                     "agent": focus.agent,
                     "surface": focus.surface.map(|id| id.0),
                 })),
+                // Which kernel this place is attached to, in the kernel's own
+                // words off the socket. `null` is "nothing attached"; a build
+                // with `commit: null` is a kernel that recorded no commit.
+                // Settings › General draws exactly this.
+                "kernel": project.kernel_build().map(|build| json!({
+                    "version": build.version,
+                    "commit": build.commit(),
+                    "git_sha": build.git_sha,
+                    "built_at": build.built_at,
+                    "binary_gone": build.binary_gone,
+                })),
                 "sessions": project.sessions.iter().map(|chat| session_json(Some(project), chat)).collect::<Vec<_>>(),
                 "surfaces": project.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
             })
         })
         .collect();
+    // The commit of the kernel binary this app ships, which is what a place's
+    // own kernel is compared against. Three answers and never a guess: `unread`
+    // (nobody has run the binary to ask yet), `unreadable`, or the sha.
+    let bundled_commit = match crate::kernel::bundled_commit() {
+        crate::kernel::Bundled::Unread => "unread",
+        crate::kernel::Bundled::Unreadable => "unreadable",
+        crate::kernel::Bundled::Sha(sha) => sha,
+    };
+    // The call to the project in front, when one is live: what the strip
+    // shows, so a test can assert on it without pixels. Built here rather
+    // than inline below — one `json!` for the whole of `state` reached the
+    // macro's recursion limit.
+    let call = this.call.as_ref().map(|call| {
+        let voice = crate::voice_ws::status();
+        json!({
+            "active": true,
+            "connecting": call.connecting,
+            "session": call.session,
+            "label": call.label,
+            "phase": voice.phase.map(|p| p.as_str()),
+            "muted": voice.muted,
+            "mic_device": voice.mic_device,
+            "mic_error": voice.mic_error,
+            "speaker_device": voice.speaker_device,
+            "work": {
+                "active": voice.work_active,
+                "agents": voice.work_agents,
+                "stale": voice.work_stale,
+                "sound": voice.work_sound,
+            },
+            "played_bytes": crate::voice_ws::counters().0,
+            "level": voice.level,
+            "partial": voice.text,
+            "reply": voice.reply,
+            "last_said": voice.last_said,
+            "seconds": call.since.elapsed().as_secs(),
+        })
+    });
     json!({
         // Which tab the middle draws, and — for a project tab — which of its
         // panes. `showing` is the project's, so a test that means "the chat is
@@ -1106,6 +1155,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         },
         // The Settings tab is in the strip. `front` says whether it is the tab
         // being looked at, and `settings_section` which section it is on.
+        "bundled_kernel_commit": bundled_commit,
         "settings_open": this.settings_tab.is_some(),
         "settings_section": this.settings_tab.as_ref()
             .map(|tab| json!(tab.pane.read(cx).section().key())),
@@ -1170,34 +1220,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         // The last dictated take's clock: Fn press to first partial, release
         // to send. The gateway's own numbers ride along.
         "voice_latency": voice_latency(this),
-        // The call to the project in front, when one is live: what the
-        // strip shows, so a test can assert on it without pixels.
-        "call": this.call.as_ref().map(|call| {
-            let voice = crate::voice_ws::status();
-            json!({
-                "active": true,
-                "connecting": call.connecting,
-                "session": call.session,
-                "label": call.label,
-                "phase": voice.phase.map(|p| p.as_str()),
-                "muted": voice.muted,
-                "mic_device": voice.mic_device,
-                "mic_error": voice.mic_error,
-                "speaker_device": voice.speaker_device,
-                "work": {
-                    "active": voice.work_active,
-                    "agents": voice.work_agents,
-                    "stale": voice.work_stale,
-                    "sound": voice.work_sound,
-                },
-                "played_bytes": crate::voice_ws::counters().0,
-                "level": voice.level,
-                "partial": voice.text,
-                "reply": voice.reply,
-                "last_said": voice.last_said,
-                "seconds": call.since.elapsed().as_secs(),
-            })
-        }),
+        "call": call,
         "active_project": workspace.active,
         "active_session": workspace.active_id(),
         "active_surface": workspace.active_surface().map(|surface| surface.id.0),
