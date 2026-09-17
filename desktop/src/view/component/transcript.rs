@@ -3892,7 +3892,7 @@ fn zone(
     let mut header_drawn = false;
     let mut open = open;
     if !running && foldable {
-        match work_header(chat.id, first, &stats, open, running, rows_under, chat, cx) {
+        match work_header(chat.id, first, &stats, open, auto_open, running, rows_under, chat, cx) {
             Some(header) => {
                 zone = zone.child(header);
                 header_drawn = true;
@@ -4531,6 +4531,7 @@ fn work_header(
     turn: usize,
     stats: &WorkStats,
     open: bool,
+    auto: bool,
     running: bool,
     rows: bool,
     chat: &ChatSession,
@@ -4584,12 +4585,15 @@ fn work_header(
             fold_row(&theme, "work-bare", turn, verb, rest, None, false, open, cx).into_any_element(),
         );
     }
+    // The toggle flips what is on screen, so it must use the same default
+    // the drawing used: recomputing it in the listener with `chat.busy()`
+    // (not this turn's `running`) made a click over a busy chat set the
+    // fold to the state it was already in — "no state change" on the
+    // `work` gate row, cycles 23–25.
     Some(
         fold_row(&theme, "work", turn, verb, rest, None, false, open, cx)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.with_session(id, cx, |chat| {
-                    let running = chat.busy();
-                    let auto = auto_work_open(&chat.items, turn, running);
                     chat.transcript.work.entry(turn).or_default().toggle(auto);
                 });
             }))
