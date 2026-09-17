@@ -14,6 +14,23 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// ETXTBSY: the tests here run in parallel threads of one process, and
+/// one's fork can hold another's freshly copied executable open for
+/// writing for the instant between its fork and exec. Not the thing under
+/// test; try again.
+fn spawn_retrying(cmd: &mut std::process::Command) -> std::process::Child {
+    for _ in 0..50 {
+        match cmd.spawn() {
+            Ok(c) => return c,
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("spawn: {e}"),
+        }
+    }
+    panic!("spawn: text file busy for a second");
+}
+
 fn healthz(url: &str) -> serde_json::Value {
     let addr = url.trim_start_matches("tcp://");
     let mut s = TcpStream::connect(addr).unwrap();
@@ -36,7 +53,7 @@ fn start_from_copy(tag: &str) -> (common::Kernel, PathBuf) {
 }
 
 /// `env` on the kernel: the tests of the *report* keep the kernel on its
-/// old image with `ARBOS_NO_REEXEC`; the test of the restart does not.
+/// old image with `ARBOS_NO_REEXEC`; the tests of the restart do not.
 fn start_from_copy_with(tag: &str, env: &[(&str, &str)]) -> (common::Kernel, PathBuf) {
     let scratch = common::scratch_dir(tag);
     let bin = scratch.join("arbos-kernel");
@@ -50,21 +67,20 @@ fn start_from_copy_with(tag: &str, env: &[(&str, &str)]) -> (common::Kernel, Pat
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let child = cmd
-        .arg("serve")
-        .arg(&place)
-        .args([
-            "--provider",
-            "replay",
-            "--replies",
-            replies.to_str().unwrap(),
-        ])
-        .env("XDG_CONFIG_HOME", &xdg)
-        .env("HOME", scratch.join("home"))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let child = spawn_retrying(
+        cmd.arg("serve")
+            .arg(&place)
+            .args([
+                "--provider",
+                "replay",
+                "--replies",
+                replies.to_str().unwrap(),
+            ])
+            .env("XDG_CONFIG_HOME", &xdg)
+            .env("HOME", scratch.join("home"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    );
     let kernel_json = place.join(".arbos/runtime/kernel.json");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let url = loop {
@@ -139,6 +155,181 @@ fn control_a_kernel_whose_binary_stands_says_nothing() {
     let _ = k.child.kill();
 }
 
+/// The app's update, not unlink-and-write: the whole directory holding
+/// the kernel is renamed to a backup and a new directory with the new
+/// build takes its place. The running kernel's inode travels with the
+/// backup, so its own current path is a real, unchanged file — judged by
+/// that, nothing happened. Judged by what is at the path it was started
+/// from, it is replaced: `binary_gone: true`.
+#[test]
+fn a_kernel_whose_directory_was_renamed_to_a_backup_reads_gone() {
+    let scratch = common::scratch_dir("binary-dir-rename");
+    let app = scratch.join("Arbos.app");
+    std::fs::create_dir_all(&app).unwrap();
+    let bin = app.join("arbos-kernel");
+    std::fs::copy(env!("CARGO_BIN_EXE_arbos-kernel"), &bin).unwrap();
+    let replies = scratch.join("replies.jsonl");
+    std::fs::write(&replies, "").unwrap();
+    std::fs::write(scratch.join("xdg/arbos/config.toml"), "trace = false\n").unwrap();
+    let place = scratch.join("place");
+    let child = spawn_retrying(
+        std::process::Command::new(&bin)
+            .arg("serve")
+            .arg(&place)
+            .args([
+                "--provider",
+                "replay",
+                "--replies",
+                replies.to_str().unwrap(),
+            ])
+            .env("XDG_CONFIG_HOME", scratch.join("xdg"))
+            .env("HOME", scratch.join("home"))
+            .env("ARBOS_NO_REEXEC", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    );
+    let pid = child.id();
+    let kernel_json = place.join(".arbos/runtime/kernel.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let url = loop {
+        if let Ok(text) = std::fs::read_to_string(&kernel_json)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && v["pid"].as_u64() == Some(pid as u64)
+        {
+            break v["url"].as_str().unwrap().to_string();
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut k = common::Kernel {
+        child,
+        place: place.clone(),
+        url,
+        scratch: scratch.clone(),
+    };
+    let mut a = Attach::connect(&k.url);
+    let hello = a
+        .wait(Duration::from_secs(5), |f| f["type"] == "hello")
+        .unwrap();
+    assert!(hello.get("binary_gone").is_none(), "{hello}");
+
+    // The app's swap: the directory becomes the backup; a new directory
+    // with a new build (a distinct file) at the same path.
+    std::fs::rename(&app, scratch.join("Arbos.app.backup")).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_arbos-kernel"), &bin).unwrap();
+    let backup_bin = scratch.join("Arbos.app.backup").join("arbos-kernel");
+    assert!(
+        backup_bin.exists(),
+        "the running inode travelled with the backup"
+    );
+
+    let mut b = Attach::connect(&k.url);
+    let hello = b
+        .wait(Duration::from_secs(5), |f| f["type"] == "hello")
+        .unwrap();
+    assert_eq!(
+        hello["binary_gone"], true,
+        "judged by the start path, not by where the inode went: {hello}"
+    );
+    assert_eq!(healthz(&k.url)["binary_gone"], true);
+    let _ = k.child.kill();
+}
+
+/// The same swap, with the restart on: the re-exec goes onto the new
+/// build at the start path, never onto the backup where the running
+/// inode went — the defect the desktop update owner's review found in
+/// `choose()`. Proven by removing the backup after the restart and
+/// finding the new image still serving, not gone.
+#[test]
+fn a_kernel_whose_directory_was_renamed_restarts_onto_the_start_path_not_the_backup() {
+    let scratch = common::scratch_dir("binary-dir-rename-reexec");
+    let app = scratch.join("Arbos.app");
+    std::fs::create_dir_all(&app).unwrap();
+    let bin = app.join("arbos-kernel");
+    std::fs::copy(env!("CARGO_BIN_EXE_arbos-kernel"), &bin).unwrap();
+    let replies = scratch.join("replies.jsonl");
+    std::fs::write(&replies, "").unwrap();
+    std::fs::write(scratch.join("xdg/arbos/config.toml"), "trace = false\n").unwrap();
+    let place = scratch.join("place");
+    let child = spawn_retrying(
+        std::process::Command::new(&bin)
+            .arg("serve")
+            .arg(&place)
+            .args([
+                "--provider",
+                "replay",
+                "--replies",
+                replies.to_str().unwrap(),
+            ])
+            .env("XDG_CONFIG_HOME", scratch.join("xdg"))
+            .env("HOME", scratch.join("home"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    );
+    let pid = child.id();
+    let kernel_json = place.join(".arbos/runtime/kernel.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let started_before = loop {
+        if let Ok(text) = std::fs::read_to_string(&kernel_json)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && v["pid"].as_u64() == Some(pid as u64)
+        {
+            break v["started"].as_i64().unwrap();
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut k = common::Kernel {
+        child,
+        place: place.clone(),
+        url: String::new(),
+        scratch: scratch.clone(),
+    };
+    std::fs::rename(&app, scratch.join("Arbos.app.backup")).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_arbos-kernel"), &bin).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let text = std::fs::read_to_string(&kernel_json).unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && v["pid"].as_u64() == Some(pid as u64)
+            && v["started"].as_i64().unwrap_or(0) > started_before
+        {
+            k.url = v["url"].as_str().unwrap().to_string();
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the kernel never restarted after its directory was renamed"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let log = std::fs::read_to_string(place.join(".arbos/runtime/kernel.log")).unwrap();
+    let reexec_line = log
+        .lines()
+        .find(|l| l.contains("\"event\":\"reexec\""))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(
+        reexec_line.contains("Arbos.app/arbos-kernel") && !reexec_line.contains("backup"),
+        "restarted onto the start path, not the backup: {reexec_line}"
+    );
+    // The backup goes, as the app's swap removes it moments later. A new
+    // image running from the backup would now be gone; one running from
+    // the start path is fine.
+    std::fs::remove_dir_all(scratch.join("Arbos.app.backup")).unwrap();
+    let mut b = Attach::connect(&k.url);
+    let hello = b
+        .wait(Duration::from_secs(10), |f| f["type"] == "hello")
+        .unwrap();
+    assert!(
+        hello.get("binary_gone").is_none(),
+        "the new image runs the file at the start path: {hello}"
+    );
+    let _ = k.child.kill();
+}
+
 /// The product answer for a kernel with no supervisor (subnet120,
 /// started detached with init as its parent): when its file is replaced
 /// under it and nothing is in flight, it execs onto the new file — same
@@ -159,19 +350,12 @@ fn a_kernel_whose_binary_was_replaced_restarts_onto_the_new_one_when_idle() {
     .unwrap()["started"]
         .as_i64()
         .unwrap();
-    // The update: the same build staged and renamed over the path (a
-    // different build would do; the same one proves the mechanism and
-    // keeps the test's kernel testable).
     std::fs::copy(
         env!("CARGO_BIN_EXE_arbos-kernel"),
         bin.with_extension("new"),
     )
     .unwrap();
     std::fs::rename(bin.with_extension("new"), &bin).unwrap();
-
-    // Within two ticks: binary_gone said, then the re-exec. kernel.json
-    // is rewritten by the new image with a later `started` and the same
-    // pid.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     let restarted = loop {
         let text =
@@ -197,7 +381,6 @@ fn a_kernel_whose_binary_was_replaced_restarts_onto_the_new_one_when_idle() {
         2,
         "the new image started in the same process: {log}"
     );
-    // The new image runs the file at its path: not gone.
     let mut b = Attach::connect(&url);
     let hello = b
         .wait(Duration::from_secs(10), |f| f["type"] == "hello")
