@@ -147,3 +147,60 @@ without this PR.
 **The shape question now has a picture.** The kernel's answer and GPT-Live's
 spoken answer sit one after the other, saying the same thing in different
 words. Visible in the still above. Still not guessed at.
+
+### Update 21:40Z — the shape question is answered and built
+
+**The decision:** the project chat shows the spoken conversation. Where Live
+spoke the kernel's answer, the spoken row stays and the kernel's parallel
+text row for that turn goes. Never both wordings. [#502](https://github.com/unarbos/arbos/pull/502)
+is now exactly that rule and nothing wider.
+
+**How it decides, and why not by comparing text.** The two wordings are
+different on purpose — that is the whole problem — so matching on the words
+would never fire. The rule is scoped to the *turn* instead. A row the app
+put there itself is marked `spoken`; a row from the kernel is not. When a
+spoken answer arrives, every unspoken agent row since the last question is
+removed, and any that arrives later in the same turn is not added. A new
+question, or a new kernel turn, clears the flag — so a turn Live never
+spoke keeps the kernel's answer, which is the case that would otherwise
+lose the reply altogether.
+
+**What is deliberately kept.** `Worked 7s` and the tool lines stay. They are
+the record of what the kernel did, not a second wording of what it said, and
+without them a delegated turn would look like Live answered it alone.
+
+**The evidence**, from a run at 21:34Z on the acceptance conversation:
+
+| | |
+|---|---|
+| `media/mobile/cycle-54/00-before-the-rule-both-wordings.png` | the same question answered twice, one under the other |
+| `media/mobile/cycle-54/01-one-wording-per-turn.png` | the same question, one answer: the spoken one |
+
+The second still is the claim. Under `What is the status on the project?` it
+reads `Main agent is idle, and all the workers are finished.` / `Worked 7s` /
+`The main agent's just picked something up. It's taken a turn.` / `Okay,
+confirmed, everything's done and committed on its own branches…` — all of it
+spoken wording.
+
+**The kernel wrote its own answer for those same turns** and it is not on the
+screen: seq 1957 and 1961, both `This project (poems, sorting algorithms, and
+the nine J-series math-library fixes — J143228 through J214750) is fully
+done…`. That the app can render that text is not in question — it is on the
+screen directly above, replayed from history, and the `Worked 7s` row proves
+the app watched the same kernel turn. It dropped the wording, not the turn.
+
+**One limit, stated plainly.** Spoken rows are display-only and are never
+sent anywhere, so they do not survive the app being restarted. After a
+restart the chat replays the kernel's transcript and shows the kernel's
+wording for those turns — `media/mobile/cycle-54/02-history-replay-is-the-kernels-wording.png`.
+That is the honest fallback rather than a bug: the kernel's transcript is the
+only record that persists, and a spoken paraphrase the kernel never heard
+cannot be in it. Worth knowing before someone reports the rule as broken.
+
+**The route to this still is now a committed script**, `deploy/mobile/scenarios/call-text-in-chat.sh`,
+because three earlier attempts were lost to navigation rather than to the
+feature. The thing that defeated them: a call screen is wordless by design
+and its composer and close button only exist once the screen is pulled down,
+so a tap for the close button before the pull gesture finds nothing.
+
+M-179 is closed.

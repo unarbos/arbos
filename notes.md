@@ -20,8 +20,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 <tldr>
 - [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — gateway live on `c40f39b0` with [#500](https://github.com/unarbos/arbos/pull/500); click Update **1616** for chat rows; next Update after 1616 has [#501](https://github.com/unarbos/arbos/pull/501); [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
-- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1616)**; [#504](https://github.com/unarbos/arbos/pull/504) pushed again after the kernel flake, waiting on CI
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [#506](https://github.com/unarbos/arbos/pull/506) on `main`; [#504](https://github.com/unarbos/arbos/pull/504) kernel CI red; `v0.2.0` stays a draft
+- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1616)**; [#504](https://github.com/unarbos/arbos/pull/504) CI green, ready to merge
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — merge [#504](https://github.com/unarbos/arbos/pull/504) (CI green); `v0.2.0` stays a draft
 - [Run QA break-and-fix loop](bc-b4f4cdba-0146-5dea-9731-24ea2538adcd) — six-chats was the harness; real find is the `hi` card at 0.84 of the column
 </tldr>
 
@@ -56,7 +56,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] iPhone on-device pass — build 13 is installed and running on Jacob's iPhone Air (replacing build 12), pointed at the live hub; his 17e is unpaired if that is the phone he meant; three findings with the iOS worker — the reply drawn twice, identical globes instead of each project's icon, and the name repeated three times per row ([stills](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/mobile/device-build-13)); earlier build 12 findings: loudness fixed (duplex model output was 14 dB low, normalised on device; gateway-side normalisation requested), round trip 0.5 s, no self-hearing, hub picker; open: barge-in over speaker (iOS mutes mic in playback), background audio check by Jacob
 - [ ] Reach agents from anywhere — fixed: CI builds had been shipping with no settings file at all, so [#276](https://github.com/unarbos/arbos/pull/276) bakes the phone's own rotated token, replaces a stale keychain copy on launch, and blocks any upload whose hub address or token the hub rejects — build 920 is the first guarded upload and reaches his real projects; the pod hub is redeployed and relays frames raw so it can no longer drop fields silently; Jacob to add CNAMEs for `hub-api` and `kernel-api.arbos.life`, which is why the phone still uses a throwaway tunnel URL
-- [ ] [Build Arbos mesh: workers everywhere](bc-22d20d79-de36-524a-ae31-3e1c44c03b98) — green after the [#500](https://github.com/unarbos/arbos/pull/500) gateway deploy; nothing outstanding
+- [ ] [Build Arbos mesh: workers everywhere](bc-22d20d79-de36-524a-ae31-3e1c44c03b98) — both watchers green; waiting on its own timers
 
 ## Agent architecture
 
@@ -87,9 +87,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1616)**; [#504](https://github.com/unarbos/arbos/pull/504) pushed again after the kernel flake, waiting on CI
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1616)**; [#504](https://github.com/unarbos/arbos/pull/504) CI green, ready to merge
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [#506](https://github.com/unarbos/arbos/pull/506) on `main`; [#504](https://github.com/unarbos/arbos/pull/504) kernel CI red; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — merge [#504](https://github.com/unarbos/arbos/pull/504) (CI green); `v0.2.0` stays a draft
 - [x] [Website download PR](https://github.com/unarbos/arbos/pull/478) — merged; Mac button is meant to take the newest dev zip until a published DMG exists
 
 ## Running Arbos
