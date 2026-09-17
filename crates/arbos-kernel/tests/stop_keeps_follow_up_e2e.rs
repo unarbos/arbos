@@ -50,6 +50,23 @@ fn stop_keeps_the_users_queued_follow_up_held_until_send_now_or_remove() {
     let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
     a.send(serde_json::json!({"type":"user","agent":"root","text":"do the slow thing","attachments":[]}));
     assert!(a.wait_turn("root", "running", Duration::from_secs(10)));
+    // The turn is *in its bash* before anything else happens: a Stop that
+    // lands while the first model call is still in flight leaves the
+    // scripted reply unconsumed, and the next turn would take it (the
+    // 30 s sleep) instead of its own — the 1-in-3 flake. The fact to wait
+    // on is the tool starting, which the kernel emits as a `tool` event
+    // with no `ended`.
+    assert!(
+        a.wait(Duration::from_secs(10), |f| {
+            f["type"] == "event"
+                && f["agent"] == "root"
+                && f["event"]["kind"] == "tool"
+                && f["event"]["name"] == "bash"
+                && f["event"]["ended"].is_null()
+        })
+        .is_some(),
+        "the bash has started"
+    );
     // Two follow-ups queued behind the turn (a plain user frame while a
     // turn runs is held for the next turn).
     a.send(serde_json::json!({"type":"user","agent":"root","text":"then do this next","attachments":[]}));

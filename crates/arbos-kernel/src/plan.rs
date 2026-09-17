@@ -495,12 +495,52 @@ fn archive_finished_inner(hooks: &KernelHooks, reported: &[String]) {
             .is_some_and(|a| a.remote.is_some());
         let dir = arbos_core::project::archive_agents_dir(&hooks.place);
         let dest = dir.join(id);
+        // The child's running jobs move with its folder. Each leash reads
+        // its cap from the folder's path, so it is told the new one
+        // before the move; a job that was blind to its own cap for the
+        // life of a moved folder is how a log grew to 164 GB. The jobs
+        // themselves go on: a server a worker started on purpose survives
+        // being archived.
+        let running: Vec<(u32, String)> =
+            arbos_engine::JobsRoot::for_agent(&hooks.place, &arbos_core::AgentId::new(id))
+                .list()
+                .into_iter()
+                .filter(|j| j.running())
+                .map(|j| (j.meta.pid, j.id.clone()))
+                .collect();
+        let store = hooks.place.arbos();
+        for (pid, job) in &running {
+            let _ = arbos_engine::repoint_leash(&store, *pid, &dest.join("jobs").join(job));
+        }
         let result = std::fs::create_dir_all(&dir).and_then(|_| {
             if dest.exists() {
                 return Err(std::io::Error::other("already archived"));
             }
             std::fs::rename(&src, &dest)
         });
+        if result.is_err() {
+            for (pid, _) in &running {
+                let _ = std::fs::remove_file(
+                    store
+                        .join(arbos_engine::LEASH_POINTERS)
+                        .join(pid.to_string()),
+                );
+            }
+        } else if !running.is_empty() {
+            crate::klog::info(
+                "jobs_repointed",
+                Some(id),
+                format!(
+                    "{} running job(s) follow the folder to the archive: {}",
+                    running.len(),
+                    running
+                        .iter()
+                        .map(|(pid, job)| format!("{job} (pid {pid})"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        }
         match result {
             Ok(()) => {
                 moved = true;

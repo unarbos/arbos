@@ -71,6 +71,21 @@ fn was_waiting_for_approval(place: &Place, agent: &AgentId, call_id: &str) -> bo
     approval_marker(place, agent, call_id).exists()
 }
 
+/// What is running now, oldest first, the files left as they are. For a
+/// kernel asking what a silent turn is waiting on.
+pub fn peek(place: &Place, agent: &AgentId) -> Vec<ToolRec> {
+    let Ok(rd) = std::fs::read_dir(dir(place, agent)) else {
+        return vec![];
+    };
+    let mut recs: Vec<ToolRec> = rd
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter_map(|e| serde_json::from_slice::<ToolRec>(&std::fs::read(e.path()).ok()?).ok())
+        .collect();
+    recs.sort_by_key(|r| r.started.unwrap_or(0));
+    recs
+}
+
 /// What was running when the last kernel died: every record, oldest
 /// first, and the files gone.
 pub fn take(place: &Place, agent: &AgentId) -> Vec<ToolRec> {

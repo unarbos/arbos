@@ -216,6 +216,13 @@ final class ChatStore: ObservableObject {
         return false
     }
 
+    /// Stop, as the kernel's stall notice offers it: the turn ends, what
+    /// ran so far stands, and the kernel's `interrupted` line says so.
+    func stopTurn() {
+        guard busy, let source else { return }
+        Task { try? await source.interrupt() }
+    }
+
     func disconnect() {
         reconnectTask?.cancel()
         reconnectTask = nil

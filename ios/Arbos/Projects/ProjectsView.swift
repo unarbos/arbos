@@ -330,6 +330,9 @@ struct ComposerBar: View {
     var focus: FocusState<Bool>.Binding?
     var attachments: Binding<[PendingAttachment]>?
     var dictation: Dictation?
+    /// A turn is running: with nothing typed, the right button is Stop.
+    var busy = false
+    var onStop: (() -> Void)?
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showFiles = false
     @State private var showPhotos = false
@@ -382,6 +385,20 @@ struct ComposerBar: View {
                             .padding(.bottom, 1)
                     }
                     .buttonStyle(.plain)
+                } else if busy, let onStop {
+                    // The kernel's stall line says "Stop ends the turn"; the
+                    // phone had no Stop (M-130). As Cursor's: the send disc
+                    // becomes a stop square while the agent works.
+                    Button(action: onStop) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color.black)
+                            .frame(width: 28, height: 28)
+                            .background(Circle().fill(ArbosTheme.text))
+                            .padding(.bottom, 1)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Stop")
                 } else {
                     Button {
                         if let dictation { dictation.start(settings: settings) } else { onMic() }

@@ -15,7 +15,6 @@ use crate::{
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
         root::{self, Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
-        settings::Section,
     },
 };
 use bezel::{
@@ -140,6 +139,10 @@ struct AgentLine {
     /// Cursor's task-list rows read "title — summary": the step while it
     /// works, its last words once done. None for the main chat.
     summary: Option<String>,
+    /// The main chat's "waiting on <worker> — <step>" while a worker is
+    /// live (kernel #366). The row draws whom it waits on, dim; the step is
+    /// on the worker's row under it and on the chat's live line.
+    waiting: Option<String>,
     /// The worker cannot write: the same mark as on its line in the chat.
     readonly: bool,
 }
@@ -277,6 +280,7 @@ impl Arbos {
                     // keeps its spinner turning.
                     since: chat.elapsed().unwrap_or_else(transcript::live_phase),
                     summary: (n != 0).then(|| row_summary(chat)).flatten(),
+                    waiting: (n == 0).then(|| chat.waiting.clone()).flatten(),
                     readonly: chat.readonly,
                 })
             })
@@ -624,6 +628,7 @@ impl Arbos {
         };
         let title = SharedString::from(line.title);
         let carried = title.clone();
+        let waiting_on = line.waiting.is_some();
         let markdown: SharedString = self
             .workspace
             .read(cx)
@@ -644,7 +649,16 @@ impl Arbos {
                     .flex()
                     .flex_row()
                     .items_baseline()
-                    .child(div().flex_none().truncate().text_color(tint).child(title))
+                    // While the main chat waits on a worker the step is the
+                    // news: the title gives way to it, not the other way.
+                    .child(
+                        div()
+                            .when(waiting_on, |el| el.min_w_0().flex_shrink(1.))
+                            .when(!waiting_on, |el| el.flex_none())
+                            .truncate()
+                            .text_color(tint)
+                            .child(title),
+                    )
                     .when(line.readonly, |el| {
                         el.child(
                             div()
@@ -660,6 +674,24 @@ impl Arbos {
                                 .truncate()
                                 .text_color(theme.text_faint)
                                 .child(SharedString::from(format!(" — {summary}"))),
+                        )
+                    })
+                    .when_some(line.waiting, |el, waiting| {
+                        // "· waiting on Slow builder": whom the main chat
+                        // waits on. The worker's own row, right under it,
+                        // carries the step and its clock; the chat's live
+                        // line carries it too. The panel is too narrow to
+                        // say the step a third time.
+                        let who = waiting
+                            .split_once(" — ")
+                            .map_or(waiting.as_str(), |(who, _)| who)
+                            .to_string();
+                        el.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(format!(" · {who}"))),
                         )
                     }),
             )
@@ -1147,9 +1179,9 @@ impl Arbos {
 
     /// The bottom strip: settings on the left, a sub-chat on the right.
     fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // Something the user tried needed a permission that is not granted:
-        // a dot on the gear, and nothing louder, after "Skip for now".
-        let wants_permission = self.permission_center.read(cx).wants_attention();
+        // No gear here: the bar under the window carries it, bottom-left,
+        // where Cursor's sidebar foot keeps its one (cycle 26, panel beside
+        // Cursor's sidebar — two gears in one window was one too many).
         div()
             .flex_none()
             .h(px(40.))
@@ -1158,48 +1190,6 @@ impl Arbos {
             .flex_row()
             .items_center()
             .justify_between()
-            .child(
-                theme
-                    .ghost("settings")
-                    .px(px(8.))
-                    .py(px(6.))
-                    .tooltip(|window, cx| {
-                        Tooltip::with_keystroke(
-                            format!("Settings — {}", crate::build::badge()),
-                            "⌘,",
-                            window,
-                            cx,
-                        )
-                    })
-                    .child(
-                        div()
-                            .relative()
-                            .child(
-                                icons::icon(icons::system::SETTINGS_MINIMALISTIC)
-                                    .size(px(14.))
-                                    .text_color(theme.text_muted),
-                            )
-                            .when(wants_permission, |el| {
-                                el.child(
-                                    div()
-                                        .id("settings-dot")
-                                        .absolute()
-                                        .top(px(-2.))
-                                        .right(px(-3.))
-                                        .size(px(6.))
-                                        .rounded_full()
-                                        .bg(theme.warning),
-                                )
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if wants_permission {
-                            this.show_permissions(window, cx);
-                        } else {
-                            this.open_settings(Section::General, cx);
-                        }
-                    })),
-            )
             .child(
                 theme
                     .ghost("search-chats")

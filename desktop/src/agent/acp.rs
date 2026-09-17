@@ -146,6 +146,10 @@ pub enum Event {
     /// event, one line, replaced by the next. Drawn on the parent's
     /// "1 Working  …" line for a worker.
     Status(String),
+    /// The parent's "waiting on <worker> — <the worker's step>" line (kernel
+    /// #366, `status` with `source: "waiting"`): someone else's step,
+    /// watched. `None` when no worker is live any more.
+    Waiting(Option<String>),
     /// The kernel's model provider and whether it holds a key (`provider`
     /// frame). `key: false` is the cue to offer this window's own key.
     Provider {
@@ -185,6 +189,12 @@ pub enum Event {
     /// answered — all redacted of credentials by the kernel. Goes to the
     /// review sheet, which shows it before anything is sent.
     Feedback(Box<crate::feedback::Bundle>),
+    /// The kernel will not answer a `feedback` ask, in its own words — most
+    /// often because it predates the frame. A kernel older than the app is
+    /// ordinary: the app carries its own binary and Jacob's places may still be
+    /// serving last week's. Better than any version guess, since it is the
+    /// kernel itself saying it does not know the frame.
+    FeedbackUnavailable(String),
     /// Provider-generated pictures for the turn that just finished.
     Images(Vec<crate::model::attachment::MessageImage>),
     /// Files a tool made for the user: screenshots, screen recordings.
@@ -845,6 +855,16 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             agent: Some(id),
             detail,
         } if id == agent => vec![Event::Refused(detail)],
+        // An unknown frame is refused with no agent on it, so this used to fall
+        // off the end of the match and be dropped — which is why a sheet on an
+        // old kernel sat reading "still reading the exchange" for ever instead
+        // of saying what was wrong.
+        Frame::Error {
+            agent: None,
+            detail,
+        } if detail.contains("unknown frame type") && detail.contains("feedback") => {
+            vec![Event::FeedbackUnavailable(detail)]
+        }
         // A `put` of an attachment's bytes the kernel would not take (too
         // large, a bad path): the words went through without the file, and
         // the chat says so.
@@ -860,6 +880,15 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
         // The agent's own line on what it is doing (or the kernel's guess
         // from the tool in flight); an empty step means idle.
+        Frame::Status {
+            agent: id,
+            step,
+            source,
+            ..
+        } if id == agent && source == "waiting" => {
+            let step = step.trim().to_string();
+            vec![Event::Waiting((!step.is_empty()).then_some(step))]
+        }
         Frame::Status { agent: id, step, .. } if id == agent => vec![Event::Status(step)],
         // Not agent-scoped: every attached chat hears it, and the
         // workspace's re-read is idempotent.

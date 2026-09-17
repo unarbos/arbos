@@ -144,6 +144,10 @@ pub struct Workspace {
     pub permissions_seen: bool,
 }
 
+/// Under a fork's trailing prompt when the original was still answering it.
+pub const FORKED_MID_TURN: &str =
+    "Forked while the original chat was still answering this — it keeps that work. Send a message to continue here.";
+
 impl Workspace {
     pub fn new(settings: Settings, state: State, cx: &mut Context<Self>) -> Self {
         let recents: Vec<Place> = state
@@ -1969,13 +1973,16 @@ impl Workspace {
         };
         let place = self.projects[ix].place();
         let title = self.display_label(id);
+        // A fork taken mid-run copies the prompt the original is still
+        // answering; the copy says so under it (Jacob, 2026-09-17-1).
+        let source_busy = self.session(id).is_some_and(|chat| chat.busy());
         cx.spawn(async move |this, cx| {
             let cloned = cx
                 .background_executor()
                 .spawn(async move { kernel::clone_session(&place, &sid) })
                 .await;
             let _ = this.update(cx, |workspace, cx| match cloned {
-                Ok(new_sid) => workspace.adopt_clone(ix, &new_sid, &title, cx),
+                Ok(new_sid) => workspace.adopt_clone(ix, &new_sid, &title, source_busy, cx),
                 Err(err) => {
                     workspace.with_session(id, cx, |chat| {
                         chat.notice(true, &format!("could not fork: {err:#}"));
@@ -1991,6 +1998,7 @@ impl Workspace {
         ix: usize,
         kernel_id: &str,
         source_title: &str,
+        source_busy: bool,
         cx: &mut Context<Self>,
     ) {
         if self.projects.get(ix).is_some_and(|project| {
@@ -2029,6 +2037,14 @@ impl Workspace {
         );
         if let Some(model) = replay.model {
             chat.model = Some(model);
+        }
+        // The copy ends on a prompt the original is still answering: with
+        // nothing under it and an idle composer it read as a chat that
+        // never replied ("Forked the chat mid run no response from sub
+        // agent", Jacob's first report). Say what it is, once.
+        let unanswered_tail = matches!(chat.items.last(), Some(ChatItem::User(_)));
+        if source_busy && unanswered_tail {
+            chat.notice(false, FORKED_MID_TURN);
         }
         chat.rank = self.projects[ix].front_rank(None);
         chat.flush();

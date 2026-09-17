@@ -8,9 +8,58 @@ fn main() -> Result<()> {
     unsafe {
         libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
     }
+    // A launcher can hand its children a signal mask with SIGCHLD blocked
+    // (it is inherited across exec). The runtime's child reaper is
+    // signal-driven on macOS, so a kernel started that way never hears a
+    // command end: five jobs exited 0 as zombies with no tool result
+    // (Jacob's Mac, 2026-09-17). Unblocked here, before the runtime
+    // starts; said on stderr when it had to be, so a log shows it.
+    #[cfg(unix)]
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGCHLD);
+        let mut old: libc::sigset_t = std::mem::zeroed();
+        if libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, &mut old) == 0
+            && libc::sigismember(&old, libc::SIGCHLD) == 1
+        {
+            eprintln!(
+                "arbos-kernel: SIGCHLD was blocked in the inherited signal mask — unblocked, or no command would ever be seen to end"
+            );
+        }
+    }
+    // The path this process was started with, kept before anything can
+    // replace the binary under it (see `binary`).
+    arbos_kernel::binary::remember_start();
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
+        // Which file a kernel started by this process would run from, and
+        // why, when it is not this process's own binary. `--wait-for
+        // <file>` answers only once the file exists (a test replaces the
+        // binary meanwhile).
+        "binary" => {
+            let mut wait_for = None;
+            let mut it = args;
+            while let Some(a) = it.next() {
+                if a == "--wait-for" {
+                    wait_for = it.next();
+                }
+            }
+            if let Some(flag) = wait_for {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !std::path::Path::new(&flag).exists() && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            let chosen = arbos_kernel::binary::kernel_binary()?;
+            println!("{}", chosen.path.display());
+            if let Some(note) = chosen.note {
+                println!("note: {note}");
+            }
+            return Ok(());
+        }
         "serve" => {
             // `serve [place] [--provider replay --replies FILE]`: the
             // provider choice goes into the environment before the runtime

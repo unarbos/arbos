@@ -14,7 +14,7 @@ use crate::{
         component::{
             chat_search::{ChatSearch, ChatSearchEvent, Hit, PaletteAction},
             composer::{Composer, ComposerEvent, VoiceState},
-            feedback_sheet::{FeedbackSheet, FeedbackSheetEvent},
+            feedback_sheet::{FeedbackSheet, FeedbackSheetEvent, Unavailable},
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
@@ -2357,6 +2357,23 @@ impl Arbos {
                 });
             });
         }
+        // And a clock on the ask. A kernel that predates the frame refuses and
+        // is caught above; one that is down, wedged, or on a link that is not
+        // carrying says nothing at all, and the sheet must not wait on it in
+        // silence. Two and a half seconds is long enough for a local socket and
+        // short enough that he is still looking at the sheet when it answers.
+        let waiting_sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2_500))
+                .await;
+            let _ = waiting_sheet.update(cx, |sheet, cx| {
+                if sheet.awaiting() {
+                    sheet.no_bundle(Unavailable::NoAnswer, cx);
+                }
+            });
+        })
+        .detach();
         // The capture runs off the UI thread: it shells out, and the window
         // must keep drawing — a frozen window is not the window he is
         // complaining about.
@@ -2391,17 +2408,26 @@ impl Arbos {
             .workspace
             .read(cx)
             .session(id)
-            .is_some_and(|chat| chat.feedback.is_some())
+            .is_some_and(|chat| chat.feedback.is_some() || chat.feedback_error.is_some())
         {
             return;
         }
         let mut taken = None;
+        let mut refused = None;
         self.workspace.update(cx, |workspace, cx| {
-            workspace.with_session(id, cx, |chat| taken = chat.take_feedback());
+            workspace.with_session(id, cx, |chat| {
+                taken = chat.take_feedback();
+                refused = chat.take_feedback_error();
+            });
         });
         if let Some(bundle) = taken {
             self.feedback_sheet
                 .update(cx, |sheet, cx| sheet.take_bundle(*bundle, cx));
+        } else if refused.is_some() {
+            // The kernel said it does not know the frame, which means it
+            // predates it. Certain, not guessed.
+            self.feedback_sheet
+                .update(cx, |sheet, cx| sheet.no_bundle(Unavailable::KernelTooOld, cx));
         }
     }
 
@@ -2505,13 +2531,16 @@ impl Arbos {
         if address.trim().is_empty() {
             return;
         }
-        let places: Vec<arbos_core::Place> = self
-            .workspace
-            .read(cx)
-            .projects
-            .iter()
-            .map(|project| arbos_core::Place::new(project.path.clone()))
-            .collect();
+        // Every place that holds reports, open or not. Walking the open tabs
+        // meant a report from a project he had closed was never retried — and he
+        // closes a project because the thing he reported is over.
+        let mut places = crate::feedback::known_outboxes();
+        for project in &self.workspace.read(cx).projects {
+            let place = arbos_core::Place::new(project.path.clone());
+            if !places.iter().any(|p| p.path() == place.path()) {
+                places.push(place);
+            }
+        }
         if places.is_empty() {
             return;
         }

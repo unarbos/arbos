@@ -64,6 +64,40 @@ pub enum Open {
     Screenshot,
 }
 
+/// Why the trajectory is not here, and what he can do about it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// The kernel answered that it does not know the frame. It is older than
+    /// the app, which the app can say for certain rather than guess.
+    KernelTooOld,
+    /// Nothing came back in time: a kernel that is down, wedged, or on a link
+    /// that is not carrying. Distinguished from the above because the fix is
+    /// different — waiting or reopening, rather than updating.
+    NoAnswer,
+}
+
+impl Unavailable {
+    /// One sentence, naming the fix. Not "unavailable": he can act on this.
+    fn words(&self) -> &'static str {
+        match self {
+            Self::KernelTooOld => {
+                "This project's kernel is older than the app and cannot attach the transcript or the log. Update it from the bar, then report again to include them."
+            }
+            Self::NoAnswer => {
+                "This project's kernel did not answer, so the transcript and the log are not attached. Your words and the screenshot will still be sent."
+            }
+        }
+    }
+
+    /// What a part's row says in place of a count.
+    fn row_detail(&self) -> &'static str {
+        match self {
+            Self::KernelTooOld => "not attached — the kernel is too old",
+            Self::NoAnswer => "not attached — the kernel did not answer",
+        }
+    }
+}
+
 pub enum FeedbackSheetEvent {
     /// Write this report to the outbox. The workspace owns the disk and the
     /// delivery; the sheet owns what is in it.
@@ -79,6 +113,16 @@ pub struct FeedbackSheet {
     /// Waiting for the kernel's answer. His words are typed meanwhile, so the
     /// wait is never in his way.
     awaiting: bool,
+    /// Why no bundle is coming, once that is known: the kernel's own refusal,
+    /// or nothing said in time.
+    ///
+    /// Jacob's first try on his Mac showed why this has to exist. His kernel
+    /// predated the `feedback` frame, the refusal was dropped, and the sheet
+    /// sat on "still reading the exchange from the kernel…" while three rows
+    /// read "nothing to send" — which is what a report with nothing to attach
+    /// also looks like. He was one click from sending a report that looked
+    /// empty, with no way to tell that anything had gone wrong.
+    unavailable: Option<Unavailable>,
     open: Open,
     /// Set once the report is on disk: what to tell him, and whether it is
     /// waiting for the network.
@@ -102,6 +146,7 @@ impl FeedbackSheet {
             draft: Draft::new(Parts::default()),
             anchor: None,
             awaiting: false,
+            unavailable: None,
             open: Open::None,
             outcome: None,
             is_open: false,
@@ -124,6 +169,7 @@ impl FeedbackSheet {
         self.draft = Draft::new(parts);
         self.anchor = agent.map(|a| (a, seq));
         self.awaiting = self.anchor.is_some();
+        self.unavailable = None;
         self.open = Open::None;
         self.outcome = None;
         self.is_open = true;
@@ -149,7 +195,38 @@ impl FeedbackSheet {
         }
         self.draft.bundle = Some(bundle);
         self.awaiting = false;
+        self.unavailable = None;
+        self.draft.trajectory_unavailable = None;
         cx.notify();
+    }
+
+    /// There will be no bundle, and this is why.
+    ///
+    /// A bundle that arrives after this is still taken: the sheet says what it
+    /// knows at the time and corrects itself if the kernel turns out to be
+    /// merely slow.
+    pub fn no_bundle(&mut self, why: Unavailable, cx: &mut Context<Self>) {
+        if !self.is_open || self.draft.bundle.is_some() {
+            return;
+        }
+        self.awaiting = false;
+        // Onto the draft as well as the sheet: the report has to carry the
+        // reason, or a loop reading it sees a part he kept and did not get and
+        // has nothing to explain it with.
+        self.draft.trajectory_unavailable = Some(why.words().to_string());
+        self.unavailable = Some(why);
+        cx.notify();
+    }
+
+    /// Whether the sheet is still expecting an answer — for the timeout to ask
+    /// before it declares one.
+    pub fn awaiting(&self) -> bool {
+        self.awaiting
+    }
+
+    /// For the driver: what the sheet says about the trajectory, if anything.
+    pub fn unavailable(&self) -> Option<&'static str> {
+        self.unavailable.as_ref().map(Unavailable::words)
     }
 
     /// The picture arrived, or did not.
@@ -245,10 +322,11 @@ impl Focusable for FeedbackSheet {
 }
 
 impl Render for FeedbackSheet {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.is_open {
             return div().into_any_element();
         }
+        let viewport = window.viewport_size();
         let theme = Theme::of(cx).clone();
         let b = self.draft.bundle.clone().unwrap_or_default();
         let parts = self.draft.parts;
@@ -348,7 +426,12 @@ impl Render for FeedbackSheet {
             .child(
                 div()
                     .id("feedback-sheet")
-                    .w(px(WIDTH))
+                    .w(px(WIDTH.min(f32::from(viewport.width) - 32.)))
+                    // Never taller than the window it sits in. Without this the
+                    // card grew with its contents and, centred, pushed its own
+                    // footer off the screen — which is how Jacob ended up
+                    // looking at a sheet whose only control was Close.
+                    .max_h(px((f32::from(viewport.height) - 48.).max(240.)))
                     .flex()
                     .flex_col()
                     .gap(px(14.))
@@ -363,9 +446,21 @@ impl Render for FeedbackSheet {
                     // clicking a row; typing already works, since the
                     // field takes the focus when the sheet opens.
                     .child(div().id("feedback-note").child(self.field.clone()))
-                    .child(theme.group_box().children(rows))
-                    .child(self.tool_io_control(&theme, cx))
-                    .child(self.provenance(&b, &theme))
+                    // The parts scroll; the heading, his words and the buttons
+                    // do not. Whatever the report holds, Send stays on screen.
+                    .child(
+                        div()
+                            .id("feedback-parts")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .flex()
+                            .flex_col()
+                            .gap(px(14.))
+                            .child(theme.group_box().children(rows))
+                            .child(self.tool_io_control(&theme, cx))
+                            .child(self.provenance(&b, &theme)),
+                    )
                     .child(self.footer(&theme, cx)),
             )
             .into_any_element()
@@ -386,6 +481,10 @@ impl FeedbackSheet {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // The trajectory, the log and the tail come from the kernel; the
+        // screenshot and the app's own view do not. Only the first three can be
+        // missing because the kernel would not answer.
+        let from_kernel = matches!(part, Open::Trajectory | Open::Log | Open::Tail);
         let id = format!("{part:?}").to_lowercase();
         let open = self.open == part && included && available;
 
@@ -411,7 +510,13 @@ impl FeedbackSheet {
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_muted)
                     .child(SharedString::from(if !available {
-                        "nothing to send".to_string()
+                        // "nothing to send" is what an empty part and a failed
+                        // one both used to read as, and they are opposite
+                        // facts. When the kernel has told us why, say that.
+                        match (&self.unavailable, from_kernel) {
+                            (Some(why), true) => why.row_detail().to_string(),
+                            _ => "nothing to send".to_string(),
+                        }
                     } else if included {
                         detail.to_string()
                     } else {
@@ -702,6 +807,9 @@ impl FeedbackSheet {
         if self.awaiting {
             lines.push("still reading the exchange from the kernel…".into());
         }
+        if let Some(why) = &self.unavailable {
+            lines.push(why.words().into());
+        }
         div()
             .flex()
             .flex_col()
@@ -720,39 +828,66 @@ impl FeedbackSheet {
         let (message, tint) = match &self.outcome {
             Some(Ok(text)) => (text.clone(), theme.success),
             Some(Err(why)) => (why.clone(), theme.danger),
-            None if !ready => (
-                "Your words are the one thing needed.".into(),
-                theme.text_faint,
-            ),
+            None if !ready => ("Your words are the one thing needed.".into(), theme.text_faint),
             None => (String::new(), theme.text_faint),
         };
+        // The message sits on its own line, above the buttons, and never beside
+        // them.
+        //
+        // This is the fault Jacob hit. It used to share a row with them, in a
+        // `flex_1` that would not shrink below its text, so one long sentence —
+        // "Saved, and waiting: it could not be sent yet — no feedback
+        // credentials at …" — pushed both buttons off the right edge of the
+        // card. On his window Close was half on screen and Send was entirely
+        // off it, so the sheet held his whole report and offered no way to send
+        // it. Driving it on a real window put Send at x=1216 in an 820-wide
+        // window, `reachable: false`; a diff would not have shown that.
         div()
             .flex()
-            .flex_row()
-            .items_center()
+            .flex_col()
             .gap(px(8.))
-            .child(
-                div()
-                    .flex_1()
-                    .text_style(TextStyle::Caption)
-                    .text_color(tint)
-                    .child(SharedString::from(message)),
-            )
-            .child(
-                theme
-                    .button("Close", ButtonStyle::Ghost, None)
-                    .id("feedback-close")
-                    .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx))),
-            )
-            .when(self.outcome.is_none(), |row| {
-                row.child(
-                    theme
-                        .button("Send", ButtonStyle::Prominent, None)
-                        .id("feedback-send")
-                        .when(!ready, |el| el.opacity(0.5))
-                        .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+            .when(!message.is_empty(), |col| {
+                col.child(
+                    div()
+                        .id("feedback-message")
+                        .w_full()
+                        .max_h(px(72.))
+                        .overflow_hidden()
+                        .text_style(TextStyle::Caption)
+                        .text_color(tint)
+                        .child(SharedString::from(message)),
                 )
             })
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(8.))
+                    // Nothing may squeeze the one row he has to be able to
+                    // reach.
+                    .flex_shrink_0()
+                    .child(
+                        theme
+                            .button("Close", ButtonStyle::Ghost, None)
+                            .id("feedback-close")
+                            .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx))),
+                    )
+                    // Send is always here. It used to be hidden once anything
+                    // settled, which left a failed send with no way to retry.
+                    .child(
+                        theme
+                            .button(
+                                if self.outcome.is_some() { "Send again" } else { "Send" },
+                                ButtonStyle::Prominent,
+                                None,
+                            )
+                            .id("feedback-send")
+                            .when(!ready, |el| el.opacity(0.5))
+                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                    ),
+            )
             .into_any_element()
     }
 }

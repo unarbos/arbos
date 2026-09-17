@@ -72,13 +72,175 @@ fn last_failing_path(place: &Place, agent: &AgentId) -> PathBuf {
         .join("repro-last-failing.json")
 }
 
-/// Every bash command that exits non-zero before the first edit is a
-/// candidate reproduction. Cycle 5: the agent ran the failing snippet
-/// without `repro:true` in 46 of 146 refusals, then wandered; the gate
-/// now takes the last failing command as the reproduction instead of
-/// refusing.
+/// Why a failed command is no evidence of the bug: the exit says the
+/// command never ran the code, not that the code is wrong.
+pub fn not_evidence(exit: Option<i32>) -> Option<&'static str> {
+    match exit {
+        Some(0) => Some("the command exited 0"),
+        Some(126) => Some("exit 126: the command was not executable"),
+        Some(127) => Some("exit 127: the command was not found"),
+        None => Some("the command was killed or timed out, which says nothing about the code"),
+        _ => None,
+    }
+}
+
+/// Whether `command` runs code — an interpreter, a test runner, a build
+/// tool, a script or a binary by path — as opposed to fetching, listing,
+/// probing or installing. Leading `cd … &&`, `VAR=x` assignments,
+/// `timeout N` and `env` are skipped. SWE-bench cycle 11: a refused `pip
+/// download` exited non-zero and became "reproduction 1", so an agent
+/// that had reproduced nothing believed it had, and the done rule passed
+/// on a command that only failed. A command that failed is evidence of
+/// nothing unless it exercised the bug.
+pub fn runs_code(command: &str) -> bool {
+    let mut words = command
+        .split("&&")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .skip_while(|s| s.starts_with("cd ") || *s == "cd")
+        .flat_map(|s| s.split_whitespace())
+        .skip_while(|w| {
+            w.contains('=') && !w.starts_with('=') && !w.starts_with('-')
+                || *w == "env"
+                || *w == "exec"
+        });
+    let Some(mut first) = words.next() else {
+        return false;
+    };
+    if first == "timeout" {
+        // `timeout [opts] N cmd`
+        for w in words.by_ref() {
+            if !w.starts_with('-') && w.chars().next().is_some_and(|c| !c.is_ascii_digit()) {
+                first = w;
+                break;
+            }
+        }
+    }
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if first.starts_with("./") || first.starts_with('/') && !INSTALLERS.contains(&base) {
+        return true;
+    }
+    if base.starts_with("python") || base.starts_with("pypy") {
+        // `python -m pip …` installs, `python setup.py install` too.
+        let rest: Vec<&str> = words.clone().take(3).collect();
+        return !(rest.first() == Some(&"-m")
+            && rest
+                .get(1)
+                .is_some_and(|m| *m == "pip" || *m == "ensurepip"))
+            && !(rest.first() == Some(&"setup.py")
+                && rest
+                    .get(1)
+                    .is_some_and(|s| *s == "install" || *s == "develop"));
+    }
+    if RUNNERS.contains(&base) {
+        return true;
+    }
+    if PACKAGE_TOOLS.contains(&base) {
+        // `npm test` runs code; `npm install` does not.
+        let sub = words.next().unwrap_or("");
+        return matches!(sub, "test" | "run" | "start" | "exec" | "x");
+    }
+    false
+}
+
+/// Interpreters, test runners, build tools: a non-zero exit from one of
+/// these is the code failing (or failing to build), which is evidence.
+const RUNNERS: &[&str] = &[
+    "pytest",
+    "py.test",
+    "nose2",
+    "nosetests",
+    "tox",
+    "nox",
+    "unittest",
+    "node",
+    "deno",
+    "bun",
+    "ts-node",
+    "tsx",
+    "jest",
+    "mocha",
+    "vitest",
+    "ruby",
+    "rspec",
+    "rake",
+    "bundle",
+    "php",
+    "phpunit",
+    "perl",
+    "prove",
+    "go",
+    "cargo",
+    "rustc",
+    "java",
+    "javac",
+    "mvn",
+    "gradle",
+    "gradlew",
+    "dotnet",
+    "make",
+    "cmake",
+    "ctest",
+    "ninja",
+    "swift",
+    "julia",
+    "R",
+    "Rscript",
+    "lua",
+    "elixir",
+    "mix",
+    "ghc",
+    "runghc",
+    "stack",
+    "cabal",
+    "zig",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "expect",
+    "npx",
+];
+
+/// Run code only with a run-like subcommand.
+const PACKAGE_TOOLS: &[&str] = &["npm", "yarn", "pnpm", "poetry", "pipenv", "uv", "pdm"];
+
+/// Whether the command's program is a fetcher or installer (`pip`, `curl`,
+/// `git`, `npm install`…): a failure of it is never the bug's, marked or
+/// not.
+pub fn only_fetches(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let base = first.rsplit('/').next().unwrap_or(first);
+    if INSTALLERS.contains(&base) {
+        return true;
+    }
+    if base.starts_with("python") && words.get(1) == Some(&"-m") && words.get(2) == Some(&"pip") {
+        return true;
+    }
+    PACKAGE_TOOLS.contains(&base)
+        && matches!(
+            words.get(1).copied().unwrap_or(""),
+            "install" | "i" | "add" | "sync" | "update" | "ci" | "lock" | "download"
+        )
+}
+
+/// Never evidence, whatever the exit: they fetch, install or list.
+const INSTALLERS: &[&str] = &[
+    "pip", "pip3", "conda", "mamba", "apt", "apt-get", "brew", "gem", "curl", "wget", "git",
+];
+
+/// Every bash command that exits non-zero before the first edit *and
+/// runs code* is a candidate reproduction. Cycle 5: the agent ran the
+/// failing snippet without `repro:true` in 46 of 146 refusals, then
+/// wandered; the gate now takes the last failing command as the
+/// reproduction instead of refusing. Cycle 11: only a command that ran
+/// code is taken — a refused `pip download`, a `grep` with no match, a
+/// `ls` of a missing path are not the bug failing.
 pub fn note_failing(place: &Place, agent: &AgentId, command: &str, cwd: &Path, exit: Option<i32>) {
-    if exit == Some(0) {
+    if not_evidence(exit).is_some() || !runs_code(command) {
         return;
     }
     let entry = Repro {
@@ -135,6 +297,16 @@ pub fn record(
 ) -> String {
     match exit {
         Some(0) => "Not recorded as a reproduction: the command exited 0. A reproduction must fail before the fix (a non-zero exit: a failing assertion, an exception, a wrong value checked with a comparison). Make it fail, then run it again with repro:true.".to_string(),
+        _ if not_evidence(exit).is_some() => format!(
+            "Not recorded as a reproduction: {}. A reproduction runs the code and fails because of the bug; fix the command so it runs, then run it again with repro:true.",
+            not_evidence(exit).unwrap_or("")
+        ),
+        // Marked by hand, the agent's word stands — except for a fetch or
+        // an install, whose failure is never the bug's.
+        _ if only_fetches(command) => format!(
+            "Not recorded as a reproduction: `{}` fetches or installs rather than running the code, so its failure says nothing about the bug. Run the failing behaviour itself (an interpreter, a test runner, a script) with repro:true.",
+            command.split_whitespace().next().unwrap_or("")
+        ),
         _ => {
             let file = path(place, agent);
             if let Some(dir) = file.parent() {
@@ -280,8 +452,28 @@ mod tests {
         let note = record(&place, &agent, "true", &dir, Some(0));
         assert!(note.starts_with("Not recorded"));
         assert!(gate(&place, &agent, "edit").is_err());
-        // An unmarked failing command is taken as the reproduction.
-        note_failing(&place, &agent, "false", &dir, Some(1));
+        // A failing command that did not run code is not a candidate: a
+        // refused download, a listing of a missing path, a missing binary.
+        note_failing(&place, &agent, "pip download requests==99", &dir, Some(1));
+        note_failing(&place, &agent, "ls /nope", &dir, Some(2));
+        note_failing(&place, &agent, "python3 -c 'import x'", &dir, Some(127));
+        assert!(gate(&place, &agent, "edit").is_err());
+        // Nor is one marked by hand.
+        let note = record(&place, &agent, "pip download requests==99", &dir, Some(1));
+        assert!(note.contains("fetches or installs"), "{note}");
+        let note = record(&place, &agent, "npm install left-pad", &dir, Some(1));
+        assert!(note.contains("fetches or installs"), "{note}");
+        let note = record(&place, &agent, "python3 repro.py", &dir, Some(127));
+        assert!(note.contains("exit 127"), "{note}");
+        assert_eq!(list(&place, &agent).len(), 0);
+        // An unmarked failing command that ran code is taken as the reproduction.
+        note_failing(
+            &place,
+            &agent,
+            "python3 -c 'raise SystemExit(1)'",
+            &dir,
+            Some(1),
+        );
         let taken = gate(&place, &agent, "edit").unwrap().unwrap();
         assert!(taken.contains("taken as a reproduction"), "{taken}");
         assert_eq!(list(&place, &agent).len(), 1);
@@ -303,5 +495,52 @@ mod tests {
         reset(&place, &agent);
         assert!(rerun_report(&agent_dir).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_counts_as_running_code() {
+        for cmd in [
+            "python3 repro.py",
+            "cd /repo && python -m pytest tests/test_x.py -x",
+            "PYTHONPATH=. python3 -c 'import astropy'",
+            "timeout 60 pytest -q",
+            "./run_tests.sh",
+            "/usr/bin/env node index.js",
+            "cargo test --lib",
+            "go test ./...",
+            "npm test",
+            "npx jest src/",
+            "make check",
+            "bash scripts/repro.sh",
+            "java -jar app.jar",
+        ] {
+            assert!(runs_code(cmd), "{cmd}");
+        }
+        for cmd in [
+            "pip download requests==99",
+            "pip install -e .",
+            "python -m pip install numpy",
+            "python setup.py install",
+            "ls /nope",
+            "grep -r needle src/",
+            "git checkout -b fix",
+            "curl -sSf https://example.com",
+            "npm install",
+            "uv sync",
+            "cd /nope",
+            "test -f missing",
+            "",
+        ] {
+            assert!(!runs_code(cmd), "{cmd}");
+        }
+        assert!(not_evidence(Some(127)).is_some());
+        assert!(not_evidence(Some(126)).is_some());
+        assert!(not_evidence(None).is_some());
+        assert!(not_evidence(Some(0)).is_some());
+        assert!(not_evidence(Some(1)).is_none());
+        assert!(
+            not_evidence(Some(124)).is_none(),
+            "a timeout under `timeout` is a hang, which can be the bug"
+        );
     }
 }

@@ -71,6 +71,10 @@ final class LiveKernelChat: ChatSource {
         try client.send(text: text, steer: steer, attachments: paths)
     }
 
+    func interrupt() async throws {
+        try client.stop()
+    }
+
     func stop() {
         pump?.cancel()
         client.detach()
@@ -263,12 +267,31 @@ final class LiveKernelChat: ChatSource {
             return
         }
         if case .tool(let record) = event, record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
+            // The record names the machine `host` since the mesh; older
+            // kernels said `machine`.
+            let machine = (record.args?["host"] as? String) ?? (record.args?["machine"] as? String) ?? ""
+            if let error = record.error {
+                // The spawn was refused (JB-6: the machine could not start a
+                // kernel). No worker exists, so no "Starting" line that
+                // never ends; one plain line says who would not start and
+                // why, the way a stopped worker is one line on the desktop.
+                if workers[child] != nil {
+                    workers[child] = nil
+                    workerOrder.removeAll { $0 == child }
+                    touched.remove(child)
+                    publishWorkers()
+                }
+                let name = (record.args?["brief"] as? String) ?? child
+                let place = machine.isEmpty ? "" : " on \(machine)"
+                stream?.yield(.agentDone)
+                stream?.yield(.item(ChatItem(.notice("Couldn't start \(name)\(place): \(error)", failed: false))))
+                return
+            }
             children.insert(child)
             childNames[child] = record.args?["brief"] as? String ?? child
             // A worker on another machine sends no steps here — only its
             // report, when it is done. "Starting" forever read as stuck
             // (Jacob, build 1021); say where it runs instead.
-            let machine = (record.args?["machine"] as? String) ?? ""
             // The spawn record comes twice — when the call starts and again
             // when it ends (`wait: true`). Only the first may say "running":
             // the second arrives after the child's own turn went idle and
@@ -319,6 +342,11 @@ final class LiveKernelChat: ChatSource {
             // Older kernels name the child only in the call's arguments.
             if record.name == "spawn", let child = record.child ?? (record.args?["name"] as? String) {
                 let brief = record.args?["brief"] as? String ?? child
+                if let error = record.error {
+                    // Refused (JB-6): no worker to list; the line says why.
+                    let machine = (record.args?["host"] as? String) ?? (record.args?["machine"] as? String) ?? ""
+                    return ChatItem(.notice("Couldn't start \(brief)\(machine.isEmpty ? "" : " on \(machine)"): \(error)", failed: false))
+                }
                 children.insert(child)
                 childNames[child] = brief
                 // A replayed spawn is a finished worker until the tree or a
@@ -340,7 +368,9 @@ final class LiveKernelChat: ChatSource {
         case .notice(let text, let failed):
             return ChatItem(.notice(text, failed: failed))
         case .interrupted(let detail):
-            return ChatItem(.notice(detail.isEmpty ? "Stopped by you" : detail, failed: false))
+            // The kernel's detail is the bare reason ("stop"); a person
+            // reads "Stopped by you", as the desktop says it.
+            return ChatItem(.notice(detail.isEmpty || detail == "stop" ? "Stopped by you" : detail, failed: false))
         case .thinking, .turnComplete, .other:
             return nil
         }

@@ -94,6 +94,19 @@ impl Scheduler {
             .unwrap()
             .insert(id.clone(), control.clone());
         tokio::spawn(async move {
+            // However this task ends — a return, a panic, an abort — the
+            // serve loop hears that the turn is over. Without the guard a
+            // panic anywhere on the turn's own task (a poisoned lock, an
+            // index past the end) left the agent in `running` for good: no
+            // `turn_complete`, no frame, every later message queued behind
+            // a turn that would never end, and nothing for the user but
+            // the working line. That is the "finished and unnoticed" class
+            // in its purest form, so it is closed here rather than at each
+            // site that could panic.
+            let _done = DoneGuard {
+                id: id.clone(),
+                done,
+            };
             let agent = match load_agent(&place, &wake.agent).map(|mut a| {
                 arbos_core::project::apply_role(&place, &mut a);
                 a
@@ -101,12 +114,10 @@ impl Scheduler {
                 Ok(a) => a,
                 Err(e) => {
                     crate::klog::error("load_agent", Some(&id), format!("{e:#}"));
-                    let _ = done.send(id);
                     return;
                 }
             };
             if agent.paused {
-                let _ = done.send(id);
                 return;
             }
             // An outside ACP program runs this kind's turns (P-14).
@@ -120,14 +131,14 @@ impl Scheduler {
                     ),
                     Err(e) => crate::klog::error("turn_error", Some(&id), format!("acp: {e:#}")),
                 }
-                let _ = done.send(id);
                 return;
             }
             let wrap = TurnHooks {
-                inner: hooks,
+                inner: Arc::clone(&hooks),
                 agent: wake.agent.clone(),
             };
-            let res = turn(arbos_engine::TurnOpts {
+            let transcript = hooks.layout(&id).transcript();
+            let opts = arbos_engine::TurnOpts {
                 place,
                 agent,
                 wake,
@@ -136,21 +147,59 @@ impl Scheduler {
                 grep,
                 hooks: Arc::new(wrap),
                 control,
+            };
+            // The turn runs on a task of its own so a panic in it is a
+            // `JoinError` here, with its message, rather than the end of
+            // this task.
+            // Test knob: `ARBOS_TEST_PANIC_TURN=<agent>` panics that
+            // agent's first turn in this process, so the guard below is
+            // driven rather than trusted.
+            let panic_now = std::env::var("ARBOS_TEST_PANIC_TURN").is_ok_and(|who| who == id)
+                && !PANIC_FIRED.swap(true, std::sync::atomic::Ordering::SeqCst);
+            let res = tokio::spawn(async move {
+                if panic_now {
+                    panic!("ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose");
+                }
+                turn(opts).await
             })
             .await;
-            match &res {
-                Ok(()) => crate::klog::info(
+            match res {
+                Ok(Ok(())) => crate::klog::info(
                     "turn_end",
                     Some(&id),
                     format!("{:.1}s", started.elapsed().as_secs_f64()),
                 ),
-                Err(e) => crate::klog::error(
+                Ok(Err(e)) => crate::klog::error(
                     "turn_error",
                     Some(&id),
                     format!("{e:#} after {:.1}s", started.elapsed().as_secs_f64()),
                 ),
+                Err(e) => {
+                    let why = panic_text(e);
+                    crate::klog::error(
+                        "turn_panicked",
+                        Some(&id),
+                        format!("{why} after {:.1}s", started.elapsed().as_secs_f64()),
+                    );
+                    // The record ends here, in words, so the window shows
+                    // why the turn stopped and the next boot does not
+                    // replay the wake as unfinished.
+                    let _ = arbos_core::append_events(
+                        &transcript,
+                        &[
+                            arbos_core::Event::new(arbos_core::EventKind::Notice {
+                                text: format!(
+                                    "The kernel hit an internal error in this turn and ended it: {why}. What ran before it stands; send again to go on. (kernel.log has the detail.)"
+                                ),
+                                failed: true,
+                            }),
+                            arbos_core::Event::new(arbos_core::EventKind::TurnComplete {
+                                usage: None,
+                            }),
+                        ],
+                    );
+                }
             }
-            let _ = done.send(id);
         });
     }
 }
@@ -159,6 +208,36 @@ impl Default for Scheduler {
     fn default() -> Self {
         Self::new()
     }
+}
+
+static PANIC_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Tells the serve loop the turn is over when dropped: on return, on
+/// panic (unwinding runs drops), on abort.
+struct DoneGuard {
+    id: String,
+    done: mpsc::UnboundedSender<String>,
+}
+
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        let _ = self.done.send(std::mem::take(&mut self.id));
+    }
+}
+
+/// A joined task's panic as one line: the message when it was a string,
+/// the kind of end otherwise.
+fn panic_text(e: tokio::task::JoinError) -> String {
+    if e.is_cancelled() {
+        return "the turn task was cancelled".into();
+    }
+    let payload = e.into_panic();
+    let text = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic with a non-text payload".into());
+    arbos_core::text::clip(text.lines().next().unwrap_or("").trim(), 300)
 }
 
 /// Kernel hooks scoped to one agent, so live events carry its id.
@@ -211,6 +290,7 @@ impl arbos_engine::Hooks for TurnHooks {
 
     fn emit(&self, event: &arbos_core::Event) {
         use arbos_core::{EventKind, wire::Frame};
+        self.inner.note_progress(self.agent.as_str());
         // A tool call starting: the kernel's guess at the live line, for
         // an agent that has not said what it is doing this turn.
         if let EventKind::Tool(rec) = &event.kind
@@ -246,6 +326,7 @@ impl arbos_engine::Hooks for TurnHooks {
     /// "status: Running sleep 45" as a one-line reply: the live line takes
     /// the words; the transcript keeps the model's line as it was.
     fn spoke_status(&self, step: &str) {
+        self.inner.note_progress(self.agent.as_str());
         let _ = self.inner.set_status(self.agent.as_str(), step, "agent");
     }
 

@@ -1,6 +1,7 @@
 pub mod access;
 pub mod acp_worker;
 pub mod attach;
+pub mod binary;
 pub mod browser;
 pub mod chatdoor;
 pub mod check;
