@@ -59,20 +59,54 @@ pub fn reset(place: &Place, agent: &AgentId) {
     }
 }
 
+/// The task a line belongs to: the transcript line of the user wake that
+/// began it (a task runs across the turns that follow — done wakes,
+/// steers — until the user's next words). The record carries it as its
+/// first line, `task:<n>`, and a reader compares before believing the
+/// text: a line from an earlier task that could not be forgotten (a
+/// read-only folder, #503) is not this task's.
+fn task_start(agent_dir: &Path) -> Option<u64> {
+    let events = arbos_core::load_transcript(&agent_dir.join("transcript.jsonl")).ok()?;
+    events
+        .iter()
+        .rposition(
+            |e| matches!(&e.kind, arbos_core::EventKind::Wake { wake, .. } if wake == "user"),
+        )
+        .map(|i| i as u64 + 1)
+}
+
+/// The text of a record, when its task is the current one. A record
+/// without a stamp (from before the stamp) is believed, once: the reset on
+/// the next user message removes or empties it either way.
+fn read_for_task(file: &Path, agent_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(file).ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    match raw.strip_prefix("task:") {
+        Some(rest) => {
+            let (stamp, text) = rest.split_once('\n')?;
+            let stamped: u64 = stamp.trim().parse().ok()?;
+            if task_start(agent_dir) != Some(stamped) {
+                return None;
+            }
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        None => Some(raw.to_string()),
+    }
+}
+
 /// The line recorded for the current task, if any.
 pub fn current(place: &Place, agent: &AgentId) -> Option<String> {
-    std::fs::read_to_string(path(place, agent))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let dir = Layout::new(place, agent.as_str()).dir;
+    read_for_task(&path(place, agent), &dir)
 }
 
 /// Same, by agent folder (for `changes`, which has the cwd and place only).
 pub fn current_in(agent_dir: &Path) -> Option<String> {
-    std::fs::read_to_string(agent_dir.join("mechanism.md"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    read_for_task(&agent_dir.join("mechanism.md"), agent_dir)
 }
 
 /// Before a write tool runs: record the `mechanism` line when the call
@@ -89,11 +123,17 @@ pub fn gate(place: &Place, agent: &AgentId, tool: &str, args: &Value) -> Result<
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let file = path(place, agent);
+    let agent_dir = Layout::new(place, agent.as_str()).dir;
     let record = |line: &str| -> Result<Option<String>> {
         if let Some(dir) = file.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        std::fs::write(&file, format!("{line}\n"))?;
+        // Stamped with the task it belongs to, so a reader in a later task
+        // does not believe it (see `task_start`).
+        let stamp = task_start(&agent_dir)
+            .map(|n| format!("task:{n}\n"))
+            .unwrap_or_default();
+        std::fs::write(&file, format!("{stamp}{line}\n"))?;
         Ok(Some(line.to_string()))
     };
     match given {
@@ -178,6 +218,66 @@ mod tests {
             "emptied, not removed: the folder forbade that"
         );
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The durable form of #503: a line that could not be forgotten (a
+    /// read-only folder, a failed unlink and a failed empty) is still not
+    /// believed once the user's next message has started another task —
+    /// the record names its task, and the reader checks.
+    #[test]
+    fn a_line_from_an_earlier_task_is_not_believed_even_when_it_could_not_be_forgotten() {
+        use arbos_core::{Event, EventKind, append_event};
+        let dir = std::env::temp_dir().join(format!("arbos-mech-task-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let agent = AgentId::new("root");
+        let agent_dir = Layout::new(&place, "root").dir;
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let transcript = agent_dir.join("transcript.jsonl");
+        let user_wake = || {
+            Event::new(EventKind::Wake {
+                wake: "user".into(),
+                text: Some("fix it".into()),
+                brief: None,
+            })
+        };
+        append_event(&transcript, &user_wake()).unwrap();
+        let args = serde_json::json!({"path": "a.py", "mechanism": "the loop skips the last group because the bound is off by one"});
+        assert!(gate(&place, &agent, "edit", &args).unwrap().is_some());
+        let file = path(&place, &agent);
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .starts_with("task:1\n")
+        );
+        assert!(
+            current(&place, &agent).is_some(),
+            "this task's line is read"
+        );
+        assert!(current_in(&agent_dir).is_some());
+        // A done wake in between is the same task.
+        append_event(
+            &transcript,
+            &Event::new(EventKind::Wake {
+                wake: "done".into(),
+                text: None,
+                brief: None,
+            }),
+        )
+        .unwrap();
+        assert!(
+            current(&place, &agent).is_some(),
+            "a done wake does not end the task"
+        );
+        // The user's next words start another task; the file stays as if
+        // reset had failed. Not believed.
+        append_event(&transcript, &user_wake()).unwrap();
+        assert_eq!(current(&place, &agent), None, "an earlier task's line");
+        assert_eq!(current_in(&agent_dir), None);
+        // A record from before the stamp existed is read as before.
+        std::fs::write(&file, "an unstamped line from an older kernel\n").unwrap();
+        assert!(current(&place, &agent).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
