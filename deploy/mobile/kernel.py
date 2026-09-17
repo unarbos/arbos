@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kernel.py <target> history [n] | read <path> | frames <secs> | hello
+"""kernel.py <target> history [n] | read <path> | frames <secs> | hello | total
          | feedback <agent> [seq=N|call=ID] [tail=N] [note...]
 target: "pod" (the direct kernel in Secrets.plist) or "<machine>/<project>" through the hub.
 hello: the kernel's own `--version` line, read off this very socket. Use it,
@@ -88,6 +88,18 @@ elif cmd == "feedback":
         if t == "error": print("ERROR", f.get("detail")); sys.exit(2)
     else:
         print("no feedback_bundle within 30 s"); sys.exit(3)
+elif cmd == "total":
+    # The kernel's own count of the transcript, from `history_end`. Counting
+    # the lines `history` prints instead measures a capped tail through a
+    # filter, which moves for reasons of its own: cycle 43's first attempt
+    # read 150 then 149 across a minute in which nothing was sent, and the
+    # comparison it was for was worthless.
+    ws.send(json.dumps({"type": "history", "agent": "main", "since": 0, "limit": 1}))
+    for f in frames(25):
+        if f.get("type") == "history_end":
+            print(f.get("total", 0)); break
+    else:
+        print("-1"); sys.exit(3)
 elif cmd == "hello":
     # The kernel sends `hello` unprompted on connect. Print the same shape
     # `arbos-kernel --version` prints, so a verdict can be compared with a
