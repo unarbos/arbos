@@ -10,6 +10,7 @@
 //! SWE-bench loop is where it is measured.
 
 use anyhow::Result;
+use arbos_core::text::clip;
 use arbos_core::{Event, EventKind};
 use std::path::Path;
 use std::process::Command;
@@ -30,16 +31,6 @@ For each one, check the diff: addressed, partly, or not, with the diff hunk that
 Then name one concrete input, taken from the request's own wording, that the diff would still get wrong — or say there is none. \
 Do not comment on style, naming, or tests. Do not propose a rewrite. Be brief: under 200 words. \
 End with exactly one line: `VERDICT: COMPLETE` or `VERDICT: INCOMPLETE — <the one gap that matters most>`.";
-
-/// The first `n` chars of `s`, whole text, with a note when cut.
-/// (`text::clip` keeps one line; the reviewer needs the whole request.)
-fn cut(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return s.to_string();
-    }
-    let head: String = s.chars().take(n).collect();
-    format!("{head}\n[... clipped at {n} chars ...]")
-}
 
 pub fn enabled() -> bool {
     std::env::var(ENABLED_ENV).is_ok_and(|v| v == "1" || v == "true")
@@ -95,7 +86,7 @@ fn diff(cwd: &Path) -> Option<String> {
             if let Ok(body) = std::fs::read_to_string(cwd.join(f)) {
                 out.push_str(&format!(
                     "\n--- /dev/null\n+++ b/{f}\n(new file)\n{}\n",
-                    cut(&body, 4_000)
+                    clip(&body, 4_000)
                 ));
             }
         }
@@ -120,7 +111,7 @@ pub async fn run(provider: &Provider, request: &str, cwd: &Path) -> Result<Optio
     };
     let user = format!(
         "REQUEST:\n{}\n\nDIFF:\n```diff\n{}\n```",
-        cut(request, REQUEST_CHARS),
+        clip(request, REQUEST_CHARS),
         diff
     );
     let reviewer = Provider {
