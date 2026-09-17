@@ -1902,6 +1902,93 @@ def register(scenario, registry, transcript, now_ms, branch):
         holder2.stop()
         cx.check()
 
+    # ── first-match readers: a stale copy in the first place, a live one in the second ──
+    @reg("fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line", tags=("first-match", "rewind", "destructive-order"))
+    def fm01(cx):
+        """settle_tree reads checkpoints.d/<line>.json when a checkpoint's tree is still pending, and accepts it if its
+        HEAD matches. Line numbers are transcript lines: after a rewind, new turns reuse the cut turns' lines, and the
+        cut turns' sidecars are not removed. Stage it: five turns, rewind to 3 (f3..f5 gone), new turns 3' and 4' with
+        the tree delayed so 4' is still pending, rewind to 4'. The right tree is {f1, f2, g3}; the stale sidecar says
+        {f1, f2, f3} — and HEAD never moved, so the guard passes it."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        cps = place / ".arbos" / "agents" / "root" / "checkpoints.jsonl"
+        sidecars = place / ".arbos" / "agents" / "root" / "checkpoints.d"
+
+        def records():
+            return [json.loads(l) for l in cps.read_text().splitlines() if l.strip()] if cps.exists() else []
+
+        def settled(n, secs=20):
+            end = time.time() + secs
+            while time.time() < end:
+                r = records()
+                if len(r) >= n and all(x.get("work") or x.get("clean") for x in r[:n]):
+                    return r
+                time.sleep(0.2)
+            return records()
+
+        replies_a = []
+        for i, w in enumerate(("first", "second", "third", "fourth", "fifth"), 1):
+            replies_a.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {w} > f{i}.txt", "description": f"write f{i}"}}]})
+            replies_a.append({"agent": "root", "content": w})
+        k = cx.kernel(tag="kernel-a", extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies_a))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        for t in ("one", "two", "three", "four", "five"):
+            c.user("root", t)
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", f"turn {t!r} never ended")
+        recs = settled(5)
+        old_lines = [r.get("line") for r in recs]
+        c.send({"type": "rewind", "agent": "root", "turn": 3, "files": True})
+        c.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+        follow = c.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 45, "the restore's report")
+        time.sleep(0.5)
+        files_after_first = sorted(p_.name for p_ in place.glob("*.txt"))
+        stale = sorted(p_.name for p_ in sidecars.glob("*.json")) if sidecars.exists() else []
+        k.stop()
+        cx.rec.notes.update({"old_checkpoint_lines": old_lines, "first_rewind": follow, "files_after_first_rewind": files_after_first, "sidecars_left_after_rewind": stale})
+        cx.rec.expect(files_after_first == ["f1.txt", "f2.txt"], "first-rewind-wrong", f"after rewinding to turn 3 the files are {files_after_first}; the probe needs f1, f2")
+        # Kernel B: the tree delayed, so a turn that does not write ends with its record still pending.
+        replies_b = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo g3 > g3.txt", "description": "write g3"}}]},
+            {"agent": "root", "content": "third again"},
+            {"agent": "root", "content": "noted, nothing to write"},
+        ]
+        k2 = cx.kernel(tag="kernel-b", extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies_b))])
+        k2.env["ARBOS_TEST_TREE_DELAY_MS"] = "8000"
+        cx.rec.expect(k2.start(), "kernel-b-start", "the second kernel did not come up")
+        c2 = k2.attach()
+        c2.wait(lambda f: f.get("type") == "snapshot", 5)
+        c2.user("root", "three again")
+        cx.rec.expect(c2.wait_turn("root", "idle", 60) is not None, "turn-never-ended", "turn 3' never ended")
+        c2.user("root", "four again")
+        cx.rec.expect(c2.wait_turn("root", "idle", 60) is not None, "turn-never-ended", "turn 4' never ended")
+        recs2 = records()
+        new4 = recs2[3] if len(recs2) >= 4 else {}
+        stale_for_new4 = (sidecars / f"{new4.get('line')}.json") if new4 else None
+        stale_json = json.loads(stale_for_new4.read_text()) if stale_for_new4 and stale_for_new4.exists() else None
+        before = tree_state(place)
+        cx.rec.notes.update({"new_turn4_record": {k_: str(v)[:40] for k_, v in new4.items()}, "stale_sidecar_for_that_line": stale_json and {k_: str(v)[:40] for k_, v in stale_json.items()}, "files_before_second_rewind": sorted(before["files"])})
+        cx.rec.expect(new4.get("work_error") and "pending" in str(new4.get("work_error")).lower() or "being saved" in str(new4.get("work_error", "")).lower(), "probe-record-not-pending", f"turn 4''s record is not pending ({new4}); the sidecar is never consulted, this run proves nothing")
+        cx.rec.expect(stale_json is not None and stale_json.get("work") and new4.get("line") in old_lines, "probe-no-stale-sidecar", f"no cut turn's sidecar at line {new4.get('line')} (old lines {old_lines}, sidecars {stale}); the collision did not happen, this run proves nothing")
+        c2.send({"type": "rewind", "agent": "root", "turn": 4, "files": True})
+        c2.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+        follow2 = c2.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 45, "the restore's report")
+        time.sleep(0.5)
+        files_after = sorted(p_.name for p_ in place.glob("*.txt"))
+        cx.rec.notes.update({"second_rewind": follow2, "files_after_second_rewind": files_after})
+        cx.rec.expect("f3.txt" not in files_after, "stale-sidecar-restored-a-cut-turns-tree", f"rewinding to the new turn 4 brought back f3.txt, a file the earlier rewind removed: the restore took the cut turn's sidecar at the same line (same HEAD) for the new turn's tree — files now {files_after}, expected f1, f2, g3", "arbos-engine tools::git settle_tree — a sidecar is matched by line and HEAD; a cut turn's sidecar at the same line passes both. Remove cut turns' sidecars on rewind, or key the sidecar on the record's ts")
+        cx.rec.expect("g3.txt" in files_after, "new-turns-file-lost", f"g3.txt, written by the new turn 3', is gone after rewinding to the new turn 4: {files_after}")
+        k2.stop()
+        cx.check()
+
     @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
     def rw09(cx):
         """#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write

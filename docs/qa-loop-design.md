@@ -116,10 +116,15 @@ Three passes tonight proved something other than what they claimed: 29 scenarios
 
 `ra-01` (the wipe guard, #410) and `rw-08`/`rw-08b`/`rw-08c` (the rewind property, #419) went through this before their results were recorded in `qal-j15` and `qal-j16`.
 
+## The first-match family (opened 12:20) — evidenced (`fm-01`)
+
+`qal-j19`'s third shape was a reader taking the first of several locations rather than the newest record. The author's audit lists four more such readers: the history lookup (id then name, live then archive), the checkpoint sidecar beside its journal, the roster's per-machine files, the leash pointer beside the job folder. The property, same shape as the rewind property: **stage a stale copy where the reader looks first and a live one where it looks second; the reader must take the live one.** `fm-01` staged the checkpoint sidecar — a cut turn's `checkpoints.d/<line>.json` beside a new turn's pending record at the same line, same HEAD — and the next rewind restored the cut turn's tree: a file the person had rewound away came back, the new session's file vanished, reported as restored (`qal-j20`, at `a5072074`). Found by the property on its first use; nobody had read for it. The other three readers are next.
+
 ## #441, a held place said once — verified 11:58 (`lk-01`…`lk-03`, kernel `b5b24dba`)
 
 - `lk-01`, a real relaunch loop rather than a moved clock: 162 relaunches over 5.5 minutes, every one exit 3 with `place already served` on stderr; the place's `kernel.log` holds **6** `place_held` lines — one full (pid, build, url), four heartbeats, one error-level escalation at 301 s naming 148 refusals and the ways out. Where the pod saw 1411 lines in 32 minutes.
 - `lk-03`: the holder killed → the next start serves, logs `place_freed`, removes the record; a new holder gets its own record (`refusals: 1`) and its own full line. No permanently-refusing state.
+- `lk-02` at `38b2e145` (12:20): all three shapes pass; `qal-j19` closed.
 - `lk-02` at `46477c88` (12:12): shapes (a) and (c) fixed — one long line with the temp fallback; six short lines saying the record could not be written when there is nowhere to keep it. Shape (b) remains: a stale `runtime/` record that cannot be updated shadows the live temp copy because `load` reads `runtime/` first — escalation on every relaunch. In `qal-j19`.
 - `lk-02` at `b5b24dba`, the record's own failure (`qal-j19`): `runtime/` read-only → the full line **6 of 6** relaunches; with a six-minute-old record that cannot be updated → the error-level escalation **6 of 6**. `HeldRecord::save` is `let _ =`, and a save that fails is treated as done — qal-j09's shape one layer down, at error level, at the volume #441 exists to stop.
 

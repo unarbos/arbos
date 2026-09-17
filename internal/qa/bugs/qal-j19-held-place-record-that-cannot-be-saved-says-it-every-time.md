@@ -1,4 +1,4 @@
-# qal-j19 (two of three shapes fixed at #441 `46477c88`, verified 12:12; one remains): when `runtime/place-held.json` cannot be saved, "once" becomes "every relaunch" — and after five minutes, an error-level line on every relaunch
+# qal-j19 (fixed: (a),(c) at #441 `46477c88`, (b) at `38b2e145`; verified 12:20): when `runtime/place-held.json` cannot be saved, "once" becomes "every relaunch" — and after five minutes, an error-level line on every relaunch
 
 - Measured at: #441 @ `b5b24dba` (`arbos-kernel 0.2.0 b5b24dba7b16`), scenario `lk-02-held-record-in-a-read-only-runtime-folder`, rollout `internal/qa/rollouts/20260917T115*-lk-02-…`. `lk-03` (holder gone → record cleared → new holder gets its own first line) and `lk-01` (a real 5.5-minute relaunch loop) pass on the same build; this is the record's own failure mode, not the ordinary path.
 - Class: the qal-j09 shape one layer down — a write that fails silently (`HeldRecord::save`: `let _ = std::fs::write(...)`, `let _ = rename`) and a later step that trusts the record as saved. Misreport at volume: the very flood #441 exists to stop, at error level.
@@ -12,6 +12,8 @@
 
 Ordinary path, for the control: with `runtime/` writable the same six relaunches give one full line then `place already served by pid N (Ns; said in full in kernel.log)` — as designed.
 
+
+## Verified at `38b2e145` (12:20): all three shapes pass — (a) full line 1 of 6; (b) escalation **1** of 6, the six-minute-old record escalates once and the live temp copy then carries `escalated: true`; (c) six short lines saying the record could not be written. `lk-03` passes. Closed.
 
 ## Verified at `46477c88` (12:12), three shapes, six relaunches each, control `b5b24dba`
 
