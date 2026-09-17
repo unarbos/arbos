@@ -267,9 +267,7 @@ impl Updater {
                 };
                 // Look again either way: on success the stranger should be
                 // gone, and on failure it is still there and should say so.
-                updater.strangers.clear();
-                updater.looked = None;
-                cx.notify();
+                updater.forget_strangers(cx);
             });
         }));
     }
