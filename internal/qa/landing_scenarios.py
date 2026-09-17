@@ -18,6 +18,11 @@
          line typed twice is filed once with an "Already queued" notice (#362 — the impatient user).
   im-02  in the desktop: while a command streams, the quiet-line hint ("Nothing has arrived in …", blaming the key)
          must not appear; when a command is truly silent the hint names the command, not the model key.
+  rp-01  a finished job must produce its tool result even when the runtime's child reaper never wakes
+         (ARBOS_TEST_NO_CHILD_WAIT, #371's fault-injection knob): the wrapper's `exit` file is the truth. Jacob's Mac
+         had five hung workers and a 600 s "still running" from exactly this; Linux's pidfd reaper hid it from the loops.
+  rp-02  a launcher that hands the kernel a signal mask with SIGCHLD blocked: the kernel unblocks it, says so on
+         stderr, and a job still ends with its result.
   fb-01  the desktop feedback chain (#336, #345, #331): the sheet opens from a thumbs-down and the window keeps
          answering; the report is on disk before anything is sent; with no credentials it waits ("saved, and
          waiting"); with credentials it is delivered through `store put` into a store a kernel serves; the poller
@@ -510,6 +515,69 @@ def register(scenario, registry, transcript, now_ms, branch):
         finally:
             rig.close(folders=[folder])
             cx.rec.snapshot(folder, "impatient-after")
+
+
+    # ── #371: the kernel deaf to its own children ──────────────────────────
+    def job_result_arrives(cx, k, tag, budget_s=20):
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        t0 = time.time()
+        c.user("root", f"Run `sleep 2; echo done-{tag}` with bash and tell me what it printed.")
+        cx.rec.expect(c.wait_turn("root", "running", 10) is not None, "turn-never-started", "no running turn")
+        idle = c.wait_turn("root", "idle", budget_s)
+        took = round(time.time() - t0, 1)
+        evs, _ = transcript(cx.place, "root")
+        tools = [e for e in evs if e.get("kind") == "tool" and e.get("name") == "bash"]
+        body = " ".join(str(e.get("body") or e.get("result") or "") for e in tools)
+        still_running = "still running" in body.lower()
+        # A zombie under the kernel is the shape Jacob's process table showed.
+        zombies = 0
+        try:
+            out = subprocess.run(["ps", "-o", "pid=,stat=,ppid=,comm=", "--ppid", str(k.proc.pid)], capture_output=True, text=True).stdout
+            zombies = sum(1 for l in out.splitlines() if l.split() and len(l.split()) > 1 and l.split()[1].startswith("Z"))
+        except Exception:  # noqa: BLE001
+            pass
+        return {"idle": idle is not None, "took_s": took, "tool_lines": len(tools), "result_has_output": f"done-{tag}" in body, "still_running": still_running, "zombies_under_kernel": zombies, "body": body[:200]}
+
+    @reg("rp-01-finished-job-result-with-reaper-broken", tags=("jobs", "platform"))
+    def rp01(cx):
+        """With the runtime's child reaper disabled (ARBOS_TEST_NO_CHILD_WAIT), a two-second bash must still return its result within seconds — the wrapper's `exit` file is the truth about a command — not sit as a zombie and come back "still running" at the 600 s floor (#371)."""
+        tag = f"R{now_ms() % 100000}"
+        cx.env["ARBOS_TEST_NO_CHILD_WAIT"] = "1"
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"sleep 2; echo done-{tag}", "description": "a short job"}}]},
+            {"agent": "root", "content": f"It printed done-{tag}."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        r = job_result_arrives(cx, k, tag, budget_s=25)
+        cx.rec.notes.update(r)
+        cx.rec.expect(r["idle"] and r["result_has_output"] and not r["still_running"], "rp-01-result-never-arrived", f"with the reaper broken the finished job produced no result within 25 s (idle={r['idle']}, output seen={r['result_has_output']}, still_running={r['still_running']}) — the exit-file path did not deliver", "arbos-engine bash.rs / jobs.rs exit file + reap_by_pid (#371)")
+        cx.rec.expect(r["zombies_under_kernel"] == 0, "rp-01-zombie-left", f"{r['zombies_under_kernel']} zombie child(ren) under the kernel after the job ended (reap_by_pid did not run)")
+
+    @reg("rp-02-sigchld-blocked-by-the-launcher", tags=("jobs", "platform"))
+    def rp02(cx):
+        """The kernel is exec'd with SIGCHLD blocked in its inherited signal mask (what a launcher can do; the shape behind Jacob's five hung workers on macOS). The kernel must unblock it and say so on stderr, and a job must still end with its result. On Linux the pidfd reaper would have masked the fault, which is why a week of green cycles never saw it."""
+        import signal as _signal
+
+        tag = f"S{now_ms() % 100000}"
+
+        def block_sigchld():
+            _signal.pthread_sigmask(_signal.SIG_BLOCK, {_signal.SIGCHLD})
+
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"sleep 2; echo done-{tag}", "description": "a short job"}}]},
+            {"agent": "root", "content": f"It printed done-{tag}."},
+        ]
+        k = cx.kernel(preexec=block_sigchld, extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up with SIGCHLD blocked")
+        r = job_result_arrives(cx, k, tag, budget_s=25)
+        stderr = k.stderr_text() if hasattr(k, "stderr_text") else ""
+        said = "SIGCHLD" in stderr
+        cx.rec.notes.update(r)
+        cx.rec.notes["kernel_said_unblocked"] = said
+        cx.rec.expect(r["idle"] and r["result_has_output"], "rp-02-result-never-arrived", f"a job under a kernel exec'd with SIGCHLD blocked produced no result within 25 s ({r})", "arbos-kernel main.rs SIGCHLD unblock (#371)")
+        cx.rec.expect(said, "rp-02-mask-not-reported", "the kernel did not say on stderr that SIGCHLD was blocked and unblocked — on a build without #371 the mask stays and only Linux's pidfd hides it")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))
