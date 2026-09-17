@@ -2597,6 +2597,19 @@ pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
 /// ssh alias for a remote place. Without either, the folder's name alone: the
 /// gateway then takes it for its own kernel.
 pub fn hub_project_name(place: &Place) -> String {
+    let target = call_target(place, "");
+    match target.machine {
+        Some(machine) if !machine.is_empty() && !target.project.is_empty() => {
+            format!("{machine}/{}", target.project)
+        }
+        _ => target.project,
+    }
+}
+
+/// What a call tells the gateway it is for: the open tab's folder path (what
+/// binds the call), the machine the hub knows this computer as, the folder's
+/// name, the ssh alias for a remote place, and the tab's label.
+pub fn call_target(place: &Place, label: &str) -> crate::voice_ws::CallTarget {
     let folder = place
         .path
         .file_name()
@@ -2605,10 +2618,24 @@ pub fn hub_project_name(place: &Place) -> String {
     let machine = match &place.host {
         Some(alias) => Some(alias.clone()),
         None => hub_machine_name(),
+    }
+    .filter(|m| !m.is_empty());
+    // A local folder is sent as it really is on disk (symlinks resolved), so
+    // the gateway's own place compares equal to it.
+    let path = match &place.host {
+        Some(_) => place.path.to_string_lossy().to_string(),
+        None => std::fs::canonicalize(&place.path)
+            .unwrap_or_else(|_| place.path.clone())
+            .to_string_lossy()
+            .to_string(),
     };
-    match machine {
-        Some(machine) if !machine.is_empty() && !folder.is_empty() => format!("{machine}/{folder}"),
-        _ => folder,
+    crate::voice_ws::CallTarget {
+        machine,
+        project: folder,
+        path,
+        host: place.host.clone(),
+        name: label.to_string(),
+        context: Default::default(),
     }
 }
 

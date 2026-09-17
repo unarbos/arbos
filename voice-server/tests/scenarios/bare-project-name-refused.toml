@@ -1,0 +1,8 @@
+# Jacob's Mac (2026-09-17): the desktop sent `project = "discord_backups"`, a bare folder name,
+# because the Mac is not on the hub. The gateway used to fall back to its own kernel (the phone
+# kernel on ArbosLife) and GPT-Live then reported ArbosLife's folder as "where we are". A call
+# named for a project the gateway cannot reach is refused: error project_not_on_hub, close 4404,
+# and no kernel hears a word. The gateway's own kernel here plays the part of the wrong one.
+title = "A bare project name off the hub is refused, never answered from another kernel"
+project = "discord_backups"
+refused = "project_not_on_hub"

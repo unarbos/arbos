@@ -1,0 +1,19 @@
+# The desktop names the folder it has open by its path (with the machine and folder name). The
+# gateway's own kernel serves that very folder: the call binds to it, and session.ready says so
+# (project_path = that folder, via = own). No hub, no name matching.
+title = "Path binding: the gateway's own kernel serves the folder the call names"
+path = "own"
+context = { recent = [{ role = "user", text = "Tidy the release notes." }, { role = "assistant", text = "Done: 14 entries grouped by area." }], agents = [{ name = "tidy-release-notes", state = "done" }], running = false }
+
+[[steps]]
+say = "What is the status?"
+model = { tool = "agent_status" }
+
+[[steps]]
+wait_tool_result = "agent_status"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+tool_result_contains = { agent_status = "release notes" }

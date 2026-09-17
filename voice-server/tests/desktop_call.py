@@ -174,6 +174,22 @@ async def main_async(name: str) -> int:
         spoken_items = [u for u in users if any(step.get("say", "") and step["say"] in u.get("text", "") for step in steps)]
         check(bool(spoken_items), f"the caller's spoken words appear in the chat as user cards ({len(users)} user cards)")
         check(all(u.get("channel") == "voice" for u in spoken_items) and bool(spoken_items), "spoken user cards carry channel = voice (the microphone mark)")
+        # One card per utterance: the app shows the caller's words as they land and the kernel's
+        # record of the forwarded message is that card's echo, not a second card (and never a
+        # second turn: the app sends nothing itself for a spoken line).
+        for step in steps:
+            if step.get("say"):
+                n = sum(1 for u in users if step["say"] in u.get("text", ""))
+                check(n == 1, f"exactly one user card for the utterance {step['say'][:40]!r} ({n})")
+        check(len(kernel.users) <= sum(1 for step in steps if step.get("say")) + sum(1 for step in steps if step.get("text")),
+              f"the kernel got no more user frames than lines were spoken or typed ({len(kernel.users)})")
+        print("   kernel user frames:", [(u.get("channel"), u.get("kind"), str(u.get("text") or u.get("body") or "")[:50]) for u in kernel.users])
+        # The speech model's own words (small talk it answered itself) land in the chat too.
+        model_lines = [n for n in voice_lines if "call started" not in n and "call ended" not in n]
+        check(bool(model_lines), f"the chat has voice lines for what was said back ({len(model_lines)})")
+        # The call is bound to this tab's folder, and the state says which.
+        bound = str(call.get("project_path") or "")
+        check(bool(bound) and Path(bound).resolve() == place.resolve(), f"state.call.project_path is this tab's folder ({bound!r})")
 
         await asyncio.to_thread(app.click, "call-mute")
         state = await asyncio.to_thread(app.wait_state, lambda s: (s.get("call") or {}).get("muted") is True, 10, 0.2, "muted")
