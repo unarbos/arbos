@@ -558,8 +558,23 @@ impl Arbos {
                 "Follow-ups aren't available for this worker"
             }
             // Cursor's new Project: the first message seeds the project.
-            _ if chat.is_some_and(|chat| chat.items.is_empty() && chat.parent.is_none()) => {
+            // Not while a kickoff is wanted or running — that turn is the
+            // project's first, and Cursor's field reads "Send follow-up"
+            // from the project's first frame (F-141, cycle 33's cold pair:
+            // ours flipped two seconds in).
+            _ if chat.is_some_and(|chat| {
+                chat.items.is_empty()
+                    && chat.parent.is_none()
+                    && !chat.kickoff_wanted
+                    && chat.kickoff_at.is_none()
+            }) =>
+            {
                 "What are you working on?"
+            }
+            // A project whose kickoff is wanted or running has its first
+            // turn: the field asks for the next line.
+            _ if chat.is_some_and(|chat| chat.items.is_empty() && chat.parent.is_none()) => {
+                "Send follow-up"
             }
             // Cursor: a fresh chat invites; one with a turn asks for the next.
             _ if chat.is_some_and(|chat| chat.items.is_empty()) => "Plan, search, build anything",
