@@ -30,14 +30,6 @@ qa_paused() {
 # pass that finds the store sound. Sound = notes.md and docs/ both listable.
 PENDING="$ROOT/store-pending"
 store_sound() { [ -s "$STORE_ROOT/notes.md" ] && [ -d "$STORE_ROOT/docs" ] && [ -f "$STORE/run.py" ]; }
-store_put() {  # store_put <local file> <store-relative path>
-  local src="$1"
-  local rel="${2:?store_put needs <local file> <store-relative path>}"
-  local dst="$STORE_ROOT/$rel"
-  if store_sound && mkdir -p "$(dirname "$dst")" 2>/dev/null && cp -f "$src" "$dst" 2>/dev/null; then return 0; fi
-  mkdir -p "$PENDING/$(dirname "$rel")" && cp -f "$src" "$PENDING/$rel" && echo "== store write failed or store not sound; staged $rel under $PENDING" >&2
-  return 1
-}
 # May the staged copy go over what the store holds now? Content, not time (2026-09-17, the mesh
 # worker's check when it applied our staged files): the store copy must be contained in ours —
 # ours is theirs plus additions, nothing of theirs removed beyond a couple of changed lines. A
@@ -55,6 +47,21 @@ for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, theirs, mine, autojunk=
         removed += i2 - i1
 sys.exit(0 if removed <= 2 else 1)
 PY
+}
+store_put() {  # store_put <local file> <store-relative path>
+  local src="$1"
+  local rel="${2:?store_put needs <local file> <store-relative path>}"
+  local dst="$STORE_ROOT/$rel"
+  if store_sound && mkdir -p "$(dirname "$dst")" 2>/dev/null && cp -f "$src" "$dst" 2>/dev/null; then return 0; fi
+  # Staging obeys the same content rule as applying (2026-09-17 12:07: this step replaced two hand-staged,
+  # newer bug files with the loop's 09:28 copies, and the branch built from the staging tree carried the
+  # rollback to the relay). A staged copy is only replaced by something that contains it.
+  if [ -e "$PENDING/$rel" ] && ! may_overwrite "$src" "$PENDING/$rel"; then
+    echo "== NOT staged $rel: the staged copy has lines this one does not; kept" >&2
+    return 1
+  fi
+  mkdir -p "$PENDING/$(dirname "$rel")" && cp -f "$src" "$PENDING/$rel" && echo "== store write failed or store not sound; staged $rel under $PENDING" >&2
+  return 1
 }
 apply_pending() {
   [ -d "$PENDING" ] || return 0
@@ -104,7 +111,9 @@ while true; do
     "$ROOT/deploy/swebench-nightly.sh" || echo "== swebench nightly failed ($?)"
   fi
   # New auto-drafts and the histories go back to the store for triage.
-  for f in "$ROOT"/loop/bugs/*.md; do b="$(basename "$f")"; { store_sound && [ -e "$STORE/bugs/$b" ]; } || store_put "$f" "internal/qa/bugs/$b"; done
+  # Bug files go to the store only when it is sound and does not already hold them. Never staged: the loop's
+  # copies are the store's copies from the last sync, and a stale copy staged over a hand edit is a rollback.
+  if store_sound; then for f in "$ROOT"/loop/bugs/*.md; do b="$(basename "$f")"; [ -e "$STORE/bugs/$b" ] || store_put "$f" "internal/qa/bugs/$b"; done; fi
   store_put "$ROOT/loop/kickoff-history.jsonl" "internal/qa/vm-kickoff-history.jsonl"
   store_put "$ROOT/loop/spend.jsonl" "internal/qa/vm-spend.jsonl"
   store_put "$ROOT/loop/rollouts/index.jsonl" "internal/qa/rollouts/vm-index.jsonl"

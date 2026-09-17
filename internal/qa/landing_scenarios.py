@@ -1725,6 +1725,270 @@ def register(scenario, registry, transcript, now_ms, branch):
         k.stop()
         cx.check()
 
+    # ── #441: a held place is said once, then escalates ─────────────────────────
+    def relaunch(cx, place, env=None, timeout=20):
+        """One supervisor relaunch: the kernel binary against a held place, as the supervisor would run it. Returns
+        (exit code, stderr)."""
+        wrap = ["bash", os.environ["ARBOS_QA_NS_WRAP"]] if os.environ.get("ARBOS_QA_NS_WRAP") and os.environ.get("ARBOS_QA_STORE_VISIBLE") != "1" else []
+        p_ = subprocess.run([*wrap, cx.binary, "serve", str(place)], cwd=str(place), env=env or cx.env, capture_output=True, text=True, timeout=timeout)
+        return p_.returncode, p_.stderr
+
+    def held_lines(place):
+        log = place / ".arbos" / "runtime" / "kernel.log"
+        if not log.exists():
+            return []
+        out = []
+        for l in log.read_text(errors="replace").splitlines():
+            if "place_held" in l or "place_freed" in l:
+                out.append(l)
+        return out
+
+    def classify(lines):
+        return {
+            "full": sum(1 for l in lines if "another kernel already serves" in l),
+            "heartbeat": sum(1 for l in lines if "still held after" in l),
+            "escalation": sum(1 for l in lines if "a person needs to look" in l),
+            "freed": sum(1 for l in lines if "place_freed" in l),
+        }
+
+    @reg("lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop", tags=("lock", "slow"))
+    def lk01(cx):
+        """#441, on a real relaunch loop rather than a moved clock: a kernel holds the place; a supervisor relaunches
+        every 2 s for 5.5 minutes (~160 starts). Expected in the place's kernel.log: one full `place_held` line naming
+        the holder's pid, build and url; one heartbeat a minute; one error-level escalation after five minutes, not
+        repeated within ten; every relaunch exits 3 with `place already served` on stderr."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        holder = cx.kernel(tag="holder")
+        cx.rec.expect(holder.start(), "holder-start", "the holding kernel did not come up")
+        holder_pid = holder.proc.pid
+        codes, phrases, t0 = [], 0, time.time()
+        while time.time() - t0 < 330:
+            code, err = relaunch(cx, place)
+            codes.append(code)
+            phrases += "place already served" in err
+            time.sleep(2)
+        lines = held_lines(place)
+        c_ = classify(lines)
+        cx.rec.notes.update({"relaunches": len(codes), "exit_codes": sorted(set(codes)), "stderr_phrase_every_time": phrases == len(codes), "kernel_log_place_held_lines": len(lines), "classes": c_, "first_line": next((l[:300] for l in lines if "another kernel already serves" in l), None), "escalation_line": next((l[:300] for l in lines if "a person needs to look" in l), None)})
+        cx.rec.expect(len(codes) >= 100, "probe-too-few-relaunches", f"only {len(codes)} relaunches in 5.5 min; this run proves little")
+        cx.rec.expect(set(codes) == {3}, "exit-code-not-3", f"relaunches exited {sorted(set(codes))}; a held place must exit 3 (EXIT_PLACE_HELD) every time")
+        cx.rec.expect(phrases == len(codes), "phrase-missing-on-stderr", f"`place already served` was on stderr {phrases} of {len(codes)} times; the desktop parses that phrase", "arbos-kernel serve.rs say_held — the phrase is an interface")
+        cx.rec.expect(c_["full"] == 1, "full-line-not-once", f"the full line appeared {c_['full']} times over {len(codes)} relaunches (kernel.log place_held lines: {len(lines)})", "arbos-kernel serve.rs HeldRecord (#441)")
+        cx.rec.expect(4 <= c_["heartbeat"] <= 7, "heartbeat-cadence", f"{c_['heartbeat']} heartbeats over 5.5 min; expected about one a minute")
+        cx.rec.expect(c_["escalation"] == 1, "escalation-did-not-escalate", f"{c_['escalation']} escalation line(s) after 5.5 min held; expected exactly one after five minutes")
+        first = next((l for l in lines if "another kernel already serves" in l), "")
+        cx.rec.expect(str(holder_pid) in first and "url" in first and "build" in first, "first-line-lacks-the-facts", f"the first line does not name pid {holder_pid}, build and url: {first[:300]}")
+        holder.stop()
+        cx.check()
+
+    @reg("lk-02-held-record-in-a-read-only-runtime-folder", tags=("lock", "destructive-order"))
+    def lk02(cx):
+        """The record that makes 'once' possible (runtime/place-held.json, or the machine's temp folder since #441 at
+        46477c88). Three shapes, six relaunches each, folders made read-only before any record exists: runtime/ read-only
+        with temp writable (one long line expected); a stale runtime/ record that cannot be updated beside a writable temp
+        (which copy is read?); both read-only (six short lines that say the record could not be kept, never the long line,
+        never the escalation). qal-j19."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        holder = cx.kernel(tag="holder")
+        cx.rec.expect(holder.start(), "holder-start", "the holding kernel did not come up")
+        runtime = place / ".arbos" / "runtime"
+        record = runtime / "place-held.json"
+        holder_pid = holder.proc.pid
+        # The record may also live in the machine's temp folder (#441 at 46477c88). Two environments for the
+        # relaunches: temp writable, and temp read-only (TMPDIR pointed at a folder with no write bit).
+        tmp_ro = cx.scratch / "tmp-ro"
+        tmp_ro.mkdir(exist_ok=True)
+        tmp_ro.chmod(0o555)
+        env_tmp_ro = {**cx.env, "TMPDIR": str(tmp_ro)}
+        tmp_rw = cx.scratch / "tmp-rw"
+        tmp_rw.mkdir(exist_ok=True)
+        env_tmp_rw = {**cx.env, "TMPDIR": str(tmp_rw)}
+
+        def burst(env, n=6):
+            errs, codes = [], []
+            for _ in range(n):
+                code, err = relaunch(cx, place, env=env)
+                codes.append(code)
+                errs.append(err)
+                time.sleep(0.2)
+            return codes, errs
+
+        def count(errs):
+            return {"full": sum("another kernel already serves" in e for e in errs), "escalation": sum("a person needs to look" in e for e in errs), "short": sum("said in full" in e or "could not" in e.lower() or "record" in e.lower() for e in errs), "says_record_unkept": sum("could not" in e.lower() and "record" in e.lower() or "place-held" in e for e in errs)}
+
+        results = {}
+        codes_all = []
+        # (a) no record, runtime/ read-only, temp writable: the record goes to temp; one long line in six.
+        record.unlink(missing_ok=True)
+        for f_ in tmp_rw.glob("arbos-place-held-*"):
+            f_.unlink()
+        runtime.chmod(0o555)
+        try:
+            c_, e_ = burst(env_tmp_rw)
+        finally:
+            runtime.chmod(0o755)
+        codes_all += c_
+        results["a_runtime_ro_temp_rw"] = {**count(e_), "sample": e_[-1][:220]}
+        # (b) a stale, unwritable runtime record (six minutes old, escalated: false) beside a writable temp: which one
+        # does the next start read? If runtime first, the temp copy never speaks and the escalation repeats.
+        for f_ in tmp_rw.glob("arbos-place-held-*"):
+            f_.unlink()
+        now = now_ms()
+        record.write_text(json.dumps({"holder_pid": holder_pid, "first_ms": now - 360_000, "last_said_ms": now - 360_000, "refusals": 180, "escalated": False}))
+        runtime.chmod(0o555)
+        try:
+            c_, e_ = burst(env_tmp_rw)
+        finally:
+            runtime.chmod(0o755)
+        codes_all += c_
+        results["b_stale_runtime_record_ro_temp_rw"] = {**count(e_), "sample": e_[-1][:220]}
+        # (c) nowhere to keep it: runtime/ and temp both read-only, no record anywhere → six short lines, no long, no escalation.
+        record.unlink(missing_ok=True)
+        runtime.chmod(0o555)
+        try:
+            c_, e_ = burst(env_tmp_ro)
+        finally:
+            runtime.chmod(0o755)
+        codes_all += c_
+        results["c_runtime_ro_temp_ro"] = {**count(e_), "sample": e_[-1][:220]}
+        tmp_ro.chmod(0o755)
+        cx.rec.notes.update({"exit_codes": sorted(set(codes_all)), "results": results})
+        a, b, c3 = results["a_runtime_ro_temp_rw"], results["b_stale_runtime_record_ro_temp_rw"], results["c_runtime_ro_temp_ro"]
+        cx.rec.expect(set(codes_all) <= {3}, "exit-code-not-3", f"relaunches exited {sorted(set(codes_all))} with folders read-only")
+        cx.rec.expect(a["full"] == 1 and a["escalation"] == 0, "runtime-ro-temp-rw-not-once", f"runtime/ read-only with a writable temp: full line {a['full']} of 6, escalation {a['escalation']} — the temp fallback did not give 'once': {a['sample']}", "arbos-kernel serve.rs HeldRecord::save/paths (#441)")
+        cx.rec.expect(b["escalation"] <= 1, "stale-runtime-record-shadows-the-temp-copy", f"a stale runtime/ record that cannot be updated, beside a writable temp: the error-level escalation went out {b['escalation']} of 6 — `load` reads runtime/ first, so the copy that is being kept is never the one read: {b['sample']}", "arbos-kernel serve.rs HeldRecord::load — prefer the newest record, or the one that save() last wrote")
+        cx.rec.expect(c3["full"] == 0 and c3["escalation"] == 0 and c3["says_record_unkept"] >= 5, "nowhere-to-keep-it-not-short", f"runtime/ and temp both read-only: full {c3['full']}, escalation {c3['escalation']}, lines saying the record could not be kept {c3['says_record_unkept']} of 6 — expected six short lines that say so: {c3['sample']}", "arbos-kernel serve.rs say_held — a record kept nowhere means the short form, every time, saying why")
+        holder.stop()
+        cx.check()
+
+    @reg("lk-03-holder-gone-clears-the-record-and-a-new-holder-starts-fresh", tags=("lock",))
+    def lk03(cx):
+        """When the holder goes, the first start that serves must clear runtime/place-held.json rather than inherit a
+        permanently-refusing state; and a new holder afterwards gets its own first full line (keyed on its pid), not
+        the old holder's heartbeat cadence."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        record = place / ".arbos" / "runtime" / "place-held.json"
+        holder = cx.kernel(tag="holder")
+        cx.rec.expect(holder.start(), "holder-start", "the holding kernel did not come up")
+        for _ in range(3):
+            relaunch(cx, place)
+            time.sleep(0.3)
+        rec_before = json.loads(record.read_text()) if record.exists() else None
+        holder.kill()
+        time.sleep(1.0)
+        # The supervisor's next start serves. Run it as the harness's own kernel so it can be stopped.
+        served = cx.kernel(tag="served")
+        ok = served.start()
+        time.sleep(1.0)
+        cleared = not record.exists()
+        lines_after_serve = held_lines(place)
+        served.stop()
+        time.sleep(0.5)
+        # A new holder, then a refusal: a fresh record for the new pid, first line in full again.
+        holder2 = cx.kernel(tag="holder2")
+        cx.rec.expect(holder2.start(), "holder2-start", "the second holding kernel did not come up")
+        relaunch(cx, place)
+        rec_after = json.loads(record.read_text()) if record.exists() else None
+        c_ = classify(held_lines(place))
+        cx.rec.notes.update({"record_before_holder_died": rec_before, "served_after_holder_died": ok, "record_cleared_by_serving_start": cleared, "record_for_new_holder": rec_after, "classes": c_, "freed_lines": [l[:200] for l in lines_after_serve if "free" in l.lower()]})
+        cx.rec.expect(ok, "did-not-serve-after-holder-died", "the start after the holder died did not serve the place")
+        cx.rec.expect(cleared, "stale-record-kept", "runtime/place-held.json survived a start that served: the next holder's refusals inherit its clock and count", "arbos-kernel serve.rs — clear the record on the first successful start (#441)")
+        cx.rec.expect(rec_after is not None and rec_before is not None and rec_after.get("holder_pid") == holder2.proc.pid and rec_after.get("refusals") == 1, "new-holder-inherits-old-record", f"after a new holder the record is {rec_after}; expected holder_pid {holder2.proc.pid}, refusals 1")
+        cx.rec.expect(c_["full"] == 2, "second-holder-not-said-in-full", f"the full line appeared {c_['full']} time(s); expected twice, once per holder")
+        cx.rec.expect(c_["freed"] >= 1, "freed-not-said", "no `place_freed` line when the start after the holder died served the place")
+        holder2.stop()
+        cx.check()
+
+    # ── first-match readers: a stale copy in the first place, a live one in the second ──
+    @reg("fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line", tags=("first-match", "rewind", "destructive-order"))
+    def fm01(cx):
+        """settle_tree reads checkpoints.d/<line>.json when a checkpoint's tree is still pending, and accepts it if its
+        HEAD matches. Line numbers are transcript lines: after a rewind, new turns reuse the cut turns' lines, and the
+        cut turns' sidecars are not removed. Stage it: five turns, rewind to 3 (f3..f5 gone), new turns 3' and 4' with
+        the tree delayed so 4' is still pending, rewind to 4'. The right tree is {f1, f2, g3}; the stale sidecar says
+        {f1, f2, f3} — and HEAD never moved, so the guard passes it."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        cps = place / ".arbos" / "agents" / "root" / "checkpoints.jsonl"
+        sidecars = place / ".arbos" / "agents" / "root" / "checkpoints.d"
+
+        def records():
+            return [json.loads(l) for l in cps.read_text().splitlines() if l.strip()] if cps.exists() else []
+
+        def settled(n, secs=20):
+            end = time.time() + secs
+            while time.time() < end:
+                r = records()
+                if len(r) >= n and all(x.get("work") or x.get("clean") for x in r[:n]):
+                    return r
+                time.sleep(0.2)
+            return records()
+
+        replies_a = []
+        for i, w in enumerate(("first", "second", "third", "fourth", "fifth"), 1):
+            replies_a.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {w} > f{i}.txt", "description": f"write f{i}"}}]})
+            replies_a.append({"agent": "root", "content": w})
+        k = cx.kernel(tag="kernel-a", extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies_a))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        for t in ("one", "two", "three", "four", "five"):
+            c.user("root", t)
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", f"turn {t!r} never ended")
+        recs = settled(5)
+        old_lines = [r.get("line") for r in recs]
+        c.send({"type": "rewind", "agent": "root", "turn": 3, "files": True})
+        c.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+        follow = c.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 45, "the restore's report")
+        time.sleep(0.5)
+        files_after_first = sorted(p_.name for p_ in place.glob("*.txt"))
+        stale = sorted(p_.name for p_ in sidecars.glob("*.json")) if sidecars.exists() else []
+        k.stop()
+        cx.rec.notes.update({"old_checkpoint_lines": old_lines, "first_rewind": follow, "files_after_first_rewind": files_after_first, "sidecars_left_after_rewind": stale})
+        cx.rec.expect(files_after_first == ["f1.txt", "f2.txt"], "first-rewind-wrong", f"after rewinding to turn 3 the files are {files_after_first}; the probe needs f1, f2")
+        # Kernel B: the tree delayed, so a turn that does not write ends with its record still pending.
+        replies_b = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo g3 > g3.txt", "description": "write g3"}}]},
+            {"agent": "root", "content": "third again"},
+            {"agent": "root", "content": "noted, nothing to write"},
+        ]
+        k2 = cx.kernel(tag="kernel-b", extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies_b))])
+        k2.env["ARBOS_TEST_TREE_DELAY_MS"] = "8000"
+        cx.rec.expect(k2.start(), "kernel-b-start", "the second kernel did not come up")
+        c2 = k2.attach()
+        c2.wait(lambda f: f.get("type") == "snapshot", 5)
+        c2.user("root", "three again")
+        cx.rec.expect(c2.wait_turn("root", "idle", 60) is not None, "turn-never-ended", "turn 3' never ended")
+        c2.user("root", "four again")
+        cx.rec.expect(c2.wait_turn("root", "idle", 60) is not None, "turn-never-ended", "turn 4' never ended")
+        recs2 = records()
+        new4 = recs2[3] if len(recs2) >= 4 else {}
+        stale_for_new4 = (sidecars / f"{new4.get('line')}.json") if new4 else None
+        stale_json = json.loads(stale_for_new4.read_text()) if stale_for_new4 and stale_for_new4.exists() else None
+        before = tree_state(place)
+        cx.rec.notes.update({"new_turn4_record": {k_: str(v)[:40] for k_, v in new4.items()}, "stale_sidecar_for_that_line": stale_json and {k_: str(v)[:40] for k_, v in stale_json.items()}, "files_before_second_rewind": sorted(before["files"])})
+        cx.rec.expect(new4.get("work_error") and "pending" in str(new4.get("work_error")).lower() or "being saved" in str(new4.get("work_error", "")).lower(), "probe-record-not-pending", f"turn 4''s record is not pending ({new4}); the sidecar is never consulted, this run proves nothing")
+        cx.rec.expect(stale_json is not None and stale_json.get("work") and new4.get("line") in old_lines, "probe-no-stale-sidecar", f"no cut turn's sidecar at line {new4.get('line')} (old lines {old_lines}, sidecars {stale}); the collision did not happen, this run proves nothing")
+        c2.send({"type": "rewind", "agent": "root", "turn": 4, "files": True})
+        c2.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+        follow2 = c2.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 45, "the restore's report")
+        time.sleep(0.5)
+        files_after = sorted(p_.name for p_ in place.glob("*.txt"))
+        cx.rec.notes.update({"second_rewind": follow2, "files_after_second_rewind": files_after})
+        cx.rec.expect("f3.txt" not in files_after, "stale-sidecar-restored-a-cut-turns-tree", f"rewinding to the new turn 4 brought back f3.txt, a file the earlier rewind removed: the restore took the cut turn's sidecar at the same line (same HEAD) for the new turn's tree — files now {files_after}, expected f1, f2, g3", "arbos-engine tools::git settle_tree — a sidecar is matched by line and HEAD; a cut turn's sidecar at the same line passes both. Remove cut turns' sidecars on rewind, or key the sidecar on the record's ts")
+        cx.rec.expect("g3.txt" in files_after, "new-turns-file-lost", f"g3.txt, written by the new turn 3', is gone after rewinding to the new turn 4: {files_after}")
+        k2.stop()
+        cx.check()
+
     @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
     def rw09(cx):
         """#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write

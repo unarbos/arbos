@@ -98,7 +98,7 @@ until the service fails such reads properly, it is the only thing that does.
 ```bash
 git -C /workspace fetch -q origin "+refs/heads/store-watch:refs/remotes/origin/store-watch"
 git -C /workspace show origin/store-watch:readers/cloud-mesh-3b98.jsonl | tail -20
-# or: bash internal/store-second-reader.sh show
+# (the script's only home is the store-watch branch — see "one source" below)
 ```
 
 To count episodes: `grep -c '"verdict":"FAULT"'` on that file; to line them
@@ -149,6 +149,39 @@ another machine is not a nicety, it is what makes agreement mean anything;
 and when a verdict is surprising in either direction, read the client's own
 log (`/tmp/agent-store-fuse.log` on this VM) before trusting the listing.
 No client's store listing is authoritative on its own.
+
+## One source, no stale primary (12:20 UTC, after `qal-j19`'s third shape)
+
+`qal-j19` found a write that lands somewhere other than where the reader
+looks first: a stale record in the primary location, the live one in the
+fallback, and every start reading the stale copy. Checked this reader for the
+same shape:
+
+- **The script** had two homes: the `store-watch` branch (what the timer
+  fetches) and a convenience copy at `internal/store-second-reader.sh`. They
+  already differed — the store copy predated a fix — so anyone running the
+  store copy would have run stale code while the timer ran the live one. The
+  store copy is **deleted**; the branch is the only source, fetched fresh on
+  every run. If the fetch fails the run fails loudly (rule 2 of the timer),
+  never falls back.
+- **The verdicts** have one home, the branch; `show` reads only that.
+- **The shout note** is a secondary, best-effort write with the fault time in
+  its name; a new fault writes a new file, never rewrites an old one, and
+  the branch line carries the verdict whether or not the note could be
+  written — so a stale note cannot be mistaken for a live one, and a failed
+  note cannot hide a fault.
+
+## The relay was a second path too (12:25 UTC, as it ended)
+
+For three hours on 2026-09-17 the QA loop's output reached the store by a
+second path: staged on a branch, applied here by hand, shaped by the
+coordinator's attention rather than by a mechanism. The error of the day rode
+that path — a publish step swept 228 loop-written files into the same folder
+as the hand edits, and a commit arrived carrying the loop's 09:28 copies of two
+verified records over their newer versions. Only the authorship check between
+the branch and the store stopped it, twice. The lesson is the one just applied
+to this reader and to the mirror: **one home each, and a path that exists
+only because someone is paying attention is a path an error will take.**
 
 ## Limits, stated
 

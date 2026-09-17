@@ -1,0 +1,322 @@
+{
+ "written_by": "arbos-desktop",
+ "fixture": false,
+ "id": "20260917T112148Z-dc98",
+ "sent_ms": 1789644108727,
+ "note": "default projects should have the left side panel closed.",
+ "app": {
+  "version": "0.2.0",
+  "build": "1403",
+  "commit": "7017eb7",
+  "kernel_version": "0.2.0",
+  "label": "0.2.0 (1403)"
+ },
+ "kernel": {
+  "arch": "aarch64",
+  "built_at": "2026-09-17T11:16Z",
+  "git_sha": "7017eb751bd7",
+  "model": "anthropic/claude-fable-5.1",
+  "os": "macos",
+  "project": "",
+  "provider": "openrouter",
+  "version": "0.2.0"
+ },
+ "place": {
+  "archive_children": true,
+  "fallback_models": [],
+  "key": true,
+  "keyless_reason": null,
+  "max_children": 8,
+  "max_turn_cost_usd": 0.0,
+  "permission": "auto",
+  "spend": {
+   "cap_usd": null,
+   "spent_usd": 0.0,
+   "turn_cap_usd": null,
+   "turns": 0
+  },
+  "window_tokens": 0
+ },
+ "agent": "root",
+ "turn": {
+  "call_id": null,
+  "complete": false,
+  "ended_ms": 1789644096400,
+  "from": 1,
+  "lines": 5,
+  "of": 5,
+  "started_ms": 1789644084612,
+  "tail": 200,
+  "to": 5
+ },
+ "events": [
+  {
+   "kind": "wake",
+   "seq": 1,
+   "text": "This place was just opened for the first time; this is its kickoff turn \u2014 one bounded turn, then end. No spawn, no ask, no subscription, no status call.\n1. Look at the folder with one composite bash (description \"Look around the new place\"): `ls -la; cat README* 2>/dev/null | head -40; git log --oneline 2>/dev/null | head -5`.\n2. Write docs/project-context.md, replacing the template's placeholders with what the folder tells you: Goal stays \"(not stated yet \u2014 the user's first ask sets it)\"; under Resources note the stack, layout, and branch you saw, in a few lines. Keep the front matter.\n3. plan set one item: `[Kickoff](docs/project-context.md) \u2014 ready; waiting for the first ask`.\n4. Greet in two short lines, nothing more: the first opens \"Hey \u2014\" and says the place is ready with one clause on what you saw (\"a Rust workspace with a kernel and a desktop app\"); the second asks what to work on and says they can tell you how to work and you will remember. No headings, no lists, no offers. user.md names no one: greet without a name.",
+   "ts": 1789644084612,
+   "wake": "kickoff"
+  },
+  {
+   "kind": "assistant",
+   "seq": 2,
+   "step": 1,
+   "text": "",
+   "ts": 1789644093394
+  },
+  {
+   "args": {
+    "command": "ls -la; cat README* 2>/dev/null | head -40; git log --oneline 2>/dev/null | head -5",
+    "description": "Look around the new place"
+   },
+   "call_id": "toolu_01VuG4yVkeoDmYbpH7YxMhMZ",
+   "ended": 1789644093394,
+   "kind": "tool",
+   "label": "Look around the new place",
+   "name": "bash",
+   "output": "/Users/const/.bash_profile: line 14: basilica: command not found\ntotal 0\ndrwxr-xr-x    3 const  staff    96 Sep 17 08:21 .\ndrwxr-x---+ 266 const  staff  8512 Sep 17 08:21 ..\ndrwxr-xr-x   18 const  staff   576 Sep 17 08:21 .arbos\nexit 128",
+   "output_clipped": true,
+   "paths": [
+    "/Users/const/testarbos/.arbos/agents/root/jobs/j1/out.log"
+   ],
+   "result_size": 238,
+   "seq": 3,
+   "started": 1789644093064,
+   "step": 1,
+   "ts": 1789644093401
+  },
+  {
+   "kind": "assistant",
+   "seq": 4,
+   "step": 2,
+   "text": "",
+   "ts": 1789644096164
+  },
+  {
+   "args": {
+    "path": ".arbos/docs/project-context.md"
+   },
+   "call_id": "toolu_01ES4ZyuvBsq4YFuyJ5tYNbG",
+   "ended": 1789644096158,
+   "kind": "tool",
+   "name": "read",
+   "output": "     1:wxz|+++\n     2:vaz|owner = \"root\"\n     3:wxz|+++\n     4:maw|# Project context\n     5:dpz|\n     6:ixs|Stable goals, constraints, decisions, and resources. Progress lives in `notes.md`.\n     7:dpz|\n     8:sof|## Goal\n     9:xdj|(what this project is for, in one or two lines)\n    10:dpz|\n    11:zjz|## Constraints\n    12:iea|- \n    13:dpz|\n    14:xkw|## Decisions (dated, newest first)\n    15:iea|- \n    16:dpz|\n    17:oea|## Resources\n    18:qfk|(machines, accounts, vault items by name \u2014 never a secret's value)\n    19:iea|- \n",
+   "paths": [
+    "/Users/const/testarbos/.arbos/docs/project-context.md"
+   ],
+   "result_size": 535,
+   "seq": 5,
+   "started": 1789644096156,
+   "step": 2,
+   "ts": 1789644096169
+  }
+ ],
+ "tail": [],
+ "children": [],
+ "agents": [
+  {
+   "archived": false,
+   "id": "root",
+   "inbox": [],
+   "kind": "",
+   "model": "inherit",
+   "name": "root",
+   "parent": null,
+   "paused": false,
+   "pending_asks": 0,
+   "readonly": false,
+   "remote": null,
+   "running": true,
+   "step": "Reading project-context.md",
+   "step_since": "2026-09-17T11:21:36Z",
+   "transcript_lines": 5
+  }
+ ],
+ "log": [
+  {
+   "detail": "pid=72106 version=0.2.0 git=7017eb751bd7 place=/Users/const/testarbos url=tcp://127.0.0.1:49285",
+   "event": "kernel_start",
+   "level": "info",
+   "ts": 1789644084351
+  },
+  {
+   "detail": "clients=1 who=local role=owner",
+   "event": "attach_open",
+   "level": "info",
+   "ts": 1789644084353
+  },
+  {
+   "detail": "who=local count=0 ids=0..0 seen_through=0",
+   "event": "notify_replayed",
+   "level": "info",
+   "ts": 1789644084353
+  },
+  {
+   "detail": "who=local",
+   "event": "attach_close",
+   "level": "info",
+   "ts": 1789644084353
+  },
+  {
+   "detail": "clients=2 who=local role=owner",
+   "event": "attach_open",
+   "level": "info",
+   "ts": 1789644084354
+  },
+  {
+   "detail": "who=local count=0 ids=0..0 seen_through=0",
+   "event": "notify_replayed",
+   "level": "info",
+   "ts": 1789644084354
+  },
+  {
+   "detail": "who=local",
+   "event": "attach_close",
+   "level": "info",
+   "ts": 1789644084354
+  },
+  {
+   "detail": "clients=3 who=local role=owner",
+   "event": "attach_open",
+   "level": "info",
+   "ts": 1789644084547
+  },
+  {
+   "detail": "who=local count=0 ids=0..0 seen_through=0",
+   "event": "notify_replayed",
+   "level": "info",
+   "ts": 1789644084547
+  },
+  {
+   "detail": "who=local",
+   "event": "attach_close",
+   "level": "info",
+   "ts": 1789644084548
+  },
+  {
+   "detail": "clients=4 who=local role=owner",
+   "event": "attach_open",
+   "level": "info",
+   "ts": 1789644084608
+  },
+  {
+   "detail": "who=local count=0 ids=0..0 seen_through=0",
+   "event": "notify_replayed",
+   "level": "info",
+   "ts": 1789644084608
+  },
+  {
+   "agent": "root",
+   "detail": "first open: kickoff turn filed",
+   "event": "kickoff",
+   "level": "info",
+   "ts": 1789644084610
+  },
+  {
+   "agent": "root",
+   "detail": "wake=kickoff",
+   "event": "turn_start",
+   "level": "info",
+   "ts": 1789644084612
+  },
+  {
+   "agent": "root",
+   "detail": "model=anthropic/claude-fable-5.1 system=4450 tools=6299 conversation=270 total=11019 (estimated tokens)",
+   "event": "prompt_size",
+   "level": "info",
+   "ts": 1789644088012
+  },
+  {
+   "detail": "clients=2 who=local role=owner",
+   "event": "attach_open",
+   "level": "info",
+   "ts": 1789644092607
+  },
+  {
+   "detail": "who=local count=0 ids=0..0 seen_through=0",
+   "event": "notify_replayed",
+   "level": "info",
+   "ts": 1789644092608
+  },
+  {
+   "detail": "who=local",
+   "event": "attach_close",
+   "level": "info",
+   "ts": 1789644092608
+  }
+ ],
+ "session": {
+  "items": [
+   {
+    "Tool": {
+     "id": "toolu_01VuG4yVkeoDmYbpH7YxMhMZ",
+     "kind": "execute",
+     "label": "bash ls -la; cat README* 2>/dev/null | head -40; git log --oneline 2>/dev/null | head -5",
+     "status": "Success",
+     "output": "/Users/const/.bash_profile: line 14: basilica: command not found\ntotal 0\ndrwxr-xr-x    3 const  staff    96 Sep 17 08:21 .\ndrwxr-x---+ 266 const  staff  8512 Sep 17 08:21 ..\ndrwxr-xr-x   18 const  staff   576 Sep 17 08:21 .arbos\nexit 128\n",
+     "desc": "Look around the new place"
+    }
+   },
+   {
+    "Tool": {
+     "id": "toolu_01ES4ZyuvBsq4YFuyJ5tYNbG",
+     "kind": "read",
+     "label": "read project-context.md",
+     "status": "Success",
+     "output": "     1:wxz|+++\n     2:vaz|owner = \"root\"\n     3:wxz|+++\n     4:maw|# Project context\n     5:dpz|\n     6:ixs|Stable goals, constraints, decisions, and resources. Progress lives in `notes.md`.\n     7:dpz|\n     8:sof|## Goal\n     9:xdj|(what this project is for, in one or two lines)\n    10:dpz|\n    11:zjz|## Constraints\n    12:iea|- \n    13:dpz|\n    14:xkw|## Decisions (dated, newest first)\n    15:iea|- \n    16:dpz|\n    17:oea|## Resources\n    18:qfk|(machines, accounts, vault items by name \u2014 never a secret's value)\n    19:iea|- \n"
+    }
+   }
+  ],
+  "index": [
+   {
+    "n": 0,
+    "kind": "tool",
+    "anchor": {
+     "call_id": "toolu_01VuG4yVkeoDmYbpH7YxMhMZ",
+     "status": "success"
+    }
+   },
+   {
+    "n": 1,
+    "kind": "tool",
+    "anchor": {
+     "call_id": "toolu_01ES4ZyuvBsq4YFuyJ5tYNbG",
+     "status": "success"
+    }
+   }
+  ],
+  "agent": "root",
+  "live_work": 0
+ },
+ "redacted": {
+  "blocks": 0,
+  "secrets": 0,
+  "tokens": 0,
+  "values": 0
+ },
+ "tool_io_stripped": 0,
+ "truncated": false,
+ "included": {
+  "screenshot": true,
+  "trajectory": true,
+  "log": true,
+  "tail": false,
+  "session": true,
+  "tool_io": true
+ },
+ "chose": {
+  "screenshot": true,
+  "trajectory": true,
+  "log": true,
+  "tail": true,
+  "session": true,
+  "tool_io": true
+ },
+ "screenshot_error": null,
+ "trajectory_unavailable": null,
+ "redacted_on_the_way_out": {
+  "tokens": 0,
+  "values": 0,
+  "blocks": 0
+ }
+}
