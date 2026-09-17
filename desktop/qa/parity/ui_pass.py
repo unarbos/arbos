@@ -65,7 +65,7 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
 
 STORE = Path(os.environ.get("STORE", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983"))
 # This folder: the scripts and fake gh beside this file. The driver module
@@ -1648,10 +1648,14 @@ def main() -> int:
     os.chmod(fake_gh / "gh", 0o755)
     os.environ["PATH"] = f"{fake_gh}:{os.environ.get('PATH', '')}"
     os.environ["FAKE_GH_STATE"] = str(fake_gh / "counter")
+    build = kernel_build(args.kernel)
+    log(f"kernel under test: {build}")
     log(f"launching {args.binary}")
     app = drv.Arbos.launch(binary=args.binary, env={"ARBOS_KERNEL_BIN": args.kernel, "DISPLAY": DISPLAY, "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(xdg / "data")},
                            log=str(outdir / "app.log"), timeout=90)
     p = Pass(drv, app, args.branch, outdir, store_dir)
+    # The first row of every run names the kernel the run measured against.
+    p.record("kernel", "rig", "arbos-kernel --version", "the build under test, from the binary", build, "info")
     phases = {"L": p.phase_launch, "C": p.phase_composer, "T": p.phase_turn, "Q": p.phase_question, "P": p.phase_plan,
               "S": p.phase_subagents, "A": p.phase_artifacts, "B": p.phase_tabs, "R": p.phase_panel, "W": p.phase_settings,
               "M": p.phase_menus, "G": p.phase_prs, "N": p.phase_permissions}
