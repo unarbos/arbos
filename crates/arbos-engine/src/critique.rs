@@ -110,7 +110,14 @@ pub async fn run(provider: &Provider, request: &str, cwd: &Path) -> Result<Optio
     let Some(diff) = diff(cwd) else {
         return Ok(None);
     };
-    let diff = cut(&diff, DIFF_CHARS);
+    let diff = if diff.len() > DIFF_CHARS {
+        format!(
+            "{}\n[... diff clipped at {DIFF_CHARS} chars ...]",
+            &diff[..DIFF_CHARS]
+        )
+    } else {
+        diff
+    };
     let user = format!(
         "REQUEST:\n{}\n\nDIFF:\n```diff\n{}\n```",
         cut(request, REQUEST_CHARS),
