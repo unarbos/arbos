@@ -473,8 +473,59 @@ The paid-for corpus: 171 honest rollouts from cycles 14–16 on the 20b/shared-1
 
 Both are visible in a transcript read: does the agent grep for the twin; does it open the sibling. The next reading pass checks the remaining 53 failures (no solved partner) against the same two patterns, then the two evidence rules already filed. No model spend this cycle.
 
-## Next (cycle 18)
+## Cycle 18 (2026-09-17) — the 53 unpaired failures, and a fifth pattern
 
-1. Read the 53 unpaired failures against patterns A–D and the two evidence rules; write what does not fit.
-2. If the features agent lands any of the four rules, read five rollouts each on the instances that carry the pattern (11728, 14629, 14182, 6386) — a read, not a measurement — and say whether the behaviour changed.
+Read against the four patterns from cycles 15 and 17 — **A** the twin, **B** producer-not-consumer, **E1** an existing test encoding the bug obeyed over the request, **E2** a reproduction that proves the crash gone rather than the behaviour present — plus **C**, the maintainers' choice the issue does not determine, which is not an agent pattern. For each instance the gold patch and FAIL_TO_PASS list were read against every failed rollout's files, mechanism line, reproduction command and final summary (`c18-unpaired.txt` in the cycle folder). Unpaired failures are a weaker instrument than pairs: **evident** below means the specific trace is in the transcript (the diff misses a file the hidden test exercises; the reproduction asserts only an exit code; the mechanism names the root and the diff sits downstream); **consistent with** means the shape fits and nothing in the transcript contradicts it, but the trace is not there.
+
+| Instance | Unpaired failures | Pattern | Evident or consistent | The trace |
+|---|---|---|---|---|
+| matplotlib-24870 | 6 | **A** twin | evident | all six changed `contour.py` only; `test_bool_autolevel` asserts `tricontour`/`tricontourf` levels; the gold and all four solved rollouts changed `tri/_tricontour.py` |
+| astropy-14182 | 2 | **A** twin | evident | both changed the writer only (13 and 19 calls); `test_rst_with_header_rows` is a round-trip through `QTable.read(..., header_rows=...)` |
+| sympy-17318 | 2 | **B** producer | evident | both mechanism lines name `_sqrt_match`'s Add branch as over-eager; both diffs guard `split_surds` downstream |
+| sphinx-8265 | 1 | **B** producer | consistent | the fix's logic went into `util/inspect.py::_unparse_default_value` (the caller); `test_unparse` tests `pycode/ast.py` directly |
+| pylint-6386 | 2 | **E2** crash-only reproduction (B secondary) | evident | both reproductions are `pylint ... -v; echo EXIT:$?`; both fixes make the action take no argument; neither checks that `-v` turns verbose on |
+| astropy-13236 | 10 | **F** — new, below | evident | all ten added the `FutureWarning` the issue schedules for 5.0; the checkout is 5.2.dev; the gold and the one solved rollout make the 5.2 change |
+| django-15022 | 12 | C: maintainers changed semantics | evident | all twelve preserve per-term semantics for multi-valued lookups (subqueries, `Exists`, per-term joins); gold ANDs the terms in one `filter()` and the test patch rewrites the assertions |
+| django-15252 | 7 (+1 capped) | C: maintainers' design differs from the issue's ask | evident | all seven gate the recorder the issue names; gold stops the executor creating the table when nothing is to migrate. (Both *solved* rollouts of this instance, in cycle-17's pairs, went up to `executor.py` — so a B reading is also available.) |
+| pylint-8898 | 4 | C: pinned incidental detail | evident | all four depth-aware splitters; the hidden test pins the error text a brace-only splitter produces |
+| django-15503 | 4 | C | consistent | all four in the gold file with the right mechanism (numeric keys as object keys); the failing detail is not visible without the test's SQL |
+| pytest-6197 | 2 | C | consistent | both in the gold file, moving the eager `__init__.py` import; the failing detail is not visible |
+| django-15022 (one rollout, `5b4690c4`) | — | **G** — observed once, below | evident | no fix made: the agent researched the ticket's upstream history, found the historic patch "tried and reverted", and declined to change the code |
+
+**The fifth pattern, F: a staged request, and the checkout decides the stage.** astropy-13236's issue proposes two steps: warn in 5.0, change the behaviour in 5.2. Ten of eleven failed rollouts implemented the warning; the hidden tests want the change; the checkout's version is 5.2.dev, and the one solved rollout said so ("since this checkout is already at 5.2.dev, I applied the 5.2 behavior directly"). The agent's reference for "which stage are we at" was the issue's text, not the tree in front of it — the same family as the two evidence rules (a check against the wrong reference) and a distinct, rule-able behaviour:
+
+> When a request schedules work across versions or stages, the checkout decides the stage: read the package version in the tree before choosing which step to implement. A warning the request scheduled for an earlier version is the wrong change in a checkout that is already at the later one.
+
+**Observed once, not a pattern: G, the agent declined the task.** One rollout investigated the ticket's history upstream, concluded the fix had been tried and reverted, wrote a report, and changed nothing. On this benchmark that is a failure; in a real repository it might be the right call. Recorded as seen, not as a rule.
+
+**Does everything fit?** Every one of the 53 fits A, B, E2, F, C or the single G; nothing needed a further category, and E1 does not appear outside its one paired case (sympy-15017). Two of the maintainers'-choice rows (django-15503, pytest-6197) are consistent-with rather than evident, so the claim is: **the five agent patterns plus the maintainers' choices are a complete account of how this agent fails on this set, with six of 53 rollouts fitting only by shape.** That is a strong claim and it is made here explicitly, on 79 failures across cycles 14–16, so that the next contrary case is noticed as one.
+
+Two more rollouts satisfied the mechanism gate with junk (`placeholder - will refine`; `test scaffold: probing...`) — the cycle-13 finding, now three cases.
+
+### What a fix would have had to change: the ranking
+
+Over all 79 failures (26 paired + 53 unpaired), primary classification, no double counting (pylint-6386's four are E2 with B as the secondary reading):
+
+| Pattern | Rollouts a rule would have had to change | Instances |
+|---|---|---|
+| **A** the twin | **16** | matplotlib-24870 (7), astropy-14182 (5), django-11728 (4) |
+| **F** the checkout decides the stage | **11** | astropy-13236 (11) |
+| **B** producer, not consumer | **9** | scikit-learn-14629 (4), django-15252 pairs (2), sympy-17318 (2), sphinx-8265 (1) |
+| **E2** reproduction of the behaviour, not the crash | **4** | pylint-6386 (4) |
+| **E1** a test that encodes the bug | **1** | sympy-15017 |
+| C, not agent-addressable | 34 | django-15022 (12), django-15252 (7), pylint-8898 (7), django-15503 (4), pytest-6197 (3), sympy-18698 (1) |
+| other / declined / capped | 4 | django-16454, sphinx-8035 pairs; one declined; one capped |
+
+Forty-one of 79 failures are agent-addressable by five rules; 34 are not addressable by any rule that fixes the agent. If the five rules worked perfectly the set would move from 92/171 to about 133/171 — 54% to 78% — which is the ceiling of what contract work can do here, and it is above anything a lever has been credited with. **The twin is the rule to build first**: it is the largest class, it is evident in all sixteen (the hidden test exercises code the diff never touched), and it is the cheapest to state. F is second and is one sentence. B is third and hardest, because it needs the agent to open a sibling before it chooses.
+
+The counts are what a rule *would have had to change*, not what it will; whether a rule changes it is a transcript read after the rule lands, and that read must check the pattern could still show itself — a twin the agent no longer has to look for because the prompt now names it is not the same as an agent that looks.
+
+**A caution for the reads to come**, from QA's afternoon: a scenario passed because the fix made the fault impossible to inject, not because the fault was handled. The reading equivalent is a failure that stops appearing because the transcripts changed shape. When any of the five rules lands and five rollouts are read, the check is: could the pattern still have shown itself — did the agent reach the point where it would have skipped the twin, or reached for the fallback, and choose otherwise? A rule that removes the choice from the transcript proves nothing about the agent.
+
+No model spend this cycle.
+
+## Next (cycle 19)
+
+1. When any of the five rules lands: five rollouts each on the instances that carry the pattern (twin: 11728, 24870, 14182; F: 13236; B: 14629; E2: 6386), read for whether the choice was made and made differently, with the caution above.
+2. Until then, the reading continues on new material only: the loop does not re-read these 171.
 3. Old regression 20 per-base check stays, band ≥ 8 of 40, for a 20-point collapse only.

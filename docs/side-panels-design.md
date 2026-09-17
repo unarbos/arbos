@@ -26,6 +26,12 @@ And your question, **does the panel show a list of open things that you click th
 
 ---
 
+## What it looks like
+
+Stills from the running app, in `media/desktop/side-panel/`. The two that show the argument: [07](../media/desktop/side-panel/07-job-tab-live-output.png) is a real job's live output in the drawer while the chat only says *Working*, and [06](../media/desktop/side-panel/06-agent-opened-both-drawer-stays-shut.png) is the promise kept — the agent opened a terminal *and* a job, and the drawer stayed shut.
+
+---
+
 ## 2. Why this is worth building
 
 **The chat is what the agent says it is doing. The panel is what the kernel says is happening.** Those are two different things, and every serious bug of the last day was the gap between them.
@@ -141,6 +147,8 @@ Two different objects, and never one row for both. This is the whole answer to "
 - *Data today:* the kernel's `PtyHub` mints `t1`, `t2`, … and announces them with `Frame::Board { panel: "terminal", terminal_ids, cwd }`; `desktop/src/view/terminal.rs` already attaches and types.
 - *Who caused it:* you. It is yours from birth.
 
+**Whose shell, today.** The kernel's `terminal` tool opens one pty page and both sides can write to it, so a page the agent opened is labelled `agent's` rather than `yours`: typing there types into the agent's shell. That is the honest label for what exists, not the design's goal — a page of your own needs handover 2. A label that is wrong from birth is worse than no label, and this one shipped wrong for an hour until a still of a live terminal showed it.
+
 **So "take over" mints a new object rather than changing an owner.** *Open a shell here* starts your shell in the job's directory, beside the job's row. No row ever changes hands, so the ownership label cannot go stale — the same reasoning as an exhaustive match with no wildcard arm: make the wrong state unrepresentable instead of labelling it correctly by hand.
 
 ### 5.2 Browser
@@ -193,11 +201,22 @@ We have shipped this bug twice: a filtered list sent a message to an off-screen 
 
 ### 6.2 Stale data, and a kernel that is gone
 
-Three states and never a default, per the standing rule that a read answers present, absent or unknown:
+This is the state you meet after something has already gone wrong, which is where every one of last night's worst findings lived. Three states and never a default, per the standing rule that a read answers present, absent or unknown.
 
-- **Link lost.** Every live row freezes, greys, and reads `link lost · 40s`. Content stays on screen; nothing is claimed to be running.
-- **Reconnected.** Rows are re-resolved against the kernel's record. Anything the kernel does not know becomes `gone` — it is never drawn as working. That is the F-137 rule, and it is why the window may not draw a row from its own memory alone.
-- **A job whose folder is gone.** `journal gone · the process may still be running`, with Stop still offered. Not an empty log, which reads as finished — that is how 164 GB went unnoticed.
+**Built and photographed** ([still 10](../media/desktop/side-panel/10-kernel-gone-link-lost.png)): a place's kernel was killed with a running job and a terminal open in the drawer.
+
+- **The link goes down.** Every row that was claiming to be live stops claiming it: the job's tab reads `link lost` instead of `running`, and so does the terminal's. The journal's last lines stay on screen, frozen — what we knew is still worth reading; what we no longer know is not asserted. The body's footer takes the same word from the same function the tab does, because when those two disagreed on screen one of them was lying.
+- **What ended still reports how.** An exit code on disk is a fact that outlives the socket, so `done`, `failed` and `stopped` keep their words with the link down.
+- **A state is not a property of a row.** It is the row *and* the link, which is why the word is decided in one place that takes both. A row that could read `running` while nothing can hear from it is the 164 GB shape in miniature.
+
+**And one thing found by doing it, which changes the order of the work.** When a kernel dies, the desktop starts a new one for that place — and the new kernel has no record of the old job or the old pty. So the link comes back, and the rows it comes back to are not rows it knows anything about. Watched live, both tabs went from `link lost` back to `running` and `agent's` the moment the replacement kernel answered, which is exactly the class of lie this design exists to prevent.
+
+The window cannot fix that on its own: it has no way to ask a kernel what it is holding. That is **kernel handover 1**, and this is why it is first. Until it lands, a returning link can restore a live-looking label on a row nothing is behind, and that limit belongs written down rather than in a comment.
+
+**Not built yet, and stated as intended behaviour:**
+
+- **Reconnected.** Rows are re-resolved against the kernel's record. Anything it does not know becomes `gone` — never drawn as working. That is the F-137 rule, and it is why the window may not draw a row from its own memory alone.
+- **A job whose folder is gone.** `journal gone · the process may still be running`, with Stop still offered. Not an empty log, which reads as finished — that is how 164 GB went unnoticed. (The word exists today; the Stop needs handover 4.)
 - **A document changed under you.** A `changed on disk` badge. Never an auto-reload.
 - **A browser page nobody has touched for ten minutes.** `stale · 10m`, and the picture is dimmed, because a screenshot from an hour ago looks exactly like a live page.
 

@@ -32,7 +32,13 @@ most likely shape: the desktop build he ran at 10:12 wanted a kernel at the
 new dotted path, found none, and treated "failed to start" as fatal
 (`transient_connect_error`: no retry) — a dead tab with one notice — until an
 updated app with the bootstrap ran at 13:11 and finished at 13:31. That is a
-guess to be confirmed from his log, stated as one.
+guess to be confirmed from his log, stated as one. (Confirmed from his
+machine at 13:30, before this report: `ArbosLife:~` as an ssh remote, no
+`hub.toml`, no `machines.toml`; the kernel placement failed because the app's
+only route was the unpublished `v0.2.0` release, which 404s. The address story
+was corrected to him then. The kernel serving `/home/const`, registered as
+project `const`, is a side effect of that path and is left in place until he
+says whether to narrow it.)
 
 The hub cases below therefore describe **the phone** first-hand and the
 desktop's *feedback* link; the desktop's *chat* has its own, ssh-shaped set,
