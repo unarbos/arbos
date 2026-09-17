@@ -16,6 +16,8 @@ A re-baseline, not a comparison. One arm, no lever.
 - Runtime: docker with `--env.agent.runtime.block '["*"]'` — the container reaches only the interception proxy. The harness now refuses to run without this (branch `cursor/swebench-loop-c12-7c9c`). The harness code in use for the run is #380's harness plus the refusal; no `instructions` are passed, so #380's instruction change is not exercised.
 - Set: `reg20` at `-r 2` = 40 rollouts. Cap $55, watcher stops at $50 recorded.
 
+Amended 04:05 UTC, before the run that counts: the second launch (kernel `864d6b00`, 19 rollouts, $18.55) graded every rollout 0 with a patch in place — verifiers grades in the agent's container and the SWE-bench verifier's `uv run parser.py` needs PyPI, which the cut denies. The harness now reopens egress after the agent exits and before grading (`076d752a`); a smoke on django-11099 under the cut then graded solved. That run is set aside as `c12-reg-ungraded-cut`, not counted. Cycle spend so far $19.15, so the run that counts has cap $40, watcher at $37; if it stops short of 40 rollouts the baseline is stated on what it covered.
+
 ## What is decided in advance
 
 - The graded rate on the 40 rollouts (or on however many the cap allows, stated as such) **is** the loop's baseline from here on. It is not adjusted, weighted, or compared favourably with the old 74%. The old figure appears only as the number that was wrong.

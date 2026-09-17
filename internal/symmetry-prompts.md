@@ -126,11 +126,43 @@ Cursor has two chat styles — the Project chat (root) and the agent chat (a del
 | p5 | small edit | 2 (classic) | 7 (Arbos) | Cursor Project + worker edit still to capture |
 | p4 | fan-out with edits | 3 (classic) | — | |
 
+## The stale remote kernel (mesh sweep, 2026-09-17) — which cycles it touched
+
+The kernel serving `arbos-remote/parity-proj--reply-with-hostname` on ArbosLife (pid 2739473) had run since **Sep 13 18:24 UTC** on a binary deleted from under it at **Sep 14 13:10** (the remote track's install replaced `bin/arbos-kernel`; the old process was left). Read from the place itself, not assumed:
+
+- its transcript's last line is Sep 13 18:24 (the remote worker's brief, cycle 5–6's "reply with hostname" scenario);
+- its `runtime/kernel.log` holds two `attach_open`s, the last at Sep 13 18:24, and was last written Sep 13 19:33;
+- so **no client attached to it after the binary was deleted**. Nothing measured after Sep 14 13:10 ran against it.
+
+**Affected cycles: none after the deletion.** The cycles that did use that process — the remote worker check of cycles 5–6 on Sep 13 — ran while its binary was current. Cycle 11's remote track (Sep 15) attached to its own fresh places on ArbosLife and Templar with the installed build, not to this worker place. Cycles 12–28 ran on the Linux rig against local kernels built from the branch under test; each PR's gate line names that kernel.
+
+**Restarted** at 04:14 UTC on the on-disk binary: `arbos-kernel 0.2.0 52cb63a04075` (pid 513786, `kernel.json` agrees). That build is itself the Sep 14 install and behind `main` (`d73a25aea876`); the remote track's install path replaces it on the next attach from a newer app, and that is the next remote-track item (coverage row "remote places", owed since 16).
+
+**Rule added to the pairing notes:** every cycle's "what the rig cannot see" note carries the kernel's own build line — `arbos-kernel --version` and `runtime/kernel.json`'s `git_sha` for each kernel the cycle attached to — read, not assumed. The rig audit gains R11: a process serving a deleted binary looks healthy and reports right numbers about the wrong build; check `/proc/<pid>/exe` for `(deleted)` on every remote kernel before a remote scenario.
+
+## What the rig cannot see, per paired area (Jacob's question, 2026-09-17)
+
+The stills are 1x captures of an Xvfb display with no compositor, read by a person or by the driver's geometry. Differences these physically cannot show, by area — so a "matches Cursor" here is a claim about what *was* visible, not about the whole:
+
+| area | invisible to the rig | how it would be seen |
+| --- | --- | --- |
+| tabs, bars, panel — the one surface | **translucency and vibrancy**: `theme.vibrancy` materials render opaque on Xvfb (no compositor); Cursor's Mac window and ours both blur the desktop through the chrome on macOS. The bundled-font gap lived here too: hinting and weight at 2x | Jacob's Mac, or the Mac worker script at 2x; a still of the window over a busy wallpaper |
+| panel / sidebar | **hover and focus rings** on rows (a still is one frame; hover states need the pointer parked); **scroll physics** (rubber-banding, momentum) | a recording with the pointer parked; the Mac |
+| tab strip | **the native title-band join on macOS** (`sync_macos_chrome`) — Linux has no title band, so the one-surface fix is unverified exactly where he saw the seam | Jacob's still after Update, or the Mac worker |
+| chat: folds, prose | **timing**: shimmer phase, spinner cadence, fade of the "Just now" clock; **selection colour**; **text rendering** at 2x | recordings, and a 2x device |
+| themes light / dark | **colour accuracy**: Xvfb is 24-bit with no colour management; a tint that is wrong by a few percent reads as fine | a calibrated display, or numbers from the theme file compared to Cursor's CSS |
+| notifications | the **OS banner's own look** (dunst is not Notification Center) | the Mac |
+| bottom bar | the **update control's live states** (downloading, restart) need a real update channel; the rig sees only "version" and the stranger plate | a staged release |
+
+Rule adopted with the rig audit (`internal/rig-audit-where-a-pass-can-lie.md`): every pairing note names its invisible column, and a finding that depends on one of these is filed as *needs the Mac*, not as matched.
+
 ## Cycle log
 
 - **Cycle 26** ([#378](https://github.com/unarbos/arbos/pull/378), on #367): F-123 measured with its own scenario — the folds toggle, the gate's ruler (footer y) was wrong on a bottom-anchored transcript; rows are measured now; one case still open (a `work-*` over nothing drawn). Panel beside Cursor's sidebar: F-126, one gear. Tabs: decision memo `docs/worker-tabs-vs-breadcrumb.md`. d11 blocked by a keyless kernel the gate left on the long-form place. Gate 101 · 2.
 - **Cycle 27** ([#381](https://github.com/unarbos/arbos/pull/381), on #378): F-123 closed — the rig clicked a fold scrolled out of view for three cycles; the driver now refuses clicks on clipped targets and the fold row picks one on screen. The rig audit `internal/rig-audit-where-a-pass-can-lie.md` (R1–R10; three fixed, seven open with next steps). Gate 109 · 0 · 20 · 34 · 7 — the first zero-fail line, and honest about it: `composer-context` is a dead control or a label, `work` a gap until the edit turn has a fold of its own (R10). d11 and themes carry to 28.
-- **Cycle 28 (opened 03:45 UTC)**: R1 for asserts (sweep `exists(` used as "seen"), R10 (a second edit prompt with the root's own read so the fold row tests the turn under test), R5 (`recover` marks later rows), then d11 with a clean kernel and the Cursor side, and light/dark side by side.
+- **Cycle 28** ([#384](https://github.com/unarbos/arbos/pull/384), on #381): F-127 (a settled fold is shut, the newest too); R1 `seen()`, R5 `pass-after-recover`, R10's own-turn prompt (not enough yet), R11 the stale remote kernel (read from the place: no cycle measured against it; restarted on `52cb63a04075`); the "what the rig cannot see" table per area; d11 ran on a clean kernel. Gate 107 · 1 (`rewind-turn` once — F-122 reopened as recurred). Carried to 29: the Cursor side of d11, light/dark side by side, the remote-track reinstall so ArbosLife runs `main`'s kernel.
+- **Cycle 29 (opened 04:20 UTC)**: F-122's recurrence (log `turn_open` around the click); the remote track — install `main`'s kernel on ArbosLife through the app's own path and read its build line; the Cursor side of d11; light/dark side by side; R10's fold.
+- **Cycle 28 as opened (03:45 UTC)**: R1 for asserts (sweep `exists(` used as "seen"), R10 (a second edit prompt with the root's own read so the fold row tests the turn under test), R5 (`recover` marks later rows), then d11 with a clean kernel and the Cursor side, and light/dark side by side.
 - **Cycle 27 as opened (03:20 UTC)**: (1) `rows_under` must agree with what draws — the P_EDIT fold; (2) d11 on the long-form place with a clean kernel, and the Cursor side of it; (3) themes light/dark side by side (owed since cycle 11); (4) if Jacob says yes to worker tabs, that is the headline instead.
 - **Cycle 26 as scoped (02:15 UTC)**: F-123 by hand first — the gate's leftover state no longer holds the edit turn (phases O/X rewrite it), so the probe needs its own scenario: one delegated edit, then click each `work-*` fold and measure the footer with the driver's `find`. Then the coverage table's oldest rows: tabs (Cursor's italic worker tab beside the project tab, F-111's kept decision) and the panel against Cursor's sidebar, side by side in both themes; a long-form d-series prompt in the rotation. Poller fix #375 and cycle-25's #367 await merge.
 

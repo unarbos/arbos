@@ -298,7 +298,10 @@ def phone_j8c(max_age_h=24):
             ts = now
         if now - ts > max_age_h * 3600:
             return {"verdict": "unverified", "why": f"phone loop's last J8c is older than {max_age_h} h ({r.get('ts')})"}
-        return {"verdict": v, "ts": r.get("ts"), "target": r.get("target"), "evidence": r.get("evidence")}
+        # The commit the phone measured on is part of its finding; until its history carries the kernel's own
+        # --version (the hub roster's build number is not trustworthy: one row per machine, last registrant wins),
+        # say plainly that it is not recorded.
+        return {"verdict": v, "ts": r.get("ts"), "target": r.get("target"), "evidence": r.get("evidence"), "kernel_commit": r.get("kernel_sha") or r.get("git_sha") or r.get("build") or "not recorded by the phone loop"}
     return None
 
 
@@ -834,7 +837,7 @@ def register(scenario, registry, transcript, now_ms, branch):
             if problems:
                 mark("J8", "fail", "; ".join(problems))
             elif c_verdict == "pass":
-                mark("J8", "pass", f"restart once (side effect once), second project isolated; dropped connection: pass on the phone loop's run {j8['dropped_connection'].get('ts')}")
+                mark("J8", "pass", f"restart once (side effect once), second project isolated; dropped connection: pass on the phone loop's run {j8['dropped_connection'].get('ts')} (kernel commit: {j8['dropped_connection'].get('kernel_commit')})")
             else:
                 mark("J8", "unverified", "restart and second project fine; dropped connection: " + str(j8["dropped_connection"].get("why", c_verdict)))
         except Hang as e:
