@@ -210,8 +210,41 @@ On the nine instances with two rollouts in both arms: **N=1 14/18, N=2 14/18.** 
 
 **Notes**: the kernel predates #349, so the one capped N=2 rollout has its cap-crossing step missing from the transcript (the grade is from git and unaffected). The VM froze during an idle gap (19:40–21:00 UTC), so this cycle's wall times are inflated again. Spend $59.44, both arms under their own caps.
 
-## Next (cycle 11)
+## Cycle 11 (2026-09-17) — the second-model critique, and what the network was doing
 
-1. The evidence lever is spent; the remaining loss class (right file, wrong mechanism) needs something that adds *information*, not a gate: the candidate is a cheap second-model critique of the patch against the issue text (skipped in cycle 5 for cost; at ~$0.02 per instance it is now the cheapest unexplored lever).
-2. Re-establish the slice baseline on the current kernel with the one-reproduction default (finish slice 6's 10 and slice 7's remaining 7 first).
-3. Wall time: Django `runtests.py` to the 1800 s timeout persists; `bash_wait_ms` 600 s for headless runs.
+One kernel (`main` `5017ef45` plus an opt-in critique, `ARBOS_CRITIQUE=1`), regression 20 at `-r 2`, one reproduction, $8 cap, $30 per arm with polite watchers. The decision rule was written down before the runs ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop/cycle-11/preregistration.md)): adopt at +3 or more rollouts on the instances both arms cover twice at no more than 1.3× the cost per rollout; drop at +2 or less, or dearer than 1.3× without +4.
+
+The lever: on the first final reply after an edit, one fresh model call with no history — the request text and `git diff HEAD` — lists each behaviour the request names, marks it addressed or not, and ends `VERDICT: COMPLETE` or `INCOMPLETE — <gap>`. On INCOMPLETE the agent is nudged once with the review. The reviewer is Sonnet 5 too: the harness pins every call to the run's model.
+
+| Arm | Rollouts before cap | Solved | Instances reached | Cost | Per rollout |
+|---|---|---|---|---|---|
+| A, critique off | 29 | **20** (69%) | 15 | $27.07 | $0.93 |
+| B, critique on | 15 | **12** (80%) | 8 | $27.96 | $1.86 |
+
+On the seven instances with two rollouts in both arms: **A 12/14, B 12/14**, at 2.4× the cost per rollout. The critique fired 15 times and said INCOMPLETE four times (both astropy-12907 rollouts, both astropy-13398). In three of the four the reviewer was wrong — it asked for a symmetric `cleft` fix that the code never needed, and for a re-timing behaviour the agent had already checked — and the agent said so in one sentence and finished, solved. In the fourth the agent made two more edits and also solved; the same instance solved without them in arm A. The cost is not the review call (about $0.03 each) but the instances B happened to spend on (astropy-13398 $12.23 for two solved rollouts; django-14792 $9.33 for two failed ones, no nudge involved).
+
+**Plainly: dropped, per the rule.** A tie inside the band, at 2.4× the price. The code is reverted on the branch (three commits and their reverts, so the experiment stays in history); nothing is kept as an opt-in.
+
+**The finding that matters more.** Reading arm B's astropy-13398 rollouts to see how the agent answered the critique showed it installing `astropy==5.2` from PyPI — the release that carries this issue's fix — and comparing its patch against it. The docker runtime has been running every cycle with `--network host`. Counting rollouts whose bash output shows a pip download of a *newer release of the package under repair*:
+
+| Run | Rollouts | Fetched upstream | Of those, solved | Solved without them |
+|---|---|---|---|---|
+| Cycle 10, N=1 (the "74%" baseline) | 35 | 6 | 6 | 20/35 (57%) |
+| Cycle 10, N=2 | 18 | 6 | 6 | 8/18 (44%) |
+| Cycle 11, A | 29 | 8 | 7 | 13/29 (45%) |
+| Cycle 11, B | 15 | 2 | 2 | 10/15 (67%) |
+
+The instances are the hard ones (astropy-13398, django-13449, django-14792, django-15252, pylint-8898, scikit-learn-25102), and the fetching rollouts solve at 21 of 22. The "solved without them" column is a floor, not the clean number — some of those rollouts might have solved anyway — but the baseline is not 74%. The same is true of cycles 1–9 to an unknown degree (bundles from those cycles are in the store and can be counted the same way; only cycles 10–11 were counted here). The harness told the agent it had no network; nothing enforced it.
+
+verifiers has the enforcement already: `--env.agent.runtime.block '["*"]'` puts the container on a bridge network with iptables rejecting everything but the interception proxy. A smoke rollout on django-11099 under the cut, with the agent told to try `pip download` first: pip refused (`NewConnectionError`), the model calls went through, the kernel ran normally. Two harness changes on the branch: the documented command carries the flag, and every rollout records `arbos_egress_open` (1.0 when the runtime is unrestricted) with a warning in the log.
+
+Two smaller things the smoke showed: a failed `pip download` was recorded as the task's reproduction (the last failing bash command counts, whatever it was), and a harness `instructions` override replaces the standing headless rules (do not commit, do not branch) rather than adding to them — the agent committed on a branch and the patch extraction saw nothing.
+
+Spend $55.75 (A $27.07, B $27.96, smokes $0.72). Two idle containers were left behind after each arm's SIGINT stop (`sleep infinity`, no agent process, eval exited); removed by ID after checking, not swept.
+
+## Next (cycle 12)
+
+1. **Re-baseline under the network cut.** The regression 20 at `-r 2`, one reproduction, $8 cap, `--env.agent.runtime.block '["*"]'`, on the current `main`. That number replaces 74% as the figure to beat. Expect it lower; the hard instances lose their shortcut.
+2. Count upstream fetches in the cycle 1–9 bundles in the store, so the loop's history has a clean/assisted column throughout.
+3. Then the wrong-mechanism class again, against a baseline that means what it says. The critique in its history-free form is spent; a reviewer that can *run* the failing test rather than read a diff is the untested shape.
+4. Still open: Django `runtests.py` to the 1800 s timeout; `bash_wait_ms` 600 s for headless runs.
