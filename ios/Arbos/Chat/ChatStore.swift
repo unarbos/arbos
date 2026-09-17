@@ -98,6 +98,9 @@ final class ChatStore: ObservableObject {
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
     private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
+    /// Spoken lines this app put in the chat itself, so the kernel's replay
+    /// of the same question replaces them instead of doubling them.
+    private var spokenLocally: [(id: UUID, text: String)] = []
     private let pathMonitor = NWPathMonitor()
     private var pathWasSatisfied = true
 
@@ -421,6 +424,26 @@ final class ChatStore: ObservableObject {
         onSeen?(last)
     }
 
+    /// A line said out loud on the call, put in the chat so the
+    /// conversation reads there afterwards. **Display only**: it is never
+    /// sent anywhere and never wakes the kernel. Typed lines still go
+    /// through `send`, which does.
+    ///
+    /// A spoken question that gets delegated is also recorded by the kernel
+    /// and replayed; `spokenLocally` lets that echo replace this copy rather
+    /// than sit beside it.
+    func spoke(_ text: String, byUser: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var item = ChatItem(byUser ? .user(trimmed) : .agent(trimmed, streaming: false))
+        item.spoken = true
+        items.append(item)
+        if byUser {
+            spokenLocally.append((item.id, trimmed))
+            if spokenLocally.count > 20 { spokenLocally.removeFirst() }
+        }
+    }
+
     /// A line the app itself has to say (a picker or dictation problem).
     /// `failed` is red, and is for something that went wrong and stayed
     /// wrong. A setback the app has already handled is said in the calm
@@ -558,6 +581,14 @@ final class ChatStore: ObservableObject {
             earlierLines = earlier
             firstSeq = first
         case .item(let item):
+            // The kernel's own record of a question that was spoken here:
+            // one line, not two. The spoken copy goes and the kernel's stays,
+            // because the kernel's carries its seq and its answer.
+            if case .user(let text, _) = item.kind,
+               let spokenIndex = spokenLocally.firstIndex(where: { $0.text == text }) {
+                let local = spokenLocally.remove(at: spokenIndex)
+                items.removeAll { $0.id == local.id }
+            }
             if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text || ($0.text.isEmpty && text.isEmpty) }) {
                 // The kernel echoed a line typed here: the pending card is real now.
                 let pending = pendingSends.remove(at: index)
