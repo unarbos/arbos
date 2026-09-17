@@ -15,7 +15,6 @@ use crate::{
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
         root::{self, Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
-        settings::Section,
     },
 };
 use bezel::{
@@ -1180,9 +1179,9 @@ impl Arbos {
 
     /// The bottom strip: settings on the left, a sub-chat on the right.
     fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // Something the user tried needed a permission that is not granted:
-        // a dot on the gear, and nothing louder, after "Skip for now".
-        let wants_permission = self.permission_center.read(cx).wants_attention();
+        // No gear here: the bar under the window carries it, bottom-left,
+        // where Cursor's sidebar foot keeps its one (cycle 26, panel beside
+        // Cursor's sidebar — two gears in one window was one too many).
         div()
             .flex_none()
             .h(px(40.))
@@ -1191,48 +1190,6 @@ impl Arbos {
             .flex_row()
             .items_center()
             .justify_between()
-            .child(
-                theme
-                    .ghost("settings")
-                    .px(px(8.))
-                    .py(px(6.))
-                    .tooltip(|window, cx| {
-                        Tooltip::with_keystroke(
-                            format!("Settings — {}", crate::build::badge()),
-                            "⌘,",
-                            window,
-                            cx,
-                        )
-                    })
-                    .child(
-                        div()
-                            .relative()
-                            .child(
-                                icons::icon(icons::system::SETTINGS_MINIMALISTIC)
-                                    .size(px(14.))
-                                    .text_color(theme.text_muted),
-                            )
-                            .when(wants_permission, |el| {
-                                el.child(
-                                    div()
-                                        .id("settings-dot")
-                                        .absolute()
-                                        .top(px(-2.))
-                                        .right(px(-3.))
-                                        .size(px(6.))
-                                        .rounded_full()
-                                        .bg(theme.warning),
-                                )
-                            }),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if wants_permission {
-                            this.show_permissions(window, cx);
-                        } else {
-                            this.open_settings(Section::General, cx);
-                        }
-                    })),
-            )
             .child(
                 theme
                     .ghost("search-chats")

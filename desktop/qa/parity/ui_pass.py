@@ -1212,8 +1212,9 @@ class Pass:
 
     def phase_settings(self) -> None:
         # Settings closes from the keyboard and the chat gets the keyboard back.
-        if not self.state().get("settings_open") and self.app.exists("settings"):
-            self.app.click("settings"); time.sleep(1.0)
+        gear = "settings" if self.app.exists("settings") else "status-bar-settings"
+        if not self.state().get("settings_open") and self.app.exists(gear):
+            self.app.click(gear); time.sleep(1.0)
         if self.state().get("settings_open"):
             def close_settings():
                 self.app.use_window("settings")
@@ -1224,10 +1225,10 @@ class Pass:
             self.check("settings-cmd-w", "settings", "⌘W in the Settings window", "window closes; composer focused",
                        close_settings, lambda a, b: b.get("settings_open") is False and b["composer"]["focused"], settle=1.2)
         sc = "settings"
-        if not self.app.exists("settings"):
+        if not self.app.exists(gear):
             self.gap("settings", sc, "click gear", "no settings element on screen")
             return
-        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click("settings"), lambda a, b: b.get("settings_open") is True, settle=1.5)
+        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click(gear), lambda a, b: b.get("settings_open") is True, settle=1.5)
         if not self.state().get("settings_open"):
             return
         try:
