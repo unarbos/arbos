@@ -161,6 +161,46 @@ impl Arbos {
         )
     }
 
+    /// The stranger plate's click: stop the kernel serving `place` and let
+    /// the app start one on this build. Off the main thread — the stop
+    /// waits on a process. The word on what happened goes on the place's
+    /// root chat, where the person is looking, not only in the bar: the
+    /// sockets drop and reconnect on their own, and the plate goes when the
+    /// next look finds no stranger.
+    fn restart_stranger(&mut self, place: crate::model::place::Place, cx: &mut Context<Self>) {
+        let title = place.title();
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.notice_on_root(
+                &place,
+                false,
+                &format!("Restarting the kernel for {title} on this build; anything it was running is being stopped."),
+                cx,
+            );
+        });
+        cx.spawn(async move |this, cx| {
+            let target = place.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { crate::kernel::restart_kernel(&target) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.updater
+                    .update(cx, |updater, cx| updater.forget_strangers(cx));
+                let (failed, text) = match outcome {
+                    Ok(()) => (
+                        false,
+                        format!("Kernel for {title} restarted on this build ({}).", build::badge()),
+                    ),
+                    Err(err) => (true, format!("Could not restart the kernel for {title}: {err:#}")),
+                };
+                this.workspace.update(cx, |workspace, cx| {
+                    workspace.notice_on_root(&place, failed, &text, cx);
+                });
+            });
+        })
+        .detach();
+    }
+
     /// The version, or the button.
     fn status_bar_update(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Settings owns the choice and this owns the asking, so the two are
@@ -476,29 +516,37 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
             el.tooltip(move |window, cx| Tooltip::text(tooltip.clone(), window, cx))
         })
         .when(clickable, |el| {
-            el.on_click(cx.listener(|this, _, _, cx| {
-                // Every place this app knows a kernel for, not only the tabs
-                // that happen to be open.
-                //
-                // The open projects alone are not enough, and that gap did
-                // real harm: after an update on 2026-09-17 a kernel from a
-                // closed tab kept running from the deleted old bundle, and
-                // the new app attached to it and sent frames it had never
-                // heard of. Recents are where those kernels are — a place
-                // stops being a tab long before its kernel stops running.
-                let workspace = this.workspace.read(cx);
-                let mut places: Vec<_> = workspace
-                    .projects
-                    .iter()
-                    .map(|project| project.place().clone())
-                    .collect();
-                for recent in &workspace.recents {
-                    if !places.contains(recent) {
-                        places.push(recent.clone());
+            el.on_click(cx.listener(move |this, _, _, cx| match action.clone() {
+                Action::None => {}
+                // The stranger's plate ran the update path instead of its
+                // own action (F-125, cycle 25): a click meant to end one
+                // kernel installed a new app.
+                Action::RestartKernel(place) => this.restart_stranger(place, cx),
+                Action::Install => {
+                    // Every place this app knows a kernel for, not only the
+                    // tabs that happen to be open.
+                    //
+                    // The open projects alone are not enough, and that gap
+                    // did real harm: after an update on 2026-09-17 a kernel
+                    // from a closed tab kept running from the deleted old
+                    // bundle, and the new app attached to it and sent frames
+                    // it had never heard of. Recents are where those kernels
+                    // are — a place stops being a tab long before its kernel
+                    // stops running.
+                    let workspace = this.workspace.read(cx);
+                    let mut places: Vec<_> = workspace
+                        .projects
+                        .iter()
+                        .map(|project| project.place().clone())
+                        .collect();
+                    for recent in &workspace.recents {
+                        if !places.contains(recent) {
+                            places.push(recent.clone());
+                        }
                     }
+                    this.updater
+                        .update(cx, |updater, cx| updater.install(places, cx));
                 }
-                this.updater
-                    .update(cx, |updater, cx| updater.install(places, cx));
             }))
         })
         .into_any_element()

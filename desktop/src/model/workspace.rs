@@ -624,6 +624,22 @@ impl Workspace {
         self.open_place(Place::local(path), cx);
     }
 
+    /// A line on the root chat of the project at `place`, for a thing the
+    /// window did to that place's kernel (the stranger plate's restart).
+    /// Nothing if the place is not open: a closed tab has no pane to say
+    /// it on, and the bar has already said what the click does.
+    pub fn notice_on_root(&mut self, place: &Place, failed: bool, text: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.projects.iter_mut().find(|p| p.place() == *place) else {
+            return;
+        };
+        let Some(chat) = project.sessions.iter_mut().find(|chat| chat.parent.is_none() && !chat.closed) else {
+            return;
+        };
+        chat.notice(failed, text);
+        chat.flush();
+        cx.notify();
+    }
+
     pub fn open_place(&mut self, place: Place, cx: &mut Context<Self>) {
         if let Some(ix) = self.projects.iter().position(|p| p.place() == place) {
             self.select_project(ix, cx);
@@ -1641,13 +1657,51 @@ impl Workspace {
         let Some(chat) = found else {
             return;
         };
+        // The place's folder is not where the window knew it — renamed,
+        // moved or deleted under the kernel, which stopped itself. This
+        // read as "archived" and dropped the words without a word (QA
+        // `af-03`, the fourth swallowed-message path). Name the path it
+        // expected, keep the line on the pane and in the queue: the next
+        // attach — when the folder is back or the project is reopened
+        // from its new place — sends it.
+        if chat.place_gone() {
+            let path = chat.cwd.display().to_string();
+            chat.hold_offline(content);
+            if !chat.has_place_gone_notice() {
+                chat.notice(
+                    true,
+                    &format!(
+                        "{}: expected {path}. Your line is kept and goes when the folder is back or the project is reopened.",
+                        session::PLACE_GONE
+                    ),
+                );
+            }
+            chat.flush();
+            cx.notify();
+            return;
+        }
         // A worker the kernel archived has no agent to speak to; its
         // transcript stays to read. Say so instead of holding the words.
         if chat.agent_gone() {
-            chat.notice(
-                true,
-                "this agent is archived: its history stays, but it takes no more messages",
-            );
+            // "Archived" only when the kernel's archive holds it; a folder
+            // that is simply missing is said to be missing, with its path.
+            let sid = chat.agent_session.clone().unwrap_or_default();
+            let archived = chat
+                .cwd
+                .join(".arbos")
+                .join("archive")
+                .join("agents")
+                .join(&sid)
+                .is_dir();
+            let text = if archived {
+                "this agent is archived: its history stays, but it takes no more messages".to_owned()
+            } else {
+                format!(
+                    "this agent's folder is gone: expected {}. Your line was not sent.",
+                    chat.cwd.join(".arbos").join("agents").join(&sid).display()
+                )
+            };
+            chat.notice(true, &text);
             chat.flush();
             cx.notify();
             return;
@@ -1660,7 +1714,16 @@ impl Workspace {
             chat.resume(cx);
         }
         if !content.is_empty() {
-            chat.send(content);
+            // Lines kept while the place was unreachable go first, in the
+            // order they were typed; the new one takes its place behind
+            // them (`af-03`: "back again" was answered before the two lines
+            // typed into the moved folder).
+            if chat.has_held_lines() {
+                chat.hold_offline(content);
+                chat.drain();
+            } else {
+                chat.send(content);
+            }
         }
         if chat.idle() && chat.resumable() && !chat.queue.is_empty() {
             chat.resume(cx);
