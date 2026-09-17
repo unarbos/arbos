@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""kernel.py <target> history [n] | read <path> | frames <secs> | hello | total
+"""kernel.py <target> history [n] | read <path> | frames <secs> | hello
          | feedback <agent> [seq=N|call=ID] [tail=N] [note...]
 target: "pod" (the direct kernel in Secrets.plist) or "<machine>/<project>" through the hub.
 hello: the kernel's own `--version` line, read off this very socket. Use it,
@@ -94,7 +94,11 @@ elif cmd == "total":
     # filter, which moves for reasons of its own: cycle 43's first attempt
     # read 150 then 149 across a minute in which nothing was sent, and the
     # comparison it was for was worthless.
-    ws.send(json.dumps({"type": "history", "agent": "main", "since": 0, "limit": 1}))
+    # `total [agent]`: the root by default, or a named worker — which is how
+    # to tell "the app drew an empty worker chat" from "the kernel has
+    # nothing for that worker" without reading either off the screen.
+    agent = sys.argv[3] if len(sys.argv) > 3 else "main"
+    ws.send(json.dumps({"type": "history", "agent": agent, "since": 0, "limit": 1}))
     for f in frames(25):
         if f.get("type") == "history_end":
             print(f.get("total", 0)); break
