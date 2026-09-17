@@ -573,6 +573,11 @@ class Pass:
 
     def phase_turn(self) -> None:
         sc = "turn-running"
+        # Run alone (`--phases T`), this phase starts five seconds after
+        # launch, inside the kickoff turn: P_LONG is then held behind it and
+        # the steer rows measure the kickoff (cycle 33's TD run). Let the
+        # place settle first; in a full run this returns at once.
+        self.wait_idle(90)
         self.send(P_LONG)
         s = self.wait(lambda s: busy(s), 20, what="turn start")
         self.inv(sc)
