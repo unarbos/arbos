@@ -80,6 +80,10 @@ final class CallViewModel: ObservableObject {
     /// The speech side finished sending the reply; playback may still be
     /// draining.
     private var responseDone = true
+    /// Whether the response now open has played anything. A response closed
+    /// without audio never reached the caller's ears and should not be drawn
+    /// as one that finished.
+    private var responseHadAudio = false
     /// The kernel is mid-turn on our behalf (pipeline shape only).
     private var kernelBusy = false
     private var openUtterance = false
@@ -386,6 +390,7 @@ final class CallViewModel: ObservableObject {
                 #endif
             }
             responseDone = false
+            responseHadAudio = true
             if phase != .speaking {
                 trace("playback start outputs=[\(audio.outputPorts)] volume=\(audio.systemVolume)")
             }
@@ -400,7 +405,18 @@ final class CallViewModel: ObservableObject {
             trace("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying) reply peak=\(Int(levels.peak))dBFS rms=\(Int(levels.rms))dBFS out=\(Int(levels.out))dBFS")
             if interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
             responseDone = true
-            settle()
+            // A response that never played is not an answer ending, so it
+            // must not take the screen back to listening. Pause mid-sentence
+            // and the server closes the first, silent response as interrupted
+            // when the rest of the question arrives: the orb fell back to
+            // listening and then jumped to speaking, which reads as "it gave
+            // up" a moment before it answers.
+            if interrupted, !responseHadAudio {
+                trace("response.done with no audio — staying in \(phase.label)")
+            } else {
+                settle()
+            }
+            responseHadAudio = false
         case .toolCall(let name, let summary):
             appendSystem("\(name)\(summary.isEmpty ? "" : " · \(summary)")")
         case .agentDone(_, let text):
