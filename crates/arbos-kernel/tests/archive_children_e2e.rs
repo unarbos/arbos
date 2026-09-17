@@ -35,10 +35,16 @@ fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
     ok()
 }
 
+// Root waits on its worker (wait=true) so the report is in the spawn
+// result and one turn ends whichever finishes first — a done landing
+// mid-turn folds into the running turn and opens no second one, and a
+// script that scripted the "done turn" waited for it in vain on a loaded
+// runner (the archived_children red, 2026-09-17). The check of the
+// archived record is then the test's own question, a turn later.
 const REPLIES: &str = concat!(
-    "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"w1\",\"task\":\"say the codeword\"}}]}\n",
-    "{\"agent\":\"root\",\"content\":\"started\"}\n",
+    "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"w1\",\"task\":\"say the codeword\",\"wait\":true}}]}\n",
     "{\"content\":\"the codeword is xylophone\"}\n",
+    "{\"agent\":\"root\",\"content\":\"started\"}\n",
     "{\"agent\":\"root\",\"content\":\"checking\",\"calls\":[{\"name\":\"read\",\"arguments\":{\"path\":\".arbos/agents/w1/transcript.jsonl\"}},{\"name\":\"grep\",\"arguments\":{\"pattern\":\"xylophone\",\"scope\":\"history\"}}]}\n",
     "{\"agent\":\"root\",\"content\":\"noted\"}\n",
 );
@@ -75,14 +81,10 @@ fn a_finished_worker_is_archived_by_default_and_its_history_still_reads() {
         .collect();
     assert_eq!(ids, vec!["root"], "{ids:?}");
 
-    // Root's done turn read the old path and grepped history: both hit.
-    assert!(wait_for(Duration::from_secs(30), || {
-        transcript(&k.place, "root")
-            .iter()
-            .filter(|e| e["kind"] == "turn_complete")
-            .count()
-            >= 2
-    }));
+    // Asked after the archive, root reads the old path and greps
+    // history: both hit, since the record moved and the tools follow it.
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "check w1's record"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
     let root = transcript(&k.place, "root");
     let read = root
         .iter()
@@ -121,13 +123,9 @@ fn archive_children_false_keeps_the_folder_where_it_was() {
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
-    assert!(wait_for(Duration::from_secs(30), || {
-        transcript(&k.place, "root")
-            .iter()
-            .filter(|e| e["kind"] == "turn_complete")
-            .count()
-            >= 2
-    }));
+    // The worker has reported (into the spawn result) and its turn is
+    // over; a moment later it is still where it was.
+    std::thread::sleep(Duration::from_millis(1500));
     assert!(k.place.join(".arbos/agents/w1/transcript.jsonl").exists());
     assert!(!k.place.join(".arbos/archive/agents/w1").exists());
     let _ = k.child.kill();
