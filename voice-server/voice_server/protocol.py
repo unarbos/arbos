@@ -27,6 +27,7 @@ AGENT_TURN = "agent.turn"
 AGENT_TREE = "agent.tree"
 AGENT_DONE = "agent.done"
 NARRATOR_SAY = "narrator.say"
+AGENT_ACTIVITY = "agent.activity"
 
 # server -> client
 SESSION_READY = "session.ready"
@@ -132,6 +133,13 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"agent.tree","agents":[{"id","name","parent"}]}
 
     call mode (session.start {"mode":"call"}; session.ready then has "mode":"call","narrator":true)
+    {"type":"agent.activity","agent":"root","state":"working"|"tool"|"idle","tool":"bash","detail":"cargo build",
+     "since_ms":4200,"heartbeat":false}
+                                   what the kernel is doing, from its own turn and tool frames: one frame per
+                                   transition for every agent of the call (the main agent and its workers), and
+                                   the current state again every 5 s with heartbeat:true while any is not idle.
+                                   Play the sound of work on this and nothing else; when the beats stop, the
+                                   state is unknown. session.ready says "activity":true when these come.
     {"type":"narrator.say","text":"...","kind":"highlight"|"report"|"ask"|"error"|"detail","ref":"transcript:1181"}
                                    the narrator is about to voice this line (as a normal reply turn:
                                    response.started, response.transcript, audio, response.done). Write it

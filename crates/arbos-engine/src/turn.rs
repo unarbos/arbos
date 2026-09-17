@@ -553,6 +553,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut events = load_transcript(&transcript)?;
 
     let cwd = agent.work_dir(&place.path);
+    let mut tree_ready: Option<tokio::sync::watch::Receiver<bool>> = None;
     {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();
@@ -574,12 +575,18 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         };
         match record {
             Ok(Some(cp)) => {
+                // The first tool that writes waits for this to finish,
+                // so the tree is the one before the turn, never one the
+                // turn has already touched.
+                let (tx, rx) = tokio::sync::watch::channel(false);
+                tree_ready = Some(rx);
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) =
                         crate::tools::git::snapshot_turn_tree(&snap, &agent_dir, &agent_id, &cp)
                     {
                         eprintln!("checkpoint {agent_id}:{turn_line}: tree not saved: {e:#}");
                     }
+                    let _ = tx.send(true);
                 });
             }
             Ok(None) => {}
@@ -843,6 +850,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         hooks: Arc::clone(&hooks),
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
+        tree_ready,
         web: Arc::new(crate::tool::WebCfg {
             search_url: host.config.search_url.clone(),
             search_key: host.config.search_key.clone(),

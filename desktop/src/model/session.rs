@@ -526,6 +526,10 @@ pub struct ChatSession {
     /// The last user bubble is already in the pane; the kernel has not
     /// seen it yet. Replay lands the card before the socket is back.
     pending_wire: bool,
+    /// How many prompts at the queue's front already have their card on
+    /// the pane — lines held while the place was unreachable (`af-03`).
+    /// Their turn opens when each is sent; no second card lands.
+    held_cards: usize,
     pub transcript: transcript::State,
     /// What is sitting in the composer for this session. Written with the
     /// transcript so a kill mid-type comes back with the same line.
@@ -712,6 +716,7 @@ impl ChatSession {
             streaming: false,
             queue: seed.into_iter().map(Prompt::from).collect(),
             pending_wire: false,
+            held_cards: 0,
             transcript: transcript::State::default(),
             draft: String::new(),
             live: Vec::new(),
@@ -805,6 +810,7 @@ impl ChatSession {
             streaming: false,
             queue: VecDeque::new(),
             pending_wire: false,
+            held_cards: 0,
             transcript: transcript::State::default(),
             draft: record.draft,
             live: Vec::new(),
@@ -898,6 +904,7 @@ impl ChatSession {
             streaming: false,
             queue: VecDeque::new(),
             pending_wire: false,
+            held_cards: 0,
             transcript: transcript::State::default(),
             draft: String::new(),
             live: Vec::new(),
@@ -1023,6 +1030,7 @@ impl ChatSession {
         self.turn_open = false;
         self.closed = true;
         self.pending_wire = false;
+        self.held_cards = 0;
         self.queue.clear();
         self.flush();
     }
@@ -1503,12 +1511,69 @@ impl ChatSession {
     /// place, its agent folder still exists. A child deleted under a live
     /// window is not attached to again and again.
     pub fn resumable(&self) -> bool {
-        !self.closed && !self.agent_gone()
+        !self.closed && !self.agent_gone() && !self.place_gone()
     }
 
-    /// A local agent whose folder is no longer on disk.
+    /// A local place whose folder is no longer where the window knew it —
+    /// renamed, moved or deleted under a running kernel (QA `af-03`). Not
+    /// an archived agent: the kernel stops, the words must not.
+    pub fn place_gone(&self) -> bool {
+        self.host.is_none() && !self.cwd.as_os_str().is_empty() && !self.cwd.is_dir()
+    }
+
+    /// Keep a line typed while the place is unreachable: its card on the
+    /// pane, the words in the queue for the next attach, no turn opened —
+    /// nothing is coming until the folder is back, so no shimmer.
+    pub fn hold_offline(&mut self, content: Prompt) {
+        if content.is_empty() {
+            return;
+        }
+        // The card is on the pane now; the kernel's own record of the line,
+        // when the queue drains, is its echo and must not land twice.
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
+        }
+        self.items.push(ChatItem::User(content.message()));
+        self.updated = SystemTime::now();
+        self.queue.push_back(content);
+        self.held_cards += 1;
+        self.flush();
+    }
+
+    /// Lines held while the place was away are still waiting, the socket is
+    /// back and nothing is in flight: a new line queues behind them so they
+    /// go in the order they were typed.
+    pub fn has_held_lines(&self) -> bool {
+        self.held_cards > 0
+            && self.live()
+            && !self.streaming
+            && !self.has_running_tool()
+            && !self.queue.is_empty()
+    }
+
+    /// Whether the newest notice already says the place is gone — one
+    /// line per disappearance, however many lines are typed into it.
+    pub fn has_place_gone_notice(&self) -> bool {
+        self.items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ChatItem::Notice { text, .. } => Some(text.starts_with(PLACE_GONE)),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    /// A local agent whose folder is no longer on disk while its place is:
+    /// the kernel archived it (or someone removed it). A place that is gone
+    /// takes every agent with it and is [`Self::place_gone`], not this.
     pub fn agent_gone(&self) -> bool {
         self.host.is_none()
+            && !self.place_gone()
             && self.agent_session.as_deref().is_some_and(|sid| {
                 !arbos_core::agent_exists(&arbos_core::Place::new(&self.cwd), sid)
             })
@@ -1585,6 +1650,26 @@ pub struct ChildSummary {
 }
 
 impl ChatSession {
+    /// The status line the agent named — unless it has since moved on to a
+    /// tool of its own that is still running: then that tool is the truer
+    /// line. Jacob's report 2026-09-17-6: "Waiting on three sorting
+    /// workers" stood over three "Done" lines for minutes while the
+    /// coordinator itself sat in `sleep 75`; the line that was true was
+    /// "Running sleep 75; echo waited".
+    pub fn live_status(&self) -> Option<String> {
+        for item in self.items.iter().rev() {
+            if let ChatItem::Tool { label, status, .. } = item {
+                if label.split_whitespace().next() == Some("status") {
+                    break;
+                }
+                if *status == ToolStatus::Running {
+                    return Some(step_label(label));
+                }
+            }
+        }
+        self.status.clone().filter(|s| !s.trim().is_empty())
+    }
+
     /// The one line that says what this chat is doing: the kernel's status
     /// event, else the running tool's title, else the last tool's.
     pub fn current_step(&self) -> Option<String> {
@@ -1930,7 +2015,27 @@ impl ChatSession {
             self.pending_wire = false;
             return;
         }
+        if self.held_cards > 0 {
+            self.held_cards -= 1;
+            self.open_turn();
+            return;
+        }
         self.land_turn(&content);
+    }
+
+    /// The turn a card already on the pane now starts: the clock, the
+    /// shimmer, the step table — everything `land_turn` does but the card.
+    fn open_turn(&mut self) {
+        self.new_turn_steps();
+        self.turn_ended = None;
+        self.flight = Some(Flight {
+            at: SystemTime::now(),
+            used: self.usage.map_or(0, |usage| usage.used),
+        });
+        self.updated = SystemTime::now();
+        self.streaming = true;
+        self.answered_ask = None;
+        self.flush();
     }
 
     /// A prompt another client sent to this agent — the caller's words on
@@ -4337,7 +4442,19 @@ fn pump(
                     let busy = chat.streaming || chat.has_running_tool();
                     let queued = !chat.queue.is_empty();
                     chat.forget_socket();
-                    if busy && !queued {
+                    // The kernel stops itself when its folder moves out
+                    // from under it: say what happened and where the
+                    // window looked, at the moment it happens (QA `af-03`).
+                    if chat.place_gone() {
+                        if !chat.has_place_gone_notice() {
+                            let text = format!(
+                                "{PLACE_GONE}: expected {}. The kernel stopped; a line typed here is kept until the folder is back or the project is reopened.",
+                                chat.cwd.display()
+                            );
+                            chat.notice(true, &text);
+                        }
+                        chat.flush();
+                    } else if busy && !queued {
                         chat.notice(false, "Stopped.");
                         chat.flush();
                     }
@@ -4485,6 +4602,9 @@ pub fn interrupt_label(detail: &str) -> String {
 
 /// The notice text for a turn the user stopped; the fold line keys on it.
 pub const STOPPED_BY_YOU: &str = "Stopped by you";
+/// The head of the notice for a place whose folder moved under the window
+/// (QA `af-03`); the path it expected follows.
+pub const PLACE_GONE: &str = "This project's folder is gone or was moved";
 
 /// The kernel's line for a turn that ended at the user's own per-turn
 /// spend cap ("Stopped at the per-turn cap: this turn spent $… over the $…

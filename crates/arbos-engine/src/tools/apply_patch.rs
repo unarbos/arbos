@@ -126,6 +126,24 @@ pub fn apply(root: &Path, cwd: &Path, patch: &str) -> Result<ToolOut> {
     }
     let mut paths = Vec::new();
     let mut body = String::new();
+    // Every hunk was planned before this; the writes are still one file
+    // at a time, and a write that fails midway has applied the files
+    // before it. The error says which, so "patch failed" never hides a
+    // half-applied patch from the model or the diff view.
+    let total = plans.len();
+    if let Err(e) = write_plans(plans, &mut body, &mut paths) {
+        let done = body.trim_end();
+        anyhow::bail!(
+            "{e}\n{} of {total} file step(s) were already applied before this failed{}{}",
+            paths.len(),
+            if done.is_empty() { "" } else { ":\n" },
+            done
+        );
+    }
+    Ok(ToolOut::with_paths(body, paths))
+}
+
+fn write_plans(plans: Vec<Plan>, body: &mut String, paths: &mut Vec<String>) -> Result<()> {
     for p in plans {
         match p {
             Plan::Create(path, contents) => {
@@ -163,7 +181,7 @@ pub fn apply(root: &Path, cwd: &Path, patch: &str) -> Result<ToolOut> {
             }
         }
     }
-    Ok(ToolOut::with_paths(body, paths))
+    Ok(())
 }
 
 fn plan_hunk(

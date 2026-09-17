@@ -119,11 +119,11 @@ pub fn run(args: Args) -> Result<i32> {
         .filter(|p| !p.trim().is_empty())
         .context("run needs a prompt")?;
     let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
-    let addr = kernel_addr(&place, !args.no_spawn)?;
+    let (addr, spawned) = kernel_addr(&place, !args.no_spawn)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    rt.block_on(async move {
+    let code = rt.block_on(async {
         let stream = TcpStream::connect(&addr)
             .await
             .with_context(|| format!("connect {addr}"))?;
@@ -141,7 +141,73 @@ pub fn run(args: Args) -> Result<i32> {
         w.write_all(format!("{}\n", serde_json::to_string(&frame)?).as_bytes())
             .await?;
         stream_turn(&mut lines, &mut w, &args, &place, Some(&prompt)).await
-    })
+    })?;
+    // What this command leaves behind, said: the kernel it started serves
+    // on (that is what makes the next `run` fast), and any job the turn
+    // started runs on under it. A person who ran this by hand and walked
+    // away should not learn from `ps` that tests are still running.
+    if spawned {
+        say_what_stays(&place, args.json);
+    }
+    Ok(code)
+}
+
+/// The kernel `run` started and the jobs still running under it, on
+/// stderr (or as one JSON line with `--json`), with how to end them.
+fn say_what_stays(place: &Place, json: bool) {
+    let Ok(text) = std::fs::read_to_string(place.kernel_json_read()) else {
+        return;
+    };
+    let Ok(info) = serde_json::from_str::<KernelJson>(&text) else {
+        return;
+    };
+    if !pid_alive(info.pid) {
+        return;
+    }
+    let mut jobs: Vec<(String, String, String)> = Vec::new();
+    for a in arbos_core::list_agents(place).unwrap_or_default() {
+        let root = arbos_engine::JobsRoot::for_agent(place, &a.id);
+        for j in root.list() {
+            if j.running() {
+                jobs.push((
+                    a.id.to_string(),
+                    j.id.clone(),
+                    arbos_core::text::clip(j.meta.command.trim(), 80),
+                ));
+            }
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "kernel_left_serving",
+                "pid": info.pid,
+                "place": place.path.display().to_string(),
+                "running_jobs": jobs.iter().map(|(agent, id, cmd)| serde_json::json!({"agent": agent, "id": id, "command": cmd})).collect::<Vec<_>>(),
+            })
+        );
+        return;
+    }
+    let mut line = format!(
+        "run: the kernel started for this command is still serving {} (pid {})",
+        place.path.display(),
+        info.pid
+    );
+    if jobs.is_empty() {
+        line.push('.');
+    } else {
+        line.push_str(&format!(", with {} job(s) still running:", jobs.len()));
+        for (agent, id, cmd) in &jobs {
+            line.push_str(&format!("\n  {agent} {id}: {cmd}"));
+        }
+    }
+    line.push_str(&format!(
+        "\n  Stop it, and its jobs with it: arbos-kernel stop {} (or a TERM to pid {}).",
+        place.path.display(),
+        info.pid
+    ));
+    eprintln!("{line}");
 }
 
 /// Read frames until the agent's turn ends, printing its transcript lines.
@@ -281,7 +347,7 @@ pub fn answer_cmd(args: Args, allow: Option<bool>, follow: bool) -> Result<i32> 
     }
     let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
     // A question is only ever waiting in a live kernel.
-    let addr = kernel_addr(&place, false)?;
+    let (addr, _) = kernel_addr(&place, false)?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -344,7 +410,7 @@ pub fn attach(args: Args, all_agents: bool) -> Result<i32> {
         } else {
             let place =
                 Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));
-            let addr = kernel_addr(&place, !args.no_spawn)?;
+            let (addr, _) = kernel_addr(&place, !args.no_spawn)?;
             let stream = TcpStream::connect(&addr)
                 .await
                 .with_context(|| format!("connect {addr}"))?;
@@ -415,9 +481,10 @@ fn print_attached(frame: &Frame, args: &Args, all_agents: bool) -> Result<()> {
 }
 
 /// The kernel's loopback address, starting one when none is alive.
-fn kernel_addr(place: &Place, may_spawn: bool) -> Result<String> {
+/// The serving kernel's address, and whether this command started it.
+fn kernel_addr(place: &Place, may_spawn: bool) -> Result<(String, bool)> {
     if let Some(addr) = live_addr(place) {
-        return Ok(addr);
+        return Ok((addr, false));
     }
     if !may_spawn {
         bail!(
@@ -430,7 +497,7 @@ fn kernel_addr(place: &Place, may_spawn: bool) -> Result<String> {
     let deadline = Instant::now() + READY_WAIT;
     while Instant::now() < deadline {
         if let Some(addr) = live_addr(place) {
-            return Ok(addr);
+            return Ok((addr, true));
         }
         std::thread::sleep(Duration::from_millis(100));
     }

@@ -21,6 +21,17 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(st.success(), "git {args:?}");
 }
 
+fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ok()
+}
+
 fn checkpoints(place: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(place.join(".arbos/agents/root/checkpoints.jsonl"))
         .unwrap_or_default()
@@ -78,7 +89,20 @@ fn rewind_with_files_in_a_repo_without_git_identity_keeps_the_kept_turns_files()
         );
     }
     assert!(k.place.join("f1.txt").exists() && k.place.join("f2.txt").exists());
+    // The record lands before the turn goes on; the tree follows on the
+    // blocking pool and fills it in (#405). A turn with no write never
+    // waits for it, so the third checkpoint can still read "still being
+    // saved" the instant the turn is idle: wait for the trees, as a
+    // restore does, before judging them.
+    let settled = wait_for(Duration::from_secs(20), || {
+        let cps = checkpoints(&k.place);
+        cps.len() == 3
+            && cps
+                .iter()
+                .all(|cp| cp.get("work_error").is_none() || cp["work_error"].is_null())
+    });
     let cps = checkpoints(&k.place);
+    assert!(settled, "the trees settled: {cps:#?}");
     assert_eq!(cps.len(), 3, "{cps:#?}");
     // Turn 1 started on a clean tree; turns 2 and 3 carry the files as a
     // work commit. Nothing is silently empty.
@@ -192,6 +216,142 @@ fn a_rewind_on_a_checkpoint_without_a_tree_leaves_the_files_and_says_so() {
     assert!(
         k.place.join("f1.txt").exists(),
         "nothing untracked was removed"
+    );
+    let _ = k.child.kill();
+}
+
+/// qal-j17: the checkpoint's tree is taken beside the turn, and on a large
+/// repository `add -A` takes seconds while a model's first tool call can
+/// come sooner. A tree taken after that call held the turn's own file, so
+/// `rewind --files` to the turn put the file back and said restored — a
+/// correct-looking restore of the wrong state. Staged with a slow tree
+/// (`ARBOS_TEST_TREE_DELAY_MS`): the turn's first write waits for the
+/// tree, and the rewind to that turn leaves no trace of it.
+#[test]
+fn the_turns_first_write_waits_for_the_checkpoint_tree_so_a_rewind_never_restores_the_turns_own_file()
+ {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"echo first > f1.txt\",\"description\":\"Write f1\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"wrote f1\"}\n",
+        "{\"agent\":\"root\",\"content\":\"\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"echo second > f2.txt\",\"description\":\"Write f2\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"wrote f2\"}\n",
+    );
+    let scratch = common::scratch_dir("rewind-slow-tree");
+    let place = scratch.join("place");
+    std::fs::create_dir_all(place.join(".arbos")).unwrap();
+    std::fs::write(
+        place.join(".arbos/project.toml"),
+        "schema = 2\n[root]\nrole = \"worker\"\n",
+    )
+    .unwrap();
+    std::fs::write(place.join(".gitignore"), ".arbos/\n").unwrap();
+    git(&place, &["init", "-q"]);
+    git(&place, &["add", ".gitignore"]);
+    git(
+        &place,
+        &[
+            "-c",
+            "user.name=setup",
+            "-c",
+            "user.email=setup@t",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ],
+    );
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    std::fs::write(scratch.join("xdg/arbos/config.toml"), "trace = false\n").unwrap();
+    // The tree takes two seconds, as it does on a large repository.
+    let mut k = common::spawn_with_env(
+        scratch,
+        &[
+            "--provider",
+            "replay",
+            "--replies",
+            &file.display().to_string(),
+        ],
+        &[("ARBOS_TEST_TREE_DELAY_MS", "2000")],
+    );
+    let mut a = Attach::connect(&k.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    // qal-j18: the wait is the kernel's own step, seen as a status line
+    // before the tool's `started`; the command is not billed for it.
+    a.send(serde_json::json!({"type":"user","agent":"root","text":"write f1","attachments":[]}));
+    let mut saw_step = false;
+    let mut tool_started: Option<i64> = None;
+    let idle = a.wait(Duration::from_secs(40), |f| {
+        if f["type"] == "status"
+            && f["agent"] == "root"
+            && f["step"].as_str().is_some_and(|s| s.contains("checkpoint"))
+        {
+            saw_step = tool_started.is_none();
+        }
+        if f["type"] == "event"
+            && f["event"]["kind"] == "tool"
+            && f["event"]["name"] == "bash"
+            && tool_started.is_none()
+        {
+            tool_started = f["event"]["started"].as_i64();
+        }
+        f["type"] == "turn" && f["agent"] == "root" && f["state"] == "idle"
+    });
+    assert!(idle.is_some(), "turn 1 ends");
+    assert!(
+        saw_step,
+        "the kernel's step is shown before the tool starts"
+    );
+    let tools: Vec<serde_json::Value> =
+        std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|e| e["kind"] == "tool" && e["name"] == "bash")
+            .collect();
+    let took = tools[0]["ended"].as_i64().unwrap() - tools[0]["started"].as_i64().unwrap();
+    assert!(
+        took < 1500,
+        "echo took {took} ms on the record: the tree's wait was billed to the command"
+    );
+    a.send(serde_json::json!({"type":"user","agent":"root","text":"write f2","attachments":[]}));
+    assert!(
+        a.wait_turn("root", "idle", Duration::from_secs(40)),
+        "write f2"
+    );
+    assert!(k.place.join("f1.txt").exists() && k.place.join("f2.txt").exists());
+    let cps = checkpoints(&k.place);
+    assert_eq!(cps.len(), 2, "{cps:#?}");
+    // Turn 2's tree is the tree *before* turn 2: f1 only.
+    let work = cps[1]["work"].as_str().expect("turn 2 has a tree");
+    let listed = std::process::Command::new("git")
+        .args(["ls-tree", "--name-only", work])
+        .current_dir(&k.place)
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&listed.stdout);
+    assert!(names.contains("f1.txt"), "{names}");
+    assert!(
+        !names.contains("f2.txt"),
+        "the checkpoint's tree holds the turn's own file — taken after the turn wrote it: {names}"
+    );
+    // Rewind to turn 2 with files: f2 must be gone, and it must say restored.
+    a.send(serde_json::json!({"type":"rewind","agent":"root","turn":2,"files":true}));
+    let restored = a
+        .wait(Duration::from_secs(30), |f| {
+            (f["type"] == "rewound" && !f["restored"].is_null()) || f["type"] == "error"
+        })
+        .expect("the restore reports");
+    assert_eq!(restored["type"], "rewound", "{restored}");
+    assert_eq!(
+        std::fs::read_to_string(k.place.join("f1.txt"))
+            .ok()
+            .as_deref(),
+        Some("first\n")
+    );
+    assert!(
+        !k.place.join("f2.txt").exists(),
+        "rewound to before the turn, and the file it created is still here"
     );
     let _ = k.child.kill();
 }

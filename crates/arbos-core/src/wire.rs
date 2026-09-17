@@ -508,8 +508,17 @@ pub enum Frame {
     Focus {
         path: String,
     },
+    /// End the agent's turn and its standing work — the stop button.
+    /// With `reason: "superseded"` it is not a person stopping anything:
+    /// a client is replacing the message this turn answers with a fuller
+    /// one (the speech gateway, when a caller pauses mid-sentence). Only
+    /// the turn ends; nothing is held or blocked; and a turn that had
+    /// done nothing yet is cut from the record so one utterance is one
+    /// line, not two lines and a stop notice.
     Stop {
         agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Summarise the oldest turns now, before the next model call.
     Compact {

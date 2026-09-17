@@ -300,7 +300,21 @@ impl JobsRoot {
             started_ms: arbos_core::now_ms(),
             timeout_ms,
         };
-        fs::write(dir.join("meta.json"), serde_json::to_vec(&meta)?)?;
+        // The process is running before its record exists. A record that
+        // cannot be written (the disk full, the store unwritable) must not
+        // leave the command running with no folder anyone can list, kill,
+        // or cap: the group is ended and the folder goes with the error,
+        // so "bash failed" is true — nothing of the command ran on.
+        let record = serde_json::to_vec(&meta)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| fs::write(dir.join("meta.json"), bytes).map_err(anyhow::Error::from));
+        if let Err(e) = record {
+            let _ = crate::tools::kill_job(meta.pid);
+            let _ = fs::remove_dir_all(&dir);
+            return Err(anyhow::anyhow!(
+                "bash: the job's record could not be written ({e}); the command was ended before it ran on unrecorded"
+            ));
+        }
         let job = Job {
             id,
             dir,
@@ -398,7 +412,7 @@ impl JobsRoot {
         // Said before the signal, so a reader that comes between never
         // sees "no exit recorded" (qa-024).
         let marker = job.dir.join("killed");
-        let _ = fs::write(&marker, "killed by the kernel\n");
+        let _ = fs::write(&marker, format!("{}\n", kill_reason()));
         if let Err(e) = crate::tools::kill_job(job.meta.pid) {
             // The claim is withdrawn: a job the kernel could not signal is
             // still running, and must read as such.
@@ -701,6 +715,11 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 ///   leash stays with the survivors — same cap, same kernel and store
 ///   checks — until the group is empty, and writes the wrapper's exit
 ///   if the wrapper could not (its exit path was the old folder).
+/// - The kernel dead but not reaped (a container whose PID 1 is `sleep
+///   infinity`, a parent that never waits): `kill -0` on a zombie
+///   succeeds, so the leash reads the process state and treats `Z` as
+///   gone. SWE-bench cycle 14 found 4–10 live test processes per rollout
+///   after the kernel had exited, for exactly this reason.
 fn leashed(dir: &Path, program: String, args: Vec<String>) -> (String, Vec<String>) {
     const LEASH: &str = r#"D=$1; P=$2; shift 2; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0; L=0; X=; T=0.25
 export ARBOS_LEASH=$$
@@ -709,6 +728,7 @@ ended() { trap '' INT TERM; echo "killed: a signal to the job's pid $$ ended it 
 trap ended INT TERM
 die() { kill -9 "$F" 2>/dev/null; rm -f "$P/runtime/leash/$$" 2>/dev/null; kill -9 -$$ 2>/dev/null; exit 137; }
 note() { printf '{"ts":%s000,"level":"warn","event":"%s","detail":"%s"}\n' "$(date +%s)" "$1" "$2" >> "$P/runtime/kernel.log" 2>/dev/null; }
+alive() { kill -0 "$1" 2>/dev/null || return 1; if [ -r "/proc/$1/stat" ]; then case "$(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null)" in Z) return 1;; esac; else case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1;; esac; fi; return 0; }
 while :; do
   if ! kill -0 "$F" 2>/dev/null; then
     if [ -z "$X" ]; then
@@ -735,7 +755,7 @@ while :; do
       fi
     fi
   fi
-  if ! kill -0 "$K" 2>/dev/null; then
+  if ! alive "$K"; then
     echo "killed: the kernel exited and the job was ended with it" > "$D/killed" 2>/dev/null
     die
   fi
@@ -763,6 +783,32 @@ done"#;
     ];
     all.extend(args);
     ("sh".to_string(), all)
+}
+
+/// Why the kernel is killing jobs right now, when it is one reason for
+/// all of them: a graceful stop sets it before ending turns, so every
+/// `killed` marker written from then on — by the stop itself or by a
+/// turn's cancel path ending its own attached command — says the same
+/// thing. Two writers with two spellings raced to the same file, and the
+/// recorded reason a job ended was whichever landed last (desktop
+/// feedback owner, 2026-09-17: `job_leash_e2e` red 4 in 5 on `main`).
+static KILL_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Set the reason every kill from now on records (`killed: <reason>`).
+pub fn set_kill_reason(reason: &str) {
+    *KILL_REASON.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.to_string());
+}
+
+/// The line a `killed` marker gets now.
+pub fn kill_reason() -> String {
+    match KILL_REASON
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_deref()
+    {
+        Some(r) => format!("killed: {r}"),
+        None => "killed by the kernel".to_string(),
+    }
 }
 
 /// Live members of process group `pgid` other than the leader, started no
