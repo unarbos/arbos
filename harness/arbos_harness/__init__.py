@@ -53,17 +53,22 @@ PROGRAM_BIN = f"{BIN_DIR}/arbos-swe-run"
 # errored in finalize). The harness collects this dir itself.
 OUT_DIR = "/tmp/vf-arbos/out"
 
-# Kills every process in the container except PID 1 (the runtime's own `sleep
-# infinity`) and this shell, then counts what is still alive and not a zombie.
-# Prints "<killed> <left>". Runs in the container's PID namespace, so /proc is
-# every process the agent could have left behind.
+# Kills every live process in the container except PID 1 (the runtime's own
+# `sleep infinity`, which reaps nothing, so exited children linger as zombies)
+# and this shell, then counts what is still alive and not a zombie. Prints
+# "<killed> <left> <zombies>" and the killed command lines. Runs in the
+# container's PID namespace, so /proc is every process the agent could have
+# left behind.
 SWEEP = r"""
-me=$$; killed=0
+me=$$; killed=0; zombies=0; names=""
 for p in /proc/[0-9]*; do
   pid=${p#/proc/}
   [ "$pid" = 1 ] && continue
   [ "$pid" = "$me" ] && continue
-  kill -9 "$pid" 2>/dev/null && killed=$((killed+1))
+  state=$(awk '{print $3}' "$p/stat" 2>/dev/null || echo gone)
+  if [ "$state" = Z ]; then zombies=$((zombies+1)); continue; fi
+  name=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null | cut -c1-80)
+  kill -9 "$pid" 2>/dev/null && killed=$((killed+1)) && names="$names|$name"
 done
 sleep 1
 left=0
@@ -74,7 +79,8 @@ for p in /proc/[0-9]*; do
   state=$(awk '{print $3}' "$p/stat" 2>/dev/null || echo gone)
   [ "$state" = Z ] || [ "$state" = gone ] || left=$((left+1))
 done
-echo "$killed $left"
+echo "$killed $left $zombies"
+echo "$names"
 """
 DEFAULT_IMAGE = "arbos-harness"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "arbos-harness"
@@ -221,15 +227,20 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
 
     async def sweep(self, runtime: Runtime) -> None:
         swept = await runtime.run(["sh", "-c", SWEEP], {})
-        parts = swept.stdout.strip().split()
+        lines = swept.stdout.strip().splitlines() or [""]
+        parts = lines[0].split()
         try:
-            killed, left = int(parts[0]), int(parts[1])
+            killed, left, zombies = int(parts[0]), int(parts[1]), int(parts[2])
         except (IndexError, ValueError):
             raise RuntimeError(
                 f"arbos: process sweep before grading failed: {swept.stderr.strip()[-300:]}"
             ) from None
+        names = [n for n in (lines[1] if len(lines) > 1 else "").split("|") if n.strip()]
         await runtime.write(
-            f"{OUT_DIR}/sweep.json", json.dumps({"killed": killed, "left": left}).encode()
+            f"{OUT_DIR}/sweep.json",
+            json.dumps(
+                {"killed": killed, "left": left, "zombies": zombies, "killed_cmdlines": names}
+            ).encode(),
         )
         if left:
             raise RuntimeError(
