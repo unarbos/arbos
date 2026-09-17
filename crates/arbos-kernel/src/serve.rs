@@ -858,6 +858,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 if let Some(lo) = superseded_at {
                     supersede_cut(&place, &hooks, &mut tails, &id, lo);
                 }
+                // A chat nobody named gets its label from the model after
+                // its first turn (F-156); decided on disk, called off-loop.
+                crate::title::after_turn(&hooks, &id);
                 // A standing agent's transcript past the cap rolls into the
                 // archive now, between turns; attached windows reload from
                 // the short file the way they do after a rewind.
@@ -2012,6 +2015,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
         .map(|a| TreeNode {
             id: a.id.to_string(),
             name: a.name.clone(),
+            title: a.title.clone(),
             // Never an agent as its own ancestor: a parent that is itself,
             // is missing, or leads back around reads as top-level.
             parent: sane_parent(&agents, a),

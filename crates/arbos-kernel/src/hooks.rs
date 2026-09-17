@@ -337,6 +337,7 @@ impl KernelHooks {
             .map(|a| arbos_core::wire::TreeNode {
                 id: a.id.to_string(),
                 name: a.name.clone(),
+                title: a.title.clone(),
                 parent: a.parent.as_ref().map(|p| p.to_string()),
                 paused: a.paused,
                 model: a.model.clone(),
