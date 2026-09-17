@@ -48,6 +48,11 @@ struct KernelJson {
     /// the kernel was started from. `check` warns about them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stray_secret_env: Vec<String>,
+    /// Whether `git` is on this kernel's PATH: without it checkpoints,
+    /// rewind and undo are off (said once on root's transcript). Absent
+    /// from older kernels; read as unknown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    git_missing: bool,
     version: String,
     git_sha: String,
     log: String,
@@ -109,7 +114,26 @@ fn acquire_or_wait(place: &Place) -> Held {
                 std::thread::sleep(Duration::from_secs(2));
             }
             Err(e) => {
-                eprintln!("arbos-kernel: cannot lock {}: {e:#}", place.path.display());
+                // The first thing a kernel writes is its lock, so a folder
+                // the person cannot write fails here — and "cannot lock"
+                // names our mechanism, not their situation (a shared
+                // mount, a folder owned by another account, a read-only
+                // disk). Say the situation and what to do.
+                let denied = e.chain().any(|c| {
+                    c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                        io.kind() == std::io::ErrorKind::PermissionDenied
+                            || io.raw_os_error() == Some(libc::EROFS)
+                    })
+                });
+                if denied {
+                    eprintln!(
+                        "arbos-kernel: cannot start in {}: the folder is not writable by this user ({e:#}). Arbos keeps its records in {}/.arbos and needs to write there — pick another folder, or make this one writable (a shared mount and a folder owned by another account are the usual causes).",
+                        place.path.display(),
+                        place.path.display()
+                    );
+                } else {
+                    eprintln!("arbos-kernel: cannot lock {}: {e:#}", place.path.display());
+                }
                 return Held::StillHeld(1);
             }
         }
@@ -189,7 +213,11 @@ impl HeldRecord {
 /// How long the holder has had the place, with no record at all: the
 /// lock file is written by the holder when it takes the lock.
 fn held_since_lock(place: &Place) -> Option<i64> {
-    let modified = std::fs::metadata(place.lock_path()).ok()?.modified().ok()?;
+    let modified = place
+        .lock_paths()
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+        .max()?;
     Some(modified.elapsed().ok()?.as_secs() as i64)
 }
 
@@ -198,10 +226,7 @@ fn held_since_lock(place: &Place) -> Option<i64> {
 /// escalation after `HELD_ESCALATE_SECS`, and otherwise nothing at all.
 fn say_held(place: &Place, wait_secs: u64) {
     let now = arbos_core::now_ms();
-    let holder_pid = std::fs::read_to_string(place.lock_path())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let holder_pid = PlaceLock::holder_pid(place).unwrap_or(0);
     let mut rec = match HeldRecord::load(place) {
         Some(r) if r.holder_pid == holder_pid => r,
         _ => HeldRecord {
@@ -297,9 +322,7 @@ fn say_held(place: &Place, wait_secs: u64) {
 /// whether it is alive, which build it runs (kernel.json), whether its
 /// file has been replaced under it (a stale image), and its url.
 fn describe_holder(place: &Place) -> String {
-    let pid = std::fs::read_to_string(place.lock_path())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok());
+    let pid = PlaceLock::holder_pid(place);
     let Some(pid) = pid else {
         return "a holder whose pid the lock file does not say".to_string();
     };
@@ -359,14 +382,22 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
     );
-    let _lock = match acquire_or_wait(&place) {
+    let lock = match acquire_or_wait(&place) {
         Held::Taken(lock) => lock,
         Held::StillHeld(code) => return Ok(code),
     };
     bootstrap(&place)?;
     klog::init(klog::log_path_for(&place.arbos()));
+    // Which folder this store is (device, inode): every later look at the
+    // path compares against it, so a store renamed out from under the
+    // kernel is told apart from a folder recreated where it was.
+    let store_id = place
+        .store_id()
+        .context("the place's .arbos folder could not be identified")?;
+    arbos_core::remember_opened(store_id);
     let host = Host::load()?;
     host.remember_place(place.path());
+    let git_present = say_if_git_missing(&place);
     match (host.api_key(), host.config.api_base()) {
         (Some(key), Ok(base)) => {
             // bash inherits this process's environment, so the model's key is
@@ -400,7 +431,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         .await
         .with_context(|| format!("bind attach {bind}"))?;
     let addr = listener.local_addr()?;
-    write_kernel_json(&place, addr, open, &access)?;
+    write_kernel_json(&place, addr, open, &access, git_present)?;
     if open {
         klog::info(
             "attach_open_bind",
@@ -439,6 +470,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
     ptys.bind(place.path.clone(), pty_tx);
+    let _ = hooks.ptys.set(Arc::clone(&ptys));
     let mut registry = kernel_registry(&hooks, &ptys);
     // MCP: every tool of every configured server (`.arbos/mcp.toml`,
     // `.cursor/mcp.json`, `~/.config/arbos/mcp.toml`, `ARBOS_MCP_CMD`)
@@ -588,7 +620,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             if job.dir.join("settled").exists() {
                 continue;
             }
-            let _ = std::fs::write(job.dir.join("settled"), "cut by a restart\n");
+            if let Err(e) = std::fs::write(job.dir.join("settled"), "cut by a restart\n") {
+                // Without the marker the next boot says "cut" again for
+                // the same run: a repeat, not a loss, and said as one.
+                crate::klog::warn(
+                    "settled_unwritten",
+                    None,
+                    format!(
+                        "job {}: {e} — this cut will be reported again at the next start",
+                        job.id
+                    ),
+                );
+            }
             let state = if job.running() {
                 "still running, its outcome will not be read"
             } else {
@@ -745,7 +788,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // appended since the last one.
     let mut tails: std::collections::HashMap<String, TranscriptTail> =
         std::collections::HashMap::new();
-    shutdown_backstop(place.lock_path());
+    shutdown_backstop(place.lock_paths().to_vec());
     // How far each detached job's journal has been streamed (`agent/jN` →
     // bytes, and whether its final frame went out).
     let mut offsets: std::collections::HashMap<String, (u64, bool)> =
@@ -847,6 +890,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(id) = done_rx.recv() => {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
+                // The turn's tail — the plan write, the roll, the commit,
+                // the idle frame's usage read — is the write that recreated
+                // a moved place at its old path (desktop gate, cycle 35).
+                // Not one byte of it lands at a path that is not the store
+                // this kernel opened.
+                if place.store_state(store_id) != arbos_core::StoreState::Intact {
+                    say_store_moved(&place, store_id, &lock);
+                    crate::remote::stop_all(&hooks).await;
+                    exit_code = 4;
+                    break;
+                }
                 // A turn superseded before it did anything is cut from
                 // the record once its folder has closed (below), so the
                 // fuller message that follows is the only user line.
@@ -858,6 +912,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 if let Some(lo) = superseded_at {
                     supersede_cut(&place, &hooks, &mut tails, &id, lo);
                 }
+                // A chat nobody named gets its label from the model after
+                // its first turn (F-156); decided on disk, called off-loop.
+                crate::title::after_turn(&hooks, &id);
                 // A standing agent's transcript past the cap rolls into the
                 // archive now, between turns; attached windows reload from
                 // the short file the way they do after a rewind.
@@ -933,19 +990,31 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 // writing into unlinked logs. QA's machine: 164 GB. Exit;
                 // the leashes see the parent go and end the jobs. Said on
                 // stderr, since the log lived in the store.
-                if !place.arbos().is_dir() {
-                    store_gone += 1;
-                    if store_gone >= 2 {
-                        eprintln!(
-                            "arbos-kernel stopping: the place's .arbos store is gone ({}); its jobs end with this kernel",
-                            place.arbos().display()
-                        );
+                match place.store_state(store_id) {
+                    arbos_core::StoreState::Gone => {
+                        store_gone += 1;
+                        if store_gone >= 2 {
+                            eprintln!(
+                                "arbos-kernel stopping: the place's .arbos store is gone ({}); its jobs end with this kernel",
+                                place.arbos().display()
+                            );
+                            crate::remote::stop_all(&hooks).await;
+                            exit_code = 4;
+                            break;
+                        }
+                    }
+                    // The folder was renamed and something made a new
+                    // `.arbos/` where it was — a kernel's own late write,
+                    // through `create_dir_all` on the absolute path, is the
+                    // usual maker. One look decides: an inode does not
+                    // change and change back. Stop before more lands there.
+                    arbos_core::StoreState::Moved => {
+                        say_store_moved(&place, store_id, &lock);
                         crate::remote::stop_all(&hooks).await;
                         exit_code = 4;
                         break;
                     }
-                } else {
-                    store_gone = 0;
+                    arbos_core::StoreState::Intact => store_gone = 0,
                 }
                 // The binary replaced under this kernel (an update, an
                 // install into the shared PATH): it serves stale code until
@@ -973,8 +1042,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                         idle::Verdict::Idle
                     )
                 {
-                    reexec_backoff_until = arbos_core::now_ms() + REEXEC_RETRY_MS;
-                    reexec_onto_new_binary(&place, &hooks);
+                    // A new file still being written (the app's swap is a
+                    // directory rename, then a copy; an installer streams
+                    // the binary) is not a failed restart: look again in
+                    // a moment. Only an exec that returned an error waits
+                    // the full minute. A restart that missed its window
+                    // by a few milliseconds used to wait sixty seconds
+                    // for it (binary_gone_e2e red one run in six).
+                    reexec_backoff_until = arbos_core::now_ms()
+                        + match reexec_onto_new_binary(&place, &hooks) {
+                            Reexec::NotReady => REEXEC_LOOK_AGAIN_MS,
+                            Reexec::Failed => REEXEC_RETRY_MS,
+                        };
                 }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
@@ -1046,6 +1125,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: Some(job.meta.cwd.display().to_string()),
                             title: Some(job.meta.command.replace('\n', " ")),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                     }
                     // Output streams for every job, attached or detached:
@@ -1071,6 +1151,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: None,
                             title: Some(job.status_line()),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                         let text = format!(
                             "job {} {} — `{}` — log: {}",
@@ -1657,11 +1738,12 @@ fn handle_frame(
                 .unwrap_or_else(|| place.path.clone());
             // The mark must be the last turn's: its start line is the
             // last checkpoint's (qal-j10).
-            let turn_line = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
+            let last = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
                 .last()
-                .map(|cp| cp.line)
-                .unwrap_or(0);
-            match arbos_engine::git::undo(&cwd, turn_line) {
+                .cloned();
+            let turn_line = last.as_ref().map(|cp| cp.line).unwrap_or(0);
+            let turn_ts = last.as_ref().map(|cp| cp.ts);
+            match arbos_engine::git::undo(&cwd, turn_line, turn_ts) {
                 Ok(out) => klog::info("undo", Some(&agent), arbos_core::text::clip(&out.body, 200)),
                 Err(e) => refuse(hooks, Some(&agent), format!("undo: {e:#}")),
             }
@@ -1783,6 +1865,60 @@ fn handle_frame(
                 let _ = ptys.write(&agent, &page, &bytes);
             }
         }
+        Frame::Shell { owner, cwd } => {
+            // A person's own shell, asked for from a window: the same
+            // `PtyHub` shell the `terminal` tool mints, announced with
+            // `by: user` so the drawer opens for it.
+            let owner = owner.unwrap_or_else(|| "root".to_string());
+            if !arbos_core::agent_exists(place, &owner) {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: no agent {owner:?} in this place"),
+                );
+                return;
+            }
+            let dir = match cwd.as_deref().filter(|c| !c.trim().is_empty()) {
+                Some(c) => {
+                    let p = std::path::PathBuf::from(c);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        place.path.join(p)
+                    }
+                }
+                None => place.path.clone(),
+            };
+            if !dir.is_dir() {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: {} is not a directory", dir.display()),
+                );
+                return;
+            }
+            let id = ptys.next_id();
+            match ptys.spawn_shell(&id, &dir, &owner, "user") {
+                Ok(_) => {
+                    klog::info(
+                        "shell_opened",
+                        Some(&owner),
+                        format!("{id} in {}", dir.display()),
+                    );
+                    hooks.broadcast(Frame::Board {
+                        owner,
+                        action: "open".into(),
+                        panel: "terminal".into(),
+                        terminal_ids: vec![id],
+                        cwd: Some(dir.display().to_string()),
+                        title: None,
+                        url: None,
+                        by: "user".into(),
+                    });
+                }
+                Err(e) => refuse(hooks, Some(&owner), format!("shell: {e:#}")),
+            }
+        }
         _ => {}
     }
 }
@@ -1792,7 +1928,7 @@ fn handle_frame(
 /// if the loop has not returned a few seconds later, drop the lock file
 /// (the `PlaceLock` guard would have) and exit, rather than leave a kernel
 /// the user cannot stop.
-fn shutdown_backstop(lock_path: std::path::PathBuf) {
+fn shutdown_backstop(lock_paths: Vec<std::path::PathBuf>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
         let (Ok(mut int), Ok(mut term)) = (
@@ -1807,7 +1943,9 @@ fn shutdown_backstop(lock_path: std::path::PathBuf) {
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("arbos-kernel: serve loop did not stop within 5s of the signal; exiting");
-        let _ = std::fs::remove_file(&lock_path);
+        for p in &lock_paths {
+            let _ = std::fs::remove_file(p);
+        }
         std::process::exit(130);
     });
 }
@@ -1846,9 +1984,26 @@ enum Page {
 
 fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
     // A finished worker's record lives in the archive; a client asking
-    // for it gets the lines from there, flagged, not an empty page.
-    let (transcript, archived) = arbos_core::files::transcript_for_history(place, agent)
-        .unwrap_or_else(|| (Layout::new(place, agent).transcript(), false));
+    // for it — by id or by the name its card shows — gets the lines from
+    // there, flagged, not an empty page. No such agent anywhere: an empty
+    // page that says so, not one that reads as an empty record.
+    let resolved = arbos_core::files::resolve_history_agent(place, agent);
+    let unknown = resolved.is_none();
+    let (transcript, archived, id) = match resolved {
+        Some(r) => (r.transcript, r.archived, r.id),
+        None => (
+            Layout::new(place, agent).transcript(),
+            false,
+            agent.to_string(),
+        ),
+    };
+    if unknown {
+        klog::warn(
+            "history_unknown",
+            Some(agent),
+            "no agent live or archived by that id or name",
+        );
+    }
     let events = load_transcript(&transcript).unwrap_or_default();
     let total = events.len() as u64;
     let picked: Vec<&Event> = match page {
@@ -1877,7 +2032,7 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     let to = picked.last().map(|e| e.seq).unwrap_or(anchor);
     for ev in picked {
         let mut event = ev.clone();
-        arbos_core::files::scrub_child_claims(place, agent, &mut event);
+        arbos_core::files::scrub_child_claims(place, &id, &mut event);
         // A record from before `output` existed gets its glance here.
         if let EventKind::Tool(rec) = &mut event.kind
             && rec.output.is_none()
@@ -1896,14 +2051,106 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         total,
         archived,
         path: if archived {
-            format!("archive/agents/{agent}/transcript.jsonl")
+            format!("archive/agents/{id}/transcript.jsonl")
         } else {
             String::new()
         },
+        id: if id == agent { String::new() } else { id },
+        unknown,
     });
 }
 
-fn snapshot(place: &Place) -> Frame {
+/// The marker that the missing-git notice was said for this place; in
+/// `runtime/`, so a reinstall of the machine starts the question afresh.
+const GIT_MISSING_SAID: &str = "git-missing.said";
+
+/// A fresh machine without git (a Mac before the command line tools, a
+/// minimal container): the kernel serves, but checkpoints, rewind and
+/// undo have nothing to stand on, and until now nothing said so — the
+/// person met it as a refused rewind with no cause. Said once on root's
+/// transcript, and once more when git appears; `kernel.json` carries
+/// `git: false` meanwhile so a window can show it.
+fn say_if_git_missing(place: &Place) -> bool {
+    let present = std::process::Command::new("git")
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    let marker = place.runtime_dir().join(GIT_MISSING_SAID);
+    let said = marker.exists();
+    let transcript = Layout::new(place, arbos_core::ROOT_ID).transcript();
+    if !present && !said {
+        klog::warn(
+            "git_missing",
+            None,
+            "no `git` on PATH: checkpoints, rewind and undo are off until it is installed",
+        );
+        let _ = arbos_core::append_event(
+            &transcript,
+            &arbos_core::Event::new(EventKind::Notice {
+                text: "git is not installed on this machine (or not on the kernel's PATH), so checkpoints, rewind and undo are off: a turn's changes cannot be taken back until git is installed. On a Mac, `xcode-select --install`; on Debian or Ubuntu, `apt install git`.".into(),
+                failed: true,
+            }),
+        );
+        let _ = std::fs::write(&marker, "said\n");
+    } else if present && said {
+        let _ = std::fs::remove_file(&marker);
+        klog::info(
+            "git_found",
+            None,
+            "git is on PATH again: checkpoints, rewind and undo are on",
+        );
+        let _ = arbos_core::append_event(
+            &transcript,
+            &arbos_core::Event::new(EventKind::Notice {
+                text: "git is installed now: checkpoints, rewind and undo are on from this turn."
+                    .into(),
+                failed: false,
+            }),
+        );
+    }
+    present
+}
+
+/// The store is not at its path any more — said on stderr, since the log
+/// lived in it; and into the store itself where it is now, when the
+/// kernel can tell (its cwd followed the folder), so the person opening
+/// the moved project reads why its kernel stopped. Nothing is written at
+/// the old path: that would be the ghost.
+fn say_store_moved(place: &Place, opened: arbos_core::StoreId, lock: &arbos_core::PlaceLock) {
+    let now_at = arbos_core::store_now_at(opened);
+    // The lock files went with the folder; `Drop` would look for them at
+    // the old path. Take ours away where they are, so the moved store is
+    // not left with a lock that names a kernel that is gone.
+    if let Some(p) = &now_at {
+        lock.release_at(&Place::new(p.clone()));
+    }
+    let where_ = match &now_at {
+        Some(p) => format!("it is now at {}", p.display()),
+        None => "where it went, this kernel cannot tell".to_string(),
+    };
+    eprintln!(
+        "arbos-kernel stopping: the .arbos store at {} is not the one this kernel opened (the folder was moved or replaced; {where_}); nothing more is written here, and its jobs end with this kernel",
+        place.arbos().display()
+    );
+    if let Some(p) = now_at {
+        let moved = Place::new(p);
+        let _ = arbos_core::append_event(
+            &Layout::new(&moved, arbos_core::ROOT_ID).transcript(),
+            &arbos_core::Event::new(EventKind::Notice {
+                text: format!(
+                    "This project's folder was moved from {} while its kernel ran. The kernel stopped rather than write into the old path; open the project here to start a new one.",
+                    place.path.display()
+                ),
+                failed: true,
+            }),
+        );
+    }
+}
+
+fn snapshot(place: &Place, hooks: &KernelHooks) -> Frame {
     let focus = arbos_core::read_focus(place);
     // The focused agent's last measured context, so a client attaching
     // mid-conversation shows the real meter rather than a placeholder.
@@ -1912,6 +2159,10 @@ fn snapshot(place: &Place) -> Frame {
         tree: tree_nodes(place),
         focus,
         budget: last_usage(place, &agent),
+        // The kernel's record of what it holds, read now: a window that
+        // reattaches after a kernel died draws rows from this, not from
+        // what it remembers (#468's frame, at the moment it matters most).
+        surfaces: crate::surfaces::list(place, hooks, None),
     }
 }
 
@@ -2011,6 +2262,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
         .map(|a| TreeNode {
             id: a.id.to_string(),
             name: a.name.clone(),
+            title: a.title.clone(),
             // Never an agent as its own ancestor: a parent that is itself,
             // is missing, or leads back around reads as top-level.
             parent: sane_parent(&agents, a),
@@ -2185,7 +2437,9 @@ fn write_kernel_json(
     addr: SocketAddr,
     open: bool,
     access: &access::Access,
+    git_present: bool,
 ) -> Result<()> {
+    arbos_core::check_store(&place.arbos())?;
     let info = KernelJson {
         url: access::local_url(addr),
         bind: open.then(|| addr.to_string()),
@@ -2198,6 +2452,7 @@ fn write_kernel_json(
         git_sha: klog::git_sha().into(),
         log: klog::log_path_for(&place.arbos()).display().to_string(),
         stray_secret_env: stray_secret_env(place),
+        git_missing: !git_present,
     };
     if !info.stray_secret_env.is_empty() {
         klog::warn(
@@ -2450,7 +2705,7 @@ pub async fn serve_client(
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });
-            let _ = out_tx.send(snapshot(&accept_place));
+            let _ = out_tx.send(snapshot(&accept_place, &accept_hooks));
             let _ = out_tx.send(provider_frame(&accept_place));
             for agent in list_agents(&accept_place).unwrap_or_default() {
                 let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));
@@ -2646,6 +2901,39 @@ pub async fn serve_client(
                                 bytes: b.bytes,
                             });
                         }
+                        // What this kernel holds, for a window reconciling
+                        // its rows after a kernel's death: answered to the
+                        // asker alone, read now, never from a cache.
+                        Frame::Surfaces { agent } => {
+                            if let Some(a) = agent.as_deref()
+                                && !arbos_core::agent_exists(&place_for_history, a)
+                            {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(a.to_string()),
+                                    detail: format!("surfaces: no agent is named {a}"),
+                                });
+                                continue;
+                            }
+                            let surfaces = crate::surfaces::list(
+                                &place_for_history,
+                                &hooks_for_feedback,
+                                agent.as_deref(),
+                            );
+                            klog::info(
+                                "surfaces",
+                                agent.as_deref(),
+                                format!(
+                                    "who={who_name} rows={} running={}",
+                                    surfaces.len(),
+                                    surfaces.iter().filter(|s| s.running).count()
+                                ),
+                            );
+                            let _ = out_for_history.send(Frame::SurfaceList {
+                                agent,
+                                surfaces,
+                                at_ms: arbos_core::now_ms(),
+                            });
+                        }
                         // Files under .arbos/, answered here too; a slow
                         // disk stalls this client alone. `put` is a peer's
                         // write by address; the store rules apply inside.
@@ -2728,27 +3016,67 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
 /// about to fire is a reason to wait), and how long between attempts.
 const REEXEC_HORIZON_MS: i64 = 60_000;
 const REEXEC_RETRY_MS: i64 = 60_000;
+/// How soon to look again when the new file was not there or was still
+/// being written.
+const REEXEC_LOOK_AGAIN_MS: i64 = 2_000;
+
+/// Why a re-exec did not happen (a successful one never returns).
+enum Reexec {
+    /// No usable new file yet, or one whose bytes were still changing.
+    NotReady,
+    /// `execv` itself returned an error; the old image serves on.
+    Failed,
+}
 
 /// Replace this process with the arbos-kernel now at its own path, same
 /// arguments, same environment. Returns only when the exec failed — the
 /// old image then serves on. Set `ARBOS_NO_REEXEC=1` to keep a kernel on
 /// its old image (a test of the notice alone, or a person who wants to
 /// choose the moment).
-fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
+fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) -> Reexec {
     if std::env::var_os("ARBOS_NO_REEXEC").is_some() {
-        return;
+        return Reexec::NotReady;
     }
     let chosen = match crate::binary::kernel_binary() {
         Ok(c) => c,
         Err(e) => {
-            klog::warn(
-                "reexec_failed",
+            klog::info(
+                "reexec_wait",
                 None,
-                format!("no binary to restart onto: {e:#}"),
+                format!("no binary to restart onto yet: {e:#}; looking again"),
             );
-            return;
+            return Reexec::NotReady;
         }
     };
+    // The file must be whole and at rest: the same size and mtime across
+    // a short pause, executable, and not this process's own image.
+    let settled = {
+        let first = arbos_core::binary_identity::of(&chosen.path);
+        std::thread::sleep(Duration::from_millis(250));
+        let second = arbos_core::binary_identity::of(&chosen.path);
+        match (first, second) {
+            (Some(a), Some(b))
+                if a == b
+                    && std::fs::metadata(&chosen.path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    };
+    if !settled {
+        klog::info(
+            "reexec_wait",
+            None,
+            format!(
+                "{} is still being written or is not there; looking again",
+                chosen.path.display()
+            ),
+        );
+        return Reexec::NotReady;
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     klog::info(
         "reexec",
@@ -2782,6 +3110,7 @@ fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
             format!("{}: {err}; the old image serves on", chosen.path.display()),
         );
     }
+    Reexec::Failed
 }
 
 /// A running turn that has shown nothing for [`crate::hooks::stall_secs`] gets

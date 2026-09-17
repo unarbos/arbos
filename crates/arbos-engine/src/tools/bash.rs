@@ -138,6 +138,23 @@ impl Tool for Bash {
                     "bash: {what} is a worker's job, not the coordinator's — spawn a worker with the exact command (wait=true for a one-off) and relay its result. Your bash is for one quick command the user asked to see."
                 );
             }
+            // `sleep N` to wait on workers: a poll by another name. The
+            // report the coordinator is waiting for is a wake that ends
+            // its turn's silence the moment it lands — unless the turn is
+            // asleep, in which case three finished workers sat behind
+            // "Waiting on three sorting workers" for the length of the
+            // sleep and the person asked where their response was
+            // (Jacob, 2026-09-17, twice). Refused with the right move.
+            if let Some(secs) = super::wipe::sleep_wait_secs(cmd)
+                && secs >= 5
+                && let Some(n) = children_count(&cx.place, cx.agent.id.as_str())
+                && n > 0
+            {
+                bail!(
+                    "bash: refused — `{}` while {n} worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the turn now (an empty reply is right here): the next report starts your next turn. To wait on a command of your own, use await <job>.",
+                    arbos_core::text::clip(cmd.trim(), 60)
+                );
+            }
             // A file this turn wrote is never moved or deleted to satisfy
             // the brief's Output line: told its deliverable was "not
             // written yet" at the brief's path, a worker moved the user's
@@ -217,6 +234,13 @@ impl Tool for Bash {
             // from then on (the desktop's undispatched restart action,
             // 2026-09-17: an anchor a merged PR had reworded).
             let inplace_before = inplace_edit_targets(cmd, &dir);
+            // The tracked files a command may change, before it runs: an
+            // edit made through the shell (`sed -i`, a redirect, `patch`,
+            // a script) is an edit however it was made, and is recorded as
+            // one — on the tool event's paths, so the coverage hook and the
+            // transcript's readers see it (SWE-bench cycle 21: four
+            // rollouts edited with sed and no edit was on the record).
+            let tracked_before = tracked_dirty(&dir);
             let asked_background = opt_bool(&args, "background").unwrap_or(false);
             let background = asked_background && looks_like_server(cmd);
             let background_ignored = asked_background && !background;
@@ -287,6 +311,9 @@ impl Tool for Bash {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut steered = false;
+            let mut child_done = false;
+            let has_children =
+                children_count(&cx.place, cx.agent.id.as_str()).is_some_and(|n| n > 0);
             let finished = loop {
                 tokio::select! {
                     _ = &mut done_rx => break true,
@@ -303,6 +330,15 @@ impl Tool for Bash {
                     _ = tick.tick() => {
                         if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
                             steered = true;
+                            break false;
+                        }
+                        // A worker's report landed: the parent's command
+                        // yields to it the way it yields to the user's
+                        // words (#362); the command goes on as a job.
+                        if has_children
+                            && arbos_core::inbox::has_child_done(&cx.place, cx.agent.id.as_str())
+                        {
+                            child_done = true;
                             break false;
                         }
                         // The command's own end is the `exit` file, and
@@ -339,6 +375,8 @@ impl Tool for Bash {
                 };
                 let why = if steered {
                     " The user said something while it ran — it follows this result. Answer them, then follow the command with await."
+                } else if child_done {
+                    " A worker's report landed while it ran — it follows this result. Read it and act on it; follow the command with await if you still need it."
                 } else {
                     ""
                 };
@@ -404,7 +442,24 @@ impl Tool for Bash {
             } else {
                 crate::repro::note_failing(&cx.place, &cx.agent.id, cmd, &dir, exit);
             }
-            Ok(ToolOut::with_paths(body, vec![journal]))
+            let mut paths = vec![journal];
+            if let Some(before) = tracked_before
+                && let Some(after) = tracked_dirty(&dir)
+            {
+                let changed = changed_between(&before, &after);
+                if !changed.is_empty() {
+                    body.push_str(&format!(
+                        "\n[files changed by this command: {} — an edit made through the shell is recorded as an edit]",
+                        changed
+                            .iter()
+                            .map(|p| p.strip_prefix(&dir).unwrap_or(p).display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    paths.extend(changed.iter().map(|p| p.display().to_string()));
+                }
+            }
+            Ok(ToolOut::with_paths(body, paths))
         })
     }
 }
@@ -829,6 +884,19 @@ mod approval_tests {
     }
 }
 
+/// How many agents name `agent` as their parent and are not archived —
+/// the workers whose reports it is waiting for. `None` when the place
+/// cannot be read.
+fn children_count(place: &arbos_core::Place, agent: &str) -> Option<usize> {
+    let agents = arbos_core::list_agents(place).ok()?;
+    Some(
+        agents
+            .iter()
+            .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == agent))
+            .count(),
+    )
+}
+
 /// The files an in-place substitution in `cmd` names, with their bytes
 /// now: `sed -i`, `sed -i.bak`, `sed -i ''`, `perl -pi -e`, `perl -i -pe`.
 /// Only files that exist under `dir` count; the expression word is not a
@@ -920,6 +988,61 @@ fn inplace_edit_targets(cmd: &str, dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 /// The note for each in-place target whose bytes did not change.
+/// Tracked files with uncommitted changes under `dir`'s repository, each
+/// with a hash of its bytes — the state a command's edits are read
+/// against (bytes, not mtime: `sed -i` rewrites a file it did not change,
+/// and that is not an edit). None when `dir` is not inside a git
+/// repository (nothing to compare). Untracked files are not listed: a
+/// build tree's are many, and the coverage hook reads only what git
+/// tracks.
+fn tracked_dirty(dir: &Path) -> Option<std::collections::BTreeMap<PathBuf, u64>> {
+    let root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let out = std::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let mut map = std::collections::BTreeMap::new();
+    for name in String::from_utf8_lossy(&out.stdout).lines() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let p = root.join(name);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // A deleted tracked file hashes as absent, which still differs
+            // from any content.
+            std::fs::read(&p).ok().hash(&mut h);
+            h.finish()
+        };
+        map.insert(p, hash);
+    }
+    Some(map)
+}
+
+/// Files dirty after the command that were clean before, or dirty before
+/// and changed again. Files the command reverted to HEAD are not listed:
+/// nothing is left to record about them.
+fn changed_between(
+    before: &std::collections::BTreeMap<PathBuf, u64>,
+    after: &std::collections::BTreeMap<PathBuf, u64>,
+) -> Vec<PathBuf> {
+    after
+        .iter()
+        .filter(|(p, stamp)| before.get(*p) != Some(stamp))
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
 fn inplace_unchanged(before: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
     before
         .iter()

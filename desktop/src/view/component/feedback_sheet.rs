@@ -142,6 +142,9 @@ pub struct FeedbackSheet {
     /// also looks like. He was one click from sending a report that looked
     /// empty, with no way to tell that anything had gone wrong.
     unavailable: Option<Unavailable>,
+    /// Every outbox refused the report, so the only thing left that helps is
+    /// getting his words off this screen.
+    stranded: bool,
     open: Open,
     /// Set once the report is on disk: what to tell him, and whether it is
     /// waiting for the network.
@@ -167,6 +170,7 @@ impl FeedbackSheet {
             awaiting: false,
             other_door: false,
             unavailable: None,
+            stranded: false,
             open: Open::None,
             outcome: None,
             is_open: false,
@@ -190,6 +194,7 @@ impl FeedbackSheet {
         self.anchor = agent.map(|a| (a, seq));
         self.awaiting = self.anchor.is_some();
         self.unavailable = None;
+        self.stranded = false;
         self.open = Open::None;
         self.outcome = None;
         self.is_open = true;
@@ -283,6 +288,22 @@ impl FeedbackSheet {
 
     pub fn settled(&mut self, outcome: Result<String, String>, cx: &mut Context<Self>) {
         self.outcome = Some(outcome);
+        self.stranded = false;
+        cx.notify();
+    }
+
+    /// Nowhere on the machine would take the report.
+    ///
+    /// Jacob's home directory went read-only, the outbox could not be created,
+    /// and the sheet offered Close and Send again — one of which loses his words
+    /// and the other of which repeats the failure. So this state offers to put
+    /// his words on the clipboard. A person's words must always have somewhere
+    /// to go, even when the disk has none.
+    pub fn nowhere_to_save(&mut self, why: String, cx: &mut Context<Self>) {
+        self.outcome = Some(Err(format!(
+            "Nothing on this machine would take the report: {why}. Your words are still here — copy them out and they are not lost."
+        )));
+        self.stranded = true;
         cx.notify();
     }
 
@@ -296,6 +317,20 @@ impl FeedbackSheet {
             return;
         }
         cx.emit(FeedbackSheetEvent::Send(Box::new(self.draft.clone())));
+        cx.notify();
+    }
+
+    /// His words onto the clipboard, so a report that cannot be saved anywhere
+    /// still leaves with him.
+    fn copy_note(&mut self, cx: &mut Context<Self>) {
+        let note = self.field.read(cx).content().to_string();
+        if note.trim().is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(note));
+        self.outcome = Some(Ok(
+            "Copied. Paste it wherever you like — it is out of this window and safe.".into(),
+        ));
         cx.notify();
     }
 
@@ -427,8 +462,8 @@ impl Render for FeedbackSheet {
             ),
             self.part_row(
                 Open::Session,
-                "What the app drew",
-                "the window's own view, to compare with the transcript",
+                "What the app knows",
+                &self.desktop_detail(),
                 parts.session && self.draft.session.is_some(),
                 self.draft.session.is_some(),
                 &theme,
@@ -670,7 +705,7 @@ impl FeedbackSheet {
                 .draft
                 .session
                 .as_ref()
-                .map(feedback::session_lines)
+                .map(|s| feedback::session_lines(s, &b.agents))
                 .unwrap_or_default(),
             Open::None | Open::Screenshot => vec![],
         };
@@ -715,6 +750,57 @@ impl FeedbackSheet {
             Open::None => {}
         }
         cx.notify();
+    }
+
+    /// What the window's own state amounts to, and whether any of it disagrees
+    /// with the kernel — the one thing worth reading first.
+    fn desktop_detail(&self) -> String {
+        let Some(state) = &self.draft.session else {
+            return "nothing to send".into();
+        };
+        let rows = state.get("rows").and_then(|r| r.as_array()).map_or(0, Vec::len);
+        let records = state
+            .get("records")
+            .and_then(|r| r.as_array())
+            .map_or(0, Vec::len);
+        let clipped = state
+            .get("records_clipped")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let known: Vec<&str> = self
+            .draft
+            .bundle
+            .as_ref()
+            .map(|b| {
+                b.agents
+                    .iter()
+                    .filter_map(|a| a.get("id").and_then(serde_json::Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let phantom = state
+            .get("rows")
+            .and_then(|r| r.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| {
+                        row.get("agent")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|a| !a.is_empty() && !known.is_empty() && !known.contains(&a))
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut detail = format!("{rows} rows, {records} records on disk");
+        if clipped > 0 {
+            detail.push_str(&format!(", {clipped} left out for size"));
+        }
+        if phantom > 0 {
+            detail.push_str(&format!(
+                " — {phantom} the kernel has no agent for",
+            ));
+        }
+        detail
     }
 
     fn shot_detail(&self) -> String {
@@ -913,6 +999,17 @@ impl FeedbackSheet {
                             .id("feedback-close")
                             .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx))),
                     )
+                    // When nothing would take the report, the thing that helps
+                    // is his words leaving this screen. Offered before Send, so
+                    // it is the first thing his eye lands on.
+                    .when(self.stranded, |row| {
+                        row.child(
+                            theme
+                                .button("Copy my words", ButtonStyle::Ghost, None)
+                                .id("feedback-copy")
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_note(cx))),
+                        )
+                    })
                     // Send is always here. It used to be hidden once anything
                     // settled, which left a failed send with no way to retry.
                     .child(

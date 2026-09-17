@@ -285,10 +285,99 @@ impl Phase {
 pub enum SessionKind {
     Dictation,
     Call {
-        /// `<machine>/<project>` for the gateway to pick the kernel; the
-        /// tab's label today.
-        project: String,
+        /// The open tab: its folder path decides which kernel the gateway
+        /// binds the call to.
+        project: CallTarget,
     },
+}
+
+/// The identity of the tab a call is for, as `session.start.project`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CallTarget {
+    /// The hub's name for the machine the folder is on (`hub.toml`'s
+    /// `machine`, or the ssh alias for a remote place). None off the hub.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// The folder's name.
+    pub project: String,
+    /// The folder's path on that machine. What the gateway binds to.
+    pub path: String,
+    /// The ssh alias when the folder is on another computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The tab's label.
+    pub name: String,
+    /// The chat so far, so the call starts knowing it: the last lines
+    /// (user, Arbos, workers, tool labels, notices, asks) and the
+    /// sub-agents on the right panel. The gateway uses this as the
+    /// on-screen chat; it does not replace the kernel's own record.
+    #[serde(skip_serializing_if = "CallContext::is_empty")]
+    pub context: CallContext,
+}
+
+/// What the tab shows when the call starts, for the gateway's narrator and
+/// the speech model: recent lines (clipped) and the workers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CallContext {
+    pub recent: Vec<ContextLine>,
+    pub agents: Vec<ContextAgent>,
+    /// Whether the main agent has a turn running right now.
+    pub running: bool,
+}
+
+impl CallContext {
+    pub fn is_empty(&self) -> bool {
+        self.recent.is_empty() && self.agents.is_empty() && !self.running
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ContextLine {
+    /// `user`, `assistant`, `worker` (a sub-agent's report), `tool` (label
+    /// only), `notice`, `asked`, `thinking`.
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ContextAgent {
+    pub name: String,
+    /// `working`, `asking`, `waiting`, `done`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+}
+
+/// The words the desktop says when a call cannot name its machine: the
+/// gateway would refuse it (`project_not_on_hub`), so the caller hears why
+/// before dialing.
+pub const NOT_ON_HUB: &str = "this computer is not on the hub, so the speech server cannot reach this project's kernel. Put the hub url, machine name and token in ~/.config/arbos/hub.toml, restart the kernel (close and reopen the tab), then call again.";
+
+impl CallTarget {
+
+    /// `<machine>/<folder>`, or the folder alone off the hub.
+    pub fn label(&self) -> String {
+        match &self.machine {
+            Some(m) => format!("{m}/{}", self.project),
+            None => self.project.clone(),
+        }
+    }
+
+    /// Whether `path`, as the gateway reports it in `session.ready.project_path`,
+    /// is this tab's folder.
+    pub fn same_place(&self, path: &str) -> bool {
+        let mine = self.path.trim_end_matches('/');
+        let theirs = path.trim_end_matches('/');
+        if mine == theirs {
+            return true;
+        }
+        // A local folder: compare what is really on disk.
+        self.host.is_none()
+            && match (std::fs::canonicalize(mine), std::fs::canonicalize(theirs)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            }
+    }
 }
 
 /// A snapshot for the UI: the take so far and the state.
@@ -305,6 +394,9 @@ pub struct Peek {
     pub mic_error: Option<String>,
     /// The output device replies play through, once the first reply played.
     pub speaker_device: String,
+    /// The folder the gateway bound the call to, and its name for it.
+    pub project_path: String,
+    pub project_label: String,
     /// The work sound: playing now, which agents the gateway says are
     /// working, whether its state went stale (no frame for 12 s), which sound.
     pub work_active: bool,
@@ -378,6 +470,10 @@ struct Shared {
     played: u64,
     interrupts: u32,
     call: bool,
+    /// The folder the gateway bound the call to (`session.ready.project_path`),
+    /// and the roster's name for it. Empty from an older gateway.
+    project_path: String,
+    project_label: String,
     muted: bool,
     last_said: String,
 }
@@ -409,6 +505,24 @@ pub fn configured() -> bool {
     crate::kernel::voice_config().is_some()
 }
 
+/// Whether the configured speech server runs on this computer (a loopback
+/// `voice_url`). A gateway elsewhere can only reach this computer's kernels
+/// through the hub, so a call from a machine off the hub has nowhere to go.
+pub fn gateway_is_local() -> bool {
+    let Some(cfg) = crate::kernel::voice_config() else {
+        return false;
+    };
+    let rest = cfg
+        .url
+        .split("://")
+        .nth(1)
+        .unwrap_or(&cfg.url);
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    let host = host.trim_matches(['[', ']']);
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+}
+
 pub fn status() -> Peek {
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
     let Some(session) = hold.as_ref() else {
@@ -429,6 +543,8 @@ pub fn status() -> Peek {
         mic_device: s.mic_device.clone(),
         mic_error: s.mic_error.clone(),
         speaker_device: s.speaker_device.clone(),
+        project_path: s.project_path.clone(),
+        project_label: s.project_label.clone(),
         work_active: s.work.on.load(std::sync::atomic::Ordering::Relaxed),
         work_agents: s
             .activity
@@ -475,13 +591,13 @@ pub fn in_call() -> bool {
 /// Call `project`: open a call session (a dictation session, if any, ends),
 /// keep the mic open, and let the gateway's narrator speak. Blocks until the
 /// gateway answers `session.ready` or the connect times out.
-pub fn call_start(project: &str) -> Result<()> {
+pub fn call_start(project: &CallTarget) -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
     // No microphone program means a call that streams silence and hears
     // nothing back: refuse now, with the install hint, not after connecting.
     mic_command().map_err(|e| anyhow!("no microphone for the call: {e}"))?;
     let kind = SessionKind::Call {
-        project: project.to_string(),
+        project: project.clone(),
     };
     ensure_session(&cfg, &kind)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
@@ -493,6 +609,19 @@ pub fn call_start(project: &str) -> Result<()> {
         if !s.call {
             bail!(
                 "the speech server did not open a call (session.ready.mode != call); does it have a kernel?"
+            );
+        }
+        // The gateway says which folder it bound the call to. Another folder
+        // is the wrong agent: hang up rather than talk into it. An older
+        // gateway that says nothing is trusted, as before.
+        if !s.project_path.is_empty() && !project.same_place(&s.project_path) {
+            let bound = s.project_path.clone();
+            drop(s);
+            drop(hold);
+            shutdown();
+            bail!(
+                "the speech server attached the call to {bound}, not this project ({}); it is serving another folder",
+                project.path
             );
         }
         s.finals.clear();
@@ -877,7 +1006,10 @@ async fn run(
         start["channel"] = json!("voice");
         start["device"] = json!("desktop");
         start["screen"] = json!("on your screen");
-        if !project.is_empty() {
+        // The tab's identity, whole: the gateway binds by `path` (its own
+        // kernel, a kernel on its host, or the hub by the roster's place) and
+        // refuses with the path in its message when nothing serves it.
+        if !project.project.is_empty() || !project.path.is_empty() {
             start["project"] = json!(project);
         }
     }
@@ -901,6 +1033,8 @@ async fn run(
     let mut activity_seen_at: Option<Instant> = None;
     let mut ready_sent = false;
     let mut speaking = false;
+    let mut reply_speaker = String::new();
+    let mut narrated_recently: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     // The last sign of life from the reply now playing — its start, or its
     // latest audio frame — for the stall guard.
     let mut reply_alive_at: Option<Instant> = None;
@@ -1095,6 +1229,21 @@ async fn run(
                                 s.text_backend = field("text");
                                 s.call = field("mode") == "call"
                                     && v.get("narrator").and_then(Value::as_bool).unwrap_or(false);
+                                // Where the call is: the folder the kernel serves,
+                                // from the hub roster (`project_info.place`), or
+                                // nothing from a gateway that does not say.
+                                let info = v.get("project_info");
+                                s.project_path = info
+                                    .and_then(|i| i.get("place").or_else(|| i.get("path")))
+                                    .and_then(Value::as_str)
+                                    .or_else(|| v.get("project_path").and_then(Value::as_str))
+                                    .unwrap_or("")
+                                    .to_string();
+                                s.project_label = info
+                                    .and_then(|i| i.get("name"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
                                 if s.phase == Some(Phase::Connecting) {
                                     s.phase = Some(Phase::Ready);
                                 }
@@ -1136,6 +1285,13 @@ async fn run(
                                 if s.call {
                                     // A call has no take: the strip shows the last utterance only.
                                     s.finals.clear();
+                                    // The caller's words go into the chat now, as a
+                                    // spoken user line. When the gateway forwards
+                                    // them to the agent, the kernel's record is this
+                                    // card's echo — never a second turn from here.
+                                    if !text.trim().is_empty() {
+                                        push_mirror(&mut s, Mirror { kind: "caller.said".into(), agent: String::new(), text: text.trim().to_string() });
+                                    }
                                 }
                                 if !text.trim().is_empty() {
                                     s.finals.push(text.trim().to_string());
@@ -1149,6 +1305,11 @@ async fn run(
                                     speaking = true;
                                     s.reply.clear();
                                 }
+                                // Who is talking: the narrator (its line is
+                                // already in the chat via narrator.say) or the
+                                // speech model itself (GPT Live answering the
+                                // caller). An older gateway names nobody: the model.
+                                reply_speaker = field("speaker");
                                 reply_alive_at = Some(Instant::now());
                                 // A reply backend of "none" plays nothing:
                                 // the phase would say speaking for no sound.
@@ -1165,6 +1326,19 @@ async fn run(
                                 speaking = false;
                                 reply_alive_at = None;
                                 let interrupted = v.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
+                                // The model's own words into the chat as they
+                                // finish; the narrator's are there already (as
+                                // narrator.say), so a reply that repeats one of
+                                // the last narrator lines is that line, not news —
+                                // a gateway that does not tag `speaker` is covered.
+                                if in_call && reply_speaker != "narrator" {
+                                    let said: String = s.reply.split_whitespace().collect::<Vec<_>>().join(" ");
+                                    let squashed: String = said.split_whitespace().collect();
+                                    if !said.is_empty() && !narrated_recently.iter().any(|n| *n == squashed) {
+                                        push_mirror(&mut s, Mirror { kind: "model.reply".into(), agent: String::new(), text: if interrupted { format!("{said} —") } else { said } });
+                                    }
+                                }
+                                reply_speaker.clear();
                                 s.work.reply_playing.store(false, std::sync::atomic::Ordering::Relaxed);
                                 if in_call {
                                     // The speaker stays open for the call; a cut reply is dropped.
@@ -1192,6 +1366,10 @@ async fn run(
                             // the chat as a `voice ·` line, and onto the call strip.
                             "narrator.say" => {
                                 let text = field("text");
+                                narrated_recently.push_back(text.split_whitespace().collect());
+                                while narrated_recently.len() > 6 {
+                                    narrated_recently.pop_front();
+                                }
                                 s.last_said = text.clone();
                                 push_mirror(&mut s, Mirror { kind: format!("narrator.say/{}", field("kind")), agent: field("ref"), text });
                             }
@@ -1256,7 +1434,16 @@ async fn run(
                             }
                             "error" => {
                                 let m = field("message");
-                                s.error = Some(if m.is_empty() { "voice server error".into() } else { m });
+                                let code = field("code");
+                                // A refusal names its cause (`project_not_on_hub`,
+                                // `project_unknown`, `project_offline`, …); the
+                                // caller reads the code and the gateway's words.
+                                s.error = Some(match (code.is_empty(), m.is_empty()) {
+                                    (true, true) => "voice server error".into(),
+                                    (true, false) => m,
+                                    (false, true) => code,
+                                    (false, false) => format!("{code}: {m}"),
+                                });
                             }
                             _ => {}
                         }
@@ -1268,7 +1455,21 @@ async fn run(
                             sink.send(text_frame(json!({ "type": "client.speaking", "speaking": on }))).await?;
                         }
                     }
-                    Message::Close(_) => bail!("{} closed the session", cfg.url),
+                    Message::Close(frame) => {
+                        if !ready_sent {
+                            // Refused before ready (a project the gateway cannot
+                            // reach closes with 4404): the caller gets the reason.
+                            let why = shared
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .error
+                                .clone()
+                                .or_else(|| frame.as_ref().map(|f| f.reason.to_string()))
+                                .unwrap_or_else(|| "closed before session.ready".into());
+                            let _ = ready.send(Err(anyhow!("{why}")));
+                        }
+                        bail!("{} closed the session", cfg.url)
+                    }
                     _ => {}
                 }
             }

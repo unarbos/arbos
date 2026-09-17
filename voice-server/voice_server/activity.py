@@ -70,6 +70,25 @@ class ActivityReporter:
     def busy(self) -> bool:
         return any(a.state != "idle" for a in self.agents.values())
 
+    def mark_working(self, agent: str = "root") -> None:
+        """Work was just handed to the agent (a delegation is on its way to the kernel): say
+        `working` now rather than when the kernel's own turn frame comes back, so the client's
+        sound starts with the wait. The kernel's frames take over from here."""
+        cur = self.agents.setdefault(agent, AgentActivity())
+        if cur.state == "idle":
+            self._set(agent, "working", "", "", "")
+
+    def summary(self) -> str:
+        """One line of what is running, for a model that needs to know: `root: tool bash (cargo
+        build); fix-tests: working`. Empty when everything is idle."""
+        parts = []
+        for name, a in self.agents.items():
+            if a.state == "idle":
+                continue
+            what = f"tool {a.tool}" + (f" ({a.detail})" if a.detail else "") if a.state == "tool" else a.state
+            parts.append(f"{name}: {what}")
+        return "; ".join(parts)
+
     def on_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         agent = str(frame.get("agent") or "")

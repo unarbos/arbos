@@ -65,7 +65,7 @@ from pathlib import Path
 from PIL import Image, ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, binary_matches_tree, desktop_build, kernel_build, pulse as display_pulse, still as display_still, tree_sha  # noqa: E402
 
 STORE = Path(os.environ.get("STORE", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983"))
 # This folder: the scripts and fake gh beside this file. The driver module
@@ -94,7 +94,6 @@ P_EDIT = "Add a mul(a, b) function to math_utils.py and call it from main.py wit
 # test is the turn under test: a delegating turn's fold is bare by design
 # (F-104) and the row had been clicking whatever fold was on screen (R10).
 P_OWN = "Run `ls` yourself with bash — no workers — and tell me in one line what is here."
-P_PERM = "Delete the file README.md with `rm -f README.md`, then recreate it with one line."
 P_PR = ("Spawn one sub-agent whose only task is to run exactly this shell command and report the URL it prints: "
         "gh pr create --base master --head cursor/parity-pill --title 'Parity PR' --body 'Opened by the parity pass.' "
         "Wait for it, then reply with that URL.")
@@ -264,7 +263,11 @@ class Pass:
             do()
         except self.drv.DriverError as err:
             msg = str(err)
-            kind = "not-reachable" if ("no element" in msg or "not reachable" in msg or "occluded" in msg) else "fail"
+            # "not on screen … clipped away" is the driver refusing to click
+            # what is not visible (R13) — the row is unreachable in this
+            # scroll position, not failing. Cycle 36 read two settings
+            # controls below the fold as fails (R24).
+            kind = "not-reachable" if ("no element" in msg or "not reachable" in msg or "occluded" in msg or "not on screen" in msg) else "fail"
             self.record(element, screen, action, expected, msg, kind, self.still(element) if still else "")
             return None
         except Exception as err:
@@ -334,6 +337,25 @@ class Pass:
 
     # -- app helpers ------------------------------------------------------
 
+    def reveal(self, el: str, body: str, tries: int = 8) -> bool:
+        """Scroll `body` until `el` is on screen. True when it is (or was)."""
+        for _ in range(tries):
+            try:
+                found = self.app.find(el)
+            except self.drv.DriverError:
+                return False
+            if found.get("visible") or found.get("reachable"):
+                return True
+            win_h = (self.state().get("window") or {}).get("height") or 900
+            y = found.get("y", 0)
+            step = 240 if y > win_h / 2 else -240
+            try:
+                self.app.scroll(body, dy=-step)
+            except self.drv.DriverError:
+                return False
+            time.sleep(0.4)
+        return False
+
     def wait(self, pred, timeout: float = 60, every: float = 0.5, what: str = "condition"):
         t0 = time.monotonic()
         last = None
@@ -380,8 +402,20 @@ class Pass:
             if self.wait(lambda s: not busy(s), 15, what="stop all"):
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop All ended the workers", "pass", self.still("recover-stop-all"))
                 return
-        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "turn still busy after Stop; opening a new chat", "fail", self.still("recover-stuck"))
+        # Which agents are still busy, in the kernel's own words, so the
+        # row says who held the turn — a root waiting on a spawn (the
+        # kernel holds Stop until the child returns; filed 2026-09-17) reads
+        # differently from a worker that ignored Stop.
+        who = [(c.get("title") or c.get("name") or c.get("id"), c.get("live_status") or c.get("status")) for c in sessions(self.state()) if c.get("streaming") or c.get("turn_open")]
+        self.stop_failures = getattr(self, "stop_failures", 0) + 1
+        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", f"turn still busy after Stop ({self.stop_failures}x this run); busy={who!r}; opening a new chat", "fail", self.still("recover-stuck"))
         self.context_lost = getattr(self, "current_screen", None)
+        # Twice in one run is the kernel holding Stop, not a row's fault:
+        # every phase after this would fail the same way and bury the
+        # run's real rows (cycle 37: 17 fails from one event). Say so once
+        # and let the main loop mark what follows not-reachable (R27).
+        if self.stop_failures >= 2:
+            self.kernel_holds_stop = True
         self.app.key("cmd-n"); time.sleep(1.5)
         try:
             self.app.wait_element("composer-field", timeout=8, reachable=True)
@@ -851,21 +885,11 @@ class Pass:
                 self.gap("ask-skip", sc, "click", "no ask-skip element")
         self.wait_idle(60)
         self.recover()
-        # Permission strip.
-        sc = "permission-strip"
-        self.send(P_PERM)
-        s = self.wait(lambda s: (active(s) or {}).get("permission") or not busy(s), 60, what="permission")
-        if s and (active(s) or {}).get("permission"):
-            self.inv(sc)
-            if self.app.exists("permission-always"):
-                self.check("permission-always", sc, "toggle Always allow", "toggle flips (no state field)", lambda: self.app.click("permission-always"), None)
-            deny = self.first("no*") ; allow = self.first("yes*")
-            if allow:
-                self.check(allow.rsplit(".", 1)[-1], sc, "click allow", "permission cleared", lambda: self.app.click(allow), lambda a, b: not (active(b) or {}).get("permission"))
-            else:
-                self.gap("allow", sc, "click", "no yes/yes-always element")
-        else:
-            self.gap("permission-strip", sc, "trigger", "no permission prompt appeared for a shell rm (strip is macOS-alert driven)")
+        # The approval card (`permission-strip`) is gone: nothing ever
+        # emitted the two events that opened it, so this row read
+        # `not-reachable` in every gate since it was written. The kernel's
+        # approvals arrive as `ask` frames and are driven by the ask rows
+        # above (rig audit R23).
         self.wait_idle(90)
 
     def phase_plan(self) -> None:
@@ -1236,6 +1260,39 @@ class Pass:
         the labelled control, Escape, ⌘1, the tab; and Start the page…
         lands in the chat with a prompt in the composer."""
         sc = "project-page"
+        # Since the side-panel rewrite the Project page is the panel's
+        # Project tab, closed by default: open the drawer first, and when
+        # there is still no full-pane page, drive the ways out of the tab
+        # instead (R25 — these rows read not-reachable in cycle 36 and said
+        # nothing; Jacob's -24 asked for a clear way out of the page).
+        panel = lambda: (self.state().get("panel") or {})
+        if not self.app.exists("panel-project-head") and self.app.exists("toggle-panel") and not panel().get("open"):
+            self.app.click("toggle-panel"); time.sleep(1.0)
+        if self.app.exists("panel-tab-0") and not self.app.exists("page-back-to-chat"):
+            tabs = panel().get("tabs") or []
+            active = panel().get("active")
+            self.record("panel-project-tab", sc, "open the drawer", "the Project tab is the drawer's first tab and is active",
+                        f"tabs={[t.get('kind') for t in tabs]} active={active}",
+                        "pass" if tabs and tabs[0].get("kind") == "project" and active == 0 else "fail", self.still("panel-project-tab"))
+            self.check("panel-escape-closes", sc, "Escape with the drawer open", "the drawer closes; the chat stays",
+                       lambda: self.app.key("escape"), lambda a, b: (b.get("panel") or {}).get("open") is False and b.get("pane") == "chat")
+            self.app.key("cmd-b"); time.sleep(0.8)
+            if self.app.exists("panel-close"):
+                self.check("panel-close", sc, "click the drawer's close mark", "the drawer closes",
+                           lambda: self.app.click("panel-close"), lambda a, b: (b.get("panel") or {}).get("open") is False)
+            else:
+                self.gap("panel-close", sc, "click", "no close mark on the drawer")
+            self.app.key("cmd-b"); time.sleep(0.8)
+            if self.app.exists("panel-expand"):
+                # Expand's effect is not in the driver's state yet (the
+                # drawer's width stayed 280 at 1100 wide — bounded by the
+                # chat's minimum, or a no-op; the side-panel owner is asked):
+                # recorded with the widths, not judged.
+                self.check("panel-expand", sc, "click expand", "the drawer widens or takes the pane",
+                           lambda: self.app.click("panel-expand"),
+                           lambda a, b: f"unverified: width {(a.get('panel') or {}).get('width')} -> {(b.get('panel') or {}).get('width')}, no other state change" if self.diff(a, b) == "no state change" else self.diff(a, b))
+                self.app.key("escape"); time.sleep(0.6)
+            return
         if not self.app.exists("panel-project-head"):
             self.gap("project-page-back", sc, "-", "no panel-project-head on this layout")
             return
@@ -1274,8 +1331,15 @@ class Pass:
             return
         sc = "right-panel"
         self.inv(sc)
-        self.check("toggle-panel", sc, "click", "panel_open flips", lambda: self.app.click("toggle-panel"), lambda a, b: a["panel_open"] != b["panel_open"])
-        self.check("cmd-b", sc, "cmd-b", "panel_open flips back", lambda: self.app.key("cmd-b"), lambda a, b: a["panel_open"] != b["panel_open"])
+        # `panel_shown` is what is on screen; `panel_open` is the wish (true
+        # at 900 wide while nothing is drawn, F-161). The row asserts on
+        # both: the wish flips and the drawing follows, or says why not.
+        def flips(a, b):
+            drawn = "panel_shown" in b
+            ok = a["panel_open"] != b["panel_open"] and (not drawn or b.get("panel_shown") == b["panel_open"] or f"shown={b.get('panel_shown')} (window too narrow for the drawer)")
+            return ok and f"open {a['panel_open']}->{b['panel_open']} shown={b.get('panel_shown')}"
+        self.check("toggle-panel", sc, "click", "panel_open flips and panel_shown follows", lambda: self.app.click("toggle-panel"), flips)
+        self.check("cmd-b", sc, "cmd-b", "panel_open flips back and panel_shown follows", lambda: self.app.key("cmd-b"), flips)
         if not self.state()["panel_open"]:
             self.app.key("cmd-b")
         if self.app.exists("panel-set-goals"):
@@ -1300,7 +1364,7 @@ class Pass:
         self.check("alt-cmd-down", sc, "alt-cmd-down", "steps to the next agent", lambda: self.app.key("alt-cmd-down"), lambda a, b: b["active_session"] != a["active_session"])
         self.check("panel-scroll", sc, "scroll the panel", "no error", lambda: self.app.scroll("panel-scroll", dy=-200), None)
         rows = self.ids("panel-agent-*")
-        if rows:
+        if rows and self.reveal(rows[0], "panel-scroll"):
             self.app.click(rows[0])
 
     def phase_settings(self) -> None:
@@ -1312,6 +1376,12 @@ class Pass:
         self.go_project()
         if not any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
             for row in self.ids("panel-agent-*"):
+                # A row scrolled out of the drawer (a run that opened many
+                # chats) is brought back or skipped, never a crash that
+                # takes the phase with it (cycle 37: phases R and W died on
+                # `panel-agent-27 … clipped away`).
+                if not self.reveal(row, "panel-scroll"):
+                    continue
                 self.app.click(row); time.sleep(0.5)
                 if any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
                     break
@@ -1349,8 +1419,18 @@ class Pass:
                 self.check(name, "settings", "click section", "section body changes (element set differs)",
                            lambda s_=s_: self.app.click(s_), lambda a, b: (len(self.ids()) > 0 and f"{len(self.ids())} interactive ids in section") or "unverified: nothing listed", settle=0.6)
                 self.inv(f"settings-{name}")
-                for el in self.ids():
+                # Only the tab's own controls. Settings shares the window
+                # now, so a bare ids() lists the strip and the bar too — and
+                # the walk clicked `tab-0` then `tab-close-0`, closing the
+                # project tab under itself (cycle 35: "No tab open", every
+                # phase after it without a composer). Rig audit R22.
+                for el in [e for e in self.ids() if ".settings-body." in e]:
                     short = el.rsplit(".", 1)[-1]
+                    # Bring a control below the fold onto the screen before
+                    # touching it: the driver refuses a click on what is not
+                    # visible (R13), and two settings controls read
+                    # not-reachable for that alone (R24's next step).
+                    self.reveal(el, "settings-body")
                     if short.startswith("section-") or short in ("settings-body", "settings-back-to-chat", "tab-settings", "tab-settings-close"):
                         continue
                     if short == "bionic-reading":
@@ -1850,6 +1930,8 @@ def main() -> int:
     ap.add_argument("--branch", required=True)
     ap.add_argument("--binary", required=True)
     ap.add_argument("--kernel", required=True)
+    ap.add_argument("--binary-from-elsewhere", action="store_true",
+                    help="the desktop binary is not built from this checkout (a release, another branch); skip the tree check")
     ap.add_argument("--driver-py", default=None)
     # openai/* through this OpenRouter key is blocked (403 policy violation, 2026-09-16); Gemini answers
     ap.add_argument("--model", default=os.environ.get("QA_MODEL", "google/gemini-2.5-flash"))
@@ -1888,12 +1970,34 @@ def main() -> int:
     os.environ["FAKE_GH_STATE"] = str(fake_gh / "counter")
     build = kernel_build(args.kernel)
     log(f"kernel under test: {build}")
+    # The desktop's build too, from the binary, against the tree it should
+    # have come from. A `cargo build` that failed leaves the previous binary
+    # in target/, and every copy-then-launch step downstream runs it without
+    # a word: a gate that only reads the kernel's build can pass a whole
+    # cycle on a desktop that is not the PR's (rig audit R21, after the QA
+    # loop's `-- desktop main: app build failed` one-liner cost it fifteen
+    # scenarios). Unless told the binary is from elsewhere, a mismatch fails.
+    app_build = desktop_build(args.binary)
+    src_sha = tree_sha(PARITY.parents[1])
+    log(f"desktop under test: {app_build} (tree {src_sha or '?'})")
     log(f"launching {args.binary}")
     app = drv.Arbos.launch(binary=args.binary, env={"ARBOS_KERNEL_BIN": args.kernel, "DISPLAY": DISPLAY, "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(xdg / "data")},
                            log=str(outdir / "app.log"), timeout=90)
     p = Pass(drv, app, args.branch, outdir, store_dir)
     # The first row of every run names the kernel the run measured against.
     p.record("kernel", "rig", "arbos-kernel --version", "the build under test, from the binary", build, "info")
+    stale = not args.binary_from_elsewhere and not binary_matches_tree(app_build, src_sha)
+    p.record("desktop", "rig", "arbos-desktop --version", f"the binary under test is this tree's ({src_sha or '?'})", app_build,
+             "fail" if stale else "info")
+    if stale:
+        log(f"FAULT: the desktop binary is {app_build}, not a build of tree {src_sha}: a failed build left the old one behind")
+        p.stop_phase("rig", f"desktop binary {app_build} is not tree {src_sha}", list(args.phases), fault=True)
+        p.save()
+        try:
+            app.close()
+        except Exception:
+            pass
+        return 2
     phases = {"L": p.phase_launch, "C": p.phase_composer, "T": p.phase_turn, "Q": p.phase_question, "P": p.phase_plan,
               "S": p.phase_subagents, "A": p.phase_artifacts, "B": p.phase_tabs, "R": p.phase_panel, "W": p.phase_settings,
               "M": p.phase_menus, "G": p.phase_prs, "N": p.phase_permissions,
@@ -1907,6 +2011,9 @@ def main() -> int:
             if not fn:
                 continue
             log(f"== phase {letter} {fn.__name__}")
+            if getattr(p, "kernel_holds_stop", False) and busy(p.state()):
+                p.stop_phase(fn.__name__, "the kernel held Stop over a waiting spawn twice this run (filed 2026-09-17-stop-waits-for-a-blocking-spawn); the phase would only repeat the cascade", [letter], fault=False)
+                continue
             # The rig's own pulse before every phase: a display that has
             # stopped answering fails the run loudly (the ten-minute hang
             # of 2026-09-16 would otherwise have passed as quiet).

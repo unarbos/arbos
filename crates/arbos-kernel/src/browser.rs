@@ -61,6 +61,15 @@ impl BrowserHub {
         true
     }
 
+    /// Every registered page: (owner, current URL), for `surfaces`.
+    pub fn pages(&self) -> Vec<(String, String)> {
+        let pages = self.pages.lock().unwrap();
+        let mut out: Vec<(String, String)> =
+            pages.iter().map(|(a, u)| (a.clone(), u.clone())).collect();
+        out.sort();
+        out
+    }
+
     /// Forget the agent's page. The next action starts a fresh one.
     pub fn close(&self, agent: &str) -> bool {
         self.pages.lock().unwrap().remove(agent).is_some()

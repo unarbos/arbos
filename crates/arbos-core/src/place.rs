@@ -1,5 +1,30 @@
 use std::path::{Path, PathBuf};
 
+/// Which folder a `.arbos/` store *is*, as the file system knows it —
+/// device and inode — apart from the path it is at. A kernel records this
+/// at start and compares before it writes: a store moved out from under
+/// it (the person renamed the project folder) keeps its identity at the
+/// new path, and whatever sits at the old path is not the store the
+/// kernel opened. Writing there would recreate the project as a ghost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreId {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// What a look at `place.arbos()` finds, against the id recorded at start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreState {
+    /// The same folder.
+    Intact,
+    /// Nothing at the path.
+    Gone,
+    /// A folder at the path that is not the one the kernel opened: the
+    /// store moved away and something (often the kernel's own late
+    /// writes) made a new one where it was.
+    Moved,
+}
+
 /// A directory the kernel serves. Remote places are the same folder on a host;
 /// the window tunnels. The kernel only ever sees a local path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +43,20 @@ impl Place {
 
     pub fn arbos(&self) -> PathBuf {
         self.path.join(".arbos")
+    }
+
+    /// The store's identity now, or None when nothing is at the path.
+    pub fn store_id(&self) -> Option<StoreId> {
+        store_id_of(&self.arbos())
+    }
+
+    /// The store at the path, against the identity recorded at start.
+    pub fn store_state(&self, opened: StoreId) -> StoreState {
+        match self.store_id() {
+            None => StoreState::Gone,
+            Some(now) if now == opened => StoreState::Intact,
+            Some(_) => StoreState::Moved,
+        }
     }
 
     pub fn agents_dir(&self) -> PathBuf {
@@ -46,14 +85,39 @@ impl Place {
         self.arbos().join("kernel.json")
     }
 
-    /// The live `kernel.json`, wherever this kernel or an older one put it.
+    /// The `kernel.json` that describes the kernel actually running here.
+    ///
+    /// Both files can exist at once and disagree, because they have
+    /// different writers. A kernel from before the `runtime/` split writes
+    /// only the legacy path; a kernel after it writes both. So a place
+    /// that has ever been served by a newer kernel keeps a `runtime/`
+    /// file for ever, and if an older kernel then serves that place —
+    /// after a rollback, or because a supervisor restarted the
+    /// `.previous` binary — the newer file stays behind, naming a process
+    /// that is gone.
+    ///
+    /// Preferring the newer path made every reader believe it. Measured
+    /// on the disposable target on 2026-09-17: a live kernel on
+    /// `67d066eb48f0` had written the legacy file with its own pid, while
+    /// `runtime/kernel.json` still named a dead pid on `cbbe9922d6a2` —
+    /// so the sweep and `update --place` reported the newer build for a
+    /// place serving older code. That is the lie this whole area exists
+    /// to prevent, arriving by a different route than `subnet120` did.
+    ///
+    /// So the question asked is not "which path is newer" but "which of
+    /// these names a process that is still there". When neither does, the
+    /// newer path wins as before, because then the honest answer is that
+    /// nothing is running and either file says so.
     pub fn kernel_json_read(&self) -> PathBuf {
         let new = self.kernel_json();
-        if new.exists() {
-            new
-        } else {
-            self.legacy_kernel_json()
+        let legacy = self.legacy_kernel_json();
+        if names_a_live_pid(&new) {
+            return new;
         }
+        if names_a_live_pid(&legacy) {
+            return legacy;
+        }
+        if new.exists() { new } else { legacy }
     }
 
     pub fn focus_path(&self) -> PathBuf {
@@ -66,6 +130,21 @@ impl Place {
 
     pub fn lock_path(&self) -> PathBuf {
         self.runtime_dir().join("lock")
+    }
+
+    /// Where kernels before the `runtime/` split took the place lock. A
+    /// kernel takes both, so an old build and a new one contend for the
+    /// same place and one of them loses honestly — with only the new
+    /// path, two kernels of two builds served one store at once (the
+    /// update worker's proof, 2026-09-17).
+    pub fn legacy_lock_path(&self) -> PathBuf {
+        self.arbos().join("lock")
+    }
+
+    /// The lock files a holder writes its pid into, legacy first: the one
+    /// an old kernel reads and the one a new kernel reads.
+    pub fn lock_paths(&self) -> [PathBuf; 2] {
+        [self.legacy_lock_path(), self.lock_path()]
     }
 
     /// The `.arbos/` folder's own git repository, when bootstrap made one.
@@ -85,5 +164,228 @@ impl Place {
     /// per child under here. A cwd inside it is that child's whole world.
     pub fn worktrees_dir(&self) -> PathBuf {
         self.arbos().join("worktrees")
+    }
+}
+
+/// Whether a `kernel.json` describes a process that is still there.
+///
+/// Absent, unreadable, or naming a pid nothing answers for all count as
+/// no: the caller is choosing between two records and wants the one that
+/// is about a live kernel, not the one that parses.
+fn names_a_live_pid(path: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(pid) = json.get("pid").and_then(|p| p.as_i64()) else {
+        return false;
+    };
+    // Guard the pids that do not mean one process: 0 is this process's
+    // whole group and a negative pid is a group too, so signalling either
+    // would answer a question nobody asked — and `kill(0, 0)` always
+    // succeeds, which would make `"pid": 0` read as live for ever.
+    if pid <= 0 || pid > i64::from(i32::MAX) {
+        return false;
+    }
+    // SAFETY: signal 0 asks whether the pid could be signalled and sends
+    // nothing.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(test)]
+mod kernel_json_tests {
+    use super::*;
+
+    fn place_with(runtime: Option<i64>, legacy: Option<i64>) -> (tempfile::TempDir, Place) {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(place.runtime_dir()).unwrap();
+        let write = |path: PathBuf, pid: i64| {
+            std::fs::write(path, format!(r#"{{"pid": {pid}, "url": "tcp://x"}}"#)).unwrap();
+        };
+        if let Some(pid) = runtime {
+            write(place.kernel_json(), pid);
+        }
+        if let Some(pid) = legacy {
+            write(place.legacy_kernel_json(), pid);
+        }
+        (dir, place)
+    }
+
+    /// A pid nothing can be running under, so `kill -0` says no.
+    const DEAD: i64 = 0x7FFF_FFFE;
+    fn alive() -> i64 {
+        i64::from(std::process::id())
+    }
+
+    #[test]
+    fn a_live_legacy_record_beats_a_dead_runtime_one() {
+        // The state measured on the target: an older kernel serving a
+        // place a newer one had served, so the newer file is left over.
+        let (_dir, place) = place_with(Some(DEAD), Some(alive()));
+        assert_eq!(place.kernel_json_read(), place.legacy_kernel_json());
+    }
+
+    #[test]
+    fn the_runtime_record_is_still_preferred_when_it_is_the_live_one() {
+        let (_dir, place) = place_with(Some(alive()), Some(DEAD));
+        assert_eq!(place.kernel_json_read(), place.kernel_json());
+    }
+
+    #[test]
+    fn both_live_reads_as_the_runtime_one() {
+        // The ordinary case: a current kernel writes both.
+        let (_dir, place) = place_with(Some(alive()), Some(alive()));
+        assert_eq!(place.kernel_json_read(), place.kernel_json());
+    }
+
+    #[test]
+    fn neither_live_keeps_the_old_answer() {
+        // Nothing is running, and both files say so. The newer path wins
+        // as it always did, so "no kernel here" reads the same as before.
+        let (_dir, place) = place_with(Some(DEAD), Some(DEAD));
+        assert_eq!(place.kernel_json_read(), place.kernel_json());
+    }
+
+    #[test]
+    fn only_a_legacy_file_is_found_whether_or_not_it_is_live() {
+        let (_dir, place) = place_with(None, Some(alive()));
+        assert_eq!(place.kernel_json_read(), place.legacy_kernel_json());
+        let (_dir, place) = place_with(None, Some(DEAD));
+        assert_eq!(place.kernel_json_read(), place.legacy_kernel_json());
+    }
+
+    #[test]
+    fn a_pid_of_zero_is_not_a_live_process() {
+        let (_dir, place) = place_with(Some(0), Some(alive()));
+        assert_eq!(place.kernel_json_read(), place.legacy_kernel_json());
+    }
+
+    #[test]
+    fn rubbish_in_a_file_is_not_a_live_process() {
+        let (_dir, place) = place_with(None, Some(alive()));
+        std::fs::write(place.kernel_json(), "not json at all").unwrap();
+        assert_eq!(place.kernel_json_read(), place.legacy_kernel_json());
+    }
+}
+
+/// Device and inode of a directory, when it exists.
+pub fn store_id_of(dir: &Path) -> Option<StoreId> {
+    let meta = std::fs::metadata(dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(StoreId {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // No stable identity to compare: every look reads as the same
+        // folder, which is the pre-guard behaviour.
+        Some(StoreId { dev: 0, ino: 0 })
+    }
+}
+
+/// Where a store with `id` is now, when the process can tell: its own
+/// current directory, if that is a place whose `.arbos/` has the id (the
+/// desktop starts a kernel with the project as its cwd, and a cwd follows
+/// the folder when it is renamed).
+pub fn store_now_at(id: StoreId) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    (store_id_of(&cwd.join(".arbos")) == Some(id)).then_some(cwd)
+}
+
+/// The store this process opened, remembered once so that any writer —
+/// a tool, a notification, the plan, the log — can ask whether the folder
+/// at the place's path is still that store before it writes. A process
+/// that never remembers one (a CLI, a test helper) reads every store as
+/// intact.
+static OPENED: std::sync::OnceLock<StoreId> = std::sync::OnceLock::new();
+
+/// Record the store a kernel opened. Once per process; a second call is
+/// ignored.
+pub fn remember_opened(id: StoreId) {
+    let _ = OPENED.set(id);
+}
+
+/// The store this process opened, when it remembered one.
+pub fn opened() -> Option<StoreId> {
+    OPENED.get().copied()
+}
+
+/// Whether `arbos_dir` is the store this process opened — or no store was
+/// remembered. False means: the folder was moved or replaced, and a write
+/// here would land somewhere the project is not (a ghost at the old path).
+pub fn store_intact(arbos_dir: &Path) -> bool {
+    store_intact_against(arbos_dir, opened())
+}
+
+fn store_intact_against(arbos_dir: &Path, opened: Option<StoreId>) -> bool {
+    match opened {
+        None => true,
+        Some(id) => store_id_of(arbos_dir) == Some(id),
+    }
+}
+
+/// `store_intact`, as the error a writer returns instead of writing.
+pub fn check_store(arbos_dir: &Path) -> std::io::Result<()> {
+    check_store_against(arbos_dir, opened())
+}
+
+fn check_store_against(arbos_dir: &Path, opened: Option<StoreId>) -> std::io::Result<()> {
+    if store_intact_against(arbos_dir, opened) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "the project folder was moved or replaced: {} is not the store this kernel opened, and nothing is written there",
+            arbos_dir.display()
+        )))
+    }
+}
+
+#[cfg(test)]
+mod store_id_tests {
+    use super::*;
+
+    /// The rename under a running kernel: the store keeps its identity at
+    /// the new path; the old path is Gone, then — once something makes a
+    /// folder there — Moved; a writer asked first refuses.
+    #[test]
+    fn a_renamed_store_is_intact_where_it_went_and_foreign_where_it_was() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old = Place::new(dir.join("w1"));
+        std::fs::create_dir_all(old.arbos()).unwrap();
+        let id = old.store_id().expect("an id");
+        assert_eq!(old.store_state(id), StoreState::Intact);
+        assert!(check_store_against(&old.arbos(), Some(id)).is_ok());
+        // No store remembered: every folder reads as intact (a CLI).
+        assert!(check_store_against(&old.arbos(), None).is_ok());
+
+        std::fs::rename(old.path(), dir.join("w1-moved")).unwrap();
+        let moved = Place::new(dir.join("w1-moved"));
+        assert_eq!(
+            moved.store_state(id),
+            StoreState::Intact,
+            "followed the folder"
+        );
+        assert_eq!(old.store_state(id), StoreState::Gone);
+        assert!(check_store_against(&old.arbos(), Some(id)).is_err());
+
+        // A late write's `create_dir_all` at the old path: a new folder, a
+        // new inode — Moved, and still refused.
+        std::fs::create_dir_all(old.arbos()).unwrap();
+        assert_eq!(old.store_state(id), StoreState::Moved);
+        let err = check_store_against(&old.arbos(), Some(id)).unwrap_err();
+        assert!(err.to_string().contains("moved or replaced"), "{err}");
+        assert!(check_store_against(&moved.arbos(), Some(id)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

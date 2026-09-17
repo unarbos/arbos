@@ -39,7 +39,7 @@ impl Tool for Undo {
         Ok(Plan::access(Access::exclusive()))
     }
     fn run(&self, cx: RunCx, _args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || undo(&cx.cwd, cx.turn_line))
+        blocking(move || undo(&cx.cwd, cx.turn_line, cx.turn_ts))
     }
 }
 
@@ -133,7 +133,27 @@ pub fn snapshot_turn_record(
     agent: &str,
     line: u64,
 ) -> Result<Option<Checkpoint>> {
-    snapshot(cwd)?;
+    snapshot_turn_record_with_mark(cwd, agent_dir, agent, line).map(|r| r.map(|(cp, _)| cp))
+}
+
+/// `snapshot_turn_record`, and beside the record the reason the old undo
+/// mark could not be cleared, when it could not — for the turn to say on
+/// the transcript that this turn has no undo point.
+pub fn snapshot_turn_record_with_mark(
+    cwd: &Path,
+    agent_dir: &Path,
+    agent: &str,
+    line: u64,
+) -> Result<Option<(Checkpoint, Option<String>)>> {
+    // The record first, in the agent's folder; the old mark's removal
+    // after, and its failure is not this record's failure. Clearing the
+    // mark needs write permission on `runtime/` — the resource whose
+    // failure is the whole reason a stale mark would matter (qal-j22,
+    // arm c: a read-only folder). With the record written, `undo`
+    // refuses that stale mark by its time; with the record *not* written
+    // because the mark could not be cleared, `undo` read the previous
+    // record, matched the stale mark by line and time, and reset to it.
+    // A recovery must not need the resource that failed.
     if !cwd.join(".git").exists() {
         return Ok(None);
     }
@@ -160,8 +180,18 @@ pub fn snapshot_turn_record(
         .with_context(|| format!("open {}", path.display()))?
         .write_all(text.as_bytes())
         .with_context(|| format!("append {}", path.display()))?;
-    let _ = agent;
-    Ok(Some(cp))
+    let mark_error = match snapshot(cwd) {
+        Ok(()) => None,
+        Err(e) => {
+            // Said, not swallowed; the record stands and its time is what
+            // `undo` checks the mark against.
+            eprintln!(
+                "checkpoint {agent}:{line}: {e:#}; undo for this turn is refused until its mark is written"
+            );
+            Some(format!("{e:#}"))
+        }
+    };
+    Ok(Some((cp, mark_error)))
 }
 
 /// The expensive half, on the blocking pool while the turn runs: the
@@ -175,6 +205,25 @@ pub fn snapshot_turn_tree(
     agent: &str,
     cp: &Checkpoint,
 ) -> Result<()> {
+    snapshot_turn_tree_unless(cwd, agent_dir, agent, cp, None)
+}
+
+/// What the record says when the tree was abandoned: the turn went on
+/// before the snapshot finished, so a tree taken now might hold the
+/// turn's own changes and is not kept (qal-j17's wrong-checkpoint shape).
+pub const TREE_TOO_SLOW: &str = "tree not saved: the working tree took too long to snapshot and the turn went on without it — a rewind of files to this turn is refused; the transcript rewind still works";
+
+/// `snapshot_turn_tree`, with a flag the turn raises when it stopped
+/// waiting for the tree: a tree finished after that is dropped and the
+/// record says why, rather than filled in from a state the turn may
+/// already have touched.
+pub fn snapshot_turn_tree_unless(
+    cwd: &Path,
+    agent_dir: &Path,
+    agent: &str,
+    cp: &Checkpoint,
+    abandoned: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     let line = cp.line;
     let head = &cp.head;
     // Test knob: a slow `add -A`, as a large repository has.
@@ -185,6 +234,10 @@ pub fn snapshot_turn_tree(
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     let (work, clean, work_error) = match work_commit(cwd, head) {
+        _ if abandoned.is_some_and(|a| a.load(std::sync::atomic::Ordering::SeqCst)) => {
+            eprintln!("checkpoint {agent}:{line}: {TREE_TOO_SLOW}");
+            (None, false, Some(TREE_TOO_SLOW.to_string()))
+        }
         Ok(Some(w)) => (Some(w), false, None),
         Ok(None) => (None, true, None),
         Err(why) => {
@@ -224,9 +277,12 @@ pub fn snapshot_turn_tree(
     // stale: `undo` on a mark from an earlier turn would reset HEAD to
     // that turn's commit. No mark → `undo` refuses and says so (#444).
     // Written atomically, with the line the turn began at (#392).
+    // And with the record's own time: a line recurs after a rewind, and a
+    // stale mark that could not be removed (a read-only folder, qal-j22)
+    // would match a new turn at the same line by line alone.
     if let Err(e) = arbos_core::record::write_atomic(
         &mark,
-        format!("{head}\n{second}\nline:{line}\n").as_bytes(),
+        format!("{head}\n{second}\nline:{line}\nts:{}\n", cp.ts).as_bytes(),
     ) {
         let _ = std::fs::remove_file(&mark);
         return Err(e.context("the undo mark could not be written; undo is refused for this turn"));
@@ -304,8 +360,14 @@ pub fn settle_tree(agent_dir: &Path, cp: &Checkpoint, wait: std::time::Duration)
     let sidecar = tree_sidecar(agent_dir, cp.line);
     let deadline = std::time::Instant::now() + wait;
     loop {
+        // The sidecar is *this* record's when its `ts` is this record's:
+        // the fact that identifies it. Line and HEAD alone took a cut
+        // turn's sidecar for the new turn at the same line (qal-j20: HEAD
+        // had not moved all session, the common case) and restored the
+        // tree the person had rewound away, saying restored.
         if let Ok(text) = std::fs::read_to_string(&sidecar)
             && let Ok(filled) = serde_json::from_str::<Checkpoint>(&text)
+            && filled.ts == cp.ts
             && filled.head == cp.head
         {
             return filled;
@@ -1093,7 +1155,7 @@ fn base_branch(cwd: &Path, git: &dyn Fn(&[&str]) -> Option<String>) -> String {
     "main".into()
 }
 
-pub fn undo(cwd: &Path, turn_line: u64) -> Result<ToolOut> {
+pub fn undo(cwd: &Path, turn_line: u64, turn_ts: Option<i64>) -> Result<ToolOut> {
     let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
     // A confirmed read: an unreadable mark is not a mark to reset to.
     let text = match arbos_core::record::read_text(&mark).confirmed() {
@@ -1118,6 +1180,31 @@ pub fn undo(cwd: &Path, turn_line: u64) -> Result<ToolOut> {
             .next()
             .and_then(|l| l.strip_prefix("line:"))
             .and_then(|n| n.parse::<u64>().ok());
+        // The fourth: the record's time. The one fact that survives a
+        // rewind reusing the line and a folder that refused the removal
+        // of a stale mark (qal-j22, arm c): a mark this turn did not write
+        // cannot carry this turn's time.
+        let for_ts = lines
+            .next()
+            .and_then(|l| l.strip_prefix("ts:"))
+            .and_then(|n| n.parse::<i64>().ok());
+        match (turn_ts, for_ts) {
+            (Some(want), got) if got != Some(want) => {
+                return Ok(ToolOut::text(format!(
+                    "no checkpoint for this turn: the mark on disk is another turn's (its time {} is not this turn's {want}; this turn's own mark was not written); nothing reset",
+                    got.map(|t| t.to_string())
+                        .unwrap_or_else(|| "unrecorded".into())
+                )));
+            }
+            // This turn has no record, and the mark names a turn that had
+            // one: not this turn's.
+            (None, Some(_)) if turn_line > 0 => {
+                return Ok(ToolOut::text(
+                    "no checkpoint for this turn: it has no record, and the mark on disk belongs to a turn that had one; nothing reset",
+                ));
+            }
+            _ => {}
+        }
         match for_line {
             Some(l) if l == turn_line => {}
             Some(l) => {
@@ -1697,7 +1784,7 @@ mod tests {
         std::fs::write(dir.join(".arbos/runtime/checkpoint"), format!("{head}\n")).unwrap();
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("mine.txt"), "the user's own untracked file\n").unwrap();
-        let out = undo(&dir, 0).unwrap();
+        let out = undo(&dir, 0, None).unwrap();
         assert!(
             out.body.contains("untracked files left as they are"),
             "{}",
@@ -1715,9 +1802,114 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("new.txt"), "this turn's\n").unwrap();
-        let out = undo(&dir, 0).unwrap();
+        let out = undo(&dir, 0, None).unwrap();
         assert!(out.body.starts_with("restored "), "{}", out.body);
         assert!(!dir.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// qal-j22, arm (c): the runtime folder went read-only mid-session (an
+    /// ext4 remount on one I/O error), so the new turn's mark could not be
+    /// written *and* the stale one could not be removed — the recovery
+    /// needed the resource that failed. `undo` must not believe a mark it
+    /// cannot prove is this turn's: the line stamp catches a different
+    /// line, and the time stamp catches the same line reused after a
+    /// rewind. Both staged.
+    #[cfg(unix)]
+    #[test]
+    fn a_stale_mark_that_could_not_be_removed_is_not_believed_by_line_or_by_time() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = identityless_repo("undo-ro-folder");
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // Turn one: a record and its mark; the person then commits.
+        std::fs::write(dir.join("a.txt"), "turn one\n").unwrap();
+        let old = snapshot_turn_record(&dir, &agent_dir, "root", 7)
+            .unwrap()
+            .unwrap();
+        snapshot_turn_tree(&dir, &agent_dir, "root", &old).unwrap();
+        let old_head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        for args in [
+            vec!["add", "a.txt"],
+            vec![
+                "-c",
+                "user.name=me",
+                "-c",
+                "user.email=me@x",
+                "commit",
+                "-q",
+                "-m",
+                "mine",
+            ],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(&args)
+                    .current_dir(&dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let mine = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        assert_ne!(mine, old_head);
+        // The folder goes read-only. A new turn — at the SAME line, as
+        // after a rewind — cannot write its mark, and cannot remove the
+        // old one either.
+        let runtime = dir.join(".arbos/runtime");
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let fresh = snapshot_turn_record(&dir, &agent_dir, "root", 7)
+            .unwrap()
+            .unwrap();
+        let tree = snapshot_turn_tree(&dir, &agent_dir, "root", &fresh);
+        assert!(
+            tree.is_err(),
+            "the mark's write fails on the read-only folder"
+        );
+        let stale = std::fs::read_to_string(runtime.join("checkpoint")).unwrap();
+        assert!(
+            stale.contains(&format!("ts:{}", old.ts)),
+            "the stale mark survived: {stale}"
+        );
+        // The record was written although the mark could not be cleared:
+        // the kernel's undo (last record's line and time) sees the new
+        // turn, not the old one.
+        let last = checkpoints(&agent_dir).last().cloned().expect("a record");
+        assert_eq!(
+            (last.line, last.ts),
+            (fresh.line, fresh.ts),
+            "the new turn's record stands"
+        );
+        // undo for the new turn: same line, different time → refused.
+        let out = undo(&dir, last.line, Some(last.ts)).unwrap();
+        assert!(
+            out.body.contains("no checkpoint for this turn"),
+            "{}",
+            out.body
+        );
+        assert!(out.body.contains("another turn's"), "{}", out.body);
+        assert_eq!(
+            git_out(&dir, &["rev-parse", "HEAD"]).unwrap(),
+            mine,
+            "HEAD did not move"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "turn one\n"
+        );
+        // And by line, as #392 does, for a turn at another line.
+        let out = undo(&dir, 12, Some(fresh.ts)).unwrap();
+        assert!(
+            out.body.contains("no checkpoint for this turn"),
+            "{}",
+            out.body
+        );
+        assert_eq!(git_out(&dir, &["rev-parse", "HEAD"]).unwrap(), mine);
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1762,9 +1954,71 @@ mod tests {
         // The undo mark carries the tree (HEAD, the work commit) and the
         // turn line it belongs to, so a stale mark is refused.
         let mark = std::fs::read_to_string(dir.join(".arbos/runtime/checkpoint")).unwrap();
-        assert_eq!(mark.lines().count(), 3, "{mark}");
+        assert_eq!(mark.lines().count(), 4, "{mark}");
         assert_eq!(mark.lines().nth(1), on_disk[0].work.as_deref(), "{mark}");
+        assert_eq!(
+            mark.lines().nth(3),
+            Some(format!("ts:{}", cp.ts).as_str()),
+            "{mark}"
+        );
         assert_eq!(mark.lines().nth(2), Some("line:9"), "{mark}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// qal-j20 (QA's `fm-01`): a rewind cut turns whose sidecars stayed
+    /// in `checkpoints.d/`; a new turn at the same line, tree pending,
+    /// was settled from the cut turn's sidecar because line and HEAD
+    /// matched (HEAD had not moved all session), and a rewind restored
+    /// the tree the person had rewound away, saying restored. The
+    /// sidecar is this record's only when its `ts` is this record's.
+    #[test]
+    fn a_cut_turns_sidecar_at_the_same_line_is_not_taken_for_the_new_turn() {
+        let dir = identityless_repo("stale-sidecar");
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // The cut turn's tree, at line 20: it had f3.
+        std::fs::write(dir.join("f3.txt"), "bad turn's file\n").unwrap();
+        let old = snapshot_turn_record(&dir, &agent_dir, "root", 20)
+            .unwrap()
+            .unwrap();
+        snapshot_turn_tree(&dir, &agent_dir, "root", &old).unwrap();
+        let stale_sidecar = std::fs::read_to_string(tree_sidecar(&agent_dir, 20)).unwrap();
+        let stale: Checkpoint = serde_json::from_str(&stale_sidecar).unwrap();
+        assert!(stale.work.is_some());
+        // The rewind removed f3 and the record — and (before the fix) left
+        // the sidecar. Stage exactly that.
+        std::fs::remove_file(dir.join("f3.txt")).unwrap();
+        std::fs::write(agent_dir.join("checkpoints.jsonl"), "").unwrap();
+        std::fs::write(dir.join("g3.txt"), "new turn's file\n").unwrap();
+        // The new turn at the same line, its tree still pending.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let fresh = snapshot_turn_record(&dir, &agent_dir, "root", 20)
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh.ts, stale.ts);
+        assert_eq!(
+            fresh.head, stale.head,
+            "HEAD has not moved: the weak fact matches"
+        );
+        // A rewind arrives while the tree is pending: settle must not take
+        // the stale sidecar for it.
+        let settled = settle_tree(&agent_dir, &fresh, std::time::Duration::from_millis(300));
+        assert_eq!(
+            settled.work_error.as_deref(),
+            Some(TREE_PENDING),
+            "the cut turn's sidecar was taken for the new turn: {settled:?}"
+        );
+        assert!(settled.work.is_none());
+        // When the new turn's own tree lands, it settles to that one: g3, not f3.
+        snapshot_turn_tree(&dir, &agent_dir, "root", &fresh).unwrap();
+        let settled = settle_tree(&agent_dir, &fresh, std::time::Duration::from_millis(300));
+        let work = settled.work.expect("the new turn's tree");
+        assert_ne!(Some(work.as_str()), stale.work.as_deref());
+        let names = git_out(&dir, &["ls-tree", "--name-only", &work]).unwrap();
+        assert!(
+            names.contains("g3.txt") && !names.contains("f3.txt"),
+            "{names}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

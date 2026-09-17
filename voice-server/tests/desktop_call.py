@@ -81,7 +81,9 @@ async def main_async(name: str) -> int:
     try:
         duplex_url = await duplex.start()
         kernel_url = await kernel.start()
-        gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=OUT / "gateway.log", extra=[])
+        # The gateway is started for the folder, as on a real machine: a call naming that
+        # folder is its own; any other bare name it refuses (project_not_on_hub).
+        gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=OUT / "gateway.log", extra=["--kernel-place", str(place)])
         await gateway.start()
 
         xdg = OUT / "xdg"
@@ -114,6 +116,11 @@ async def main_async(name: str) -> int:
                 await asyncio.to_thread(app.key, "cmd-shift-]")
             state = await asyncio.to_thread(app.wait_state, lambda s: s["projects"][ix]["active"], 10, 0.2, "the place tab in front")
         check(state.get("call") is None, "no call before the button is pressed")
+        # The handset lives in the side panel's head; the panel is closed until asked (cmd-b).
+        if not (state.get("panel") or {}).get("open"):
+            await asyncio.to_thread(app.key, "cmd-b")
+            state = await asyncio.to_thread(app.wait_state, lambda s: bool((s.get("panel") or {}).get("open")), 10, 0.2, "the panel open")
+        await asyncio.to_thread(app.wait_state, lambda s: True, 1, 0.5, "a frame")
         await asyncio.sleep(1.0)
         screenshot(display, OUT / "01-before-call.png")
 
@@ -174,6 +181,26 @@ async def main_async(name: str) -> int:
         spoken_items = [u for u in users if any(step.get("say", "") and step["say"] in u.get("text", "") for step in steps)]
         check(bool(spoken_items), f"the caller's spoken words appear in the chat as user cards ({len(users)} user cards)")
         check(all(u.get("channel") == "voice" for u in spoken_items) and bool(spoken_items), "spoken user cards carry channel = voice (the microphone mark)")
+        # One card per utterance: the app shows the caller's words as they land and the kernel's
+        # record of the forwarded message is that card's echo, not a second card (and never a
+        # second turn: the app sends nothing itself for a spoken line).
+        for step in steps:
+            if step.get("say"):
+                n = sum(1 for u in users if step["say"] in u.get("text", ""))
+                check(n == 1, f"exactly one user card for the utterance {step['say'][:40]!r} ({n})")
+        check(len(kernel.users) <= sum(1 for step in steps if step.get("say")) + sum(1 for step in steps if step.get("text")),
+              f"the kernel got no more user frames than lines were spoken or typed ({len(kernel.users)})")
+        print("   kernel user frames:", [(u.get("channel"), u.get("kind"), str(u.get("text") or u.get("body") or "")[:50]) for u in kernel.users])
+        # The speech model's own words (small talk it answered itself) land in the chat too.
+        model_lines = [n for n in voice_lines if "call started" not in n and "call ended" not in n]
+        check(bool(model_lines), f"the chat has voice lines for what was said back ({len(model_lines)})")
+        # The call is bound to this tab's folder: the gateway either says which folder
+        # (session.ready.project_info.place) and it is this one, or says nothing (own kernel by
+        # address). Another folder would have hung up before this point.
+        bound = str(call.get("project_path") or "")
+        check(not bound or Path(bound).resolve() == place.resolve(), f"state.call.project_path is this tab's folder or unsaid ({bound!r})")
+        glog = (OUT / "gateway.log").read_text(errors="replace")
+        check("project_not_on_hub" not in glog and "refused" not in glog, "the gateway did not refuse the call")
 
         await asyncio.to_thread(app.click, "call-mute")
         state = await asyncio.to_thread(app.wait_state, lambda s: (s.get("call") or {}).get("muted") is True, 10, 0.2, "muted")

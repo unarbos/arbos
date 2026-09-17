@@ -7,6 +7,7 @@
 use crate::{
     kernel,
     model::{
+        panel::OpenedBy,
         place::Place,
         surface::{Bind, Surface},
     },
@@ -69,6 +70,59 @@ pub fn live(surface: &Surface) -> bool {
     matches!(surface.bind, Bind::Process { .. })
 }
 
+/// Whether the kernel of this row's place is answering. A row's state is not a
+/// property of the row alone: with the link gone, nothing on screen is news,
+/// and the honest word for a job we can no longer hear about is not `running`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    Live,
+    Lost,
+}
+
+/// What state a row is in, in one word, or none where the surface has no
+/// state to be in. A tab wears this on its face, so a finished job and a
+/// running one are told apart by a word rather than by a colour — and a
+/// journal that has gone while its process may still be writing says so
+/// (the 164 GB job, #377).
+///
+/// With the link lost, whatever is on disk stays on screen but nothing claims
+/// to be live: a job reads `link lost`, not `running`. What ended is still
+/// reported, because an exit code on disk is a fact that outlives the socket.
+pub fn state_word(surface: &Surface, link: Link) -> Option<&'static str> {
+    // The kernel has been asked and does not hold it. That answer outranks
+    // everything below, and outlasts the link going down and coming back:
+    // a row nothing is behind is not a row that might be running.
+    if surface.gone {
+        return Some("gone");
+    }
+    match &surface.bind {
+        Bind::Process { done, log, .. } => match (done, link) {
+            (None, Link::Lost) => Some("link lost"),
+            (None, Link::Live) if log.is_file() => Some("running"),
+            (None, Link::Live) => Some("no journal"),
+            (Some(Some(0)), _) => Some("done"),
+            (Some(Some(_)), _) => Some("failed"),
+            (Some(None), _) => Some("stopped"),
+        },
+        // Whose shell this is, which is not the same question as who may type
+        // in it. The kernel's `terminal` tool opens one page and both sides
+        // can write to it, so a page the agent opened says so rather than
+        // claiming to be the person's: a label that is wrong from birth is
+        // worse than no label. A page of the person's own needs a frame the
+        // kernel does not have yet (`docs/side-panels-design.md`, handover 2).
+        // Whose shell: read from who asked, which the kernel's board frame
+        // says. `owner` cannot answer it — a shell the person asked for still
+        // docks under an agent, so keying on that labelled his own terminal
+        // "agent's" the moment the tile could open one.
+        Bind::Terminal { .. } => match (surface.by, link) {
+            (_, Link::Lost) => Some("link lost"),
+            (OpenedBy::User, Link::Live) => Some("yours"),
+            (OpenedBy::Agent, Link::Live) => Some("agent's"),
+        },
+        Bind::Browser { .. } | Bind::Url(_) | Bind::Path(_) | Bind::Empty => None,
+    }
+}
+
 /// Filename, page title, or host — never a full path.
 pub fn title(surface: &Surface) -> String {
     if !surface.title.is_empty() && !generic_title(&surface.title, &surface.board_kind) {
@@ -108,6 +162,7 @@ fn generic_title(title: &str, board_kind: &str) -> bool {
 pub fn render(
     surface: &Surface,
     place: Option<&Place>,
+    link: Link,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
@@ -117,7 +172,15 @@ pub fn render(
         Bind::Browser { url, shot, .. } => browser_body(&theme, url, shot.clone()),
         Bind::Process {
             log, live, done, ..
-        } => process_body(&theme, log, live, *done),
+        } => process_body(
+            &theme,
+            log,
+            live,
+            *done,
+            link,
+            surface.status.as_deref(),
+            surface.gone,
+        ),
         Bind::Url(url) => open_card(&theme, Some(url), url),
         Bind::Empty => quiet(&theme, "Nothing here."),
         Bind::Path(path) => path_body(surface, place, path, window, cx),
@@ -189,7 +252,15 @@ fn browser_body(theme: &Theme, url: &str, shot: Option<Arc<Image>>) -> AnyElemen
 /// The tail of a job's journal, and how it ended if it has. The kernel's
 /// streamed output wins when any has arrived (it is the only source on a
 /// remote place); the file is read for kernels that do not stream.
-fn process_body(theme: &Theme, log: &Path, live: &str, done: Option<Option<i32>>) -> AnyElement {
+fn process_body(
+    theme: &Theme,
+    log: &Path,
+    live: &str,
+    done: Option<Option<i32>>,
+    link: Link,
+    kernel_words: Option<&str>,
+    gone: bool,
+) -> AnyElement {
     let streamed = !live.is_empty() || done.is_some();
     let tail = if streamed {
         let lines: Vec<&str> = live.lines().collect();
@@ -209,16 +280,42 @@ fn process_body(theme: &Theme, log: &Path, live: &str, done: Option<Option<i32>>
             .map(|code| code.trim().to_owned())
             .filter(|code| !code.is_empty())
     };
-    let status = match exit {
-        Some(code) if code == "0" => "exited 0".to_owned(),
-        Some(code) if code == "killed" => "killed".to_owned(),
-        Some(code) => format!("exited {code}"),
-        None => "running".to_owned(),
+    // The kernel's own words, when it has told us how this ended — it is the
+    // side that knows, and after a kernel's death its replacement is the only
+    // thing that can say what became of the job.
+    //
+    // Only for an end, and this restraint is load-bearing: `status` is a
+    // snapshot from the last time we asked, and we ask on attach, not on a
+    // timer. A live job's "running for 41s (pid 4812)" would therefore sit
+    // there reading 41s an hour later — a clock that has stopped while
+    // claiming to run, which is the family of lie this whole panel exists to
+    // end. Widening this to live rows means asking on a timer first; without
+    // that, showing them is worse than showing nothing.
+    let ended = gone || exit.is_some() || done.is_some_and(|code| code.is_some());
+    let status = match (kernel_words, ended) {
+        (Some(words), true) if !words.is_empty() => words.to_owned(),
+        _ => match (exit, link) {
+            (Some(code), _) if code == "0" => "exited 0".to_owned(),
+            (Some(code), _) if code == "killed" => "killed".to_owned(),
+            (Some(code), _) => format!("exited {code}"),
+            (None, _) if gone => "gone".to_owned(),
+            (None, Link::Live) => "running".to_owned(),
+            (None, Link::Lost) => "link lost".to_owned(),
+        },
     };
-    let text = if tail.is_empty() {
-        SharedString::from("(no output yet)")
-    } else {
-        SharedString::from(tail)
+    // "No output yet" is only true while there is somewhere for output to
+    // appear. A job whose journal is not on disk has nowhere, and saying
+    // nothing yet about a row that can never say anything is how an empty
+    // screen passes for a working one (the 164 GB job's folder was gone while
+    // it wrote). Checked here rather than remembered: the file either opens or
+    // it does not.
+    let readable = streamed || log.is_file();
+    let text = match (tail.is_empty(), readable) {
+        (false, _) => SharedString::from(tail),
+        (true, true) => SharedString::from("(no output yet)"),
+        (true, false) => SharedString::from(
+            "The journal for this job is not on disk, so its output cannot be read here.",
+        ),
     };
     div()
         .flex_1()
@@ -252,7 +349,8 @@ fn process_body(theme: &Theme, log: &Path, live: &str, done: Option<Option<i32>>
         .into_any_element()
 }
 
-/// The last `TAIL_LINES` of a file, read from its end only.
+/// The last `TAIL_LINES` of a file, read from its end only — the end of a
+/// journal, as the panel draws it.
 fn tail_lines(path: &Path) -> String {
     let Ok(mut file) = File::open(path) else {
         return String::new();
@@ -270,6 +368,37 @@ fn tail_lines(path: &Path) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let skip = lines.len().saturating_sub(TAIL_LINES);
     lines[skip..].join("\n")
+}
+
+/// What a row seeded from the kernel's list starts with: everything the job
+/// has already written, ready for the kernel's `job` frames to be appended to
+/// it.
+///
+/// The trailing newline is the whole point of this existing beside
+/// [`tail_lines`], which drops it. Without it the first delta lands on the end
+/// of the last line the job wrote and two lines read as one — seen on the first
+/// still of this working, as `tick 24tick 25`. A file that ends mid-line has no
+/// newline to keep, and there the delta *is* the rest of that line, so the
+/// question is asked of the file rather than assumed either way.
+pub fn journal_prime(path: &Path) -> String {
+    let text = tail_lines(path);
+    if text.is_empty() || !ends_with_newline(path) {
+        return text;
+    }
+    text + "\n"
+}
+
+/// Whether a file's last byte is a newline. Read from the end, so the size of
+/// the journal does not matter.
+fn ends_with_newline(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if file.seek(SeekFrom::End(-1)).is_err() {
+        return false;
+    }
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).is_ok() && last[0] == b'\n'
 }
 
 fn path_body(
@@ -710,5 +839,40 @@ fn language_for(path: &Path) -> &'static str {
         other => syntax::lang::resolve(other)
             .map(|lang| lang.name)
             .unwrap_or(""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::testing::Scratch;
+
+    #[test]
+    fn priming_keeps_the_break_the_next_delta_needs() {
+        let dir = Scratch::new("journal");
+        let log = dir.path().join("out.log");
+        std::fs::write(&log, "tick 23\ntick 24\n").unwrap();
+        // The kernel's next `job` frame is appended to this, so a lost
+        // newline reads as `tick 24tick 25` — which is what the first still of
+        // a seeded row showed.
+        assert_eq!(journal_prime(&log), "tick 23\ntick 24\n");
+    }
+
+    #[test]
+    fn a_journal_cut_mid_line_is_left_for_the_delta_to_finish() {
+        let dir = Scratch::new("journal-partial");
+        let log = dir.path().join("out.log");
+        std::fs::write(&log, "tick 23\nhalf a li").unwrap();
+        assert_eq!(
+            journal_prime(&log),
+            "tick 23\nhalf a li",
+            "no newline to keep: the rest of that line is what comes next"
+        );
+    }
+
+    #[test]
+    fn nothing_to_prime_from_is_nothing() {
+        let dir = Scratch::new("journal-missing");
+        assert_eq!(journal_prime(&dir.path().join("gone.log")), "");
     }
 }

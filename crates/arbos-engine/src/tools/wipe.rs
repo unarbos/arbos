@@ -558,6 +558,114 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
+/// The seconds a command spends waiting in `sleep`, read the way the
+/// wipe guard reads a removal: through paths (`/bin/sleep`), wrappers
+/// (`timeout 20 sleep 8`, `nohup`, `env`), `sh -c '…'`, `eval`, and
+/// `&&`/`;` chains (`true && sleep 8`). A sleep inside a loop (`while …;
+/// do sleep 1; done`) is a poll that never ends on its own and counts as
+/// an hour. `None` when the command has no sleep at all.
+///
+/// The first version read the literal fragment (`sleep N` as the whole
+/// command) and let `sh -c 'sleep 8'` and `/bin/sleep 8` through — the
+/// wipe guard's own shape before #410, on a model just told not to sleep.
+pub fn sleep_wait_secs(cmd: &str) -> Option<u64> {
+    let mut total: Option<u64> = None;
+    let mut in_loop = false;
+    for words in segments(cmd) {
+        let mut i = 0;
+        // Loop and branch keywords open a segment; the command follows.
+        while i < words.len()
+            && matches!(
+                words[i].text.as_str(),
+                "do" | "then" | "else" | "!" | "{" | "while" | "until" | "for" | "if"
+            )
+        {
+            if matches!(words[i].text.as_str(), "while" | "until" | "for") {
+                in_loop = true;
+            }
+            i += 1;
+        }
+        // `X=1 sleep 8`
+        while i < words.len() && words[i].text.contains('=') && !words[i].text.starts_with('-') {
+            i += 1;
+        }
+        let Some(first) = words.get(i) else { continue };
+        let mut cmd_word = base(&first.text);
+        let mut rest = &words[i + 1..];
+        while matches!(
+            cmd_word,
+            "command"
+                | "exec"
+                | "nohup"
+                | "env"
+                | "time"
+                | "nice"
+                | "ionice"
+                | "builtin"
+                | "timeout"
+                | "stdbuf"
+                | "sudo"
+                | "doas"
+        ) {
+            let mut k = 0;
+            while k < rest.len()
+                && (rest[k].text.starts_with('-') || (cmd_word == "timeout" && k == 0))
+            {
+                k += 1;
+            }
+            let Some(next) = rest.get(k) else { break };
+            cmd_word = base(&next.text);
+            rest = &rest[k + 1..];
+        }
+        let found = match cmd_word {
+            "sleep" => rest.first().and_then(|w| parse_sleep(&w.text)),
+            "sh" | "bash" | "zsh" | "dash" | "ksh" => {
+                let mut saw_c = false;
+                let mut inner = None;
+                for w in rest {
+                    if w.text.starts_with('-') && w.text.contains('c') && !w.text.starts_with("--")
+                    {
+                        saw_c = true;
+                        continue;
+                    }
+                    if saw_c {
+                        inner = sleep_wait_secs(&w.text);
+                        break;
+                    }
+                }
+                inner
+            }
+            "eval" => {
+                let joined: Vec<String> = rest.iter().map(|w| w.text.clone()).collect();
+                sleep_wait_secs(&joined.join(" "))
+            }
+            _ => None,
+        };
+        if let Some(s) = found {
+            total = Some(total.unwrap_or(0).saturating_add(s));
+        }
+    }
+    match total {
+        Some(s) if in_loop => Some(s.max(3600)),
+        other => other,
+    }
+}
+
+/// `75`, `0.5`, `2m`, `1h` as whole seconds.
+fn parse_sleep(n: &str) -> Option<u64> {
+    let cut = n.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len();
+    let (num, unit) = n.split_at(cut);
+    let v: f64 = num.parse().ok()?;
+    let mult = match unit {
+        "" | "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        "d" => 86400.0,
+        _ => return None,
+    };
+    Some((v * mult) as u64)
+}
+
 fn base(w: &str) -> &str {
     w.rsplit('/').next().unwrap_or(w)
 }
@@ -872,6 +980,41 @@ mod tests {
             judge("rm -rf *", &at(Path::new("/tmp/scratch"), home, None)),
             Verdict::Run
         );
+    }
+
+    /// The sleep guard reads what the command will do, not the fragment
+    /// (`co-*`, 2026-09-17: `sh -c 'sleep 8'`, `/bin/sleep 8`, `timeout 20
+    /// sleep 8` and `true && sleep 8` all ran with a worker live).
+    #[test]
+    fn a_sleep_is_found_through_paths_wrappers_shells_and_chains() {
+        let s = sleep_wait_secs;
+        assert_eq!(s("sleep 75"), Some(75));
+        assert_eq!(s("sleep 75; echo waited"), Some(75));
+        assert_eq!(s("sleep 2m && ls"), Some(120));
+        assert_eq!(s("/bin/sleep 8"), Some(8));
+        assert_eq!(s("/usr/bin/sleep 8"), Some(8));
+        assert_eq!(s("timeout 20 sleep 8"), Some(8));
+        assert_eq!(s("nohup sleep 8 &"), Some(8));
+        assert_eq!(s("env sleep 8"), Some(8));
+        assert_eq!(s("command sleep 8"), Some(8));
+        assert_eq!(s("true && sleep 8"), Some(8));
+        assert_eq!(s("echo x; sleep 30"), Some(30));
+        assert_eq!(s("sh -c 'sleep 8'"), Some(8));
+        assert_eq!(s("bash -lc \"sleep 8; echo x\""), Some(8));
+        assert_eq!(s("sh -c 'sh -c \"sleep 8\"'"), Some(8));
+        assert_eq!(s("eval sleep 8"), Some(8));
+        assert_eq!(s("sleep 3; sleep 3"), Some(6));
+        assert_eq!(s("X=1 sleep 8"), Some(8));
+        // A sleep in a loop is a poll: an hour, however short the sleep.
+        assert!(s("while :; do sleep 1; done").unwrap() >= 3600);
+        assert!(s("for i in $(seq 1 60); do echo poll $i; sleep 1; done").unwrap() >= 3600);
+        assert!(s("until grep -q done out.log; do sleep 2; done").unwrap() >= 3600);
+        // No sleep: nothing.
+        assert_eq!(s("ls -la"), None);
+        assert_eq!(s("cargo build"), None);
+        assert_eq!(s("echo 'sleep 8'"), None);
+        assert_eq!(s("python3 -c 'import time; time.sleep(30)'"), None);
+        assert_eq!(s("sleep"), None);
     }
 
     #[test]

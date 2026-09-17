@@ -119,7 +119,12 @@ pub fn release_asset(os_arch: &str, version: &str) -> Option<Asset> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     Probing,
-    Installing { version: String },
+    Installing {
+        version: String,
+        /// The binary's size when the window is copying its own, so the
+        /// line says what is crossing the wire ("27 MB"); 0 when unknown.
+        bytes: u64,
+    },
     Updating { from: String, to: String },
     Building,
     Stopping,
@@ -133,14 +138,20 @@ pub enum Progress {
     Starting,
     Connecting,
     Ready,
-    Failed { step: String, why: String },
+    Failed {
+        step: String,
+        why: String,
+    },
 }
 
 impl fmt::Display for Progress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Probing => write!(f, "Checking the machine…"),
-            Self::Installing { version } => write!(f, "Installing arbos-kernel {version}…"),
+            Self::Installing { version, bytes } => match bytes / (1024 * 1024) {
+                0 => write!(f, "Installing arbos-kernel {version}…"),
+                mb => write!(f, "Installing arbos-kernel {version} ({mb} MB)…"),
+            },
             Self::Updating { from, to } => write!(f, "Updating {from} → {to}…"),
             Self::Building => write!(f, "Building arbos-kernel from source…"),
             Self::Stopping => write!(f, "Stopping the old kernel…"),
@@ -789,10 +800,19 @@ mod tests {
     fn progress_reads_as_the_windows_line() {
         assert_eq!(
             Progress::Installing {
-                version: "0.2.1".into()
+                version: "0.2.1".into(),
+                bytes: 0,
             }
             .to_string(),
             "Installing arbos-kernel 0.2.1…"
+        );
+        assert_eq!(
+            Progress::Installing {
+                version: "0.2.1".into(),
+                bytes: 27 * 1024 * 1024 + 1,
+            }
+            .to_string(),
+            "Installing arbos-kernel 0.2.1 (27 MB)…"
         );
         assert_eq!(
             Progress::Updating {
@@ -840,7 +860,11 @@ mod tests {
         // The path forms, which are the only thing that finds a process
         // whose image was unlinked two installs ago.
         assert!(s.contains(r#"path=${link% (deleted)}"#), "{s}");
-        for suffix in ["\"$target\"", "\"$target\".previous", "\"$target\".arbos-old"] {
+        for suffix in [
+            "\"$target\"",
+            "\"$target\".previous",
+            "\"$target\".arbos-old",
+        ] {
             assert!(s.contains(suffix), "missing {suffix} in the match: {s}");
         }
         // Never by name: matching `arbos-kernel` anywhere would reach
@@ -924,7 +948,10 @@ mod tests {
     #[test]
     fn paths_with_a_quote_in_them_stay_one_shell_word() {
         let s = bootstrap_script("/home/o'brien/bin/arbos-kernel", "/tmp/in", 20, 10);
-        assert!(s.contains(r#"target='/home/o'\''brien/bin/arbos-kernel'"#), "{s}");
+        assert!(
+            s.contains(r#"target='/home/o'\''brien/bin/arbos-kernel'"#),
+            "{s}"
+        );
     }
 
     /// A generated script has no compiler behind it, so this is the only

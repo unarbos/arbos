@@ -964,9 +964,48 @@ fn pid_identity(pid: u32, dir: &Path, meta: &Meta) -> PidIdentity {
     PidIdentity::Unverified
 }
 
-/// Linux: when `pid` started, as Unix millis, from /proc/<pid>/stat field
-/// 22 (clock ticks since boot) and /proc/stat's btime.
+/// When `pid` started, as Unix millis. Linux: /proc/<pid>/stat field 22
+/// (clock ticks since boot) and /proc/stat's btime. Elsewhere (macOS —
+/// Jacob's machines): `ps -o etime=`, the elapsed time, subtracted from
+/// now; a second's rounding against a two-minute tolerance. Without this
+/// a Mac had no second proof, so a job whose pid was reused after a
+/// reboot read as `Unverified`, which is shown as running, for ever.
 fn process_start_ms(pid: u32) -> Option<i64> {
+    if let Some(ms) = process_start_ms_proc(pid) {
+        return Some(ms);
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let elapsed = parse_etime(String::from_utf8_lossy(&out.stdout).trim())?;
+    Some(arbos_core::now_ms() - elapsed * 1000)
+}
+
+/// `ps` elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+fn parse_etime(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (days, clock) = match s.split_once('-') {
+        Some((d, rest)) => (d.trim().parse::<i64>().ok()?, rest),
+        None => (0, s),
+    };
+    let parts: Vec<i64> = clock
+        .split(':')
+        .map(|p| p.trim().parse::<i64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let (h, m, sec) = match parts.as_slice() {
+        [m, s] => (0, *m, *s),
+        [h, m, s] => (*h, *m, *s),
+        _ => return None,
+    };
+    Some(((days * 24 + h) * 60 + m) * 60 + sec)
+}
+
+fn process_start_ms_proc(pid: u32) -> Option<i64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The command name is in parentheses and may hold spaces: split after it.
     let after = stat.rsplit_once(')')?.1;
@@ -1008,8 +1047,12 @@ fn process_args(pid: u32) -> Option<String> {
     if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
         return Some(String::from_utf8_lossy(&raw).replace('\0', " "));
     }
+    // `-ww`: BSD ps (macOS) cuts the line at the window width — or 79
+    // columns off a terminal — and a job folder under a person's
+    // Documents is longer than that, so the leash's argv proof of a pid
+    // never matched on a Mac. Twice means unbounded; procps takes it too.
     let out = std::process::Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1050,6 +1093,37 @@ fn sh_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ps_elapsed_time_parses_in_all_its_shapes() {
+        assert_eq!(parse_etime("00:05"), Some(5));
+        assert_eq!(parse_etime("   12:34"), Some(12 * 60 + 34));
+        assert_eq!(parse_etime("01:02:03"), Some(3723));
+        assert_eq!(parse_etime("2-01:02:03"), Some(2 * 86400 + 3723));
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("garbage"), None);
+    }
+
+    /// The start-time proof holds on this machine, by either path: this
+    /// process started when it says it did, within the tolerance
+    /// `pid_identity` uses.
+    #[test]
+    fn this_process_start_time_is_found_within_the_tolerance() {
+        let pid = std::process::id();
+        let started = process_start_ms(pid).expect("a start time by /proc or ps");
+        let now = arbos_core::now_ms();
+        assert!(
+            now - started >= 0 && now - started < 120_000,
+            "started {started} now {now}"
+        );
+        // The portable path alone agrees with the machine's own answer.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "etime=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let elapsed = parse_etime(String::from_utf8_lossy(&out.stdout).trim()).expect("etime");
+        assert!((now - elapsed * 1000 - started).abs() < 5_000);
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("arbos-jobs-{tag}-{}", std::process::id()));

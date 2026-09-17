@@ -1,0 +1,22 @@
+# The call names the project as the desktop does when its machine is on the hub
+# (`qa-mac/discord_backups`, a mock hub in this process; never Jacob's real Mac). session.ready
+# must name that kernel's own folder as the call's place (project_info.place = the scripted
+# kernel's folder, via = hub), not the gateway kernel's, and the words land in that kernel.
+title = "A hub-named project reports its own folder as the call's place"
+hub = { machine = "qa-mac", project = "discord_backups" }
+
+[[steps]]
+say = "What's your current working directory?"
+model = { ack = "One sec." }
+[steps.kernel]
+reply = "I am working in the discord_backups folder on your Mac."
+
+[[steps]]
+wait_spoken = "discord_backups folder on your Mac"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+spoken_contains = ["discord_backups folder on your Mac"]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

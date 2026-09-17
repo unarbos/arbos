@@ -230,8 +230,11 @@ pub fn read(place: &Place, agent: &str, name: &str) -> Result<Filed> {
 pub fn is_steer_kind(kind: &str) -> bool {
     // An `answer` reaches a running turn too: a question asked with
     // `wait:false` gets its reply at the next tool boundary instead of a
-    // turn later. Idle, it opens the next turn like any wake.
-    matches!(kind, "steer" | "wake" | "answer")
+    // turn later. Idle, it opens the next turn like any wake. A worker's
+    // `done` reaches a running parent the same way: the report is what a
+    // parent that ran `sleep` was waiting for, and the yield to it (#432)
+    // is only honest if the report then follows at the boundary.
+    matches!(kind, "steer" | "wake" | "answer" | "done")
 }
 
 /// Whether a steer waits: a batch of tool calls stops taking new calls
@@ -245,6 +248,15 @@ pub fn has_steer(place: &Place, agent: &str) -> bool {
 /// Whether a person's own words wait for this agent's running turn: a
 /// steer from `user` (not a peer's `say mode=steer`, not the kernel's
 /// wake). What an attached tool call yields to.
+/// A worker's report (`done`) is waiting in `agent`'s inbox: the event a
+/// parent that ran `sleep` to wait for it was waiting for. What an
+/// attached tool call of a parent yields to, beside the user's words.
+pub fn has_child_done(place: &Place, agent: &str) -> bool {
+    list(place, agent)
+        .iter()
+        .any(|f| f.msg.kind == "done" && f.msg.from.starts_with("agent:"))
+}
+
 pub fn has_user_steer(place: &Place, agent: &str) -> bool {
     list(place, agent)
         .iter()

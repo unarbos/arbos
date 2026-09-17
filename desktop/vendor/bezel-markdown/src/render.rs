@@ -123,6 +123,9 @@ pub enum Annotation {
     Resolved,
     /// The one whose thread the reader has in front of them.
     Active,
+    /// A link the pointer is over: an underline in the accent, not a wash,
+    /// so a URL reads as something to click before it is clicked.
+    LinkHover,
 }
 
 impl Annotation {
@@ -131,7 +134,12 @@ impl Annotation {
             Self::Open => theme.warning.opacity(0.20),
             Self::Resolved => theme.warning.opacity(0.08),
             Self::Active => theme.warning.opacity(0.38),
+            Self::LinkHover => theme.accent,
         }
+    }
+
+    fn underline(self) -> bool {
+        matches!(self, Self::LinkHover)
     }
 }
 
@@ -494,10 +502,12 @@ impl<'a> Overlay<'a> {
 
     /// The annotated slices of this text, already resolved to their paint —
     /// the wash goes into a `move` closure that the theme does not travel into.
-    fn annotated(&self, len: usize, theme: &Theme) -> Vec<(Range<usize>, Hsla)> {
+    fn annotated(&self, len: usize, theme: &Theme) -> Vec<(Range<usize>, Hsla, bool)> {
         self.annotations
             .iter()
-            .filter_map(|(range, kind)| Some((self.clip(*range, len)?, kind.wash(theme))))
+            .filter_map(|(range, kind)| {
+                Some((self.clip(*range, len)?, kind.wash(theme), kind.underline()))
+            })
             .collect()
     }
 
@@ -1189,11 +1199,19 @@ fn painted_text(
             if let Some(layouts) = &layouts {
                 layouts.record(ix, part, span.clone(), layout.clone());
             }
-            for (range, wash) in &annotated {
+            for (range, wash, underline) in &annotated {
                 for rect in range_rects(&layout, range, 0.0, 0.0) {
+                    let rect = if *underline {
+                        Bounds::new(
+                            gpui::point(rect.origin.x, rect.origin.y + rect.size.height - px(2.0)),
+                            gpui::size(rect.size.width, px(1.0)),
+                        )
+                    } else {
+                        rect
+                    };
                     window.paint_quad(quad(
                         rect,
-                        px(2.0),
+                        px(if *underline { 0.0 } else { 2.0 }),
                         *wash,
                         px(0.0),
                         gpui::transparent_black(),
@@ -1462,7 +1480,7 @@ fn code_block(
                 if let Some(sink) = &sink {
                     sink.record(ix, Part::Code, span.clone(), layout.clone());
                 }
-                for (range, wash) in &annotated {
+                for (range, wash, _) in &annotated {
                     let (from, to) = (range.start.max(span.start), range.end.min(span.end));
                     if from < to {
                         for rect in

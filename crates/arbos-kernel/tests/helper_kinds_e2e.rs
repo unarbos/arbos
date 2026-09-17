@@ -89,8 +89,10 @@ fn an_area_coordinator_child_runs_its_own_worker_and_reports_once() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one area\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"role\":\"coordinator\",\"name\":\"Run the voice area\",\"task\":\"own the voice area\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"area started\"}\n",
-        "{\"agent\":\"run-the-voice-area\",\"content\":\"splitting\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"Write the echo gate\",\"task\":\"write it\"}},{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi > forbidden.txt\"}}]}\n",
-        "{\"agent\":\"run-the-voice-area\",\"content\":\"worker running\"}\n",
+        // The area waits on its worker (wait=true), so the report is in
+        // the spawn result and the area's next line is its report to root
+        // whichever order the worker's end and the area's step land in.
+        "{\"agent\":\"run-the-voice-area\",\"content\":\"splitting\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"Write the echo gate\",\"task\":\"write it\",\"wait\":true}},{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi > forbidden.txt\"}}]}\n",
         "{\"agent\":\"write-the-echo-gate\",\"content\":\"gate written\"}\n",
         "{\"agent\":\"run-the-voice-area\",\"content\":\"Voice area done: the echo gate is written.\"}\n",
         "{\"agent\":\"root\",\"content\":\"noted the area\"}\n",
@@ -105,15 +107,16 @@ fn an_area_coordinator_child_runs_its_own_worker_and_reports_once() {
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "run the voice area"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(60)));
     let area = "run-the-voice-area";
+    // The worker's report reaches the area coordinator (in the spawn
+    // result it waited on), and the turn holding it ends. The count of
+    // turns is the runner's business, not the fact to wait for.
     assert!(
         common::wait_for(Duration::from_secs(60), || {
-            transcript(&k.place, area)
-                .iter()
-                .filter(|e| e["kind"] == "turn_complete")
-                .count()
-                >= 2
+            let t = transcript(&k.place, area);
+            t.iter().any(|e| e.to_string().contains("gate written"))
+                && t.last().is_some_and(|e| e["kind"] == "turn_complete")
         }),
-        "the area coordinator ran its own turn and then the done turn: {:?}",
+        "the worker's report reached the area coordinator, and the turn holding it ended: {:?}",
         transcript(&k.place, area)
     );
     let agent_md =
@@ -140,13 +143,14 @@ fn an_area_coordinator_child_runs_its_own_worker_and_reports_once() {
         !agent.may("undo"),
         "the coordinator tool set, as root has it"
     );
-    // The worker's done went to the area coordinator, not to root.
+    // The worker's report went to the area coordinator (in its spawn
+    // result, or as a say), not to root.
     let area_t = transcript(&k.place, area);
     assert!(
         area_t
             .iter()
-            .any(|e| e["text"].as_str().unwrap_or("").contains("gate written")),
-        "the worker's done reached its parent, the area: {area_t:?}"
+            .any(|e| e.to_string().contains("gate written")),
+        "the worker's report reached its parent, the area: {area_t:?}"
     );
     let root = transcript(&k.place, "root");
     assert!(
@@ -161,7 +165,14 @@ fn an_area_coordinator_child_runs_its_own_worker_and_reports_once() {
                 .iter()
                 .any(|e| e["text"].as_str().unwrap_or("").contains("Voice area done"))
         }),
-        "root hears the area once, with the combined result"
+        "root hears the area, with the combined result: {:?}",
+        transcript(&k.place, "root")
     );
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    let heard = transcript(&k.place, "root")
+        .iter()
+        .filter(|e| e["kind"] == "say" && e["from"] == area)
+        .count();
+    assert_eq!(heard, 1, "once: {:?}", transcript(&k.place, "root"));
     let _ = k.child.kill();
 }

@@ -56,7 +56,10 @@ pub use machines::{Machine, Machines};
 /// item): see `wire::PlanNode`.
 pub type NodeId = u64;
 pub use page::{Page, PageKind};
-pub use place::Place;
+pub use place::{
+    Place, StoreId, StoreState, check_store, opened as opened_store, remember_opened, store_id_of,
+    store_intact, store_now_at,
+};
 pub use project::{ArchivedChild, archived_children};
 pub use prs::{PrRec, load_prs, record_pr};
 pub use skills::{Skill, load_skills, slash_skill};

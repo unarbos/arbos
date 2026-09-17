@@ -11,14 +11,15 @@
 //! to [`crate::view::root`]. This is only what it draws.
 
 use crate::{
+    kernel,
     model::{permission_center::Permissions, workspace::Workspace},
     view::root::{self, ShowChat},
     voice_ws,
 };
 use bezel::{
     gpui::{
-        self, App, Context, Entity, FocusHandle, Focusable, KeyBinding, Render, Window, actions,
-        div, prelude::*, px,
+        self, App, Context, Div, Entity, FocusHandle, Focusable, KeyBinding, Render, SharedString,
+        Window, actions, div, prelude::*, px,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset},
@@ -54,16 +55,142 @@ mod typography;
 /// the right-hand panel's width instead.
 const SIDEBAR_WIDTH: f32 = 200.;
 
-/// The gap between a group and the label of the next one, and between a label
-/// and the box under it.
+/// The gap between a group and the caption of the next one, and between a
+/// caption and the rows under it.
 pub(super) const GROUP_GAP: f32 = 20.;
 pub(super) const LABEL_GAP: f32 = 8.;
 
-/// The reading column's cap, `--container-content`. The body is centred in
-/// whatever is left beside the rail, up to this — so a tab the width of the
-/// window gives the same form more air around it, never a wider row. Nothing
-/// here is stretched to fill the extra room.
-const CONTENT_MAX_WIDTH: f32 = 860.;
+/// A row's own padding above and below its text. Provisional: the parity loop
+/// has live Cursor and is measuring the real one — see
+/// `internal/features-inbox/2026-09-17-cursor-settings-interior-measurements-ask.md`.
+const ROW_PAD_Y: f32 = 10.;
+
+/// Between a row's label and its description.
+const ROW_LINE_GAP: f32 = 3.;
+
+/// A line under a row's label. `Warn` is the only styling choice a row makes,
+/// and it means *something here is wrong*, not *this is interesting*.
+pub(super) enum Tone {
+    Plain,
+    Warn,
+}
+
+pub(super) struct Line {
+    pub text: SharedString,
+    pub tone: Tone,
+}
+
+impl Line {
+    pub(super) fn say(text: impl Into<SharedString>) -> Self {
+        Self {
+            text: text.into(),
+            tone: Tone::Plain,
+        }
+    }
+
+    pub(super) fn warn(text: impl Into<SharedString>) -> Self {
+        Self {
+            text: text.into(),
+            tone: Tone::Warn,
+        }
+    }
+}
+
+/// One settings row, Cursor's shape (Jacob, 09-17: "settings should feel more
+/// like this"): the label on the left with its description under it, and the
+/// control hard right.
+///
+/// No box, and no horizontal inset — the label lines up with the section
+/// heading above it, and the hairline that divides it from the row before runs
+/// the width of the column. `first` carries no hairline; the last row carries
+/// none after it, because a rule with nothing under it is drawing the edge of a
+/// box we deliberately do not have.
+pub(super) fn row(first: bool, theme: &Theme) -> Div {
+    div()
+        .py(px(ROW_PAD_Y))
+        .when(!first, |el| el.border_t_1().border_color(theme.border))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(16.))
+}
+
+/// A row whose control is too wide to sit hard right: the label and its
+/// description above, the control on its own line under them.
+///
+/// Cursor's rows carry small controls — a toggle, a dropdown, a button — and a
+/// row is read along its width, so a control that eats half the column leaves
+/// the description wrapping in what is left. At 640px the API key's field and
+/// buttons wrapped its instructions to four lines; this is the honest variant
+/// for the two rows that are not a toggle.
+pub(super) fn stacked_row(first: bool, theme: &Theme) -> Div {
+    div()
+        .py(px(ROW_PAD_Y))
+        .when(!first, |el| el.border_t_1().border_color(theme.border))
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+}
+
+/// A row's left side: what the setting is, and what it does.
+pub(super) fn label_block(label: impl Into<SharedString>, lines: Vec<Line>, theme: &Theme) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(theme.row_title(label.into()))
+        .children(lines.into_iter().map(|line| {
+            div()
+                .mt(px(ROW_LINE_GAP))
+                .text_style(TextStyle::Subheadline)
+                .text_color(match line.tone {
+                    Tone::Plain => theme.text_muted,
+                    Tone::Warn => theme.warning,
+                })
+                .child(line.text)
+        }))
+}
+
+/// The container for a run of rows: nothing around it. Cursor's groups are
+/// held apart by space and a caption, not by a border — a box around three
+/// rows is a box drawn to say "these three go together", which the caption
+/// already says.
+pub(super) fn rows() -> Div {
+    div().flex().flex_col()
+}
+
+/// The muted words over a run of rows — `Colors`, `Updates`, `This machine`.
+/// Quieter than the section heading and quieter than a row's own label, so it
+/// groups without competing.
+pub(super) fn caption(text: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .text_style(TextStyle::Caption)
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .text_color(theme.text_muted)
+        .child(text.into())
+}
+
+/// A caption with its rows under it, which is every group in every section.
+pub(super) fn group(caption_text: impl Into<SharedString>, theme: &Theme) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(LABEL_GAP))
+        .child(caption(caption_text, theme))
+}
+
+/// The content column's width, and how far it sits from the rail.
+///
+/// Left-aligned rather than centred, which puts it left of centre in a wide
+/// window — Cursor's shape, and the reason is that a row whose label is on the
+/// left and whose control is hard right is read along its width, so the width
+/// has to be a fixed measure rather than whatever the window is. Centring it
+/// also moved the whole form when the panel opened.
+///
+/// Both provisional until the parity loop measures Cursor's.
+const CONTENT_WIDTH: f32 = 640.;
+const CONTENT_INSET: f32 = 32.;
 
 /// Which section the rail has selected.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,6 +279,13 @@ impl SettingsPane {
         // The permission rows are the centre's; follow it.
         let center = cx.global::<Permissions>().0.clone();
         cx.observe(&center, |_, _, cx| cx.notify()).detach();
+        // General compares the kernel it is talking to against the one this app
+        // ships, and reading that runs the binary. Off the window's thread, so
+        // the first paint of the tab does not wait for a subprocess and the row
+        // does not sit on "not read yet".
+        cx.background_executor()
+            .spawn(async { kernel::warm_bundled_commit() })
+            .detach();
         Self {
             workspace,
             section,
@@ -203,6 +337,10 @@ impl SettingsPane {
         // and could not find the way out of it. The tab's own close mark, ⌘1
         // and Escape all do this too. With no project open there is no chat to
         // go back to, and the tab's close mark is the way out.
+        //
+        // At the top, where Cursor puts its own Back and where the eye starts,
+        // rather than at the foot where it was — a way out is worth finding
+        // before the list, not after it.
         let back = self.workspace.read(cx).active.is_some().then(|| {
             theme
                 .nav_row(
@@ -232,6 +370,14 @@ impl SettingsPane {
             .flex_col()
             .gap(px(2.))
             .p(px(8.))
+            .children(back)
+            // Space under the way out, so it reads as its own thing above the
+            // list rather than as a sixth section.
+            .child(div().h(px(GROUP_GAP)).flex_none())
+            // One run, no bands. Cursor's rail has about thirteen items in four
+            // bands; five in a row already read as one band, and bands here
+            // would be space around arbitrary splits. A sixth and seventh
+            // section will split on their own.
             .children(Section::ALL.into_iter().enumerate().map(|(ix, section)| {
                 theme
                     .nav_row(
@@ -243,8 +389,11 @@ impl SettingsPane {
                     .id(("section", ix))
                     .on_click(cx.listener(move |this, _, _, cx| this.show(section, cx)))
             }))
-            .child(div().flex_1())
-            .children(back)
+        // No search field. In Cursor it filters a long list; over five sections
+        // it is decoration, and one that matches section names while a person
+        // types a setting's name ("kernel", "key") is worse than none. It earns
+        // its place when it can search row labels, or when the sections outgrow
+        // one screen each.
     }
 }
 
@@ -274,15 +423,14 @@ impl Render for SettingsPane {
                     .min_w_0()
                     .h_full()
                     .overflow_y_scroll()
-                    .px(px(32.))
-                    .py(px(32.))
+                    .px(px(CONTENT_INSET))
+                    .py(px(CONTENT_INSET))
                     .flex()
                     .flex_col()
-                    .items_center()
                     .child(
                         div()
-                            .w_full()
-                            .max_w(px(CONTENT_MAX_WIDTH))
+                            .w(px(CONTENT_WIDTH))
+                            .max_w_full()
                             .flex()
                             .flex_col()
                             // The header block, held off its body by the gap

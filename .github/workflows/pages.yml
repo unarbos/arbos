@@ -7,9 +7,9 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: ["www/**", ".github/workflows/pages.yml"]
+    paths: ["www/**", "deploy/www/**", ".github/workflows/pages.yml"]
   pull_request:
-    paths: ["www/**", ".github/workflows/pages.yml"]
+    paths: ["www/**", "deploy/www/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -35,6 +35,19 @@ jobs:
             grep -q '<meta name="viewport"' "$f"
           done
           test -f www/_headers
+
+      # /download/mac must land on a real, published file. Pick it now so the
+      # deployed _redirects and download/mac.json agree with GitHub releases.
+      - name: Pick the Mac download
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p www/download
+          python3 deploy/www/mac-download.py \
+            --json www/download/mac.json \
+            --redirect-pages www/_redirects
+          tail -1 www/_redirects
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3

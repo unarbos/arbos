@@ -48,6 +48,7 @@ pub fn load(place: &Place) -> Spend {
 }
 
 pub fn save(place: &Place, spend: &Spend) -> Result<()> {
+    crate::check_store(&place.arbos())?;
     let p = path(place);
     let text = toml::to_string(spend).context("serialise spend")?;
     let tmp = p.with_extension("toml.tmp");

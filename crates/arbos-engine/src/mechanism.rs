@@ -38,9 +38,25 @@ fn path(place: &Place, agent: &AgentId) -> PathBuf {
     Layout::new(place, agent.as_str()).dir.join("mechanism.md")
 }
 
-/// A user message starts a new task: forget the previous line.
+/// A user message starts a new task: forget the previous line. Unlinking
+/// needs write permission on the folder; when that fails (a folder gone
+/// read-only mid-session, qal-j22's shape), the file itself is emptied,
+/// which needs only the file — so the last task's line is not shown for
+/// this one by `changes`. Both failing is said on stderr, once per call.
 pub fn reset(place: &Place, agent: &AgentId) {
-    let _ = std::fs::remove_file(path(place, agent));
+    let p = path(place, agent);
+    match std::fs::remove_file(&p) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(unlink) => {
+            if let Err(write) = std::fs::write(&p, "") {
+                eprintln!(
+                    "mechanism {}: the last task's line could not be forgotten (unlink: {unlink}; empty: {write}); `changes` may show it for this task",
+                    agent.as_str()
+                );
+            }
+        }
+    }
 }
 
 /// The line recorded for the current task, if any.
@@ -110,7 +126,7 @@ pub fn schema_property() -> Value {
         "description": if required() {
             "Required on the first edit of a task, optional after: one line — what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Checked against every symptom the request names."
         } else {
-            "Optional, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked."
+            "On the first edit of a task, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked — state it anyway, before the edit."
         }
     })
 }
@@ -124,6 +140,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         (Place::new(dir), AgentId::new("root"))
+    }
+
+    /// qal-j22's shape on this record: the agent folder went read-only,
+    /// so the last task's line could not be unlinked. Emptying the file
+    /// needs only the file, and `current` reads nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_that_cannot_be_unlinked_is_emptied_so_the_next_task_does_not_show_it() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("arbos-mech-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let agent = AgentId::new("root");
+        let file = path(&place, &agent);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "the loop skips the last group because of an off-by-one\n",
+        )
+        .unwrap();
+        assert!(current(&place, &agent).is_some());
+        let folder = file.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(std::fs::remove_file(&file).is_err(), "the fault is staged");
+        reset(&place, &agent);
+        assert_eq!(
+            current(&place, &agent),
+            None,
+            "the old line is not believed"
+        );
+        assert!(
+            file.exists(),
+            "emptied, not removed: the folder forbade that"
+        );
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// No refusal for any shape by default: an edit without a line, with

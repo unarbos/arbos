@@ -38,7 +38,7 @@ const KERNEL_WAIT: Duration = Duration::from_secs(90);
 /// socket open while nothing else happens.
 const PING_EVERY: Duration = Duration::from_secs(30);
 
-type Ws = WebSocketStream<TcpStream>;
+pub(crate) type Ws = WebSocketStream<TcpStream>;
 
 /// One connected kernel or worker.
 pub struct Registrant {
@@ -460,7 +460,7 @@ fn list<'a>(it: impl Iterator<Item = &'a String>) -> String {
 /// the same instant after the upgrade — the client saw a bare close and
 /// never the `error`. A short pause before the close handshake lets the
 /// proxy forward the text; refusals are rare, so the wait costs nothing.
-async fn refuse_close(ws: &mut Ws) {
+pub(crate) async fn refuse_close(ws: &mut Ws) {
     // Wait for the peer to read the reason and hang up itself (its close
     // or its socket ending) rather than guessing how long the proxy
     // needs; two seconds is the ceiling for a peer that keeps the socket.

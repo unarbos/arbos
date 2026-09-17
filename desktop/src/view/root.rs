@@ -4,8 +4,10 @@
 use crate::{
     kernel,
     model::{
+        panel::{Panel, PanelTab},
         permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
+        surface::SurfaceId,
         settings::Settings,
         state::{self, State},
         workspace::{PaneRequest, Reloaded, Workspace},
@@ -57,6 +59,7 @@ actions!(
         ShowPermissions,
         ReportProblem,
         TogglePanel,
+        ZoomPanel,
         ShowChat,
         ShowProject,
         SearchChats,
@@ -102,6 +105,10 @@ const WINDOW_CONTEXT: &str = "ArbosWindow";
 
 /// Claimed on the rename field so `enter` files the name and `escape` drops it.
 const RENAME_CONTEXT: &str = "ArbosSessionName";
+
+/// The side panel's key context. Nothing is bound on it: it exists so the
+/// panel's own focus is a fact the tab chords can read.
+pub(crate) const PANEL_CONTEXT: &str = "ArbosPanel";
 
 fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField> {
     cx.new(|cx| {
@@ -283,6 +290,7 @@ pub fn init(cx: &mut App) {
         // before the window is offered it, and the editor's own `cmd-b` —
         // bold — is not reached while this one is on the bar.
         KeyBinding::new("cmd-b", TogglePanel, None),
+        KeyBinding::new("cmd-\\", ZoomPanel, None),
         // Call the project in front: a full-duplex conversation with its
         // main agent through the speech server. ⇧⌘C again hangs up.
         KeyBinding::new("cmd-shift-c", StartCall, None),
@@ -319,6 +327,11 @@ pub fn init(cx: &mut App) {
         // A context menu closes on Escape wherever the focus rests; the
         // composer forwards its own Escape here when it has nothing to close.
         KeyBinding::new("escape", DismissMenu, Some(WINDOW_CONTEXT)),
+        // And in the side panel, where Escape is one of its three ways back.
+        // An action reaches a handler only through the focused element's own
+        // ancestors, and the panel's focus is not under `WINDOW_CONTEXT`, so
+        // without this line Escape in the drawer went nowhere at all.
+        KeyBinding::new("escape", DismissMenu, Some(PANEL_CONTEXT)),
         KeyBinding::new("enter", CommitName, Some(RENAME_CONTEXT)),
         KeyBinding::new("escape", DismissName, Some(RENAME_CONTEXT)),
     ]);
@@ -329,8 +342,10 @@ pub fn init(cx: &mut App) {
 /// smaller than `window_min_size`; clamp those so the pane is usable.
 const WINDOW_WIDTH: f32 = 1100.;
 const WINDOW_HEIGHT: f32 = 761.;
-
-/// The main window's AppKit title, as `open` sets it.
+/// The title the macOS window-restore check matches; only that check
+/// reads it, so Linux would otherwise warn it is unused (#486 deleted it
+/// on that warning and broke the macOS build).
+#[cfg(target_os = "macos")]
 const WINDOW_TITLE: &str = "Arbos";
 
 fn restore_usable_bounds(window: &mut Window) {
@@ -694,8 +709,12 @@ pub struct Arbos {
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
     active_terminal: Option<String>,
-    /// Whether the right-hand panel is out. ⌘B folds it away.
-    pub(crate) panel_open: bool,
+    /// The side panel's own focus. Two rows of tabs are on screen and one
+    /// pair of chords drives both — `⌘T`, `⌘⇧{`, `⌘⇧}` act on the panel's
+    /// tabs while this holds the focus and on the window's projects
+    /// otherwise — so which row is lit and which row moves are the same
+    /// fact, read from here.
+    pub(crate) panel_focus: FocusHandle,
     /// The panel's "N archived" row is unfolded: finished workers the
     /// kernel moved to `archive/agents/` are listed, faint.
     pub(crate) archived_open: bool,
@@ -794,18 +813,36 @@ impl Arbos {
                     .any(|surface| surface.terminal_id() == Some(id.as_str()))
             })
         });
-        let active = workspace.active_surface().and_then(|surface| {
-            Some((
-                surface.terminal_id()?.to_owned(),
-                workspace.active_project()?.place(),
-            ))
-        });
+        // Which terminal wants a live pane: the one the side panel is showing,
+        // or the one in the column when a tab has been zoomed there. Before
+        // the drawer existed only the column could hold one, and a terminal
+        // opened into the panel drew "This terminal has no session" for ever.
+        let in_panel = match workspace.panel().map(Panel::active_tab) {
+            Some(PanelTab::Surface(id)) => workspace
+                .active_project()
+                .and_then(|project| project.surface(id))
+                .and_then(|surface| surface.terminal_id())
+                .map(str::to_owned),
+            Some(PanelTab::Project | PanelTab::New(_)) | None => None,
+        };
+        let active = in_panel
+            .or_else(|| {
+                workspace
+                    .active_surface()
+                    .and_then(|surface| surface.terminal_id())
+                    .map(str::to_owned)
+            })
+            .zip(workspace.active_project().map(|project| project.place()));
         let active_id = active.as_ref().map(|(id, _)| id.clone());
+        let zoomed = self.pane == Pane::Surface;
         if let Some((id, place)) = active {
             let terminal = self.terminals.entry(id.clone()).or_insert_with(|| {
                 cx.new(|cx| crate::view::terminal::TerminalPane::new(place, id, cx))
             });
-            if self.active_terminal != active_id {
+            // The column takes the caret with it, since zooming a terminal is
+            // an act of sitting down at it. In the drawer nothing takes the
+            // focus but a click, as everywhere else here.
+            if zoomed && self.active_terminal != active_id {
                 window.focus(&terminal.focus_handle(cx), cx);
             }
         }
@@ -1026,7 +1063,7 @@ impl Arbos {
             notifications_posted: Vec::new(),
             touched: false,
             launched_at: std::time::Instant::now(),
-            panel_open: true,
+            panel_focus: cx.focus_handle(),
             archived_open: false,
             agents_card_open: None,
             composer,
@@ -1291,14 +1328,22 @@ impl Arbos {
         self.focus_composer_after_create(window, cx);
     }
 
-    /// ⌘T: a new tab, which is a project — pick the machine, then the
-    /// folder. Same picker as ⌘O.
+    /// ⌘T: a new tab. Which row of tabs it lands in follows the focus — the
+    /// side panel's when the panel has it, the window's projects otherwise.
+    /// The lit tab row is the one that answers, and it is lit off the same
+    /// focus this reads, so what the chord will do is on screen before it is
+    /// pressed.
     pub(crate) fn new_tab_action(
         &mut self,
         _: &NewTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.panel_focused(window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
+            return;
+        }
         self.open_project_action(&OpenProject, window, cx);
     }
 
@@ -1311,9 +1356,16 @@ impl Arbos {
     }
 
     /// Step to the neighbouring tab, wrapping at either end as a browser
-    /// does. The ring is the strip: the projects in their order, then Settings
-    /// when it is open, because a tab the cycle cannot reach is not a tab.
+    /// does — the side panel's own row when the panel has the focus, and the
+    /// window's strip otherwise. That strip's ring is the projects in their
+    /// order, then Settings when it is open, because a tab the cycle cannot
+    /// reach is not a tab.
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_focused(window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.step_panel_tab(step, cx));
+            return;
+        }
         let projects = self.workspace.read(cx).projects.len();
         // The Settings slot's index, when the strip holds one: past the last
         // project, which is where the strip draws it.
@@ -1472,6 +1524,22 @@ impl Arbos {
             self.dismiss_menu(cx);
             return;
         }
+        // The side panel is the next thing Escape closes: it is the one of
+        // the three ways back that needs no keystroke to be learned first
+        // (the Project page shipped without one, and he told us he could not
+        // close it).
+        if self.panel_focused(window, cx)
+            && self
+                .workspace
+                .read(cx)
+                .panel()
+                .is_some_and(|panel| panel.open)
+        {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.set_panel_open(false, cx));
+            self.focus_composer(window, cx);
+            return;
+        }
         // Nothing to close: Escape leaves the Settings tab, the Project page or
         // a document for the chat, as ⌘1 does. The pane binds `escape` on its
         // own key context as well, and both are wanted: this one answers when
@@ -1509,11 +1577,37 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.select_session(id, cx));
     }
 
-    pub(crate) fn select_surface(
+    /// A click on a surface, wherever it was clicked: it comes to the front
+    /// of the side panel and the drawer opens with it.
+    pub(crate) fn show_surface(
         &mut self,
-        id: crate::model::surface::SurfaceId,
+        id: SurfaceId,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.show_surface(id, true, cx));
+        self.focus_panel(window, cx);
+    }
+
+    /// ⌘\\: the tab in front takes the window, and the same key gives the chat
+    /// back — "let me really work in this one" without a grid to arrange.
+    /// Only a surface can be zoomed; the project tab and an empty tab have
+    /// nothing the column would draw.
+    pub(crate) fn zoom_panel_action(
+        &mut self,
+        _: &ZoomPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane == Pane::Surface {
+            self.show_chat(&ShowChat, window, cx);
+            return;
+        }
+        let Some(PanelTab::Surface(id)) = self.workspace.read(cx).panel().map(Panel::active_tab)
+        else {
+            return;
+        };
         self.show_pane(Pane::Surface, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_surface(id, cx));
@@ -1589,13 +1683,39 @@ impl Arbos {
         });
     }
 
+    /// ⌘B: open or close the side panel of the project in front. Opening it
+    /// gives it the focus, so the tab chords act on its row at once — he
+    /// asked for the drawer, so the drawer is what he is driving.
     pub(crate) fn toggle_panel_action(
         &mut self,
         _: &TogglePanel,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.panel_open = !self.panel_open;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.toggle_panel(cx));
+        let open = self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_some_and(|panel| panel.open);
+        if open {
+            self.focus_panel(window, cx);
+        } else {
+            self.focus_composer(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the side panel holds the focus — which row of tabs `⌘T` and
+    /// `⌘⇧{ }` act on, and which row is drawn lit.
+    pub(crate) fn panel_focused(&self, window: &Window, cx: &App) -> bool {
+        self.panel_focus.contains_focused(window, cx)
+    }
+
+    /// Give the panel the focus. Only a person's own action calls this.
+    pub(crate) fn focus_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.panel_focus, cx);
         cx.notify();
     }
 
@@ -1701,7 +1821,7 @@ impl Arbos {
     }
 
     /// The composer takes the keyboard back, when there is one to take it.
-    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let composer = self
             .workspace
             .read(cx)
@@ -1715,12 +1835,10 @@ impl Arbos {
         self.show_pane(Pane::Project, cx);
     }
 
+    /// ⌘1: the chat, whatever else is open — the way back from the Settings
+    /// tab as much as from the Project page or the side panel, and the one
+    /// that always works.
     pub(crate) fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
-        // ⌘1 and Escape are the way back from the Settings tab as much as from
-        // the Project page. `show_pane` below leaves the tab; it stays in the
-        // strip, where its close mark is, and the composer takes the keyboard
-        // so the next keystroke lands in the chat.
-        let leaving_settings = self.front() == Front::Settings;
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
                 if let Some(focus) = &mut project.focus {
@@ -1729,9 +1847,12 @@ impl Arbos {
             }
         });
         self.show_pane(Pane::Chat, cx);
-        if leaving_settings {
-            self.focus_composer(window, cx);
-        }
+        // The composer takes the keyboard either way, so the next keystroke
+        // lands in the chat: the Settings tab stays in the strip where its
+        // close mark is, and the side panel gives the tab chords back to the
+        // window's own strip. Unconditional because "⌘1 goes to the chat" has
+        // to mean the caret too, or the drawer keeps answering ⌘T.
+        self.focus_composer(window, cx);
     }
 
     /// ⌘, the gear, and the menu item: open the Settings tab on `section`, or
@@ -1821,8 +1942,16 @@ impl Arbos {
     /// While a speech-server session is live, what its agent does
     /// (`agent.*`, `tool.*`, `text.done`) lands in the active chat as
     /// notices, a few times a second. Ends when the session does.
+    ///
+    /// A live call owns the same queue (`start_call_mirror`). This loop
+    /// must not run then: it writes to whichever tab is in front, so Home
+    /// or another project would get the spoken rows.
     pub(crate) fn start_voice_mirror(&mut self, cx: &mut Context<Self>) {
-        if self.voice_mirror_on || !crate::voice_ws::configured() {
+        if self.voice_mirror_on
+            || self.call.is_some()
+            || crate::voice_ws::in_call()
+            || !crate::voice_ws::configured()
+        {
             return;
         }
         self.voice_mirror_on = true;
@@ -1831,9 +1960,13 @@ impl Arbos {
                 cx.background_executor()
                     .timer(Duration::from_millis(400))
                     .await;
-                let lines = crate::voice_ws::drain_mirror();
-                let live = crate::voice_ws::status().phase.is_some();
                 let keep = this.update(cx, |this, cx| {
+                    if this.call.is_some() || crate::voice_ws::in_call() {
+                        this.voice_mirror_on = false;
+                        return false;
+                    }
+                    let lines = crate::voice_ws::drain_mirror();
+                    let live = crate::voice_ws::status().phase.is_some();
                     if !lines.is_empty() {
                         let id = this.workspace.read(cx).active_id();
                         if let Some(id) = id {
@@ -2129,10 +2262,12 @@ impl Arbos {
             return;
         }
         let workspace = self.workspace.read(cx);
-        let Some(session) = workspace.active_id() else {
+        let Some(project) = workspace.active_project() else {
             return;
         };
-        let Some(project) = workspace.active_project() else {
+        // That project's own chat — not a worker under it, and not Home
+        // unless Home is the tab in front (the call is then Home's).
+        let Some(session) = project.main_session().or_else(|| workspace.active_id()) else {
             return;
         };
         if !crate::voice_ws::configured() {
@@ -2143,15 +2278,33 @@ impl Arbos {
             return;
         }
         let label = Workspace::tab_label(project);
-        // What the gateway is told the call is for: the tab's hub name
-        // (`mac/arbos`), so a gateway on another machine can attach to this
-        // kernel through the hub; a gateway serving this very kernel takes
-        // the folder's name as its own.
-        let hub_name = kernel::hub_project_name(&project.place());
+        // What the gateway is told the call is for: this tab's folder path
+        // with the machine and folder name the hub knows it by. The path is
+        // what binds the call — never another folder's agent, whatever the
+        // gateway was started with.
+        let mut target = kernel::call_target(&project.place(), &label);
+        if let Some(chat) = workspace.session(session) {
+            target.context = call_context(chat);
+        }
+        // No machine name and a speech server elsewhere: the gateway would
+        // refuse (`project_not_on_hub`) — say so now, in the chat, with what
+        // to do, instead of dialing. A gateway on this computer can still
+        // reach the folder by its path.
+        if target.machine.is_none() && !crate::voice_ws::gateway_is_local() {
+            let why = format!("voice · call refused: {}", crate::voice_ws::NOT_ON_HUB);
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.with_session(session, cx, |chat| chat.notice(true, &why));
+            });
+            self.voice_error(&format!("call refused: {}", crate::voice_ws::NOT_ON_HUB), cx);
+            return;
+        }
         // Dictation, if a take is open, ends: the call owns the mic.
         if self.composer.read(cx).is_recording() {
             self.stop_voice(cx);
         }
+        // Stop the dictation mirror so it cannot steal call frames onto
+        // the front tab (Home, another project) while this call is live.
+        self.voice_mirror_on = false;
         self.call = Some(Call {
             session,
             label: label.clone(),
@@ -2162,7 +2315,7 @@ impl Arbos {
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { crate::voice_ws::call_start(&hub_name) })
+                .spawn(async move { crate::voice_ws::call_start(&target) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match started {
@@ -2179,6 +2332,13 @@ impl Arbos {
                     }
                     Err(e) => {
                         this.call = None;
+                        // The refusal in the chat too, where the caller looks
+                        // (`project_not_on_hub: … put the hub url … then call again`).
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(session, cx, |chat| {
+                                chat.notice(true, &format!("voice · call refused: {e:#}"));
+                            });
+                        });
                         this.voice_error(&format!("call failed: {e:#}"), cx);
                     }
                 }
@@ -2215,9 +2375,9 @@ impl Arbos {
         cx.notify();
     }
 
-    /// While the call is live: the narrator's lines land in the call's chat
-    /// as `voice ·` notices, the strip repaints, and a dropped session ends
-    /// the call on this side too.
+    /// While the call is live: spoken lines land only in the call's project
+    /// chat (`call.session`). The dictation mirror is off, so Home and other
+    /// projects cannot receive them. A dropped session ends the call here.
     fn start_call_mirror(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -2235,7 +2395,9 @@ impl Arbos {
                         this.workspace.update(cx, |workspace, cx| {
                             workspace.with_session(call.session, cx, |chat| {
                                 for m in &lines {
-                                    if let Some(line) = call_line(m) {
+                                    if m.kind == "caller.said" {
+                                        chat.voice_prompt(&m.text);
+                                    } else if let Some(line) = call_line(m) {
                                         chat.notice(false, &line);
                                     }
                                 }
@@ -2453,14 +2615,26 @@ impl Arbos {
         self.report_anchor = id.zip(seq);
         self.feedback_sheet.update(cx, |sheet, cx| {
             sheet.show(agent, seq, parts, window, cx);
-            sheet.take_session(
-                self.workspace
-                    .read(cx)
-                    .active_session()
-                    .map(|chat| chat.drawn_view())
-                    .unwrap_or(serde_json::Value::Null),
-                cx,
-            );
+            // Everything the window knows about this place, not only the chat
+            // in front: the rows and the facts behind them, the records on
+            // disk, the tabs and the focus. A report that carries one side of a
+            // disagreement cannot show it.
+            let workspace = self.workspace.read(cx);
+            let mut view = workspace
+                .active_project()
+                .map(|project| {
+                    // The store, not the path: a remote place's records live in
+                    // its local sidecar, and its path is the far machine's.
+                    workspace
+                        .desktop_state(&project.store(), crate::feedback::DESKTOP_STATE_BUDGET)
+                })
+                .unwrap_or(serde_json::Value::Null);
+            if let Some(obj) = view.as_object_mut()
+                && let Some(chat) = workspace.active_session()
+            {
+                obj.insert("drawn".into(), chat.drawn_view());
+            }
+            sheet.take_session(view, cx);
         });
         if let Some(id) = id {
             self.workspace.update(cx, |workspace, cx| {
@@ -2574,8 +2748,9 @@ impl Arbos {
         } else if refused.is_some() {
             // The kernel said it does not know the frame, which means it
             // predates it. Certain, not guessed.
-            self.feedback_sheet
-                .update(cx, |sheet, cx| sheet.no_bundle(Unavailable::KernelTooOld, cx));
+            self.feedback_sheet.update(cx, |sheet, cx| {
+                sheet.no_bundle(Unavailable::KernelTooOld, cx)
+            });
         }
     }
 
@@ -2610,6 +2785,13 @@ impl Arbos {
         draft: &crate::feedback::Draft,
         cx: &mut Context<Self>,
     ) {
+        // The host as well as the path: a remote place's path is not a local
+        // path, and staging a report inside one is what stranded his.
+        let host = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .and_then(|project| project.host.clone());
         let Some(place) = self
             .workspace
             .read(cx)
@@ -2623,13 +2805,24 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let written = crate::feedback::write(&place, draft, &id, arbos_core::now_ms());
-        if let Err(e) = written {
-            sheet.update(cx, |sheet, cx| {
-                sheet.settled(Err(format!("could not write the report: {e:#}")), cx)
-            });
-            return;
-        }
+        let written = match crate::feedback::write(
+            &place,
+            host.as_deref(),
+            draft,
+            &id,
+            arbos_core::now_ms(),
+        ) {
+            Ok(written) => written,
+            Err(e) => {
+                // Every outbox refused it. His words are still in the field and
+                // must not die there, so the sheet offers to put them on the
+                // clipboard rather than a button that repeats the failure.
+                sheet.update(cx, |sheet, cx| {
+                    sheet.nowhere_to_save(format!("{e:#}"), cx);
+                });
+                return;
+            }
+        };
         // The thumbs-down he pressed now reads as reported.
         if let Some((chat_id, seq)) = self.report_anchor.take() {
             self.workspace.update(cx, |workspace, cx| {
@@ -2642,14 +2835,23 @@ impl Arbos {
         let address = self.workspace.read(cx).settings.feedback.address.clone();
         sheet.update(cx, |sheet, cx| {
             sheet.settled(
-                Ok(if address.trim().is_empty() {
-                    format!(
-                        "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk. Reference {id}."
-                    )
-                } else {
-                    format!(
-                        "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
-                    )
+                Ok({
+                    // Where it went, when that is not where it usually goes.
+                    // A report saved somewhere unexpected is only honest if it
+                    // says so.
+                    let where_ = match written.elsewhere {
+                        Some(why) => format!(" Saved to {why} — {}.", written.dir.display()),
+                        None => String::new(),
+                    };
+                    if address.trim().is_empty() {
+                        format!(
+                            "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk.{where_} Reference {id}."
+                        )
+                    } else {
+                        format!(
+                            "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix.{where_} Reference {id}."
+                        )
+                    }
                 }),
                 cx,
             )
@@ -2679,17 +2881,18 @@ impl Arbos {
         if address.trim().is_empty() {
             return;
         }
-        // Every place that holds reports, open or not. Walking the open tabs
-        // meant a report from a project he had closed was never retried — and he
-        // closes a project because the thing he reported is over.
-        let mut places = crate::feedback::known_outboxes();
+        // Every outbox that holds reports, whatever is open. Walking the open
+        // tabs meant a report from a project he had closed was never retried,
+        // and a report staged outside a project — because his home went
+        // read-only — belongs to no tab at all.
+        let mut roots = crate::feedback::known_outboxes();
         for project in &self.workspace.read(cx).projects {
-            let place = arbos_core::Place::new(project.path.clone());
-            if !places.iter().any(|p| p.path() == place.path()) {
-                places.push(place);
+            let root = crate::feedback::outbox(&arbos_core::Place::new(project.path.clone()));
+            if !roots.contains(&root) {
+                roots.push(root);
             }
         }
-        if places.is_empty() {
+        if roots.is_empty() {
             return;
         }
         let sheet = self.feedback_sheet.clone();
@@ -2699,10 +2902,10 @@ impl Arbos {
                 .spawn(async move {
                     let home = std::path::Path::new(&hub_home);
                     let now = arbos_core::now_ms();
-                    places
+                    roots
                         .iter()
-                        .flat_map(|place| {
-                            crate::feedback::deliver_pending(place, &address, home, now)
+                        .flat_map(|root| {
+                            crate::feedback::deliver_pending(root, &address, home, now)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -3057,8 +3260,83 @@ fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
         "narrator.say/error" => Some(format!("voice · {text}")),
         "narrator.say/detail" => Some(format!("voice · detail: {text}")),
         k if k.starts_with("narrator.say") => Some(format!("voice · {text}")),
+        // GPT Live's own words, including short small talk ("hey"). The
+        // narrator's "On it." is `narrator.say/ack` above, not this.
+        "model.reply" => Some(format!("voice · {text}")),
         _ => None,
     }
+}
+
+/// What the call starts knowing: the last lines of this chat, clipped, and
+/// the sub-agents, so the narrator and the speech model can answer "what
+/// were we doing" before the first new turn. Tool lines are the label and
+/// state only — never the output or the diff.
+fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::CallContext {
+    use crate::model::session::{ChatItem, ChildState, ToolStatus};
+    use crate::voice_ws::{CallContext, ContextAgent, ContextLine};
+    const LINES: usize = 40;
+    const CLIP: usize = 400;
+    let clip = |text: &str| -> String {
+        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.chars().count() > CLIP {
+            flat.chars().take(CLIP).collect::<String>() + "…"
+        } else {
+            flat
+        }
+    };
+    let mut recent: Vec<ContextLine> = chat
+        .items
+        .iter()
+        .rev()
+        .filter_map(|item| match item {
+            ChatItem::User(m) if !m.text.trim().is_empty() => Some(ContextLine { role: "user".into(), text: clip(&m.text) }),
+            ChatItem::Agent(text) if !text.trim().is_empty() => Some(ContextLine { role: "assistant".into(), text: clip(text) }),
+            ChatItem::From { who, text, .. } if !text.trim().is_empty() => {
+                Some(ContextLine { role: "worker".into(), text: clip(&format!("{who}: {text}")) })
+            }
+            ChatItem::Tool { label, status, .. } => {
+                let state = match status {
+                    ToolStatus::Running => "running",
+                    ToolStatus::Success => "done",
+                    ToolStatus::Failure => "failed",
+                };
+                Some(ContextLine { role: "tool".into(), text: clip(&format!("{label} ({state})")) })
+            }
+            ChatItem::Notice { text, .. } if !text.trim().is_empty() => {
+                Some(ContextLine { role: "notice".into(), text: clip(text) })
+            }
+            ChatItem::Asked { question, answer } => {
+                let line = if answer.trim().is_empty() {
+                    format!("asked: {question}")
+                } else {
+                    format!("asked: {question} → {answer}")
+                };
+                Some(ContextLine { role: "asked".into(), text: clip(&line) })
+            }
+            ChatItem::Thinking { text, done, .. } if !done && !text.trim().is_empty() => {
+                Some(ContextLine { role: "thinking".into(), text: clip(text) })
+            }
+            _ => None,
+        })
+        .take(LINES)
+        .collect();
+    recent.reverse();
+    let agents = chat
+        .children
+        .iter()
+        .map(|c| ContextAgent {
+            name: c.kernel_id.clone().unwrap_or_else(|| c.title.clone()),
+            state: match c.state {
+                ChildState::Working => "working",
+                ChildState::Asking => "asking",
+                ChildState::Waiting => "waiting",
+                ChildState::Done => "done",
+            }
+            .into(),
+            step: c.step.clone(),
+        })
+        .collect();
+    CallContext { recent, agents, running: chat.busy() }
 }
 
 /// One notice line for a mirrored speech-server event: who, what, words.
