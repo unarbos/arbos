@@ -393,8 +393,14 @@ impl State {
                 if !self.dragging {
                     return None;
                 }
-                self.dragging = false;
+                // Release reaches every prose item, and the ones above the
+                // pressed one hear it first: an Up on an item that does not
+                // hold the press must leave the gesture alone, or the
+                // pressed item's own Up finds `dragging` already false and
+                // no link ever opened — every URL and doc chip in an answer
+                // was dead to a click (Jacob, reports 2026-09-17-15/-16).
                 let (_, selection) = self.selection.filter(|(item, _)| *item == ix)?;
+                self.dragging = false;
                 click_url(&self.doc(ix, text), selection)
             }
         }
@@ -4174,9 +4180,20 @@ fn zone(
     // Standing work the turn set up: a small card at the moment it was made.
     zone = zone.children(subscription_cards(chat, body.clone(), &theme));
     // Screenshots and clips the work produced stay in view when the work
-    // folds: they are what the user asked to see.
+    // folds: they are what the user asked to see. Not one the answer
+    // itself shows: the agent drew a cat, screenshotted it twice on the
+    // way, and embedded the last shot in its reply — three cats (Jacob,
+    // report 2026-09-17-11, F-142). A file the answer's prose embeds is
+    // the answer's to show.
+    let answer_text = turn_answer(&chat.items, turn).unwrap_or_default();
     for ix in body.clone() {
         if let ChatItem::Artifacts(files) = &chat.items[ix] {
+            let shown_in_answer = files
+                .iter()
+                .all(|file| !file.path.is_empty() && answer_text.contains(&file.path));
+            if shown_in_answer {
+                continue;
+            }
             zone = zone.child(artifacts_row(chat, ix, files, &theme, cx));
         }
     }
