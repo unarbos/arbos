@@ -90,6 +90,10 @@ on:
 
 permissions:
   contents: write
+  # To ask what CI concluded on a commit other than this run's own. The
+  # plan job needs that to tell "a newer build will publish this" from
+  # "a newer build went red and nobody will".
+  actions: read
 
 concurrency:
   group: dev-channel
@@ -146,9 +150,22 @@ jobs:
   plan:
     name: what to publish
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # A failed CI run starts this too, and that is the point. It is the
+    # only moment at which we learn that the commit an earlier green build
+    # stepped aside for is never going to publish, so it is the moment to
+    # go back for that green build. The job publishes nothing on its own
+    # account — it re-asks "what is the newest commit worth publishing".
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.conclusion == 'success'
+      || github.event.workflow_run.conclusion == 'failure'
     env:
       HAVE_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY != '' }}
+      GH_TOKEN: ${{ github.token }}
+      # How far back to look for a green commit. A merge batch is a few
+      # commits; this is room for a bad afternoon without ever becoming an
+      # unbounded walk through history.
+      SCAN: "40"
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
       sha: ${{ steps.plan.outputs.sha }}
@@ -170,45 +187,105 @@ jobs:
             echo "::notice title=dev channel not set up::ARBOS_UPDATE_SIGNING_KEY is not set, so nothing was published. Run .github/setup-publishing.sh once."
             exit 0
           fi
-          # Has `main` already moved past the commit this run is for?
+          # The question is not "was this run superseded" but "what is the
+          # newest commit on `main` worth publishing right now".
           #
-          # A merge batch starts a run per commit. The concurrency group
-          # serialises them and GitHub drops all but the newest *waiting* run,
-          # so the first of a batch still runs to completion — a full macOS
-          # build, a real Apple notarisation, an upload — and is then replaced
-          # minutes later by the last one. That is a runner and a submission
-          # spent on a build nobody should install, and for a few minutes the
-          # feed offers it: somebody pressing Update gets a build that is
-          # already superseded.
+          # Those used to be the same question and they are not. A merge
+          # batch starts a run per commit, and a run whose commit is no
+          # longer the tip steps aside so the newer one publishes instead —
+          # which saves a runner, an Apple notarisation and a few minutes of
+          # the feed offering a build that is already behind. That part was
+          # right and it stays.
           #
-          # Checked here rather than by cancelling a run that is under way.
-          # Cancelling is the dangerous one: it can land between notarization
-          # and the feed write and leave assets uploaded with nothing pointing
-          # at them, or a feed entry whose asset the prune then removes.
+          # What was missing is the way back. On 2026-09-17, build 1609
+          # (#490, the commit that draws voice lines in the chat) went
+          # green, stepped aside for 1611 — and 1611's CI failed. Nothing
+          # published. The green build had given up its turn to a commit
+          # that never took it, and the channel sat still for half an hour
+          # while Jacob waited for exactly that change. Stepping aside is
+          # only safe if somebody is actually going to go.
+          #
+          # So: walk `main` back from the tip and take the newest commit
+          # whose CI went green. If something newer than it is still
+          # deciding, do nothing — that run will come back here and decide
+          # properly. If everything newer has failed, the green one is the
+          # newest publishable commit and this run publishes it, whichever
+          # commit happened to trigger the run.
+          #
           # Nothing has been built, signed, submitted or uploaded at this
-          # point, so skipping here has nothing to leave half-done.
+          # point, so a run that decides to do nothing leaves nothing
+          # half-done. That is why the decision is here and not in a
+          # cancellation, which could land between notarization and the feed
+          # write.
           #
-          # `--is-ancestor` is what makes this "we are behind" rather than
-          # "we are different": a force-push or a diverged tip is not a reason
-          # to skip a commit whose CI went green.
-          #
-          # A hand-started run is never skipped. Somebody asking for this
-          # build by name has a reason.
+          # A hand-started run publishes what it was pointed at. Somebody
+          # asking for a build by name has a reason.
           git fetch --quiet origin main
           tip="$(git rev-parse FETCH_HEAD)"
-          sha="$(git rev-parse HEAD)"
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ] \
-            && [ "$sha" != "$tip" ] \
-            && git merge-base --is-ancestor "$sha" "$tip"; then
+          here="$(git rev-parse HEAD)"
+
+          # What CI concluded for one commit: success, pending, failed, or
+          # none at all. A commit nobody ran is not pending — treating it so
+          # would wait for a run that is never coming.
+          ci_state() {
+            gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f head_sha="$1" -f per_page=20 --jq '
+                if   ([.workflow_runs[] | select(.conclusion == "success")] | length) > 0 then "success"
+                elif ([.workflow_runs[] | select(.status != "completed")]  | length) > 0 then "pending"
+                elif (.workflow_runs | length) > 0 then "failed"
+                else "none" end' 2>/dev/null || echo "none"
+          }
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            choose="$here"
+          else
+            choose=""
+            newer_pending=""
+            for candidate in $(git rev-list --max-count="$SCAN" "$tip"); do
+              case "$(ci_state "$candidate")" in
+                success) choose="$candidate"; break ;;
+                # Older than this, but newer than any green we go on to
+                # find — so whatever we would have chosen, this one is
+                # still entitled to publish instead.
+                pending) newer_pending="${newer_pending:-$candidate}" ;;
+                *) ;;
+              esac
+            done
+
+            if [ -n "$newer_pending" ]; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Waiting::${newer_pending:0:7} is newer and still running. Its run decides, and comes back here whichever way it goes."
+              exit 0
+            fi
+            if [ -z "$choose" ]; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::warning title=Nothing green::No commit in the last $SCAN on main has a green CI run, so there is nothing to publish."
+              exit 0
+            fi
+          fi
+
+          # Already out? Then this run has nothing to add. What makes the
+          # whole thing safe to re-enter: any number of failure events can
+          # fire without republishing what is already on the channel.
+          want_build="$(git rev-list --count "$choose")"
+          feed_build="$(curl -fsSL --max-time 30 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/arbos-dev.json" 2>/dev/null \
+            | jq -r '[.releases[].build] | max // 0' 2>/dev/null || echo 0)"
+          feed_build="${feed_build:-0}"
+          if [ "$want_build" -le "$feed_build" ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Superseded::main is already at ${tip:0:7}, so this build of ${sha:0:7} was not made. The run for the newer commit publishes it."
-            {
-              echo "### dev channel"
-              echo
-              echo "Skipped \`${sha:0:7}\` — \`main\` has already moved to \`${tip:0:7}\`."
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Already published::The channel is on build $feed_build, and ${choose:0:7} is build $want_build."
             exit 0
           fi
+
+          if [ "$choose" != "$here" ]; then
+            echo "::notice title=Reclaimed::${here:0:7} is not the one to publish; ${choose:0:7} (build $want_build) is the newest commit on main with a green CI, and nothing newer is still deciding."
+          fi
+          # Everything below reads the tree, so stand on the commit chosen.
+          # The build jobs already check out `plan.outputs.sha`, so this is
+          # the only place that has to move.
+          git checkout --detach --quiet "$choose"
+          sha="$choose"
 
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
