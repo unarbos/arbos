@@ -181,15 +181,14 @@ if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
   # held the step for 2.5 hours — and every one of them drafted a bug against a build that was fine.
   # `available()` cannot see this coming: the file stats perfectly well, it is the read that fails.
   # So: one copy to local disk per cycle, and the scenarios read that.
-  if [ -n "${ARBOS_QA_DRIVER_DIR:-}" ] && [ -f "$ARBOS_QA_DRIVER_DIR/arbosdriver.py" ]; then
-    mkdir -p "$ROOT/loop/driver"
-    if cp -f "$ARBOS_QA_DRIVER_DIR"/*.py "$ROOT/loop/driver/" 2>/dev/null && [ -s "$ROOT/loop/driver/arbosdriver.py" ]; then
-      echo "-- desktop driver: copied $(ls "$ROOT/loop/driver"/*.py | wc -l) file(s) from $ARBOS_QA_DRIVER_DIR to local disk"
-      ARBOS_QA_DRIVER_DIR="$ROOT/loop/driver"
-    else
-      echo "!! DESKTOP DRIVER NOT COPIED from $ARBOS_QA_DRIVER_DIR; the scenarios would read it from that path on every import"
-    fi
-  fi
+  # Where the driver comes from is decided per branch below, inside the loop, because **the driver is
+  # versioned with the app it drives**: `desktop/driver/arbosdriver.py` in the same commit as the binary.
+  # 2026-09-17 22:35: the store's `internal/parity/` copy — which this step preferred — was from 07:06
+  # and had neither the `front` nor the `settings_section` field the app began reporting at 12:32
+  # (`4feabfd0`), because settings stopped being a window and became a tab. A driver older than its app
+  # does not fail loudly; it reads the fields it knows and a check meaning "the settings surface is on
+  # screen" keeps passing on `settings_open`, whose meaning changed underneath it. Third instance today
+  # of one file with two homes where the stale one wins (qal-j19, qal-j23, qal-j25).
   for branch in ${ARBOS_QA_DESKTOP_BRANCH:-main}; do
     slug=$(echo "$branch" | tr '/' '-')
     if ! git -C "$ROOT/repo" fetch -q origin "$branch" 2>/dev/null; then
@@ -202,6 +201,22 @@ if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
     else
       mkdir -p "$ROOT/repo-track"
       git -C "$ROOT/repo" worktree add -q --detach "$wt" "$sha" || { echo "-- desktop $branch: worktree failed"; continue; }
+    fi
+    # The driver from the same commit as the app, copied to local disk (never imported off the store's
+    # FUSE mount, qal-j23). The store's internal/parity copy is the parity loop's working area and is
+    # used only when the worktree has none.
+    dsrc="$wt/desktop/driver"
+    [ -f "$dsrc/arbosdriver.py" ] || dsrc="${ARBOS_QA_DRIVER_DIR:-}"
+    if [ -n "$dsrc" ] && [ -f "$dsrc/arbosdriver.py" ]; then
+      rm -rf "$ROOT/loop/driver"; mkdir -p "$ROOT/loop/driver"
+      if cp -f "$dsrc"/*.py "$ROOT/loop/driver/" 2>/dev/null && [ -s "$ROOT/loop/driver/arbosdriver.py" ]; then
+        echo "-- desktop driver: $(ls "$ROOT/loop/driver"/*.py | wc -l) file(s) from $dsrc (app's own commit: $(git -C "$wt" rev-parse --short=12 HEAD))"
+        ARBOS_QA_DRIVER_DIR="$ROOT/loop/driver"
+      else
+        echo "!! DESKTOP DRIVER NOT COPIED from $dsrc; the scenarios would import it from that path every time"
+      fi
+    else
+      echo "!! NO DESKTOP DRIVER for $branch: neither $wt/desktop/driver nor ARBOS_QA_DRIVER_DIR has arbosdriver.py"
     fi
     echo "-- desktop $branch: building kernel + app ($(git -C "$wt" rev-parse --short=12 HEAD))"
     if ! (cd "$wt" && CARGO_TARGET_DIR="$ROOT/target-desktop-$slug" nice -n 19 cargo build --release -p arbos-kernel -j "$JOBS" 2>&1 | tail -1); then

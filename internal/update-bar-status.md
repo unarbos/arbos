@@ -5,11 +5,12 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-17 22:36 UTC.
+Last checked 2026-09-17 22:45 UTC.
 
-## Click Update. You will get build 1657.
+## Click Update. You will get build 1662.
 
-**1657** — signed, notarised, stapled, on the feed since 22:19 UTC.
+**1662** — signed, notarised, stapled, on the feed since 22:41 UTC. It is
+the tip of `main`, so the channel is caught up.
 
 It contains everything you were waiting for:
 
@@ -26,35 +27,31 @@ It contains everything you were waiting for:
 | Notarised | Apple returned `status: Accepted` |
 | Stapled | ticket present in the downloaded zip — 1674 bytes, signed by Apple System Integration CA for "Software Ticket Signing" |
 | Gatekeeper | `source=Notarized Developer ID` |
-| Bundle | `Info.plist` reads `0.2.0 build 1657` |
+| Bundle | `Info.plist` reads `0.2.0 build 1662` |
 | Feed | every download it names is really on the tag |
 
-The ticket was read out of `Arbos-0.2.0-1657-macos-arm64.zip` as
+The ticket was read out of `Arbos-0.2.0-1662-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
-## The channel is behind `main` again, and the cause is known
+## The stall that held it, and the fix
 
-`main` is on build 1662; the feed is on 1657. The publisher is waiting
-rather than failing, and it is waiting on the wrong thing — the same
-fault that held it from 21:37 to 22:19. It recurred at 22:29:
+The channel sat on 1657 from 22:19 to 22:41 for the same reason it sat
+from 21:37 to 22:19. At 22:29 the publisher said:
 
 > `8d0688d is newer and still running. Its run decides, and comes back
 > here whichever way it goes.`
 
-`8d0688d` is that run's **own** triggering commit. Every commit gets two
+`8d0688d` was that run's **own** triggering commit. Every commit gets two
 CI runs about forty seconds apart; the first to finish fires the event,
 the second is still going when the publisher asks the API, so it reads
-"still deciding" and waits for an event that has already happened.
+"still deciding" and waits for an event that has already happened. It
+published only once a later CI completion came along.
 
-[#517](https://github.com/unarbos/arbos/pull/517) is the fix and is in
-review: the commit that started a run takes its conclusion from the event
-rather than re-asking, so it can never block. A green sibling still
-counts; the answer for that one commit is simply never "wait".
-
-Until it lands the channel still moves — it publishes whenever it catches
-a tip whose CI has settled — but it can sit for half an hour while `main`
-merges faster than CI finishes. 1657 is current enough to click; nothing
-merged since changes what you are testing.
+[#517](https://github.com/unarbos/arbos/pull/517) is the fix and is
+**green, waiting on the steward**: the commit that started a run takes its
+conclusion from the event rather than re-asking, so it can never block. A
+green sibling still counts; the answer for that one commit is simply never
+"wait".
 
 ## Also since the last note
 
