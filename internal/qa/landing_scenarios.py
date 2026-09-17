@@ -23,6 +23,11 @@
          had five hung workers and a 600 s "still running" from exactly this; Linux's pidfd reaper hid it from the loops.
   rp-02  a launcher that hands the kernel a signal mask with SIGCHLD blocked: the kernel unblocks it, says so on
          stderr, and a job still ends with its result.
+  st-01  a silent turn names its wait (#374): after ARBOS_STALL_SECS with nothing a window could see, one plain notice
+         "Still working …" naming the tool and its command, said once; the turn then finishes normally.
+  pn-01  a panic on the turn's own task no longer strands the agent (#374, ARBOS_TEST_PANIC_TURN): the agent goes idle,
+         its record says why (a failed notice, `turn_panicked` in kernel.log), and the next message runs — the purest
+         form of the invisible class: a fault with no error anywhere that looks exactly like the app thinking.
   fb-01  the desktop feedback chain (#336, #345, #331): the sheet opens from a thumbs-down and the window keeps
          answering; the report is on disk before anything is sent; with no credentials it waits ("saved, and
          waiting"); with credentials it is delivered through `store put` into a store a kernel serves; the poller
@@ -578,6 +583,66 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.notes["kernel_said_unblocked"] = said
         cx.rec.expect(r["idle"] and r["result_has_output"], "rp-02-result-never-arrived", f"a job under a kernel exec'd with SIGCHLD blocked produced no result within 25 s ({r})", "arbos-kernel main.rs SIGCHLD unblock (#371)")
         cx.rec.expect(said, "rp-02-mask-not-reported", "the kernel did not say on stderr that SIGCHLD was blocked and unblocked — on a build without #371 the mask stays and only Linux's pidfd hides it")
+
+
+    # ── #374: the turn watchdog ────────────────────────────────────────────
+    @reg("st-01-silent-turn-names-its-wait", tags=("watchdog",))
+    def st01(cx):
+        """A turn that shows nothing for ARBOS_STALL_SECS (5 min in production; 3 s here) gets one plain notice — "Still working …" — naming the tool in flight and its command and what the user can do; not a failure, said once; the turn then ends normally when the command does."""
+        cx.env["ARBOS_STALL_SECS"] = "3"
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 12", "description": "a long quiet command"}}]},
+            {"agent": "root", "content": "Done waiting."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "Wait quietly for twelve seconds, then say done.")
+        cx.rec.expect(c.wait_turn("root", "running", 10) is not None, "st-01-turn-never-started", "no running turn")
+        stall = c.wait(lambda f: f.get("type") == "event" and f.get("agent") == "root" and f.get("event", {}).get("kind") == "notice" and str(f.get("event", {}).get("text", "")).startswith("Still working"), 20, "the stall notice")
+        text = str((stall or {}).get("event", {}).get("text", ""))
+        cx.rec.notes["stall_notice"] = text[:240]
+        cx.rec.expect(stall is not None, "st-01-no-notice", "a turn silent for 3 s (+ the 5 s tick) produced no 'Still working' notice within 20 s", "arbos-kernel hooks.rs stall watchdog (#374)")
+        if stall:
+            cx.rec.expect((stall.get("event") or {}).get("failed") is False, "st-01-notice-marked-failed", "the stall notice is marked failed; it is a report, not a failure")
+            cx.rec.expect("`bash`" in text and "sleep 12" in text, "st-01-tool-unnamed", f"the notice does not name the tool and its command: {text[:160]!r}")
+            cx.rec.expect("Stop ends the turn" in text, "st-01-no-way-out", f"the notice does not say what the user can do: {text[:160]!r}")
+        cx.rec.expect(c.wait_turn("root", "idle", 40) is not None, "st-01-turn-never-ended", "the turn did not end after the command did")
+        time.sleep(1)
+        evs, _ = transcript(cx.place, "root")
+        stalls = [e for e in evs if e.get("kind") == "notice" and str(e.get("text", "")).startswith("Still working")]
+        cx.rec.notes["stall_notices_on_transcript"] = len(stalls)
+        cx.rec.expect(len(stalls) == 1, "st-01-said-more-than-once", f"the stall line is on the transcript {len(stalls)} time(s) for one silence")
+        cx.rec.expect(any(e.get("kind") == "assistant" and "Done waiting" in e.get("text", "") for e in evs) and evs[-1].get("kind") == "turn_complete", "st-01-turn-did-not-finish-normally", "after the notice the turn did not finish with its reply and turn_complete")
+
+    @reg("pn-01-panic-does-not-strand-the-agent", tags=("watchdog", "platform"))
+    def pn01(cx):
+        """A panic on the turn's own task (ARBOS_TEST_PANIC_TURN=root fires once): the agent goes idle within seconds instead of staying `running` for good; the transcript ends with a failed notice naming the internal error and a `turn_complete`; kernel.log says `turn_panicked`; the next message runs a normal turn (#374). Before the guard a user saw only a working line, forever, with no error anywhere."""
+        cx.env["ARBOS_TEST_PANIC_TURN"] = "root"
+        lines = [{"agent": "root", "content": "Fine now."}]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "first")
+        cx.rec.expect(c.wait_turn("root", "running", 10) is not None, "pn-01-turn-never-started", "no running turn")
+        idle = c.wait_turn("root", "idle", 12)
+        evs, _ = transcript(cx.place, "root")
+        notice = next((e for e in evs if e.get("kind") == "notice" and e.get("failed")), None)
+        log = ""
+        for pth in (cx.place / ".arbos" / "runtime" / "kernel.log", cx.place / ".arbos" / "kernel.log"):
+            if pth.exists():
+                log = pth.read_text(errors="replace")
+        cx.rec.notes.update({"idle_after_panic": idle is not None, "notice": (notice or {}).get("text", "")[:200], "ends_with": evs[-1].get("kind") if evs else None, "turn_panicked_logged": '"event":"turn_panicked"' in log})
+        cx.rec.expect(idle is not None, "pn-01-agent-stranded", "the agent stayed `running` after its turn task panicked — the shape that looks exactly like the app thinking", "arbos-kernel sched.rs turn guard (#374)")
+        cx.rec.expect(notice is not None and "internal error" in notice.get("text", "").lower(), "pn-01-no-reason-on-record", f"no failed notice naming the internal error on the transcript: {(notice or {}).get('text', '')[:120]!r}")
+        cx.rec.expect(bool(evs) and evs[-1].get("kind") == "turn_complete", "pn-01-record-not-closed", f"the transcript ends in {evs[-1].get('kind') if evs else None}, not turn_complete")
+        cx.rec.expect('"event":"turn_panicked"' in log, "pn-01-not-logged", "kernel.log has no turn_panicked event")
+        c.user("root", "second")
+        cx.rec.expect(c.wait_turn("root", "running", 10) is not None and c.wait_turn("root", "idle", 20) is not None, "pn-01-next-message-stuck", "the next message did not run a normal turn after the panic")
+        evs, _ = transcript(cx.place, "root")
+        cx.rec.expect(any(e.get("kind") == "assistant" and e.get("text") == "Fine now." for e in evs), "pn-01-next-message-unanswered", "the message after the panic was not answered")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))

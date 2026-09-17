@@ -429,6 +429,51 @@ class Cx:
         for k in self.kernels:
             if k.alive():
                 k.kill()
+        reap_scratch(self.scratch)
+
+
+def reap_scratch(scratch):
+    """Kill every process still working under a scenario's scratch folder before it is removed.
+    Without this, jobs a scenario started (a `while true` loop from a job scenario, a desktop's
+    home-store kernel) outlived their folder: on 2026-09-17 one such job had written 164 GB into
+    a deleted out.log and filled the VM's disk, and 123 leaked processes were running, some a day old."""
+    try:
+        out = subprocess.run(["ps", "-eo", "pid=,cmd="], capture_output=True, text=True, timeout=10).stdout
+    except Exception:  # noqa: BLE001
+        return 0
+    mine = os.getpid()
+    victims = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2 or str(scratch) not in parts[1]:
+            continue
+        pid = int(parts[0])
+        if pid == mine:
+            continue
+        victims.append(pid)
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    # Jobs that started with a cwd under the scratch but whose command line does not name it.
+    try:
+        for proc in Path("/proc").iterdir():
+            if not proc.name.isdigit() or int(proc.name) == mine:
+                continue
+            try:
+                cwd = os.readlink(proc / "cwd")
+            except OSError:
+                continue
+            if cwd.startswith(str(scratch)):
+                try:
+                    os.kill(int(proc.name), signal.SIGKILL)
+                    victims.append(int(proc.name))
+                except ProcessLookupError:
+                    pass
+    except Exception:  # noqa: BLE001
+        pass
+    return len(set(victims))
 
     def check(self, kernel_running=False, place=None):
         findings = check_place(place or self.place, kernel_running=kernel_running)
@@ -1812,8 +1857,11 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     final = rec.finalize()
     with open(ROLLOUTS / "index.jsonl", "a") as f:
         f.write(json.dumps({"ts": now_ms(), "rollout": final.name, "scenario": name, "branch": KERNEL_BRANCH or "rust", "status": result["status"], "breaks": [b["rule"] for b in rec.breaks]}) + "\n")
+    leaked = reap_scratch(scratch)
+    if leaked:
+        rec.log(f"reaped {leaked} process(es) still running under the scratch folder")
     shutil.rmtree(scratch, ignore_errors=True)
-    print(f"[{result['status']:5}] {name} ({result['duration_s']}s, {len(rec.breaks)} break(s)) -> {final.name}")
+    print(f"[{result['status']:5}] {name} ({result['duration_s']}s, {len(rec.breaks)} break(s)) -> {final.name}" + (f"  [reaped {leaked} leaked process(es)]" if leaked else ""))
     return result
 
 
