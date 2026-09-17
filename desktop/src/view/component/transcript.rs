@@ -1585,12 +1585,7 @@ fn children_lines(
         // One worker: its own live step (Jacob's Cursor still reads "1
         // Working  Reading project context…"); several: the coordinator's
         // step over all of them ("Waiting on three writers").
-        let own = chat
-            .status
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        let own = chat.live_status();
         // The coordinator's step only where nothing above says it: under a
         // live "Working <step>" headline the line names the workers instead
         // (cycle 23: "Working Updating the plan" over "2 Working Updating
@@ -3979,9 +3974,7 @@ fn zone(
     let live_headline = running && foldable && !kickoff_turn && rows_under;
     if live_headline {
         let step = chat
-            .status
-            .clone()
-            .filter(|s| !s.trim().is_empty())
+            .live_status()
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
         let id = chat.id;
@@ -4160,9 +4153,22 @@ fn zone(
         .flex_col()
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
+    // The worker lines go under the prose that spawned them and *above*
+    // any line the person typed into the turn afterwards: Jacob's "where
+    // is my response" drew with three "Done <worker>" lines under it, as if
+    // they were the answer to it (his report 2026-09-17-8). Taken here at
+    // the first steer card; otherwise after the tail.
+    let mut workers = workers;
     // The tail starts where the body ended: the report line under a wake
     // segment's header is drawn above, not again here.
     for ix in turn.answer_from.max(body_start)..turn.range.end {
+        if inline_user(&chat.items, ix)
+            && matches!(chat.items[ix], ChatItem::User(_))
+            && let Some((lines, _)) = workers.take()
+        {
+            has_tail = true;
+            tail = tail.child(lines);
+        }
         // The interruption is on the fold line already; once is enough.
         if header_drawn
             && let ChatItem::Notice { text, .. } = &chat.items[ix]
@@ -5650,13 +5656,8 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     }
     // The agent named its step (Cursor's UpdateCurrentStep on the
     // timeline: "Copying stills to artifacts"): that is the line.
-    if let Some(step) = chat
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return Some(step.to_string());
+    if let Some(step) = chat.live_status() {
+        return Some(step);
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
     let tool_running = matches!(
@@ -5767,11 +5768,7 @@ fn heartbeat(
     // The agent's own step reads as Cursor's "Working  Launching three
     // sort writers": the verb a shade brighter, the step faint and
     // shimmering, no chevron — there is nothing under it to fold.
-    let is_step = chat
-        .status
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|step| step == label);
+    let is_step = chat.live_status().is_some_and(|step| step == label);
     let label = if quiet {
         format!("{label} · {}", since_short(since))
     } else {

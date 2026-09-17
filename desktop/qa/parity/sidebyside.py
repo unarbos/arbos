@@ -72,6 +72,8 @@ PROMPTS.update({
     "d8": "What did we decide about terminology, and where is it written down? Answer from the notes only.",
     "d9": "Summarise the project so far in four lines for a newcomer, with links to the docs.",
     "d10": "Which of the five questions are still open? For each open one, spawn a worker to answer it in a new doc under docs/answers/. Wait, then list what landed.",
+    # cycle 33: the notes restructure as one long turn, after the d-series has grown the page
+    "d12": "The project page has grown in pieces. Restructure notes.md yourself, no workers: sections Goal, Decisions, Done, In flight, Open questions, Next — keep every fact and every link, drop nothing, merge duplicates. Then tell me in the chat, as a short list, what moved where and what you merged.",
     # after a relaunch, on the same project
     "l13": "Continue: what were we doing? Pick up the next item from the plan and do it.",
     "p23": "In one sentence, what does main.py do? Do not run anything.",
@@ -93,7 +95,7 @@ ANSWER = {"p10": (12.0, "alpha")}
 CANCEL = {"p9": 5}
 STAGES = [("t2", 2.0), ("t8", 6.0), ("t20", 12.0)]
 # long-form turns after which the Project page is captured too, and the chat scrolled to its top
-PAGE_AFTER = {"l1", "l4", "l5", "l8", "l12", "l13", "d1", "d3", "d6", "d10"}
+PAGE_AFTER = {"l1", "l4", "l5", "l8", "l12", "l13", "d1", "d3", "d6", "d10", "d12"}
 SCROLL_TOP = {"l12", "l13", "d10"}
 
 
