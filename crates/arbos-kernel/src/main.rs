@@ -201,7 +201,10 @@ fn main() -> Result<()> {
             println!("{}", arbos_kernel::worker::USAGE);
             Ok(())
         }
-        other => bail!("unknown command {other}"),
+        other => bail!(
+            "unknown command {other}. Commands: serve, run, answer, attach, log, rollout, check, prompt, store, setup, rewind, update, worker, version, help. \
+             A kernel that answers this to `update` is older than the feature and cannot update itself: from any newer arbos-kernel, run `arbos-kernel update --install --binary <path to the old file>`; afterwards it can."
+        ),
     }
 }
 
