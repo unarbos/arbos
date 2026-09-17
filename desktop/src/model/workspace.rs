@@ -2217,11 +2217,20 @@ impl Workspace {
     ///
     /// `budget` bounds the on-disk records. They hold whole chats, so their
     /// messages are counted rather than copied and the result says so.
-    pub fn desktop_state(&self, place: &std::path::Path, budget: usize) -> serde_json::Value {
+    /// `store` is the place's own local folder — `Project::store()` — and not its
+    /// path.
+    ///
+    /// A remote place's path belongs to the far machine: `ArbosLife:~` has the
+    /// path `~`, which is not even absolute here. Reading records from it reads a
+    /// relative path against the app's working directory, so a remote report
+    /// would carry either nothing or whatever happened to sit there. `store()` is
+    /// the local sidecar the desktop already keeps a remote project's records in.
+    pub fn desktop_state(&self, store: &std::path::Path, budget: usize) -> serde_json::Value {
+        let place = store;
         let project = self
             .projects
             .iter()
-            .find(|project| project.path == place);
+            .find(|project| project.store() == store);
         let rows: Vec<serde_json::Value> = project
             .map(|project| project.sessions.iter().map(ChatSession::row_facts).collect())
             .unwrap_or_default();

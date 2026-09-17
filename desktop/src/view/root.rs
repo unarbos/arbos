@@ -2349,7 +2349,10 @@ impl Arbos {
             let mut view = workspace
                 .active_project()
                 .map(|project| {
-                    workspace.desktop_state(&project.path, crate::feedback::DESKTOP_STATE_BUDGET)
+                    // The store, not the path: a remote place's records live in
+                    // its local sidecar, and its path is the far machine's.
+                    workspace
+                        .desktop_state(&project.store(), crate::feedback::DESKTOP_STATE_BUDGET)
                 })
                 .unwrap_or(serde_json::Value::Null);
             if let Some(obj) = view.as_object_mut()
