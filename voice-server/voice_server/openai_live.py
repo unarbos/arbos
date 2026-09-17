@@ -97,6 +97,8 @@ class OpenAILiveSession(DuplexSession):
         self.context_task: asyncio.Task | None = None
         self.context_kernel = None  # the kernel whose frames feed GPT-Live's context
         self.workers_known: set[str] = set()
+        self.seed_task: asyncio.Task | None = None  # the chat-history read, started when the kernel is known
+        self.last_answer_at = 0.0  # when a delegation's answer went to the model (its chat copy is not news)
 
     # ------------------------------------------------------------------ upstream
 
@@ -111,11 +113,19 @@ class OpenAILiveSession(DuplexSession):
         # in the project's chat lately (the seed). Both come from the call's kernel, never from
         # the gateway's own.
         brief = self._project_brief()
-        seed = await self._history_seed()
-        self.up = await websockets.connect(
+        seed_task = self.seed_task or asyncio.create_task(self._history_seed())
+        # The connect and the chat-history read run side by side; the seed may cost the model's
+        # start at most a moment, never the caller's first word.
+        connect = asyncio.ensure_future(websockets.connect(
             LIVE_URL, additional_headers={"Authorization": f"Bearer {self.api_key}"},
             max_size=16 * 1024 * 1024, compression=None, open_timeout=20,
-        )
+        ))
+        try:
+            seed = await asyncio.wait_for(asyncio.shield(seed_task), 1.5)
+        except Exception as exc:
+            log.warning("[%s] chat history not ready in time for the seed (%s); starting without it", self.sid, type(exc).__name__)
+            seed = []
+        self.up = await connect
         session: dict = {
             "model": self.live_model,
             "instructions": _ascii((self.instructions or LIVE_INSTRUCTIONS) + "\n\n" + brief),
@@ -234,7 +244,10 @@ class OpenAILiveSession(DuplexSession):
                     return  # the caller's own words, already in the conversation
                 who = f"on the {ev['device']}" if ev.get("device") else "in the project chat"
                 self._context(f"The user typed {who}: {text[:500]}")
-            elif ek == "assistant" and text and agent == "root" and not self.delegations_in_flight():
+            elif (ek == "assistant" and text and agent == "root" and not self.delegations_in_flight()
+                  and time.monotonic() - self.last_answer_at > 8.0):
+                # a reply to a typed line or to another client; a delegation's own answer already
+                # went to the model as commentary and is skipped
                 self._context(f"Arbos replied in the project chat (text, not spoken): {text[:700]}")
             elif ek == "tool" and agent != "root" and ev.get("name") and not ev.get("seq") and ev.get("ended") is None:
                 self._context(f"Worker {agent} is running {ev['name']}" + (f": {_ascii(_detail(ev))}" if _detail(ev) else ""))
@@ -417,6 +430,7 @@ class OpenAILiveSession(DuplexSession):
             return
         spoken = speakable(answer).replace("\n", " ").strip() or "Arbos had no answer."
         self._emit(P.TOOL_RESULT, name="delegate", output=spoken[:400])
+        self.last_answer_at = time.monotonic()
         await self._append("session.commentary.append", did, spoken[:MAX_APPEND_CHARS])
         log.info("[%s] delegation %s answered in %.1fs (%d chars)", self.sid, tag, time.monotonic() - t0, len(spoken))
 
@@ -464,6 +478,8 @@ class OpenAILiveSession(DuplexSession):
                 # moment a delegation leaves for the kernel (mark_working in _delegate).
                 self.activity = ActivityReporter(self.kernel, self._emit)
                 self.activity.start()
+        if self.kernel is not None and self.seed_task is None and self.up is None:
+            self.seed_task = asyncio.create_task(self._history_seed(), name=f"live-seed-{self.sid}")
         if self.up is not None:
             # The model is already up (audio came before session.start): give it the brief now.
             brief = self._project_brief()
