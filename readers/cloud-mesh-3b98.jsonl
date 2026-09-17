@@ -1,0 +1,1 @@
+{"ts":"2026-09-17T06:18:36Z","client":"cloud-mesh-3b98","verdict":"BEHIND","reason":"3 file(s) here that the mirror has not taken yet (mirror tip is 18 min old)","here_files":314,"mirror_files":313,"missing_here":0,"not_yet_mirrored":3,"mirror_tip":"3073efe6a021","mirror_age_min":18,"docs_dir":"present","notes_md":"present","missing_sample":[]}
