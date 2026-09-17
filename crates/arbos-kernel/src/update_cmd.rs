@@ -24,7 +24,7 @@
 use anyhow::{Context, Result};
 use arbos_update::{
     Channel,
-    kernel::{self, Refusal},
+    kernel::{self, Probe, Refusal},
     net, sign,
 };
 use std::path::PathBuf;
@@ -163,7 +163,15 @@ pub fn run(args: Args) -> Result<i32> {
     println!("\nfetching  {} bytes", offered.download.size);
     let bytes = net::bytes(&offered.download.url)?;
     let scratch = std::env::temp_dir().join("arbos-kernel-update");
-    kernel::verify_and_install(&bytes, &offered, &binary, &key, &scratch)?;
+    // A place to try the new binary against, when there is one. Reading the
+    // store with the parsers `serve` boots on is as close to "it will work" as
+    // anything can get before the exec.
+    let known = places(&args);
+    let probe = match known.first() {
+        Some(place) => Probe::Place(place),
+        None => Probe::Version,
+    };
+    kernel::verify_and_install(&bytes, &offered, &binary, &key, &scratch, probe)?;
 
     let now = kernel::Running::read(&binary)?;
     println!("installed {} {}", now.version.human(), now.sha);
@@ -321,8 +329,12 @@ fn restart_note(binary: &std::path::Path) -> String {
          \x20       <place>/.arbos/runtime/kernel.json)\n\
          \n\
          That is the graceful stop: every running turn ends the way the stop button ends\n\
-         it. Started by hand, start it again from {}.",
-        binary.display()
+         it. Started by hand, start it again from {}.\n\
+         \n\
+         The build it replaced is kept beside it as {}. If the new one will not start,\n\
+         moving that back over it is the way out.",
+        binary.display(),
+        arbos_update::kernel::previous_path(binary).display()
     )
 }
 

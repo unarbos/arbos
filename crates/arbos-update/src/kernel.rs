@@ -213,6 +213,90 @@ pub fn plan(
     Ok(offered)
 }
 
+/// How hard the staged binary is tried before it replaces anything.
+///
+/// This matters more than it looks. The swap is followed by an `execv`, and
+/// **`execv` only returns an error when the exec itself fails** — a binary
+/// that starts and then dies while booting is not caught by it. There is no
+/// "it came up, so keep it" moment afterwards, because by then the old image
+/// is gone. So whatever confidence there is has to be bought here, before the
+/// old binary is moved aside.
+#[derive(Debug, Clone, Copy)]
+pub enum Probe<'a> {
+    /// It runs, and reports the version the feed promised. The floor: it
+    /// proves the file is an executable for this machine that links and
+    /// reaches `main`.
+    Version,
+    /// That, and it reads a real place no worse than the binary it is
+    /// replacing.
+    ///
+    /// `arbos-kernel check <place>` walks the store with the same parsers
+    /// `serve` boots on, so a new build that cannot read this machine's
+    /// agents says so here rather than after the exec. It is compared with
+    /// the *old* binary's answer rather than required to be clean, because a
+    /// place with pre-existing errors is not the new build's fault and
+    /// refusing on it would make every update impossible on exactly the
+    /// machines that need one.
+    Place(&'a Path),
+}
+
+impl Probe<'_> {
+    /// Run it. `staged` is the candidate; `current` is what it would replace.
+    fn run(self, staged: &Path, current: &Path, expected: &Version) -> Result<()> {
+        let new = Running::read(staged).context("the downloaded kernel would not run")?;
+        if new.version.cmp_release(expected) != std::cmp::Ordering::Equal {
+            bail!(
+                "the download says it is {} but the feed said {}",
+                new.version.human(),
+                expected.human()
+            );
+        }
+        let Self::Place(place) = self else {
+            return Ok(());
+        };
+        let theirs = read_place(current, place);
+        let ours = read_place(staged, place).with_context(|| {
+            format!(
+                "the downloaded kernel could not read {} at all",
+                place.display()
+            )
+        })?;
+        if let Ok(theirs) = theirs
+            && ours > theirs
+        {
+            bail!(
+                "the downloaded kernel finds {ours} problems in {} where the one it would \
+                 replace finds {theirs} — refusing it rather than serving with it",
+                place.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// How many errors a binary sees in a place. `check` exits non-zero when it
+/// finds any, so the count comes from the report rather than the status.
+fn read_place(binary: &Path, place: &Path) -> Result<usize> {
+    let out = Command::new(binary)
+        .arg("check")
+        .arg(place)
+        .arg("--json")
+        .output()
+        .with_context(|| format!("running {} check", binary.display()))?;
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("reading what {} said about {}", binary.display(), place.display()))?;
+    Ok(report
+        .get("findings")
+        .and_then(|f| f.as_array())
+        .map(|findings| {
+            findings
+                .iter()
+                .filter(|f| f.get("level").and_then(|l| l.as_str()) == Some("error"))
+                .count()
+        })
+        .unwrap_or(0))
+}
+
 /// Put a verified payload in place of `target`.
 ///
 /// The same two renames the app's install uses, so the same promise holds:
@@ -225,8 +309,13 @@ pub fn plan(
 /// ([`Download::check_payload`]) — this does not download and does not verify
 /// a signature, because a function that sometimes verifies is one that
 /// sometimes does not.
-pub fn install_payload(payload: &Path, offered: &Available, target: &Path) -> Result<()> {
-    let done = staged(payload, offered, target);
+pub fn install_payload(
+    payload: &Path,
+    offered: &Available,
+    target: &Path,
+    probe: Probe<'_>,
+) -> Result<()> {
+    let done = staged(payload, offered, target, probe);
     // However that went, the staging directory goes. A payload that would not
     // run is the common failure, and leaving its unpacked remains beside the
     // binary means the next attempt starts by tripping over them.
@@ -236,7 +325,12 @@ pub fn install_payload(payload: &Path, offered: &Available, target: &Path) -> Re
     done
 }
 
-fn staged(payload: &Path, offered: &Available, target: &Path) -> Result<()> {
+fn staged(
+    payload: &Path,
+    offered: &Available,
+    target: &Path,
+    probe: Probe<'_>,
+) -> Result<()> {
     let staged_dir = install::unpack(payload, offered.download.format, target)?;
     // The tarball carries one directory with the binary in it.
     let name = target
@@ -253,21 +347,40 @@ fn staged(payload: &Path, offered: &Available, target: &Path) -> Result<()> {
         ),
     };
 
-    // Before anything is moved: does it run, and is it what the feed said?
-    let new = Running::read(&staged).context("the downloaded kernel would not run")?;
-    if new.version.cmp_release(&offered.version) != std::cmp::Ordering::Equal {
-        bail!(
-            "the download says it is {} but the feed said {}",
-            new.version.human(),
-            offered.version.human()
-        );
-    }
+    // Before anything is moved. This is the only place confidence can be
+    // bought: after the swap comes an execv, and execv does not report a
+    // binary that starts and then dies.
+    probe.run(&staged, target, &offered.version)?;
+
+    // And a way back, for the failure the probe cannot see. Cheap — one
+    // binary — and it turns "the new kernel dies at boot on a box nobody
+    // watches" from unrecoverable into one `mv`.
+    let previous = previous_path(target);
+    let _ = std::fs::remove_file(&previous);
+    std::fs::copy(target, &previous)
+        .with_context(|| format!("keeping the current binary as {}", previous.display()))?;
 
     let swap = install::Swap::begin(target, &staged)?;
     // In place now. A failure here puts the old binary back before the error
     // reaches anybody — `Swap` does it from its `Drop`.
-    Running::read(target).context("the new kernel did not survive being moved into place")?;
+    if let Err(e) = Running::read(target) {
+        // `Swap` puts the old binary back as it unwinds; the copy beside it
+        // is then redundant.
+        let _ = std::fs::remove_file(&previous);
+        return Err(e).context("the new kernel did not survive being moved into place");
+    }
     swap.commit()
+}
+
+/// Where the binary that was replaced is kept.
+///
+/// Not hidden, unlike the staging and backup names: this one is meant to be
+/// found. Somebody looking at a kernel that will not start should see the one
+/// that did, sitting next to it.
+pub fn previous_path(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(".previous");
+    PathBuf::from(name)
 }
 
 /// Check a payload's bytes and put it in place. The whole of the install, for
@@ -278,6 +391,7 @@ pub fn verify_and_install(
     target: &Path,
     key: &PublicKey,
     scratch: &Path,
+    probe: Probe<'_>,
 ) -> Result<()> {
     offered.download.check_url()?;
     offered
@@ -288,7 +402,7 @@ pub fn verify_and_install(
         .with_context(|| format!("making {}", scratch.display()))?;
     let file = scratch.join(offered.download.file_name());
     std::fs::write(&file, bytes).with_context(|| format!("writing {}", file.display()))?;
-    let installed = install_payload(&file, offered, target);
+    let installed = install_payload(&file, offered, target, probe);
     let _ = std::fs::remove_file(&file);
     installed
 }
@@ -510,6 +624,82 @@ mod tests {
         assert!(!text.contains("component"), "{text}");
         let read = Feed::parse(&text).unwrap();
         assert_eq!(read.releases[0].downloads[0].component, Component::App);
+    }
+
+    /// A stand-in kernel: reports `version`, and claims `errors` problems in
+    /// whatever place it is asked about.
+    #[cfg(unix)]
+    fn stub(at: &Path, version: &str, errors: usize) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let findings = (0..errors)
+            .map(|n| format!(r#"{{"level":"error","path":"p{n}","line":null,"what":"x"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            at,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  check) echo '{{\"place\":\"p\",\"agents\":0,\
+                 \"findings\":[{findings}]}}';;\n  *) echo 'arbos-kernel {version} \
+                 abc123def456 protocol 1';;\nesac\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        at.to_path_buf()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_place_probe_refuses_a_build_that_reads_the_store_worse() {
+        // The failure `execv` cannot report: a binary that runs, and then
+        // cannot do the job. This is the only moment it can be caught.
+        let home = tempfile::tempdir().unwrap();
+        let place = home.path().join("place");
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        let current = stub(&home.path().join("old"), "0.1.40", 0);
+        let worse = stub(&home.path().join("new-worse"), "0.2.0", 2);
+        let want = Version::parse("0.2.0").unwrap();
+
+        let err = super::Probe::Place(&place)
+            .run(&worse, &current, &want)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("2 problems"), "{err}");
+        assert!(err.contains("refusing"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_place_probe_allows_a_build_that_reads_it_no_worse() {
+        let home = tempfile::tempdir().unwrap();
+        let place = home.path().join("place");
+        std::fs::create_dir_all(place.join(".arbos")).unwrap();
+        let want = Version::parse("0.2.0").unwrap();
+
+        // Same number of problems: not this build's fault, so not its problem.
+        let current = stub(&home.path().join("old"), "0.1.40", 3);
+        let same = stub(&home.path().join("new-same"), "0.2.0", 3);
+        super::Probe::Place(&place).run(&same, &current, &want).unwrap();
+
+        // Fewer: better. A place with pre-existing errors must still be
+        // updatable, or the machines that most need a fix can never have one.
+        let better = stub(&home.path().join("new-better"), "0.2.0", 1);
+        super::Probe::Place(&place)
+            .run(&better, &current, &want)
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn every_probe_refuses_a_build_that_is_not_what_the_feed_promised() {
+        let home = tempfile::tempdir().unwrap();
+        let current = stub(&home.path().join("old"), "0.1.40", 0);
+        let wrong = stub(&home.path().join("new"), "0.1.41", 0);
+        let want = Version::parse("0.2.0").unwrap();
+        for probe in [super::Probe::Version, super::Probe::Place(home.path())] {
+            let err = probe.run(&wrong, &current, &want).unwrap_err().to_string();
+            assert!(err.contains("the feed said"), "{err}");
+        }
     }
 
     #[test]
