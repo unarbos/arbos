@@ -23,7 +23,15 @@ fn kernel_log(place: &Path) -> Vec<serde_json::Value> {
 }
 
 fn relaunch(k: &common::Kernel) -> (i32, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_arbos-kernel"))
+    relaunch_env(k, &[])
+}
+
+fn relaunch_env(k: &common::Kernel, env: &[(&str, &str)]) -> (i32, String) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_arbos-kernel"));
+    for (key, v) in env {
+        cmd.env(key, v);
+    }
+    let out = cmd
         .arg("serve")
         .arg(&k.place)
         .env("XDG_CONFIG_HOME", k.scratch.join("xdg"))
@@ -146,4 +154,88 @@ fn a_held_place_is_said_once_then_beats_then_escalates_and_every_relaunch_exits_
     assert_eq!(freed, 1, "the place is said to be free once");
     assert!(!record.exists(), "the held record is cleared");
     drop(k2);
+}
+
+/// qal-j19: `HeldRecord::save` was `let _ = write; let _ = rename`, so a
+/// runtime folder that could not be written turned the say-once into the
+/// long line on every relaunch, then the error-level escalation for
+/// ever. Now the record falls back to the machine's temp folder when the
+/// place cannot hold it, and when nowhere can, every start says one
+/// short warn line and never the long form or the escalation.
+#[cfg(unix)]
+#[test]
+fn a_record_that_cannot_be_kept_never_turns_the_refusal_into_spam() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let mut k = start_kernel_replay("place-held-ro", "");
+    let runtime = k.place.join(".arbos/runtime");
+    let tmp = k.scratch.join("tmp-rw");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let ro = k.scratch.join("tmp-ro");
+    std::fs::create_dir_all(&ro).unwrap();
+    std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let restore = |k: &common::Kernel| {
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = k;
+    };
+
+    // The place cannot hold the record; the temp folder can: the story
+    // is still told once. Six relaunches, one long line.
+    let tmp_s = tmp.display().to_string();
+    let mut long = 0;
+    let mut escalations = 0;
+    for _ in 0..6 {
+        let (code, err) = relaunch_env(&k, &[("TMPDIR", tmp_s.as_str())]);
+        assert_eq!(code, 3, "{err}");
+        assert!(err.contains("place already served"), "{err}");
+        if err.contains("another kernel already serves") {
+            long += 1;
+        }
+        if err.contains("a person needs to look") {
+            escalations += 1;
+        }
+    }
+    if long != 1 || escalations != 0 {
+        restore(&k);
+        panic!(
+            "with the record in the temp folder: {long} long line(s), {escalations} escalation(s) in six relaunches"
+        );
+    }
+    assert!(
+        std::fs::read_dir(&tmp).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("arbos-place-held-")
+        }),
+        "the record went to the temp folder"
+    );
+
+    // Nowhere to keep it: the short form on every start, warn level,
+    // never the long line, never the escalation — even with the record's
+    // clock the long-form and escalation branches would have taken.
+    let ro_s = ro.display().to_string();
+    let mut short = 0;
+    for _ in 0..6 {
+        let (code, err) = relaunch_env(&k, &[("TMPDIR", ro_s.as_str())]);
+        assert_eq!(code, 3, "{err}");
+        assert!(err.contains("place already served"), "{err}");
+        if err.contains("another kernel already serves") || err.contains("a person needs to look") {
+            restore(&k);
+            panic!("the long form or the escalation came with no record: {err}");
+        }
+        if err.contains("the held record could not be written") {
+            short += 1;
+        }
+    }
+    restore(&k);
+    assert_eq!(
+        short, 6,
+        "each start says, in short, that the record could not be kept"
+    );
+    let _ = k.child.kill();
+    let _ = k.child.wait();
 }

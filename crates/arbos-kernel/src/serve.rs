@@ -133,24 +133,56 @@ struct HeldRecord {
 }
 
 impl HeldRecord {
-    fn path(place: &Place) -> std::path::PathBuf {
-        place.runtime_dir().join("place-held.json")
+    /// Where the record lives: the place's runtime folder, else — when
+    /// that cannot be written (qal-j19: `runtime/` read-only turned the
+    /// say-once into the long line on every relaunch, then the error
+    /// line for ever, because a save that failed was treated as done) —
+    /// the machine's temp folder, keyed on the place's path.
+    fn paths(place: &Place) -> [std::path::PathBuf; 2] {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&place.path, &mut h);
+        [
+            place.runtime_dir().join("place-held.json"),
+            std::env::temp_dir().join(format!(
+                "arbos-place-held-{:016x}.json",
+                std::hash::Hasher::finish(&h)
+            )),
+        ]
     }
     fn load(place: &Place) -> Option<Self> {
-        serde_json::from_str(&std::fs::read_to_string(Self::path(place)).ok()?).ok()
+        Self::paths(place)
+            .iter()
+            .find_map(|p| serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok())
     }
-    fn save(&self, place: &Place) {
-        if let Ok(text) = serde_json::to_string(self) {
-            let p = Self::path(place);
+    /// Saved where, or why nowhere. A record that could not be kept is
+    /// not a record: the caller says so and speaks as if there were none.
+    fn save(&self, place: &Place) -> Result<std::path::PathBuf, String> {
+        let text = serde_json::to_string(self).map_err(|e| e.to_string())?;
+        let mut why = Vec::new();
+        for p in Self::paths(place) {
             let tmp = p.with_extension("json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, &p);
+            match std::fs::write(&tmp, &text).and_then(|()| std::fs::rename(&tmp, &p)) {
+                Ok(()) => return Ok(p),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    why.push(format!("{}: {e}", p.display()));
+                }
             }
         }
+        Err(why.join("; "))
     }
     fn clear(place: &Place) {
-        let _ = std::fs::remove_file(Self::path(place));
+        for p in Self::paths(place) {
+            let _ = std::fs::remove_file(p);
+        }
     }
+}
+
+/// How long the holder has had the place, with no record at all: the
+/// lock file is written by the holder when it takes the lock.
+fn held_since_lock(place: &Place) -> Option<i64> {
+    let modified = std::fs::metadata(place.lock_path()).ok()?.modified().ok()?;
+    Some(modified.elapsed().ok()?.as_secs() as i64)
 }
 
 /// One refusal of a held place, said according to the record: in full
@@ -175,6 +207,22 @@ fn say_held(place: &Place, wait_secs: u64) {
     rec.refusals += 1;
     let held_for = (now - rec.first_ms) / 1000;
     let holder = describe_holder(place);
+    // The record is what makes "once" possible. When it cannot be kept
+    // anywhere, this process cannot know what an earlier one said, so it
+    // says the short form — one warn line, the holder and the reason the
+    // record failed — and never the long line or the escalation, which
+    // would otherwise come on every relaunch (qal-j19: 6 of 6, at error
+    // level, for ever).
+    let saved = rec.save(place);
+    if let Err(why) = &saved {
+        let age = held_since_lock(place).unwrap_or(held_for);
+        let text = format!(
+            "held by {holder} for about {age}s; the held record could not be written ({why}), so this is said in short on every start"
+        );
+        eprintln!("arbos-kernel: place already served — {text}");
+        log_line_to_place(place, "warn", "place_held", &text);
+        return;
+    }
     let waiting = if wait_secs > 0 {
         format!(
             " This process waits up to {wait_secs}s for the place to be freed (ARBOS_LOCK_WAIT_SECS), then exits {EXIT_PLACE_HELD}."
@@ -227,7 +275,14 @@ fn say_held(place: &Place, wait_secs: u64) {
             "arbos-kernel: place already served by pid {holder_pid} ({held_for}s; said in full in kernel.log)"
         ),
     }
-    rec.save(place);
+    // Said, so the record must show it: the words above were chosen from
+    // the record as loaded; what changed (last_said_ms, escalated) is
+    // saved now, and a save that fails here is said in the same breath.
+    if let Err(why) = rec.save(place) {
+        eprintln!(
+            "arbos-kernel: the held record could not be updated ({why}); the next start may say this again"
+        );
+    }
 }
 
 /// Who holds the place, from what is on disk: the pid in the lock file,
