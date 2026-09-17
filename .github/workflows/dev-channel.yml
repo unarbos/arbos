@@ -241,7 +241,16 @@ jobs:
           else
             choose=""
             newer_pending=""
-            for candidate in $(git rev-list --max-count="$SCAN" "$tip"); do
+            # `--first-parent`, or the walk leaves `main` entirely. A plain
+            # rev-list descends into the branches that were merged in, and
+            # those commits have green CI runs of their own from when the
+            # PR was tested. One of them would be chosen, and it was never
+            # a state `main` was in: its tree is the branch's, not the
+            # merge's, and its commit count is not a build number on this
+            # line at all. Following first parents keeps the walk to the
+            # merges and direct commits that `main` actually passed
+            # through, which is the only sequence the channel publishes.
+            for candidate in $(git rev-list --first-parent --max-count="$SCAN" "$tip"); do
               case "$(ci_state "$candidate")" in
                 success) choose="$candidate"; break ;;
                 # Older than this, but newer than any green we go on to

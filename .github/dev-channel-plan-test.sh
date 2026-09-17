@@ -72,11 +72,21 @@ git -C "$repo" config user.email t@example.com
 git -C "$repo" config user.name t
 printf 'version = "0.2.0"\n' > "$repo/desktop/Cargo.toml"
 printf '<key>LSMinimumSystemVersion</key>\n<string>13.0</string>\n' > "$repo/desktop/bundle/Info.plist"
+# Dates are set explicitly and increase. A plain `git rev-list` orders by
+# date, so the merge case below depends on the branch commit being *newer*
+# than the commit on `main` it has to be distinguished from — and leaving
+# that to whichever second the test happened to run in would make it pass
+# or fail by luck.
+at() { printf '2026-09-17T%02d:00:00Z' "$1"; }
+commit_at() {
+  GIT_AUTHOR_DATE="$(at "$1")" GIT_COMMITTER_DATE="$(at "$1")" \
+    git -C "$repo" commit -qm "$2"
+}
 declare -a SHA
 for i in 1 2 3 4; do
   echo "$i" > "$repo/c$i"
   git -C "$repo" add -A
-  git -C "$repo" commit -qm "commit $i"
+  commit_at "$i" "commit $i"
   SHA[$i]="$(git -C "$repo" rev-parse HEAD)"
 done
 # Build numbers are commit counts, so commit N is build N.
@@ -143,6 +153,33 @@ check "a commit with no CI run of its own is not waited for" \
 check "nothing green anywhere is a refusal, not a guess" \
   "${SHA[4]}" "${SHA[4]}" 0 none \
   "${SHA[4]}" failed "${SHA[3]}" failed "${SHA[2]}" failed "${SHA[1]}" failed
+
+# --- a merge, and the branch that was merged ------------------------------
+# A PR's own commits have green CI runs from when the PR was tested. They
+# were never a state `main` was in: the tree is the branch's, and the
+# commit count is not a build number on this line. So the walk must follow
+# first parents only, and a red merge must fall back to the previous
+# commit on `main` — not into the branch it just brought in.
+#
+# The branch is rooted early and is one commit long, so its head counts 2
+# where the commit on `main` counts 4. Without `--first-parent` the walk
+# reaches the branch head first, it is green, and the step publishes build
+# 2 — a build number belonging to no state `main` was ever in. That is the
+# difference this case exists to see; if both counted the same the test
+# would pass either way and prove nothing.
+git -C "$repo" checkout -q -b side "${SHA[1]}"
+echo side > "$repo/side"
+git -C "$repo" add -A
+commit_at 10 "a commit on the PR branch"   # newer than commit 4
+BRANCH_HEAD="$(git -C "$repo" rev-parse HEAD)"
+git -C "$repo" checkout -q "${SHA[4]}"
+GIT_AUTHOR_DATE="$(at 11)" GIT_COMMITTER_DATE="$(at 11)" \
+  git -C "$repo" merge -q --no-ff side -m "Merge the PR"
+MERGE="$(git -C "$repo" rev-parse HEAD)"
+
+check "a red merge falls back along main, not into the branch it merged" \
+  "$MERGE" "$MERGE" 0 4 \
+  "$MERGE" failed "$BRANCH_HEAD" success "${SHA[4]}" success
 
 echo
 if [ "$failures" -eq 0 ]; then
