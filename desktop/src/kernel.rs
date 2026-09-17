@@ -1581,13 +1581,20 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     if place.host.is_some() {
         return None;
     }
-    let path = place
-        .path
-        .join(".arbos")
-        .join("agents")
-        .join(id)
-        .join("transcript.jsonl");
-    let text = std::fs::read_to_string(path).ok()?;
+    // A finished worker is moved to the archive with its transcript; read
+    // back from there, or a worker's chat opened after a relaunch showed
+    // its brief alone (F-133, cycle 32).
+    let store = place.path.join(".arbos");
+    let text = [
+        store.join("agents").join(id).join("transcript.jsonl"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(id)
+            .join("transcript.jsonl"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())?;
     let mut items = Vec::new();
     // Timestamps give the replay what the live view measures: the turn's
     // wall time on its prompt, and a thought's seconds as the gap to the
@@ -1622,9 +1629,13 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
             match &ev.kind {
                 arbos_core::EventKind::User { .. } if !steer => turn_began = Some(ev.ts),
                 // A wake of the kernel's own (a worker's report, a
-                // subscription) opens a segment whose clock starts here.
+                // subscription) opens a segment whose clock starts here. So
+                // does a worker's `plan` wake: it is the brief's card below,
+                // and the worker's first turn has no `user` line to start
+                // the clock — read back, its headline lost its "Worked for
+                // 20s" and showed the summary phrase instead (F-131).
                 arbos_core::EventKind::Wake { wake, .. }
-                    if !matches!(wake.as_str(), "user" | "kickoff" | "compact" | "plan") =>
+                    if !matches!(wake.as_str(), "user" | "kickoff" | "compact") =>
                 {
                     turn_began = Some(ev.ts)
                 }

@@ -1031,7 +1031,21 @@ impl ChatSession {
     /// it, for the "Worked 21s" line. Once per turn; a late duplicate end
     /// leaves the first figure.
     fn stamp_worked(&mut self) {
-        let Some(elapsed) = self.elapsed() else {
+        // No clock of this window's own when the turn opened before it
+        // attached — a worker's brief is on the card before the worker's
+        // chat is joined mid-turn — the opener's own stamp says when it
+        // began (F-131, cycle 32: the worker tab read its summary phrase
+        // where Cursor's says "Worked for 20s").
+        let since_opener = || {
+            let began = self.items.iter().rev().find_map(|item| match item {
+                ChatItem::User(message) => Some(message.sent_at),
+                ChatItem::Wake { at, .. } => Some(*at),
+                _ => None,
+            })??;
+            let now = arbos_core::now_ms();
+            (now > began).then(|| Duration::from_millis((now - began) as u64))
+        };
+        let Some(elapsed) = self.elapsed().or_else(since_opener) else {
             return;
         };
         // The kickoff turn has no prompt: its time is the chat's, measured
@@ -3251,16 +3265,35 @@ impl ChatSession {
             }
             Event::Waiting(line) => self.waiting = line,
             Event::TurnEndedAt(ended) => {
-                if let Some(ChatItem::User(message)) = self
+                // The turn read back is the newest opener's: a prompt, or a
+                // wake — a worker's whole first turn opens on its `plan`
+                // wake and has no `user` line at all, so a replayed worker
+                // tab read "Edited 2 files, …" where Cursor's says "Worked
+                // for 46s" (F-131, cycle 32).
+                let opener = self
                     .items
                     .iter_mut()
                     .rev()
-                    .find(|item| matches!(item, ChatItem::User(_)))
-                    && message.worked_secs.is_none()
-                    && let Some(sent) = message.sent_at
-                    && ended > sent
-                {
-                    message.worked_secs = Some(((ended - sent) / 1000).min(u32::MAX as i64) as u32);
+                    .find(|item| matches!(item, ChatItem::User(_) | ChatItem::Wake { .. }));
+                let stamp = |began: i64| ((ended - began) / 1000).min(u32::MAX as i64) as u32;
+                match opener {
+                    Some(ChatItem::User(message)) => {
+                        if message.worked_secs.is_none()
+                            && let Some(sent) = message.sent_at
+                            && ended > sent
+                        {
+                            message.worked_secs = Some(stamp(sent));
+                        }
+                    }
+                    Some(ChatItem::Wake { at, secs, .. }) => {
+                        if secs.is_none()
+                            && let Some(began) = *at
+                            && ended > began
+                        {
+                            *secs = Some(stamp(began));
+                        }
+                    }
+                    _ => {}
                 }
             }
             Event::TurnDone(result) => {
