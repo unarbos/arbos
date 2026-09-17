@@ -519,6 +519,7 @@ impl Session {
     pub fn cancel(&self) -> Result<(), Error> {
         self.send_frame(&Frame::Stop {
             agent: self.session_id.clone(),
+            reason: None,
         })
         .map_err(|e| Error::internal_error().data(e.to_string()))
     }

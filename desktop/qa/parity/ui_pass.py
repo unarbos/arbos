@@ -198,6 +198,8 @@ class Pass:
         self.inventory: dict[str, list[str]] = {}
         self.n = 0
         self.tabs = False
+        # The config home the app was launched with; set by main().
+        self.xdg: Path = Path(f"/tmp/qa-ui-xdg-{branch}")
 
     # -- plumbing ---------------------------------------------------------
 
@@ -384,6 +386,15 @@ class Pass:
             self.clear_composer()
         self.app.click("composer-field")
         self.app.type(text + "\n")
+        # The line must leave the composer: once (cycle 32's full gate) the
+        # typed Enter landed on nothing and the prompt sat in the field while
+        # every row after it measured a turn that never ran. Wait for the
+        # field to empty; press Enter once more if it has not; say so.
+        if self.wait(lambda s: not s["composer"]["text"], 4) is None:
+            log(f"send: composer still holds the line after Enter; pressing Enter again ({text[:40]!r})")
+            self.app.click("composer-field"); self.app.key("enter")
+            if self.wait(lambda s: not s["composer"]["text"], 4) is None:
+                log("send: the line did not leave the composer (R17)")
 
     def close_second_windows(self) -> None:
         for title in ("Settings",):
@@ -573,6 +584,11 @@ class Pass:
 
     def phase_turn(self) -> None:
         sc = "turn-running"
+        # Run alone (`--phases T`), this phase starts five seconds after
+        # launch, inside the kickoff turn: P_LONG is then held behind it and
+        # the steer rows measure the kickoff (cycle 33's TD run). Let the
+        # place settle first; in a full run this returns at once.
+        self.wait_idle(90)
         self.send(P_LONG)
         s = self.wait(lambda s: busy(s), 20, what="turn start")
         self.inv(sc)
@@ -746,7 +762,12 @@ class Pass:
             # here; the app then rightly refuses "stop the turn before
             # rewinding" (cycle 32t: `turn_ended=None` at the click). Let
             # that turn end first, so the row measures Rewind, not the race.
-            self.wait_idle(90); time.sleep(1.5)
+            self.wait_idle(90)
+            # Idle is not enough: cycle 33's run had a wake land one second
+            # before the click (`progress=1s ago`). Wait for a quiet stretch
+            # — no worker running, nothing arrived for four seconds — so the
+            # click meets a chat with no turn about to open.
+            self.wait(lambda s: not busy(s) and not ((active(s) or {}).get("pills") or {}).get("working") and (active(s) or {}).get("quiet_secs", 0) >= 4, 120, what="quiet before rewind")
             ids = self.turn_ids()
         if ids["rewind-turn"]:
             n_items = len(active(self.state())["items"])
@@ -1377,13 +1398,62 @@ class Pass:
                     if short.startswith("provider-"):
                         self.skip(short, "settings-window", "click", "rewrites config.toml for the rest of the run; selection state is not in the driver dump")
                         continue
-                    if short.startswith("model-pick-") or short.startswith("appearance-"):
-                        self.check(short, "settings-window", "click", "selection changes (visual); main window state unchanged",
-                                   lambda el=el: self.app.click(el), None)
+                    # The values these controls set live in the main window's
+                    # state (`appearance`, `reduce_transparency`, `cursor_blink`,
+                    # `watch_bounce`, `update_channel`, `text_size`); a model
+                    # pick lands in config.toml. Read those, not the click
+                    # (rig audit R3, cycle 32: these rows were `unverified`).
+                    def main_state():
+                        self.app.use_window("main")
+                        try:
+                            return self.state()
+                        finally:
+                            self.app.use_window("settings")
+                    def settled(el, field, want=None, action="click", changed_ok=False):
+                        a = main_state().get(field)
+                        self.app.click(el); time.sleep(0.6)
+                        b = main_state().get(field)
+                        if want is not None:
+                            self.record(short, "settings-window", action, f"{field} == {want!r}", f"{field}: {a!r} → {b!r}", "pass" if b == want else "fail", self.still(short))
+                        elif changed_ok and b != a:
+                            self.record(short, "settings-window", action, f"{field} changes", f"{field}: {a!r} → {b!r}", "pass", self.still(short))
+                        elif changed_ok:
+                            self.record(short, "settings-window", action, f"{field} changes", f"{field} unchanged at {a!r} (already the selection?)", "unverified", self.still(short))
+                        return a, b
+                    def flips(el, field):
+                        a = main_state().get(field)
+                        self.app.click(el); time.sleep(0.5)
+                        mid = main_state().get(field)
+                        self.app.click(el); time.sleep(0.5)
+                        b = main_state().get(field)
+                        ok = isinstance(a, bool) and mid == (not a) and b == a
+                        self.record(short, "settings-window", "click toggle twice", f"{field} flips and flips back", f"{field}: {a!r} → {mid!r} → {b!r}", "pass" if ok else "fail", self.still(short))
+                    if short.startswith("model-pick-"):
+                        cfg = self.xdg / "arbos" / "config.toml"
+                        line = lambda: next((l.strip() for l in cfg.read_text().splitlines() if l.strip().startswith("model")), None) if cfg.exists() else None
+                        a = line(); self.app.click(el); time.sleep(0.6); b = line()
+                        if b is not None and b != a:
+                            self.record(short, "settings-window", "click", "config.toml's model line changes to the pick", f"{a} → {b}", "pass", self.still(short))
+                        else:
+                            self.record(short, "settings-window", "click", "config.toml's model line changes to the pick", f"model line unchanged: {b} (already the pick?)", "unverified", self.still(short))
                         continue
-                    if short in ("reduce-transparency", "cursor-blink", "bionic-reading") or short.startswith("watch-bounce"):
-                        self.check(short, "settings-window", "click toggle twice", "toggle flips and flips back (visual)",
-                                   lambda el=el: (self.app.click(el), time.sleep(0.3), self.app.click(el)), None)
+                    if short.startswith("appearance-"):
+                        settled(el, "appearance", changed_ok=True)
+                        continue
+                    if short.startswith("watch-bounce-"):
+                        settled(el, "watch_bounce", want=int(short.rsplit("-", 1)[-1]))
+                        continue
+                    if short.startswith("update-channel-"):
+                        settled(el, "update_channel", want=short.rsplit("-", 1)[-1])
+                        continue
+                    if short in ("size-up", "size-down"):
+                        a, b = settled(el, "text_size", changed_ok=True)
+                        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and b != a:
+                            grew = b > a
+                            self.record(short, "settings-window", "direction", "+ grows, − shrinks", f"{a} → {b}", "pass" if grew == (short == "size-up") else "fail")
+                        continue
+                    if short in ("reduce-transparency", "cursor-blink"):
+                        flips(el, short.replace("-", "_"))
                         continue
                     if short in ("commit", "meter"):
                         self.check(short, "settings-window", "click", "copies / no-op", lambda el=el: self.app.click(el), None)
@@ -1396,6 +1466,107 @@ class Pass:
             self.close_second_windows()
         self.check("cmd-,", sc, "cmd-, from the main window", "settings_open true", lambda: self.app.key("cmd-,"), lambda a, b: b.get("settings_open") is True, settle=1.5)
         self.close_second_windows()
+
+    def phase_world(self, kernel: str) -> None:
+        """After-failure states — what the window says when the world outside
+        it changed (coverage row added cycle 33; QA found `af-03` here and
+        the rotation had no row). Two changes on a scratch place of its own:
+        the folder renamed under the kernel, and the kernel's file replaced
+        under a running turn. Last in the order: it copies the kernel binary
+        and serves the scratch place from the copy."""
+        sc = "world"
+        home = Path.home()
+        place = home / "parity-world-tmp" / f"w{int(time.time()) % 100000}"
+        moved = place.with_name(place.name + "-moved")
+        shutil.rmtree(place.parent, ignore_errors=True)
+        place.mkdir(parents=True)
+        (place / "README.md").write_text("# world\n")
+        def root_of(path):
+            for p in self.state()["projects"]:
+                if p["path"].rstrip("/") == str(path).rstrip("/"):
+                    for c in p["sessions"]:
+                        if c.get("parent") is None:
+                            return c
+            return None
+        def notices(c):
+            return [i.get("text", "") for i in (c or {}).get("items", []) if i.get("kind") == "notice"]
+        def users(c):
+            return [i.get("text", "") for i in (c or {}).get("items", []) if i.get("kind") == "user"]
+        def kernel_pids(path):
+            out = subprocess.run(["pgrep", "-f", f"arbos-kernel[-0-9a-z]* serve {path}$"], capture_output=True, text=True).stdout.split()
+            return out
+        try:
+            # Open the scratch place by typed path and let its kickoff settle.
+            self.app.key("cmd-t"); time.sleep(0.8)
+            self.app.type(str(place)); time.sleep(1.2); self.app.key("enter"); time.sleep(2.5)
+            if self.app.exists("tab-sheet-done"):
+                self.app.key("escape"); time.sleep(0.6)
+            opened = self.wait(lambda s: root_of(place) is not None, 20, what="world place open")
+            if not opened:
+                self.gap("world-open", sc, "open a scratch place", "the opener did not open it; the phase has no place to change")
+                return
+            self.wait(lambda s: (lambda c: c and not (c.get("streaming") or c.get("turn_open")) and any(i.get("kind") == "agent" for i in c.get("items", [])))(root_of(place)), 90, what="world kickoff")
+            # --- the folder moves under the kernel (af-03) ---
+            place.rename(moved)
+            time.sleep(2)
+            self.send("Reply with exactly: after the move.")
+            time.sleep(2.5)
+            c = root_of(place)
+            n = notices(c)
+            said = [t for t in n if t.startswith("This project's folder is gone or was moved") and str(place) in t]
+            self.record("world-moved-notice", sc, "rename the folder, type a line", "one notice: folder gone or moved, naming the expected path",
+                        f"notices={len(n)}; named={bool(said)}; text={said[0][:120] if said else n[-1][:120] if n else '-'}", "pass" if len(said) == 1 else "fail", self.still("world-moved"))
+            self.record("world-moved-line-kept", sc, "the typed line's fate", "its card is on the pane and the composer is empty; not 'archived'",
+                        f"users={len(users(c))} composer={self.state()['composer']['text']!r} archived-word={any('archived' in t for t in n)}",
+                        "pass" if users(c) and users(c)[-1].endswith("after the move.") and not self.state()["composer"]["text"] and not any("archived" in t for t in n) else "fail")
+            self.send("And this one too.")
+            time.sleep(2)
+            c = root_of(place)
+            self.record("world-moved-second-line", sc, "a second line into the moved place", "a second card, still one notice",
+                        f"users={len(users(c))} notices={len(notices(c))}", "pass" if len(users(c)) >= 2 and len(notices(c)) == 1 else "fail")
+            # --- the folder comes back: held lines go first, in order ---
+            moved.rename(place)
+            time.sleep(2)
+            self.send("Reply with exactly: back again.")
+            settled = self.wait(lambda s: (lambda c: c and not (c.get("streaming") or c.get("turn_open")) and len([i for i in c.get("items", []) if i.get("kind") == "agent"]) >= 4)(root_of(place)), 150, what="world held lines answered")
+            c = root_of(place)
+            agents = [i.get("text", "") for i in (c or {}).get("items", []) if i.get("kind") == "agent"]
+            order = [next((k for k, key in enumerate(("after the move", "this one too", "back again")) if key in a), None) for a in agents[1:]]
+            order = [o for o in order if o is not None]
+            self.record("world-back-in-order", sc, "rename back, type a third line", "three answers, in the order typed, no duplicate prompt cards",
+                        f"settled={bool(settled)} answers={order} users={len(users(c))}", "pass" if settled and order == [0, 1, 2] and len(users(c)) == 3 else "fail", self.still("world-back"))
+            # --- the kernel's file is replaced under a running turn ---
+            copy_dir = Path("/tmp/parity-world-kernel"); shutil.rmtree(copy_dir, ignore_errors=True); copy_dir.mkdir()
+            copy = copy_dir / "arbos-kernel"; shutil.copy(kernel, copy)
+            for pid in kernel_pids(place):
+                subprocess.run(["kill", pid])
+            time.sleep(1.5)
+            served = subprocess.Popen([str(copy), "serve", str(place)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            time.sleep(3)
+            self.send("Run `sleep 120` yourself with bash right now, attached, no workers.")
+            self.wait(lambda s: (lambda c: c and (c.get("streaming") or c.get("turn_open")))(root_of(place)), 30, what="world long turn")
+            time.sleep(3)
+            tmp = copy_dir / "arbos-kernel.new"; shutil.copy(kernel, tmp); os.replace(tmp, copy)
+            control = self.wait(lambda s: bool(self.ids("status-bar-stranger-kernel")) or None, 75, every=2, what="stranger plate")
+            ids = self.ids("status-bar-stranger-kernel")
+            if not ids:
+                # A kernel from before #385 says nothing about its file; the
+                # bar cannot know. Said as a gap, not a fail.
+                self.gap("world-deleted-build-plate", sc, "replace the kernel's file under a running turn", "no plate within 75 s — this kernel may predate `binary_gone` (#385); read its --version in the first row")
+                return
+            self.record("world-deleted-build-plate", sc, "replace the kernel's file under a running turn", "the bar's plate appears while the turn runs", "plate on the bar", "pass", self.still("world-plate"))
+            before = kernel_pids(place)
+            self.check("world-deleted-build-click", sc, "click the plate", "the kernel is restarted (new pid), the plate goes, the root chat says so",
+                       lambda: self.app.click(ids[0]),
+                       lambda a, b: (lambda c: (kernel_pids(place) != before and not self.ids("status-bar-stranger-kernel") and any("restarted on this build" in t for t in notices(c))) and f"pid {before} -> {kernel_pids(place)}; notices {[t[:40] for t in notices(c)[-3:]]}")(root_of(place)),
+                       settle=8)
+        finally:
+            for pid in kernel_pids(place) + kernel_pids(moved):
+                subprocess.run(["kill", pid])
+            try:
+                self.go_project()
+            except Exception:
+                pass
 
     def phase_permissions(self) -> None:
         """The permissions sheet from the menu (Arbos › Permissions…): a modal
@@ -1654,7 +1825,7 @@ def main() -> int:
     ap.add_argument("--driver-py", default=None)
     # openai/* through this OpenRouter key is blocked (403 policy violation, 2026-09-16); Gemini answers
     ap.add_argument("--model", default=os.environ.get("QA_MODEL", "google/gemini-2.5-flash"))
-    ap.add_argument("--phases", default="LCTQPSABRWMKGXON")
+    ap.add_argument("--phases", default="LCTQPSABRWMKGNDXO")
     args = ap.parse_args()
     if not os.environ.get("OPENROUTER_API_KEY"):
         raise SystemExit("OPENROUTER_API_KEY is not set")
@@ -1697,7 +1868,8 @@ def main() -> int:
     p.record("kernel", "rig", "arbos-kernel --version", "the build under test, from the binary", build, "info")
     phases = {"L": p.phase_launch, "C": p.phase_composer, "T": p.phase_turn, "Q": p.phase_question, "P": p.phase_plan,
               "S": p.phase_subagents, "A": p.phase_artifacts, "B": p.phase_tabs, "R": p.phase_panel, "W": p.phase_settings,
-              "M": p.phase_menus, "G": p.phase_prs, "N": p.phase_permissions}
+              "M": p.phase_menus, "G": p.phase_prs, "N": p.phase_permissions,
+              "D": lambda: p.phase_world(args.kernel)}
     try:
         place_window(); time.sleep(1.5)
         for letter in args.phases:

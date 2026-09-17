@@ -220,6 +220,21 @@ fn worktree_note(place: &std::path::Path, agent: &Agent) -> String {
     )
 }
 
+/// The `transcript_lo` of the agent's newest open turn folder — the line
+/// its wake was written at — if a turn is open.
+pub fn open_turn_lo(hooks: &KernelHooks, agent: &str) -> Option<u64> {
+    let dir = open_turn_folder(hooks, agent)?;
+    std::fs::read_to_string(dir.join("meta.toml"))
+        .ok()?
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("transcript_lo = ")?
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+}
+
 /// The newest open turn folder of `agent`, if any.
 fn open_turn_folder(hooks: &KernelHooks, agent: &str) -> Option<std::path::PathBuf> {
     let turns = inbox::turns_dir(&hooks.place, agent);

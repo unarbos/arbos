@@ -131,15 +131,15 @@ impl Arbos {
         self.updater
             .update(cx, |updater, cx| updater.look_for_strangers(places, cx));
         // A restart in flight, or one that failed, comes before the warning
-        // that prompted it: a click that takes a minute must not look like a
-        // click that did nothing, and one that failed must say so on screen
-        // rather than only on stderr.
+        // that prompted it. #423 wired the click and says what happened on
+        // the root transcript; this is the answer in the place the click
+        // happened, which is where somebody who just clicked is looking.
         if let Some(place) = self.updater.read(cx).restarting().cloned() {
             return Some(plate(
                 cx,
                 Plate {
                     id: "status-bar-kernel-restarting",
-                    label: "Restarting kernel…".into(),
+                    label: format!("Restarting kernel · {}", place.title()),
                     icon: None,
                     fill: theme.warning,
                     progress: Some(1.),
@@ -157,7 +157,7 @@ impl Arbos {
                 cx,
                 Plate {
                     id: "status-bar-kernel-restart-failed",
-                    label: "Could not restart kernel".into(),
+                    label: format!("Could not restart kernel · {}", place.title()),
                     icon: None,
                     fill: theme.danger,
                     progress: None,
@@ -170,13 +170,36 @@ impl Arbos {
             ));
         }
 
-        let found = self.updater.read(cx).strangers().first()?.clone();
+        // The project in front first: with two strangers (the Home place's
+        // and this tab's, after one replacement took both) the plate named
+        // and the click ended the other place's kernel while the person
+        // looked at this one (F-136, cycle 33).
+        let front = self
+            .workspace
+            .read(cx)
+            .active
+            .and_then(|ix| self.workspace.read(cx).projects.get(ix))
+            .map(|project| project.place());
+        let strangers = self.updater.read(cx).strangers();
+        let found = front
+            .as_ref()
+            .and_then(|place| strangers.iter().find(|found| found.place == *place))
+            .or_else(|| strangers.first())?
+            .clone();
+        let several = strangers.len() > 1;
         let place = found.place.clone();
         // Capitalised: `say` gives the sentence, this is the start of one.
         let what = found.reason.say(&place.title());
+        // More than one: the label says which place this plate is about,
+        // since the click ends that one's work and no other's.
+        let label = if several {
+            format!("{} · {}", found.reason.headline(), place.title())
+        } else {
+            found.reason.headline().to_string()
+        };
         // What is wrong, then what to do, then why it matters. The remedy
         // used to come third, after the consequence had been given twice,
-        // and this is read at a glance.
+        // and a sentence began in lower case. This is read at a glance.
         let gate = found.gate.say();
         let tooltip = format!(
             "{}{}.\n\n\
@@ -193,7 +216,7 @@ impl Arbos {
                 cx,
                 Plate {
                     id: "status-bar-stranger-kernel",
-                    label: found.reason.headline().into(),
+                    label,
                     icon: None,
                     fill: theme.warning,
                     progress: None,
@@ -203,6 +226,53 @@ impl Arbos {
             )
             .into_any_element(),
         )
+    }
+
+    /// The stranger plate's click: stop the kernel serving `place` and let
+    /// the app start one on this build. Off the main thread — the stop
+    /// waits on a process. The word on what happened goes on the place's
+    /// root chat, where the person is looking, not only in the bar: the
+    /// sockets drop and reconnect on their own, and the plate goes when the
+    /// next look finds no stranger.
+    fn restart_stranger(&mut self, place: crate::model::place::Place, cx: &mut Context<Self>) {
+        let title = place.title();
+        eprintln!("arbos: stranger plate clicked — restarting the kernel for {}", place.path.display());
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.notice_on_root(
+                &place,
+                false,
+                &format!("Restarting the kernel for {title} on this build; anything it was running is being stopped."),
+                cx,
+            );
+        });
+        self.updater
+            .update(cx, |updater, cx| updater.restart_began(place.clone(), cx));
+        cx.spawn(async move |this, cx| {
+            let target = place.clone();
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { crate::kernel::restart_kernel(&target) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let why = outcome.as_ref().err().map(|e| format!("{e:#}"));
+                this.updater.update(cx, |updater, cx| {
+                    updater.restart_ended(place.clone(), why, cx);
+                    updater.forget_strangers(cx);
+                });
+                eprintln!("arbos: stranger restart for {}: {:?}", place.path.display(), outcome.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
+                let (failed, text) = match outcome {
+                    Ok(()) => (
+                        false,
+                        format!("Kernel for {title} restarted on this build ({}).", build::badge()),
+                    ),
+                    Err(err) => (true, format!("Could not restart the kernel for {title}: {err:#}")),
+                };
+                this.workspace.update(cx, |workspace, cx| {
+                    workspace.notice_on_root(&place, failed, &text, cx);
+                });
+            });
+        })
+        .detach();
     }
 
     /// The version, or the button.
@@ -520,50 +590,40 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
             el.tooltip(move |window, cx| Tooltip::text(tooltip.clone(), window, cx))
         })
         .when(clickable, |el| {
-            el.on_click(cx.listener(move |this, _, _, cx| {
-                // Exhaustive on purpose. The first version of this control
-                // built an `Action::RestartKernel` and never matched it, so
-                // the click ran the update path instead, found nothing to
-                // install and did nothing at all. A `match` with no wildcard
-                // means the next action added here cannot be silently
-                // undispatched.
-                match &action {
-                    Action::None => {}
-                    Action::RestartKernel(place) => {
-                        let place = place.clone();
-                        this.updater
-                            .update(cx, |updater, cx| updater.restart_kernel(place, cx));
+            el.on_click(cx.listener(move |this, _, _, cx| match action.clone() {
+                Action::None => {}
+                // The stranger's plate ran the update path instead of its
+                // own action (F-125, cycle 25): a click meant to end one
+                // kernel installed a new app.
+                Action::RestartKernel(place) => this.restart_stranger(place, cx),
+                Action::Install => {
+                    // Every place this app knows a kernel for, not only the
+                    // tabs that happen to be open.
+                    //
+                    // The open projects alone are not enough, and that gap
+                    // did real harm: after an update on 2026-09-17 a kernel
+                    // from a closed tab kept running from the deleted old
+                    // bundle, and the new app attached to it and sent frames
+                    // it had never heard of. Recents are where those kernels
+                    // are — a place stops being a tab long before its kernel
+                    // stops running.
+                    let workspace = this.workspace.read(cx);
+                    let mut places: Vec<_> = workspace
+                        .projects
+                        .iter()
+                        .map(|project| project.place().clone())
+                        .collect();
+                    for recent in &workspace.recents {
+                        if !places.contains(recent) {
+                            places.push(recent.clone());
+                        }
                     }
-                    Action::Install => install_the_update(this, cx),
+                    this.updater
+                        .update(cx, |updater, cx| updater.install(places, cx));
                 }
             }))
         })
         .into_any_element()
-}
-
-/// Download and install the update being offered.
-fn install_the_update(this: &mut Arbos, cx: &mut Context<Arbos>) {
-    // Every place this app knows a kernel for, not only the tabs that happen
-    // to be open.
-    //
-    // The open projects alone are not enough, and that gap did real harm:
-    // after an update on 2026-09-17 a kernel from a closed tab kept running
-    // from the deleted old bundle, and the new app attached to it and sent
-    // frames it had never heard of. Recents are where those kernels are — a
-    // place stops being a tab long before its kernel stops running.
-    let workspace = this.workspace.read(cx);
-    let mut places: Vec<_> = workspace
-        .projects
-        .iter()
-        .map(|project| project.place().clone())
-        .collect();
-    for recent in &workspace.recents {
-        if !places.contains(recent) {
-            places.push(recent.clone());
-        }
-    }
-    this.updater
-        .update(cx, |updater, cx| updater.install(places, cx));
 }
 
 /// A label that reads on a plate.

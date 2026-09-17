@@ -84,6 +84,9 @@ final class ChatStore: ObservableObject {
     private var pump: Task<Void, Never>?
     private var sentAt: Date?
     private var reconnectTask: Task<Void, Never>?
+    /// The last refusal said out loud. Retrying every ten seconds against an
+    /// offline machine must not fill the chat with the same sentence.
+    private var lastRefusal: String?
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
     private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
@@ -203,17 +206,66 @@ final class ChatStore: ObservableObject {
         do {
             try await live.start()
             mode = .live
+            lastRefusal = nil
             registerPushIfLive()
             return true
         } catch {
             #if DEBUG
             print("attach \(endpoint.url): \(error)")
             #endif
+            // A refusal the hub explained is said once, in its words. The
+            // silent case keeps the waiting card ("… is not answering —
+            // waiting"), which is the honest thing to show when nobody has
+            // told us anything; saying more than we know is how a client
+            // ends up describing its own plumbing to the user.
+            if let reason = refusal(from: error), reason != lastRefusal {
+                lastRefusal = reason
+                items.append(ChatItem(.notice(reason, failed: true)))
+            }
         }
         live.stop()
         pump?.cancel()
         source = nil
         return false
+    }
+
+    /// The hub's refusals, said the way a person would say them.
+    ///
+    /// The hub is right to log `no machine named "arboslife" is registered
+    /// (known: none)`, and the app was showing that sentence to Jacob. It is
+    /// accurate and it is a record of our internals; what he needs to know is
+    /// that ArbosLife is off and this chat will not open until it is back.
+    ///
+    /// Anything whose shape is not recognised keeps the hub's own words.
+    /// Guessing at a refusal is worse than quoting one.
+    static func inPlainWords(_ why: String) -> String {
+        let text = why.replacingOccurrences(of: "hub: ", with: "")
+        if let machine = quoted(in: text), text.contains("no machine named") {
+            return "\(machine) is not connected — its kernel isn't running, or the machine is off."
+        }
+        if let project = quoted(in: text), text.contains("no project named") {
+            return "\(project) isn't on that machine any more."
+        }
+        return text
+    }
+
+    /// The first `"…"` in a hub message: the name it is talking about.
+    private static func quoted(in text: String) -> String? {
+        let parts = text.split(separator: "\"", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        let name = String(parts[1])
+        return name.isEmpty ? nil : name
+    }
+
+    /// The other end's own words, when the failure carries them. Transport
+    /// errors are not refusals and are left to the waiting card.
+    private func refusal(from error: Error) -> String? {
+        guard case KernelClientError.failed(let reason) = error else { return nil }
+        let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.hasPrefix("The operation couldn"),
+              !text.contains("Socket is not connected"), text != "closed"
+        else { return nil }
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
 
     /// Stop, as the kernel's stall notice offers it: the turn ends, what
@@ -611,7 +663,7 @@ final class ChatStore: ObservableObject {
             busy = false
             if settings.chatEndpoint != nil, refusal == nil { scheduleReconnect() }
         case .refused(let why):
-            refusal = why.replacingOccurrences(of: "hub: ", with: "")
+            refusal = Self.inPlainWords(why)
             reconnectTask?.cancel()
             reconnectTask = nil
             reconnectIn = nil

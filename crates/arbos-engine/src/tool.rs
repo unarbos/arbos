@@ -120,6 +120,13 @@ pub struct RunCx {
     /// What `search` and `fetch` may use: the custom endpoint from
     /// config, and the model provider (OpenRouter's web plugin).
     pub web: Arc<WebCfg>,
+    /// `true` once this turn's checkpoint has its working tree saved (or
+    /// gave up). A tool that writes waits on it first: the tree is taken
+    /// beside the turn, and a first tool call that landed before `add -A`
+    /// finished was in the "before" tree — a rewind then restored the
+    /// turn's own file and said restored (qal-j17). `None`: nothing to
+    /// wait for.
+    pub tree_ready: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl RunCx {

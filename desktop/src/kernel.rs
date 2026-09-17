@@ -2467,6 +2467,7 @@ pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
     let mut token_env = String::new();
     let mut mirror = true;
     let mut reply = String::new();
+    let mut work_sound = String::new();
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -2482,6 +2483,7 @@ pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
             "voice_token_env" => token_env = v.to_string(),
             "voice_mirror" => mirror = !matches!(v, "false" | "0" | "no"),
             "voice_reply" => reply = v.to_ascii_lowercase(),
+            "voice_work_sound" => work_sound = v.to_ascii_lowercase(),
             _ => {}
         }
     }
@@ -2494,6 +2496,11 @@ pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
     Some(crate::voice_ws::VoiceCfg {
         url,
         token: (!token.is_empty()).then_some(token),
+        work_sound: match work_sound.as_str() {
+            "off" | "none" | "false" | "0" => crate::voice_ws::WorkSound::Off,
+            "ticks" | "tick" => crate::voice_ws::WorkSound::Ticks,
+            _ => crate::voice_ws::WorkSound::Bed,
+        },
         mirror,
         reply,
     })

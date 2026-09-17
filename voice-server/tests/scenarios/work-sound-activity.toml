@@ -1,0 +1,26 @@
+# The sound of work has an honest source: agent.activity frames from the kernel's own turn and
+# tool frames — working, tool (named), working, idle — with a heartbeat while it runs, and idle last.
+title = "agent.activity: transitions from the kernel's turn and tool frames, heartbeat while working"
+
+[[steps]]
+say = "Run the tests and tell me."
+model = { quiet = true }
+[steps.kernel]
+reply_delay = 0.4
+tool_output_lines = 30
+tool_seconds = 6.5
+reply = "All 30 tests pass."
+
+[[steps]]
+wait_spoken = "All 30 tests pass"
+timeout = 40
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+activity_states = ["working", "tool", "working", "idle"]
+activity_tool = "bash"
+activity_heartbeats_min = 1
+activity_idle_last = true
+spoken_contains = ["All 30 tests pass"]

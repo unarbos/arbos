@@ -49,6 +49,11 @@ pub struct Reply {
     /// records. Default none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// How long the model "takes" before this reply, for tests of what
+    /// lands during a model call (a stop, a steer). Cancellable like a
+    /// real call. Default none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -113,6 +118,17 @@ impl Replay {
             .count()
     }
 
+    /// The `delay_ms` of the reply `next` would hand `agent`, without
+    /// taking it.
+    pub fn peek_delay(&self, agent: &str) -> Option<u64> {
+        let used = self.used.lock().unwrap_or_else(|p| p.into_inner());
+        self.replies
+            .iter()
+            .enumerate()
+            .find(|(i, r)| !used[*i] && r.agent.as_deref().is_none_or(|a| a == agent))
+            .and_then(|(_, r)| r.delay_ms)
+    }
+
     /// The next reply for `agent`, or the end-of-script notice.
     pub fn next(&self, agent: &str) -> Completion {
         let mut used = self.used.lock().unwrap_or_else(|p| p.into_inner());
@@ -159,30 +175,38 @@ impl Replay {
     }
 }
 
-static CURRENT: OnceLock<Option<Arc<Replay>>> = OnceLock::new();
-
 /// The process's replay script, read once from the environment. `None`
 /// when `ARBOS_PROVIDER` is not `replay`. A named file that does not parse
 /// is an error at first use, not a silent fall back to the network.
+///
+/// One instance per process, whoever asks first: two turns starting at
+/// once (a parent and its child continued after a restart) each loaded
+/// their own copy, one of them not the one kept, and the third caller
+/// then took a line the first had already used — the parent's "restarted,
+/// still waiting" said twice and swallowed as a repeat (CI, one run in
+/// a few). The load happens inside the once-cell.
 pub fn current() -> Result<Option<Arc<Replay>>> {
-    if let Some(c) = CURRENT.get() {
-        return Ok(c.clone());
+    let loaded: &Result<Option<Arc<Replay>>, String> = LOADED.get_or_init(|| {
+        let selected = std::env::var(PROVIDER_ENV)
+            .map(|p| p.trim().eq_ignore_ascii_case("replay"))
+            .unwrap_or(false);
+        if !selected {
+            return Ok(None);
+        }
+        let path = std::env::var(REPLIES_ENV)
+            .ok()
+            .filter(|p| !p.trim().is_empty())
+            .ok_or_else(|| format!("{PROVIDER_ENV}=replay needs {REPLIES_ENV}=<replies.jsonl>"))?;
+        let replay = Replay::load(Path::new(&path)).map_err(|e| format!("{e:#}"))?;
+        Ok(Some(Arc::new(replay)))
+    });
+    match loaded {
+        Ok(r) => Ok(r.clone()),
+        Err(e) => Err(anyhow::anyhow!("{e}")),
     }
-    let selected = std::env::var(PROVIDER_ENV)
-        .map(|p| p.trim().eq_ignore_ascii_case("replay"))
-        .unwrap_or(false);
-    if !selected {
-        let _ = CURRENT.set(None);
-        return Ok(None);
-    }
-    let path = std::env::var(REPLIES_ENV)
-        .ok()
-        .filter(|p| !p.trim().is_empty())
-        .with_context(|| format!("{PROVIDER_ENV}=replay needs {REPLIES_ENV}=<replies.jsonl>"))?;
-    let replay = Arc::new(Replay::load(Path::new(&path))?);
-    let _ = CURRENT.set(Some(Arc::clone(&replay)));
-    Ok(Some(replay))
 }
+
+static LOADED: OnceLock<Result<Option<Arc<Replay>>, String>> = OnceLock::new();
 
 /// Select the replay provider for this process (what `serve --provider
 /// replay --replies FILE` does before anything reads the environment).

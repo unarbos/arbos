@@ -65,6 +65,36 @@ struct VoiceServerInfo: Equatable {
     }
 }
 
+/// Why a reply ended, as the server says rather than as the client guesses.
+///
+/// The phone used to read the bare presence of `response.done` as "the answer
+/// is over", which sent the call back to listening for a reply that had never
+/// made a sound. The server says why now, so the client reads it.
+enum ResponseEnd: String {
+    /// It finished saying what it had to say.
+    case completed
+    /// The caller spoke over it. It had been playing.
+    case interrupted
+    /// More speech arrived and the question was re-asked; this reply was
+    /// abandoned before it reached anyone. Nothing happened.
+    case superseded
+    case failed
+
+    /// Older servers send `interrupted: true|false` and no reason.
+    init(reason: String?, interrupted: Bool) {
+        self = reason.flatMap(ResponseEnd.init(rawValue:)) ?? (interrupted ? .interrupted : .completed)
+    }
+
+    /// Whether a caller could have heard any of it. A reply nobody heard is
+    /// not an answer ending and must not be drawn as one.
+    var reachedTheCaller: Bool {
+        switch self {
+        case .completed, .interrupted: return true
+        case .superseded, .failed: return false
+        }
+    }
+}
+
 enum VoiceEvent {
     case connected(VoiceServerInfo)
     /// Server voice-activity detection heard the user start speaking.
@@ -78,7 +108,7 @@ enum VoiceEvent {
     /// One chunk of speech to play.
     case assistantAudio(Data)
     case assistantTranscript(delta: String)
-    case responseDone(interrupted: Bool)
+    case responseDone(ResponseEnd)
     /// Text channel.
     case textDelta(String)
     case textDone(text: String, cancelled: Bool)
@@ -145,6 +175,19 @@ final class OrderedWebSocket {
         var held: AsyncStream<URLSessionWebSocketTask.Message>.Continuation!
         outbox = AsyncStream { held = $0 }
         outboxContinuation = held
+    }
+
+    /// What the other end said as it closed, when it said anything. A server
+    /// that refuses a connection puts its reason here; without it a client
+    /// has only the transport's own words, which describe the socket and not
+    /// the refusal, and it ends up inventing an explanation for the user.
+    var closeReason: String? {
+        guard let data = socket.closeReason, !data.isEmpty,
+              let text = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
+        else { return nil }
+        return text
     }
 
     /// `onMessage` runs for each inbound frame; `onFailure` once, when the
