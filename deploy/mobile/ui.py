@@ -95,9 +95,17 @@ def main():
         if verb == "field":
             print(fields[0].get("AXValue") or "", end="")
             return
-        x, y = centre(fields[0])
+        # The caret lands where the tap lands. The composer grows into a
+        # multi-line box, so its centre is in the middle of what is already
+        # written and typing there weaves the new line into the old one —
+        # which is what garbled six of cycle 48's eight typed lines. Tapping
+        # inside the last line, past its end, puts the caret after
+        # everything. For an empty field this is the same place as anywhere.
+        f = fields[0].get("frame") or {}
+        x = round(f.get("x", 0) + f.get("width", 0) - 12)
+        y = round(f.get("y", 0) + f.get("height", 0) - 12)
         subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
-        print(f"focused the text field at {x},{y}")
+        print(f"caret at the end of the text field, {x},{y}")
         return
 
     if verb == "dump":
