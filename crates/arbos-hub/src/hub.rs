@@ -405,7 +405,17 @@ fn list<'a>(it: impl Iterator<Item = &'a String>) -> String {
 /// never the `error`. A short pause before the close handshake lets the
 /// proxy forward the text; refusals are rare, so the wait costs nothing.
 async fn refuse_close(ws: &mut Ws) {
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Wait for the peer to read the reason and hang up itself (its close
+    // or its socket ending) rather than guessing how long the proxy
+    // needs; two seconds is the ceiling for a peer that keeps the socket.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    })
+    .await;
     let _ = ws.close(None).await;
 }
 
@@ -793,6 +803,9 @@ pub async fn attach(
                 },
             )
             .await;
+            // The commonest refusal of all — a machine that is offline — and
+            // until now the one that still closed bare through the tunnel.
+            refuse_close(&mut ws).await;
             return;
         }
     };
@@ -1032,6 +1045,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     };
     if !ok {
         let _ = send_json(&mut ws, &answer).await;
+        refuse_close(&mut ws).await;
         return;
     }
     // A worktree place is not a project of the user's: the roster says
