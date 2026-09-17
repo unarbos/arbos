@@ -1231,6 +1231,10 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
             // here: three rows reading "nothing to send" look exactly like a
             // report that had nothing to attach.
             "unavailable": this.feedback_sheet.read(cx).unavailable(),
+            // Which door the bundle came through. Assertable, because a report
+            // collected over ssh and one the tab answered are different facts
+            // and the sheet must not present them as the same.
+            "other_door": this.feedback_sheet.read(cx).other_door(),
             "screenshot": {
                 "attached": this.feedback_sheet.read(cx).shot_state().0,
                 "whole_screen": this.feedback_sheet.read(cx).shot_state().1,

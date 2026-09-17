@@ -204,6 +204,13 @@ pub struct Draft {
     /// invented complaint, which is the worst case — a reader diagnoses a
     /// complaint the events were never about. A fixture has to say so itself.
     pub fixture: bool,
+    /// The bundle was read over ssh from the far machine rather than through the
+    /// tab's own attach.
+    ///
+    /// Recorded, because a reader has to know which door a report came through:
+    /// through the attach means the tab was answering, and over ssh means it was
+    /// not — which is frequently the complaint.
+    pub collected_over_ssh: bool,
     /// Why there is no trajectory, when the kernel would not give one.
     ///
     /// Without it the report would say `included.trajectory: true` with no
@@ -337,6 +344,7 @@ impl Draft {
             },
             "screenshot_error": self.shot_error,
             "trajectory_unavailable": self.trajectory_unavailable,
+            "collected_over_ssh": self.collected_over_ssh,
         });
 
         // The last thing that happens to a report before it is written: every
@@ -2111,6 +2119,57 @@ mod tests {
         let id = new_id(1_789_573_330_000);
         let written = write(&place, None, &draft, &id, 1_789_573_330_000).unwrap();
         println!("WROTE {}", written.dir.display());
+    }
+
+    /// The CLI's line is the frame, so one parser serves both doors.
+    ///
+    /// If this drifts, a report collected over ssh silently loses everything the
+    /// frame path carries — which is the whole value of a report from a tab that
+    /// never connected.
+    #[test]
+    fn the_cli_s_line_reads_as_the_same_bundle_the_frame_gives() {
+        // The frame as `arbos-kernel feedback` prints it, with `door` and
+        // `serving` inside `kernel` where an older reader ignores them.
+        let line = json!({
+            "type": "feedback_bundle",
+            "agent": "root",
+            "turn": {"from": 1, "to": 4, "complete": true},
+            "events": [{"kind": "wake", "seq": 1, "wake": "user", "text": "hello"}],
+            "tail": [],
+            "children": [],
+            "log": [{"ts": 1_789_573_301_000i64, "level": "warn", "event": "serve.exit"}],
+            "kernel": {
+                "version": "0.2.0",
+                "git_sha": "abc123",
+                "os": "linux",
+                "arch": "x86_64",
+                "door": "cli",
+                "serving": {"known": true, "live": false, "pid": 4821, "version": "0.2.0"},
+            },
+            "note": "",
+            "redacted": {"secrets": 0, "tokens": 0, "values": 0, "blocks": 0},
+            "truncated": false,
+            "bytes": 812,
+        })
+        .to_string();
+
+        let bundle = crate::agent::acp::feedback_bundle_from_json(&line)
+            .expect("the CLI's line is a feedback_bundle frame");
+        assert_eq!(bundle.agent, "root");
+        assert_eq!(bundle.events.len(), 1);
+        assert_eq!(bundle.log.len(), 1);
+        assert_eq!(bundle.turn["complete"], json!(true));
+        // The two fields the CLI adds survive, because they ride inside `kernel`.
+        assert_eq!(bundle.kernel["door"], json!("cli"));
+        assert_eq!(bundle.kernel["serving"]["live"], json!(false));
+        assert_eq!(bundle.kernel["serving"]["pid"], json!(4821));
+
+        // Anything that is not that frame is refused rather than guessed at.
+        assert!(crate::agent::acp::feedback_bundle_from_json("not json").is_none());
+        assert!(
+            crate::agent::acp::feedback_bundle_from_json(&json!({"type": "error"}).to_string())
+                .is_none()
+        );
     }
 
     #[test]
