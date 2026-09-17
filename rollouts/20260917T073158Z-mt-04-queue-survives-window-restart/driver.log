@@ -1,0 +1,4 @@
+1789630319752 desktop: app pid 1351122 on :9792
+1789630333078 desktop-relaunch: app pid 1351304 on :9792
+1789630483109 BREAK mt-04-queue-lost-on-restart: the follow-up typed during the turn never reached the transcript after quit + relaunch
+1789630483261 bugs: seen 11b8de99d0.md

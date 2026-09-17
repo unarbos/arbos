@@ -1,0 +1,42 @@
+{
+  "scenario": "desktop-rapid-session-switch",
+  "doc": "Create six chats and switch between them as fast as the driver allows. The app must stay up and responsive; each chat must keep its own folder.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-gap",
+      "detail": "no clickable session row; ids seen: view-4294967298.tab-bar, view-4294967298.tab-bar.tab-0, view-4294967298.tab-bar.tab-0.tab-close-0, view-4294967298.tab-bar.tab-1, view-4294967298.tab-bar.tab-1.tab-close-1, view-4294967298.tab-bar.new-tab, view-4294967298.chat-header, view-4294967298.chat-header.chat-header-crumb-0, view-4294967298.chat-header.chat-header-title-7, view-4294967298.chat-header.chat-header-menu-7, view-4294967298.chat-header.toggle-panel, view-4294967298.conversation-drop, view-4294967298.conversation-drop.chat-title-7, view-4294967298.view-4294967299.composer-card, view-4294967298.view-4294967299.composer-card.composer-attach, view-4294967298.view-4294967299.composer-card.composer-field, view-4294967298.view-4294967299.composer-card.composer-field.composer-hint, view-4294967298.view-4294967299.composer-card.composer-model, view-4294967298.view-4294967299.composer-card.composer-voice, view-4294967298.composer-context, view-4294967298.composer-context.composer-machine, view-4294967298.panel, view-4294967298.panel.panel-scroll, view-4294967298.panel.panel-scroll.panel-call, view-4294967298.panel.panel-scroll.panel-agent-0, view-4294967298.panel.panel-scroll.panel-agent-2, view-4294967298.panel.panel-scroll.panel-agent-3, view-4294967298.panel.panel-scroll.panel-agent-4, view-4294967298.panel.panel-scroll.panel-agent-5, view-4294967298.panel.panel-scroll.panel-agent-6, view-4294967298.panel.panel-scroll.panel-agent-7, view-4294967298.panel.panel-scroll.panel-project-head, view-4294967298.panel.panel-scroll.panel-start-page, view-4294967298.panel.search-chats, view-4294967298.panel.new-subchat, view-4294967298.status-bar, view-4294967298.status-bar.status-bar-settings, view-4294967298.status-bar.status-bar-version",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "sessions": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "session_rows": 0,
+    "switches": 0,
+    "switch_failures": 0,
+    "agent_folders": [
+      "chat-1789629905170",
+      "chat-1789629905660",
+      "chat-1789629906140",
+      "chat-1789629906620",
+      "chat-1789629907101",
+      "chat-1789629907588",
+      "root"
+    ]
+  },
+  "duration_s": 12.1,
+  "place": "/tmp/arbos-qa-desktop-rapid-session-switch-26i_ayma/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T072503Z-desktop-rapid-session-switch",
+  "branch": "main",
+  "usd": 0.01644
+}

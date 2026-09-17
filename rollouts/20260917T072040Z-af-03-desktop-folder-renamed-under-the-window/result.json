@@ -1,0 +1,34 @@
+{
+  "scenario": "af-03-desktop-folder-renamed-under-the-window",
+  "doc": "The window is open on a place; the folder is renamed on disk; the user types a line. The kernel stops itself (#377). What does the window do \u2014 respawn a kernel at the OLD path and mint a ghost `.arbos/` there (destructive: history split), tell the user the folder moved, or follow it? Recorded as the user sees it: the chat items, a ghost folder, and where the new line landed.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "af-03-wrong-explanation",
+      "detail": "the chat explains a renamed folder as 'this agent is archived: its history stays, but it takes no more messages' \u2014 nothing was archived; the user's line went nowhere",
+      "where": "desktop session.rs: a kernel that stopped because its store is gone is drawn as an archived agent"
+    }
+  ],
+  "notes": {
+    "kernel_pid_before": 1343107,
+    "kernel_pid_after": 1343107,
+    "ghost_at_old_path": false,
+    "line_in_moved": false,
+    "line_in_ghost": false,
+    "connection": "lost",
+    "new_items": [
+      [
+        "notice",
+        "this agent is archived: its history stays, but it takes no more messages"
+      ]
+    ]
+  },
+  "duration_s": 68.1,
+  "place": "/tmp/arbos-qa-af-03-desktop-folder-renamed-under-the-window-eq4au9vk/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T072040Z-af-03-desktop-folder-renamed-under-the-window",
+  "branch": "main",
+  "usd": 0.0
+}

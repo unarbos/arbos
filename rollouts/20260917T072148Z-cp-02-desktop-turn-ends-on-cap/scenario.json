@@ -1,0 +1,9 @@
+{
+  "name": "cp-02-desktop-turn-ends-on-cap",
+  "doc": "In the desktop: a turn that ends on the cost cap leaves the app responsive (driver answers within 1 s) and the reason readable in the chat as a failed notice; the composer takes the next line and that turn, too, ends with the notice rather than silence.",
+  "tags": [
+    "landing",
+    "cap",
+    "desktop"
+  ]
+}

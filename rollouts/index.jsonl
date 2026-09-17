@@ -2461,3 +2461,118 @@
 {"ts": 1789626243091, "rollout": "20260917T062329Z-sq-02-desktop-stop-holds-follow-up", "scenario": "sq-02-desktop-stop-holds-follow-up", "branch": "main", "status": "pass", "breaks": []}
 {"ts": 1789626340408, "rollout": "20260917T062403Z-xp-01-dead-kernel-line-stays-in-its-project", "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "branch": "main", "status": "break", "breaks": ["xp-01-first-line-lost"]}
 {"ts": 1789626380585, "rollout": "20260917T062540Z-xp-02-queued-line-survives-close-and-reopen-in-place", "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789626952575, "rollout": "20260917T063550Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789626989145, "rollout": "20260917T063552Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "rust", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789626989563, "rollout": "20260917T063629Z-second-serve", "scenario": "second-serve", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789626993216, "rollout": "20260917T063629Z-concurrent-sessions", "scenario": "concurrent-sessions", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627008631, "rollout": "20260917T063633Z-rapid-create-delete", "scenario": "rapid-create-delete", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627014690, "rollout": "20260917T063648Z-huge-input", "scenario": "huge-input", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627076967, "rollout": "20260917T063654Z-malformed-folder", "scenario": "malformed-folder", "branch": "rust", "status": "break", "breaks": ["state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines"]}
+{"ts": 1789627079688, "rollout": "20260917T063756Z-malformed-frames", "scenario": "malformed-frames", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627101105, "rollout": "20260917T063759Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "branch": "rust", "status": "break", "breaks": ["wrong-output"]}
+{"ts": 1789627122761, "rollout": "20260917T063821Z-ordinary-task", "scenario": "ordinary-task", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627127194, "rollout": "20260917T063842Z-readonly-arbos", "scenario": "readonly-arbos", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627128676, "rollout": "20260917T063847Z-disk-full", "scenario": "disk-full", "branch": "rust", "status": "break", "breaks": ["state:transcript-unended-turn"]}
+{"ts": 1789627128787, "rollout": "20260917T063848Z-clock-jump-cron", "scenario": "clock-jump-cron", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627128893, "rollout": "20260917T063848Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627136492, "rollout": "20260917T063848Z-restart-during-compaction", "scenario": "restart-during-compaction", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627146055, "rollout": "20260917T063856Z-steer-storm", "scenario": "steer-storm", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627181865, "rollout": "20260917T063906Z-spawn-storm", "scenario": "spawn-storm", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627188876, "rollout": "20260917T063941Z-bench-standing-job", "scenario": "bench-standing-job", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627192270, "rollout": "20260917T063948Z-bench-ask-before-risky", "scenario": "bench-ask-before-risky", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627208727, "rollout": "20260917T063952Z-bench-research-links", "scenario": "bench-research-links", "branch": "rust", "status": "break", "breaks": ["wrong-output", "wrong-output", "wrong-output"]}
+{"ts": 1789627256449, "rollout": "20260917T064008Z-bench-fix-commit-branch", "scenario": "bench-fix-commit-branch", "branch": "rust", "status": "break", "breaks": ["wrong-output", "wrong-output", "wrong-output", "wrong-output", "wrong-output"]}
+{"ts": 1789627303716, "rollout": "20260917T064056Z-bench-screenshot", "scenario": "bench-screenshot", "branch": "rust", "status": "break", "breaks": ["wrong-output"]}
+{"ts": 1789627321650, "rollout": "20260917T064143Z-secrets-leak-hunt", "scenario": "secrets-leak-hunt", "branch": "rust", "status": "break", "breaks": ["secret-leak-encoded"]}
+{"ts": 1789627326696, "rollout": "20260917T064201Z-ask-identity", "scenario": "ask-identity", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627372366, "rollout": "20260917T064206Z-bench-tests-are-spec", "scenario": "bench-tests-are-spec", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627377464, "rollout": "20260917T064252Z-bench-no-screenshot-unasked", "scenario": "bench-no-screenshot-unasked", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627377516, "rollout": "20260917T064257Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627377564, "rollout": "20260917T064257Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627377621, "rollout": "20260917T064257Z-desktop-composer-pills", "scenario": "desktop-composer-pills", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627377668, "rollout": "20260917T064257Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627377716, "rollout": "20260917T064257Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627377763, "rollout": "20260917T064257Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789627709843, "rollout": "20260917T064257Z-kickoff-session", "scenario": "kickoff-session", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627882863, "rollout": "20260917T064830Z-inbox:multitasking-audit", "scenario": "inbox:multitasking-audit", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627900776, "rollout": "20260917T065122Z-inbox:project-page-coordinator-protocol", "scenario": "inbox:project-page-coordinator-protocol", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627938564, "rollout": "20260917T065140Z-inbox:swebench-gaps", "scenario": "inbox:swebench-gaps", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789627948022, "rollout": "20260917T065218Z-inbox:swebench-harness-comparison", "scenario": "inbox:swebench-harness-comparison", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628125184, "rollout": "20260917T065228Z-inbox:swebench-loop-cycle-1", "scenario": "inbox:swebench-loop-cycle-1", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628133712, "rollout": "20260917T065525Z-inbox:swebench-loop-cycle-2", "scenario": "inbox:swebench-loop-cycle-2", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628145125, "rollout": "20260917T065533Z-inbox:swebench-loop-cycle-3", "scenario": "inbox:swebench-loop-cycle-3", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628180382, "rollout": "20260917T065545Z-inbox:swebench-loop-cycle-4", "scenario": "inbox:swebench-loop-cycle-4", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628285556, "rollout": "20260917T065620Z-inbox:swebench-loop-cycle-5", "scenario": "inbox:swebench-loop-cycle-5", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628292954, "rollout": "20260917T065805Z-inbox:done-wakes-remote-lifecycle", "scenario": "inbox:done-wakes-remote-lifecycle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628306519, "rollout": "20260917T065812Z-inbox:kickoff-scorer-reads-archive", "scenario": "inbox:kickoff-scorer-reads-archive", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628316486, "rollout": "20260917T065826Z-inbox:swebench-loop-cycle-10", "scenario": "inbox:swebench-loop-cycle-10", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628336281, "rollout": "20260917T065836Z-inbox:swebench-loop-cycle-6", "scenario": "inbox:swebench-loop-cycle-6", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628376159, "rollout": "20260917T065856Z-inbox:swebench-loop-cycle-7", "scenario": "inbox:swebench-loop-cycle-7", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628398483, "rollout": "20260917T065936Z-inbox:swebench-loop-cycle-8", "scenario": "inbox:swebench-loop-cycle-8", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628494627, "rollout": "20260917T065958Z-inbox:swebench-loop-cycle-9", "scenario": "inbox:swebench-loop-cycle-9", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628504816, "rollout": "20260917T070134Z-journey-j8a-headless", "scenario": "journey-j8a-headless", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789628546173, "rollout": "20260917T070223Z-boot-idle", "scenario": "boot-idle", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628582745, "rollout": "20260917T070226Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "main", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789628583166, "rollout": "20260917T070302Z-second-serve", "scenario": "second-serve", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628586820, "rollout": "20260917T070303Z-concurrent-sessions", "scenario": "concurrent-sessions", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628626001, "rollout": "20260917T070306Z-rapid-create-delete", "scenario": "rapid-create-delete", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628632291, "rollout": "20260917T070346Z-huge-input", "scenario": "huge-input", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628694223, "rollout": "20260917T070352Z-malformed-folder", "scenario": "malformed-folder", "branch": "main", "status": "break", "breaks": ["state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines"]}
+{"ts": 1789628696953, "rollout": "20260917T070454Z-malformed-frames", "scenario": "malformed-frames", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628729958, "rollout": "20260917T070456Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628760027, "rollout": "20260917T070530Z-ordinary-task", "scenario": "ordinary-task", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628765012, "rollout": "20260917T070600Z-readonly-arbos", "scenario": "readonly-arbos", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628766495, "rollout": "20260917T070605Z-disk-full", "scenario": "disk-full", "branch": "main", "status": "break", "breaks": ["state:transcript-unended-turn"]}
+{"ts": 1789628766609, "rollout": "20260917T070606Z-clock-jump-cron", "scenario": "clock-jump-cron", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789628766720, "rollout": "20260917T070606Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789628773220, "rollout": "20260917T070606Z-restart-during-compaction", "scenario": "restart-during-compaction", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628791938, "rollout": "20260917T070613Z-steer-storm", "scenario": "steer-storm", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628836233, "rollout": "20260917T070631Z-spawn-storm", "scenario": "spawn-storm", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628841345, "rollout": "20260917T070716Z-bench-standing-job", "scenario": "bench-standing-job", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628844639, "rollout": "20260917T070721Z-bench-ask-before-risky", "scenario": "bench-ask-before-risky", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789628868404, "rollout": "20260917T070724Z-bench-research-links", "scenario": "bench-research-links", "branch": "main", "status": "break", "breaks": ["wrong-output", "wrong-output", "wrong-output"]}
+{"ts": 1789628950054, "rollout": "20260917T070748Z-bench-fix-commit-branch", "scenario": "bench-fix-commit-branch", "branch": "main", "status": "break", "breaks": ["wrong-output", "wrong-output", "wrong-output"]}
+{"ts": 1789629005723, "rollout": "20260917T070910Z-bench-screenshot", "scenario": "bench-screenshot", "branch": "main", "status": "break", "breaks": ["wrong-output"]}
+{"ts": 1789629030565, "rollout": "20260917T071005Z-secrets-leak-hunt", "scenario": "secrets-leak-hunt", "branch": "main", "status": "break", "breaks": ["secret-leak-encoded"]}
+{"ts": 1789629038869, "rollout": "20260917T071030Z-ask-identity", "scenario": "ask-identity", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629098091, "rollout": "20260917T071038Z-bench-tests-are-spec", "scenario": "bench-tests-are-spec", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629104441, "rollout": "20260917T071138Z-bench-no-screenshot-unasked", "scenario": "bench-no-screenshot-unasked", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629104495, "rollout": "20260917T071144Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789629104543, "rollout": "20260917T071144Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789629104600, "rollout": "20260917T071144Z-desktop-composer-pills", "scenario": "desktop-composer-pills", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789629104647, "rollout": "20260917T071144Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789629104694, "rollout": "20260917T071144Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789629104741, "rollout": "20260917T071144Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789629330595, "rollout": "20260917T071144Z-kickoff-session", "scenario": "kickoff-session", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629488637, "rollout": "20260917T071530Z-inbox:headless-kernel-run", "scenario": "inbox:headless-kernel-run", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629548519, "rollout": "20260917T071853Z-inbox:swebench-loop-cycle-12", "scenario": "inbox:swebench-loop-cycle-12", "branch": "cursor/swebench-loop-c12-7c9c", "status": "pass", "breaks": []}
+{"ts": 1789629640358, "rollout": "20260917T071951Z-af-02-two-windows-on-one-place", "scenario": "af-02-two-windows-on-one-place", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629708493, "rollout": "20260917T072040Z-af-03-desktop-folder-renamed-under-the-window", "scenario": "af-03-desktop-folder-renamed-under-the-window", "branch": "main", "status": "break", "breaks": ["af-03-wrong-explanation"]}
+{"ts": 1789629725578, "rollout": "20260917T072148Z-cp-02-desktop-turn-ends-on-cap", "scenario": "cp-02-desktop-turn-ends-on-cap", "branch": "main", "status": "break", "breaks": ["cp-02-agent-apologises-for-cap", "cp-02-cap-told-more-than-once"]}
+{"ts": 1789629783885, "rollout": "20260917T072205Z-desktop-composer-pills", "scenario": "desktop-composer-pills", "branch": "main", "status": "break", "breaks": ["pill-missing"]}
+{"ts": 1789629833381, "rollout": "20260917T072303Z-desktop-composer-pills@composer-pills", "scenario": "desktop-composer-pills@composer-pills", "branch": "main", "status": "break", "breaks": ["pill-missing"]}
+{"ts": 1789629845366, "rollout": "20260917T072353Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629881264, "rollout": "20260917T072405Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629903226, "rollout": "20260917T072441Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789629915382, "rollout": "20260917T072503Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "main", "status": "break", "breaks": ["driver-gap"]}
+{"ts": 1789629941258, "rollout": "20260917T072515Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "main", "status": "break", "breaks": ["driver-gap"]}
+{"ts": 1789629957873, "rollout": "20260917T072541Z-desktop-user-message-card@user-message-card", "scenario": "desktop-user-message-card@user-message-card", "branch": "main", "status": "break", "breaks": ["driver-gap"]}
+{"ts": 1789629959969, "rollout": "20260917T072557Z-fb-01-feedback-report-written-delivered-picked-up", "scenario": "fb-01-feedback-report-written-delivered-picked-up", "branch": "main", "status": "skipped", "breaks": []}
+{"ts": 1789630144401, "rollout": "20260917T072600Z-im-02-desktop-no-quiet-line-while-streaming", "scenario": "im-02-desktop-no-quiet-line-while-streaming", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630302193, "rollout": "20260917T072904Z-journey-linux", "scenario": "journey-linux", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630318138, "rollout": "20260917T073142Z-mt-01-typed-while-running-steers", "scenario": "mt-01-typed-while-running-steers", "branch": "main", "status": "break", "breaks": ["mt-01-typed-not-a-steer", "mt-01-follow-up-after-turn"]}
+{"ts": 1789630483269, "rollout": "20260917T073158Z-mt-04-queue-survives-window-restart", "scenario": "mt-04-queue-survives-window-restart", "branch": "main", "status": "break", "breaks": ["mt-04-queue-lost-on-restart"]}
+{"ts": 1789630521543, "rollout": "20260917T073443Z-mt-14-child-done-does-not-interrupt", "scenario": "mt-14-child-done-does-not-interrupt", "branch": "main", "status": "break", "breaks": ["mt-14-composer-clobbered"]}
+{"ts": 1789630528804, "rollout": "20260917T073521Z-mt-17-plan-strip-empty-chat", "scenario": "mt-17-plan-strip-empty-chat", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630535113, "rollout": "20260917T073528Z-mt-18-project-page-not-in-chat-column", "scenario": "mt-18-project-page-not-in-chat-column", "branch": "main", "status": "break", "breaks": ["mt-18-page-fills-column"]}
+{"ts": 1789630541118, "rollout": "20260917T073535Z-mt-19-standing-work-appears-once", "scenario": "mt-19-standing-work-appears-once", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630665755, "rollout": "20260917T073541Z-mt-20-ask-is-a-card-in-place", "scenario": "mt-20-ask-is-a-card-in-place", "branch": "main", "status": "break", "breaks": ["mt-20-ask-pinned-not-in-place", "mt-20-answer-not-a-bubble"]}
+{"ts": 1789630680597, "rollout": "20260917T073745Z-mt-23-deleted-child-under-live-window", "scenario": "mt-23-deleted-child-under-live-window", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630690896, "rollout": "20260917T073800Z-mt-24-relaunch-restores-active-tab", "scenario": "mt-24-relaunch-restores-active-tab", "branch": "main", "status": "break", "breaks": ["mt-24-active-tab-not-restored"]}
+{"ts": 1789630726993, "rollout": "20260917T073810Z-sq-02-desktop-stop-holds-follow-up", "scenario": "sq-02-desktop-stop-holds-follow-up", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630824423, "rollout": "20260917T073847Z-xp-01-dead-kernel-line-stays-in-its-project", "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "branch": "main", "status": "break", "breaks": ["xp-01-first-line-lost"]}
+{"ts": 1789630864483, "rollout": "20260917T074024Z-xp-02-queued-line-survives-close-and-reopen-in-place", "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789630938048, "rollout": "20260917T074215Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789630938476, "rollout": "20260917T074218Z-second-serve", "scenario": "second-serve", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789630938585, "rollout": "20260917T074218Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789630988154, "rollout": "20260917T074305Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}

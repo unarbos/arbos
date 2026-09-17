@@ -1,0 +1,29 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-yx_aosn6/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8137 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-yx_aosn6/home/.cache/arbos/tgrep/98ec1a617eef5305
+tools root: 2 calls, wall 2ms, sum 2ms, speedup 1.0x
+tools worker-fix-hello-py: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+snapshot_failed: git add: warning: could not open directory 'agents/worker-fix-hello-py/jobs/j12/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j1/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j13/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j8/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j15/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j4/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j7/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j9/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j10/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j17/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j6/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j2/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j5/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j3/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j16/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/jobs/j11/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/turns/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/inflight/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/inbox/': No such file or directory
+warning: could not open directory 'agents/worker-fix-hello-py/pages/': No such file or directory
+fatal: unable to stat 'agents/worker-fix-hello-py/jobs/j14/exit': No such file or directory
