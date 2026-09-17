@@ -230,8 +230,11 @@ pub fn read(place: &Place, agent: &str, name: &str) -> Result<Filed> {
 pub fn is_steer_kind(kind: &str) -> bool {
     // An `answer` reaches a running turn too: a question asked with
     // `wait:false` gets its reply at the next tool boundary instead of a
-    // turn later. Idle, it opens the next turn like any wake.
-    matches!(kind, "steer" | "wake" | "answer")
+    // turn later. Idle, it opens the next turn like any wake. A worker's
+    // `done` reaches a running parent the same way: the report is what a
+    // parent that ran `sleep` was waiting for, and the yield to it (#432)
+    // is only honest if the report then follows at the boundary.
+    matches!(kind, "steer" | "wake" | "answer" | "done")
 }
 
 /// Whether a steer waits: a batch of tool calls stops taking new calls
