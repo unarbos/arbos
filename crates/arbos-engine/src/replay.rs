@@ -10,9 +10,15 @@
 //! ```
 //!
 //! `agent` pins a reply to one agent's calls; a reply without it goes to
-//! whoever asks next. Replies are consumed in file order within those
-//! rules. When they run out, the call returns a short notice with no tool
-//! calls, which ends the turn.
+//! whoever asks next **among the agents the script never pins a line
+//! to**. An agent with pinned lines anywhere in the script reads only
+//! those: a script that pins root's lines and leaves a worker's unpinned
+//! means the unpinned line for the worker, and root's extra step (after a
+//! spawn result, on a done wake) must not take it first — which it did on
+//! a loaded runner, and every such red read as a flake (2026-09-17).
+//! Replies are consumed in file order within those rules. When they run
+//! out, the call returns a short notice with no tool calls, which ends the
+//! turn.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -125,8 +131,24 @@ impl Replay {
         self.replies
             .iter()
             .enumerate()
-            .find(|(i, r)| !used[*i] && r.agent.as_deref().is_none_or(|a| a == agent))
+            .find(|(i, r)| !used[*i] && self.serves(r, agent))
             .and_then(|(_, r)| r.delay_ms)
+    }
+
+    /// Whether the script pins any line (used or not) to `agent`: such an
+    /// agent reads only its own lines, never an unpinned one.
+    fn is_pinned(&self, agent: &str) -> bool {
+        self.replies
+            .iter()
+            .any(|r| r.agent.as_deref() == Some(agent))
+    }
+
+    /// Whether an unused reply `r` may go to `agent`.
+    fn serves(&self, r: &Reply, agent: &str) -> bool {
+        match r.agent.as_deref() {
+            Some(a) => a == agent,
+            None => !self.is_pinned(agent),
+        }
     }
 
     /// Whether the script pins at least one unused line to `agent`. A side
@@ -147,7 +169,7 @@ impl Replay {
             .replies
             .iter()
             .enumerate()
-            .position(|(i, r)| !used[i] && r.agent.as_deref().is_none_or(|a| a == agent));
+            .position(|(i, r)| !used[i] && self.serves(r, agent));
         let Some(ix) = pick else {
             return Completion {
                 content: "(replay: no more scripted replies)".into(),
@@ -226,5 +248,53 @@ pub fn select(path: &Path) {
     unsafe {
         std::env::set_var(PROVIDER_ENV, "replay");
         std::env::set_var(REPLIES_ENV, path);
+    }
+}
+
+#[cfg(test)]
+mod pinned_tests {
+    use super::*;
+
+    fn script(name: &str, lines: &str) -> Replay {
+        let dir = std::env::temp_dir().join(format!("arbos-replay-pinned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{name}.jsonl"));
+        std::fs::write(&path, lines).unwrap();
+        Replay::load(&path).unwrap()
+    }
+
+    /// The race behind the #436 red: root's pinned lines run out, root
+    /// takes another step, and the worker's unpinned line was first in
+    /// file order. A pinned agent now reads only its own lines.
+    #[test]
+    fn a_pinned_agent_never_takes_an_unpinned_line_meant_for_another() {
+        let r = script(
+            "pinned",
+            concat!(
+                "{\"agent\":\"root\",\"content\":\"spawning\"}\n",
+                "{\"content\":\"the codeword is marimba\"}\n",
+            ),
+        );
+        assert_eq!(r.next("root").content, "spawning");
+        // Root's extra step: exhaustion, not the worker's line.
+        assert!(
+            r.next("root").content.starts_with("(replay:"),
+            "root took the worker's line"
+        );
+        assert_eq!(r.next("w1").content, "the codeword is marimba");
+        assert!(r.peek_delay("root").is_none());
+    }
+
+    /// Unpinned lines still go to whoever asks among unpinned agents, in
+    /// file order — the single-agent scripts keep working.
+    #[test]
+    fn unpinned_lines_serve_unpinned_agents_in_order() {
+        let r = script(
+            "unpinned",
+            concat!("{\"content\":\"one\"}\n", "{\"content\":\"two\"}\n",),
+        );
+        assert_eq!(r.next("a").content, "one");
+        assert_eq!(r.next("b").content, "two");
+        assert!(r.next("a").content.starts_with("(replay:"));
     }
 }
