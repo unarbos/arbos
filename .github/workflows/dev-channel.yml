@@ -90,6 +90,10 @@ on:
 
 permissions:
   contents: write
+  # To ask what CI concluded on a commit other than this run's own. The
+  # plan job needs that to tell "a newer build will publish this" from
+  # "a newer build went red and nobody will".
+  actions: read
 
 concurrency:
   group: dev-channel
@@ -103,9 +107,9 @@ env:
   # the tag. One number, read by both the step that writes the feed and the
   # step that prunes the tag, so they cannot disagree about it.
   #
-  # Three rather than one. The updater only ever wants the newest, so the
-  # older two are not there for it — they are there for the morning a bad
-  # build goes out and somebody needs the one before it. A rollback is
+  # Three rather than one. The updater only ever wants the newest app, so
+  # the older two are not there for it — they are there for the morning a
+  # bad build goes out and somebody needs the one before it. A rollback is
   # downloading that zip and unpacking it over the app, and that is only
   # possible if the zip still exists.
   #
@@ -113,6 +117,26 @@ env:
   # payloads for two builds' worth of actual use, on a channel that publishes
   # on every merge.
   KEEP_BUILDS: "3"
+  # How many builds keep their *kernel* payload, which is a different
+  # question and has a different answer.
+  #
+  # An app places a kernel on a remote machine by fetching the kernel for
+  # its **own** build — anything else is replaced again at the next attach,
+  # because the version check that opens a tunnel would still disagree. So
+  # the app asking can be any age, and the kernel it needs has to still be
+  # here.
+  #
+  # Three was an hour's window on a channel that publishes every twenty
+  # minutes. Jacob's app was forty-seven builds behind when it could not
+  # place a kernel on ArbosLife, so three would not have reached it. Sixty
+  # is about two days.
+  #
+  # It is affordable because kernels are the cheap half: about 9 MB against
+  # 35 MB for an app. Sixty kernels is roughly 1 GB, where sixty whole
+  # builds would be nearly 5 GB. Releases past KEEP_BUILDS keep their
+  # kernel payloads and nothing else, so they can never be offered as an
+  # app update.
+  KEEP_KERNELS: "60"
   # The iPhone app is not a payload — TestFlight installs it, and this only
   # says where. One URL per app rather than per build, so every release in the
   # feed carries the same link and the newest build behind it is whatever the
@@ -126,9 +150,27 @@ jobs:
   plan:
     name: what to publish
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # A failed CI run starts this too, and that is the point. It is the
+    # only moment at which we learn that the commit an earlier green build
+    # stepped aside for is never going to publish, so it is the moment to
+    # go back for that green build. The job publishes nothing on its own
+    # account — it re-asks "what is the newest commit worth publishing".
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.workflow_run.conclusion == 'success'
+      || github.event.workflow_run.conclusion == 'failure'
     env:
       HAVE_KEY: ${{ secrets.ARBOS_UPDATE_SIGNING_KEY != '' }}
+      GH_TOKEN: ${{ github.token }}
+      # How far back to look for a green commit. A merge batch is a few
+      # commits; this is room for a bad afternoon without ever becoming an
+      # unbounded walk through history.
+      SCAN: "40"
+      # What started this run, taken from the event rather than asked of
+      # the API again. See `ci_state`: re-asking about the triggering
+      # commit is how a run ends up waiting on itself.
+      EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+      EVENT_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
     outputs:
       publish: ${{ steps.plan.outputs.publish }}
       sha: ${{ steps.plan.outputs.sha }}
@@ -150,45 +192,145 @@ jobs:
             echo "::notice title=dev channel not set up::ARBOS_UPDATE_SIGNING_KEY is not set, so nothing was published. Run .github/setup-publishing.sh once."
             exit 0
           fi
-          # Has `main` already moved past the commit this run is for?
+          # The question is not "was this run superseded" but "what is the
+          # newest commit on `main` worth publishing right now".
           #
-          # A merge batch starts a run per commit. The concurrency group
-          # serialises them and GitHub drops all but the newest *waiting* run,
-          # so the first of a batch still runs to completion — a full macOS
-          # build, a real Apple notarisation, an upload — and is then replaced
-          # minutes later by the last one. That is a runner and a submission
-          # spent on a build nobody should install, and for a few minutes the
-          # feed offers it: somebody pressing Update gets a build that is
-          # already superseded.
+          # Those used to be the same question and they are not. A merge
+          # batch starts a run per commit, and a run whose commit is no
+          # longer the tip steps aside so the newer one publishes instead —
+          # which saves a runner, an Apple notarisation and a few minutes of
+          # the feed offering a build that is already behind. That part was
+          # right and it stays.
           #
-          # Checked here rather than by cancelling a run that is under way.
-          # Cancelling is the dangerous one: it can land between notarization
-          # and the feed write and leave assets uploaded with nothing pointing
-          # at them, or a feed entry whose asset the prune then removes.
+          # What was missing is the way back. On 2026-09-17, build 1609
+          # (#490, the commit that draws voice lines in the chat) went
+          # green, stepped aside for 1611 — and 1611's CI failed. Nothing
+          # published. The green build had given up its turn to a commit
+          # that never took it, and the channel sat still for half an hour
+          # while Jacob waited for exactly that change. Stepping aside is
+          # only safe if somebody is actually going to go.
+          #
+          # So: walk `main` back from the tip and take the newest commit
+          # whose CI went green. If something newer than it is still
+          # deciding, do nothing — that run will come back here and decide
+          # properly. If everything newer has failed, the green one is the
+          # newest publishable commit and this run publishes it, whichever
+          # commit happened to trigger the run.
+          #
           # Nothing has been built, signed, submitted or uploaded at this
-          # point, so skipping here has nothing to leave half-done.
+          # point, so a run that decides to do nothing leaves nothing
+          # half-done. That is why the decision is here and not in a
+          # cancellation, which could land between notarization and the feed
+          # write.
           #
-          # `--is-ancestor` is what makes this "we are behind" rather than
-          # "we are different": a force-push or a diverged tip is not a reason
-          # to skip a commit whose CI went green.
-          #
-          # A hand-started run is never skipped. Somebody asking for this
-          # build by name has a reason.
+          # A hand-started run publishes what it was pointed at. Somebody
+          # asking for a build by name has a reason.
           git fetch --quiet origin main
           tip="$(git rev-parse FETCH_HEAD)"
-          sha="$(git rev-parse HEAD)"
-          if [ "${{ github.event_name }}" != "workflow_dispatch" ] \
-            && [ "$sha" != "$tip" ] \
-            && git merge-base --is-ancestor "$sha" "$tip"; then
+          here="$(git rev-parse HEAD)"
+
+          # What CI concluded for one commit, as the API has it: success,
+          # pending, failed, or none at all. A commit nobody ran is not
+          # pending — treating it so would wait for a run that is never
+          # coming.
+          api_state() {
+            gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+              -f head_sha="$1" -f per_page=20 --jq '
+                if   ([.workflow_runs[] | select(.conclusion == "success")] | length) > 0 then "success"
+                elif ([.workflow_runs[] | select(.status != "completed")]  | length) > 0 then "pending"
+                elif (.workflow_runs | length) > 0 then "failed"
+                else "none" end' 2>/dev/null || echo "none"
+          }
+
+          # The same question, except that the commit this run was started
+          # by can never be answered "pending".
+          #
+          # A commit gets more than one CI run — two, about forty seconds
+          # apart. The first to finish fires the event that starts this
+          # workflow; asking the API a moment later sees its sibling still
+          # going and says "pending", and the plan then waits for an event
+          # that has already happened. On 2026-09-17 four runs in a row
+          # each waited on their own triggering commit, and the channel sat
+          # from 21:37 to 22:19.
+          #
+          # The event already carries that run's conclusion, so use it. A
+          # sibling that went green still counts — a failed trigger asks
+          # the API in case one did — but the answer for this commit is
+          # never "wait", because there is nothing left to wait for.
+          ci_state() {
+            if [ -n "${EVENT_SHA:-}" ] && [ "$1" = "$EVENT_SHA" ]; then
+              if [ "${EVENT_CONCLUSION:-}" = "success" ]; then
+                echo success
+                return
+              fi
+              case "$(api_state "$1")" in
+                success) echo success ;;
+                *) echo failed ;;
+              esac
+              return
+            fi
+            api_state "$1"
+          }
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            choose="$here"
+          else
+            choose=""
+            newer_pending=""
+            # `--first-parent`, or the walk leaves `main` entirely. A plain
+            # rev-list descends into the branches that were merged in, and
+            # those commits have green CI runs of their own from when the
+            # PR was tested. One of them would be chosen, and it was never
+            # a state `main` was in: its tree is the branch's, not the
+            # merge's, and its commit count is not a build number on this
+            # line at all. Following first parents keeps the walk to the
+            # merges and direct commits that `main` actually passed
+            # through, which is the only sequence the channel publishes.
+            for candidate in $(git rev-list --first-parent --max-count="$SCAN" "$tip"); do
+              case "$(ci_state "$candidate")" in
+                success) choose="$candidate"; break ;;
+                # Older than this, but newer than any green we go on to
+                # find — so whatever we would have chosen, this one is
+                # still entitled to publish instead.
+                pending) newer_pending="${newer_pending:-$candidate}" ;;
+                *) ;;
+              esac
+            done
+
+            if [ -n "$newer_pending" ]; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::notice title=Waiting::${newer_pending:0:7} is newer and still running. Its run decides, and comes back here whichever way it goes."
+              exit 0
+            fi
+            if [ -z "$choose" ]; then
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              echo "::warning title=Nothing green::No commit in the last $SCAN on main has a green CI run, so there is nothing to publish."
+              exit 0
+            fi
+          fi
+
+          # Already out? Then this run has nothing to add. What makes the
+          # whole thing safe to re-enter: any number of failure events can
+          # fire without republishing what is already on the channel.
+          want_build="$(git rev-list --count "$choose")"
+          feed_build="$(curl -fsSL --max-time 30 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/arbos-dev.json" 2>/dev/null \
+            | jq -r '[.releases[].build] | max // 0' 2>/dev/null || echo 0)"
+          feed_build="${feed_build:-0}"
+          if [ "$want_build" -le "$feed_build" ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=Superseded::main is already at ${tip:0:7}, so this build of ${sha:0:7} was not made. The run for the newer commit publishes it."
-            {
-              echo "### dev channel"
-              echo
-              echo "Skipped \`${sha:0:7}\` — \`main\` has already moved to \`${tip:0:7}\`."
-            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice title=Already published::The channel is on build $feed_build, and ${choose:0:7} is build $want_build."
             exit 0
           fi
+
+          if [ "$choose" != "$here" ]; then
+            echo "::notice title=Reclaimed::${here:0:7} is not the one to publish; ${choose:0:7} (build $want_build) is the newest commit on main with a green CI, and nothing newer is still deciding."
+          fi
+          # Everything below reads the tree, so stand on the commit chosen.
+          # The build jobs already check out `plan.outputs.sha`, so this is
+          # the only place that has to move.
+          git checkout --detach --quiet "$choose"
+          sha="$choose"
 
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
@@ -352,6 +494,7 @@ jobs:
             --notes-url "https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}" \
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
             --keep "$KEEP_BUILDS" \
+            --keep-kernels "$KEEP_KERNELS" \
             --artifact "macos/arm64=$mac" \
             --artifact "macos/arm64/kernel=$mac_kernel" \
             --artifact "linux/x86_64=$linux" \
@@ -377,7 +520,72 @@ jobs:
           SIGNING: ${{ needs.macos.outputs.signing }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" dist/* --clobber
+          # The payloads first, then the feed, and never the two in one
+          # batch.
+          #
+          # `gh release upload` takes a batch concurrently and retries a
+          # file whose connection dropped. A retry of a file the first
+          # attempt had in fact created fails with "already exists", and
+          # `set -e` takes the whole batch down with it — including the
+          # uploads still in flight. On 2026-09-17 that left the feed
+          # advertising a Linux app tarball that was never uploaded, and
+          # the largest file is the one most likely to still be going when
+          # it happens.
+          #
+          # A feed that is late is a channel that has not moved yet. A feed
+          # that is early is a download that 404s. So the feed goes last,
+          # and only once everything it names is really on the tag.
+          for f in dist/*; do
+            case "${f##*/}" in arbos-dev.json) continue ;; esac
+            for attempt in 1 2 3; do
+              if gh release upload "$TAG" "$f" --clobber; then break; fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error title=Upload failed::${f##*/} would not upload after three tries"
+                exit 1
+              fi
+              echo "retrying ${f##*/} ($attempt)"
+              sleep $((attempt * 15))
+            done
+          done
+
+          # What this build must have, before anything is allowed to drop.
+          want="$(jq -r --argjson b "$BUILD" \
+            '.releases[] | select(.build == $b) | .downloads[].url | split("/") | last' \
+            dist/arbos-dev.json | sort -u)"
+
+          # Drop from the feed anything the tag does not actually have.
+          #
+          # Older releases are kept for their payloads, and a payload that
+          # went missing — a partial publish, a prune that ran when it
+          # should not have — must stop being advertised rather than
+          # standing as a 404 for ever. Self-healing, so one bad run cannot
+          # block the channel behind it.
+          have="$(gh release view "$TAG" --json assets -q '.assets[].name' \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          jq --argjson have "$have" '
+            .releases |= (
+              map(.downloads |= map(select((.url | split("/") | last) as $n | $have | index($n))))
+              | map(select((.downloads | length) > 0 or (.links | length) > 0))
+            )' dist/arbos-dev.json > dist/arbos-dev.checked.json
+          if ! cmp -s dist/arbos-dev.json dist/arbos-dev.checked.json; then
+            echo "::warning title=Feed pruned::Entries naming payloads that are not on the tag were dropped."
+            diff <(jq -S . dist/arbos-dev.json) <(jq -S . dist/arbos-dev.checked.json) || true
+          fi
+          mv dist/arbos-dev.checked.json dist/arbos-dev.json
+
+          # This build's own payloads are not optional. Losing one of those
+          # is this run failing, not something to quietly publish around.
+          for name in $want; do
+            if ! jq -e --arg n "$name" \
+              '[.releases[].downloads[].url | split("/") | last] | index($n)' \
+              dist/arbos-dev.json > /dev/null; then
+              echo "::error title=Payload missing::$name did not reach the tag, so this build is not being published"
+              exit 1
+            fi
+          done
+
+          # Now the feed, which every download in it is known to be behind.
+          gh release upload "$TAG" dist/arbos-dev.json --clobber
           # The page says what the newest build is, so the releases list reads
           # as a release and not as a bucket.
           commit_url="https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}"
@@ -391,10 +599,14 @@ jobs:
           } > dist/release-notes.md
           gh release edit "$TAG" --notes-file dist/release-notes.md
           rm -f dist/release-notes.md
-          # Drop the payloads no release in the feed still points at. The feed
-          # was just truncated to KEEP_BUILDS, so this is what makes the tag
-          # agree with it — otherwise the pre-release grows a payload per
-          # merge and never sheds one.
+          # Drop the payloads no release in the feed still points at, which
+          # is what makes the tag agree with the feed — otherwise the
+          # pre-release grows a payload per merge and never sheds one.
+          #
+          # The list comes from the feed rather than from a number here, so
+          # it follows the two tiers by itself: a release past KEEP_BUILDS
+          # has had its app payload dropped and keeps its kernel, so the app
+          # zip is pruned from the tag and the kernel tarball stays.
           keep="$(jq -r '.releases[].downloads[].url | split("/") | last' dist/arbos-dev.json | sort -u)"
           gh release view "$TAG" --json assets -q '.assets[].name' | while read -r name; do
             case "$name" in

@@ -32,6 +32,11 @@ const CHUNK: usize = (RATE as usize / 10) * 2;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
 /// After a reply ends, how long the mic still counts as hearing the speaker.
 const ECHO_TAIL: Duration = Duration::from_millis(400);
+/// No `agent.activity` frame or heartbeat for this long: the work state is
+/// unknown and the sound stops (a dropped link must not hum).
+const ACTIVITY_STALE: Duration = Duration::from_secs(12);
+/// The caller's voice ducks the work sound for this long after each loud chunk.
+const USER_DUCK_MS: u64 = 400;
 /// After Stop, how long the final transcript may take to arrive.
 /// How long a release waits for the server's `transcript.final` before the
 /// partial stands. The recogniser is a beat behind the voice, so a partial
@@ -60,6 +65,184 @@ pub struct VoiceCfg {
     /// server's own kernel agent), or `openrouter` (its model with the
     /// Arbos tools). `voice_reply` in config.toml; default `none`.
     pub reply: String,
+    /// What a call plays while the agent works: `voice_work_sound` in
+    /// config.toml (`bed`, default; `ticks`; `off`).
+    pub work_sound: WorkSound,
+}
+
+/// The sound of work on a call. It plays only while the gateway says the
+/// agent (or one of its workers) is running a turn or a tool — never on a
+/// timer — and ducks to nothing the moment either side speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkSound {
+    /// A quiet bed: soft, low, breathing noise at about -38 dBFS, like an
+    /// open line to someone at their desk; a soft tick each time the main
+    /// agent starts a command.
+    Bed,
+    /// No bed: only a quiet tick every 2.5 s while work runs, and the
+    /// command tick.
+    Ticks,
+    Off,
+}
+
+impl WorkSound {
+    fn code(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Bed => 1,
+            Self::Ticks => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Bed => "bed",
+            Self::Ticks => "ticks",
+        }
+    }
+}
+
+/// What the speaker's synth reads, from wherever the state changes:
+/// whether work is running, whether a voice (ours or the caller's) has
+/// the floor, which sound, and ticks waiting to be played.
+#[derive(Default)]
+pub struct WorkState {
+    /// The gateway says a turn or a tool is running.
+    pub on: std::sync::atomic::AtomicBool,
+    /// Reply audio is playing.
+    pub reply_playing: std::sync::atomic::AtomicBool,
+    /// Unix millis until which the caller counts as talking.
+    pub user_until_ms: std::sync::atomic::AtomicU64,
+    /// `WorkSound::code`.
+    pub mode: std::sync::atomic::AtomicU8,
+    /// Command ticks not yet played.
+    pub ticks: std::sync::atomic::AtomicU32,
+}
+
+impl WorkState {
+    fn ducked(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.reply_playing.load(Relaxed) || now_ms() < self.user_until_ms.load(Relaxed)
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Generates the work sound, one sample at a time, at the device rate.
+/// Lives inside the output callback (or the process pacer); reads
+/// [`WorkState`] and nothing else.
+struct BedSynth {
+    rate: f32,
+    state: Arc<WorkState>,
+    /// Ramp toward 1 while the bed should sound, toward 0 otherwise: 400 ms
+    /// in, 40 ms out, so a voice is never talked over and starts never click.
+    gain: f32,
+    /// Noise shaping: two one-pole low-passes and a one-pole high-pass.
+    lp1: f32,
+    lp2: f32,
+    hp_prev_in: f32,
+    hp: f32,
+    rng: u32,
+    /// Breathing envelope phase, samples of the current tick, and the
+    /// periodic-tick counter for `Ticks` mode.
+    t: u32,
+    tick_pos: Option<u32>,
+    since_tick: u32,
+}
+
+/// Bed loudness, about -38 dBFS; the tick about -26 dBFS.
+const BED_LEVEL: f32 = 0.012;
+const TICK_LEVEL: f32 = 0.05;
+const TICK_HZ: f32 = 880.0;
+const TICK_MS: u32 = 45;
+const PERIODIC_TICK_S: f32 = 2.5;
+
+impl BedSynth {
+    fn new(rate: u32, state: Arc<WorkState>) -> Self {
+        Self {
+            rate: rate.max(8000) as f32,
+            state,
+            gain: 0.0,
+            lp1: 0.0,
+            lp2: 0.0,
+            hp_prev_in: 0.0,
+            hp: 0.0,
+            rng: 0x9E37_79B9,
+            t: 0,
+            tick_pos: None,
+            since_tick: 0,
+        }
+    }
+
+    /// Whether the sound is on (or fading out): the pacer writes real time then.
+    fn sounding(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.gain > 0.0 || self.tick_pos.is_some() || (self.state.mode.load(Relaxed) != 0 && self.state.on.load(Relaxed))
+    }
+
+    fn next(&mut self) -> f32 {
+        use std::sync::atomic::Ordering::Relaxed;
+        let mode = self.state.mode.load(Relaxed);
+        let on = mode != 0 && self.state.on.load(Relaxed);
+        let want = if on && !self.state.ducked() { 1.0 } else { 0.0 };
+        let step = if want > self.gain { 1.0 / (0.4 * self.rate) } else { 1.0 / (0.04 * self.rate) };
+        self.gain = if want > self.gain { (self.gain + step).min(1.0) } else { (self.gain - step).max(0.0) };
+        if self.gain <= 0.0 && self.tick_pos.is_none() {
+            // Nothing to hear: drop pending ticks too, they belong to a moment that passed.
+            if !on {
+                self.state.ticks.store(0, Relaxed);
+                self.since_tick = 0;
+            }
+            self.t = self.t.wrapping_add(1);
+            return 0.0;
+        }
+        let mut out = 0.0;
+        if mode == 1 {
+            // White → pink-ish: xorshift noise through two low-passes (~1.4 kHz) and a high-pass (~150 Hz).
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 17;
+            self.rng ^= self.rng << 5;
+            let white = (self.rng as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            let a = (2.0 * std::f32::consts::PI * 1400.0 / self.rate).min(0.9);
+            self.lp1 += a * (white - self.lp1);
+            self.lp2 += a * (self.lp1 - self.lp2);
+            let hp_a = 1.0 - (2.0 * std::f32::consts::PI * 150.0 / self.rate).min(0.9);
+            self.hp = hp_a * (self.hp + self.lp2 - self.hp_prev_in);
+            self.hp_prev_in = self.lp2;
+            let breath = 0.7 + 0.3 * (2.0 * std::f32::consts::PI * 0.25 * self.t as f32 / self.rate).sin();
+            out += self.hp * BED_LEVEL * 6.0 * breath;
+        } else if mode == 2 && on {
+            self.since_tick += 1;
+            if self.since_tick as f32 >= PERIODIC_TICK_S * self.rate {
+                self.since_tick = 0;
+                self.state.ticks.fetch_add(1, Relaxed);
+            }
+        }
+        // A command tick: a short damped sine, one at a time.
+        if self.tick_pos.is_none() && self.state.ticks.load(Relaxed) > 0 && self.gain > 0.5 {
+            self.state.ticks.fetch_sub(1, Relaxed);
+            self.tick_pos = Some(0);
+        }
+        if let Some(pos) = self.tick_pos {
+            let len = TICK_MS * self.rate as u32 / 1000;
+            if pos >= len {
+                self.tick_pos = None;
+            } else {
+                let x = pos as f32 / self.rate;
+                let env = (-x * 60.0).exp();
+                out += (2.0 * std::f32::consts::PI * TICK_HZ * x).sin() * env * TICK_LEVEL;
+                self.tick_pos = Some(pos + 1);
+            }
+        }
+        self.t = self.t.wrapping_add(1);
+        out * self.gain
+    }
 }
 
 /// One thing the speech server's agent did, for the chat to show.
@@ -102,10 +285,99 @@ impl Phase {
 pub enum SessionKind {
     Dictation,
     Call {
-        /// `<machine>/<project>` for the gateway to pick the kernel; the
-        /// tab's label today.
-        project: String,
+        /// The open tab: its folder path decides which kernel the gateway
+        /// binds the call to.
+        project: CallTarget,
     },
+}
+
+/// The identity of the tab a call is for, as `session.start.project`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CallTarget {
+    /// The hub's name for the machine the folder is on (`hub.toml`'s
+    /// `machine`, or the ssh alias for a remote place). None off the hub.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// The folder's name.
+    pub project: String,
+    /// The folder's path on that machine. What the gateway binds to.
+    pub path: String,
+    /// The ssh alias when the folder is on another computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// The tab's label.
+    pub name: String,
+    /// The chat so far, so the call starts knowing it: the last lines
+    /// (user, Arbos, workers, tool labels, notices, asks) and the
+    /// sub-agents on the right panel. The gateway uses this as the
+    /// on-screen chat; it does not replace the kernel's own record.
+    #[serde(skip_serializing_if = "CallContext::is_empty")]
+    pub context: CallContext,
+}
+
+/// What the tab shows when the call starts, for the gateway's narrator and
+/// the speech model: recent lines (clipped) and the workers.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CallContext {
+    pub recent: Vec<ContextLine>,
+    pub agents: Vec<ContextAgent>,
+    /// Whether the main agent has a turn running right now.
+    pub running: bool,
+}
+
+impl CallContext {
+    pub fn is_empty(&self) -> bool {
+        self.recent.is_empty() && self.agents.is_empty() && !self.running
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ContextLine {
+    /// `user`, `assistant`, `worker` (a sub-agent's report), `tool` (label
+    /// only), `notice`, `asked`, `thinking`.
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ContextAgent {
+    pub name: String,
+    /// `working`, `asking`, `waiting`, `done`.
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+}
+
+/// The words the desktop says when a call cannot name its machine: the
+/// gateway would refuse it (`project_not_on_hub`), so the caller hears why
+/// before dialing.
+pub const NOT_ON_HUB: &str = "this computer is not on the hub, so the speech server cannot reach this project's kernel. Put the hub url, machine name and token in ~/.config/arbos/hub.toml, restart the kernel (close and reopen the tab), then call again.";
+
+impl CallTarget {
+
+    /// `<machine>/<folder>`, or the folder alone off the hub.
+    pub fn label(&self) -> String {
+        match &self.machine {
+            Some(m) => format!("{m}/{}", self.project),
+            None => self.project.clone(),
+        }
+    }
+
+    /// Whether `path`, as the gateway reports it in `session.ready.project_path`,
+    /// is this tab's folder.
+    pub fn same_place(&self, path: &str) -> bool {
+        let mine = self.path.trim_end_matches('/');
+        let theirs = path.trim_end_matches('/');
+        if mine == theirs {
+            return true;
+        }
+        // A local folder: compare what is really on disk.
+        self.host.is_none()
+            && match (std::fs::canonicalize(mine), std::fs::canonicalize(theirs)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            }
+    }
 }
 
 /// A snapshot for the UI: the take so far and the state.
@@ -122,6 +394,15 @@ pub struct Peek {
     pub mic_error: Option<String>,
     /// The output device replies play through, once the first reply played.
     pub speaker_device: String,
+    /// The folder the gateway bound the call to, and its name for it.
+    pub project_path: String,
+    pub project_label: String,
+    /// The work sound: playing now, which agents the gateway says are
+    /// working, whether its state went stale (no frame for 12 s), which sound.
+    pub work_active: bool,
+    pub work_agents: Vec<String>,
+    pub work_stale: bool,
+    pub work_sound: &'static str,
     /// What the reply audio is saying, when the server tells us.
     pub reply: String,
     pub error: Option<String>,
@@ -153,6 +434,14 @@ const MIRROR_CAP: usize = 200;
 
 #[derive(Default)]
 struct Shared {
+    /// The work sound's state; shared with the speaker's synth.
+    work: Arc<WorkState>,
+    /// `agent.activity` per agent: state, tool, when it arrived.
+    activity: std::collections::HashMap<String, (String, String, Instant)>,
+    /// The gateway sends `agent.activity`: the sound has an honest source.
+    activity_seen: bool,
+    /// No activity frame (or heartbeat) for too long while work was on.
+    activity_stale: bool,
     phase: Option<Phase>,
     engine: String,
     kernel: bool,
@@ -181,6 +470,10 @@ struct Shared {
     played: u64,
     interrupts: u32,
     call: bool,
+    /// The folder the gateway bound the call to (`session.ready.project_path`),
+    /// and the roster's name for it. Empty from an older gateway.
+    project_path: String,
+    project_label: String,
     muted: bool,
     last_said: String,
 }
@@ -212,6 +505,24 @@ pub fn configured() -> bool {
     crate::kernel::voice_config().is_some()
 }
 
+/// Whether the configured speech server runs on this computer (a loopback
+/// `voice_url`). A gateway elsewhere can only reach this computer's kernels
+/// through the hub, so a call from a machine off the hub has nowhere to go.
+pub fn gateway_is_local() -> bool {
+    let Some(cfg) = crate::kernel::voice_config() else {
+        return false;
+    };
+    let rest = cfg
+        .url
+        .split("://")
+        .nth(1)
+        .unwrap_or(&cfg.url);
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    let host = host.trim_matches(['[', ']']);
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+}
+
 pub fn status() -> Peek {
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
     let Some(session) = hold.as_ref() else {
@@ -232,6 +543,21 @@ pub fn status() -> Peek {
         mic_device: s.mic_device.clone(),
         mic_error: s.mic_error.clone(),
         speaker_device: s.speaker_device.clone(),
+        project_path: s.project_path.clone(),
+        project_label: s.project_label.clone(),
+        work_active: s.work.on.load(std::sync::atomic::Ordering::Relaxed),
+        work_agents: s
+            .activity
+            .iter()
+            .filter(|(_, (state, _, _))| state != "idle")
+            .map(|(agent, (state, tool, _))| if tool.is_empty() { format!("{agent}:{state}") } else { format!("{agent}:{state}:{tool}") })
+            .collect(),
+        work_stale: s.activity_stale,
+        work_sound: match s.work.mode.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => "bed",
+            2 => "ticks",
+            _ => "off",
+        },
         reply: s.reply.clone(),
         error: s.error.clone(),
         engine: s.engine.clone(),
@@ -265,13 +591,13 @@ pub fn in_call() -> bool {
 /// Call `project`: open a call session (a dictation session, if any, ends),
 /// keep the mic open, and let the gateway's narrator speak. Blocks until the
 /// gateway answers `session.ready` or the connect times out.
-pub fn call_start(project: &str) -> Result<()> {
+pub fn call_start(project: &CallTarget) -> Result<()> {
     let cfg = crate::kernel::voice_config().ok_or_else(|| anyhow!("no voice_url in config"))?;
     // No microphone program means a call that streams silence and hears
     // nothing back: refuse now, with the install hint, not after connecting.
     mic_command().map_err(|e| anyhow!("no microphone for the call: {e}"))?;
     let kind = SessionKind::Call {
-        project: project.to_string(),
+        project: project.clone(),
     };
     ensure_session(&cfg, &kind)?;
     let hold = hold().lock().unwrap_or_else(|p| p.into_inner());
@@ -283,6 +609,19 @@ pub fn call_start(project: &str) -> Result<()> {
         if !s.call {
             bail!(
                 "the speech server did not open a call (session.ready.mode != call); does it have a kernel?"
+            );
+        }
+        // The gateway says which folder it bound the call to. Another folder
+        // is the wrong agent: hang up rather than talk into it. An older
+        // gateway that says nothing is trusted, as before.
+        if !s.project_path.is_empty() && !project.same_place(&s.project_path) {
+            let bound = s.project_path.clone();
+            drop(s);
+            drop(hold);
+            shutdown();
+            bail!(
+                "the speech server attached the call to {bound}, not this project ({}); it is serving another folder",
+                project.path
             );
         }
         s.finals.clear();
@@ -667,7 +1006,10 @@ async fn run(
         start["channel"] = json!("voice");
         start["device"] = json!("desktop");
         start["screen"] = json!("on your screen");
-        if !project.is_empty() {
+        // The tab's identity, whole: the gateway binds by `path` (its own
+        // kernel, a kernel on its host, or the hub by the roster's place) and
+        // refuses with the path in its message when nothing serves it.
+        if !project.project.is_empty() || !project.path.is_empty() {
             start["project"] = json!(project);
         }
     }
@@ -680,8 +1022,19 @@ async fn run(
     let mut mic_held = false;
     let mut warm_until: Option<Instant> = None;
     let mut player: Option<Player> = None;
+    // A call keeps its speaker open from the first frame to the last: the
+    // work sound needs it between replies. Dictation opens one per reply.
+    let in_call = matches!(kind, SessionKind::Call { .. });
+    let work = Arc::clone(&shared.lock().unwrap_or_else(|p| p.into_inner()).work);
+    work.mode.store(
+        if in_call { cfg.work_sound.code() } else { WorkSound::Off.code() },
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let mut activity_seen_at: Option<Instant> = None;
     let mut ready_sent = false;
     let mut speaking = false;
+    let mut reply_speaker = String::new();
+    let mut narrated_recently: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     // The last sign of life from the reply now playing — its start, or its
     // latest audio frame — for the stall guard.
     let mut reply_alive_at: Option<Instant> = None;
@@ -699,6 +1052,17 @@ async fn run(
                     Cmd::MicStart => {
                         mic_held = false;
                         warm_until = None;
+                        if in_call && player.is_none() {
+                            match Player::spawn(&shared, true) {
+                                Ok(p) => player = Some(p),
+                                Err(e) => {
+                                    let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
+                                    if s.error.is_none() {
+                                        s.error = Some(format!("no audio output: {e:#}"));
+                                    }
+                                }
+                            }
+                        }
                         if mic.is_none() {
                             match Mic::spawn(mic_tx.clone(), Arc::clone(&shared)) {
                                 Ok(m) => {
@@ -731,10 +1095,13 @@ async fn run(
                         }
                     }
                     Cmd::Speak(text) => {
-                        if let Some(p) = player.take() {
+                        if in_call {
+                            if let Some(p) = player.as_mut() { p.cut(); }
+                        } else if let Some(p) = player.take() {
                             p.stop();
                         }
                         speaking = true;
+                        work.reply_playing.store(true, std::sync::atomic::Ordering::Relaxed);
                         reply_alive_at = Some(Instant::now());
                         sink.send(text_frame(json!({ "type": "speak", "text": text }))).await?;
                     }
@@ -743,10 +1110,13 @@ async fn run(
                             .await?;
                     }
                     Cmd::Interrupt => {
-                        if let Some(p) = player.take() {
+                        if in_call {
+                            if let Some(p) = player.as_mut() { p.cut(); }
+                        } else if let Some(p) = player.take() {
                             p.stop();
                         }
                         speaking = false;
+                        work.reply_playing.store(false, std::sync::atomic::Ordering::Relaxed);
                         reply_alive_at = None;
                         sink.send(text_frame(json!({ "type": "interrupt" }))).await?;
                     }
@@ -754,6 +1124,7 @@ async fn run(
                         muted = on;
                     }
                     Cmd::End => {
+                        work.on.store(false, std::sync::atomic::Ordering::Relaxed);
                         if let Some(m) = mic.take() { m.stop(); }
                         if let Some(p) = player.take() { p.stop(); }
                         let _ = sink.send(text_frame(json!({ "type": "session.end" }))).await;
@@ -782,6 +1153,15 @@ async fn run(
             }
             chunk = mic_rx.recv() => {
                 let Some(chunk) = chunk else { continue };
+                // Work-sound watchdog: a state the gateway stopped confirming
+                // (no frame or heartbeat for 12 s) is unknown, not "working".
+                if let Some(at) = activity_seen_at
+                    && at.elapsed() > ACTIVITY_STALE
+                    && work.on.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    work.on.store(false, std::sync::atomic::Ordering::Relaxed);
+                    shared.lock().unwrap_or_else(|p| p.into_inner()).activity_stale = true;
+                }
                 if mic_held {
                     continue;
                 }
@@ -812,7 +1192,7 @@ async fn run(
                         }
                         reply_alive_at = Some(Instant::now());
                         if player.is_none() {
-                            match Player::spawn(&shared) {
+                            match Player::spawn(&shared, in_call) {
                                 Ok(p) => player = Some(p),
                                 Err(e) => {
                                     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
@@ -849,6 +1229,21 @@ async fn run(
                                 s.text_backend = field("text");
                                 s.call = field("mode") == "call"
                                     && v.get("narrator").and_then(Value::as_bool).unwrap_or(false);
+                                // Where the call is: the folder the kernel serves,
+                                // from the hub roster (`project_info.place`), or
+                                // nothing from a gateway that does not say.
+                                let info = v.get("project_info");
+                                s.project_path = info
+                                    .and_then(|i| i.get("place").or_else(|| i.get("path")))
+                                    .and_then(Value::as_str)
+                                    .or_else(|| v.get("project_path").and_then(Value::as_str))
+                                    .unwrap_or("")
+                                    .to_string();
+                                s.project_label = info
+                                    .and_then(|i| i.get("name"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string();
                                 if s.phase == Some(Phase::Connecting) {
                                     s.phase = Some(Phase::Ready);
                                 }
@@ -890,6 +1285,13 @@ async fn run(
                                 if s.call {
                                     // A call has no take: the strip shows the last utterance only.
                                     s.finals.clear();
+                                    // The caller's words go into the chat now, as a
+                                    // spoken user line. When the gateway forwards
+                                    // them to the agent, the kernel's record is this
+                                    // card's echo — never a second turn from here.
+                                    if !text.trim().is_empty() {
+                                        push_mirror(&mut s, Mirror { kind: "caller.said".into(), agent: String::new(), text: text.trim().to_string() });
+                                    }
                                 }
                                 if !text.trim().is_empty() {
                                     s.finals.push(text.trim().to_string());
@@ -903,6 +1305,11 @@ async fn run(
                                     speaking = true;
                                     s.reply.clear();
                                 }
+                                // Who is talking: the narrator (its line is
+                                // already in the chat via narrator.say) or the
+                                // speech model itself (GPT Live answering the
+                                // caller). An older gateway names nobody: the model.
+                                reply_speaker = field("speaker");
                                 reply_alive_at = Some(Instant::now());
                                 // A reply backend of "none" plays nothing:
                                 // the phase would say speaking for no sound.
@@ -911,6 +1318,7 @@ async fn run(
                                 }
                                 // The gateway's echo gate tightens while we play.
                                 say_speaking = Some(true);
+                                s.work.reply_playing.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                             // Increments with their own spacing: append raw.
                             "response.transcript" => s.reply.push_str(&field("text")),
@@ -918,7 +1326,24 @@ async fn run(
                                 speaking = false;
                                 reply_alive_at = None;
                                 let interrupted = v.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
-                                if let Some(p) = player.take() {
+                                // The model's own words into the chat as they
+                                // finish; the narrator's are there already (as
+                                // narrator.say), so a reply that repeats one of
+                                // the last narrator lines is that line, not news —
+                                // a gateway that does not tag `speaker` is covered.
+                                if in_call && reply_speaker != "narrator" {
+                                    let said: String = s.reply.split_whitespace().collect::<Vec<_>>().join(" ");
+                                    let squashed: String = said.split_whitespace().collect();
+                                    if !said.is_empty() && !narrated_recently.iter().any(|n| *n == squashed) {
+                                        push_mirror(&mut s, Mirror { kind: "model.reply".into(), agent: String::new(), text: if interrupted { format!("{said} —") } else { said } });
+                                    }
+                                }
+                                reply_speaker.clear();
+                                s.work.reply_playing.store(false, std::sync::atomic::Ordering::Relaxed);
+                                if in_call {
+                                    // The speaker stays open for the call; a cut reply is dropped.
+                                    if interrupted && let Some(p) = player.as_mut() { p.cut(); }
+                                } else if let Some(p) = player.take() {
                                     // Cut short: nothing queued should still be heard.
                                     if interrupted { p.stop() } else { p.finish() }
                                 }
@@ -941,6 +1366,10 @@ async fn run(
                             // the chat as a `voice ·` line, and onto the call strip.
                             "narrator.say" => {
                                 let text = field("text");
+                                narrated_recently.push_back(text.split_whitespace().collect());
+                                while narrated_recently.len() > 6 {
+                                    narrated_recently.pop_front();
+                                }
                                 s.last_said = text.clone();
                                 push_mirror(&mut s, Mirror { kind: format!("narrator.say/{}", field("kind")), agent: field("ref"), text });
                             }
@@ -985,9 +1414,36 @@ async fn run(
                                 push_mirror(&mut s, Mirror { kind: "tool.result".into(), agent: String::new(), text: format!("{} → {out}", field("name")) });
                             }
                             "agent.tree" => {}
+                            // The gateway's word on work: a turn or a tool running on
+                            // the agent (or a worker). The sound follows this and only this.
+                            "agent.activity" => {
+                                let agent = field("agent");
+                                let state = field("state");
+                                let tool = field("tool");
+                                let was_tool = s.activity.get(&agent).is_some_and(|(st, _, _)| st == "tool");
+                                s.activity.insert(agent.clone(), (state.clone(), tool, Instant::now()));
+                                s.activity_seen = true;
+                                s.activity_stale = false;
+                                activity_seen_at = Some(Instant::now());
+                                let active = s.activity.values().any(|(st, _, _)| st != "idle");
+                                s.work.on.store(active, std::sync::atomic::Ordering::Relaxed);
+                                // A command just started on the main agent: one tick.
+                                if state == "tool" && !was_tool && (agent == "root" || agent.is_empty()) {
+                                    s.work.ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
                             "error" => {
                                 let m = field("message");
-                                s.error = Some(if m.is_empty() { "voice server error".into() } else { m });
+                                let code = field("code");
+                                // A refusal names its cause (`project_not_on_hub`,
+                                // `project_unknown`, `project_offline`, …); the
+                                // caller reads the code and the gateway's words.
+                                s.error = Some(match (code.is_empty(), m.is_empty()) {
+                                    (true, true) => "voice server error".into(),
+                                    (true, false) => m,
+                                    (false, true) => code,
+                                    (false, false) => format!("{code}: {m}"),
+                                });
                             }
                             _ => {}
                         }
@@ -999,7 +1455,21 @@ async fn run(
                             sink.send(text_frame(json!({ "type": "client.speaking", "speaking": on }))).await?;
                         }
                     }
-                    Message::Close(_) => bail!("{} closed the session", cfg.url),
+                    Message::Close(frame) => {
+                        if !ready_sent {
+                            // Refused before ready (a project the gateway cannot
+                            // reach closes with 4404): the caller gets the reason.
+                            let why = shared
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .error
+                                .clone()
+                                .or_else(|| frame.as_ref().map(|f| f.reason.to_string()))
+                                .unwrap_or_else(|| "closed before session.ready".into());
+                            let _ = ready.send(Err(anyhow!("{why}")));
+                        }
+                        bail!("{} closed the session", cfg.url)
+                    }
                     _ => {}
                 }
             }
@@ -1097,6 +1567,9 @@ impl Mic {
                                 {
                                     let mut s = shared.lock().unwrap_or_else(|p| p.into_inner());
                                     s.level = rms(&buf);
+                                    if s.level > 0.05 {
+                                        s.work.user_until_ms.store(now_ms() + USER_DUCK_MS, std::sync::atomic::Ordering::Relaxed);
+                                    }
                                 }
                                 if tx.send(buf.clone()).is_err() {
                                     break;
@@ -1558,7 +2031,9 @@ pub fn mic_test() -> Option<MicTest> {
 /// command reading raw PCM16 mono 24 kHz from stdin.
 enum Player {
     Device(DeviceOut),
-    Process(Child),
+    /// The process, and the pacer thread that feeds it the work sound
+    /// (persistent players only), stopped by its flag.
+    Process(Child, Option<Arc<std::sync::atomic::AtomicBool>>),
 }
 
 /// Reply audio arrives as PCM16 mono 24 kHz; the device wants its own rate
@@ -1589,19 +2064,34 @@ impl Drop for DeviceOut {
     }
 }
 
+/// A second handle on the player's stdin for the work-sound pacer.
+#[cfg(unix)]
+fn clone_stdin(stdin: &std::process::ChildStdin) -> Option<std::fs::File> {
+    use std::os::fd::AsFd;
+    stdin.as_fd().try_clone_to_owned().ok().map(std::fs::File::from)
+}
+
+#[cfg(not(unix))]
+fn clone_stdin(_stdin: &std::process::ChildStdin) -> Option<std::fs::File> {
+    None
+}
+
 /// Reply speech is brought to this peak (about -6 dBFS); quiet voices are
 /// lifted at most this much.
 const TARGET_PEAK: f32 = 0.5;
 const MAX_GAIN: f32 = 4.0;
 
 impl Player {
-    fn spawn(shared: &Arc<Mutex<Shared>>) -> Result<Self> {
+    /// `persistent`: a call's speaker, open until the call ends, mixing the
+    /// work sound between replies. Else one reply's worth.
+    fn spawn(shared: &Arc<Mutex<Shared>>, persistent: bool) -> Result<Self> {
+        let work = Arc::clone(&shared.lock().unwrap_or_else(|p| p.into_inner()).work);
         if let Some(custom) = std::env::var("ARBOS_VOICE_PLAYER_CMD")
             .ok()
             .filter(|c| !c.trim().is_empty())
         {
             let mut cmd = sh(&custom);
-            let child = cmd
+            let mut child = cmd
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1611,9 +2101,43 @@ impl Player {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .speaker_device = "command".into();
-            return Ok(Self::Process(child));
+            let pacer = if persistent {
+                // The work sound for a process sink: 20 ms blocks at 24 kHz
+                // while the bed should sound, nothing otherwise.
+                let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                if let Some(stdin) = child.stdin.as_ref().and_then(clone_stdin) {
+                    let flag = Arc::clone(&alive);
+                    let mut synth = BedSynth::new(RATE, Arc::clone(&work));
+                    std::thread::Builder::new()
+                        .name("arbos-work-sound".into())
+                        .spawn(move || {
+                            let mut stdin = stdin;
+                            let block = RATE as usize / 50;
+                            while flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                let samples: Vec<f32> = (0..block).map(|_| synth.next()).collect();
+                                // Real time while the sound is on (silence between ticks
+                                // included), nothing at all while it is off.
+                                if synth.sounding() {
+                                    let pcm: Vec<u8> = samples
+                                        .iter()
+                                        .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+                                        .collect();
+                                    if stdin.write_all(&pcm).is_err() {
+                                        break;
+                                    }
+                                }
+                                std::thread::sleep(Duration::from_millis(20));
+                            }
+                        })
+                        .ok();
+                }
+                Some(alive)
+            } else {
+                None
+            };
+            return Ok(Self::Process(child, pacer));
         }
-        match DeviceOut::open() {
+        match DeviceOut::open(if persistent { Some(work) } else { None }) {
             Ok((out, name)) => {
                 shared
                     .lock()
@@ -1637,7 +2161,7 @@ impl Player {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                Ok(Self::Process(child))
+                Ok(Self::Process(child, None))
             }
         }
     }
@@ -1648,7 +2172,7 @@ impl Player {
                 out.push(pcm);
                 Ok(())
             }
-            Self::Process(child) => match child.stdin.as_mut() {
+            Self::Process(child, _) => match child.stdin.as_mut() {
                 Some(stdin) => stdin.write_all(pcm),
                 None => Err(std::io::Error::other("player stdin closed")),
             },
@@ -1676,7 +2200,10 @@ impl Player {
                     alive.store(false, std::sync::atomic::Ordering::Relaxed);
                 });
             }
-            Self::Process(mut child) => {
+            Self::Process(mut child, pacer) => {
+                if let Some(flag) = pacer {
+                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
                 drop(child.stdin.take());
                 std::thread::spawn(move || {
                     let _ = child.wait();
@@ -1692,16 +2219,28 @@ impl Player {
                 out.queue.lock().unwrap_or_else(|p| p.into_inner()).clear();
                 out.alive.store(false, std::sync::atomic::Ordering::Relaxed);
             }
-            Self::Process(mut child) => {
+            Self::Process(mut child, pacer) => {
+                if let Some(flag) = pacer {
+                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                }
                 let _ = child.kill();
                 let _ = child.wait();
             }
         }
     }
+
+    /// A call's speaker on barge-in: drop what is queued of the reply, keep
+    /// the device (the work sound may come back a moment later).
+    fn cut(&mut self) {
+        if let Self::Device(out) = self {
+            out.queue.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        }
+    }
 }
 
 impl DeviceOut {
-    fn open() -> Result<(Self, String)> {
+    /// `work`: mix the work sound into the output (a call's speaker).
+    fn open(work: Option<Arc<WorkState>>) -> Result<(Self, String)> {
         let queue: Arc<Mutex<std::collections::VecDeque<f32>>> = Arc::new(Mutex::new(
             std::collections::VecDeque::with_capacity(48_000),
         ));
@@ -1711,7 +2250,7 @@ impl DeviceOut {
         let flag = Arc::clone(&alive);
         std::thread::Builder::new()
             .name("arbos-speaker".into())
-            .spawn(move || Self::run(q, flag, ready_tx))
+            .spawn(move || Self::run(q, flag, work, ready_tx))
             .map_err(|e| anyhow!("speaker thread: {e}"))?;
         let (name, rate, channels) = ready_rx
             .recv_timeout(Duration::from_secs(5))
@@ -1736,6 +2275,7 @@ impl DeviceOut {
     fn run(
         queue: Arc<Mutex<std::collections::VecDeque<f32>>>,
         alive: Arc<std::sync::atomic::AtomicBool>,
+        work: Option<Arc<WorkState>>,
         ready: std::sync::mpsc::Sender<Result<(String, u32, u16)>>,
     ) {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -1751,13 +2291,20 @@ impl DeviceOut {
             let rate = config.sample_rate().0;
             let channels = config.channels();
             let q = Arc::clone(&queue);
+            // The work sound is mixed under the reply, one value per frame
+            // (the same for every channel of the frame).
+            let mut bed = work.map(|w| BedSynth::new(rate, w));
+            let frame_channels = channels.max(1) as usize;
             let stream = device
                 .build_output_stream(
                     &config.config(),
                     move |data: &mut [f32], _| {
                         let mut q = q.lock().unwrap_or_else(|p| p.into_inner());
-                        for sample in data.iter_mut() {
-                            *sample = q.pop_front().unwrap_or(0.0);
+                        for frame in data.chunks_mut(frame_channels) {
+                            let under = bed.as_mut().map(|b| b.next()).unwrap_or(0.0);
+                            for sample in frame.iter_mut() {
+                                *sample = (q.pop_front().unwrap_or(0.0) + under).clamp(-1.0, 1.0);
+                            }
                         }
                     },
                     |err| eprintln!("voice speaker: {err}"),

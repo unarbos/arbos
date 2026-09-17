@@ -23,11 +23,15 @@ fn transcript(place: &Path, agent: &str) -> Vec<serde_json::Value> {
     .collect()
 }
 
+// Root waits on its worker (wait=true), so the report is in the spawn
+// result and the script reads the same whether the worker finishes before
+// or after root's next step — a done landing mid-turn folds into the
+// running turn and opens no second one, which a scripted "done turn" line
+// would have waited for in vain (CI, 2026-09-17).
 const REPLIES: &str = concat!(
-    "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"write-cli\",\"task\":\"say the codeword\"}}]}\n",
-    "{\"agent\":\"root\",\"content\":\"started\"}\n",
+    "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"write-cli\",\"task\":\"say the codeword\",\"wait\":true}}]}\n",
     "{\"agent\":\"write-cli\",\"content\":\"Done: the codeword is xylophone.\"}\n",
-    "{\"agent\":\"root\",\"content\":\"noted\"}\n",
+    "{\"agent\":\"root\",\"content\":\"noted the codeword\"}\n",
     "{\"agent\":\"root\",\"content\":\"listing\",\"calls\":[{\"name\":\"agents\",\"arguments\":{}}]}\n",
     "{\"agent\":\"root\",\"content\":\"One finished worker: write-cli.\"}\n",
 );
@@ -41,17 +45,17 @@ fn the_agents_tool_lists_archived_workers_by_default() {
             .is_some()
     );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
-    // The worker finishes, root's done turn runs, the worker is archived.
-    assert!(common::wait_for(Duration::from_secs(30), || {
-        k.place
-            .join(".arbos/archive/agents/write-cli/agent.md")
-            .exists()
-            && transcript(&k.place, "root")
-                .iter()
-                .filter(|e| e["kind"] == "turn_complete")
-                .count()
-                >= 2
-    }));
+    // The worker reports into the spawn result, root's turn ends, the
+    // worker is archived.
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    assert!(
+        common::wait_for(Duration::from_secs(30), || {
+            k.place
+                .join(".arbos/archive/agents/write-cli/agent.md")
+                .exists()
+        }),
+        "the finished worker is archived"
+    );
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "which workers ran, and which are archived?"}));
     assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
     assert!(common::wait_for(Duration::from_secs(5), || {

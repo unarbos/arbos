@@ -4,6 +4,7 @@
 
 use anyhow::{Result, bail};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::ToolOut;
@@ -137,6 +138,23 @@ impl Tool for Bash {
                     "bash: {what} is a worker's job, not the coordinator's — spawn a worker with the exact command (wait=true for a one-off) and relay its result. Your bash is for one quick command the user asked to see."
                 );
             }
+            // `sleep N` to wait on workers: a poll by another name. The
+            // report the coordinator is waiting for is a wake that ends
+            // its turn's silence the moment it lands — unless the turn is
+            // asleep, in which case three finished workers sat behind
+            // "Waiting on three sorting workers" for the length of the
+            // sleep and the person asked where their response was
+            // (Jacob, 2026-09-17, twice). Refused with the right move.
+            if let Some(secs) = super::wipe::sleep_wait_secs(cmd)
+                && secs >= 5
+                && let Some(n) = children_count(&cx.place, cx.agent.id.as_str())
+                && n > 0
+            {
+                bail!(
+                    "bash: refused — `{}` while {n} worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the turn now (an empty reply is right here): the next report starts your next turn. To wait on a command of your own, use await <job>.",
+                    arbos_core::text::clip(cmd.trim(), 60)
+                );
+            }
             // A file this turn wrote is never moved or deleted to satisfy
             // the brief's Output line: told its deliverable was "not
             // written yet" at the brief's path, a worker moved the user's
@@ -209,6 +227,20 @@ impl Tool for Bash {
             // marked background came back after its first line ("step 1")
             // and the user saw one line of six (F-37, F-43): for anything
             // that is not a server the call stays attached to the floor.
+            // Files an in-place substitution names (`sed -i`, `perl -pi`):
+            // their bytes before, so a pattern that matched no line is
+            // said afterwards. sed exits 0 either way, and an agent that
+            // believed the edit landed carried a wrong model of the file
+            // from then on (the desktop's undispatched restart action,
+            // 2026-09-17: an anchor a merged PR had reworded).
+            let inplace_before = inplace_edit_targets(cmd, &dir);
+            // The tracked files a command may change, before it runs: an
+            // edit made through the shell (`sed -i`, a redirect, `patch`,
+            // a script) is an edit however it was made, and is recorded as
+            // one — on the tool event's paths, so the coverage hook and the
+            // transcript's readers see it (SWE-bench cycle 21: four
+            // rollouts edited with sed and no edit was on the record).
+            let tracked_before = tracked_dirty(&dir);
             let asked_background = opt_bool(&args, "background").unwrap_or(false);
             let background = asked_background && looks_like_server(cmd);
             let background_ignored = asked_background && !background;
@@ -279,6 +311,9 @@ impl Tool for Bash {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut steered = false;
+            let mut child_done = false;
+            let has_children =
+                children_count(&cx.place, cx.agent.id.as_str()).is_some_and(|n| n > 0);
             let finished = loop {
                 tokio::select! {
                     _ = &mut done_rx => break true,
@@ -295,6 +330,15 @@ impl Tool for Bash {
                     _ = tick.tick() => {
                         if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
                             steered = true;
+                            break false;
+                        }
+                        // A worker's report landed: the parent's command
+                        // yields to it the way it yields to the user's
+                        // words (#362); the command goes on as a job.
+                        if has_children
+                            && arbos_core::inbox::has_child_done(&cx.place, cx.agent.id.as_str())
+                        {
+                            child_done = true;
                             break false;
                         }
                         // The command's own end is the `exit` file, and
@@ -317,7 +361,11 @@ impl Tool for Bash {
 
             let job = root.load(&job.id)?;
             if !finished && job.running() {
-                root.mark_detached(&job);
+                let unarmed = root
+                    .mark_detached(&job)
+                    .err()
+                    .map(|e| format!(" (The kernel could not arm the finished notice — {e:#} — so its end will not be announced; follow it with await or jobs.)"))
+                    .unwrap_or_default();
                 let (text, skipped) = root.read_new(&job);
                 let body = format_tail(&text, "(no output yet)", &journal, skipped);
                 let verb = if background {
@@ -327,12 +375,14 @@ impl Tool for Bash {
                 };
                 let why = if steered {
                     " The user said something while it ran — it follows this result. Answer them, then follow the command with await."
+                } else if child_done {
+                    " A worker's report landed while it ran — it follows this result. Read it and act on it; follow the command with await if you still need it."
                 } else {
                     ""
                 };
                 return Ok(ToolOut::with_paths(
                     format!(
-                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
+                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}{unarmed}",
                         id = job.id,
                         pid = job.meta.pid,
                     ),
@@ -350,6 +400,9 @@ impl Tool for Bash {
             }
             match job.status {
                 Status::Exited(0) => {
+                    for line in inplace_unchanged(&inplace_before) {
+                        body.push_str(&format!("\n{line}"));
+                    }
                     if let Some(file) = viewed_file(cmd) {
                         // Reading through the shell gives no LINE:HASH, so
                         // the next edit has nothing to anchor on and the
@@ -389,7 +442,24 @@ impl Tool for Bash {
             } else {
                 crate::repro::note_failing(&cx.place, &cx.agent.id, cmd, &dir, exit);
             }
-            Ok(ToolOut::with_paths(body, vec![journal]))
+            let mut paths = vec![journal];
+            if let Some(before) = tracked_before
+                && let Some(after) = tracked_dirty(&dir)
+            {
+                let changed = changed_between(&before, &after);
+                if !changed.is_empty() {
+                    body.push_str(&format!(
+                        "\n[files changed by this command: {} — an edit made through the shell is recorded as an edit]",
+                        changed
+                            .iter()
+                            .map(|p| p.strip_prefix(&dir).unwrap_or(p).display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    paths.extend(changed.iter().map(|p| p.display().to_string()));
+                }
+            }
+            Ok(ToolOut::with_paths(body, paths))
         })
     }
 }
@@ -811,6 +881,215 @@ mod approval_tests {
         ] {
             assert!(!needs_approval(free), "{free:?} should run");
         }
+    }
+}
+
+/// How many agents name `agent` as their parent and are not archived —
+/// the workers whose reports it is waiting for. `None` when the place
+/// cannot be read.
+fn children_count(place: &arbos_core::Place, agent: &str) -> Option<usize> {
+    let agents = arbos_core::list_agents(place).ok()?;
+    Some(
+        agents
+            .iter()
+            .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == agent))
+            .count(),
+    )
+}
+
+/// The files an in-place substitution in `cmd` names, with their bytes
+/// now: `sed -i`, `sed -i.bak`, `sed -i ''`, `perl -pi -e`, `perl -i -pe`.
+/// Only files that exist under `dir` count; the expression word is not a
+/// file. Empty when the command has no such step.
+fn inplace_edit_targets(cmd: &str, dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for segment in cmd.split(['\n', ';', '|', '&']) {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .collect();
+        let Some(first) = words.first() else { continue };
+        let prog = first.rsplit('/').next().unwrap_or(first);
+        let rest = &words[1..];
+        let files: Vec<&str> = match prog {
+            "sed"
+                if rest
+                    .iter()
+                    .any(|w| w.starts_with("-i") || *w == "--in-place") =>
+            {
+                // Flags, then the expression (the first bare word, unless
+                // given by -e/-f), then files. `-i ''` (BSD) leaves an
+                // empty quoted word that is not a file.
+                let mut expr_given = false;
+                let mut skip_next = false;
+                let mut seen_expr = false;
+                let mut files = Vec::new();
+                for w in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if *w == "-e" || *w == "-f" || *w == "--expression" || *w == "--file" {
+                        expr_given = true;
+                        skip_next = true;
+                        continue;
+                    }
+                    if w.starts_with('-') || *w == "''" || *w == "\"\"" {
+                        continue;
+                    }
+                    if !expr_given && !seen_expr {
+                        seen_expr = true;
+                        continue;
+                    }
+                    files.push(*w);
+                }
+                files
+            }
+            "perl"
+                if rest
+                    .iter()
+                    .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('i')) =>
+            {
+                let mut skip_next = false;
+                let mut files = Vec::new();
+                for w in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if *w == "-e" || *w == "-E" {
+                        skip_next = true;
+                        continue;
+                    }
+                    if w.starts_with('-') {
+                        continue;
+                    }
+                    files.push(*w);
+                }
+                files
+            }
+            _ => Vec::new(),
+        };
+        for f in files {
+            let f = f.trim_matches(['"', '\'']);
+            if f.is_empty() || f.contains('$') || f.contains('*') {
+                continue;
+            }
+            let p = dir.join(f);
+            if let Ok(bytes) = std::fs::read(&p)
+                && p.is_file()
+                && !out.iter().any(|(q, _)| *q == p)
+            {
+                out.push((p, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// The note for each in-place target whose bytes did not change.
+/// Tracked files with uncommitted changes under `dir`'s repository, each
+/// with a hash of its bytes — the state a command's edits are read
+/// against (bytes, not mtime: `sed -i` rewrites a file it did not change,
+/// and that is not an edit). None when `dir` is not inside a git
+/// repository (nothing to compare). Untracked files are not listed: a
+/// build tree's are many, and the coverage hook reads only what git
+/// tracks.
+fn tracked_dirty(dir: &Path) -> Option<std::collections::BTreeMap<PathBuf, u64>> {
+    let root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let out = std::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let mut map = std::collections::BTreeMap::new();
+    for name in String::from_utf8_lossy(&out.stdout).lines() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let p = root.join(name);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // A deleted tracked file hashes as absent, which still differs
+            // from any content.
+            std::fs::read(&p).ok().hash(&mut h);
+            h.finish()
+        };
+        map.insert(p, hash);
+    }
+    Some(map)
+}
+
+/// Files dirty after the command that were clean before, or dirty before
+/// and changed again. Files the command reverted to HEAD are not listed:
+/// nothing is left to record about them.
+fn changed_between(
+    before: &std::collections::BTreeMap<PathBuf, u64>,
+    after: &std::collections::BTreeMap<PathBuf, u64>,
+) -> Vec<PathBuf> {
+    after
+        .iter()
+        .filter(|(p, stamp)| before.get(*p) != Some(stamp))
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
+fn inplace_unchanged(before: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
+    before
+        .iter()
+        .filter(|(p, bytes)| std::fs::read(p).is_ok_and(|now| now == *bytes))
+        .map(|(p, _)| {
+            format!(
+                "[the in-place substitution on {} changed nothing: its pattern matched no line — the file is as it was; read it and edit with an anchor]",
+                p.display()
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod inplace_tests {
+    use super::{inplace_edit_targets, inplace_unchanged};
+
+    #[test]
+    fn sed_and_perl_in_place_targets_are_named_and_a_no_op_is_said() {
+        let dir = std::env::temp_dir().join(format!("arbos-inplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        let t = inplace_edit_targets("sed -i 's/old/new/' src/a.rs b.txt", &dir);
+        assert_eq!(t.len(), 2, "{t:?}");
+        let t = inplace_edit_targets("sed -i.bak -e 's/x/y/' src/a.rs && cargo build", &dir);
+        assert_eq!(t.len(), 1);
+        let t = inplace_edit_targets("sed -i '' 's/x/y/' src/a.rs", &dir);
+        assert_eq!(t.len(), 1, "{t:?}");
+        let t = inplace_edit_targets("perl -pi -e 's/x/y/' b.txt", &dir);
+        assert_eq!(t.len(), 1);
+        let t = inplace_edit_targets("perl -i -pe 's/x/y/' src/a.rs b.txt", &dir);
+        assert_eq!(t.len(), 2);
+        // Not in place, or no such file: nothing to watch.
+        assert!(inplace_edit_targets("sed 's/x/y/' src/a.rs", &dir).is_empty());
+        assert!(inplace_edit_targets("sed -i 's/x/y/' nothere.rs", &dir).is_empty());
+        assert!(inplace_edit_targets("grep -rn old src/", &dir).is_empty());
+        // A pattern that matched nothing: the note names the file.
+        let before = inplace_edit_targets("sed -i 's/zzz/y/' src/a.rs", &dir);
+        let notes = inplace_unchanged(&before);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("src/a.rs") && notes[0].contains("changed nothing"));
+        // One that did: no note.
+        std::fs::write(dir.join("src/a.rs"), "fn b() {}\n").unwrap();
+        assert!(inplace_unchanged(&before).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

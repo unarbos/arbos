@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use arbos_core::{AgentId, Layout, Place};
 use serde_json::Value;
 
@@ -38,9 +38,25 @@ fn path(place: &Place, agent: &AgentId) -> PathBuf {
     Layout::new(place, agent.as_str()).dir.join("mechanism.md")
 }
 
-/// A user message starts a new task: forget the previous line.
+/// A user message starts a new task: forget the previous line. Unlinking
+/// needs write permission on the folder; when that fails (a folder gone
+/// read-only mid-session, qal-j22's shape), the file itself is emptied,
+/// which needs only the file — so the last task's line is not shown for
+/// this one by `changes`. Both failing is said on stderr, once per call.
 pub fn reset(place: &Place, agent: &AgentId) {
-    let _ = std::fs::remove_file(path(place, agent));
+    let p = path(place, agent);
+    match std::fs::remove_file(&p) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(unlink) => {
+            if let Err(write) = std::fs::write(&p, "") {
+                eprintln!(
+                    "mechanism {}: the last task's line could not be forgotten (unlink: {unlink}; empty: {write}); `changes` may show it for this task",
+                    agent.as_str()
+                );
+            }
+        }
+    }
 }
 
 /// The line recorded for the current task, if any.
@@ -67,27 +83,51 @@ pub fn gate(place: &Place, agent: &AgentId, tool: &str, args: &Value) -> Result<
     if !GATED.contains(&tool) {
         return Ok(None);
     }
-    let Some(line) = args
+    let given = args
         .get(ARG)
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| s.len() >= MIN_LEN)
-    else {
-        return Ok(None);
-    };
+        .filter(|s| !s.is_empty());
     let file = path(place, agent);
-    if let Some(dir) = file.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    let record = |line: &str| -> Result<Option<String>> {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(&file, format!("{line}\n"))?;
+        Ok(Some(line.to_string()))
+    };
+    match given {
+        Some(line) if line.len() >= MIN_LEN => record(line),
+        // The gate, back for the A/B only (`ARBOS_MECHANISM_REQUIRED=1`):
+        // the first edit of a task without a line is refused as before
+        // #399. Off by default; the loop measures whether being made to
+        // state a mechanism was worth solves, which "satisfiable by
+        // `placeholder`" did not establish (16/24 → 9/24 across the
+        // bases that include #399).
+        Some(short) if required() && !file.exists() => bail!(
+            "{tool} refused: mechanism is too short ({short:?}). One full line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Then check it against every symptom the request names before you edit."
+        ),
+        None if required() && !file.exists() => bail!(
+            "{tool} refused: the first edit of a task needs mechanism. Add mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Check that line against every symptom the request names (each example, error message, edge); a mechanism that explains one symptom but not another is the wrong one, even in the right file. Then repeat this call with mechanism set."
+        ),
+        _ => Ok(None),
     }
-    std::fs::write(&file, format!("{line}\n"))?;
-    Ok(Some(line.to_string()))
+}
+
+/// `ARBOS_MECHANISM_REQUIRED=1`: the pre-#399 gate, for measuring it.
+pub fn required() -> bool {
+    std::env::var(REQUIRED_ENV).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// The JSON-schema property the gated tools add.
 pub fn schema_property() -> Value {
     serde_json::json!({
         "type": "string",
-        "description": "Optional, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked."
+        "description": if required() {
+            "Required on the first edit of a task, optional after: one line — what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Checked against every symptom the request names."
+        } else {
+            "On the first edit of a task, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked — state it anyway, before the edit."
+        }
     })
 }
 
@@ -102,13 +142,73 @@ mod tests {
         (Place::new(dir), AgentId::new("root"))
     }
 
-    /// No refusal for any shape: an edit without a line, with a label,
-    /// with `placeholder` — none is evidence and none is a gate. A real
-    /// line is recorded and the newest wins.
+    /// qal-j22's shape on this record: the agent folder went read-only,
+    /// so the last task's line could not be unlinked. Emptying the file
+    /// needs only the file, and `current` reads nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_that_cannot_be_unlinked_is_emptied_so_the_next_task_does_not_show_it() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("arbos-mech-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let agent = AgentId::new("root");
+        let file = path(&place, &agent);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            "the loop skips the last group because of an off-by-one\n",
+        )
+        .unwrap();
+        assert!(current(&place, &agent).is_some());
+        let folder = file.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(std::fs::remove_file(&file).is_err(), "the fault is staged");
+        reset(&place, &agent);
+        assert_eq!(
+            current(&place, &agent),
+            None,
+            "the old line is not believed"
+        );
+        assert!(
+            file.exists(),
+            "emptied, not removed: the folder forbade that"
+        );
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No refusal for any shape by default: an edit without a line, with
+    /// a label, with `placeholder` — none is evidence and none is a gate.
+    /// A real line is recorded and the newest wins. With
+    /// `ARBOS_MECHANISM_REQUIRED=1` the pre-#399 gate is back, for the
+    /// A/B: the first edit without a line is refused, a label is too
+    /// short, a real line passes and later edits are free.
     #[test]
     fn the_line_is_recorded_when_given_and_nothing_is_refused() {
-        // SAFETY: test-local; the variable is read for compatibility only.
-        unsafe { std::env::set_var(REQUIRED_ENV, "1") };
+        // SAFETY: test-local; set and unset within this test.
+        unsafe { std::env::remove_var(REQUIRED_ENV) };
+        {
+            let (place, agent) = place();
+            unsafe { std::env::set_var(REQUIRED_ENV, "1") };
+            let none = serde_json::json!({"path": "a.py"});
+            let err = gate(&place, &agent, "edit", &none).unwrap_err().to_string();
+            assert!(err.contains("needs mechanism"), "{err}");
+            let label = serde_json::json!({"path": "a.py", "mechanism": "placeholder"});
+            let err = gate(&place, &agent, "edit", &label)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("too short"), "{err}");
+            let ok = serde_json::json!({"path": "a.py", "mechanism": "set_cmap stores cmap.name, not the registered name; use the given name string"});
+            assert!(gate(&place, &agent, "edit", &ok).unwrap().is_some());
+            // Later edits of the task are not gated.
+            assert!(gate(&place, &agent, "edit", &none).unwrap().is_none());
+            unsafe { std::env::remove_var(REQUIRED_ENV) };
+            let _ = std::fs::remove_dir_all(&place.path);
+        }
         let (place, agent) = place();
         let none = serde_json::json!({"path": "a.py"});
         assert!(gate(&place, &agent, "edit", &none).unwrap().is_none());

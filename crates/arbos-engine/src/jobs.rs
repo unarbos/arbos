@@ -300,7 +300,21 @@ impl JobsRoot {
             started_ms: arbos_core::now_ms(),
             timeout_ms,
         };
-        fs::write(dir.join("meta.json"), serde_json::to_vec(&meta)?)?;
+        // The process is running before its record exists. A record that
+        // cannot be written (the disk full, the store unwritable) must not
+        // leave the command running with no folder anyone can list, kill,
+        // or cap: the group is ended and the folder goes with the error,
+        // so "bash failed" is true — nothing of the command ran on.
+        let record = serde_json::to_vec(&meta)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| fs::write(dir.join("meta.json"), bytes).map_err(anyhow::Error::from));
+        if let Err(e) = record {
+            let _ = crate::tools::kill_job(meta.pid);
+            let _ = fs::remove_dir_all(&dir);
+            return Err(anyhow::anyhow!(
+                "bash: the job's record could not be written ({e}); the command was ended before it ran on unrecorded"
+            ));
+        }
         let job = Job {
             id,
             dir,
@@ -370,19 +384,29 @@ impl JobsRoot {
     }
 
     /// The tool call returned while the job was still running. Arms the
-    /// completion notice.
-    pub fn mark_detached(&self, job: &Job) {
-        let _ = fs::write(job.dir.join("detached"), b"");
+    /// completion notice — the one thing that tells anyone this job
+    /// ended. A marker that could not be written is a job that would
+    /// finish unnoticed (the class of 2026-09-17), so the failure is
+    /// returned for the tool result to say.
+    pub fn mark_detached(&self, job: &Job) -> Result<()> {
+        fs::write(job.dir.join("detached"), b"")
+            .with_context(|| format!("arm the completion notice for {}", job.id))
     }
 
     /// Detached jobs that have finished and have not yet been announced.
-    /// Marks them announced; the caller delivers the notice.
+    /// Marks them announced; the caller delivers the notice. A marker
+    /// that could not be written would have the same end announced on
+    /// every sweep for ever; the caller keeps its own memory of what it
+    /// said this run (`serve.rs`), so the failure costs one repeat after
+    /// a restart, and is logged here.
     pub fn sweep(&self) -> Vec<Job> {
         self.list()
             .into_iter()
             .filter(|j| !j.running() && j.detached() && !j.dir.join("notified").exists())
             .inspect(|j| {
-                let _ = fs::write(j.dir.join("notified"), b"");
+                if let Err(e) = fs::write(j.dir.join("notified"), b"") {
+                    eprintln!("job {}: could not mark its end as announced: {e}", j.id);
+                }
             })
             .collect()
     }
@@ -398,7 +422,7 @@ impl JobsRoot {
         // Said before the signal, so a reader that comes between never
         // sees "no exit recorded" (qa-024).
         let marker = job.dir.join("killed");
-        let _ = fs::write(&marker, "killed by the kernel\n");
+        let _ = fs::write(&marker, format!("{}\n", kill_reason()));
         if let Err(e) = crate::tools::kill_job(job.meta.pid) {
             // The claim is withdrawn: a job the kernel could not signal is
             // still running, and must read as such.
@@ -771,6 +795,32 @@ done"#;
     ("sh".to_string(), all)
 }
 
+/// Why the kernel is killing jobs right now, when it is one reason for
+/// all of them: a graceful stop sets it before ending turns, so every
+/// `killed` marker written from then on — by the stop itself or by a
+/// turn's cancel path ending its own attached command — says the same
+/// thing. Two writers with two spellings raced to the same file, and the
+/// recorded reason a job ended was whichever landed last (desktop
+/// feedback owner, 2026-09-17: `job_leash_e2e` red 4 in 5 on `main`).
+static KILL_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Set the reason every kill from now on records (`killed: <reason>`).
+pub fn set_kill_reason(reason: &str) {
+    *KILL_REASON.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.to_string());
+}
+
+/// The line a `killed` marker gets now.
+pub fn kill_reason() -> String {
+    match KILL_REASON
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_deref()
+    {
+        Some(r) => format!("killed: {r}"),
+        None => "killed by the kernel".to_string(),
+    }
+}
+
 /// Live members of process group `pgid` other than the leader, started no
 /// earlier than the job where the machine can say (Linux). `pgrep -g` is
 /// on Linux and macOS alike.
@@ -914,9 +964,48 @@ fn pid_identity(pid: u32, dir: &Path, meta: &Meta) -> PidIdentity {
     PidIdentity::Unverified
 }
 
-/// Linux: when `pid` started, as Unix millis, from /proc/<pid>/stat field
-/// 22 (clock ticks since boot) and /proc/stat's btime.
+/// When `pid` started, as Unix millis. Linux: /proc/<pid>/stat field 22
+/// (clock ticks since boot) and /proc/stat's btime. Elsewhere (macOS —
+/// Jacob's machines): `ps -o etime=`, the elapsed time, subtracted from
+/// now; a second's rounding against a two-minute tolerance. Without this
+/// a Mac had no second proof, so a job whose pid was reused after a
+/// reboot read as `Unverified`, which is shown as running, for ever.
 fn process_start_ms(pid: u32) -> Option<i64> {
+    if let Some(ms) = process_start_ms_proc(pid) {
+        return Some(ms);
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "etime=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let elapsed = parse_etime(String::from_utf8_lossy(&out.stdout).trim())?;
+    Some(arbos_core::now_ms() - elapsed * 1000)
+}
+
+/// `ps` elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+fn parse_etime(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (days, clock) = match s.split_once('-') {
+        Some((d, rest)) => (d.trim().parse::<i64>().ok()?, rest),
+        None => (0, s),
+    };
+    let parts: Vec<i64> = clock
+        .split(':')
+        .map(|p| p.trim().parse::<i64>())
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let (h, m, sec) = match parts.as_slice() {
+        [m, s] => (0, *m, *s),
+        [h, m, s] => (*h, *m, *s),
+        _ => return None,
+    };
+    Some(((days * 24 + h) * 60 + m) * 60 + sec)
+}
+
+fn process_start_ms_proc(pid: u32) -> Option<i64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The command name is in parentheses and may hold spaces: split after it.
     let after = stat.rsplit_once(')')?.1;
@@ -958,8 +1047,12 @@ fn process_args(pid: u32) -> Option<String> {
     if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
         return Some(String::from_utf8_lossy(&raw).replace('\0', " "));
     }
+    // `-ww`: BSD ps (macOS) cuts the line at the window width — or 79
+    // columns off a terminal — and a job folder under a person's
+    // Documents is longer than that, so the leash's argv proof of a pid
+    // never matched on a Mac. Twice means unbounded; procps takes it too.
     let out = std::process::Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -1000,6 +1093,37 @@ fn sh_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ps_elapsed_time_parses_in_all_its_shapes() {
+        assert_eq!(parse_etime("00:05"), Some(5));
+        assert_eq!(parse_etime("   12:34"), Some(12 * 60 + 34));
+        assert_eq!(parse_etime("01:02:03"), Some(3723));
+        assert_eq!(parse_etime("2-01:02:03"), Some(2 * 86400 + 3723));
+        assert_eq!(parse_etime(""), None);
+        assert_eq!(parse_etime("garbage"), None);
+    }
+
+    /// The start-time proof holds on this machine, by either path: this
+    /// process started when it says it did, within the tolerance
+    /// `pid_identity` uses.
+    #[test]
+    fn this_process_start_time_is_found_within_the_tolerance() {
+        let pid = std::process::id();
+        let started = process_start_ms(pid).expect("a start time by /proc or ps");
+        let now = arbos_core::now_ms();
+        assert!(
+            now - started >= 0 && now - started < 120_000,
+            "started {started} now {now}"
+        );
+        // The portable path alone agrees with the machine's own answer.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "etime=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let elapsed = parse_etime(String::from_utf8_lossy(&out.stdout).trim()).expect("etime");
+        assert!((now - elapsed * 1000 - started).abs() < 5_000);
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("arbos-jobs-{tag}-{}", std::process::id()));

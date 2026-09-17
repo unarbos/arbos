@@ -96,7 +96,7 @@ fn cached(dir: &Path, id: &str) -> Option<String> {
     path.exists().then(|| path.to_str())?.map(str::to_owned)
 }
 
-// ── the catalog, for the settings window ─────────────────────────
+// ── the catalog, for the Settings tab ────────────────────────────
 
 /// The clients Arbos supports, by their id in the catalog. Named one by one
 /// rather than taken by a rule: the registry takes any publisher who submits

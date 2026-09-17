@@ -234,6 +234,10 @@ pub struct KernelHooks {
     /// the first thing the next turn's model reads after the history).
     pub notes_nudge: Mutex<HashSet<String>>,
     pub browsers: BrowserHub,
+    /// The shells this kernel opened, set once when `serve` builds the
+    /// hub (it binds a frame sender the hooks do not have yet); read by
+    /// `surfaces` to say which shells have a process behind them.
+    pub ptys: std::sync::OnceLock<Arc<crate::pty::PtyHub>>,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
     pub plan_lock: Mutex<()>,
@@ -306,6 +310,7 @@ impl KernelHooks {
             notes_nudge: Mutex::new(HashSet::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
+            ptys: std::sync::OnceLock::new(),
             plan_lock: Mutex::new(()),
             running: Mutex::new(HashSet::new()),
             progress: Mutex::new(HashMap::new()),
@@ -337,6 +342,7 @@ impl KernelHooks {
             .map(|a| arbos_core::wire::TreeNode {
                 id: a.id.to_string(),
                 name: a.name.clone(),
+                title: a.title.clone(),
                 parent: a.parent.as_ref().map(|p| p.to_string()),
                 paused: a.paused,
                 model: a.model.clone(),
@@ -1564,6 +1570,17 @@ impl KernelHooks {
                 if let Some(gone) = self.archived_named(q) {
                     bail!("{}", gone.refusal(&agents, from));
                 }
+                // A path, or another place's agent: a boundary, not a
+                // lookup failure. "no agent is named /Users/…/agents/root"
+                // read as one (Jacob, 2026-09-17: "is this can't-speak-to-
+                // other-agents design correct?").
+                if q.contains('/') || q.contains(".arbos") {
+                    bail!(
+                        "say: {q:?} is a path, not an agent here. say reaches the agents of this place, and agents on machines registered with the hub (machine/project). Another project on this machine is its own place: open it as a project, or register this machine so places can talk. Live agents here: {}{}",
+                        roster(&agents, from),
+                        self.archived_note()
+                    )
+                }
                 bail!(
                     "say: no agent is named {q:?}. Live agents: {}{}",
                     roster(&agents, from),
@@ -1985,13 +2002,17 @@ impl KernelHooks {
     /// reads the parent's chat, not a child's — and on the sender's own
     /// when that is a different agent.
     pub fn notify_user(&self, from: &str, text: &str) -> Result<()> {
-        let mut inbox = std::fs::read_to_string(self.place.user_md()).unwrap_or_default();
+        // A confirmed read: an unreadable user.md is not rewritten as one
+        // line (the qal-j08 family; see arbos_core::record).
+        let mut inbox = arbos_core::record::read_text(&self.place.user_md())
+            .confirmed()?
+            .unwrap_or_default();
         inbox.push_str(&format!(
             "- {} [{from}] {}\n",
             subscription::clock(arbos_core::now_ms()),
             text.replace('\n', " ")
         ));
-        std::fs::write(self.place.user_md(), inbox)?;
+        arbos_core::record::write_atomic(&self.place.user_md(), inbox.as_bytes())?;
         let event = Event::new(EventKind::Say {
             from: format!("{from} → user"),
             text: text.to_string(),

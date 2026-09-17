@@ -955,8 +955,20 @@ async fn run_job(
         Ok(x) => x,
         Err(e) => return (None, -1, format!("could not start: {e}")),
     };
-    // Whose run this is, for a kernel that finds the job at boot.
-    let _ = std::fs::write(job.dir.join(SUB_MARKER), sub_id.to_string());
+    // Whose run this is, for a kernel that finds the job at boot. Unwritten,
+    // a restart would find a job it cannot place and the run's result would
+    // reach nobody — the "finished and unnoticed" class; the run is ended
+    // and said to have failed to start instead.
+    if let Err(e) = std::fs::write(job.dir.join(SUB_MARKER), sub_id.to_string()) {
+        let _ = root.kill(&job);
+        return (
+            None,
+            -1,
+            format!(
+                "could not start: the run's record could not be written ({e}); the command was ended before it ran on unrecorded"
+            ),
+        );
+    }
     let id = job.id.clone();
     // The runtime's wait, or the wrapper's `exit` file — whichever says
     // first that the command ended (see bash.rs on a reaper that never
@@ -1003,8 +1015,19 @@ async fn run_job(
     if timed_out {
         tail = format!("timed out after {}s\n{tail}", CMD_TIMEOUT.as_secs());
     }
-    // Seen to its end by this kernel: not a run a restart cut.
-    let _ = std::fs::write(job.dir.join("settled"), "ok\n");
+    // Seen to its end by this kernel: not a run a restart cut. Without
+    // the marker the next boot reports this run as cut — a repeat of an
+    // outcome already delivered, not a loss — so its absence is said.
+    if let Err(e) = std::fs::write(job.dir.join("settled"), "ok\n") {
+        crate::klog::warn(
+            "settled_unwritten",
+            None,
+            format!(
+                "job {}: {e} — the next start will report this finished run as cut",
+                job.id
+            ),
+        );
+    }
     (Some(id), code, tail)
 }
 

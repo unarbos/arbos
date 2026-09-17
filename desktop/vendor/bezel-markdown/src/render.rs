@@ -123,6 +123,9 @@ pub enum Annotation {
     Resolved,
     /// The one whose thread the reader has in front of them.
     Active,
+    /// A link the pointer is over: an underline in the accent, not a wash,
+    /// so a URL reads as something to click before it is clicked.
+    LinkHover,
 }
 
 impl Annotation {
@@ -131,7 +134,12 @@ impl Annotation {
             Self::Open => theme.warning.opacity(0.20),
             Self::Resolved => theme.warning.opacity(0.08),
             Self::Active => theme.warning.opacity(0.38),
+            Self::LinkHover => theme.accent,
         }
+    }
+
+    fn underline(self) -> bool {
+        matches!(self, Self::LinkHover)
     }
 }
 
@@ -494,10 +502,12 @@ impl<'a> Overlay<'a> {
 
     /// The annotated slices of this text, already resolved to their paint —
     /// the wash goes into a `move` closure that the theme does not travel into.
-    fn annotated(&self, len: usize, theme: &Theme) -> Vec<(Range<usize>, Hsla)> {
+    fn annotated(&self, len: usize, theme: &Theme) -> Vec<(Range<usize>, Hsla, bool)> {
         self.annotations
             .iter()
-            .filter_map(|(range, kind)| Some((self.clip(*range, len)?, kind.wash(theme))))
+            .filter_map(|(range, kind)| {
+                Some((self.clip(*range, len)?, kind.wash(theme), kind.underline()))
+            })
             .collect()
     }
 
@@ -1189,41 +1199,25 @@ fn painted_text(
             if let Some(layouts) = &layouts {
                 layouts.record(ix, part, span.clone(), layout.clone());
             }
-            for (range, wash) in &annotated {
+            for (range, wash, underline) in &annotated {
                 for rect in range_rects(&layout, range, 0.0, 0.0) {
+                    let rect = if *underline {
+                        Bounds::new(
+                            gpui::point(rect.origin.x, rect.origin.y + rect.size.height - px(2.0)),
+                            gpui::size(rect.size.width, px(1.0)),
+                        )
+                    } else {
+                        rect
+                    };
                     window.paint_quad(quad(
                         rect,
-                        px(2.0),
+                        px(if *underline { 0.0 } else { 2.0 }),
                         *wash,
                         px(0.0),
                         gpui::transparent_black(),
                         BorderStyle::default(),
                     ));
                 }
-            }
-            if let Some(range) = &selected {
-                for rect in range_rects(&layout, range, 0.0, 0.0) {
-                    window.paint_quad(quad(
-                        rect,
-                        px(2.0),
-                        selection_color,
-                        px(0.0),
-                        gpui::transparent_black(),
-                        BorderStyle::default(),
-                    ));
-                }
-            }
-            if let Some(offset) = caret
-                && let Some(head) = layout.position_for_index(offset)
-            {
-                window.paint_quad(quad(
-                    caret_quad(head, size, layout.line_height()),
-                    px(0.0),
-                    caret_color,
-                    px(0.0),
-                    gpui::transparent_black(),
-                    BorderStyle::default(),
-                ));
             }
             for range in &code_ranges {
                 for rect in range_rects(&layout, range, INLINE_CODE_PAD_X, INLINE_CODE_INSET_Y) {
@@ -1252,6 +1246,33 @@ fn painted_text(
                         ));
                     });
                 }
+            }
+            // The selection last, over the code and chip washes: painted
+            // under them it vanished behind every `inline_code()` in the
+            // range, so the band read as boxes with a hole (same report).
+            if let Some(range) = &selected {
+                for rect in range_rects(&layout, range, 0.0, 0.0) {
+                    window.paint_quad(quad(
+                        rect,
+                        px(0.0),
+                        selection_color,
+                        px(0.0),
+                        gpui::transparent_black(),
+                        BorderStyle::default(),
+                    ));
+                }
+            }
+            if let Some(offset) = caret
+                && let Some(head) = layout.position_for_index(offset)
+            {
+                window.paint_quad(quad(
+                    caret_quad(head, size, layout.line_height()),
+                    px(0.0),
+                    caret_color,
+                    px(0.0),
+                    gpui::transparent_black(),
+                    BorderStyle::default(),
+                ));
             }
         },
     )
@@ -1346,14 +1367,38 @@ fn range_rects(
                 (low, high)
             }
         };
-        if let Some(tail) = layout.position_for_index(row_end)
-            && tail.x > head.x
-        {
+        // A row the range runs off the end of extends to the layout's right
+        // edge, as a browser's or Cursor's selection does: every wrapped
+        // row of a block then shares one right edge instead of each
+        // stopping under its own last glyph (ARBOS: Jacob, "text
+        // highlighting is not correct", 2026-09-17). The final row ends
+        // where the range ends. Only the selection and the comment washes
+        // take the wide row; an inline-code or chip wash (`pad_x > 0`) hugs
+        // its glyphs as before.
+        let wraps_on = row_end < range.end;
+        let tail_x = match layout.position_for_index(row_end) {
+            Some(tail) if wraps_on && pad_x == 0.0 => tail.x.max(layout.bounds().right()),
+            Some(tail) => tail.x,
+            None => head.x,
+        };
+        // Rows abut: the next row's top is this row's bottom, so a block's
+        // selection reads as one continuous band rather than stripes with
+        // gaps where the leading sits (same report). The last row keeps the
+        // font's line height.
+        let row_height = if pad_x == 0.0 && wraps_on {
+            match layout.position_for_index(next) {
+                Some(below) if below.y > head.y => below.y - head.y,
+                _ => line_height,
+            }
+        } else {
+            line_height
+        };
+        if tail_x > head.x {
             rects.push(Bounds::new(
                 point(head.x - px(pad_x), head.y + px(inset_y)),
                 size(
-                    tail.x - head.x + px(2.0 * pad_x),
-                    line_height - px(2.0 * inset_y),
+                    tail_x - head.x + px(2.0 * pad_x),
+                    row_height - px(2.0 * inset_y),
                 ),
             ));
         }
@@ -1435,7 +1480,7 @@ fn code_block(
                 if let Some(sink) = &sink {
                     sink.record(ix, Part::Code, span.clone(), layout.clone());
                 }
-                for (range, wash) in &annotated {
+                for (range, wash, _) in &annotated {
                     let (from, to) = (range.start.max(span.start), range.end.min(span.end));
                     if from < to {
                         for rect in

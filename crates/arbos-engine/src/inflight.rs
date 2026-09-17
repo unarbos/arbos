@@ -32,16 +32,15 @@ fn file(place: &Place, agent: &AgentId, call_id: &str) -> PathBuf {
     dir(place, agent).join(format!("{safe}.json"))
 }
 
-/// The call is about to run. Best effort: a full disk does not stop the
-/// tool, it only loses this safety net.
-pub fn start(place: &Place, agent: &AgentId, rec: &ToolRec) {
+/// The call is about to run. Not best effort: the record is what keeps a
+/// command from running twice across a kernel death (qal-j02), and a
+/// record that could not be written is a guarantee silently gone. The
+/// caller refuses the call and says why (the qal-j08 family; see
+/// `arbos_core::record`).
+pub fn start(place: &Place, agent: &AgentId, rec: &ToolRec) -> anyhow::Result<()> {
     let path = file(place, agent, &rec.call_id);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(json) = serde_json::to_vec(rec) {
-        let _ = std::fs::write(path, json);
-    }
+    let json = serde_json::to_vec(rec)?;
+    arbos_core::record::write_atomic(&path, &json)
 }
 
 /// The call returned (its `tool` line follows on the transcript).

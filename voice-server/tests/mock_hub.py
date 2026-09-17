@@ -22,6 +22,7 @@ class MockHub:
         self.token = token
         self.host, self.port = host, port
         self.kernels: dict[str, str] = {}  # "machine/project" -> tcp://host:port
+        self.places: dict[str, str] = {}  # "machine/project" -> the folder that kernel serves
         self.attaches: list[str] = []
         self._server = None
 
@@ -38,7 +39,12 @@ class MockHub:
     def _auth(self, connection: ServerConnection, request):
         parts = urlsplit(request.path)
         if parts.path == "/list":
-            body = json.dumps({"machines": [{"name": k.split("/")[0], "projects": [{"name": k.split("/")[1], "live": True}]} for k in self.kernels]})
+            # The roster names each kernel's folder (`place`), as the real hub does: that is how the
+            # gateway learns the call's working directory.
+            body = json.dumps({"machines": [
+                {"name": k.split("/")[0], "projects": [{"name": k.split("/")[1], "live": True, "place": self.places.get(k)}]}
+                for k in self.kernels
+            ]})
             return connection.respond(HTTPStatus.OK, body)
         query = parse_qs(parts.query).get("token", [""])[0]
         header = request.headers.get("Authorization", "")

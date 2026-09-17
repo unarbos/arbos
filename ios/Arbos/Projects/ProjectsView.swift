@@ -103,6 +103,7 @@ struct ProjectsView: View {
             if open.wrappedValue {
                 ForEach(rows) { entry in
                     Button {
+                        projects.remember(opened: entry.target)
                         path.append(entry.target)
                     } label: {
                         ProjectRow(entry: entry, working: isWorking(entry), step: step(for: entry), nameShared: isShared(entry))
@@ -218,6 +219,7 @@ struct ProjectsView: View {
                 guard let target = composerTarget else { return }
                 let text = draft
                 draft = ""
+                projects.remember(opened: target)
                 path.append(target)
                 Task {
                     await chat.switchTarget(target)
@@ -301,6 +303,10 @@ struct ProjectRow: View {
         // It answers, so "Off" would be a lie, and "Idle" would hide that
         // every worker it is asked for will be refused.
         if entry.needsRestart { return "Restart needed" }
+        // The roster has stopped listing it. "Off" is true but says nothing
+        // about which thing is off, and that is the only question worth
+        // answering here: his machine, or that project's kernel.
+        if !entry.waitingOn.isEmpty { return entry.waitingOn }
         return entry.live ? "Idle" : "Off"
     }
 }

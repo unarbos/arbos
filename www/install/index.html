@@ -4,9 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Install Arbos</title>
-  <meta name="description" content="Install Arbos on macOS from the DMG, build it from source, put it on your iPhone, run the voice server, and add a machine to the mesh.">
+  <meta name="description" content="Install Arbos on your Mac, build it from source, put it on your iPhone, run the voice server, or lend a machine to the mesh.">
   <meta name="theme-color" content="#161616">
-  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="canonical" href="https://arbos.life/install/">
   <link rel="stylesheet" href="/assets/style.css">
 </head>
@@ -14,17 +17,12 @@
   <header class="top">
     <div class="wrap">
       <a class="brand" href="/" aria-label="Arbos home">
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10.3 3h3.4v11.2c0 1.6.8 2.8 2.4 3.6V19H7.9v-1.2c1.6-.8 2.4-2 2.4-3.6V3z"/><path d="M14.15 9.9 17.55 6.5l2.2 2.2-3.4 3.4-2.2-2.2z"/><path d="M9.85 11.95 6.05 8.15l-2.2 2.2 3.8 3.8 2.2-2.2z"/></svg>
+        <img src="/favicon-32.png" width="18" height="18" alt="">
         Arbos
       </a>
       <nav class="nav" aria-label="Main">
-        <a href="/what/">What it is</a>
         <a href="/install/" aria-current="page">Install</a>
-        <a href="/docs/">Docs</a>
-        <a class="gh" href="https://github.com/unarbos/arbos" rel="noopener" aria-label="Arbos on GitHub">
-          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-          <span>GitHub</span>
-        </a>
+        <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
       </nav>
     </div>
   </header>
@@ -32,99 +30,68 @@
   <main class="page">
     <div class="wrap">
       <div class="page-head">
-        <span class="kicker">Install</span>
-        <h1>Install Arbos</h1>
-        <p>The Mac app is the quick path. Everything else here is optional: build from source, put Arbos on your iPhone, run your own voice server, or lend a machine to the mesh.</p>
+        <h1>Install</h1>
+        <p>The Mac app is the short path. The rest is optional.</p>
       </div>
 
-      <div class="with-toc">
-        <div class="prose">
-          <h2 id="mac">macOS app</h2>
-          <ol>
-            <li><a href="https://github.com/unarbos/arbos/releases/latest" data-dmg rel="noopener">Download <code>Arbos-&lt;version&gt;.dmg</code></a> for your Mac from the latest release (<code>arm64</code> for Apple silicon, <code>x86_64</code> for Intel). macOS 11 or newer.</li>
-            <li>Open the DMG and drag <strong>Arbos</strong> into <strong>Applications</strong>.</li>
-            <li>Open Arbos. The build is not notarized yet, so macOS may say it cannot verify the developer. Right-click the app and choose <strong>Open</strong>, or go to <strong>System Settings › Privacy &amp; Security</strong> and click <strong>Open Anyway</strong>. You do this once.</li>
-            <li><strong>Microphone.</strong> The first time you dictate or start a call, macOS asks for microphone access. Click <strong>Allow</strong>. If you declined, turn it on under <strong>System Settings › Privacy &amp; Security › Microphone › Arbos</strong>. Arbos shows the current state in <strong>Settings › Permissions</strong>, with a <em>Test the microphone</em> row.</li>
-            <li><strong>Model key.</strong> Open <strong>Settings › Model</strong>, paste an <a href="https://openrouter.ai/settings/keys" rel="noopener">OpenRouter key</a>, and pick a model. OpenAI keys and any OpenAI-compatible endpoint work too.</li>
-            <li>Press <kbd>⌘T</kbd>, choose a folder. That folder is now a project with its own agent. Type or hold <kbd>fn</kbd> to speak.</li>
-          </ol>
-          <p>The same settings live in a file, if you prefer to edit it:</p>
+      <div class="prose">
+        <h2 id="mac">Mac</h2>
+        <ol>
+          <li><a href="/download/mac" data-mac-download>Download Arbos</a> (<span data-release-note>the newest dev build</span>). Apple silicon, macOS 13 or newer. A zip unpacks to <strong>Arbos.app</strong>.</li>
+          <li>Open the download and drag <strong>Arbos</strong> into <strong>Applications</strong>.</li>
+          <li>Open Arbos. Builds are Developer ID signed and notarized, so macOS opens them without a warning.</li>
+          <li><strong>Microphone.</strong> The first time you dictate or start a call, macOS asks. Allow it. <strong>Settings › Permissions</strong> shows the state and can test the microphone.</li>
+          <li><strong>Model key.</strong> <strong>Settings › Model</strong>: paste an <a href="https://openrouter.ai/settings/keys" rel="noopener">OpenRouter key</a> and pick a model. OpenAI keys and any OpenAI-compatible endpoint work too.</li>
+          <li><kbd>⌘T</kbd>, choose a folder. That folder is now a project with its own agent. Type, or hold <kbd>fn</kbd> to speak.</li>
+        </ol>
+        <p>The same settings live in a file:</p>
 <pre><code># ~/.config/arbos/config.toml
-provider = "openrouter"          # or "openai", or "custom" with api_base
+provider = "openrouter"             # or "openai", or "custom" with api_base
 api_key_env = "OPENROUTER_API_KEY"  # or api_key = "sk-or-..."
 model = "anthropic/claude-opus-5"</code></pre>
 
-          <h2 id="source">From source</h2>
-          <p>You need a <a href="https://rustup.rs" rel="noopener">Rust</a> nightly toolchain (the repo's <code>rust-toolchain.toml</code> selects it) and, on macOS, Xcode command line tools.</p>
-<pre><code>git clone https://github.com/unarbos/arbos.git
-cd arbos
-
-# the kernel: runs the agents
-cargo install --path crates/arbos-kernel
-
-# the desktop app: finds arbos-kernel in ~/.cargo/bin
-cd desktop &amp;&amp; cargo install --path .
+        <h2 id="source">From source</h2>
+        <p>Rust nightly (<code>rust-toolchain.toml</code> selects it) and, on macOS, the Xcode command line tools.</p>
+<pre><code>git clone https://github.com/unarbos/arbos.git &amp;&amp; cd arbos
+cargo install --path crates/arbos-kernel   # the kernel: runs the agents
+cd desktop &amp;&amp; cargo install --path .       # the app; finds arbos-kernel in ~/.cargo/bin
 arbos-desktop</code></pre>
-          <p>To point the app at a kernel binary somewhere else, set <code>ARBOS_KERNEL_BIN=/path/to/arbos-kernel</code>. The kernel also runs on its own: <code>arbos-kernel serve</code> in a project folder, or <code>arbos-kernel run "task"</code> for a headless turn in CI or a container.</p>
+        <p><code>ARBOS_KERNEL_BIN=/path/to/arbos-kernel</code> points the app at a kernel elsewhere. The kernel runs alone too: <code>arbos-kernel serve</code> in a project folder, <code>arbos-kernel run "task"</code> for one headless turn.</p>
 
-          <h2 id="iphone">iPhone</h2>
-          <p>The iPhone app is one long full-duplex call with your project, plus the main chat one swipe up. It is not on the App Store yet; you build it with Xcode and install it on your own phone.</p>
-          <ol>
-            <li>Xcode 16 or newer, an iPhone on iOS 17 or newer, and a free Apple developer team for signing.</li>
-            <li>Open <code>ios/Arbos.xcodeproj</code>. Under <strong>Signing &amp; Capabilities</strong>, pick your team.</li>
-            <li>Run <code>ios/scripts/gen-secrets.sh</code> once. It writes the voice, kernel, and hub URLs and tokens the app will use.</li>
-            <li>Select your phone as the destination and press <strong>Run</strong>. Or from a shell:</li>
-          </ol>
-<pre><code>cd ios &amp;&amp; ./scripts/gen-secrets.sh
-xcodebuild -scheme Arbos -destination 'platform=iOS,id=&lt;device-id&gt;' \
-  -allowProvisioningUpdates build</code></pre>
-          <p>On first launch iOS asks for the microphone; allow it. The kernel picker lists any machine on your mesh hub; pick one and the call starts.</p>
+        <h2 id="iphone">iPhone</h2>
+        <p>One long full-duplex call with your project, plus the main chat one swipe up. Not on the App Store yet; build it with Xcode onto your own phone.</p>
+        <ol>
+          <li>Xcode 16 or newer, iOS 17 or newer, a free Apple developer team.</li>
+          <li>Open <code>ios/Arbos.xcodeproj</code> and pick your team under <strong>Signing &amp; Capabilities</strong>.</li>
+          <li>Endpoints and tokens go in <code>ios/Arbos/Secrets.plist</code> (<code>ios/scripts/gen-secrets.sh</code> writes it from 1Password).</li>
+          <li>Select your phone and press <strong>Run</strong>.</li>
+        </ol>
 
-          <h2 id="voice">Voice server</h2>
-          <p>Speech runs on a server you control. The voice server is one WebSocket per call: raw audio both ways, plus a text channel and the tools that let the voice model dispatch agents. It has two engines behind the same protocol:</p>
-          <ul>
-            <li><strong>duplex</strong> — one full-duplex speech-to-speech model (NVIDIA Nemotron VoiceChat). Needs a GPU with about 24 GB. This is the GPT Live shape: no turn-taking, natural interruption.</li>
-            <li><strong>pipeline</strong> — Silero VAD → faster-whisper → the model → Kokoro TTS. Runs on any GPU or a CPU.</li>
-          </ul>
+        <h2 id="voice">Voice server</h2>
+        <p>Speech runs on a server you control. One WebSocket per call, two engines behind it: <strong>duplex</strong> (one speech-to-speech model, a GPU with about 24 GB, no turn-taking) or <strong>pipeline</strong> (VAD → Whisper → the model → Kokoro; any GPU or a CPU).</p>
 <pre><code>cd voice-server
 VOICE_HOME=$PWD VOICE_TOKEN=&lt;a long random string&gt; deploy/run.sh</code></pre>
-          <p><code>run.sh</code> installs <a href="https://docs.astral.sh/uv/" rel="noopener">uv</a>, makes a virtual environment, fetches the models, and starts the server on port 8765. Nothing is written outside <code>VOICE_HOME</code>. Then tell the desktop app where it is, in the same <code>config.toml</code> as the model key, and put the same values into <code>ios/scripts/gen-secrets.sh</code> for the phone:</p>
-<pre><code># ~/.config/arbos/config.toml
-voice_url = "wss://voice.example.com/ws"
+        <p>Then tell the app where it is, in the same <code>config.toml</code>:</p>
+<pre><code>voice_url = "wss://voice.example.com/ws"
 voice_token_env = "VOICE_TOKEN"        # or voice_token = "..."</code></pre>
-          <p> To reach it from anywhere, <code>deploy/cloudflare-tunnel.sh</code> fronts it with a Cloudflare Tunnel.</p>
 
-          <h2 id="mesh">Add a machine to the mesh</h2>
-          <p>Any machine running the Arbos worker can be used by any of your other Arbos instances: a cloud agent can build iOS on your Mac, your laptop can run a long job on a server. The worker connects outbound to the hub, so no ports need opening.</p>
-          <p>On the machine you want to offer, with <code>arbos-kernel</code> built and a model key in <code>~/arbos-hub/config/arbos/config.toml</code>:</p>
+        <h2 id="mesh">Lend a machine to the mesh</h2>
+        <p>Any machine running the worker can be used by your other Arbos instances. It connects outbound; no ports to open.</p>
 <pre><code>ARBOS_HUB=wss://hub-api.arbos.life ARBOS_HUB_TOKEN=&lt;token&gt; \
   ~/arbos-hub/bin/arbos-kernel worker --dir ~/arbos-hub/projects --machine &lt;name&gt;</code></pre>
-          <p>Add <code>--cap xcode --cap ios</code> on a Mac with Xcode so agents can find it. Clone the repositories the mesh may work on into <code>~/arbos-hub/projects/&lt;name&gt;</code>. <code>deploy/hub/worker.sh</code> wraps the same command in a restart loop, and <code>deploy/hub/hub-run.sh</code> runs your own hub if you would rather not use ours.</p>
+        <p>Add <code>--cap xcode --cap ios</code> on a Mac with Xcode. <code>deploy/hub/worker.sh</code> wraps this in a restart loop; <code>deploy/hub/hub-run.sh</code> runs your own hub.</p>
 
-          <p class="callout"><strong>Stuck?</strong> <a href="https://github.com/unarbos/arbos/issues/new" rel="noopener">Open an issue</a> with the step you were on. The <a href="https://github.com/unarbos/arbos#readme" rel="noopener">README</a> on GitHub always has the newest version of these steps.</p>
-        </div>
-
-        <aside class="toc" aria-label="On this page">
-          <ol>
-            <li><a href="#mac">macOS app</a></li>
-            <li><a href="#source">From source</a></li>
-            <li><a href="#iphone">iPhone</a></li>
-            <li><a href="#voice">Voice server</a></li>
-            <li><a href="#mesh">Mesh worker</a></li>
-          </ol>
-        </aside>
+        <p>The <a href="https://github.com/unarbos/arbos#readme" rel="noopener">README</a> has the long version. Stuck? <a href="https://github.com/unarbos/arbos/issues/new" rel="noopener">Open an issue</a>.</p>
       </div>
     </div>
   </main>
 
   <footer class="foot">
     <div class="wrap">
-      <span>© 2026 Arbos · <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT license</a></span>
       <nav aria-label="Footer">
         <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
-        <a href="https://github.com/unarbos/arbos/releases" rel="noopener">Releases</a>
-        <a href="https://github.com/unarbos/arbos/issues" rel="noopener">Issues</a>
-        <a href="https://github.com/unarbos/arbos/issues/new" rel="noopener">Contact</a>
+        <a href="https://github.com/unarbos/arbos#readme" rel="noopener">Docs</a>
+        <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT</a>
       </nav>
     </div>
   </footer>

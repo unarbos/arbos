@@ -11,10 +11,34 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 if [ "${1:-}" = "--rebuild" ] || [ ! -x "$ARBOS_BIN" ] || [ ! -x "$KERNEL_BIN" ]; then
-  log "building arbos-kernel and arbos-desktop (debug)"
-  (cd "$ARBOS_SRC" && cargo build -p arbos-kernel 2>&1 | tail -2)
-  (cd "$ARBOS_SRC/desktop" && cargo build 2>&1 | tail -2)
+  log "building arbos-kernel and arbos-desktop (debug); log at /tmp/arbos-build.log"
+  # A build that fails must stop the run here, loudly, with its log kept —
+  # not leave the previous binary in target/ for the launch below to run as
+  # if it were this tree's (rig audit R21; the QA loop's one-line
+  # "app build failed" cost it fifteen scenarios and the journey).
+  if ! (cd "$ARBOS_SRC" && cargo build -p arbos-kernel) >/tmp/arbos-build.log 2>&1; then
+    tail -40 /tmp/arbos-build.log >&2
+    log "BUILD FAILED: arbos-kernel (see /tmp/arbos-build.log); nothing launched"
+    exit 1
+  fi
+  if ! (cd "$ARBOS_SRC/desktop" && cargo build) >>/tmp/arbos-build.log 2>&1; then
+    tail -40 /tmp/arbos-build.log >&2
+    log "BUILD FAILED: arbos-desktop (see /tmp/arbos-build.log; the Linux packages are in desktop/BUILDING.md); nothing launched"
+    exit 1
+  fi
 fi
+
+# The binary about to run must be this tree's. `arbos-desktop --version`
+# prints `<version> <build> <sha>[-dirty]`; a sha that is not HEAD's means a
+# stale binary (a failed build, an old copy), and the run would measure the
+# wrong thing. ARBOS_ALLOW_STALE=1 says so on purpose (a release under test).
+tree_sha="$(git -C "$ARBOS_SRC" rev-parse --short=7 HEAD 2>/dev/null || true)"
+bin_line="$("$ARBOS_BIN" --version 2>/dev/null | head -n1 || true)"
+if [ -n "$tree_sha" ] && [ "${ARBOS_ALLOW_STALE:-0}" != "1" ] && ! grep -q -- "${tree_sha}" <<<"$bin_line"; then
+  log "STALE BINARY: $ARBOS_BIN is '$bin_line', tree is $tree_sha — rebuild (--rebuild) or set ARBOS_ALLOW_STALE=1; nothing launched"
+  exit 1
+fi
+log "desktop under test: $bin_line (tree $tree_sha)"
 
 # Model access. OpenRouter speaks the same HTTP API as OpenAI, so Arbos's
 # OpenAI client works with it unchanged.

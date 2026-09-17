@@ -32,10 +32,13 @@ fn feedback_hands_over_one_exchange_redacted_budgeted_and_bounded() {
         concat!(
             // Exchange 1, spawn-first: root spawns a worker and its turn ends;
             // the worker prints a key and writes a big file; the done wake
-            // opens root's second turn, which answers.
+            // opens root's second turn, which answers. The worker's `sleep 2`
+            // keeps its report behind root's first turn on a loaded runner:
+            // a report landing mid-turn would fold in and open no done wake,
+            // and the done wake inside the exchange is what this asserts.
             "{{\"agent\":\"root\",\"content\":\"delegating\",\"calls\":[{{\"name\":\"spawn\",\"arguments\":{{\"name\":\"checker\",\"task\":\"Do: bash `echo OPENROUTER_API_KEY=sk-or-v1-0123456789abcdef0123456789abcdef; seq 1 500`. Then write big.txt. Report.\"}}}}]}}\n",
             "{{\"agent\":\"root\",\"content\":\"checker is on it.\"}}\n",
-            "{{\"agent\":\"checker\",\"content\":\"checking\",\"calls\":[{{\"name\":\"bash\",\"arguments\":{{\"command\":\"echo OPENROUTER_API_KEY=sk-or-v1-0123456789abcdef0123456789abcdef; seq 1 500; exit 3\",\"description\":\"Env check\"}}}},{{\"name\":\"write\",\"arguments\":{{\"path\":\"big.txt\",\"content\":\"{big}\"}}}}]}}\n",
+            "{{\"agent\":\"checker\",\"content\":\"checking\",\"calls\":[{{\"name\":\"bash\",\"arguments\":{{\"command\":\"sleep 2; echo OPENROUTER_API_KEY=sk-or-v1-0123456789abcdef0123456789abcdef; seq 1 500; exit 3\",\"description\":\"Env check\"}}}},{{\"name\":\"write\",\"arguments\":{{\"path\":\"big.txt\",\"content\":\"{big}\"}}}}]}}\n",
             "{{\"agent\":\"checker\",\"content\":\"The env is set; big.txt written.\"}}\n",
             "{{\"agent\":\"root\",\"content\":\"checker reports the env is set.\"}}\n",
             // Exchange 2.

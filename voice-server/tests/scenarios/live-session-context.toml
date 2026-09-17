@@ -1,0 +1,55 @@
+# GPT-Live (--engine openai) is told the project, the chat on screen, and the workers.
+# The on-screen snapshot includes worker and tool rows; the kernel transcript adds an older
+# line and a tool whose body must not reach the model.
+title = "GPT-Live sees the project, the on-screen chat, and the workers"
+engine = "openai"
+path = "own"
+context = { recent = [
+  { role = "user", text = "Tidy the release notes." },
+  { role = "assistant", text = "Done: 14 entries grouped by area." },
+  { role = "worker", text = "rewrite-readme: Drafting the install section." },
+  { role = "tool", text = "bash (running)" },
+  { role = "notice", text = "rewound: last turn" },
+  { role = "asked", text = "asked: Ship the notes? → yes" },
+], agents = [{ name = "rewrite-readme", state = "working", step = "writing the README" }], running = true }
+
+[[history]]
+kind = "user"
+text = "Last sprint's plan is in NOTES.md"
+
+[[history]]
+kind = "assistant"
+text = "I read NOTES.md. The plan is three items."
+
+[[history]]
+kind = "tool"
+name = "bash"
+body = "SECRET_DIFF_BODY\nfn should_never_reach_live() {}\n-----DIFF-----"
+args = { cmd = "cargo test --offline" }
+
+[[steps]]
+pause = 2.5
+
+[expect]
+live_started = true
+live_sees = [
+  "PROJECT IDENTITY",
+  "ON-SCREEN CHAT",
+  "WORKERS AND ACTIVITY",
+  "Tidy the release notes",
+  "Done: 14 entries grouped by area",
+  "rewrite-readme",
+  "writing the README",
+  "bash (running)",
+  "rewound: last turn",
+  "Ship the notes",
+  "Last sprint's plan is in NOTES.md",
+  "cargo test --offline",
+  "The main agent had a turn running",
+]
+live_not_sees = [
+  "SECRET_DIFF_BODY",
+  "should_never_reach_live",
+  "-----DIFF-----",
+]
+user_frames = 0

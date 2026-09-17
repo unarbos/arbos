@@ -45,8 +45,9 @@ protocol VoiceSession: AnyObject {
 
 /// What the server said about itself in `session.ready`.
 struct VoiceServerInfo: Equatable {
-    /// `duplex` (one speech-to-speech model that answers on its own) or
-    /// `pipeline` (ASR → optional reply hop → TTS).
+    /// `duplex` (one speech-to-speech model that answers on its own),
+    /// `openai` (GPT-Live speaks; the kernel answers project questions
+    /// through client delegation) or `pipeline` (ASR → optional reply hop → TTS).
     var engine: String = ""
     /// Who answers spoken turns: `none` means the app must.
     var reply: String = ""
@@ -61,7 +62,7 @@ struct VoiceServerInfo: Equatable {
     /// True when the server produces the spoken reply itself, so the app
     /// must not forward transcripts to the kernel (that would answer twice).
     var answersItself: Bool {
-        engine == "duplex" || (!reply.isEmpty && reply != "none")
+        engine == "duplex" || engine == "openai" || (!reply.isEmpty && reply != "none")
     }
 }
 
@@ -121,6 +122,10 @@ enum VoiceEvent {
     case agentEvent(agent: String, kind: String, text: String, from: String?)
     case agentTurn(agent: String, running: Bool)
     case agentTree([KernelAgent])
+    /// The gateway's word on work: `working` (a turn is running), `tool`
+    /// (inside a tool call: `tool` and `detail` say which), or `idle`. The
+    /// working sound follows this and only this; a timer would lie.
+    case agentActivity(agent: String, state: String, tool: String?, detail: String?)
     case error(String)
     case closed
 }

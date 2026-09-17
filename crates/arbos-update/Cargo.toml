@@ -29,5 +29,12 @@ ring = "0.17"
 # rather than a second HTTP stack in the tree.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 
+# One call: the atomic exchange that keeps the installed path resolving
+# while it is replaced (`renamex_np` on macOS, `renameat2` on Linux).
+# `std::fs` has no way to swap two paths, and doing it as two renames is
+# the window this crate exists to not have.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

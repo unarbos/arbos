@@ -45,6 +45,7 @@ class Behaviour:
     approval: str = ""  # "bash: rm -rf target": an allow/deny ask before the reply; the reply says what happened
     reply_denied: str = ""  # the reply when the approval was denied (default: reply)
     tool_output_lines: int = 0  # a big tool body on the root transcript during the turn
+    tool_seconds: float = 1.0  # how long that tool "runs" between its live start and its recorded end
     steer_reply: str = ""  # what the running turn says when steered
 
 
@@ -308,7 +309,7 @@ class MockKernel:
         self.broadcast({"type": "turn", "agent": agent, "state": "running", "budget": None})
         await asyncio.sleep(b.reply_delay)
         if b.tool_output_lines:
-            self._tool(agent, "bash", b.tool_output_lines)
+            await self._tool(agent, "bash", b.tool_output_lines, b.tool_seconds)
         child: Child | None = b.spawn
         if child is not None:
             self._spawn(agent, child)
@@ -326,14 +327,20 @@ class MockKernel:
             await asyncio.sleep(child.done_after)
             await self._finish_child(agent, child, b.reply_after_done)
 
-    def _tool(self, agent: str, name: str, lines: int) -> None:
+    async def _tool(self, agent: str, name: str, lines: int, seconds: float = 0.0) -> None:
+        """A tool call the way the kernel shows one: a live `event` with no seq when it starts
+        (`ended` unset), the recorded line with its seq when it ends."""
+        call_id = f"c{self._next()}"
+        if seconds > 0:
+            self.broadcast({"type": "event", "agent": agent, "event": {"ts": now_ms(), "kind": "tool", "name": name, "call_id": call_id, "args": {"cmd": "pytest -q"}}})
+            await asyncio.sleep(seconds)
         body = "\n".join(
             f"[{i:04d}] test_skeptic.py::test_timeout ... {'FAILED' if i == lines - 3 else 'ok'}  (assert timeout == 30, got 60)"
             if i == lines - 3 else f"[{i:04d}] tests/test_module_{i % 17}.py::test_case_{i} ... ok"
             for i in range(lines)
         )
-        seq = self._append(agent, {"kind": "tool", "name": name, "call_id": f"c{self._next()}", "body": body, "result_size": len(body), "args": {"cmd": "pytest -q"}})
-        self.broadcast({"type": "event", "agent": agent, "event": {"seq": seq, "ts": now_ms(), "kind": "tool", "name": name, "call_id": f"c{seq}", "result_size": len(body)}})
+        seq = self._append(agent, {"kind": "tool", "name": name, "call_id": call_id, "body": body, "result_size": len(body), "args": {"cmd": "pytest -q"}, "ended": now_ms()})
+        self.broadcast({"type": "event", "agent": agent, "event": {"seq": seq, "ts": now_ms(), "kind": "tool", "name": name, "call_id": call_id, "result_size": len(body), "ended": now_ms()}})
 
     def _spawn(self, parent: str, child: Child) -> None:
         self.agents[child.name] = parent
@@ -393,7 +400,7 @@ class MockKernel:
 
     async def _finish_child(self, parent: str, child: Child, reply_after_done: str) -> None:
         if child.tool_output_lines:
-            self._tool(child.name, child.tool_name, child.tool_output_lines)
+            await self._tool(child.name, child.tool_name, child.tool_output_lines)
         seq = self._append(child.name, {"kind": "assistant", "text": child.last_words})
         self._append(child.name, {"kind": "turn_complete"})
         self.running.discard(child.name)

@@ -54,6 +54,11 @@ final class ChatStore: ObservableObject {
     /// Why this target cannot be reached at all (the hub does not know
     /// it); shown in place of the countdown, no retry.
     @Published private(set) var refusal: String?
+    /// A named reason the link is down that retrying could still cure — a
+    /// project's kernel not running, say. Unlike `refusal` it does not stop
+    /// the countdown; it only replaces "Link lost" with what is actually
+    /// missing.
+    @Published private(set) var standing: String?
 
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
@@ -87,9 +92,20 @@ final class ChatStore: ObservableObject {
     /// The last refusal said out loud. Retrying every ten seconds against an
     /// offline machine must not fill the chat with the same sentence.
     private var lastRefusal: String?
+    /// The last transport failure said out loud. The retry loop runs every
+    /// few seconds and must not write the same line each time round.
+    private var lastTransport: String?
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
     private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
+    /// Spoken lines this app put in the chat itself, so the kernel's replay
+    /// of the same question replaces them instead of doubling them.
+    private var spokenLocally: [(id: UUID, text: String)] = []
+    /// Set once the caller has heard this turn's answer out loud. A delegated
+    /// turn is answered twice — the kernel writes it and the voice says it in
+    /// its own words — and the chat shows the conversation, so the spoken
+    /// wording is the one that stays. Clears at the next question.
+    private var answerWasSpoken = false
     private let pathMonitor = NWPathMonitor()
     private var pathWasSatisfied = true
 
@@ -207,20 +223,34 @@ final class ChatStore: ObservableObject {
             try await live.start()
             mode = .live
             lastRefusal = nil
+            lastTransport = nil
+            standing = nil
             registerPushIfLive()
             return true
         } catch {
             #if DEBUG
             print("attach \(endpoint.url): \(error)")
             #endif
-            // A refusal the hub explained is said once, in its words. The
-            // silent case keeps the waiting card ("… is not answering —
-            // waiting"), which is the honest thing to show when nobody has
-            // told us anything; saying more than we know is how a client
-            // ends up describing its own plumbing to the user.
-            if let reason = refusal(from: error), reason != lastRefusal {
-                lastRefusal = reason
-                items.append(ChatItem(.notice(reason, failed: true)))
+            // Two different things wearing the same coat. A refusal is a
+            // verdict — somebody said no and meant it, so say their reason
+            // and stop. A transport failure is the path, which usually
+            // clears by itself, so name it and keep trying. The app had
+            // these the wrong way round.
+            switch failure(from: error) {
+            case .refusal(let why)?:
+                let said = Self.inPlainWords(why)
+                if said != lastRefusal {
+                    lastRefusal = said
+                    items.append(ChatItem(.notice(said, failed: true)))
+                }
+                refusal = said
+            case .transport(let what)?:
+                if what != lastTransport {
+                    lastTransport = what
+                    items.append(ChatItem(.notice(what, failed: false)))
+                }
+            case nil:
+                break
             }
         }
         live.stop()
@@ -246,6 +276,13 @@ final class ChatStore: ObservableObject {
         if let project = quoted(in: text), text.contains("no project named") {
             return "\(project) isn't on that machine any more."
         }
+        // Arrived with #417: the machine is registered and the project is
+        // known, and nothing is serving it. Different from the two above,
+        // and different from what to do about it.
+        if let project = quoted(in: text), text.contains("has no kernel serving") {
+            let machine = text.split(separator: " ").first.map(String.init) ?? "its machine"
+            return "\(project)'s kernel on \(machine) isn't running."
+        }
         return text
     }
 
@@ -257,15 +294,16 @@ final class ChatStore: ObservableObject {
         return name.isEmpty ? nil : name
     }
 
-    /// The other end's own words, when the failure carries them. Transport
-    /// errors are not refusals and are left to the waiting card.
-    private func refusal(from error: Error) -> String? {
-        guard case KernelClientError.failed(let reason) = error else { return nil }
-        let text = reason.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !text.hasPrefix("The operation couldn"),
-              !text.contains("Socket is not connected"), text != "closed"
-        else { return nil }
-        return text.prefix(1).uppercased() + text.dropFirst()
+    /// What kind of failure this was, when the error carries the answer.
+    private func failure(from error: Error) -> KernelFailure? {
+        guard case KernelClientError.failed(let failure) = error else { return nil }
+        let text = failure.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let said = text.prefix(1).uppercased() + text.dropFirst()
+        switch failure {
+        case .refusal: return .refusal(said)
+        case .transport: return .transport(said)
+        }
     }
 
     /// Stop, as the kernel's stall notice offers it: the turn ends, what
@@ -301,6 +339,16 @@ final class ChatStore: ObservableObject {
     /// it holds (the path monitor cuts the wait short when the network
     /// returns). `reconnectIn` counts down for the chat's notice.
     private func scheduleReconnect() {
+        // Somebody said no and gave a reason. Trying the same thing every
+        // few seconds will get the same answer, and the countdown suggests
+        // to the user that waiting will help. `reconnect()` clears the
+        // refusal, so a deliberate retry still works.
+        guard refusal == nil else {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            reconnectIn = nil
+            return
+        }
         reconnectTask?.cancel()
         let delay = min(15, 2 << min(reconnectAttempt, 3))
         reconnectAttempt += 1
@@ -381,6 +429,46 @@ final class ChatStore: ObservableObject {
         onSeen?(last)
     }
 
+    /// A line said out loud on the call, put in the chat so the
+    /// conversation reads there afterwards. **Display only**: it is never
+    /// sent anywhere and never wakes the kernel. Typed lines still go
+    /// through `send`, which does.
+    ///
+    /// A delegated turn is worded twice: the kernel writes an answer and the
+    /// voice says it in its own words. The chat shows the conversation, so
+    /// the spoken wording is the one that stays and the kernel's goes. The
+    /// question is the other way round — one line either way, never two.
+    func spoke(_ text: String, byUser: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var item = ChatItem(byUser ? .user(trimmed) : .agent(trimmed, streaming: false))
+        item.spoken = true
+        if byUser {
+            answerWasSpoken = false
+        } else {
+            // The kernel's wording of the same answer, if it got here first.
+            dropKernelWordingOfThisTurn()
+            answerWasSpoken = true
+        }
+        items.append(item)
+        if byUser {
+            spokenLocally.append((item.id, trimmed))
+            if spokenLocally.count > 20 { spokenLocally.removeFirst() }
+        }
+    }
+
+    /// Removes the kernel's own reply text for the turn in progress, leaving
+    /// its record of the work — the tool lines and the time it took — alone.
+    /// Those say what happened; only the prose is said twice.
+    private func dropKernelWordingOfThisTurn() {
+        closeOpenAgentMessage()
+        let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }).map { $0 + 1 } ?? 0
+        guard turnStart < items.count else { return }
+        let written = Set(items[turnStart...].filter { $0.isAgent && !$0.spoken }.map(\.id))
+        guard !written.isEmpty else { return }
+        items.removeAll { written.contains($0.id) }
+    }
+
     /// A line the app itself has to say (a picker or dictation problem).
     /// `failed` is red, and is for something that went wrong and stayed
     /// wrong. A setback the app has already handled is said in the calm
@@ -453,6 +541,7 @@ final class ChatStore: ObservableObject {
         // makes it real. A turn already running gets the new words as a
         // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
+        answerWasSpoken = false
         if !unseen.isEmpty { markSeen() }
         // Files are named on the card; photos are drawn on it.
         let files = attachments.filter { !$0.isImage }
@@ -518,6 +607,18 @@ final class ChatStore: ObservableObject {
             earlierLines = earlier
             firstSeq = first
         case .item(let item):
+            if case .user = item.kind { answerWasSpoken = false }
+            // This turn's answer was already said out loud, in the voice's
+            // own words. The kernel's wording of it is the second telling.
+            if item.isAgent, answerWasSpoken { return }
+            // The kernel's own record of a question that was spoken here:
+            // one line, not two. The spoken copy goes and the kernel's stays,
+            // because the kernel's carries its seq and its answer.
+            if case .user(let text, _) = item.kind,
+               let spokenIndex = spokenLocally.firstIndex(where: { $0.text == text }) {
+                let local = spokenLocally.remove(at: spokenIndex)
+                items.removeAll { $0.id == local.id }
+            }
             if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text || ($0.text.isEmpty && text.isEmpty) }) {
                 // The kernel echoed a line typed here: the pending card is real now.
                 let pending = pendingSends.remove(at: index)
@@ -537,6 +638,7 @@ final class ChatStore: ObservableObject {
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta, let step):
+            if answerWasSpoken { return }
             if let sentAt {
                 lastFirstToken = Date().timeIntervalSince(sentAt)
                 self.sentAt = nil
@@ -556,6 +658,7 @@ final class ChatStore: ObservableObject {
         case .agentDone:
             closeOpenAgentMessage()
         case .agentReplace(let raw, let step):
+            if answerWasSpoken { return }
             let text = ToolMarkup.strip(raw)
             // The step's own item when the kernel numbers steps; the last
             // agent item when it does not (older kernels). Steps restart
@@ -604,6 +707,9 @@ final class ChatStore: ObservableObject {
             }
         case .turn(let running):
             busy = running
+            // A fresh turn: whatever was last said out loud belongs to the
+            // one before it, and must not swallow this one's text.
+            if running { answerWasSpoken = false }
             if !running { closeOpenAgentMessage() }
         case .notify(let notification):
             // Live, with the chat in front: the user is reading it — seen,
@@ -654,10 +760,17 @@ final class ChatStore: ObservableObject {
             identity = face
         case .store(let address):
             store = address
-        case .dropped:
+        case .dropped(let why):
             // One calm line under the transcript (the mode notice), not an
             // error plus a reassurance. A second drop for the same close
             // (the hub's word, then the socket) leaves the countdown alone.
+            //
+            // The line keeps retrying either way, because a kernel that is
+            // not running can start; it just says which thing is not there
+            // when the hub told us. "Link lost" is wrong for a live link and
+            // a stopped kernel, and the two want different things of Jacob.
+            let named = Self.inPlainWords(why)
+            standing = named == why ? nil : named
             guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false

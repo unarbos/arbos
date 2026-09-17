@@ -378,10 +378,21 @@ async fn drive(
             .as_str()
             .context("session/new returned no sessionId")?
             .to_string();
-        let _ = std::fs::write(
+        if let Err(e) = std::fs::write(
             &session_path,
             json!({"sessionId": id, "command": command_for(place, agent)}).to_string(),
-        );
+        ) {
+            // The next ACP turn opens a fresh session: the tool's context
+            // from this one is not carried over.
+            crate::klog::warn(
+                "acp_session_unsaved",
+                Some(agent.id.as_str()),
+                format!(
+                    "{}: {e} — the next turn starts a fresh session",
+                    session_path.display()
+                ),
+            );
+        }
         session_id = Some(id);
     }
     let session_id = session_id.unwrap();

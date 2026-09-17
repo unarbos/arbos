@@ -8,7 +8,7 @@
 
 use crate::{
     kernel::{self, HostSummary},
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, Line, SettingsPane},
 };
 use arbos_core::host::{KeySource, ProviderKind};
 use bezel::{
@@ -45,7 +45,7 @@ pub(super) enum Note {
 }
 
 impl HostPanel {
-    pub fn new(cx: &mut Context<SettingsWindow>) -> Self {
+    pub fn new(cx: &mut Context<SettingsPane>) -> Self {
         let summary = kernel::host_summary();
         let key_field = cx.new(|cx| {
             TextField::new(cx)
@@ -63,7 +63,7 @@ impl HostPanel {
         for field in [&key_field, &base_field, &model_search] {
             cx.subscribe(
                 field,
-                |_this: &mut SettingsWindow, _, event: &FieldEvent, cx| {
+                |_this: &mut SettingsPane, _, event: &FieldEvent, cx| {
                     if *event == FieldEvent::Changed {
                         cx.notify();
                     }
@@ -86,7 +86,7 @@ impl HostPanel {
     }
 }
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn model_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let panel = &self.host;
@@ -102,8 +102,7 @@ impl SettingsWindow {
                     .map(|e| theme.error_strip(format!("config.toml did not parse: {e}"))),
             )
             .child(
-                theme
-                    .group_box()
+                settings::rows()
                     .child(self.provider_row(cx))
                     .children(
                         (self.host.summary.provider == ProviderKind::Custom)
@@ -124,8 +123,7 @@ impl SettingsWindow {
         let theme = Theme::of(cx).clone();
         let current = self.host.summary.provider;
         let base = self.host.summary.base.clone();
-        theme
-            .card_row(true)
+        settings::row(true, &theme)
             .child(
                 div()
                     .flex_1()
@@ -211,37 +209,19 @@ impl SettingsWindow {
                     format!("The kernel of the open chat has no key for {}.", k.provider)
                 }
             });
-        theme
-            .card_row(false)
+        let mut lines = vec![if missing {
+            Line::warn(status)
+        } else {
+            Line::say(status)
+        }];
+        lines.extend(kernel_line.map(Line::say));
+        // Stacked: the field and its buttons are wider than a toggle, and hard
+        // right they left the key's instructions wrapping in a quarter of the
+        // column.
+        settings::stacked_row(false, &theme)
+            .child(settings::label_block("API key", lines, &theme))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("API key"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(if missing {
-                                theme.warning_muted
-                            } else {
-                                theme.text_muted
-                            })
-                            .child(status),
-                    )
-                    .children(kernel_line.map(|line| {
-                        div()
-                            .mt(px(2.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child(line)
-                    })),
-            )
-            .child(
-                div()
-                    .flex_none()
                     .flex()
                     .flex_row()
                     .items_center()
@@ -249,7 +229,8 @@ impl SettingsWindow {
                     .child(
                         div()
                             .id("key-field")
-                            .w(px(220.))
+                            .flex_1()
+                            .min_w_0()
                             .child(self.host.key_field.clone()),
                     )
                     .child(
@@ -293,8 +274,7 @@ impl SettingsWindow {
     /// The Custom provider's base URL, typed.
     fn base_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
-        theme
-            .card_row(false)
+        settings::row(false, &theme)
             .child(
                 div()
                     .flex_1()
@@ -375,7 +355,7 @@ impl SettingsWindow {
         let no_match = !query.is_empty() && picks.is_empty();
         let typed_model = (!query.is_empty())
             .then(|| self.host.model_search.read(cx).content().trim().to_string());
-        theme.card_row(false).child(
+        settings::row(false, &theme).child(
             div()
                 .flex_1()
                 .min_w_0()
@@ -469,32 +449,17 @@ impl SettingsWindow {
         let theme = Theme::of(cx).clone();
         let path = self.host.summary.config_path.clone();
         let shown = path.display().to_string();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(settings::LABEL_GAP))
-            .child(theme.field_label("File"))
+        settings::group("File", &theme)
             .child(
-                theme.group_box().child(
-                    theme
-                        .card_row(true)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(theme.row_title("config.toml"))
-                                .child(
-                                    div()
-                                        .mt(px(4.))
-                                        .text_style(TextStyle::Subheadline)
-                                        .text_color(theme.text_muted)
-                                        .child(format!(
-                                            "{shown} — the same file `arbos-kernel setup` writes."
-                                        )),
-                                ),
-                        )
+                settings::rows().child(
+                    settings::row(true, &theme)
+                        .child(settings::label_block(
+                            "config.toml",
+                            vec![Line::say(format!(
+                                "{shown} — the same file `arbos-kernel setup` writes."
+                            ))],
+                            &theme,
+                        ))
                         .child(
                             theme
                                 .button("Reveal", ButtonStyle::Ghost, None)

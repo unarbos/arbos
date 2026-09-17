@@ -51,6 +51,15 @@ pub const SCREENSHOT_NAME: &str = "screenshot.b64";
 /// worse than a small one.
 pub const SHOT_MAX_BASE64: usize = 900 * 1024;
 
+/// How much of the desktop's own state a report carries.
+///
+/// Jacob's ruling: the bundle holds what is needed to debug it, his app's
+/// internals included. A place's session records hold whole chats, so this
+/// bounds them — and what will not fit is counted and named rather than
+/// dropped in silence, which is the fault this feature has spent a day
+/// removing.
+pub const DESKTOP_STATE_BUDGET: usize = 128 * 1024;
+
 /// A picture is scaled to this width before it is encoded.
 ///
 /// A bug report does not need Retina pixels; it needs to show what the window
@@ -285,6 +294,11 @@ impl Draft {
             "children": children,
             "agents": if self.parts.trajectory { b.agents } else { vec![] },
             "log": if self.parts.log { b.log } else { vec![] },
+            // The window's own state: the rows it draws and the facts behind
+            // them, the session records on disk, the tabs and the focus. The
+            // kernel's roster and agent list are in `place` and `agents` above,
+            // so the two sides can be set against each other — which is the
+            // only way a report can show a row the kernel has no agent for.
             "session": if self.parts.session {
                 self.session.clone().unwrap_or(Value::Null)
             } else {
@@ -506,22 +520,77 @@ pub fn log_lines(log: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// What the app itself believes the chat holds. Deliberately shallow: the
-/// point is whether its count and its kinds match the transcript, not its
-/// internals.
-pub fn session_lines(session: &Value) -> Vec<String> {
-    let Some(items) = session.get("items").and_then(Value::as_array) else {
-        return vec!["(the app kept no view of this chat)".into()];
-    };
-    let mut out = vec![format!("{} items drawn in this chat", items.len())];
-    out.extend(items.iter().take(60).enumerate().map(|(n, item)| {
-        let kind = item
-            .as_object()
-            .and_then(|o| o.keys().next().cloned())
-            .unwrap_or_else(|| "?".into());
-        format!("{}. {kind}", n + 1)
-    }));
+/// What the window knows, set against what the kernel knows.
+///
+/// This does the comparison rather than leaving it to a reader, because the
+/// comparison *is* the diagnosis. F-137 was a `Delegate 1 · Working` row for an
+/// agent the kernel had never heard of, and finding that out meant fetching the
+/// window's state from Jacob's machine by hand. A row the kernel has no agent
+/// for is now named as such, here, in the sheet he is looking at and in the
+/// report an agent reads.
+pub fn session_lines(session: &Value, kernel_agents: &[Value]) -> Vec<String> {
+    if session.is_null() {
+        return vec!["(the app kept no view of this place)".into()];
+    }
+    let known: Vec<&str> = kernel_agents
+        .iter()
+        .filter_map(|a| a.get("id").and_then(Value::as_str))
+        .collect();
+
+    let mut out = Vec::new();
+    let rows = session.get("rows").and_then(Value::as_array);
+    if let Some(rows) = rows {
+        out.push(format!(
+            "{} drawn in this place; the kernel has {}",
+            plural(rows.len(), "row"),
+            plural(known.len(), "agent")
+        ));
+        for row in rows.iter().take(40) {
+            let s = |k: &str| row.get(k).and_then(Value::as_str).unwrap_or("");
+            let label = s("label");
+            let agent = s("agent");
+            let mut line = format!("{label} — agent {}", if agent.is_empty() { "(none)" } else { agent });
+            if row.get("streaming").and_then(Value::as_bool) == Some(true) {
+                line.push_str(", streaming");
+            }
+            if let Some(n) = row.get("live_work").and_then(Value::as_u64).filter(|n| *n > 0) {
+                line.push_str(&format!(", {} running", plural(n as usize, "job")));
+            }
+            if let Some(status) = row.get("status").and_then(Value::as_str) {
+                line.push_str(&format!(", says \"{}\"", clip(status, 40)));
+            }
+            // The disagreement, called by its name.
+            if !agent.is_empty() && !known.is_empty() && !known.contains(&agent) {
+                line.push_str("  ← THE KERNEL HAS NO AGENT BY THIS NAME");
+            }
+            out.push(line);
+        }
+    }
+    if let Some(records) = session.get("records").and_then(Value::as_array) {
+        out.push(format!("{} on disk", plural(records.len(), "session record")));
+        if let Some(note) = session.get("records_note").and_then(Value::as_str) {
+            out.push(note.to_string());
+        }
+    }
+    if let Some(items) = session
+        .get("drawn")
+        .and_then(|d| d.get("items"))
+        .and_then(Value::as_array)
+    {
+        out.push(format!("{} drawn in the chat in front", plural(items.len(), "item")));
+    }
+    if out.is_empty() {
+        out.push("(the app kept no view of this place)".into());
+    }
     out
+}
+
+fn plural(n: usize, one: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {one}s")
+    }
 }
 
 fn clock_of(ms: i64) -> String {
@@ -598,19 +667,148 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Where reports wait for delivery: on his own disk, under the project's
-/// `.arbos/`, beside the sessions the app already keeps there.
+/// Where reports wait for delivery when the place is a folder on this machine:
+/// under the project's own `.arbos/`, beside the sessions the app already keeps
+/// there.
+///
+/// **Only for a local, absolute place.** Use [`outbox_for`], which decides.
 pub fn outbox(place: &Place) -> PathBuf {
     place.arbos().join("desktop").join("feedback-outbox")
 }
 
-/// Write the report to the outbox and return its folder.
+/// Where a report about this place is staged.
 ///
-/// This runs before anything is sent, and its success is what the sheet
-/// calls "sent". A report is on disk or it is not; there is no state where
-/// he pressed the button and nothing exists.
-pub fn write(place: &Place, draft: &Draft, id: &str, now_ms: i64) -> Result<PathBuf> {
-    let dir = outbox(place).join(id);
+/// A remote place's path is not a local path, and treating one as the other is
+/// what stranded Jacob's report. His tab is `ArbosLife:~`, whose path is the
+/// literal string `~` — so the outbox came out **relative**, was resolved
+/// against the app's working directory, and a Finder-launched app has that as
+/// `/`. `mkdir /~` is `Read-only file system (os error 30)` on macOS, which is
+/// the error he saw.
+///
+/// Failing was the visible half. The quiet half is worse: a remote path that
+/// *happens* to exist on this machine — `/Users/jacob/proj` on his laptop and on
+/// the box — would have staged his report into the local folder of that name and
+/// said nothing. Misfiling beats failing only in that nobody notices.
+///
+/// So anything not plainly local and absolute is staged under the app's own
+/// support directory, keyed by the place rather than inside it.
+pub fn outbox_for(place: &Place, host: Option<&str>) -> PathBuf {
+    if host.is_none() && place.path().is_absolute() {
+        return outbox(place);
+    }
+    let root = crate::model::settings::data_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("arbos-desktop"))
+        .join("feedback-outbox");
+    root.join(place_key(place, host))
+}
+
+/// A readable, filesystem-safe name for a place that is not on this disk.
+///
+/// Readable rather than hashed, because whoever finds one of these folders
+/// should be able to tell whose report it is without a lookup.
+fn place_key(place: &Place, host: Option<&str>) -> String {
+    let raw = match host {
+        Some(host) => format!("{host}:{}", place.path().to_string_lossy()),
+        None => place.path().to_string_lossy().into_owned(),
+    };
+    let mut key: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Trim the runs a path leaves behind, and keep it short enough for any
+    // filesystem. Two places whose names collide after 96 characters would
+    // share an outbox, so the raw length goes on the end to part them.
+    while key.contains("--") {
+        key = key.replace("--", "-");
+    }
+    let key = key.trim_matches('-').to_string();
+    if key.chars().count() > 96 {
+        format!(
+            "{}-{}",
+            key.chars().take(96).collect::<String>(),
+            raw.len()
+        )
+    } else if key.is_empty() {
+        "unnamed".into()
+    } else {
+        key
+    }
+}
+
+/// Everywhere a report could be staged, best first.
+///
+/// A report must never depend on one writable location. Jacob's home directory
+/// went read-only, so the project's own outbox could not even be created — and
+/// the sheet told him "could not write the report", offered Close and Send
+/// again, and his words existed only in a text field. That is the one shape
+/// this design exists to prevent.
+///
+/// The project's `.arbos/` stays first because delivery and the loop's
+/// `fixed.json` writeback both belong beside it. After that, anywhere: the
+/// app's own data directory, then the system temp folder, which survives a
+/// read-only home.
+fn outbox_candidates(place: &Place, host: Option<&str>) -> Vec<(PathBuf, Option<&'static str>)> {
+    let mut out = vec![(outbox_for(place, host), None)];
+    if let Ok(data) = crate::model::settings::data_dir() {
+        out.push((
+            data.join("feedback-outbox"),
+            Some("the app's own folder, because the project's could not be written"),
+        ));
+    }
+    out.push((
+        std::env::temp_dir().join("arbos-feedback-outbox"),
+        Some("this machine's temporary folder, because nothing else could be written"),
+    ));
+    out
+}
+
+/// Where a report was staged, and whether that was its usual home.
+#[derive(Clone, Debug)]
+pub struct Written {
+    pub dir: PathBuf,
+    /// Set when the report is not in the project's own outbox: what to tell
+    /// him, because a report saved somewhere unexpected is only honest if it
+    /// says where.
+    pub elsewhere: Option<&'static str>,
+}
+
+/// Write the report to the first outbox that will take it.
+///
+/// This runs before anything is sent, and its success is what the sheet calls
+/// "sent". A report is on disk or it is not; there is no state where he pressed
+/// the button and nothing exists — and now no single unwritable folder can put
+/// him in one.
+pub fn write(
+    place: &Place,
+    host: Option<&str>,
+    draft: &Draft,
+    id: &str,
+    now_ms: i64,
+) -> Result<Written> {
+    let mut refusals = Vec::new();
+    for (root, elsewhere) in outbox_candidates(place, host) {
+        match write_into(&root, draft, id, now_ms) {
+            Ok(dir) => {
+                remember_outbox_root(&root);
+                return Ok(Written { dir, elsewhere });
+            }
+            Err(e) => refusals.push(format!("{}: {e:#}", root.display())),
+        }
+    }
+    anyhow::bail!(
+        "nowhere on this machine would take it — {}",
+        refusals.join("; ")
+    )
+}
+
+fn write_into(root: &Path, draft: &Draft, id: &str, now_ms: i64) -> Result<PathBuf> {
+    let dir = root.join(id);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("make the outbox folder {}", dir.display()))?;
 
@@ -639,9 +837,6 @@ pub fn write(place: &Place, draft: &Draft, id: &str, now_ms: i64) -> Result<Path
     // Last, and only once everything else is on disk: delivery looks for
     // this file, so a half-written report is never picked up.
     write_atomic(&dir.join("ready"), b"")?;
-    // And note the place, so this report is retried whether or not the project
-    // is still open. He closes a project because the thing he reported is over.
-    remember_outbox(place);
     Ok(dir)
 }
 
@@ -798,7 +993,7 @@ fn put(
 /// the loop can write `fixed.json` back into it and the app can tell him which
 /// build carries the fix.
 pub fn deliver_pending(
-    place: &Place,
+    root: &Path,
     base: &str,
     hub_home: &Path,
     now_ms: i64,
@@ -810,7 +1005,7 @@ pub fn deliver_pending(
         // thirty seconds.
         return out;
     }
-    for dir in pending(place) {
+    for dir in pending(root) {
         let state = state_of(&dir);
         if let Delivery::Waiting { attempts, .. } = &state
             && !due(&dir, *attempts, now_ms)
@@ -924,58 +1119,92 @@ fn registry_path() -> Option<PathBuf> {
         .map(|dir| dir.join("feedback-outboxes.json"))
 }
 
-/// Note that this place holds reports. Idempotent.
-pub fn remember_outbox(place: &Place) {
+/// Note that reports are staged under `root`. Idempotent.
+///
+/// The *root*, not the place: with a fallback in play the outbox is no longer
+/// derivable from the project, and a report staged in the temp folder because
+/// his home went read-only has to be findable from the list alone.
+pub fn remember_outbox_root(root: &Path) {
     let Some(path) = registry_path() else { return };
-    let mut places = read_registry(&path);
-    let here = place.path().to_string_lossy().into_owned();
-    if places.iter().any(|p| p == &here) {
+    remember_outbox_root_at(&path, root);
+}
+
+/// The same, against a named registry file.
+///
+/// Split out so a test can name its own file instead of pointing
+/// `XDG_DATA_HOME` at a scratch folder: that is process-global, and tests run
+/// in parallel, so one test's registry became another's — the same class of
+/// flake as two tests sharing a scratch directory.
+fn remember_outbox_root_at(path: &Path, root: &Path) {
+    let mut roots = read_registry(path);
+    let here = root.to_string_lossy().into_owned();
+    if roots.iter().any(|p| p == &here) {
         return;
     }
-    places.push(here);
+    roots.push(here);
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&path, json!({"places": places}).to_string() + "\n");
+    let _ = std::fs::write(path, json!({"roots": roots}).to_string() + "\n");
 }
 
 fn read_registry(path: &Path) -> Vec<String> {
-    std::fs::read_to_string(path)
+    let Some(v) = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| {
-            v.get("places").and_then(Value::as_array).map(|a| {
-                a.iter()
-                    .filter_map(|p| p.as_str().map(str::to_string))
-                    .collect()
-            })
-        })
-        .unwrap_or_default()
-}
-
-/// Every place known to hold an outbox, open or not.
-///
-/// A place whose outbox folder has gone — the project deleted, the store
-/// cleared — is dropped from the list as it is read, so this cannot grow for
-/// ever from folders that no longer exist.
-pub fn known_outboxes() -> Vec<Place> {
-    let Some(path) = registry_path() else {
+    else {
         return vec![];
     };
-    let all = read_registry(&path);
-    let (alive, gone): (Vec<String>, Vec<String>) = all
-        .iter()
-        .cloned()
-        .partition(|p| outbox(&Place::new(p)).is_dir());
-    if !gone.is_empty() {
-        let _ = std::fs::write(&path, json!({"places": alive}).to_string() + "\n");
+    // `roots` now; `places` is what earlier builds wrote, and a place's outbox
+    // is derivable from it, so those are read once and carried across rather
+    // than losing whatever is waiting in them.
+    let mut out: Vec<String> = v
+        .get("roots")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    if let Some(old) = v.get("places").and_then(Value::as_array) {
+        for place in old.iter().filter_map(Value::as_str) {
+            // Only absolute ones: a relative root recorded by an older build
+            // is the bug this release fixes, and re-adding it would point the
+            // drain at `/~/...` again.
+            let candidate = outbox(&Place::new(place));
+            if !candidate.is_absolute() {
+                continue;
+            }
+            let root = candidate.to_string_lossy().into_owned();
+            if !out.contains(&root) {
+                out.push(root);
+            }
+        }
     }
-    alive.into_iter().map(Place::new).collect()
+    out
 }
 
-/// Reports written and not yet delivered, oldest first.
-pub fn pending(place: &Place) -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = std::fs::read_dir(outbox(place))
+/// Every outbox known to hold reports, whatever is open.
+///
+/// A root that has gone — the project deleted, the temp folder cleared — is
+/// dropped as the list is read, so this cannot grow for ever.
+pub fn known_outboxes() -> Vec<PathBuf> {
+    match registry_path() {
+        Some(path) => known_outboxes_at(&path),
+        None => vec![],
+    }
+}
+
+fn known_outboxes_at(path: &Path) -> Vec<PathBuf> {
+    let all = read_registry(path);
+    let (alive, gone): (Vec<String>, Vec<String>) =
+        all.iter().cloned().partition(|p| Path::new(p).is_dir());
+    if !gone.is_empty() {
+        let _ = std::fs::write(path, json!({"roots": alive}).to_string() + "\n");
+    }
+    alive.into_iter().map(PathBuf::from).collect()
+}
+
+/// Reports written under `root` and not yet delivered, oldest first.
+pub fn pending(root: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = std::fs::read_dir(root)
         .into_iter()
         .flatten()
         .flatten()
@@ -1332,12 +1561,47 @@ mod tests {
             "00:00:55 warn attach.drop — peer went away"
         );
         assert_eq!(
-            session_lines(&json!({"items": [{"User": {}}, {"Assistant": {}}]}))[0],
-            "2 items drawn in this chat"
+            session_lines(&Value::Null, &[])[0],
+            "(the app kept no view of this place)"
         );
-        assert_eq!(
-            session_lines(&Value::Null)[0],
-            "(the app kept no view of this chat)"
+    }
+
+    /// The report has to answer F-137 by itself: a row the window draws for an
+    /// agent the kernel has never heard of. A report carrying one side cannot
+    /// show a disagreement, so both sides travel and the comparison is done
+    /// here rather than left to whoever reads it.
+    #[test]
+    fn a_row_the_kernel_has_no_agent_for_is_named_as_such() {
+        let state = json!({
+            "rows": [
+                {"label": "Main", "agent": "root", "streaming": false, "live_work": 0},
+                {"label": "Delegate 1", "agent": "ghost-7", "streaming": true, "live_work": 1,
+                 "status": "Working"},
+            ],
+            "records": [{"agent": "ghost-7", "delegate_number": 1}],
+            "records_note": "every session record is here",
+        });
+        let kernel = vec![json!({"id": "root", "running": false})];
+        let lines = session_lines(&state, &kernel);
+
+        assert_eq!(lines[0], "2 rows drawn in this place; the kernel has 1 agent");
+        assert!(!lines[1].contains("NO AGENT"), "root is known: {}", lines[1]);
+        assert!(
+            lines[2].contains("THE KERNEL HAS NO AGENT BY THIS NAME"),
+            "the phantom row is named: {}",
+            lines[2]
+        );
+        assert!(lines[2].contains("Delegate 1") && lines[2].contains("ghost-7"));
+        assert!(lines[2].contains("streaming") && lines[2].contains("1 job running"));
+        assert!(lines[2].contains(r#"says "Working""#), "{}", lines[2]);
+        assert!(lines.iter().any(|l| l == "1 session record on disk"));
+
+        // With no kernel list at all nothing is accused: an empty list means the
+        // kernel did not answer, not that every row is a phantom.
+        let quiet = session_lines(&state, &[]);
+        assert!(
+            !quiet.iter().any(|l| l.contains("NO AGENT")),
+            "no kernel side, no accusation: {quiet:?}"
         );
     }
 
@@ -1522,7 +1786,7 @@ mod tests {
         let place = Place::new(dir.path());
         let mut draft = Draft::new(Parts::default());
         draft.note = "it froze".into();
-        write(&place, &draft, "20260916T154210Z-aa11", 1_789_573_330_000).unwrap();
+        write(&place, None, &draft, "20260916T154210Z-aa11", 1_789_573_330_000).unwrap();
         (dir, place)
     }
 
@@ -1532,11 +1796,11 @@ mod tests {
     #[test]
     fn with_no_address_a_report_waits_instead_of_failing() {
         let (_dir, place) = outbox_with_one_report();
-        assert_eq!(pending(&place).len(), 1);
-        assert!(deliver_pending(&place, "", Path::new("/nonexistent"), 0).is_empty());
-        assert!(deliver_pending(&place, "   ", Path::new("/nonexistent"), 0).is_empty());
+        assert_eq!(pending(&outbox(&place)).len(), 1);
+        assert!(deliver_pending(&outbox(&place), "", Path::new("/nonexistent"), 0).is_empty());
+        assert!(deliver_pending(&outbox(&place), "   ", Path::new("/nonexistent"), 0).is_empty());
         // And it is still there to send later.
-        assert_eq!(pending(&place).len(), 1);
+        assert_eq!(pending(&outbox(&place)).len(), 1);
     }
 
     /// A report that will not go is retried on a widening delay, and its
@@ -1544,7 +1808,7 @@ mod tests {
     #[test]
     fn a_report_that_will_not_go_backs_off_and_keeps_its_reason() {
         let (_dir, place) = outbox_with_one_report();
-        let dir = pending(&place).remove(0);
+        let dir = pending(&outbox(&place)).remove(0);
 
         assert_eq!(
             state_of(&dir),
@@ -1555,7 +1819,7 @@ mod tests {
         // An address the kernel cannot resolve: the attempt fails, and the
         // kernel's own words are what is kept.
         let now = 1_789_573_400_000;
-        let out = deliver_pending(&place, "arbos://nowhere/nothing/internal/feedback", Path::new("/nonexistent"), now);
+        let out = deliver_pending(&outbox(&place), "arbos://nowhere/nothing/internal/feedback", Path::new("/nonexistent"), now);
         assert_eq!(out.len(), 1);
         let Delivery::Waiting { attempts, last_error, .. } = &out[0].1 else {
             panic!("a report with no hub cannot have been sent: {:?}", out[0].1);
@@ -1575,7 +1839,7 @@ mod tests {
         assert!(due(&dir, 99, now + 3_601_000));
 
         // It is still pending, because nothing marked it delivered.
-        assert_eq!(pending(&place).len(), 1);
+        assert_eq!(pending(&outbox(&place)).len(), 1);
     }
 
     /// Every project's outbox is drained, not only the one on screen. A report
@@ -1589,7 +1853,7 @@ mod tests {
         for (n, place) in [(1, &pa), (2, &pb)] {
             let mut draft = Draft::new(Parts::default());
             draft.note = format!("report {n}");
-            write(place, &draft, &format!("20260916T15421{n}Z-aa11"), 1_789_573_330_000).unwrap();
+            write(place, None, &draft, &format!("20260916T15421{n}Z-aa11"), 1_789_573_330_000).unwrap();
         }
         // As the drain does it: every open place, one pass.
         let now = 1_789_573_400_000;
@@ -1597,7 +1861,7 @@ mod tests {
             .iter()
             .flat_map(|place| {
                 deliver_pending(
-                    place,
+                    &outbox(place),
                     "arbos://nowhere/nothing/internal/feedback",
                     Path::new("/nonexistent"),
                     now,
@@ -1613,44 +1877,171 @@ mod tests {
         }
         // And both are still there to try again — nothing was dropped for
         // being in the wrong project.
-        assert_eq!(pending(&pa).len(), 1);
-        assert_eq!(pending(&pb).len(), 1);
+        assert_eq!(pending(&outbox(&pa)).len(), 1);
+        assert_eq!(pending(&outbox(&pb)).len(), 1);
     }
 
-    /// A report from a project he has since closed is still retried.
-    ///
-    /// Two of Jacob's sat at attempt three with a reason that had already been
-    /// fixed, because the sweep walked the list of *open* places. He closes a
-    /// project because the thing he was reporting is over, so the outbox has to
-    /// be findable without it.
+    /// A report from a project he has since closed is still retried, and a
+    /// report staged outside any project — because his home went read-only — is
+    /// found too.
     #[test]
-    fn a_closed_project_s_outbox_is_still_found() {
+    fn an_outbox_is_found_without_asking_what_is_open() {
         let scratch = Scratch::new("closed");
-        let data = scratch.path().join("data");
-        // `data_dir` reads this, so the registry lands under the scratch folder
-        // rather than this machine's real one.
-        let restore = std::env::var("XDG_DATA_HOME").ok();
-        unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
+        let registry = scratch.path().join("feedback-outboxes.json");
 
         let place = Place::new(scratch.path().join("project"));
         let mut draft = Draft::new(Parts::default());
         draft.note = "it drew the sidebar twice".into();
-        write(&place, &draft, "20260916T154210Z-cc33", 1_789_573_330_000).unwrap();
+        let written = write(&place, None, &draft, "20260916T154210Z-cc33", 1_789_573_330_000).unwrap();
+        assert!(written.elsewhere.is_none(), "a writable project takes its own");
+        assert!(written.dir.starts_with(outbox(&place)));
 
         // Nothing here knows or asks which projects are open.
-        let known = known_outboxes();
-        assert_eq!(known.len(), 1, "the place was remembered: {known:?}");
-        assert_eq!(known[0].path(), place.path());
+        remember_outbox_root_at(&registry, &outbox(&place));
+        let known = known_outboxes_at(&registry);
+        assert_eq!(known.len(), 1, "the outbox was remembered: {known:?}");
+        assert_eq!(known[0], outbox(&place));
         assert_eq!(pending(&known[0]).len(), 1, "and its report is there to send");
 
-        // A place whose outbox has gone drops out rather than lingering.
+        // An outbox that has gone drops out rather than lingering.
         std::fs::remove_dir_all(outbox(&place)).unwrap();
-        assert!(known_outboxes().is_empty(), "a vanished outbox is forgotten");
+        assert!(
+            known_outboxes_at(&registry).is_empty(),
+            "a vanished outbox is forgotten"
+        );
+    }
 
-        match restore {
-            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
-            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
-        }
+    /// The fault that actually stranded Jacob's report.
+    ///
+    /// His tab is `ArbosLife:~`. A remote place's path is the remote machine's,
+    /// and `~` is not even absolute — so the outbox came out relative, was
+    /// resolved against the app's working directory (`/` for a Finder launch),
+    /// and `mkdir /~` is `Read-only file system (os error 30)`.
+    ///
+    /// The quiet half matters more than the loud one: a remote path that happens
+    /// to exist on this machine would have staged his report into the local
+    /// folder of that name and said nothing at all.
+    #[test]
+    fn a_remote_place_is_staged_locally_and_absolutely() {
+        // His case, exactly.
+        let tilde = Place::new("~");
+        let root = outbox_for(&tilde, Some("ArbosLife"));
+        assert!(root.is_absolute(), "never relative: {}", root.display());
+        assert!(
+            !outbox(&tilde).is_absolute(),
+            "and the old derivation really was relative"
+        );
+        assert!(
+            root.to_string_lossy().contains("ArbosLife"),
+            "keyed by the place, so a person can tell whose it is: {}",
+            root.display()
+        );
+
+        // The silent half: a remote path that also exists locally must not be
+        // written into. Two places of the same path on different machines get
+        // different outboxes, and neither is the local folder.
+        let shared = Place::new("/Users/jacob/proj");
+        let here = outbox_for(&shared, None);
+        let there = outbox_for(&shared, Some("ArbosLife"));
+        assert_eq!(here, outbox(&shared), "a local place keeps its own .arbos");
+        assert_ne!(there, here, "the remote one is somewhere else entirely");
+        assert!(!there.starts_with("/Users/jacob/proj"), "{}", there.display());
+
+        // Two remote places cannot share an outbox.
+        assert_ne!(
+            outbox_for(&Place::new("~"), Some("ArbosLife")),
+            outbox_for(&Place::new("~"), Some("other-box")),
+        );
+        assert_ne!(
+            outbox_for(&Place::new("~/a"), Some("ArbosLife")),
+            outbox_for(&Place::new("~/b"), Some("ArbosLife")),
+        );
+    }
+
+    /// And a report about a remote place is written, through the public path.
+    ///
+    /// Through `write`, not the helper under it: choosing the root for a remote
+    /// place is the code that failed on his Mac, so it is the code that has to be
+    /// covered. That needs the data directory under the test's control, which is
+    /// what `data_dir_for_test` is for — per thread, so it cannot leak into a
+    /// test running beside it.
+    #[test]
+    fn a_report_about_a_remote_place_is_written() {
+        let scratch = Scratch::new("remote");
+        let _data = crate::model::settings::data_dir_for_test(scratch.path());
+
+        let mut draft = Draft::new(Parts::default());
+        draft.note = "chat fully disconnected on this ask".into();
+        let written = write(
+            &Place::new("~"),
+            Some("ArbosLife"),
+            &draft,
+            "20260917T131552Z-a3c8",
+            1_789_573_330_000,
+        )
+        .expect("a remote tab can file a report");
+
+        assert!(written.dir.is_absolute(), "{}", written.dir.display());
+        assert!(
+            written.dir.starts_with(scratch.path()),
+            "staged locally, under the app's own folder: {}",
+            written.dir.display()
+        );
+        assert!(
+            written.elsewhere.is_none(),
+            "this is where a remote place's reports belong, not a fallback"
+        );
+        assert!(
+            written.dir.to_string_lossy().contains("ArbosLife"),
+            "filed under the place it is about: {}",
+            written.dir.display()
+        );
+        assert!(written.dir.join(REPORT_NAME).is_file());
+        assert!(written.dir.join("ready").is_file());
+        let back: Value =
+            serde_json::from_str(&std::fs::read_to_string(written.dir.join(REPORT_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(back["note"], json!("chat fully disconnected on this ask"));
+
+        // And the drain finds it without being told which project is open.
+        assert!(
+            known_outboxes().iter().any(|r| written.dir.starts_with(r)),
+            "the root was remembered: {:?}",
+            known_outboxes()
+        );
+    }
+
+    /// The fallback, which stands whatever the cause: when the chosen outbox
+    /// cannot be made, the report still lands somewhere and says where.
+    #[test]
+    fn an_unwritable_project_does_not_lose_the_report() {
+        let scratch = Scratch::new("readonly");
+        // A place under a path that cannot be created: a file where the folder
+        // would have to be. Nothing can be made beneath it, which is what a
+        // read-only home does to `create_dir_all`.
+        let blocked = scratch.path().join("blocked");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let place = Place::new(blocked.join("project"));
+        assert!(
+            std::fs::create_dir_all(outbox(&place)).is_err(),
+            "the fixture really is unwritable"
+        );
+
+        let mut draft = Draft::new(Parts::default());
+        draft.note = "chat fully disconnected on this ask".into();
+        let written = write(&place, None, &draft, "20260917T131552Z-a3c8", 1_789_573_330_000)
+            .expect("a report is never lost to one unwritable folder");
+
+        assert!(
+            written.elsewhere.is_some(),
+            "and it says it went somewhere else"
+        );
+        assert!(written.dir.join(REPORT_NAME).is_file(), "the report is there");
+        assert!(written.dir.join("ready").is_file(), "and complete");
+        let back: Value =
+            serde_json::from_str(&std::fs::read_to_string(written.dir.join(REPORT_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(back["note"], json!("chat fully disconnected on this ask"));
     }
 
     /// A delivered report keeps its folder: the loop writes `fixed.json` back
@@ -1658,10 +2049,10 @@ mod tests {
     #[test]
     fn a_delivered_report_leaves_the_outbox_but_not_the_disk() {
         let (_dir, place) = outbox_with_one_report();
-        let dir = pending(&place).remove(0);
+        let dir = pending(&outbox(&place)).remove(0);
         std::fs::write(dir.join("delivered"), r#"{"at_ms":7,"to":"arbos://x/y/z"}"#).unwrap();
         assert_eq!(state_of(&dir), Delivery::Sent { at_ms: 7 });
-        assert!(pending(&place).is_empty(), "not tried again");
+        assert!(pending(&outbox(&place)).is_empty(), "not tried again");
         assert!(dir.join(REPORT_NAME).is_file(), "still on disk for the answer");
     }
 
@@ -1674,9 +2065,9 @@ mod tests {
         let half = outbox(&place).join("20260916T160000Z-bb22");
         std::fs::create_dir_all(&half).unwrap();
         std::fs::write(half.join(REPORT_NAME), "{}").unwrap();
-        assert!(pending(&place).is_empty(), "no `ready`, so not offered");
+        assert!(pending(&outbox(&place)).is_empty(), "no `ready`, so not offered");
         std::fs::write(half.join("ready"), "").unwrap();
-        assert_eq!(pending(&place).len(), 1);
+        assert_eq!(pending(&outbox(&place)).len(), 1);
     }
 
     /// Not a test of behaviour: writes one report into a folder named by the
@@ -1718,8 +2109,8 @@ mod tests {
             ..Default::default()
         });
         let id = new_id(1_789_573_330_000);
-        let dir = write(&place, &draft, &id, 1_789_573_330_000).unwrap();
-        println!("WROTE {}", dir.display());
+        let written = write(&place, None, &draft, &id, 1_789_573_330_000).unwrap();
+        println!("WROTE {}", written.dir.display());
     }
 
     #[test]

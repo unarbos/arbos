@@ -57,15 +57,21 @@ fn the_gc_chore_is_a_subscription_file_but_not_a_plan_row() {
 
 #[test]
 fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
+    // The first helper sleeps four seconds, so its report lands after
+    // root's spawn turn has ended and opens the done turn the test reads
+    // (a report landing mid-turn folds in and opens none — the red on a
+    // loaded runner). The second is waited on: its report is in the
+    // spawn result, one turn, no done wake — the shape does not matter for
+    // what the second round asserts (the user's words re-arm the nudge).
     let replies = concat!(
-        "{\"agent\":\"root\",\"content\":\"delegating\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper\",\"task\":\"say one word\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"delegating\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper\",\"task\":\"Run: bash `sleep 4`. Then say one word.\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"started a helper\"}\n",
-        "{\"content\":\"one word\"}\n",
+        "{\"agent\":\"helper\",\"content\":\"pausing\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 4\",\"description\":\"A pause\"}}]}\n",
+        "{\"agent\":\"helper\",\"content\":\"one word\"}\n",
         "{\"agent\":\"root\",\"content\":\"noted\"}\n",
-        "{\"agent\":\"root\",\"content\":\"delegating again\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper-two\",\"task\":\"say one word\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"delegating again\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper-two\",\"task\":\"say one word\",\"wait\":true}}]}\n",
+        "{\"agent\":\"helper-two\",\"content\":\"one word\"}\n",
         "{\"agent\":\"root\",\"content\":\"started another\"}\n",
-        "{\"content\":\"one word\"}\n",
-        "{\"agent\":\"root\",\"content\":\"noted again\"}\n",
     );
     let mut k = start_kernel_replay("nudge", replies);
     let mut a = Attach::connect(&k.url);
@@ -122,8 +128,13 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
     // change earns one more, and only one more.
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "another helper"}));
     let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
-        evs.iter().filter(|e| e["kind"] == "turn_complete").count() >= 4
+        evs.iter().filter(|e| e["kind"] == "turn_complete").count() >= 3
     });
+    assert_eq!(
+        evs.iter().filter(|e| e["kind"] == "turn_complete").count(),
+        3,
+        "the spawn turn, its done turn, and the waited spawn: {evs:#?}"
+    );
     assert_eq!(
         evs.iter().filter(|e| e["kind"] == "nudge").count(),
         2,

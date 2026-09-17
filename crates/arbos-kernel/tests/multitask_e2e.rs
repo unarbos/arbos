@@ -78,10 +78,11 @@ fn settle(place: &Path, quiet: Duration, timeout: Duration) {
 }
 
 /// Scenario 9: eight (here three, the cap set low) finished workers do not
-/// stop the next spawn. Scenario 12/15: each child reports once, and the
-/// done files of children ending together open one parent turn.
+/// stop the next spawn. Scenario 12/15: each child reports once, and every
+/// done file reaches root in exactly one `done` wake (children ending
+/// together share one, when the timing allows — not asserted, see below).
 #[test]
-fn finished_children_do_not_count_toward_the_cap_and_their_dones_batch() {
+fn finished_children_do_not_count_toward_the_cap_and_each_done_reaches_root_once() {
     let calls: Vec<String> = ["w1", "w2", "w3"]
         .iter()
         .map(|n| spawn_call(n, ""))
@@ -115,10 +116,46 @@ fn finished_children_do_not_count_toward_the_cap_and_their_dones_batch() {
     for w in ["w1", "w2", "w3"] {
         assert_eq!(says.iter().filter(|e| e["from"] == w).count(), 1, "{w}");
     }
-    // Batched: the spawn turn plus at most two turns for three dones (one
-    // when they all land while root is still on its first turn).
+    // Batching is opportunistic: a done file that lands while root is
+    // still on a turn joins the next done wake; one that lands after root
+    // went idle opens its own. How many of the three fall into one turn
+    // depends on how close together the children finish, which a loaded
+    // runner decides — so the turn count is not a fact about the kernel.
+    // What batching is *for* is: every report reaches root in a `done`
+    // wake, exactly once, and no turn opens without a report to carry.
+    let done_wakes: Vec<&str> = root
+        .iter()
+        .filter(|e| e["kind"] == "wake" && e["wake"] == "done")
+        .filter_map(|e| e["text"].as_str())
+        .collect();
+    assert!(
+        (1..=3).contains(&done_wakes.len()),
+        "done wakes: {done_wakes:?}\n{root:#?}"
+    );
+    // A report that lands while root is on a turn folds into that turn as
+    // a say line (the done-wake fold) and opens no wake of its own; one
+    // that lands between turns opens a wake that names it. So a child is
+    // named in at most one wake, and every child's report is on the
+    // transcript once (asserted above) — never twice, never missing.
+    for w in ["w1", "w2", "w3"] {
+        let named = done_wakes
+            .iter()
+            .filter(|t| {
+                let (reported, _) = t.split_once(" above").unwrap_or((t, ""));
+                reported.contains(w)
+            })
+            .count();
+        assert!(
+            named <= 1,
+            "{w} is named in at most one wake: {done_wakes:?}"
+        );
+    }
     let turns = count(&root, "turn_complete");
-    assert!((2..=3).contains(&turns), "root turns: {turns}\n{root:#?}");
+    assert_eq!(
+        turns,
+        1 + done_wakes.len(),
+        "the spawn turn, then one turn per done wake and no other: {turns}\n{root:#?}"
+    );
 
     // The three are finished: the cap of three does not stop a fourth —
     // on a fresh kernel too, since what counts is on disk, not in memory.

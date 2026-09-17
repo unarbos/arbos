@@ -169,12 +169,51 @@ pub fn spawn_with(scratch: PathBuf, extra: &[&str]) -> Kernel {
 /// `spawn_with`, plus variables set in the kernel's environment (what a
 /// shell's rc file would have exported).
 pub fn spawn_with_env(scratch: PathBuf, extra: &[&str], env: &[(&str, &str)]) -> Kernel {
+    spawn_with_opts(scratch, extra, env, false)
+}
+
+/// `start_kernel_replay`, with the place as the kernel's working directory
+/// (as the desktop starts one): a test that renames the place needs the
+/// kernel's cwd to follow it.
+pub fn start_kernel_replay_in_place_cwd(name: &str, replies: &str) -> Kernel {
+    let scratch = scratch_dir(name);
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    spawn_with_opts(
+        scratch,
+        &[
+            "--provider",
+            "replay",
+            "--replies",
+            &file.display().to_string(),
+        ],
+        &[],
+        true,
+    )
+}
+
+pub fn spawn_with_opts(
+    scratch: PathBuf,
+    extra: &[&str],
+    env: &[(&str, &str)],
+    cwd_in_place: bool,
+) -> Kernel {
     let place = scratch.join("place");
     let xdg = scratch.join("xdg");
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_arbos-kernel"));
     cmd.arg("serve").arg(&place).args(extra);
     for var in KEY_VARS {
         cmd.env_remove(var);
+    }
+    // A chat's model-made title (F-156) is one more provider call after a
+    // first turn; a test that counts a fake provider's calls would see it.
+    // Off unless the test's process says otherwise (chat_title_e2e).
+    cmd.env(
+        "ARBOS_CHAT_TITLES",
+        std::env::var("ARBOS_CHAT_TITLES").unwrap_or_else(|_| "off".into()),
+    );
+    if cwd_in_place {
+        cmd.current_dir(&place);
     }
     for (k, v) in env {
         cmd.env(k, v);

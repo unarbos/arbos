@@ -31,9 +31,12 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 arbos-kernel update [--install] [--channel stable|dev] [--binary PATH] [--pin X.Y.Z+N]
-                    [--place DIR ...]
+                    [--from PATH] [--place DIR ...]
     What the channel has, and whether this binary is behind it. --install
-    replaces it; without that it only reports. Replacing the binary does not
+    replaces it; --from PATH installs a kernel already on this machine instead
+    of asking the channel, which is how an installation too old to update
+    itself is bootstrapped and how a box with no route to the feed is served.
+    Without --install it only reports. Replacing the binary does not
     update a running kernel: it keeps the code it started with until it
     restarts, and --place says which ones are still serving what.
     --binary PATH checks and replaces that file instead of this one. That is
@@ -46,6 +49,10 @@ pub struct Args {
     pub channel: Option<Channel>,
     pub binary: Option<PathBuf>,
     pub pin: Option<String>,
+    /// A kernel binary already on this machine to install instead of asking
+    /// the channel. What bootstraps an installation too old to update itself,
+    /// and what works on a box with no route to the feed.
+    pub from: Option<PathBuf>,
     /// Places whose running kernel to report on. Defaults to the working
     /// directory when it is one.
     pub places: Vec<PathBuf>,
@@ -58,6 +65,7 @@ impl Args {
             channel: None,
             binary: None,
             pin: None,
+            from: None,
             places: Vec::new(),
         };
         let mut rest = argv.peekable();
@@ -74,6 +82,12 @@ impl Args {
                         Some(PathBuf::from(rest.next().context("--binary wants a path")?));
                 }
                 "--pin" => args.pin = Some(rest.next().context("--pin wants a version")?),
+                "--from" => {
+                    args.from = Some(PathBuf::from(
+                        rest.next()
+                            .context("--from wants a path to a kernel binary")?,
+                    ));
+                }
                 "--place" => args.places.push(PathBuf::from(
                     rest.next().context("--place wants a directory")?,
                 )),
@@ -118,6 +132,34 @@ pub fn run(args: Args) -> Result<i32> {
         binary.display()
     );
     println!("channel   {}", channel.as_str());
+
+    // A file on this machine instead of the channel. Nothing is fetched and
+    // nothing is compared with a feed: the caller has named the build.
+    if let Some(source) = &args.from {
+        let coming = kernel::Running::read(source)?;
+        println!(
+            "from      {} {} ({})",
+            coming.version.human(),
+            coming.sha,
+            source.display()
+        );
+        if !args.install {
+            println!("\nrun again with --install to replace it");
+            return Ok(0);
+        }
+        let known = places(&args);
+        let probe = match known.first() {
+            Some(place) => kernel::Probe::Place(place),
+            None => kernel::Probe::Version,
+        };
+        kernel::install_file(source, &binary, probe)?;
+        let now = kernel::Running::read(&binary)?;
+        println!("installed {} {}", now.version.human(), now.sha);
+        report_serving(&args, &now);
+        println!();
+        println!("{}", restart_note(&binary));
+        return Ok(0);
+    }
 
     let feed = net::feed(channel)?;
     let offered = match kernel::plan(&running, &feed, args.pin.as_deref()) {

@@ -7,44 +7,28 @@
 
 use crate::{
     model::state,
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, Line, SettingsPane},
 };
 use bezel::{
     gpui::{AnyElement, Context, ElementId, SharedString, div, prelude::*, px},
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{Buttons, Controls, Scaffolding},
+    ui::widgets::{Buttons, Controls},
 };
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn typography_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let size = self.workspace.read(cx).text_size;
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(settings::LABEL_GAP))
-            .child(theme.field_label("Typography"))
+        settings::group("Typography", &theme)
             .child(
-                theme
-                    .group_box()
+                settings::rows()
                     .child(
-                        theme
-                            .card_row(true)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(theme.row_title("UI font size"))
-                                    .child(
-                                        div()
-                                            .mt(px(4.))
-                                            .text_style(TextStyle::Subheadline)
-                                            .text_color(theme.text_muted)
-                                            .child("Every other size is a ratio of this one."),
-                                    ),
-                            )
+                        settings::row(true, &theme)
+                            .child(settings::label_block(
+                                "UI font size",
+                                vec![Line::say("Every other size is a ratio of this one.")],
+                                &theme,
+                            ))
                             .child(
                                 div()
                                     .flex_none()
@@ -80,23 +64,14 @@ impl SettingsWindow {
     fn bionic_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let on = self.workspace.read(cx).bionic_reading;
-        theme
-            .card_row(true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("Bionic reading"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child("Weight the start of each word in the agent's replies."),
-                    ),
-            )
+        settings::row(true, &theme)
+            .child(settings::label_block(
+                "Bionic reading",
+                vec![Line::say(
+                    "Weight the start of each word in the agent's replies.",
+                )],
+                &theme,
+            ))
             .child(
                 div()
                     .id("bionic-reading")

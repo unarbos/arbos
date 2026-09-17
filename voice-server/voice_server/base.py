@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 import numpy as np
@@ -15,7 +16,8 @@ from . import protocol as P
 from .audio import Normalizer, float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
-from .kernel import KernelClient, hub_attach_url
+from .kernel import KernelClient, hub_attach_url, kernel_alive, kernel_url_of
+from .activity import ActivityReporter
 from .narrator import Narrator, is_conversational, openrouter_key
 from .tools import CALL_TOOLS, TOOLS, ToolRunner
 
@@ -101,8 +103,11 @@ class BaseSession:
         self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
+        self.activity: ActivityReporter | None = None  # call mode: agent.activity frames to the client
         self.call_kernel: KernelClient | None = None  # a per-call attach through the hub, when the call names one
         self.project_info: dict | None = None  # machine/project/name/icon/store/kind from the hub roster, when scoped
+        self.project_path = ""  # the place's folder as the client sent it (session.start.project.path)
+        self.start_context: dict = {}  # session.start.project.context: the chat so far, as the client showed it
         self.dictation = False  # ASR only: words to the client, no reply, no agent, no asks
         self.last_conversational = False  # the last utterance was small talk (auto model voice lets it through)
         self.user_talking = False
@@ -158,6 +163,11 @@ class BaseSession:
 
     # ------------------------------------------------------------------ call mode
 
+    def context_text(self) -> str:
+        """The chat so far as the client sent it at session.start, for the speech model's
+        instructions: the last lines and the sub-agents. Empty when the client sent none."""
+        return context_text(self.start_context)
+
     def on_user_final(self, text: str) -> None:
         """A finished caller utterance. In call mode it goes to the main agent as a `voice` message;
         outside it, only a pending approval or question takes it (as the yes/no or the answer)."""
@@ -170,6 +180,12 @@ class BaseSession:
         elif self.narrator.pending_ask is not None:
             self.narrator.user_said(text, channel=self.channel)
 
+    async def on_call_text(self, text: str) -> None:
+        """Typed during a call (text.input): the same inbox as the spoken words, filed as `text`.
+        The kernel takes it as a steer when a turn is running."""
+        self.narrator.user_said(text, channel="text")
+        self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
+
     def note_interrupt(self) -> None:
         """The caller cut in (barge-in or an `interrupt` frame): the narrator drops what it was saying."""
         if self.narrator is not None:
@@ -179,10 +195,10 @@ class BaseSession:
         """Voice one narrator line as a reply turn the client can play: response.started,
         response.transcript, audio, response.done. Interrupted audio is dropped by the gen tag."""
         gen = self.gen
-        self._emit_for_gen(gen, P.RESPONSE_STARTED)
+        self._emit_for_gen(gen, P.RESPONSE_STARTED, speaker="narrator")
         self._emit_for_gen(gen, P.RESPONSE_TRANSCRIPT, text=text)
         await self._speak(text, gen)
-        self._emit_for_gen(gen, P.RESPONSE_DONE)
+        self._emit_for_gen(gen, P.RESPONSE_DONE, speaker="narrator")
 
     async def _start_call(self) -> None:
         if self.narrator is not None and not self.narrator.only_asks:
@@ -201,8 +217,7 @@ class BaseSession:
             self.tools.rebind(kernel)
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
-            if self.mirror_agents:
-                kernel.listeners.append(self._mirror)
+            kernel.listeners.append(self._mirror)
         self.narrator = Narrator(
             kernel,
             speak=self.speak_narration,
@@ -225,46 +240,122 @@ class BaseSession:
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS
         self.narrator.start()
+        # What the kernel is doing, as frames, so the client can play the sound of work and
+        # show it. From the kernel's own turn and tool frames, never from what was said.
+        if self.activity is None:
+            self.activity = ActivityReporter(kernel, self._emit)
+            self.activity.start()
         log.info("[%s] call mode: narrating %s (channel %s)", self.sid, self.project or "the gateway's kernel", self.channel)
 
     async def _kernel_for(self, project: str) -> KernelClient | None:
         """The kernel a call is for. Empty, or a name for this gateway's own kernel: that one. A hub
         name (`<machine>/<project>`) with a hub configured: a fresh attach through the hub, owned
-        by this call. A hub name with no hub: the own kernel, and the caller is told."""
+        by this call. Any other name: none — a call named for a project never talks to a different
+        kernel (session.start already refused it; this is the safety net behind that)."""
         own = self.engines.kernel
         if self.call_kernel is not None:
             return self.call_kernel  # session.start named the project and _attach_project already attached
+        if (self.project_info or {}).get("via") == "own":
+            return own  # session.start sent the path and it is the folder this gateway's kernel serves
         if not project or project in self.engines.own_project_names():
             return own
-        if "/" not in project and own is not None:
-            return own
-        if not self.engines.hub_url:
-            self._emit(P.ERROR, message=f"project {project!r} names another kernel but the gateway has no --hub; using its own kernel")
-            return own
+        if "/" not in project or not self.engines.hub_url:
+            log.warning("[%s] no kernel for %r (bare name or no --hub); not using another", self.sid, project)
+            return None
         url = hub_attach_url(self.engines.hub_url, project, self.engines.hub_token)
         client = KernelClient(url=url, auto_approve=self.engines.auto_approve, token=self.engines.hub_token, name=project)
         try:
             await client.connect()
         except Exception as exc:
             log.warning("[%s] hub attach to %s failed: %s", self.sid, project, exc)
-            self._emit(P.ERROR, message=f"could not reach {project} through the hub ({_ascii_short(exc)}); using the gateway's own kernel")
-            return own
+            self._emit(P.ERROR, message=f"could not reach {project} through the hub ({_ascii_short(exc)}); no other kernel takes the call")
+            return None
         log.info("[%s] call attached to %s through the hub", self.sid, project)
         return client
 
-    # ------------------------------------------------------------------ project scoping (hub)
+    # ------------------------------------------------------------------ project scoping
 
-    async def _attach_project(self, machine: str, project: str) -> bool:
+    async def _scope_call(self, target: "Target") -> bool:
+        """Bind this call to exactly the project the client opened. The client sends the
+        place's path with its machine and folder name; the path decides:
+
+        1. The gateway's own kernel serves that very folder: use it.
+        2. The folder is on this host with a live kernel: attach to it (the desktop and the
+           gateway on one Mac, any number of open tabs).
+        3. The folder is on this host with no kernel: refuse — never another folder's agent.
+        4. Otherwise the hub, matched by the roster's `place` when the path is known, else by
+           `<machine>/<project>`; refused when the roster has no such project.
+
+        Without a path (older clients) the name decides as before: the gateway's own kernel
+        when the name is one of its own, the hub otherwise."""
+        own = self.engines.kernel
+        own_place = str(getattr(own, "place", "") or "") if own is not None else ""
+        if target.path:
+            want = _norm(target.path)
+            if own_place and _norm(own_place) == want:
+                log.info("[%s] call scoped to the gateway's own kernel at %s", self.sid, want)
+                self.project_info = _local_info(target, want) | {"via": "own"}
+                return True
+            if os.path.isdir(want) and not target.host:
+                url = kernel_url_of(want)
+                if url and own is not None and _same_kernel_url(url, str(getattr(own, "url", "") or "")):
+                    # The gateway's kernel was named by address (--kernel tcp://...), not by folder;
+                    # the folder's kernel.json says it is this one.
+                    log.info("[%s] call scoped to the gateway's own kernel (by address) at %s", self.sid, want)
+                    self.project_info = _local_info(target, want) | {"via": "own"}
+                    return True
+                if url and kernel_alive(url):
+                    return await self._attach_local(target, want, url)
+                return await self._refuse(
+                    "project_offline", target.label,
+                    f"{target.label} is open at {want} on this machine but no kernel is running there; open the folder in the desktop first",
+                )
+        if not target.path and target.label in self.engines.own_project_names():
+            return True
+        return await self._attach_project(target.machine, target.project, path=target.path)
+
+    async def _attach_local(self, target: "Target", place: str, url: str) -> bool:
+        kernel = KernelClient(url=url, auto_approve=self.engines.auto_approve, name=target.label or place)
+        kernel.place = place
+        try:
+            await asyncio.wait_for(kernel.connect(), 10)
+        except Exception as exc:
+            await kernel.close()
+            return await self._refuse("project_unreachable", target.label, f"the kernel at {place} did not answer: {_ascii_short(exc)}")
+        self._swap_kernel(kernel, target.label)
+        self.project_info = _local_info(target, place)
+        log.info("[%s] call scoped to the kernel at %s (%s)", self.sid, place, target.label)
+        return True
+
+    def _swap_kernel(self, kernel: KernelClient, label: str) -> None:
+        """The call's tools and the agent mirror follow its own attach."""
+        self.call_kernel = kernel
+        self.project = label
+        self.tools.rebind(kernel)
+        if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
+            self.engines.kernel.listeners.remove(self._mirror)
+        if self.mirror_agents:
+            kernel.listeners.append(self._mirror)
+
+    async def _attach_project(self, machine: str, project: str, path: str = "") -> bool:
         """Attach this call to `<machine>/<project>` through the hub. Refuses (error frame, then
         close 4404) when there is no hub or the project is not on the roster, not live, or
         does not answer; never falls back to another kernel."""
         hub, token = self.engines.hub_url, self.engines.hub_token
-        label = f"{machine}/{project}"
+        label = f"{machine}/{project}" if machine else project
+        if not machine:
+            # The client is off the hub (no machine name) and the folder is not on this host: nothing
+            # can reach that kernel. Say what to do; never take another kernel.
+            return await self._refuse("project_not_on_hub", label, _not_on_hub_message(label, path))
         if not hub:
             return await self._refuse("no_hub", label, "this voice server has no hub configured, so it cannot scope a call to a project")
-        info = await self._roster_lookup(hub, token, machine, project)
+        info = await self._roster_lookup(hub, token, machine, project, path=path)
         if info is None:
             return await self._refuse("project_unknown", label, f"{label} is not on the hub roster")
+        # The roster may know the project under another name than the client's folder; attach by
+        # the roster's name so the words land in the right place.
+        project = str(info.get("name") or project)
+        label = f"{machine}/{project}"
         if not info.get("live", True):
             return await self._refuse("project_offline", label, f"{label} is on the roster but its kernel is not running")
         url = hub_attach_url(hub, label, token)
@@ -274,25 +365,23 @@ class BaseSession:
         except Exception as exc:
             await kernel.close()
             return await self._refuse("project_unreachable", label, f"could not attach to {label}: {_ascii_short(exc)}")
-        # swap the call over: tools and the agent mirror follow it
-        self.call_kernel = kernel
-        self.project = label
-        self.tools.rebind(kernel)
-        if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
-            self.engines.kernel.listeners.remove(self._mirror)
-        if self.mirror_agents:
-            kernel.listeners.append(self._mirror)
+        self._swap_kernel(kernel, label)
         identity = info.get("identity") or {}
         self.project_info = {
             "machine": machine, "project": project,
             "name": identity.get("name") or project, "icon": identity.get("icon"),
             "store": info.get("store") or f"arbos://{machine}/{project}/",
             "kind": info.get("kind", "project"),
+            # the folder the project's kernel serves, from the roster (else the path the client sent):
+            # the call's working directory. `place` is the same value under the roster's name.
+            "path": info.get("place") or path or "",
+            "place": info.get("place") or path or None,
+            "via": "hub",
         }
         log.info("[%s] call scoped to %s (%s)", self.sid, label, self.project_info["name"])
         return True
 
-    async def _roster_lookup(self, hub: str, token: str | None, machine: str, project: str) -> dict | None:
+    async def _roster_lookup(self, hub: str, token: str | None, machine: str, project: str, path: str = "") -> dict | None:
         base = hub.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         try:
@@ -304,7 +393,13 @@ class BaseSession:
         for m in roster.get("machines", []):
             if m.get("name") != machine:
                 continue
-            for pr in m.get("projects", []):
+            projects = m.get("projects", [])
+            # The folder decides when both sides know it: two projects may share a leaf name.
+            if path:
+                for pr in projects:
+                    if pr.get("place") and _norm(str(pr["place"])) == _norm(path):
+                        return pr
+            for pr in projects:
                 if pr.get("name") == project:
                     return pr
         return None
@@ -330,8 +425,8 @@ class BaseSession:
             if first is not None:
                 stop = await self._take(first)
             if not self.dictation:
-                if self.mirror_agents and self.engines.kernel:
-                    self.engines.kernel.listeners.append(self._mirror)
+                if self.engines.kernel and self._mirror not in self.engines.kernel.listeners:
+                    self.engines.kernel.listeners.append(self._mirror)  # transcript mirror + agent.activity
                 self._ensure_asker()
             if not stop:
                 async for message in self.ws:
@@ -340,6 +435,8 @@ class BaseSession:
         finally:
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
+            if self.activity is not None:
+                self.activity.close()
             if self.narrator is not None:
                 log.info("[%s] narrator: %s %s", self.sid, self.narrator.stats,
                          {k: v for k, v in self.narrator.bench.items() if v})
@@ -421,12 +518,14 @@ class BaseSession:
             voice=self.voice,
             mode="call" if self.call_mode else ("dictation" if self.dictation else "voice"),
             narrator=self.narrator is not None,
+            activity=self.activity is not None,  # agent.activity frames follow
             channel=self.channel,
             device=self.device,
             project=(self.call_kernel.name if self.call_kernel else (self.project or "")),
             project_info=self.project_info,
+            project_path=(self.project_info or {}).get("path") or (str(getattr(self.call_kernel or self.engines.kernel, "place", "") or "")),
             answerer=getattr(self, "answerer", "n/a"),
-            via=("hub" if self.call_kernel else "gateway"),
+            via=(self.project_info or {}).get("via") or ("hub" if self.call_kernel else "gateway"),
         )
 
     def tools_available(self) -> list[dict]:
@@ -448,11 +547,21 @@ class BaseSession:
         if kind == P.SESSION_START:
             self._apply_start(msg)
             target = _parse_target(msg)
-            if target is not None and self.call_kernel is None and "/".join(target) not in self.engines.own_project_names():
-                if not await self._attach_project(*target):
-                    return True  # refused: the caller asked for a project we cannot reach; never another one
+            if target is not None and self.call_kernel is None and not await self._scope_call(target):
+                return True  # refused: the caller asked for a project we cannot reach; never another one
+            elif target is None and self.project and self.project not in self.engines.own_project_names():
+                # A bare folder name ("discord_backups") from a machine that is not on the hub, with no
+                # path (an older client). The gateway cannot reach that kernel, and it used to answer
+                # from its own instead — a call about Jacob's Mac project talking to the phone kernel on
+                # ArbosLife. Refuse.
+                if not await self._refuse("project_not_on_hub", self.project, _not_on_hub_message(self.project)):
+                    return True
+            if self.call_kernel is None and self.project_info is None and self.engines.kernel is not None:
+                self.project_info = self.engines.own_project_info()
             if self.call_mode and (self.narrator is None or self.narrator.only_asks):
                 await self._start_call()
+                if self.narrator is not None and self.start_context:
+                    self.narrator.seed(self.start_context)
             await self.on_start()
             self._send_ready()
         elif kind == P.SPEAK:
@@ -465,9 +574,7 @@ class BaseSession:
         elif kind == P.TEXT_INPUT:
             text = str(msg.get("text", "")).strip()
             if text and self.call_mode and self.narrator is not None:
-                # Typed during a call: the same inbox as the spoken words, filed as `text`.
-                self.narrator.user_said(text, channel="text")
-                self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
+                await self.on_call_text(text)
             elif text:
                 self._start_text_turn(text)
         elif kind == P.TEXT_CANCEL:
@@ -521,7 +628,9 @@ class BaseSession:
                 self.reply_kind = reply
         target = _parse_target(msg)
         if target is not None:
-            self.project = "/".join(target)  # dict, "machine/project" or arbos:// forms all land here
+            self.project = target.label  # dict, "machine/project" or arbos:// forms all land here
+            self.project_path = target.path
+            self.start_context = target.context
         elif isinstance(msg.get("project"), str):
             self.project = msg["project"].strip()  # a bare name: this gateway's own kernel
         answerer = msg.get("answerer")
@@ -661,23 +770,104 @@ def _speak_name(agent: str) -> str:
     return agent[:24]
 
 
-def _parse_target(msg: dict) -> tuple[str, str] | None:
-    """session.start may name the project as {"project": {"machine","project"|"place"}},
-    "project": "machine/project", {"kernel": "machine/project"}, or an "arbos://machine/project/" address."""
+@dataclass
+class Target:
+    """What the client opened: the machine and folder name the hub knows it by, and — the part
+    that decides — the place's path. `host` is the client's ssh alias for a remote place (empty
+    for a folder on the client's own machine)."""
+
+    machine: str
+    project: str
+    path: str = ""
+    host: str = ""
+    name: str = ""
+    context: dict = field(default_factory=dict)  # {"recent": [{"role","text"}], "agents": [{"name","state","step"}], "running": bool}
+
+    @property
+    def label(self) -> str:
+        return f"{self.machine}/{self.project}" if self.machine else self.project
+
+
+def _parse_target(msg: dict) -> Target | None:
+    """session.start may name the project as {"project": {"machine","project"|"place","path","host","name"}},
+    "project": "machine/project", {"kernel": "machine/project"}, or an "arbos://machine/project/" address.
+    A dict with a `path` is the desktop's full identity of the open tab; the path is what binds the call."""
     raw = msg.get("project") or msg.get("kernel")
     if not raw:
         return None
     if isinstance(raw, dict):
         machine = str(raw.get("machine", "")).strip()
         project = str(raw.get("project") or raw.get("place") or "").strip()
-    else:
-        text = str(raw).strip()
-        if text.startswith("arbos://"):
-            text = text[len("arbos://"):]
-        parts = [p for p in text.strip("/").split("/") if p]
-        if len(parts) < 2:
-            return None  # a bare name means the gateway's own kernel (see Engines.own_project_names)
-        machine, project = parts[:2]
+        path = str(raw.get("path") or "").strip()
+        if not project and path:
+            project = os.path.basename(path.rstrip("/"))
+        if not project:
+            return None
+        context = raw.get("context") if isinstance(raw.get("context"), dict) else {}
+        return Target(machine=machine, project=project, path=path, host=str(raw.get("host") or "").strip(),
+                      name=str(raw.get("name") or "").strip(), context=context)
+    text = str(raw).strip()
+    if text.startswith("arbos://"):
+        text = text[len("arbos://"):]
+    parts = [p for p in text.strip("/").split("/") if p]
+    if len(parts) < 2:
+        return None  # a bare name means the gateway's own kernel (see Engines.own_project_names)
+    machine, project = parts[:2]
     if not machine or not project:
         return None
-    return machine, project
+    return Target(machine=machine, project=project)
+
+
+def _not_on_hub_message(project: str, path: str = "") -> str:
+    where = f" (open at {path} on your machine)" if path else ""
+    return (
+        f"{project!r}{where} names a project on a machine that is not on the hub, and this voice server does "
+        f"not serve it. A call can only reach a project through the hub as <machine>/<project>: on the machine "
+        f"that has the folder, put the hub url, machine name and token in ~/.config/arbos/hub.toml, restart its "
+        f"kernel so it registers, then call again. Not attaching to any other kernel."
+    )
+
+
+def _norm(path: str) -> str:
+    return os.path.realpath(os.path.expanduser(path)).rstrip("/")
+
+
+def _same_kernel_url(a: str, b: str) -> bool:
+    def canon(u: str) -> str:
+        u = u.strip().removeprefix("tcp://")
+        return u.replace("localhost", "127.0.0.1").rstrip("/")
+    return bool(a and b) and canon(a) == canon(b)
+
+
+def _local_info(target: Target, place: str) -> dict:
+    return {
+        "machine": target.machine, "project": target.project, "name": target.name or target.project,
+        "icon": None, "store": f"arbos://{target.machine}/{target.project}/" if target.machine else "",
+        "kind": "project", "path": place, "via": "local",
+    }
+
+
+def context_text(context: dict, *, lines: int = 40, clip_at: int = 300) -> str:
+    """`session.start.project.context` as a few plain lines of text."""
+    if not context:
+        return ""
+    out: list[str] = []
+    recent = [l for l in context.get("recent", []) if isinstance(l, dict) and str(l.get("text", "")).strip()]
+    if recent:
+        out.append("The chat so far (latest last):")
+        for line in recent[-lines:]:
+            role = {
+                "user": "user", "assistant": "arbos", "worker": "worker", "tool": "tool",
+                "notice": "notice", "asked": "asked", "thinking": "thinking",
+            }.get(str(line.get("role", "")), str(line.get("role", "")))
+            text = " ".join(str(line.get("text", "")).split())
+            out.append(f"- {role}: {text[:clip_at]}{'...' if len(text) > clip_at else ''}")
+    agents = [a for a in context.get("agents", []) if isinstance(a, dict) and a.get("name")]
+    if agents:
+        out.append("Sub-agents on the screen:")
+        for a in agents:
+            step = f" - {a['step']}" if a.get("step") else ""
+            out.append(f"- {a['name']}: {a.get('state', '')}{step}")
+    if context.get("running"):
+        out.append("The main agent has a turn running right now.")
+    return "\n".join(out)

@@ -204,21 +204,36 @@ impl Scheduler {
                     );
                     // The record ends here, in words, so the window shows
                     // why the turn stopped and the next boot does not
-                    // replay the wake as unfinished.
-                    let _ = arbos_core::append_events(
+                    // replay the wake as unfinished. The turn folder
+                    // remembers the panic too, and when the transcript
+                    // cannot take the words they go to the windows live
+                    // (the same as a turn's Err, #408).
+                    crate::plan::note_turn_error(&hooks, &id, &format!("panic: {why}"));
+                    let notice = arbos_core::Event::new(arbos_core::EventKind::Notice {
+                        text: format!(
+                            "The kernel hit an internal error in this turn and ended it: {why}. What ran before it stands; send again to go on. (kernel.log has the detail.)"
+                        ),
+                        failed: true,
+                    });
+                    if let Err(write_err) = arbos_core::append_events(
                         &transcript,
                         &[
-                            arbos_core::Event::new(arbos_core::EventKind::Notice {
-                                text: format!(
-                                    "The kernel hit an internal error in this turn and ended it: {why}. What ran before it stands; send again to go on. (kernel.log has the detail.)"
-                                ),
-                                failed: true,
-                            }),
+                            notice.clone(),
                             arbos_core::Event::new(arbos_core::EventKind::TurnComplete {
                                 usage: None,
                             }),
                         ],
-                    );
+                    ) {
+                        crate::klog::error(
+                            "turn_panicked_unrecorded",
+                            Some(&id),
+                            format!("the transcript would not take the notice: {write_err:#}"),
+                        );
+                        hooks.broadcast(arbos_core::wire::Frame::Event {
+                            agent: id.to_string(),
+                            event: notice,
+                        });
+                    }
                 }
             }
         });
@@ -403,6 +418,11 @@ impl arbos_engine::Hooks for TurnHooks {
     fn spoke_status(&self, step: &str) {
         self.inner.note_progress(self.agent.as_str());
         let _ = self.inner.set_status(self.agent.as_str(), step, "agent");
+    }
+
+    fn kernel_step(&self, step: &str) {
+        self.inner.note_progress(self.agent.as_str());
+        let _ = self.inner.set_status(self.agent.as_str(), step, "derived");
     }
 
     fn working(&self, secs: u64) {

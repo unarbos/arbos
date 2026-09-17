@@ -27,13 +27,15 @@
 
 use crate::{
     model::{
+        panel::PanelTab,
         project::Project,
         session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
+        workspace::Workspace,
     },
     view::{
-        root::{Arbos, Pane},
-        settings::SettingsWindow,
+        component::surface as board,
+        root::{Arbos, Front, Pane},
     },
 };
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -190,12 +192,11 @@ fn failure(id: Value, err: &anyhow::Error) -> Value {
     json!({ "id": id, "ok": false, "error": format!("{err:#}") })
 }
 
-/// What kind of window a handle is, by its root view type.
+/// What kind of window a handle is, by its root view type. Settings used to be
+/// one of these; it is a tab of the main window now, and `state` reports it.
 fn window_kind(window: &AnyWindowHandle) -> &'static str {
     if window.downcast::<Arbos>().is_some() {
         "main"
-    } else if window.downcast::<SettingsWindow>().is_some() {
-        "settings"
     } else {
         "other"
     }
@@ -228,8 +229,8 @@ fn windows_json(main: WindowHandle<Arbos>, cx: &mut App) -> Value {
 }
 
 /// `"window"` param -> handle. Missing or `"main"` is the chat window;
-/// `"settings"` is the settings window; anything else is a window id from
-/// `windows`.
+/// anything else is a window id from `windows`. There is no `"settings"`
+/// window: Settings is a tab of the main one.
 fn resolve_window(
     main: WindowHandle<Arbos>,
     wanted: &Value,
@@ -237,7 +238,7 @@ fn resolve_window(
 ) -> Result<AnyWindowHandle> {
     match wanted.as_str() {
         None | Some("") | Some("main") => Ok(main.into()),
-        Some(kind @ ("settings" | "other")) => cx
+        Some(kind @ "other") => cx
             .windows()
             .into_iter()
             .find(|window| window_kind(window) == kind)
@@ -715,20 +716,10 @@ fn act(
             let ActionParams { name, data } = parse(params)?;
             // ⌘W's handler acts on the key window through a nested window
             // update, which cannot run from inside this request's own update
-            // of the target. Close the target here instead, with the menu's
-            // semantics: the chat window takes Settings with it.
+            // of the target. Close the target here instead.
             if name == "arbos::CloseWindow" {
                 if root.is_some() {
                     crate::kernel::shutdown_tunnels();
-                    cx.defer(|cx| {
-                        for other in cx.windows() {
-                            if let Some(handle) =
-                                other.downcast::<crate::view::settings::SettingsWindow>()
-                            {
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                            }
-                        }
-                    });
                 }
                 window.remove_window();
                 return Ok(json!({ "action": name, "window_closed": true }));
@@ -1049,6 +1040,45 @@ fn snapshot(root: Option<&Entity<Arbos>>, window: &mut Window, cx: &mut App) -> 
 // ---------------------------------------------------------------------------
 // App state
 
+/// The side panel of the project in front: whether it is out, how wide, its own
+/// tabs and which of them the tab chords will move. Its own function because
+/// `state`'s one `json!` reached the macro's recursion limit with it inline —
+/// and because the loops assert on these names.
+fn panel_json(this: &Arbos, workspace: &Workspace, window: &Window, cx: &App) -> Value {
+    let Some(panel) = workspace.panel() else {
+        return Value::Null;
+    };
+    let tabs: Vec<Value> = panel
+        .tabs()
+        .iter()
+        .map(|tab| match tab {
+            PanelTab::Project => json!({ "kind": "project" }),
+            PanelTab::New(n) => json!({ "kind": "new", "id": n }),
+            PanelTab::Surface(id) => {
+                let surface = workspace.active_project().and_then(|p| p.surface(*id));
+                json!({
+                    "kind": "surface",
+                    "id": id.0,
+                    "title": surface.map(board::title),
+                    "board_kind": surface.map(|s| s.board_kind.clone()),
+                    "state": surface.and_then(|s| board::state_word(s, workspace.panel_link())),
+                    // What the kernel said about this row when it was last
+                    // asked, and whether it said it holds nothing behind it.
+                    "status": surface.and_then(|s| s.status.clone()),
+                    "gone": surface.map(|s| s.gone),
+                })
+            }
+        })
+        .collect();
+    json!({
+        "open": panel.open,
+        "width": panel.width(),
+        "active": panel.active(),
+        "focused": this.panel_focused(window, cx),
+        "tabs": tabs,
+    })
+}
+
 /// What the app believes is going on, in words a test can assert on: which
 /// pane shows, what is open, what the composer holds, what was said.
 fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
@@ -1083,18 +1113,83 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                     "agent": focus.agent,
                     "surface": focus.surface.map(|id| id.0),
                 })),
+                // Which kernel this place is attached to, in the kernel's own
+                // words off the socket. `null` is "nothing attached"; a build
+                // with `commit: null` is a kernel that recorded no commit.
+                // Settings › General draws exactly this.
+                "kernel": project.kernel_build().map(|build| json!({
+                    "version": build.version,
+                    "commit": build.commit(),
+                    "git_sha": build.git_sha,
+                    "built_at": build.built_at,
+                    "binary_gone": build.binary_gone,
+                })),
                 "sessions": project.sessions.iter().map(|chat| session_json(Some(project), chat)).collect::<Vec<_>>(),
                 "surfaces": project.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
             })
         })
         .collect();
+    // The commit of the kernel binary this app ships, which is what a place's
+    // own kernel is compared against. Three answers and never a guess: `unread`
+    // (nobody has run the binary to ask yet), `unreadable`, or the sha.
+    let bundled_commit = match crate::kernel::bundled_commit() {
+        crate::kernel::Bundled::Unread => "unread",
+        crate::kernel::Bundled::Unreadable => "unreadable",
+        crate::kernel::Bundled::Sha(sha) => sha,
+    };
+    // The call to the project in front, when one is live: what the strip
+    // shows, so a test can assert on it without pixels. Built here rather
+    // than inline below — one `json!` for the whole of `state` reached the
+    // macro's recursion limit.
+    let call = this.call.as_ref().map(|call| {
+        let voice = crate::voice_ws::status();
+        json!({
+            "active": true,
+            "connecting": call.connecting,
+            "session": call.session,
+            "label": call.label,
+            "phase": voice.phase.map(|p| p.as_str()),
+            "muted": voice.muted,
+            "mic_device": voice.mic_device,
+            "mic_error": voice.mic_error,
+            "speaker_device": voice.speaker_device,
+            "project_path": voice.project_path,
+            "project_label": voice.project_label,
+            "work": {
+                "active": voice.work_active,
+                "agents": voice.work_agents,
+                "stale": voice.work_stale,
+                "sound": voice.work_sound,
+            },
+            "played_bytes": crate::voice_ws::counters().0,
+            "level": voice.level,
+            "partial": voice.text,
+            "reply": voice.reply,
+            "last_said": voice.last_said,
+            "seconds": call.since.elapsed().as_secs(),
+        })
+    });
     json!({
+        // Which tab the middle draws, and — for a project tab — which of its
+        // panes. `showing` is the project's, so a test that means "the chat is
+        // on screen" has to read `front` as well.
+        "front": front_name(this.front()),
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
-        "panel_open": this.panel_open,
+        // The side panel: whether it is out, how wide, its own tabs and which
+        // of them is in front, plus whether its row is the one the tab chords
+        // will move. `panel_open` stays under its old name — the parity loop
+        // and the journeys assert on it.
+        "panel_open": workspace.panel().is_some_and(|panel| panel.open),
+        // Whether the drawer is on screen: open *and* the window wide enough
+        // to give it room. At 900 wide `panel_open` read true while nothing
+        // was drawn (F-161, rig audit R1) — a rig must assert on what shows.
+        "panel_shown": workspace.panel().is_some_and(|panel| panel.open)
+            && f32::from(window.viewport_size().width) >= crate::view::panel::PANEL_MIN_WINDOW,
+        "panel": panel_json(this, workspace, window, cx),
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
-        // The rest of the Settings window's values, so a click on a control
+        // The rest of the Settings tab's values, so a click on a control
         // there can be asserted on state and not recorded `unverified`
         // (rig audit R3, cycle 32).
         "appearance": format!("{:?}", workspace.appearance).to_ascii_lowercase(),
@@ -1114,7 +1209,12 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "error": n.error,
             })).collect::<Vec<_>>(),
         },
-        "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
+        // The Settings tab is in the strip. `front` says whether it is the tab
+        // being looked at, and `settings_section` which section it is on.
+        "bundled_kernel_commit": bundled_commit,
+        "settings_open": this.settings_tab.is_some(),
+        "settings_section": this.settings_tab.as_ref()
+            .map(|tab| json!(tab.pane.read(cx).section().key())),
         "opener_open": this.opener.read(cx).open,
         "search_open": this.chat_search.read(cx).is_open(),
         "feedback": {
@@ -1176,28 +1276,7 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         // The last dictated take's clock: Fn press to first partial, release
         // to send. The gateway's own numbers ride along.
         "voice_latency": voice_latency(this),
-        // The call to the project in front, when one is live: what the
-        // strip shows, so a test can assert on it without pixels.
-        "call": this.call.as_ref().map(|call| {
-            let voice = crate::voice_ws::status();
-            json!({
-                "active": true,
-                "connecting": call.connecting,
-                "session": call.session,
-                "label": call.label,
-                "phase": voice.phase.map(|p| p.as_str()),
-                "muted": voice.muted,
-                "mic_device": voice.mic_device,
-                "mic_error": voice.mic_error,
-                "speaker_device": voice.speaker_device,
-                "played_bytes": crate::voice_ws::counters().0,
-                "level": voice.level,
-                "partial": voice.text,
-                "reply": voice.reply,
-                "last_said": voice.last_said,
-                "seconds": call.since.elapsed().as_secs(),
-            })
-        }),
+        "call": call,
         "active_project": workspace.active,
         "active_session": workspace.active_id(),
         "active_surface": workspace.active_surface().map(|surface| surface.id.0),
@@ -1211,6 +1290,13 @@ fn pane_name(pane: Option<Pane>) -> Value {
         Some(Pane::Surface) => json!("surface"),
         Some(Pane::Project) => json!("project"),
         None => Value::Null,
+    }
+}
+
+fn front_name(front: Front) -> Value {
+    match front {
+        Front::Project => json!("project"),
+        Front::Settings => json!("settings"),
     }
 }
 
@@ -1233,16 +1319,24 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "held": chat.plan_queued(),
         "asks": chat.plan_open().filter(|n| n.do_kind == "ask").count(),
         "reconnect_attempt": chat.reconnect_attempt,
+        // The plain-words reason the bar keeps while a connection is down,
+        // so a rig can assert the tab says *why* and not only that it failed.
+        "connect_fault": chat.connect_fault,
+        "reconnect_in_secs": chat.reconnect_at.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_secs()),
+        // The item whose link the pointer is over, so a rig can assert the
+        // hand and the underline are drawn for a URL (report -31).
+        "hover_link": chat.transcript.hover_link_item(),
         "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",
             Connection::Connecting => "connecting",
             Connection::Live(_) => "live",
-            Connection::Reconnecting(_) => "reconnecting",
             Connection::Lost => "lost",
         },
         "streaming": chat.streaming,
         "waiting": chat.waiting,
+        "status": chat.status,
+        "live_status": chat.live_status(),
         "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
@@ -1250,7 +1344,6 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
             let (working, prs) = crate::view::detail::pill_counts(project, chat);
             json!({ "working": working.len(), "prs": prs.len(), "pr_urls": prs })
         }),
-        "permission": chat.permission.as_ref().map(|prompt| prompt.title.clone()),
         "questions": chat.questions.as_ref().map(|prompt| prompt.title.clone()),
         "items": chat.items.iter().map(item_json).collect::<Vec<_>>(),
     })

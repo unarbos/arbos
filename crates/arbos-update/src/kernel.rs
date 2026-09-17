@@ -51,6 +51,52 @@ pub struct Running {
     pub protocol: u32,
 }
 
+/// Run `<binary> --version`, waiting out a file that was only just written.
+///
+/// Everything this module does runs a binary moments after putting it
+/// there: a payload is unpacked and probed, a candidate is copied beside
+/// its target and probed again. On Linux that can fail with `ETXTBSY`,
+/// "Text file busy" — the kernel refuses to execute a file while any
+/// process holds it open for writing.
+///
+/// Our own descriptor is closed by then. The one that is not is a
+/// *stranger's*: a thread that forks between another thread's `open` and
+/// `close` gives its child an inherited writable descriptor to the file,
+/// and until that child execs or exits the file cannot be run. Nothing the
+/// writing code does can prevent it, because the fork is somewhere else
+/// entirely — in a program with threads, which is what the desktop is, it
+/// is a matter of luck.
+///
+/// The window is the length of somebody else's fork-to-exec, so it closes
+/// on its own in well under a millisecond. Waiting it out is the whole
+/// remedy. Only `ETXTBSY` is retried: a binary that is genuinely broken
+/// must still fail on the first try and say so.
+///
+/// Seen as a flake in `the_place_probe_allows_a_build_that_reads_it_no_worse`,
+/// where 69 sibling tests supply the forks, and reported as
+/// `Text file busy (os error 26)` on 2026-09-17.
+fn run_version(binary: &Path) -> Result<std::process::Output> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match Command::new(binary).arg("--version").output() {
+            Ok(out) => return Ok(out),
+            Err(e)
+                if e.raw_os_error() == Some(TEXT_FILE_BUSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("running {} --version", binary.display()));
+            }
+        }
+    }
+}
+
+/// `ETXTBSY`. 26 on Linux, where this happens; on macOS it is the same
+/// number, and on anything else the comparison simply never matches.
+const TEXT_FILE_BUSY: i32 = 26;
+
 impl Running {
     /// Ask a binary what it is, by running it.
     ///
@@ -59,10 +105,7 @@ impl Running {
     /// so this doubles as the check that a staged payload works before it is
     /// moved into place.
     pub fn read(binary: &Path) -> Result<Self> {
-        let out = Command::new(binary)
-            .arg("--version")
-            .output()
-            .with_context(|| format!("running {} --version", binary.display()))?;
+        let out = run_version(binary)?;
         if !out.status.success() {
             bail!("{} --version exited {}", binary.display(), out.status);
         }
@@ -243,7 +286,7 @@ pub enum Probe<'a> {
 impl Probe<'_> {
     /// Run it. `staged` is the candidate; `current` is what it would replace.
     fn run(self, staged: &Path, current: &Path, expected: &Version) -> Result<()> {
-        let new = Running::read(staged).context("the downloaded kernel would not run")?;
+        let new = Running::read(staged).context("the new kernel would not run")?;
         if new.version.cmp_release(expected) != std::cmp::Ordering::Equal {
             bail!(
                 "the download says it is {} but the feed said {}",
@@ -257,7 +300,7 @@ impl Probe<'_> {
         let theirs = read_place(current, place);
         let ours = read_place(staged, place).with_context(|| {
             format!(
-                "the downloaded kernel could not read {} at all",
+                "the new kernel could not read {} at all",
                 place.display()
             )
         })?;
@@ -265,7 +308,7 @@ impl Probe<'_> {
             && ours > theirs
         {
             bail!(
-                "the downloaded kernel finds {ours} problems in {} where the one it would \
+                "the new kernel finds {ours} problems in {} where the one it would \
                  replace finds {theirs} — refusing it rather than serving with it",
                 place.display()
             );
@@ -383,6 +426,62 @@ pub fn previous_path(target: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Put a kernel binary that is already on this machine in place of another
+/// one, with the same care a downloaded payload gets.
+///
+/// For the case the feed cannot serve: bootstrapping an installation too old
+/// to update itself (a kernel that answers `unknown command update`), and a
+/// machine with no route to the internet. What makes it worth a function
+/// rather than `mv` is everything around the move — the candidate is run
+/// before anything is touched, run again once it is in place, rolled back by
+/// `Swap` if either fails, and the replaced build is kept beside it.
+///
+/// No signature is checked, because there is nothing to check one against. A
+/// file already on the machine was put there by whoever had access to the
+/// machine; the feed's signature protects bytes that crossed a network, and
+/// this protects a swap.
+pub fn install_file(source: &Path, target: &Path, probe: Probe<'_>) -> Result<()> {
+    if source == target {
+        bail!("{} is already the file being replaced", source.display());
+    }
+    let coming =
+        Running::read(source).with_context(|| format!("{} does not run", source.display()))?;
+    probe.run(source, target, &coming.version)?;
+
+    // Staged beside the target: the rename that follows has to be a rename,
+    // and the source may be on another filesystem entirely.
+    let staging = install::staging_for(target)?;
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).with_context(|| format!("making {}", staging.display()))?;
+    let staged = staging.join(
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("arbos-kernel"),
+    );
+    let done = (|| -> Result<()> {
+        std::fs::copy(source, &staged)
+            .with_context(|| format!("copying {} beside {}", source.display(), target.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let previous = previous_path(target);
+        let _ = std::fs::remove_file(&previous);
+        std::fs::copy(target, &previous)
+            .with_context(|| format!("keeping the current binary as {}", previous.display()))?;
+        let swap = install::Swap::begin(target, &staged)?;
+        if let Err(e) = Running::read(target) {
+            let _ = std::fs::remove_file(&previous);
+            return Err(e).context("the new kernel did not survive being moved into place");
+        }
+        swap.commit()
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    done
+}
+
 /// Check a payload's bytes and put it in place. The whole of the install, for
 /// a caller that already has the bytes.
 pub fn verify_and_install(
@@ -405,6 +504,62 @@ pub fn verify_and_install(
     let installed = install_payload(&file, offered, target, probe);
     let _ = std::fs::remove_file(&file);
     installed
+}
+
+/// A kernel built for a machine that is not this one: checked, unpacked,
+/// and left on disk for the caller to send somewhere.
+///
+/// The desktop puts kernels on remote hosts and cannot run what it puts
+/// there — a Linux kernel does not execute on a Mac — so every probe
+/// [`install_payload`] does is unavailable. What remains are the checks
+/// that need nothing executed: the download's length, its digest, and its
+/// Ed25519 signature. Those are the ones that matter here, because these
+/// bytes crossed a network, and they are the same check the app applies
+/// to its own payload rather than a second trust path.
+///
+/// What cannot be checked here is checked at the far end, where the file
+/// can run: the caller asks the remote for `--version` before moving it
+/// into place, which is where a wrong architecture or a truncated
+/// download shows up.
+///
+/// Returns the path of the binary inside `scratch`. The caller owns
+/// `scratch` and is expected to remove it.
+pub fn payload_for_another_machine(
+    bytes: &[u8],
+    offered: &Available,
+    key: &PublicKey,
+    scratch: &Path,
+) -> Result<PathBuf> {
+    offered.download.check_url()?;
+    offered
+        .download
+        .check_payload(bytes, key)
+        .context("the kernel download did not verify")?;
+    std::fs::create_dir_all(scratch).with_context(|| format!("making {}", scratch.display()))?;
+    let file = scratch.join(offered.download.file_name());
+    std::fs::write(&file, bytes).with_context(|| format!("writing {}", file.display()))?;
+    let unpacked = install::unpack(&file, offered.download.format, &scratch.join("arbos-kernel"));
+    let _ = std::fs::remove_file(&file);
+    let one = unpacked?;
+    // The tarball carries one directory with the binary in it; a bare
+    // binary is published for macOS.
+    let binary = match one.is_dir() {
+        true => one.join("arbos-kernel"),
+        false => one,
+    };
+    if !binary.is_file() {
+        bail!(
+            "the kernel download had no arbos-kernel in it ({} is missing)",
+            binary.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("making {} runnable", binary.display()))?;
+    }
+    Ok(binary)
 }
 
 /// Where `arbos-kernel` is on this machine, when it can be found without being
@@ -666,6 +821,52 @@ mod tests {
             .to_string();
         assert!(err.contains("2 problems"), "{err}");
         assert!(err.contains("refusing"), "{err}");
+    }
+
+    /// The flake, made to happen on purpose.
+    ///
+    /// A writable descriptor anywhere on the file is what makes the kernel
+    /// refuse to execute it, so holding one here is the same condition a
+    /// stranger's forked child creates — and the only way to produce it
+    /// without a race.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_binary_that_is_only_briefly_busy_is_waited_for_rather_than_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = stub(&home.path().join("k"), "0.2.0", 0);
+
+        let held = std::fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        assert_eq!(
+            std::process::Command::new(&bin)
+                .arg("--version")
+                .output()
+                .expect_err("a file held open for writing cannot be executed")
+                .raw_os_error(),
+            Some(super::TEXT_FILE_BUSY),
+            "the condition under test did not arise, so the rest proves nothing"
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            drop(held);
+        });
+        let running = Running::read(&bin).expect("waited the busy file out");
+        assert_eq!(running.sha, "abc123def456");
+    }
+
+    /// And the wait must not become a way to be slow about real failures.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_that_will_never_run_fails_at_once() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = home.path().join("not-here");
+        let started = std::time::Instant::now();
+        assert!(Running::read(&missing).is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "waited {:?} for a file that does not exist",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]

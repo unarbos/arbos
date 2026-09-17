@@ -114,7 +114,11 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
     let arbos = place.arbos();
     std::fs::create_dir_all(&arbos)?;
     let ignore = arbos.join(".gitignore");
-    let have = std::fs::read_to_string(&ignore).unwrap_or_default();
+    // Confirmed: a hand's extra lines are merged, not lost to a failed
+    // read (the qal-j08 family; see `crate::record`).
+    let have = crate::record::read_text(&ignore)
+        .confirmed()?
+        .unwrap_or_default();
     if have != ARBOS_GITIGNORE {
         // Keep a hand's extra lines; make sure ours are present.
         let mut merged = String::new();
@@ -138,7 +142,19 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
     // Every start, not only the first: a place that moved its store to
     // .arbos.nosync (cloudsync) needs that name excluded too, or a
     // `git add -A` in the project records the nested repository.
-    exclude_locally(&place.path, &[".arbos/", ".arbos.nosync/"]);
+    if let Err(e) = exclude_locally(&place.path, &[".arbos/", ".arbos.nosync/"]) {
+        // Not fatal to serving; fatal to silence. The person is told on
+        // root's transcript, once per start, what to do before they
+        // commit.
+        eprintln!("arbos: .arbos/ could not be excluded from git: {e:#}");
+        let notice = Event::new(EventKind::Notice {
+            text: format!(
+                "`.arbos/` could not be added to .git/info/exclude ({e:#}). Add `.arbos/` to .gitignore before committing, or `git add -A` will stage the agent's records into the repository."
+            ),
+            failed: true,
+        });
+        let _ = append_event(&Layout::new(place, ROOT_ID).transcript(), &notice);
+    }
     if place.arbos_repo().exists() {
         return Ok(false);
     }
@@ -169,14 +185,23 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
 /// `.git/info/exclude` is the local, uncommitted ignore list: each of
 /// `patterns` (a folder name with its slash) goes there unless git already
 /// ignores it. Quiet when the project is not a repository.
-pub fn exclude_locally(project: &Path, patterns: &[&str]) {
+pub fn exclude_locally(project: &Path, patterns: &[&str]) -> Result<()> {
     let git_dir = project.join(".git");
     if !git_dir.exists() {
-        return;
+        return Ok(());
     }
     let exclude = git_dir.join("info").join("exclude");
-    let _ = std::fs::create_dir_all(exclude.parent().unwrap());
-    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    std::fs::create_dir_all(exclude.parent().unwrap())
+        .with_context(|| format!("create {}", exclude.parent().unwrap().display()))?;
+    // Confirmed: a failed read is not an empty file to write over
+    // (`crate::record`). An unknown read is returned as the error the
+    // caller says on root's transcript, so the patterns are not silently
+    // left for the next start (#444) and never overwrite a file that
+    // could not be read (#392).
+    let text = crate::record::read_text(&exclude)
+        .confirmed()
+        .with_context(|| format!("read {}", exclude.display()))?;
+    let mut text = text.unwrap_or_default();
     let mut changed = false;
     for pattern in patterns {
         let bare = pattern.trim_end_matches('/');
@@ -204,8 +229,11 @@ pub fn exclude_locally(project: &Path, patterns: &[&str]) {
         changed = true;
     }
     if changed {
-        let _ = std::fs::write(&exclude, text);
+        // Unwritten, the person's next `git add -A` stages the agent's
+        // whole record into their repository. Said, not swallowed.
+        std::fs::write(&exclude, text).with_context(|| format!("write {}", exclude.display()))?;
     }
+    Ok(())
 }
 
 pub fn bootstrap(place: &Place) -> Result<Agent> {
@@ -421,7 +449,14 @@ fn root_focus() -> String {
 /// The focused agent folder. A missing or invalid file reads as root, and
 /// is rewritten so every reader agrees.
 pub fn read_focus(place: &Place) -> String {
-    let raw = std::fs::read_to_string(place.focus_path()).unwrap_or_default();
+    // A focus file that could not be read is not rewritten: the value
+    // shown is root for now, the file keeps what it holds
+    // (`crate::record`). Absent or invalid, it is set so readers agree.
+    let raw = match crate::record::read_text(&place.focus_path()) {
+        crate::record::Read::Present(t) => t,
+        crate::record::Read::Absent => String::new(),
+        crate::record::Read::Unknown(_) => return root_focus(),
+    };
     match validate_focus(place, &raw) {
         Ok(focus) => focus,
         Err(_) => {
@@ -788,17 +823,70 @@ pub fn agent_exists(place: &Place, id: &str) -> bool {
 /// chat read "Nothing on record yet" while its whole record sat in the
 /// archive (M-27). None when no folder of that name exists in either.
 pub fn transcript_for_history(place: &Place, id: &str) -> Option<(std::path::PathBuf, bool)> {
-    if crate::validate_id(id).is_err() {
-        return None;
+    resolve_history_agent(place, id).map(|r| (r.transcript, r.archived))
+}
+
+/// What a `history` request resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTarget {
+    /// The folder id, live or archived.
+    pub id: String,
+    pub transcript: std::path::PathBuf,
+    pub archived: bool,
+}
+
+/// The agent a client means by `q`: its id, live or archived — or its
+/// *name* (the spawn's `name`, what the roster and a worker card show),
+/// live first, then archived. The phone asked `history` for "Run J152618
+/// verification command", the name on its sheet, and got `total: 0` for
+/// eight of eight finished workers whose records were on disk under
+/// their ids; a name is not a valid id, so nothing was even looked up.
+pub fn resolve_history_agent(place: &Place, q: &str) -> Option<HistoryTarget> {
+    let q = q.trim();
+    let by_id = |id: &str| -> Option<HistoryTarget> {
+        if crate::validate_id(id).is_err() {
+            return None;
+        }
+        if place.agent_dir(id).join("agent.md").exists() {
+            return Some(HistoryTarget {
+                id: id.to_string(),
+                transcript: Layout::new(place, id).transcript(),
+                archived: false,
+            });
+        }
+        let dir = crate::project::archive_agents_dir(place).join(id);
+        dir.join("agent.md").exists().then(|| HistoryTarget {
+            id: id.to_string(),
+            transcript: dir.join("transcript.jsonl"),
+            archived: true,
+        })
+    };
+    if let Some(t) = by_id(q) {
+        return Some(t);
     }
-    let live = Layout::new(place, id).transcript();
-    if place.agent_dir(id).join("agent.md").exists() {
-        return Some((live, false));
+    // By name, case-folded: the live roster, then the archive.
+    let want = q.to_lowercase();
+    if let Ok(agents) = list_agents(place)
+        && let Some(a) = agents.iter().find(|a| a.name.trim().to_lowercase() == want)
+    {
+        return by_id(a.id.as_str());
     }
-    let archived = crate::project::archive_agents_dir(place)
-        .join(id)
-        .join("transcript.jsonl");
-    archived.exists().then_some((archived, true))
+    let rd = std::fs::read_dir(crate::project::archive_agents_dir(place)).ok()?;
+    let mut hits: Vec<(std::path::PathBuf, Agent)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| Agent::load(&p).ok().map(|a| (p, a)))
+        .filter(|(_, a)| a.name.trim().to_lowercase() == want)
+        .collect();
+    // Two archived workers with one name: the newest folder (by mtime).
+    hits.sort_by_key(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    let (dir, a) = hits.pop()?;
+    Some(HistoryTarget {
+        id: a.id.to_string(),
+        transcript: dir.join("transcript.jsonl"),
+        archived: true,
+    })
 }
 
 /// `id`, its parent, grandparent, … up to the top (or an unreadable or

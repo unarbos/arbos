@@ -37,6 +37,7 @@ from tests.client import Caller
 from tests.mock_duplex import MockDuplex, Response, Utterance
 from tests.mock_hub import MockHub
 from tests.mock_kernel import Behaviour, Child, MockKernel
+from tests.mock_openai import MockOpenAILive
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -101,6 +102,7 @@ def kernel_behaviour(k: dict) -> Behaviour:
         reply=k.get("reply", ""), reply_delay=float(k.get("reply_delay", 0.3)), spawn=spawn,
         reply_after_done=k.get("reply_after_done", ""), ask=k.get("ask", ""), ask_options=list(k.get("ask_options", [])),
         tool_output_lines=int(k.get("tool_output_lines", 0)), steer_reply=k.get("steer_reply", ""),
+        tool_seconds=float(k.get("tool_seconds", 1.0)),
         approval=k.get("approval", ""), reply_denied=k.get("reply_denied", ""),
     )
 
@@ -111,10 +113,11 @@ def kernel_behaviour(k: dict) -> Behaviour:
 class Gateway:
     """The real thing, as a subprocess."""
 
-    def __init__(self, *, duplex_url: str, kernel_url: str, log: Path, extra: list[str]):
+    def __init__(self, *, duplex_url: str, kernel_url: str, log: Path, extra: list[str], env: dict | None = None):
         self.port = free_port()
         self.url = f"ws://127.0.0.1:{self.port}/ws"
         self.log = log
+        self.env = env or {}
         model_dir = OUT / "no-models"
         model_dir.mkdir(parents=True, exist_ok=True)
         self.cmd = [
@@ -128,8 +131,11 @@ class Gateway:
         self.proc: subprocess.Popen | None = None
 
     async def start(self, timeout: float = 30.0) -> None:
-        env = dict(os.environ, PYTHONPATH=str(ROOT))
-        self.proc = subprocess.Popen(self.cmd, cwd=ROOT, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
+        # ARBOS_VOICE_SERVER_SRC: run another checkout's gateway (a branch under review) against
+        # this tree's desktop and mocks.
+        src = Path(os.environ.get("ARBOS_VOICE_SERVER_SRC") or ROOT)
+        env = dict(os.environ, PYTHONPATH=str(src), **self.env)
+        self.proc = subprocess.Popen(self.cmd, cwd=src, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
         deadline = time.monotonic() + timeout
         async with httpx.AsyncClient(timeout=2.0) as client:
             while time.monotonic() < deadline:
@@ -151,6 +157,10 @@ class Gateway:
                 self.proc.wait(5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+
+
+class _Refused(Exception):
+    """The gateway refused the call, as the scenario expected: nothing more to drive."""
 
 
 async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
@@ -175,16 +185,49 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
 
     gateway: Gateway | None = None
     caller: Caller | None = None
+    live: MockOpenAILive | None = None
     # `hub = { machine, project }`: the scripted kernel sits behind a mock hub under that name;
     # the gateway's own kernel is a second, unscripted one, so routing through the hub is provable.
     hub_cfg = sc.get("hub")
     hub: MockHub | None = None
     own: MockKernel | None = None
+    decoy: MockKernel | None = None
+    decoy_name = ""
     extra = [*opts.gateway_args, *sc.get("gateway_args", [])]
-    project = ""
+    project: "str | dict" = ""
+    # `path = "own" | "local" | "missing"`: the call names a folder by its path, as the desktop does.
+    # own: the gateway's kernel serves that very folder. local: the scripted kernel serves another
+    # folder on this host and the gateway's own kernel is a second one — the call must attach to the
+    # folder named. missing: a folder with no kernel — the call must be refused, never rerouted.
+    path_mode = sc.get("path")
     try:
         duplex_url = await duplex.start()
         kernel_url = opts.kernel or await kernel.start()
+        if sc.get("history"):
+            transcript = place / ".arbos" / "agents" / "root" / "transcript.jsonl"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            with transcript.open("a", encoding="utf-8") as fh:
+                for event in sc["history"]:
+                    fh.write(json.dumps(event) + "\n")
+        live_env: dict[str, str] = {}
+        if sc.get("engine") == "openai":
+            live = MockOpenAILive()
+            live_url = await live.start()
+            extra += ["--engine", "openai"]
+            live_env = {"OPENAI_API_KEY": "test-key", "VOICE_OPENAI_URL": live_url}
+        if path_mode in ("local", "missing"):
+            own_place = out / "own-place"
+            own_place.mkdir()
+            own = MockKernel(own_place)
+            own_url = await own.start()
+            kernel_url = own_url
+            folder = place if path_mode == "local" else (out / "no-kernel-here")
+            folder.mkdir(exist_ok=True)
+            project = {"machine": "", "project": folder.name, "path": str(folder.resolve()), "name": folder.name,
+                       "context": sc.get("context") or {}}
+        elif path_mode == "own":
+            project = {"machine": "", "project": place.name, "path": str(place.resolve()), "name": place.name,
+                       "context": sc.get("context") or {}}
         if hub_cfg:
             own_place = out / "own-place"
             own_place.mkdir()
@@ -193,27 +236,84 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             hub = MockHub(token="harness-hub")
             project = f"{hub_cfg['machine']}/{hub_cfg['project']}"
             hub.kernels[project] = kernel_url
+            hub.places[project] = str(place)
+            # `hub.decoy = "name"`: a second, unscripted kernel on the same machine under another roster
+            # name, so a client naming the folder by path must land on the scripted one by `place`.
+            if hub_cfg.get("decoy"):
+                decoy_place = out / "decoy-place"
+                decoy_place.mkdir()
+                decoy = MockKernel(decoy_place)
+                decoy_url = await decoy.start()
+                decoy_name = f"{hub_cfg['machine']}/{hub_cfg['decoy']}"
+                hub.kernels[decoy_name] = decoy_url
+                hub.places[decoy_name] = str(decoy_place)
             hub_url = await hub.start()
             extra += ["--hub", hub_url, "--hub-token", "harness-hub", "--hub-machine", "gateway-box"]
             kernel_url = own_url
         if opts.gateway:
             url, token = opts.gateway, opts.token
         else:
-            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=extra)
+            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=extra,
+                               env=live_env)
             await gateway.start()
             url, token = gateway.url, TOKEN
-        caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=project)
+        # `project = "name"`: a bare folder name, as a desktop off the hub sends it; `refused = "code"`:
+        # the gateway must answer with that error code and close, and no kernel may hear a word.
+        if sc.get("project"):
+            project = sc["project"]
+        if isinstance(sc.get("client_project"), dict):
+            # The client's own naming of the project (a dict as the desktop sends it); "$PLACE" is the
+            # scripted kernel's folder. The hub name the harness checks against stays `project`.
+            client_project = {k: (str(place) if v == "$PLACE" else v) for k, v in sc["client_project"].items()}
+        else:
+            client_project = project
+        caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=client_project)
         ready = await caller.connect()
+        if sc.get("refused"):
+            # `refused = "code"`: the call must be refused with that error code and closed; no kernel hears a word.
+            code = ready.get("code") if ready.get("type") == "error" else None
+            res.checks.append((code == sc["refused"], f"the gateway refused the call with {sc['refused']} (got {ready.get('type')} {code}: {str(ready.get('message'))[:90]})"))
+            await asyncio.sleep(0.6)
+            res.checks.append((caller.ready == {}, "no session.ready followed the refusal"))
+            res.checks.append((caller.closed is not None and caller.closed[0] == 4404, f"the socket closed with 4404 ({caller.closed})"))
+            res.checks.append((len(kernel.users) == 0, f"the gateway's own kernel received no user frames ({len(kernel.users)})"))
+            raise _Refused()
+        if path_mode == "missing":
+            errors = [f.msg for f in caller.rec.frames if f.msg.get("type") == "error"]
+            code = errors[-1].get("code") if errors else None
+            res.checks.append((not caller.ready, f"no session.ready for a folder with no kernel (got {bool(caller.ready)})"))
+            res.checks.append((code == "project_offline", f"the refusal names the cause: error.code = project_offline (got {code})"))
+            res.checks.append((caller.closed is not None and caller.closed[0] == 4404, f"the socket closed with 4404 ({caller.closed})"))
+            res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
+            raise _Refused()
         res.checks.append((ready.get("mode") == "call" and ready.get("narrator") is True, f"session.ready says call mode with a narrator ({ready.get('mode')}, narrator={ready.get('narrator')})"))
+        if path_mode in ("own", "local"):
+            want = str(place.resolve())
+            got = str(ready.get("project_path") or "")
+            same = got and os.path.realpath(got) == os.path.realpath(want)
+            via = ready.get("via")
+            res.checks.append((bool(same), f"session.ready.project_path is the folder the call asked for ({got})"))
+            res.checks.append((via == path_mode, f"session.ready.via = {path_mode} (got {via})"))
         if hub_cfg:
             res.checks.append((ready.get("via") == "hub" and ready.get("project") == project, f"session.ready says the call is attached through the hub to {project} (via={ready.get('via')}, project={ready.get('project')})"))
+            info = ready.get("project_info") or {}
+            res.checks.append((info.get("path") == str(place) and info.get("place") == str(place) and info.get("via") == "hub",
+                               f"session.ready.project_info names the project's own folder {place} (got {info.get('path')}, via={info.get('via')}), not the gateway kernel's"))
         await asyncio.sleep(0.4)  # the speech model's session.update lands
         await run_steps(steps, caller, duplex, kernel, opts)
         await caller.wait_quiet(1.0, timeout=10)
-        check(sc.get("expect") or {}, res, caller, duplex, kernel)
+        check(sc.get("expect") or {}, res, caller, duplex, kernel, live=live)
         if hub_cfg and own is not None and hub is not None:
             res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
             res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
+            if decoy is not None:
+                res.checks.append((len(decoy.users) == 0, f"the same-named decoy kernel received no user frames ({len(decoy.users)})"))
+                res.checks.append((decoy_name not in hub.attaches, f"the hub saw no attach for the decoy {decoy_name} ({hub.attaches})"))
+        if path_mode == "local" and own is not None:
+            res.checks.append((len(own.users) == 0, f"the gateway's own kernel (another folder) received no user frames ({len(own.users)})"))
+            res.checks.append((len(kernel.users) >= 1, f"the kernel at the named folder received the caller's words ({len(kernel.users)})"))
+    except _Refused:
+        pass  # the refusal was the expected outcome; its checks are recorded
     except Exception as exc:
         res.error = f"{type(exc).__name__}: {exc}"
         traceback.print_exc()
@@ -227,10 +327,14 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             gateway.stop()
         await duplex.stop()
         await kernel.stop()
+        if live:
+            await live.stop()
         if hub:
             await hub.stop()
         if own:
             await own.stop()
+        if decoy:
+            await decoy.stop()
         res.inbox = kernel.inbox_files("root")
         (out / "inbox.json").write_text(json.dumps(res.inbox, indent=1))
     res.seconds = time.monotonic() - started
@@ -279,7 +383,8 @@ async def run_steps(steps: list[dict], caller: Caller, duplex: MockDuplex, kerne
 # ---------------------------------------------------------------------- expectations
 
 
-def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: MockKernel) -> None:
+def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: MockKernel,
+          live: MockOpenAILive | None = None) -> None:
     rec = caller.rec
     spoken = rec.spoken()
     joined = "\n".join(spoken).lower()
@@ -377,6 +482,19 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
         limit = float(exp["approval_answered_within_s"])
         ok = len(asks) >= 2 and asks[1] - asks[0] <= limit
         add(ok, f"the approval was closed within {limit:.0f} s of being spoken ({[round(a, 1) for a in asks]})")
+    if "activity_states" in exp:
+        got = [(f.msg.get("agent"), f.msg.get("state")) for f in rec.of("agent.activity") if not f.msg.get("heartbeat")]
+        root = [st for ag, st in got if ag == "root"]
+        add(root == list(exp["activity_states"]), f"root's agent.activity transitions are {exp['activity_states']} (got {root})")
+    if "activity_tool" in exp:
+        tools = [f.msg.get("tool") for f in rec.of("agent.activity") if f.msg.get("state") == "tool"]
+        add(exp["activity_tool"] in tools, f"agent.activity named the tool {exp['activity_tool']!r} (got {tools})")
+    if "activity_heartbeats_min" in exp:
+        beats = [f for f in rec.of("agent.activity") if f.msg.get("heartbeat")]
+        add(len(beats) >= int(exp["activity_heartbeats_min"]), f"at least {exp['activity_heartbeats_min']} heartbeat(s) while work ran ({len(beats)})")
+    if exp.get("activity_idle_last"):
+        acts = rec.of("agent.activity")
+        add(bool(acts) and acts[-1].msg.get("state") == "idle", "the last agent.activity frame says idle")
     if "user_frames" in exp:
         add(len(kernel.users) == int(exp["user_frames"]), f"kernel received {exp['user_frames']} user frame(s) ({len(kernel.users)})")
     for needle in exp.get("kernel_user_not", []):
@@ -386,6 +504,13 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
     if "audio_bytes_min" in exp:
         total = sum(a.size for a in rec.audio if a.speaking)
         add(total >= int(exp["audio_bytes_min"]), f"at least {exp['audio_bytes_min']} bytes of reply audio ({total})")
+    if live is not None and (exp.get("live_sees") or exp.get("live_not_sees") or exp.get("live_started")):
+        blob = (live.instructions + "\n" + live.input_text()).lower()
+        add(live.started >= 1, f"GPT-Live received session.start ({live.started})")
+        for needle in exp.get("live_sees", []):
+            add(needle.lower() in blob, f"GPT-Live session sees {needle!r}")
+        for needle in exp.get("live_not_sees", []):
+            add(needle.lower() not in blob, f"GPT-Live session does not see {needle!r}")
 
 
 # ---------------------------------------------------------------------- main

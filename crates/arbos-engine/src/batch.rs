@@ -162,6 +162,12 @@ pub(crate) fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
 /// body goes to a side file the model can `read` in pieces.
 pub const BODY_CAP: usize = 1024 * 1024;
 const BODY_HEAD: usize = 64 * 1024;
+/// How long a call already in flight gets, after the turn is stopped, to
+/// return its own account. Every tool watches the turn's cancel token
+/// (`bash` yields in about two seconds, a waiting `spawn` at once); one
+/// that has not returned by then is aborted and recorded as interrupted —
+/// never as skipped, since it may already have acted.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A body larger than the model's view of it (the eviction limits) is
 /// written whole to `<agent dir>/results/<call_id>.txt`, so the model can
@@ -210,7 +216,8 @@ enum State {
     /// Arrived; not yet through preflight.
     New,
     Ready(Prepared),
-    Running,
+    /// In flight since this ms timestamp.
+    Running(i64),
     Done(Outcome),
 }
 
@@ -240,7 +247,13 @@ pub async fn run(
     let mut task_slot: HashMap<tokio::task::Id, usize> = HashMap::new();
     let mut committed = false;
     let mut aborted = false;
+    let mut waiting_on_tree = false;
+    let mut tree_step_said = false;
+    let mut tree_held_since: Option<std::time::Instant> = None;
     let mut rx_open = true;
+    // Set when the turn is stopped with calls in flight: the moment their
+    // grace runs out.
+    let mut stop_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         // Preflight arrivals in order. Hooks are user scripts; order matters.
@@ -288,19 +301,29 @@ pub async fn run(
         let steered = arbos_core::inbox::has_stop_steer(&cx.place, cx.agent.id.as_str());
         let running = slots
             .iter()
-            .filter(|s| matches!(s.state, State::Running))
+            .filter(|s| matches!(s.state, State::Running(_)))
             .count();
 
         if stopped {
-            set.abort_all();
+            // What has not started is skipped. What is in flight is not:
+            // it may already have acted (a worker spawned, a command
+            // started), and it watches the same cancel token, so it gets
+            // a moment to return its own account — "interrupted while
+            // waiting for w1; it keeps working" — before it is aborted.
             for s in &mut slots {
-                if !s.is_done() {
+                if matches!(s.state, State::New | State::Ready(_)) {
                     s.state = State::Done(Outcome::Skipped(if aborted {
                         "skipped: model response failed".into()
                     } else {
                         "skipped: interrupted".into()
                     }));
                 }
+            }
+            if aborted {
+                set.abort_all();
+                interrupt_running(&mut slots, "the model response failed");
+            } else if running > 0 && stop_deadline.is_none() {
+                stop_deadline = Some(tokio::time::Instant::now() + STOP_GRACE);
             }
         } else if steered && running == 0 {
             // The user said stop: nothing more starts; the words land at
@@ -328,7 +351,26 @@ pub async fn run(
                 if blocked {
                     continue;
                 }
-                let State::Ready(prepared) = std::mem::replace(&mut slots[i].state, State::Running)
+                // A write waits for the turn's checkpoint tree (qal-j17)
+                // *here*, before its record is stamped `started`, so the
+                // wait is the kernel's own step and not six seconds
+                // billed to `echo` (qal-j18). Reads go on meanwhile.
+                if !slots[i].access.is_readonly()
+                    && let Some(rx) = &cx.tree_ready
+                    && !*rx.borrow()
+                {
+                    if !tree_step_said {
+                        tree_step_said = true;
+                        tree_held_since = Some(std::time::Instant::now());
+                        cx.hooks
+                            .kernel_step("Saving a checkpoint of the working tree");
+                    }
+                    waiting_on_tree = true;
+                    continue;
+                }
+                let started = arbos_core::now_ms();
+                let State::Ready(prepared) =
+                    std::mem::replace(&mut slots[i].state, State::Running(started))
                 else {
                     unreachable!()
                 };
@@ -338,7 +380,6 @@ pub async fn run(
                     call_id: call.id.clone(),
                     ..cx.clone()
                 };
-                let started = arbos_core::now_ms();
                 let rec = ToolRec {
                     name: call.name.clone(),
                     call_id: call.id.clone(),
@@ -357,8 +398,20 @@ pub async fn run(
                     output: None,
                 };
                 // On disk before it runs: a kernel that dies mid-call
-                // leaves this for the next one to write up (qal-j02).
-                crate::inflight::start(&cx.place, &cx.agent.id, &rec);
+                // leaves this for the next one to write up (qal-j02). A
+                // record that cannot be written refuses the call: a crash
+                // now would run it twice with nothing to say so.
+                if let Err(e) = crate::inflight::start(&cx.place, &cx.agent.id, &rec) {
+                    running -= 1;
+                    slots[i].state = State::Done(Outcome::Ran {
+                        out: Err(anyhow::anyhow!(
+                            "not run: its in-flight record could not be written ({e:#}) — a kernel death during the call would run it again unrecorded. Fix what blocks writes under .arbos/ (a full disk?) and call again."
+                        )),
+                        started,
+                        ended: arbos_core::now_ms(),
+                    });
+                    continue;
+                }
                 cx.hooks.emit(&Event::new(EventKind::Tool(rec)));
                 for note in &prepared.notices {
                     hook_notice(&cx, note);
@@ -383,9 +436,33 @@ pub async fn run(
             break;
         }
 
+        // The tree's completion is one more thing the loop wakes on when
+        // a write is held for it.
+        let mut tree_rx = cx.tree_ready.clone().filter(|_| waiting_on_tree);
+        waiting_on_tree = false;
+        let grace =
+            stop_deadline.filter(|_| slots.iter().any(|s| matches!(s.state, State::Running(_))));
         tokio::select! {
             biased;
             _ = control.cancel().cancelled(), if !stopped => {}
+            // The grace for calls in flight after a stop ran out.
+            _ = async { if let Some(d) = grace { tokio::time::sleep_until(d).await } }, if grace.is_some() => {
+                set.abort_all();
+                interrupt_running(&mut slots, "the turn was stopped");
+            }
+            // The tool's own derived step replaces the checkpoint line
+            // the moment it starts.
+            _ = async { if let Some(rx) = tree_rx.as_mut() { let _ = rx.wait_for(|r| *r).await; } }, if tree_rx.is_some() => {
+                if let Some(since) = tree_held_since.take()
+                    && since.elapsed() > std::time::Duration::from_millis(500)
+                {
+                    eprintln!(
+                        "{}: a writing tool was held {:.1}s for the turn's checkpoint tree",
+                        cx.agent.id,
+                        since.elapsed().as_secs_f64()
+                    );
+                }
+            }
             msg = rx.recv(), if rx_open => match msg {
                 Some(Msg::Call(call)) => slots.push(Slot { call, access: Access::none(), state: State::New }),
                 Some(Msg::Commit) => committed = true,
@@ -401,12 +478,11 @@ pub async fn run(
                     Some(Err(e)) => {
                         // A panicking or aborted tool task.
                         if let Some(&i) = task_slot.get(&e.id()) {
-                            if matches!(slots[i].state, State::Running) {
-                                let now = arbos_core::now_ms();
+                            if let State::Running(started) = slots[i].state {
                                 slots[i].state = State::Done(Outcome::Ran {
                                     out: Err(anyhow::anyhow!("tool task: {e}")),
-                                    started: now,
-                                    ended: now,
+                                    started,
+                                    ended: arbos_core::now_ms(),
                                 });
                             }
                         }
@@ -434,6 +510,24 @@ pub async fn run(
         .collect();
     log_speedup(&cx.agent.id, &outcomes);
     outcomes
+}
+
+/// Calls still in flight when their grace ran out: recorded as run and
+/// interrupted, with the time they held, never as skipped — the call may
+/// already have acted, and the model's next turn must know to check.
+fn interrupt_running(slots: &mut [Slot], why: &str) {
+    let now = arbos_core::now_ms();
+    for s in slots.iter_mut() {
+        if let State::Running(started) = s.state {
+            s.state = State::Done(Outcome::Ran {
+                out: Err(anyhow::anyhow!(
+                    "interrupted: {why} while this call was running; what it started may still be going — check before repeating it"
+                )),
+                started,
+                ended: now,
+            });
+        }
+    }
 }
 
 /// One line per multi-call batch: how long the tools took end to end versus
@@ -468,28 +562,22 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
 /// the result and may add context for the model.
 async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
     let name = call.name.clone();
-    // A tool that writes waits for the turn's checkpoint to have its
-    // tree: taken beside the turn, on a large repository `add -A` takes
-    // seconds while a model's first call can come sooner, and a tree
-    // taken after the call held the turn's own file — a rewind then put
-    // that file back and said restored (qal-j17). Reads go on; the wait
-    // is bounded only by the stop button.
+    // A writing tool after the project folder was renamed under the
+    // kernel would recreate the project at the old path (a ghost the next
+    // open reads as a project). The store's identity is checked first.
+    if !prepared.plan.access.is_readonly() {
+        arbos_core::check_store(&cx.place.arbos())?;
+    }
+    // The scheduler holds a writing tool until the turn's checkpoint has
+    // its tree (qal-j17/j18), so this is normally already true; a caller
+    // that reached here another way still does not write before it.
     if !prepared.plan.access.is_readonly()
         && let Some(rx) = cx.tree_ready.clone()
         && !*rx.borrow()
     {
         let mut rx = rx;
-        let waited = std::time::Instant::now();
         tokio::select! {
-            r = rx.wait_for(|ready| *ready) => {
-                if r.is_ok() && waited.elapsed() > std::time::Duration::from_millis(500) {
-                    eprintln!(
-                        "{}: {name} waited {:.1}s for the turn's checkpoint tree",
-                        cx.agent.id,
-                        waited.elapsed().as_secs_f64()
-                    );
-                }
-            }
+            _ = rx.wait_for(|ready| *ready) => {}
             _ = cx.cancel.cancelled() => {
                 anyhow::bail!("{name}: stopped while waiting for the turn's checkpoint tree");
             }
@@ -552,7 +640,8 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
             );
             // A source edit reports which existing tests name what it
             // changed; "none" is the wrong-layer signal (see git::coverage_note).
-            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch") {
+            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch" | "bash")
+            {
                 if let Some(note) = tools::git::coverage_note(&cwd, &paths) {
                     after.context.push(note);
                 }

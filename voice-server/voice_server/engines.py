@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 
@@ -29,6 +30,8 @@ class Engines:
     engine: str  # "duplex" or "pipeline"
     duplex_url: str
     duplex_name: str
+    openai_model: str = "gpt-live-1"
+    openai_voice: str = "marin"
     hub_url: str = ""
     hub_token: str = ""
     hub_machine: str = ""
@@ -47,6 +50,29 @@ class Engines:
         if self.hub_machine:
             names.add(self.hub_machine)
         return names
+
+    def own_project_info(self) -> dict | None:
+        """What the gateway's own kernel is, said plainly, for a call that named no project (or
+        named this one): the folder when the kernel is local, else only the address it answers at.
+        A model given this cannot mistake it for the caller's project."""
+        kernel = self.kernel
+        if kernel is None:
+            return None
+        place = str(getattr(kernel, "place", "") or "")
+        leaf = place.rstrip("/").rsplit("/", 1)[-1] if place else ""
+        url = str(getattr(kernel, "url", "") or "").split("?")[0]
+        return {
+            "machine": self.hub_machine or "",
+            "project": leaf or "the gateway's default kernel",
+            "name": leaf or "the gateway's default kernel",
+            "icon": None,
+            "store": f"arbos://{self.hub_machine}/{leaf}/" if (self.hub_machine and leaf) else None,
+            "kind": "gateway",
+            "path": place or "",
+            "place": place or None,
+            "url": url or None,
+            "via": "gateway",
+        }
 
     @classmethod
     async def load(cls, args) -> "Engines":
@@ -72,7 +98,11 @@ class Engines:
 
         engine = args.engine
         duplex_name = ""
-        if engine in ("duplex", "auto"):
+        if engine == "openai":
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise SystemExit("--engine openai needs OPENAI_API_KEY in the environment")
+            duplex_name = f"openai/{args.openai_model}"
+        elif engine in ("duplex", "auto"):
             duplex_name = await probe_duplex(args.duplex_url)
             if duplex_name:
                 engine = "duplex"
@@ -87,6 +117,7 @@ class Engines:
         )
         return cls(vad=vad, asr=asr, tts=tts, reply=reply, kernel=kernel, engine=engine,
                    duplex_url=args.duplex_url, duplex_name=duplex_name,
+                   openai_model=getattr(args, "openai_model", "gpt-live-1"), openai_voice=getattr(args, "openai_voice", "marin"),
                    hub_url=(getattr(args, "hub", None) or ""), hub_token=getattr(args, "hub_token", "") or "",
                    hub_machine=getattr(args, "hub_machine", "") or "", auto_approve=False)
 
