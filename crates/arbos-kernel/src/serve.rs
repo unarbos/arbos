@@ -149,10 +149,18 @@ impl HeldRecord {
             )),
         ]
     }
+    /// The newest copy wherever it lies. A first-match read took a stale
+    /// copy in `runtime/` over a live one in the temp folder once the
+    /// runtime folder had stopped being writable (qal-j19, the third
+    /// shape: writable at first, then not — a full disk, a permission
+    /// change), and said the escalation on every relaunch. A write that
+    /// landed somewhere other than where the reader looks first is a
+    /// write the reader must still find.
     fn load(place: &Place) -> Option<Self> {
         Self::paths(place)
             .iter()
-            .find_map(|p| serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok())
+            .filter_map(|p| serde_json::from_str::<Self>(&std::fs::read_to_string(p).ok()?).ok())
+            .max_by_key(|r| (r.last_said_ms, r.refusals))
     }
     /// Saved where, or why nowhere. A record that could not be kept is
     /// not a record: the caller says so and speaks as if there were none.
@@ -1838,26 +1846,9 @@ enum Page {
 
 fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
     // A finished worker's record lives in the archive; a client asking
-    // for it — by id or by the name its card shows — gets the lines from
-    // there, flagged, not an empty page. No such agent anywhere: an empty
-    // page that says so, not one that reads as an empty record.
-    let resolved = arbos_core::files::resolve_history_agent(place, agent);
-    let unknown = resolved.is_none();
-    let (transcript, archived, id) = match resolved {
-        Some(r) => (r.transcript, r.archived, r.id),
-        None => (
-            Layout::new(place, agent).transcript(),
-            false,
-            agent.to_string(),
-        ),
-    };
-    if unknown {
-        klog::warn(
-            "history_unknown",
-            Some(agent),
-            "no agent live or archived by that id or name",
-        );
-    }
+    // for it gets the lines from there, flagged, not an empty page.
+    let (transcript, archived) = arbos_core::files::transcript_for_history(place, agent)
+        .unwrap_or_else(|| (Layout::new(place, agent).transcript(), false));
     let events = load_transcript(&transcript).unwrap_or_default();
     let total = events.len() as u64;
     let picked: Vec<&Event> = match page {
@@ -1886,7 +1877,7 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     let to = picked.last().map(|e| e.seq).unwrap_or(anchor);
     for ev in picked {
         let mut event = ev.clone();
-        arbos_core::files::scrub_child_claims(place, &id, &mut event);
+        arbos_core::files::scrub_child_claims(place, agent, &mut event);
         // A record from before `output` existed gets its glance here.
         if let EventKind::Tool(rec) = &mut event.kind
             && rec.output.is_none()
@@ -1905,12 +1896,10 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         total,
         archived,
         path: if archived {
-            format!("archive/agents/{id}/transcript.jsonl")
+            format!("archive/agents/{agent}/transcript.jsonl")
         } else {
             String::new()
         },
-        id: if id == agent { String::new() } else { id },
-        unknown,
     });
 }
 
