@@ -455,8 +455,19 @@ pub fn forget(hooks: &KernelHooks, agent: &str) {
         .cloned()
         .collect();
     file.remotes.retain(|r| r.agent != agent);
-    if file.remotes.len() != before {
-        let _ = file.save(&hooks.place);
+    if file.remotes.len() != before
+        && let Err(e) = file.save(&hooks.place)
+    {
+        // The next start drops a record whose agent folder is gone
+        // (restore), so nothing restarts over there; said, since the
+        // record it keeps is a record of a child that no longer exists.
+        crate::klog::warn(
+            "remote_record_kept",
+            Some(agent),
+            format!(
+                "remotes.json: {e:#} — the forgotten child's record stays until the next start drops it"
+            ),
+        );
     }
     if let Some(link) = link
         && let Route::Ssh { tunnel, .. } = &link.route
@@ -868,7 +879,14 @@ async fn spawn_hub(
     // Fix the stand-in's address now that the worker named the place.
     if let Ok(mut a) = arbos_core::load_agent(&place, &AgentId::new(&id)) {
         a.remote = Some(format!("{}:{remote_path}", info.name));
-        let _ = a.save(&place.agent_dir(&id));
+        if let Err(e) = a.save(&place.agent_dir(&id)) {
+            // A restart reads the old address and cannot reach the child.
+            crate::klog::warn(
+                "remote_address_unsaved",
+                Some(&id),
+                format!("{e:#} — after a restart this child is reachable only by its old address"),
+            );
+        }
     }
     // Both nodes are on the hub: the brief's store paths become this
     // node's addresses (the child reads the Project's memory and delivers
@@ -1230,14 +1248,32 @@ fn mirror(hooks: &KernelHooks, link: &Link, events: Vec<Event>, mirrored: usize)
             e
         })
         .collect();
-    let _ = append_events(&hooks.layout(&link.record.agent).transcript(), &events);
+    if let Err(e) = append_events(&hooks.layout(&link.record.agent).transcript(), &events) {
+        crate::klog::warn(
+            "remote_mirror_unwritten",
+            Some(&link.record.agent),
+            format!(
+                "{} line(s) from the remote transcript not mirrored: {e:#}",
+                events.len()
+            ),
+        );
+    }
     let mut file = RecordsFile::load(&hooks.place);
     for r in &mut file.remotes {
         if r.agent == link.record.agent {
             r.mirrored = mirrored;
         }
     }
-    let _ = file.save(&hooks.place);
+    if let Err(e) = file.save(&hooks.place) {
+        // The mark is where the mirror resumes after a restart: without
+        // it the same remote lines are mirrored again — twice on the
+        // transcript, a repeat and not a loss.
+        crate::klog::warn(
+            "remote_mirror_mark_unsaved",
+            Some(&link.record.agent),
+            format!("remotes.json: {e:#} — a restart will mirror these lines a second time"),
+        );
+    }
 }
 
 /// A remote turn ended: its last words (or its failure) to the parent.
