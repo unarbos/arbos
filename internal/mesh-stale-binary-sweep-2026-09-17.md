@@ -61,9 +61,18 @@ checklist for any install; the note below asks the node to say it itself.
   `projects/demo/.arbos/worktrees/c161060-1`; the child answered
   `computeinstance-u00sd1yvtcwsc091pb` / `2026-09-17T04:09:23Z` and root
   reported it verbatim. Turn complete in about 50 s.
-- Subscribed to #382. When it merges I update `~/arbos-hub/bin/arbos-kernel`
-  again, restart **all three** of its processes (kernel, feedback, worker), and
-  repeat the spawn.
+- 04:46 UTC, #382 on `main` (`0f2a8bc6`, dev build 1249 published 04:44):
+  `update --install` on `~/arbos-hub/bin/arbos-kernel` → `0f2a8bc68cc6`. The
+  sweep then showed **four** `GONE` processes on that file, not the three I
+  expected — the worktree kernel from the 04:09 test spawn was still running.
+  All four stopped with `SIGTERM`; the `start.sh` loops relaunched the `demo`
+  kernel, the `feedback` kernel and the worker daemon from the new file (the
+  worktree kernel had finished and was not relaunched). Sweep afterwards: no
+  `GONE` line on the machine. 04:47: one real `spawn host=arboslife` from
+  `demo`'s root, claim `c443742-1`, worktree kernel started, child answered
+  `computeinstance-u00sd1yvtcwsc091pb / 2026-09-17 04:47:26 UTC`, root reported
+  it verbatim, about 50 s. `bin/arbos-kernel --version`:
+  `arbos-kernel 0.2.0 0f2a8bc68cc6 protocol 1`.
 - 04:19 UTC, on the coordinator's decision: Templar's `~/.cargo/bin/arbos-kernel`
   (`3940aac3`, a day behind `main`, too old to have `update`) was brought to
   the dev channel's `7f6a6b9a06bc` (build 1232) with the kernel's own

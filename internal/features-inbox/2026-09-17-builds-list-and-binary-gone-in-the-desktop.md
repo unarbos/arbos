@@ -5,7 +5,7 @@ cursor:
 
 # #385's `builds` list and `binary_gone`, read from the desktop's side (cycle 29)
 
-For the authors of [#385](https://github.com/unarbos/arbos/pull/385) and [#388](https://github.com/unarbos/arbos/pull/388) (#372 was auto-closed when its base branch was deleted, not merged; the work moved to #388), from the layout loop.
+For the authors of [#385](https://github.com/unarbos/arbos/pull/385) and [#388](https://github.com/unarbos/arbos/pull/388) (#372 **is in `main`** — its head `6b186378` is an ancestor of `main`, checked with `git merge-base --is-ancestor`; it was closed by hand after merging. #388 is a correction on top of shipped code, not a replacement), from the layout loop.
 
 **Method note, added after a correction below:** the reading here that found the real gap (`binary_gone` unread by `gate_of`) traced what the code does; the one that got `unknown` backwards inferred from what the code appeared to intend. Same file, same hour. A claim about another component's behaviour is worth exactly the trace behind it — every such claim in these notes should quote the lines it rests on.
 

@@ -33,6 +33,17 @@
          the kernel; the wrapper watches its own parent).
   sb-01  #377's stated cost: a shell subscription whose command backgrounds something must still finish promptly, not
          hold until its timeout.
+  sw-01  the qal-j08 family: a read that fails is treated as "nothing" and the file is then rewritten from nothing.
+         The project page (.arbos/notes.md) made unreadable for one call → the next `plan` call replaces it with an
+         empty page and reports success (destructive). The same shape sits in memory.md, user.md, meta.toml.
+  sw-02  the same family in `undo`: the turn-start mark (.arbos/runtime/checkpoint) is written best-effort; when that
+         write fails the mark keeps an older turn's HEAD, and `undo` runs `git reset --hard` + `clean -fd` to it —
+         destroying committed work from the turns in between, and reporting "restored <sha>".
+  sw-03  `undo` in a project that had untracked files before Arbos ever ran (the user's own): they must survive; on the
+         old kernel `undo` ran `clean -fd` and deleted them (#390's fourth hole).
+  rw-05  the refusal path Jacob will meet on every place he already has: checkpoints written by an OLDER kernel, then
+         a rewind with files: true on the new one — the transcript is rewound, nothing is deleted, and the reason is
+         one a person can read. The kernel binary to play "older" comes from ARBOS_QA_OLD_KERNEL.
   rw-04  the same rewind in a repo without git identity: checkpoints carry no work tree and files: true deletes the
          kept turns' uncommitted files while reporting success (qal-j08).
   rw-01  rewind with files: true keeps the history: the turns before the rewind point stay on the transcript and are
@@ -896,6 +907,202 @@ def register(scenario, registry, transcript, now_ms, branch):
     rw_scenario("rw-02-rewind-with-files-keeps-the-history-pinned", "The same rewind with the kernel pinned to one core beside four spinners — the shape in which standing_pass_e2e read the transcript as empty.", "pinned")
     rw_scenario("rw-03-rewind-with-files-keeps-the-history-under-churn", "The same rewind under disk churn (200 MB fsync loops) and a spinner per core.", "churn")
     rw_scenario("rw-04-rewind-with-files-in-a-repo-without-git-identity", "The same rewind in a repository with no git user.name/user.email (a new user's fresh place): the checkpoint's work-tree commit fails silently, so `files: true` resets to HEAD and cleans — deleting the kept turns' uncommitted files too — and reports success (qal-j08).", "no-identity")
+
+
+    # ── the qal-j08 family: a failed read becomes "nothing", then a write trusts it ──
+    @reg("sw-01-unreadable-notes-page-is-rewritten-empty", tags=("silent-write", "destructive"))
+    def sw01(cx):
+        """`notes::load` reads the project page with `unwrap_or_default()`: any read failure (EACCES here; EIO, a lock, a partial view on a network mount in life) parses as an empty page, and the next `plan` call writes that empty page over the real one by tmp+rename — the goal, the checklist, the prose gone, the tool reporting success. Expected: a page that could not be read is not rewritten; the call fails with the reason."""
+        arbos = cx.place / ".arbos"
+        arbos.mkdir(exist_ok=True)
+        page = arbos / "notes.md"
+        original = "# Shapes\n\n## Goal\nKeep the geometry helpers correct and documented.\n\n## Now\n- [ ] [Kickoff](docs/project-context.md) — ready\n- [ ] Fix area() — in progress\n- [x] Seed the repo — done 09-16\n\n## Notes\nJacob wants British spelling in the CHANGELOG.\nThe worker reports to root, root reports once.\n"
+        page.write_text(original)
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "plan", "arguments": {"items": ["- [ ] Add perimeter() tests — ready"]}}]},
+            {"agent": "root", "content": "Plan updated."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        # The page becomes unreadable (the injector); it still holds every byte.
+        os.chmod(page, 0)
+        try:
+            c.user("root", "Add a plan item: perimeter tests.")
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "sw-01-turn-never-ended", "the turn never ended")
+        finally:
+            try:
+                os.chmod(page, 0o644)
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(0.5)
+        after = page.read_text(errors="replace") if page.exists() else None
+        evs, _ = transcript(cx.place, "root")
+        plan_calls = [e for e in evs if e.get("kind") == "tool" and e.get("name") == "plan"]
+        plan_said = [(e.get("error") or str(e.get("body") or e.get("result") or ""))[:200] for e in plan_calls]
+        kept = after is not None and all(x in after for x in ("Keep the geometry helpers", "Fix area()", "British spelling", "Seed the repo"))
+        cx.rec.notes.update({"page_after": (after or "")[:400], "page_kept": kept, "plan_said": plan_said, "page_bytes_before_after": [len(original), len(after or "")]})
+        cx.rec.expect(kept, "sw-01-page-rewritten-from-nothing", f"the project page was replaced after one unreadable read: {len(original)} → {len(after or '')} bytes; goal/checklist/notes gone; the plan tool said {plan_said[:1]}", "arbos-core notes.rs load() unwrap_or_default + save_path tmp+rename")
+        cx.rec.expect(not plan_calls or any(e.get("error") for e in plan_calls) or kept, "sw-01-success-reported-over-a-lost-page", "the plan tool reported success while the page it could not read was being replaced")
+
+
+    @reg("sw-02-stale-undo-mark-resets-past-committed-work", tags=("silent-write", "destructive"))
+    def sw02(cx):
+        """Turn 1 commits A. Before turn 2 the mark file is made unwritable (the injector for a full disk or an unwritable runtime/), so turn 2's start cannot record HEAD=A and the mark still says HEAD0. Turn 2 commits B, then calls `undo` — meant to drop only turn 2's work. `undo` reads the stale mark, `git reset --hard HEAD0` + `git clean -fd`: commit A is gone from the branch, its files gone from the tree, and the tool says "restored HEAD0"."""
+        place = cx.place
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            subprocess.run(["git", *args], cwd=place, capture_output=True)
+        (place / ".gitignore").write_text(".arbos/\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=place, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ignore"], cwd=place, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "work"], cwd=place, capture_output=True)  # not a protected branch
+        head0 = subprocess.run(["git", "rev-parse", "HEAD"], cwd=place, capture_output=True, text=True).stdout.strip()
+        # root as a plain agent with `undo` on its allowlist (a coordinator has neither undo nor project writes).
+        root = place / ".arbos" / "agents" / "root"
+        (root / "pages").mkdir(parents=True, exist_ok=True)
+        (root / "jobs").mkdir(exist_ok=True)
+        (root / "agent.md").write_text(f"name: root\ntitle: \nparent: \npaused: false\nmodel: inherit\nallowlist: ls, read, write, edit, bash, undo, changes, plan, say\nreadonly: false\ncwd: {place}\n")
+        (root / "transcript.jsonl").touch()
+        (place / ".arbos" / "project.toml").write_text('schema = 2\n\n[git]\nprotected = []\n')
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo A > a.txt && git add a.txt && git commit -q -m 'turn one: A' && git rev-parse HEAD", "description": "commit A"}}]},
+            {"agent": "root", "content": "Committed A."},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo B > b.txt && git add b.txt && git commit -q -m 'turn two: B' && git rev-parse HEAD", "description": "commit B"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "undo", "arguments": {}}]},
+            {"agent": "root", "content": "Undone."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "Commit A.")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "sw-02-turn-one-never-ended", "turn one never ended")
+        head_a = subprocess.run(["git", "rev-parse", "HEAD"], cwd=place, capture_output=True, text=True).stdout.strip()
+        mark = place / ".arbos" / "runtime" / "checkpoint"
+        mark_before = mark.read_text().strip() if mark.exists() else None
+        # The injector: the mark cannot be rewritten at turn 2's start (a full disk, an unwritable runtime/ — silent either way).
+        os.chmod(mark, 0o444)
+        os.chmod(mark.parent, 0o555)
+        try:
+            c.user("root", "Commit B, then undo this turn.")
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "sw-02-turn-two-never-ended", "turn two never ended")
+        finally:
+            os.chmod(mark.parent, 0o755)
+            os.chmod(mark, 0o644)
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=place, capture_output=True, text=True).stdout.strip()
+        log = subprocess.run(["git", "log", "--oneline"], cwd=place, capture_output=True, text=True).stdout.strip().splitlines()
+        evs, _ = transcript(place, "root")
+        undo_said = [(e.get("error") or str(e.get("body") or e.get("result") or ""))[:120] for e in evs if e.get("kind") == "tool" and e.get("name") == "undo"]
+        cx.rec.notes.update({"head0": head0[:12], "head_after_turn_one": head_a[:12], "mark_before_turn_two": (mark_before or "")[:12], "mark_after": mark.read_text().strip()[:12] if mark.exists() else None, "head_after_undo": head_after[:12], "log_after": log[:4], "a_txt_exists": (place / "a.txt").exists(), "undo_said": undo_said})
+        cx.rec.expect(head_a != head0, "sw-02-turn-one-did-not-commit", "turn one's commit did not happen; nothing to measure")
+        if head_a != head0:
+            cx.rec.expect(head_after == head_a and (place / "a.txt").exists(), "sw-02-undo-destroyed-committed-work", f"`undo` in turn two reset to {head_after[:12]} (turn two started at {head_a[:12]}; the mark said {(mark_before or '?')[:12]}): commit A and a.txt are gone, the tool said {undo_said[:1]}", "arbos-engine tools/git.rs snapshot() ignored write + undo() trusting the mark")
+
+
+    # ── #390's fourth hole, and its refusal path ────────────────────────────
+    def user_repo(place, identity=True):
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *args], cwd=place, capture_output=True)
+        if identity:
+            subprocess.run(["git", "config", "user.name", "qa"], cwd=place, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "qa@qa"], cwd=place, capture_output=True)
+        (place / ".gitignore").write_text(".arbos/\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=place, capture_output=True)
+        subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", "commit", "-q", "-m", "ignore"], cwd=place, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "work"], cwd=place, capture_output=True)
+        root = place / ".arbos" / "agents" / "root"
+        (root / "pages").mkdir(parents=True, exist_ok=True)
+        (root / "jobs").mkdir(exist_ok=True)
+        (root / "agent.md").write_text(f"name: root\ntitle: \nparent: \npaused: false\nmodel: inherit\nallowlist: ls, read, write, edit, bash, undo, changes, plan, say\nreadonly: false\ncwd: {place}\n")
+        (root / "transcript.jsonl").touch()
+        (place / ".arbos" / "project.toml").write_text('schema = 2\n\n[git]\nprotected = []\n')
+
+    @reg("sw-03-undo-keeps-the-users-own-untracked-files", tags=("silent-write", "destructive", "undo"))
+    def sw03(cx):
+        """A project with the user's own untracked files — notes, a scratch folder, a photo — before Arbos ever ran. The agent does one turn of work and calls `undo`. The user's files must still be there afterwards; on the old kernel `undo` ran `git clean -fd` and deleted every untracked file in the project."""
+        place = cx.place
+        user_repo(place)
+        (place / "my-notes.txt").write_text("things I typed before Arbos existed\n")
+        (place / "scratch").mkdir()
+        (place / "scratch" / "ideas.md").write_text("- an idea\n")
+        (place / "holiday.jpg").write_bytes(b"\xff\xd8\xff\xe0 not really a jpeg\n")
+        mine = ["my-notes.txt", "scratch/ideas.md", "holiday.jpg"]
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo draft > draft.txt", "description": "some work"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "undo", "arguments": {}}]},
+            {"agent": "root", "content": "Undone."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "Write a draft, then undo it.")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "sw-03-turn-never-ended", "the turn never ended")
+        evs, _ = transcript(place, "root")
+        undo_said = [(e.get("error") or str(e.get("body") or e.get("result") or ""))[:160] for e in evs if e.get("kind") == "tool" and e.get("name") == "undo"]
+        survived = [m for m in mine if (place / m).exists()]
+        lost = [m for m in mine if not (place / m).exists()]
+        cx.rec.notes.update({"users_files_survived": survived, "users_files_lost": lost, "draft_after": (place / "draft.txt").exists(), "undo_said": undo_said})
+        cx.rec.expect(not lost, "sw-03-undo-deleted-the-users-files", f"`undo` deleted the user's own pre-existing untracked files: {lost}; the tool said {undo_said[:1]}", "arbos-engine tools/git.rs undo → git clean -fd (#390)")
+        cx.rec.expect(bool(undo_said), "sw-03-undo-not-run", "the undo tool did not run")
+
+    @reg("rw-05-old-kernels-checkpoint-refused-cleanly", tags=("rewind", "history", "compat"))
+    def rw05(cx):
+        """Checkpoints written by an OLDER kernel (ARBOS_QA_OLD_KERNEL) on a real place; then the current kernel takes over the place and the user rewinds with files: true. Expected on #390: the transcript is rewound, nothing is deleted, and the refusal is said in words a person can read — the case Jacob meets on every place he already has. Fails on the old kernel itself (it trusts the record) or if the refusal reads as a failure with no way on."""
+        old = os.environ.get("ARBOS_QA_OLD_KERNEL")
+        if not old or not Path(old).exists():
+            cx.rec.notes["skipped"] = "ARBOS_QA_OLD_KERNEL not set: no older kernel to write the old-format checkpoints"
+            return
+        place = cx.place
+        user_repo(place)
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo one > f1.txt", "description": "f1"}}]},
+            {"agent": "root", "content": "first"},
+            # Turn 2 commits, so at turn 3's start the tree equals HEAD: an older kernel records that checkpoint as
+            # `work: None` — the same record it wrote when the checkpoint FAILED — which is why the new kernel cannot
+            # trust it. This is the common shape on a real place: a rewind to the turn right after a commit.
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo two > f2.txt && git add -A && git commit -q -m two", "description": "f2, committed"}}]},
+            {"agent": "root", "content": "second"},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo three > f3.txt", "description": "f3"}}]},
+            {"agent": "root", "content": "third"},
+        ]
+        rf = replies_file(cx, lines)
+        kold = cx.kernel(tag="kernel-old", extra_args=["--provider", "replay", "--replies", str(rf)])
+        kold.binary = old
+        cx.rec.expect(kold.start(), "rw-05-old-kernel-start", "the older kernel did not come up")
+        c = kold.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        for t in ("one", "two", "three"):
+            c.user("root", t)
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "rw-05-old-turn-never-ended", f"turn {t!r} never ended on the older kernel")
+        c.close()
+        kold.stop()
+        cps = (place / ".arbos" / "agents" / "root" / "checkpoints.jsonl").read_text().splitlines()
+        cx.rec.notes["old_checkpoints"] = [l[:120] for l in cps]
+        cx.rec.notes["old_kernel"] = subprocess.run([old, "--version"], capture_output=True, text=True).stdout.strip()
+        files_before = sorted(p_.name for p_ in place.glob("f*.txt"))
+        # The current kernel takes the place over; the user rewinds to turn 3 with files.
+        knew = cx.kernel(tag="kernel-new", extra_args=["--provider", "replay", "--replies", str(rf)])
+        cx.rec.expect(knew.start(), "rw-05-new-kernel-start", "the current kernel did not come up on the old place")
+        c2 = knew.attach()
+        c2.wait(lambda f: f.get("type") == "snapshot", 5)
+        before_n = len(transcript(place, "root")[0])
+        c2.send({"type": "rewind", "agent": "root", "turn": 3, "files": True})
+        first = c2.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "rewound")
+        follow = c2.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 30, "the restore's report")
+        time.sleep(1)
+        evs, _ = transcript(place, "root")
+        files_after = sorted(p_.name for p_ in place.glob("f*.txt"))
+        notices = [e.get("text", "") for e in evs if e.get("kind") == "notice"]
+        said = json.dumps(follow or {})
+        cx.rec.notes.update({"files_before": files_before, "files_after": files_after, "transcript_lines": [before_n, len(evs)], "rewound_first": {k_: str(v)[:80] for k_, v in (first or {}).items()}, "follow": {k_: str(v)[:200] for k_, v in (follow or {}).items()}, "notices": [n[:200] for n in notices[-3:]]})
+        cx.rec.expect(len(evs) < before_n and any(e.get("kind") == "user" and e.get("text") == "two" for e in evs) and not any(e.get("kind") == "user" and e.get("text") == "three" for e in evs), "rw-05-transcript-not-rewound", f"the transcript was not rewound to turn 3 ({before_n} → {len(evs)} lines)")
+        cx.rec.expect(files_after == files_before, "rw-05-files-deleted-on-an-untrusted-record", f"files changed under a checkpoint the new kernel should not trust: {files_before} → {files_after}", "arbos-engine tools/git.rs restore knows_tree (#390)")
+        refused = follow is not None and (follow.get("type") == "error" or "left as they are" in said or "no checkpoint of the working tree" in said)
+        cx.rec.expect(refused, "rw-05-old-record-trusted", f"the new kernel did not refuse the old checkpoint: {said[:200]}")
+        readable = "transcript is rewound" in said or any("transcript is rewound" in n or "files left as they are" in n for n in notices)
+        cx.rec.expect(readable, "rw-05-refusal-unreadable", f"the refusal does not tell the user what happened and what did not: {said[:200]} / notices {notices[-1:]}")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))
