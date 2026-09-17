@@ -1242,7 +1242,16 @@ class Pass:
             self.record("opener-create-open", "opener", "Enter on Create", "folder made under the real home; a tab opens on it (path expanded, no literal ~)",
                         f"made={made} opened={opened} new={sorted(after - before)}", "pass" if made and opened else "fail", self.still("opener-create-open"))
             # The new, empty project lands on the kickoff view, never the
-            # Project page (Jacob's third bug).
+            # Project page (Jacob's third bug). A new tab opens its name/
+            # icon sheet over the header; the row reads the header only
+            # once the sheet is gone (cycle 37c: read through the sheet,
+            # the header was "not visible" and the row failed for it).
+            for _ in range(10):
+                if self.app.exists("tab-sheet-done"):
+                    self.app.key("escape"); time.sleep(0.5)
+                if not self.app.exists("tab-sheet-done"):
+                    break
+                time.sleep(0.3)
             st = self.state()
             self.record("new-project-kickoff", "new-project", "after the opener opens an empty folder", "pane chat; kickoff view (project head + greeting); composer asks what you are working on",
                         f"pane={st.get('pane')} kickoff={self.app.exists('kickoff')} greeting={self.app.exists('kickoff-greeting')} changes_pill={self.app.exists('pill-changes')} branch={self.app.exists('composer-branch')}",
