@@ -142,7 +142,19 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
     // Every start, not only the first: a place that moved its store to
     // .arbos.nosync (cloudsync) needs that name excluded too, or a
     // `git add -A` in the project records the nested repository.
-    exclude_locally(&place.path, &[".arbos/", ".arbos.nosync/"]);
+    if let Err(e) = exclude_locally(&place.path, &[".arbos/", ".arbos.nosync/"]) {
+        // Not fatal to serving; fatal to silence. The person is told on
+        // root's transcript, once per start, what to do before they
+        // commit.
+        eprintln!("arbos: .arbos/ could not be excluded from git: {e:#}");
+        let notice = Event::new(EventKind::Notice {
+            text: format!(
+                "`.arbos/` could not be added to .git/info/exclude ({e:#}). Add `.arbos/` to .gitignore before committing, or `git add -A` will stage the agent's records into the repository."
+            ),
+            failed: true,
+        });
+        let _ = append_event(&Layout::new(place, ROOT_ID).transcript(), &notice);
+    }
     if place.arbos_repo().exists() {
         return Ok(false);
     }
@@ -173,18 +185,22 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
 /// `.git/info/exclude` is the local, uncommitted ignore list: each of
 /// `patterns` (a folder name with its slash) goes there unless git already
 /// ignores it. Quiet when the project is not a repository.
-pub fn exclude_locally(project: &Path, patterns: &[&str]) {
+pub fn exclude_locally(project: &Path, patterns: &[&str]) -> Result<()> {
     let git_dir = project.join(".git");
     if !git_dir.exists() {
-        return;
+        return Ok(());
     }
     let exclude = git_dir.join("info").join("exclude");
-    let _ = std::fs::create_dir_all(exclude.parent().unwrap());
+    std::fs::create_dir_all(exclude.parent().unwrap())
+        .with_context(|| format!("create {}", exclude.parent().unwrap().display()))?;
     // Confirmed: a failed read is not an empty file to write over
-    // (`crate::record`); the patterns wait for the next start.
-    let Ok(text) = crate::record::read_text(&exclude).confirmed() else {
-        return;
-    };
+    // (`crate::record`). An unknown read is returned as the error the
+    // caller says on root's transcript, so the patterns are not silently
+    // left for the next start (#444) and never overwrite a file that
+    // could not be read (#392).
+    let text = crate::record::read_text(&exclude)
+        .confirmed()
+        .with_context(|| format!("read {}", exclude.display()))?;
     let mut text = text.unwrap_or_default();
     let mut changed = false;
     for pattern in patterns {
@@ -213,8 +229,11 @@ pub fn exclude_locally(project: &Path, patterns: &[&str]) {
         changed = true;
     }
     if changed {
-        let _ = std::fs::write(&exclude, text);
+        // Unwritten, the person's next `git add -A` stages the agent's
+        // whole record into their repository. Said, not swallowed.
+        std::fs::write(&exclude, text).with_context(|| format!("write {}", exclude.display()))?;
     }
+    Ok(())
 }
 
 pub fn bootstrap(place: &Place) -> Result<Agent> {
