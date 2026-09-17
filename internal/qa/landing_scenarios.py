@@ -1456,13 +1456,272 @@ def register(scenario, registry, transcript, now_ms, branch):
         except OSError:
             pass
         cx.rec.notes.update({"timeline_after_message": timeline[:12], "seconds_to_first_visible_frame": first_visible, "frames_naming_the_wait": named[:5], "notices": notices, "tool_record": {"started_after_message_s": wait_s, "started_to_ended_s": tool_span_s, "label": tool.get("label")}, "kernel_stderr_waited": stderr_line})
-        cx.rec.expect(bool(stderr_line), "probe-did-not-wait", "the kernel's stderr does not say it waited; the delay knob did not hold the tool, this run proves nothing")
+        waited_somewhere = bool(stderr_line) or (wait_s is not None and wait_s >= 4.0) or (tool_span_s is not None and tool_span_s >= 4.0)
+        cx.rec.notes["wait_logged_on_stderr"] = bool(stderr_line)
+        cx.rec.expect(waited_somewhere, "probe-did-not-wait", "neither the tool record nor the kernel's stderr shows a wait; the delay knob did not hold the tool, this run proves nothing")
         cx.rec.expect(first_visible is not None and first_visible < 2.0, "silent-wait", f"{first_visible}s after the person's message before anything but a tree/plan frame reached the window; the kernel waited for the checkpoint tree ({stderr_line.split(': ', 1)[-1] if stderr_line else '?'}) and nothing the window draws said so — the silent stall shape (st-01) with correct data underneath", "arbos-engine turn.rs — the checkpoint wait (#419 at 2daa555d) is logged to stderr only")
         status_steps = [json.loads(b).get("step") for _, k_, b in timeline if k_ == "status" and json.loads(b).get("step")]
         cx.rec.notes["status_steps_shown"] = status_steps
+        # The fix (#419 at a5072074): the wait is the kernel's own step, said first; the command's step follows.
+        ck = next((i for i, st in enumerate(status_steps) if "checkpoint" in st.lower()), None)
+        run_ = next((i for i, st in enumerate(status_steps) if st.lower().startswith("running")), None)
+        cx.rec.expect(ck is not None and (run_ is None or ck < run_), "wait-not-named-first", f"the status steps shown were {status_steps}: no `Saving a checkpoint…` step before the command's own", "arbos-engine batch.rs kernel_step (#419 at a5072074)")
         cx.rec.expect(tool_span_s is None or tool_span_s < 2.0, "wait-charged-to-the-tool", f"the window showed {status_steps[:1]} and a running tool card for the whole wait, and the transcript's tool record says `{tool.get('label')}` ran for {tool_span_s}s (started {wait_s}s after the message): the checkpoint wait is shown and recorded as the command's own running time — a person sees `echo` hang for six seconds, and history and any duration view blame it", "arbos-engine turn.rs — the checkpoint wait (#419 at 2daa555d) happens inside the tool's started..ended and under the tool's status; name it as its own step")
         cx.rec.expect((place / "f1.txt").exists(), "tool-did-not-run", "f1.txt was never written")
         cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
+        k.stop()
+        cx.check()
+
+    @reg("rw-10d-the-checkpoint-step-never-overwrites-a-status-the-agent-set", tags=("rewind", "misreport"))
+    def rw10d(cx):
+        """qal-j18's fix (#419 at a5072074) shows `Saving a checkpoint of the working tree` as a derived status. A status
+        the agent set itself this turn (the `status` tool) must stay: the derived line is a guess, the agent's words are
+        not. Same six-second tree delay; the reply sets a status first, then writes."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        replies = [
+            {"agent": "root", "content": "", "calls": [{"name": "status", "arguments": {"step": "Sorting the samples"}}, {"name": "bash", "arguments": {"command": "echo first > f1.txt", "description": "write f1"}}]},
+            {"agent": "root", "content": "first"},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        k.env["ARBOS_TEST_TREE_DELAY_MS"] = "6000"
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        t0_ms = now_ms()
+        c.user("root", "one")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", "the turn never ended")
+        time.sleep(0.3)
+        statuses = [(round((at - t0_ms) / 1000, 2), f.get("step"), f.get("source")) for at, f in list(c.frames) if at >= t0_ms and f.get("type") == "status" and f.get("agent") == "root"]
+        cx.rec.notes["statuses"] = statuses
+        agent_at = next((t for t, step, src in statuses if src == "agent" and step == "Sorting the samples"), None)
+        derived_after = [(t, step) for t, step, src in statuses if src == "derived" and step and agent_at is not None and t >= agent_at]
+        stderr = ""
+        try:
+            stderr = next((l for l in (cx.rec.dir / "kernel.stderr.log").read_text(errors="replace").splitlines() if "waited" in l and "checkpoint" in l), "")
+        except OSError:
+            pass
+        evs_, _ = transcript(place, "root")
+        tool_ = next((e for e in evs_ if e.get("kind") == "tool" and e.get("name") == "bash"), {})
+        user_ts_ = next((e.get("ts") for e in evs_ if e.get("kind") == "user"), None)
+        held = bool(stderr) or (tool_ and user_ts_ and ((tool_.get("ended") or 0) - user_ts_) >= 4000)
+        cx.rec.expect(held, "probe-did-not-wait", "the kernel did not wait for the tree (tool ended under 4 s after the message, nothing on stderr); this run proves nothing")
+        cx.rec.expect(agent_at is not None, "agent-status-not-shown", f"the agent's own status never reached the window: {statuses}")
+        cx.rec.expect(not derived_after, "derived-status-overwrote-the-agents", f"a derived status replaced the agent's `Sorting the samples` during the turn: {derived_after}", "arbos-kernel hooks.rs set_status — a guess never overwrites what the agent said this turn")
+        cx.rec.expect((place / "f1.txt").exists(), "tool-did-not-run", "f1.txt was never written")
+        k.stop()
+        cx.check()
+
+    # ── #432: the coordinator that slept on its workers ───────────────────────
+    def co_setup(cx):
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        return place
+
+    def co_run(cx, replies, prompt, tag="kernel", timeout=90):
+        k = cx.kernel(tag=tag, extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        t0 = time.time()
+        c.user("root", prompt)
+        ended = c.wait_turn("root", "idle", timeout)
+        return k, c, t0, ended
+
+    def bash_records(place, agent="root"):
+        evs, _ = transcript(place, agent)
+        return [e for e in evs if e.get("kind") == "tool" and e.get("name") == "bash"]
+
+    @reg("co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives", tags=("coordinator", "sleep"))
+    def co01(cx):
+        """Jacob's report: three workers spawned, then `sleep 75`, reports queued behind the sleeping turn. #432: a bare
+        sleep of 5 s or more while the agent has workers is refused, naming how many and the move; the worker's report
+        then starts the next turn."""
+        place = co_setup(cx)
+        replies = [
+            {"agent": "root", "content": "", "calls": [{"name": "spawn", "arguments": {"name": "sorter", "task": "Sort the samples and report"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 75; echo waited", "description": "wait for the worker"}}]},
+            {"agent": "root", "content": "Waiting on the sorter."},
+            {"content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 6; echo sorted", "description": "sort"}}]},
+            {"content": "Sorted: a b c."},
+            {"agent": "root", "content": "The sorter reports: a b c."},
+        ]
+        k, c, t0, ended = co_run(cx, replies, "Spawn a sorter and wait for it.", timeout=60)
+        first_turn_s = round(time.time() - t0, 1)
+        recs = bash_records(place)
+        sleep_rec = next((r for r in recs if "sleep 75" in json.dumps(r.get("args") or {})), None)
+        err = str((sleep_rec or {}).get("error") or "")
+        cx.rec.notes["sleep_record"] = {k_: str(v)[:200] for k_, v in (sleep_rec or {}).items() if k_ in ("error", "output", "started", "ended")}
+        cx.rec.notes["first_turn_s"] = first_turn_s
+        cx.rec.expect(ended is not None, "turn-never-ended", "root's first turn never ended")
+        cx.rec.expect(sleep_rec is not None, "sleep-not-recorded", "no bash record for the sleep")
+        cx.rec.expect("refus" in err.lower() and "worker" in err.lower(), "sleep-ran-with-workers", f"`sleep 75` with a worker running was not refused: error={err[:160]!r} output={str((sleep_rec or {}).get('output'))[:80]!r}", "arbos-engine tools/bash.rs bare_sleep_secs / children_count (#432)")
+        cx.rec.expect(first_turn_s < 20, "turn-slept-anyway", f"root's turn took {first_turn_s}s; a refused sleep must not cost the wait")
+        cx.rec.expect("end the turn" in err.lower() or "await" in err.lower(), "refusal-names-no-alternative", f"the refusal does not say what to do instead: {err[:200]}")
+        # The worker's report must start root's next turn and be answered.
+        end = time.time() + 45
+        answered = False
+        while time.time() < end:
+            evs, _ = transcript(place, "root")
+            if any(e.get("kind") == "assistant" and "a b c" in (e.get("text") or "") for e in evs):
+                answered = True
+                break
+            time.sleep(0.5)
+        cx.rec.expect(answered, "report-never-answered", "the worker finished but root never took a turn on its report within 45 s")
+        k.stop()
+        cx.check()
+
+    @reg("co-02-short-sleep-and-sleep-without-workers-still-run", tags=("coordinator", "sleep"))
+    def co02(cx):
+        """The refusal must not be broader than the fault: a 3 s sleep with a worker running, and a 6 s sleep with no
+        workers at all, are legitimate and must run to completion with their output."""
+        place = co_setup(cx)
+        replies = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 6; echo no-workers-waited", "description": "wait, no workers"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "spawn", "arguments": {"name": "helper", "task": "Help and report"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 3 && echo short-waited", "description": "short wait"}}]},
+            {"agent": "root", "content": "Both waits ran."},
+            {"content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 20; echo helped", "description": "help"}}]},
+            {"content": "Helped."},
+            {"agent": "root", "content": "The helper reports."},
+        ]
+        k, c, t0, ended = co_run(cx, replies, "Wait six seconds, spawn a helper, wait three seconds.", timeout=90)
+        recs = bash_records(place)
+        outs = {json.dumps(r.get("args") or {})[:60]: (str(r.get("output") or ""), str(r.get("error") or "")) for r in recs}
+        cx.rec.notes["bash_records"] = outs
+        long_no_workers = next(((o, e) for a, (o, e) in outs.items() if "sleep 6" in a), ("", ""))
+        short_with = next(((o, e) for a, (o, e) in outs.items() if "sleep 3" in a), ("", ""))
+        cx.rec.expect(ended is not None, "turn-never-ended", "root's turn never ended")
+        cx.rec.expect("no-workers-waited" in long_no_workers[0], "sleep-without-workers-refused", f"`sleep 6` with no workers did not run to its output: output={long_no_workers[0][:80]!r} error={long_no_workers[1][:160]!r}", "arbos-engine tools/bash.rs — the sleep refusal is broader than 'while the agent has workers' (#432)")
+        cx.rec.expect("short-waited" in short_with[0], "short-sleep-with-workers-refused", f"`sleep 3` with a worker running did not run to its output: output={short_with[0][:80]!r} error={short_with[1][:160]!r}", "arbos-engine tools/bash.rs — the sleep refusal catches sleeps under 5 s (#432)")
+        k.stop()
+        cx.check()
+
+    @reg("co-03-sleep-inside-a-script-runs-and-the-bare-spellings-that-slip-past-are-listed", tags=("coordinator", "sleep"))
+    def co03(cx):
+        """#432 scopes the refusal to a bare `sleep N` heading the command. A sleep inside a loop is meant to run. The
+        spellings that mean the same wait but are not bare — `sh -c 'sleep 75'`, `/bin/sleep 75`, `timeout 80 sleep 75`,
+        `true && sleep 75` — are recorded here for what the kernel does with them, as an observation and not a break:
+        the PR's contract is the bare form, and this is the list a reviewer should see."""
+        place = co_setup(cx)
+        spellings = ["for i in 1 2 3; do sleep 1; done; echo looped", "sh -c 'sleep 8'; echo via-sh", "/bin/sleep 8; echo via-path", "timeout 20 sleep 8; echo via-timeout", "true && sleep 8; echo via-and"]
+        replies = [{"agent": "root", "content": "", "calls": [{"name": "spawn", "arguments": {"name": "helper", "task": "Help and report"}}]}]
+        for s_ in spellings:
+            replies.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": s_, "description": "wait"}}]})
+        replies += [{"agent": "root", "content": "Done waiting."}, {"content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 60; echo helped", "description": "help"}}]}, {"content": "Helped."}, {"agent": "root", "content": "The helper reports."}]
+        k, c, t0, ended = co_run(cx, replies, "Spawn a helper, then wait in several ways.", timeout=120)
+        recs = bash_records(place)
+        verdicts = []
+        for s_ in spellings:
+            r = next((r for r in recs if (r.get("args") or {}).get("command") == s_), {})
+            err = str(r.get("error") or "")
+            verdicts.append({"command": s_, "refused": "refus" in err.lower(), "ran": bool(r) and not err and "echo" in s_ and s_.split("echo ")[-1].strip() in str(r.get("output") or ""), "error": err[:120]})
+        cx.rec.notes["verdicts"] = verdicts
+        loop = verdicts[0]
+        cx.rec.expect(ended is not None, "turn-never-ended", "root's turn never ended")
+        cx.rec.expect(loop["ran"], "sleep-in-a-loop-refused-or-lost", f"the loop with `sleep 1` inside did not run to its output: {loop}", "arbos-engine tools/bash.rs bare_sleep_secs (#432) — a sleep inside a script is meant to run")
+        slipped = [v["command"] for v in verdicts[1:] if v["ran"]]
+        cx.rec.notes["same-wait-not-bare-and-ran"] = slipped
+        k.stop()
+        cx.check()
+
+    @reg("co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives", tags=("coordinator", "yield"))
+    def co04(cx):
+        """The yielding path is the one that can lose work. Root runs an attached twelve-second loop (not a bare sleep, which
+        would be refused outright) while a worker finishes in ~2 s. #432: the command yields when the worker's report lands, goes on as a job, and
+        its result follows. Check both halves: the yield is said, and the command's own output reaches the record."""
+        place = co_setup(cx)
+        replies = [
+            {"agent": "root", "content": "", "calls": [{"name": "spawn", "arguments": {"name": "quick", "task": "Report at once"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "for i in $(seq 12); do sleep 1; done; echo finished-after-yield", "description": "long attached command"}}]},
+            {"agent": "root", "content": "Command started."},
+            {"content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 2; echo quick-done", "description": "quick"}}]},
+            {"content": "Quick: done."},
+            {"agent": "root", "content": "Noted the quick worker."},
+            {"agent": "root", "content": "Noted the command's result."},
+            {"agent": "root", "content": "Still here."},
+        ]
+        k, c, t0, ended = co_run(cx, replies, "Spawn a quick worker and run a long command.", timeout=60)
+        first_turn_s = round(time.time() - t0, 1)
+        recs = bash_records(place)
+        long_rec = next((r for r in recs if "finished-after-yield" in json.dumps(r.get("args") or {})), {})
+        blob = json.dumps(long_rec)
+        yielded = "report landed" in blob.lower() or "follows this result" in blob.lower() or "yield" in blob.lower()
+        cx.rec.notes["first_turn_s"] = first_turn_s
+        cx.rec.notes["long_command_record"] = {k_: str(v)[:200] for k_, v in long_rec.items() if k_ in ("error", "output", "body", "started", "ended")}
+        cx.rec.expect(ended is not None, "turn-never-ended", "root's first turn never ended")
+        cx.rec.expect(yielded and first_turn_s < 10, "no-yield-to-the-report", f"the attached command did not yield to the worker's report (turn took {first_turn_s}s; record: {blob[:200]})", "arbos-engine tools/bash.rs — yield on a worker's done (#432)")
+        # The command must have gone on as a job (its out.log fills within its own twelve seconds), and its result must
+        # then reach root's record somewhere other than the call's own arguments (a wake, a notice, a job record).
+        end = time.time() + 25
+        job_out = None
+        while time.time() < end and job_out is None:
+            jobs = place / ".arbos" / "agents" / "root" / "jobs"
+            for j in sorted(jobs.glob("*/out.log")) if jobs.exists() else []:
+                if "finished-after-yield" in j.read_text(errors="replace"):
+                    job_out = str(j.relative_to(place))
+            time.sleep(0.5)
+        arrived = None
+        end = time.time() + 20
+        while time.time() < end and arrived is None:
+            evs, _ = transcript(place, "root")
+            for e in evs:
+                if e.get("kind") == "tool" and "finished-after-yield" in json.dumps(e.get("args") or {}) and "finished-after-yield" not in json.dumps({k_: v for k_, v in e.items() if k_ != "args"}):
+                    continue  # the call's own record, naming the command
+                if "finished-after-yield" in json.dumps(e):
+                    arrived = {"kind": e.get("kind"), "text": json.dumps(e)[:200]}
+                    break
+            time.sleep(0.5)
+        cx.rec.notes["job_output_file"] = job_out
+        cx.rec.notes["result_reached_root_as"] = arrived
+        cx.rec.expect(job_out is not None, "yielded-command-dropped", "the yielded command never finished as a job: no jobs/*/out.log holds its output", "arbos-engine tools/bash.rs — a yielded command must go on as a job (#432)")
+        cx.rec.expect(arrived is not None, "yielded-result-never-reported", "the command finished as a job (its out.log holds the output) but its result never reached root's transcript as anything but the call's own arguments within 20 s", "arbos-kernel — job completion → the agent's record (#432)")
+        k.stop()
+        cx.check()
+
+    @reg("co-05-sleep-after-the-workers-are-done", tags=("coordinator", "sleep"))
+    def co05(cx):
+        """#432 counts non-archived children as workers. A worker that has finished and reported is no longer anything
+        to wait for; a `sleep 6` then is legitimate. Measured twice: right after the report (worker done, perhaps not yet
+        archived) and after the archive."""
+        place = co_setup(cx)
+        replies = [
+            {"agent": "root", "content": "", "calls": [{"name": "spawn", "arguments": {"name": "poet", "task": "Write one line and report"}}]},
+            {"agent": "root", "content": "spawned"},
+            {"content": "Rain writes on the roof."},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 6; echo after-report", "description": "wait after the report"}}]},
+            {"agent": "root", "content": "waited after the report"},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "sleep 6; echo after-archive", "description": "wait after the archive"}}]},
+            {"agent": "root", "content": "waited after the archive"},
+        ]
+        k, c, t0, ended = co_run(cx, replies, "Spawn a poet.", timeout=60)
+        # The report starts root's second turn, which sleeps.
+        end = time.time() + 60
+        while time.time() < end:
+            recs = bash_records(place)
+            if any("after-report" in json.dumps(r.get("args") or {}) and (r.get("ended") or r.get("error")) for r in recs):
+                break
+            time.sleep(0.5)
+        recs = bash_records(place)
+        r1 = next((r for r in recs if "after-report" in json.dumps(r.get("args") or {})), {})
+        archived_wait_end = time.time() + 60
+        while time.time() < archived_wait_end and not (place / ".arbos" / "archive" / "agents" / "poet").exists():
+            time.sleep(1)
+        archived = (place / ".arbos" / "archive" / "agents" / "poet").exists()
+        c.user("root", "Wait again.")
+        c.wait_turn("root", "idle", 60)
+        time.sleep(0.5)
+        recs = bash_records(place)
+        r2 = next((r for r in recs if "after-archive" in json.dumps(r.get("args") or {})), {})
+        cx.rec.notes.update({"after_report": {k_: str(v)[:160] for k_, v in r1.items() if k_ in ("error", "output")}, "archived_before_second_wait": archived, "after_archive": {k_: str(v)[:160] for k_, v in r2.items() if k_ in ("error", "output")}})
+        cx.rec.expect("after-report" in str(r1.get("output") or ""), "sleep-refused-after-the-report", f"the worker had reported and was done; `sleep 6` was still refused: {str(r1.get('error') or '')[:200]}", "arbos-engine tools/bash.rs children_count — a finished, unarchived worker still counts (#432)")
+        cx.rec.expect(not archived or "after-archive" in str(r2.get("output") or ""), "sleep-refused-after-the-archive", f"the worker was archived; `sleep 6` was still refused: {str(r2.get('error') or '')[:200]}")
         k.stop()
         cx.check()
 
