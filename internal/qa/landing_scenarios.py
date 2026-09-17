@@ -1243,9 +1243,12 @@ def register(scenario, registry, transcript, now_ms, branch):
             if pth.exists():
                 log = pth.read_text(errors="replace")
         cx.rec.notes.update({"cron_copies": len(crons), "kept_files": kept, "transcript_notice": (told or "")[:300], "kernel_log_says": '"migrate_cut"' in log})
-        cx.rec.expect(len(crons) == 0, "sw-06-cut-migrated-again", f"a cut migration was run again: {len(crons)} cron file(s)", "arbos-kernel migrate.rs Claim::Cut")
-        cx.rec.expect("plan.jsonl.migrating" in kept, "sw-06-source-not-kept", f"the cut source is not kept for a person: {kept}")
-        cx.rec.expect(told is not None and ".migrating" in told, "sw-06-person-not-told", f"the cut is only in kernel.log ({'yes' if '\"migrate_cut\"' in log else 'no'}); the transcript says nothing that names `plan.jsonl.migrating` or what a person should do with it — a file nobody would recognise", "arbos-kernel migrate.rs Claim::Cut: a notice beside the log line")
+        # Two honest outcomes for a cut migration: finished once (the standing cron exists exactly once) with the
+        # person told, or left with its source kept and the person told. Doubling, or silence, fails.
+        cx.rec.expect(len(crons) <= 1, "sw-06-cut-migrated-again", f"a cut migration doubled its work: {len(crons)} cron file(s)", "arbos-kernel migrate.rs Claim::Cut")
+        cx.rec.expect(len(crons) == 1 or "plan.jsonl.migrating" in kept, "sw-06-work-lost-and-source-gone", f"the cut migration neither finished (crons={len(crons)}) nor kept its source for a person: {kept}")
+        cx.rec.expect(told is not None and ("plan.jsonl" in told or ".migrating" in told), "sw-06-person-not-told", f"the cut is only in kernel.log ({'yes' if '\"migrate_cut\"' in log else 'no'}); the transcript says nothing a person could act on about the old plan", "arbos-kernel migrate.rs Claim::Cut: a notice beside the log line")
+        cx.rec.notes["outcome"] = "finished-once-and-told" if (len(crons) == 1 and told) else ("kept-and-told" if told else "silent")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))

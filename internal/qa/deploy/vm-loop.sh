@@ -24,9 +24,40 @@ qa_paused() {
   done
   return 1
 }
+# The store answers per client (2026-09-17 05:35: one VM saw it empty and unwritable while two others read and
+# wrote it). Nothing here trusts a read of the store that could be a blackout, and nothing written to it is lost
+# when the write fails: it is staged under $ROOT/store-pending at the store-relative path and applied on the next
+# pass that finds the store sound. Sound = notes.md and docs/ both listable.
+PENDING="$ROOT/store-pending"
+store_sound() { [ -s "$STORE_ROOT/notes.md" ] && [ -d "$STORE_ROOT/docs" ] && [ -f "$STORE/run.py" ]; }
+store_put() {  # store_put <local file> <store-relative path>
+  local src="$1" rel="$2" dst="$STORE_ROOT/$rel"
+  if store_sound && mkdir -p "$(dirname "$dst")" 2>/dev/null && cp -f "$src" "$dst" 2>/dev/null; then return 0; fi
+  mkdir -p "$PENDING/$(dirname "$rel")" && cp -f "$src" "$PENDING/$rel" && echo "== store write failed or store not sound; staged $rel under $PENDING" >&2
+  return 1
+}
+apply_pending() {
+  [ -d "$PENDING" ] || return 0
+  store_sound || { echo "== store not sound from here; $(find "$PENDING" -type f | wc -l) staged file(s) kept"; return 0; }
+  local n=0 f rel
+  while IFS= read -r f; do
+    rel="${f#"$PENDING/"}"
+    if mkdir -p "$STORE_ROOT/$(dirname "$rel")" 2>/dev/null && cp -f "$f" "$STORE_ROOT/$rel" 2>/dev/null; then rm -f "$f"; n=$((n+1)); fi
+  done < <(find "$PENDING" -type f)
+  find "$PENDING" -type d -empty -delete 2>/dev/null
+  [ "$n" -gt 0 ] && echo "== applied $n staged file(s) to the store"
+  return 0
+}
+STORE_ROOT="${STORE%/internal/qa}"
+
 while true; do
   if qa_paused; then sleep 300; continue; fi
+  apply_pending
+  if ! store_sound; then
+    echo "== $(date -u +%FT%TZ) the store is not sound from this client (notes.md/docs/run.py not all listable); running the cycle on the runner already here, syncing nothing from it"
+  fi
   # Runner from the store (small files only); bugs are merged, never clobbered.
+  if store_sound; then
   for f in run.py consistency.py desktop_scenarios.py fileplan_scenarios.py multitasking_scenarios.py remote_scenarios.py batch_scenarios.py crossproject_scenarios.py journey_scenarios.py landing_scenarios.py; do cp -f "$STORE/$f" "$ROOT/loop/$f" 2>/dev/null; done
   mkdir -p "$ROOT/loop/scenarios" "$ROOT/loop/bugs" "$ROOT/loop/inbox"
   cp -f "$STORE"/scenarios/*.json "$ROOT/loop/scenarios/" 2>/dev/null
@@ -35,6 +66,7 @@ while true; do
   cp -f "$STORE"/deploy/cycle.sh "$STORE"/deploy/publish.sh "$STORE"/deploy/kill-shim.sh "$ROOT/deploy/" 2>/dev/null
   chmod +x "$ROOT"/deploy/*.sh
   cp -f "$STORE"/deploy/mirror-timer.sh "$STORE"/deploy/swebench-nightly.sh "$STORE"/deploy/swebench-collect.py "$STORE"/deploy/call-mode-collect.py "$STORE"/deploy/pod-health.py "$STORE"/deploy/mirror-alarm.py "$ROOT/deploy/" 2>/dev/null; chmod +x "$ROOT"/deploy/*.sh
+  fi
   "$ROOT/deploy/cycle.sh" || echo "== cycle failed ($?)"
   # Nightly SWE-bench slice after the 02:00 UTC cycle (16 instances, capped).
   if [ "$(date -u +%H)" = "02" ] && [ ! -e "$ROOT/state/swebench-$(date -u +%F)" ]; then
@@ -42,10 +74,12 @@ while true; do
     "$ROOT/deploy/swebench-nightly.sh" || echo "== swebench nightly failed ($?)"
   fi
   # New auto-drafts and the histories go back to the store for triage.
-  for f in "$ROOT"/loop/bugs/*.md; do b="$(basename "$f")"; [ -e "$STORE/bugs/$b" ] || cp -f "$f" "$STORE/bugs/$b"; done
-  cp -f "$ROOT/loop/kickoff-history.jsonl" "$STORE/vm-kickoff-history.jsonl" 2>/dev/null
-  cp -f "$ROOT/loop/spend.jsonl" "$STORE/vm-spend.jsonl" 2>/dev/null
-  cp -f "$ROOT/loop/rollouts/index.jsonl" "$STORE/rollouts/vm-index.jsonl" 2>/dev/null
+  for f in "$ROOT"/loop/bugs/*.md; do b="$(basename "$f")"; { store_sound && [ -e "$STORE/bugs/$b" ]; } || store_put "$f" "internal/qa/bugs/$b"; done
+  store_put "$ROOT/loop/kickoff-history.jsonl" "internal/qa/vm-kickoff-history.jsonl"
+  store_put "$ROOT/loop/spend.jsonl" "internal/qa/vm-spend.jsonl"
+  store_put "$ROOT/loop/rollouts/index.jsonl" "internal/qa/rollouts/vm-index.jsonl"
+  for h in journey-history.jsonl store-mirror-losses.jsonl store-mirror-history.jsonl; do [ -f "$ROOT/loop/$h" ] && store_put "$ROOT/loop/$h" "internal/qa/$h"; done
+  apply_pending
   now=$(date +%s); next=$(( (now / 3600 + 1) * 3600 ))
   echo "== next cycle at $(date -u -d @$next +%FT%TZ)"
   # Short sleeps, not one long one: the VM is suspended while the agent is idle and a long

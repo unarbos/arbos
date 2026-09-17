@@ -276,6 +276,33 @@ EOF
 "$ROOT/deploy/publish.sh" push || echo "-- publish failed (kept locally)"
 
 # 6. Mirror the store again at the end of the cycle.
+# Two or more clients' views of the store, compared: the per-client fault (2026-09-17 05:35) is visible only this way.
+python3 - "${ARBOS_QA_STORE_ROOT:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983}/internal/qa/store-probes" "$ROOT/loop/store-probe-qa-vm.jsonl" <<'PY' || true
+import glob, json, os, sys, time
+probes_dir, mine = sys.argv[1], sys.argv[2]
+rows = {}
+for f in glob.glob(os.path.join(probes_dir, "*.jsonl")) + [mine]:
+    try:
+        last = [json.loads(l) for l in open(f) if l.strip()][-1]
+        rows[last.get("machine", os.path.basename(f))] = last
+    except Exception:
+        pass
+def ts(r):
+    try: return time.mktime(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+    except Exception: return 0
+now = time.time()
+fresh = {m: r for m, r in rows.items() if now - ts(r) < 1200}
+if len(fresh) < 2:
+    print(f"-- store views: {len(fresh)} fresh probe(s) ({', '.join(sorted(fresh)) or 'none'}); a second reader on another machine is needed to see a per-client fault (internal/store-probe-second-reader.md)")
+else:
+    whole = {m for m, r in fresh.items() if r.get("docs_dir") and r.get("write_ok")}
+    broken = {m for m in fresh if m not in whole}
+    if whole and broken:
+        print("!! STORE VIEWS DISAGREE: " + ", ".join(f"{m} sees the store {'whole' if m in whole else 'empty/unwritable'}" for m in sorted(fresh)))
+        for m in sorted(fresh): print("   " + json.dumps(fresh[m]))
+    else:
+        print(f"-- store views agree across {len(fresh)} machines: {', '.join(sorted(fresh))} ({'whole' if whole else 'all broken'})")
+PY
 # Everything the runners shouted (!! SKIPPED / BUDGET BOUND / MODULE MISSING / HEADLINE NOT RUN) in one
 # block at the end, so a cycle that measured less than it claims cannot look green in the log's tail.
 if grep -q '^!!' "$LOG" 2>/dev/null; then

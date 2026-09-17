@@ -18,6 +18,8 @@ LOG="$ROOT/loop/store-mirror-losses.jsonl"
 pass() {
   local prev new mrc ts deleted
   ts="$(date -u +%FT%TZ)"
+  # This client's view, one JSON line, beside the mirror: the row other machines' probes are compared with.
+  MACHINE="${MACHINE:-qa-vm}" STORE_PROBE_LOG="$ROOT/loop/store-probe-qa-vm.jsonl" bash "$ROOT/deploy/store-probe.sh" >/dev/null 2>&1 || true
   git -C "$REPO" fetch -q origin store-docs 2>/dev/null || true
   prev="$(git -C "$REPO" rev-parse origin/store-docs 2>/dev/null || echo none)"
   if [ ! -f "$MIRROR" ]; then
