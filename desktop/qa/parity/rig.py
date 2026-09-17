@@ -65,3 +65,18 @@ def still(path: Path | str, display: str | None = None) -> None:
         raise DisplayHung(
             f"display {env['DISPLAY']} did not deliver a still in {STILL_TIMEOUT_S:.0f}s"
         ) from e
+
+
+def kernel_build(kernel_bin: str | Path) -> str:
+    """The kernel's own word on its build — `arbos-kernel --version`, e.g.
+    `arbos-kernel 0.2.0 d73a25aea876 protocol 1` — read from the binary the
+    run will launch, never from a roster (the hub reports whichever process
+    registered last) and never assumed from the branch (a kernel serving a
+    deleted binary looked current for two and a half days, rig audit R11).
+    """
+    try:
+        out = subprocess.run([str(kernel_bin), "--version"], capture_output=True, text=True, timeout=10)
+        line = (out.stdout or out.stderr).strip().splitlines()
+        return line[0] if line else f"{kernel_bin}: no version line"
+    except Exception as e:  # noqa: BLE001
+        return f"{kernel_bin}: --version failed ({e})"
