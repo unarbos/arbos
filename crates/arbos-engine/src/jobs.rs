@@ -300,7 +300,21 @@ impl JobsRoot {
             started_ms: arbos_core::now_ms(),
             timeout_ms,
         };
-        fs::write(dir.join("meta.json"), serde_json::to_vec(&meta)?)?;
+        // The process is running before its record exists. A record that
+        // cannot be written (the disk full, the store unwritable) must not
+        // leave the command running with no folder anyone can list, kill,
+        // or cap: the group is ended and the folder goes with the error,
+        // so "bash failed" is true — nothing of the command ran on.
+        let record = serde_json::to_vec(&meta)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| fs::write(dir.join("meta.json"), bytes).map_err(anyhow::Error::from));
+        if let Err(e) = record {
+            let _ = crate::tools::kill_job(meta.pid);
+            let _ = fs::remove_dir_all(&dir);
+            return Err(anyhow::anyhow!(
+                "bash: the job's record could not be written ({e}); the command was ended before it ran on unrecorded"
+            ));
+        }
         let job = Job {
             id,
             dir,
@@ -398,7 +412,7 @@ impl JobsRoot {
         // Said before the signal, so a reader that comes between never
         // sees "no exit recorded" (qa-024).
         let marker = job.dir.join("killed");
-        let _ = fs::write(&marker, "killed by the kernel\n");
+        let _ = fs::write(&marker, format!("{}\n", kill_reason()));
         if let Err(e) = crate::tools::kill_job(job.meta.pid) {
             // The claim is withdrawn: a job the kernel could not signal is
             // still running, and must read as such.
@@ -769,6 +783,32 @@ done"#;
     ];
     all.extend(args);
     ("sh".to_string(), all)
+}
+
+/// Why the kernel is killing jobs right now, when it is one reason for
+/// all of them: a graceful stop sets it before ending turns, so every
+/// `killed` marker written from then on — by the stop itself or by a
+/// turn's cancel path ending its own attached command — says the same
+/// thing. Two writers with two spellings raced to the same file, and the
+/// recorded reason a job ended was whichever landed last (desktop
+/// feedback owner, 2026-09-17: `job_leash_e2e` red 4 in 5 on `main`).
+static KILL_REASON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Set the reason every kill from now on records (`killed: <reason>`).
+pub fn set_kill_reason(reason: &str) {
+    *KILL_REASON.lock().unwrap_or_else(|p| p.into_inner()) = Some(reason.to_string());
+}
+
+/// The line a `killed` marker gets now.
+pub fn kill_reason() -> String {
+    match KILL_REASON
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_deref()
+    {
+        Some(r) => format!("killed: {r}"),
+        None => "killed by the kernel".to_string(),
+    }
 }
 
 /// Live members of process group `pgid` other than the leader, started no

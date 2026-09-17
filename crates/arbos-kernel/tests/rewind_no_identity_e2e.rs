@@ -21,6 +21,17 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(st.success(), "git {args:?}");
 }
 
+fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ok()
+}
+
 fn checkpoints(place: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(place.join(".arbos/agents/root/checkpoints.jsonl"))
         .unwrap_or_default()
@@ -78,7 +89,20 @@ fn rewind_with_files_in_a_repo_without_git_identity_keeps_the_kept_turns_files()
         );
     }
     assert!(k.place.join("f1.txt").exists() && k.place.join("f2.txt").exists());
+    // The record lands before the turn goes on; the tree follows on the
+    // blocking pool and fills it in (#405). A turn with no write never
+    // waits for it, so the third checkpoint can still read "still being
+    // saved" the instant the turn is idle: wait for the trees, as a
+    // restore does, before judging them.
+    let settled = wait_for(Duration::from_secs(20), || {
+        let cps = checkpoints(&k.place);
+        cps.len() == 3
+            && cps
+                .iter()
+                .all(|cp| cp.get("work_error").is_none() || cp["work_error"].is_null())
+    });
     let cps = checkpoints(&k.place);
+    assert!(settled, "the trees settled: {cps:#?}");
     assert_eq!(cps.len(), 3, "{cps:#?}");
     // Turn 1 started on a clean tree; turns 2 and 3 carry the files as a
     // work commit. Nothing is silently empty.
@@ -252,13 +276,49 @@ fn the_turns_first_write_waits_for_the_checkpoint_tree_so_a_rewind_never_restore
     );
     let mut a = Attach::connect(&k.url);
     let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
-    for text in ["write f1", "write f2"] {
-        a.send(serde_json::json!({"type":"user","agent":"root","text":text,"attachments":[]}));
-        assert!(
-            a.wait_turn("root", "idle", Duration::from_secs(40)),
-            "{text}"
-        );
-    }
+    // qal-j18: the wait is the kernel's own step, seen as a status line
+    // before the tool's `started`; the command is not billed for it.
+    a.send(serde_json::json!({"type":"user","agent":"root","text":"write f1","attachments":[]}));
+    let mut saw_step = false;
+    let mut tool_started: Option<i64> = None;
+    let idle = a.wait(Duration::from_secs(40), |f| {
+        if f["type"] == "status"
+            && f["agent"] == "root"
+            && f["step"].as_str().is_some_and(|s| s.contains("checkpoint"))
+        {
+            saw_step = tool_started.is_none();
+        }
+        if f["type"] == "event"
+            && f["event"]["kind"] == "tool"
+            && f["event"]["name"] == "bash"
+            && tool_started.is_none()
+        {
+            tool_started = f["event"]["started"].as_i64();
+        }
+        f["type"] == "turn" && f["agent"] == "root" && f["state"] == "idle"
+    });
+    assert!(idle.is_some(), "turn 1 ends");
+    assert!(
+        saw_step,
+        "the kernel's step is shown before the tool starts"
+    );
+    let tools: Vec<serde_json::Value> =
+        std::fs::read_to_string(k.place.join(".arbos/agents/root/transcript.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|e| e["kind"] == "tool" && e["name"] == "bash")
+            .collect();
+    let took = tools[0]["ended"].as_i64().unwrap() - tools[0]["started"].as_i64().unwrap();
+    assert!(
+        took < 1500,
+        "echo took {took} ms on the record: the tree's wait was billed to the command"
+    );
+    a.send(serde_json::json!({"type":"user","agent":"root","text":"write f2","attachments":[]}));
+    assert!(
+        a.wait_turn("root", "idle", Duration::from_secs(40)),
+        "write f2"
+    );
     assert!(k.place.join("f1.txt").exists() && k.place.join("f2.txt").exists());
     let cps = checkpoints(&k.place);
     assert_eq!(cps.len(), 2, "{cps:#?}");
