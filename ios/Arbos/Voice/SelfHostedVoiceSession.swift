@@ -174,7 +174,8 @@ final class SelfHostedVoiceSession: VoiceSession {
         case "response.transcript":
             sink.emit(.assistantTranscript(delta: text))
         case "response.done":
-            sink.emit(.responseDone(interrupted: object["interrupted"] as? Bool ?? false))
+            sink.emit(.responseDone(ResponseEnd(reason: object["reason"] as? String,
+                                                interrupted: object["interrupted"] as? Bool ?? false)))
         case "text.delta":
             sink.emit(.textDelta(text))
         case "text.done":
