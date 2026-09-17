@@ -78,8 +78,11 @@ final class ArbosKernelClient {
             case .attaching: try await Task.sleep(for: .milliseconds(50))
             }
         }
-        dropped("kernel did not answer")
-        throw KernelClientError.failed("kernel did not answer")
+        // Eight seconds and no hello. Nobody refused us, so this is the path.
+        let silence = KernelFailure.transport(
+            "\(endpoint.url.host ?? "the kernel") did not answer in time — retrying")
+        dropped(silence)
+        throw KernelClientError.failed(silence)
     }
 
     func detach() {
