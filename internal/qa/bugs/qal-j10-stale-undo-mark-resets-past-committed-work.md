@@ -1,5 +1,6 @@
 # qal-j10: when the turn-start mark cannot be written, `undo` resets to an older turn's HEAD — destroying committed work — and says "restored"
 
+- **Closed 2026-09-17 05:25 UTC against #392 @ `a0f2a92d`** (`arbos-kernel 0.2.0 a0f2a92dbf3a`). `sw-02` passes in the honest way: the turn's own mark could not be written, the transcript carries *"Checkpoint not written for this turn: could not clear the undo mark … Permission denied"*, and `undo` refuses — *"no checkpoint for this turn: the mark on disk is from the turn at line 2, this turn started at line 8 (its own mark was not written); nothing reset"* — with commit A and `a.txt` intact and HEAD untouched. Controls: #390 @ `9ade320f` and `main` @ `7f6a6b9a` still reset to the stale mark and destroy A. The ordinary path was checked beside it (`sw-04`): a healthy `undo` after a committed turn drops the tracked edit and the turn's own draft, keeps the commit, and says `restored …` on all three kernels — the refusals did not eat it.
 - Measured at: `main` @ `7f6a6b9a` (`arbos-kernel 0.2.0 7f6a6b9a06bc`); replay provider, no model. Code read at `main` @ `0f2a8bc6`.
 - Family: qal-j08's — a best-effort write that fails silently, a record that then looks valid, and a destructive step that trusts it.
 - Severity: **high, destructive.** `undo` exists to drop the current turn's work. With a stale mark it runs `git reset --hard <older HEAD>` and `git clean -fd`, removing commits and files from turns the user meant to keep, and reports success.
@@ -27,4 +28,4 @@ Repository on branch `work`, HEAD0. Turn 1: the agent commits A (`a.txt`). Befor
 
 ## Fix
 
-Not started (features agent). Regression check: `sw-02` (HEAD after `undo` = HEAD at turn 2's start; `a.txt` present; or `undo` refuses with a reason).
+#392 @ `a0f2a92d` (see the closing line). Regression check: `sw-02` (HEAD after `undo` = HEAD at turn 2's start; `a.txt` present; or `undo` refuses with a reason).

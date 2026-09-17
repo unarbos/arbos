@@ -44,6 +44,10 @@
   rw-05  the refusal path Jacob will meet on every place he already has: checkpoints written by an OLDER kernel, then
          a rewind with files: true on the new one — the transcript is rewound, nothing is deleted, and the reason is
          one a person can read. The kernel binary to play "older" comes from ARBOS_QA_OLD_KERNEL.
+  sw-04  a healthy `undo` still undoes: after #390/#392's refusals, an ordinary turn's work is dropped, the commit before
+         it stays, and the tool says "restored" — a refusal here would trade deletion for doing nothing.
+  sw-05  the census's "misreport-only" markers, second look: the one-time migration renames plan.jsonl aside with a
+         best-effort rename; if it fails, the next start migrates again — standing crons and pending tasks doubled.
   rw-04  the same rewind in a repo without git identity: checkpoints carry no work tree and files: true deletes the
          kept turns' uncommitted files while reporting success (qal-j08).
   rw-01  rewind with files: true keeps the history: the turns before the rewind point stay on the transcript and are
@@ -997,7 +1001,13 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.notes.update({"head0": head0[:12], "head_after_turn_one": head_a[:12], "mark_before_turn_two": (mark_before or "")[:12], "mark_after": mark.read_text().strip()[:12] if mark.exists() else None, "head_after_undo": head_after[:12], "log_after": log[:4], "a_txt_exists": (place / "a.txt").exists(), "undo_said": undo_said})
         cx.rec.expect(head_a != head0, "sw-02-turn-one-did-not-commit", "turn one's commit did not happen; nothing to measure")
         if head_a != head0:
-            cx.rec.expect(head_after == head_a and (place / "a.txt").exists(), "sw-02-undo-destroyed-committed-work", f"`undo` in turn two reset to {head_after[:12]} (turn two started at {head_a[:12]}; the mark said {(mark_before or '?')[:12]}): commit A and a.txt are gone, the tool said {undo_said[:1]}", "arbos-engine tools/git.rs snapshot() ignored write + undo() trusting the mark")
+            # Two honest outcomes: `undo` restored exactly to turn two's start (A), or it refused and reset nothing
+            # (HEAD still at B, a refusal that names the reason). The dishonest one: HEAD behind A — commit A destroyed.
+            a_intact = (place / "a.txt").exists() and subprocess.run(["git", "merge-base", "--is-ancestor", head_a, "HEAD"], cwd=place, capture_output=True).returncode == 0
+            refused = any(("nothing reset" in u.lower() or "no checkpoint" in u.lower()) for u in undo_said)
+            cx.rec.notes["outcome"] = "restored-to-turn-start" if head_after == head_a else ("refused-nothing-reset" if refused and a_intact else "destroyed")
+            cx.rec.expect(a_intact, "sw-02-undo-destroyed-committed-work", f"`undo` in turn two reset to {head_after[:12]} (turn two started at {head_a[:12]}; the mark said {(mark_before or '?')[:12]}): commit A and a.txt are gone, the tool said {undo_said[:1]}", "arbos-engine tools/git.rs snapshot() ignored write + undo() trusting the mark")
+            cx.rec.expect(head_after == head_a or refused, "sw-02-undo-silent", f"`undo` neither restored to turn two's start nor said why it refused: HEAD {head_after[:12]}, said {undo_said[:1]}")
 
 
     # ── #390's fourth hole, and its refusal path ────────────────────────────
@@ -1103,6 +1113,139 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.expect(refused, "rw-05-old-record-trusted", f"the new kernel did not refuse the old checkpoint: {said[:200]}")
         readable = "transcript is rewound" in said or any("transcript is rewound" in n or "files left as they are" in n for n in notices)
         cx.rec.expect(readable, "rw-05-refusal-unreadable", f"the refusal does not tell the user what happened and what did not: {said[:200]} / notices {notices[-1:]}")
+
+
+    # ── after #392: the refusals must not have eaten the ordinary path ─────
+    @reg("sw-04-healthy-undo-still-undoes", tags=("undo", "regression"))
+    def sw04(cx):
+        """Turn 1 commits A. Turn 2 edits a tracked file and writes an untracked draft, then calls `undo`. Expected: the tracked edit is gone, the draft is gone (the turn's own work), commit A and `a.txt` stay, HEAD is back at A, and the tool says "restored …" — not a refusal, not silence."""
+        place = cx.place
+        user_repo(place)
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo A > a.txt && git add a.txt && git commit -q -m 'A'", "description": "commit A"}}]},
+            {"agent": "root", "content": "Committed A."},
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "echo changed >> a.txt && echo draft > draft.txt", "description": "turn two's work"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "undo", "arguments": {}}]},
+            {"agent": "root", "content": "Undone."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "Commit A.")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "sw-04-turn-one-never-ended", "turn one never ended")
+        head_a = subprocess.run(["git", "rev-parse", "HEAD"], cwd=place, capture_output=True, text=True).stdout.strip()
+        c.user("root", "Edit a.txt, write a draft, then undo this turn.")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "sw-04-turn-two-never-ended", "turn two never ended")
+        head_after = subprocess.run(["git", "rev-parse", "HEAD"], cwd=place, capture_output=True, text=True).stdout.strip()
+        a_text = (place / "a.txt").read_text() if (place / "a.txt").exists() else None
+        evs, _ = transcript(place, "root")
+        undo_said = [(e.get("error") or str(e.get("body") or e.get("result") or ""))[:200] for e in evs if e.get("kind") == "tool" and e.get("name") == "undo"]
+        undo_err = [e.get("error") for e in evs if e.get("kind") == "tool" and e.get("name") == "undo" and e.get("error")]
+        cx.rec.notes.update({"head_a": head_a[:12], "head_after": head_after[:12], "a_txt": a_text, "draft_exists": (place / "draft.txt").exists(), "undo_said": undo_said, "undo_error": undo_err})
+        cx.rec.expect(not undo_err and undo_said and "restored" in undo_said[-1].lower(), "sw-04-healthy-undo-refused", f"an ordinary undo did not restore: {undo_said[-1:] or undo_err}", "arbos-engine tools/git.rs undo (#390/#392 refusals)")
+        cx.rec.expect(head_after == head_a and a_text == "A\n", "sw-04-tracked-edit-not-undone", f"after undo HEAD={head_after[:12]} (A={head_a[:12]}), a.txt={a_text!r}")
+        cx.rec.expect(not (place / "draft.txt").exists(), "sw-04-turns-own-draft-kept", "the turn's own untracked draft survived its undo")
+
+    # ── the census's misreport-only markers, second look ───────────────────
+    @reg("sw-05-failed-migration-rename-doubles-crons-and-tasks", tags=("silent-write", "destructive", "migration"))
+    def sw05(cx):
+        """The one-time migration turns a legacy plan.jsonl into subscriptions, inbox files and notes lines, then renames plan.jsonl aside with `let _ = rename(...)`. If that rename fails (here: the agent folder is not writable for the rename while its subfolders are; in life a partial view or a permissions slip), the next kernel start finds plan.jsonl again and migrates again — the standing cron now exists twice and fires twice, the pending task is queued twice. A marker judged misreport-only reaches a doubled side effect."""
+        arbos = cx.place / ".arbos"
+        root = arbos / "agents" / "root"
+        for d in ("pages", "jobs", "subscriptions", "inbox"):
+            (root / d).mkdir(parents=True, exist_ok=True)
+        (root / "agent.md").write_text(f"name: root\ntitle: \nparent: \npaused: false\nmodel: inherit\nallowlist: ls, read, bash, plan, say\nreadonly: false\ncwd: {cx.place}\n")
+        (root / "transcript.jsonl").touch()
+        now = now_ms()
+        rows = [
+            {"id": 1, "parent": 0, "seq": 0, "goal": "tick every 30s", "when": {"every_ms": 30_000, "next_due_ms": now + 3_600_000}, "do": {"kind": "shell", "cmd": "echo legacy-tick >> ticks.txt"}, "status": "pending", "origin": "user", "created_ms": now, "updated_ms": now},
+            {"id": 2, "parent": 0, "seq": 1, "goal": "Reply with the single word MIGRATED.", "when": {"wake": False}, "do": {"kind": "agent"}, "status": "pending", "origin": "user", "created_ms": now, "updated_ms": now},
+        ]
+        (root / "plan.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        # The injector: the agent folder itself is read-only (rename needs a writable parent), its subfolders are not.
+        os.chmod(root, 0o555)
+        try:
+            for i in (1, 2):
+                k = cx.kernel(tag=f"kernel-{i}", extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "hi"}]))])
+                cx.rec.expect(k.start(), f"sw-05-start-{i}", f"kernel start {i} did not come up")
+                time.sleep(2.5)
+                k.stop()
+        finally:
+            os.chmod(root, 0o755)
+        subs = sorted(p_.name for p_ in (root / "subscriptions").glob("*.toml"))
+        crons = [p_ for p_ in (root / "subscriptions").glob("*.toml") if "legacy-tick" in p_.read_text(errors="replace")]
+        inbox = sorted(p_.name for p_ in (root / "inbox").glob("*")) if (root / "inbox").exists() else []
+        plan_left = (root / "plan.jsonl").exists()
+        evs, _ = transcript(cx.place, "root")
+        notices = [e.get("text", "") for e in evs if e.get("kind") == "notice"]
+        blocked_notice = next((n for n in notices if "migration" in n.lower()), None)
+        cx.rec.notes.update({"plan_jsonl_left": plan_left, "subscriptions": subs, "cron_copies": len(crons), "inbox_files": inbox, "migration_notice": (blocked_notice or "")[:300]})
+        if plan_left and not crons:
+            # The blocked outcome (#392 @ 92f6eb59): the person must be able to read what happened, what to do, and still use the place.
+            cx.rec.expect(blocked_notice is not None, "sw-05-blocked-in-silence", "the migration was blocked (nothing migrated) but the transcript carries no notice saying so", "arbos-kernel migrate.rs Claim::Blocked notice")
+            if blocked_notice:
+                actionable = "plan.jsonl" in blocked_notice and ("fix" in blocked_notice.lower() or "start" in blocked_notice.lower()) and ("permission" in blocked_notice.lower() or "denied" in blocked_notice.lower() or "could not" in blocked_notice.lower())
+                cx.rec.expect(actionable, "sw-05-blocked-notice-not-actionable", f"the blocked notice does not name the file, the cause and the action: {blocked_notice[:200]!r}")
+            # Usable while blocked: a turn runs and answers.
+            os.chmod(root, 0o555)
+            try:
+                k3 = cx.kernel(tag="kernel-3", extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "still here"}], name="replies3.jsonl"))])
+                cx.rec.expect(k3.start(), "sw-05-start-3", "the kernel did not start a third time")
+                c3 = k3.attach()
+                c3.wait(lambda f: f.get("type") == "snapshot", 5)
+                c3.user("root", "Are you there?")
+                answered = c3.wait_turn("root", "idle", 30) is not None
+                evs3, _ = transcript(cx.place, "root")
+                said = any(e.get("kind") == "assistant" and "still here" in e.get("text", "") for e in evs3)
+                cx.rec.notes["usable_while_blocked"] = {"turn_ended": answered, "answered": said}
+                if not (answered and said):
+                    # The injector that blocks the rename (a read-only agent folder) also blocks the turn's own
+                    # writes (inflight/, jobs/), so this probe cannot separate "blocked migration" from "unwritable
+                    # folder". Recorded, not failed: the notice's advice — fix what blocks writes in the folder — is
+                    # the same fix for both.
+                    cx.rec.notes["usable_while_blocked"]["verdict"] = "unverified: the injector blocks ordinary turns too; a read-only agent folder is unusable regardless of the migration"
+                k3.stop()
+            finally:
+                os.chmod(root, 0o755)
+        cx.rec.expect(len(crons) <= 1, "sw-05-cron-doubled", f"the legacy standing cron was migrated {len(crons)} times into subscriptions/ (plan.jsonl left in place: {plan_left}) — it will fire that many times", "arbos-kernel migrate.rs: `let _ = rename(plan.jsonl → .migrated)` then migrate again on the next start")
+        cx.rec.expect(len([n for n in inbox if "MIGRATED" in (root / "inbox" / n).read_text(errors="replace")]) <= 1 if inbox else True, "sw-05-task-doubled", f"the pending task was queued more than once: {inbox}")
+
+
+    @reg("sw-06-migration-cut-leaves-something-a-person-can-finish", tags=("silent-write", "migration"))
+    def sw06(cx):
+        """An earlier start moved plan.jsonl aside as plan.jsonl.migrating and died before writing any record (the cut case). The next start must not migrate again (no doubled crons) — and it must leave a person something they can act on: a transcript notice that names the kept file and what it is, not only a kernel.log line and a `.migrating` file nobody would recognise."""
+        arbos = cx.place / ".arbos"
+        root = arbos / "agents" / "root"
+        for d in ("pages", "jobs", "subscriptions", "inbox"):
+            (root / d).mkdir(parents=True, exist_ok=True)
+        (root / "agent.md").write_text(f"name: root\ntitle: \nparent: \npaused: false\nmodel: inherit\nallowlist: ls, read, bash, plan, say\nreadonly: false\ncwd: {cx.place}\n")
+        (root / "transcript.jsonl").touch()
+        now = now_ms()
+        rows = [{"id": 1, "parent": 0, "seq": 0, "goal": "tick every 30s", "when": {"every_ms": 30_000, "next_due_ms": now + 3_600_000}, "do": {"kind": "shell", "cmd": "echo legacy-tick >> ticks.txt"}, "status": "pending", "origin": "user", "created_ms": now, "updated_ms": now}]
+        # The cut: moved aside, nothing written after.
+        (root / "plan.jsonl.migrating").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "hi"}]))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        time.sleep(2.5)
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "hello")
+        c.wait_turn("root", "idle", 30)
+        k.stop()
+        crons = [p_ for p_ in (root / "subscriptions").glob("*.toml") if "legacy-tick" in p_.read_text(errors="replace")]
+        kept = sorted(p_.name for p_ in root.glob("plan.jsonl*"))
+        evs, _ = transcript(cx.place, "root")
+        notices = [e.get("text", "") for e in evs if e.get("kind") == "notice"]
+        told = next((n for n in notices if "migrat" in n.lower() or ".migrating" in n), None)
+        log = ""
+        for pth in (arbos / "runtime" / "kernel.log", arbos / "kernel.log"):
+            if pth.exists():
+                log = pth.read_text(errors="replace")
+        cx.rec.notes.update({"cron_copies": len(crons), "kept_files": kept, "transcript_notice": (told or "")[:300], "kernel_log_says": '"migrate_cut"' in log})
+        cx.rec.expect(len(crons) == 0, "sw-06-cut-migrated-again", f"a cut migration was run again: {len(crons)} cron file(s)", "arbos-kernel migrate.rs Claim::Cut")
+        cx.rec.expect("plan.jsonl.migrating" in kept, "sw-06-source-not-kept", f"the cut source is not kept for a person: {kept}")
+        cx.rec.expect(told is not None and ".migrating" in told, "sw-06-person-not-told", f"the cut is only in kernel.log ({'yes' if '\"migrate_cut\"' in log else 'no'}); the transcript says nothing that names `plan.jsonl.migrating` or what a person should do with it — a file nobody would recognise", "arbos-kernel migrate.rs Claim::Cut: a notice beside the log line")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))

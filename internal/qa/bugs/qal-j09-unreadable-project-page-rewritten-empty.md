@@ -1,5 +1,6 @@
 # qal-j09: one unreadable read of the project page, and the next `plan` call replaces the page with an empty one — reporting success
 
+- **Closed 2026-09-17 05:25 UTC against #392 @ `a0f2a92d`** (`arbos-kernel 0.2.0 a0f2a92dbf3a`, built and run here). `sw-01` passes: the 293-byte page keeps every byte while the unreadable read is reported and `plan` errors. Controls the same minute: #390 @ `9ade320f` and `main` @ `7f6a6b9a` still rewrite it to 36 bytes. Reads now answer Present / Absent / Unknown(why), and nothing rewrites a page on Unknown.
 - Measured at: `main` @ `7f6a6b9a` (`arbos-kernel 0.2.0 7f6a6b9a06bc`); replay provider, no model. Code read at `main` @ `0f2a8bc6`.
 - Family: qal-j08's — a read that fails is treated as *nothing* rather than *unknown*, and a later write acts on it with confidence. Here the write is the rewrite of `.arbos/notes.md` (the project page: goal, checklist, notes) and of every agent's own checklist page.
 - Severity: **high, destructive.** The project page is the coordinator's memory of what the project is for and what is in flight; on this team it also lives on a network mount that answers partially (six store episodes today). One failed read at the moment of a `plan` call and the page is gone, with `Set 1 item(s).` as the only word said. `archived.md` gets nothing (the overflow was empty), so nothing is moved — it is dropped.
@@ -26,4 +27,4 @@ A page that could not be read is not rewritten. The `plan` call fails with the r
 
 ## Fix
 
-Not started (features agent). Regression check: `sw-01` (page bytes unchanged after the call; the tool call carries an error).
+#392 @ `a0f2a92d` (see the closing line). Regression check: `sw-01` (page bytes unchanged after the call; the tool call carries an error).
