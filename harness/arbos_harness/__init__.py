@@ -11,10 +11,12 @@ custom OpenAI-compatible provider, so the trace verifiers records is the sample.
         --client.base-url https://openrouter.ai/api/v1 --client.api-key-var OPENROUTER_API_KEY
 
 `--env.agent.runtime.block '["*"]'` leaves the container only the interception
-route. Without it the docker runtime uses the host network, and the agent can
-`pip download` the release that already carries the fix: in the SWE-bench loop's
-cycle-10 baseline run 6 of 35 rollouts did, all six graded solved; in cycle 11,
-8 of 29. The `arbos_egress_open` metric records which rollouts ran open.
+route, and the harness refuses to run without it: with the docker runtime's
+default host network the agent `pip download`s the release that already carries
+the fix (133 of 948 rollouts across the SWE-bench loop's first eleven cycles,
+114 of them graded solved), so an open-network rollout is not a measurement.
+`--env.agent.harness.allow-open-egress true` overrides the refusal for debugging;
+the `arbos_egress_open` metric then marks those rollouts.
 """
 
 from __future__ import annotations
@@ -50,6 +52,30 @@ PROGRAM_BIN = f"{BIN_DIR}/arbos-swe-run"
 # with a 32 MB cap, and a long rollout's trace/ alone passes it (django-15629
 # errored in finalize). The harness collects this dir itself.
 OUT_DIR = "/tmp/vf-arbos/out"
+
+# Kills every process in the container except PID 1 (the runtime's own `sleep
+# infinity`) and this shell, then counts what is still alive and not a zombie.
+# Prints "<killed> <left>". Runs in the container's PID namespace, so /proc is
+# every process the agent could have left behind.
+SWEEP = r"""
+me=$$; killed=0
+for p in /proc/[0-9]*; do
+  pid=${p#/proc/}
+  [ "$pid" = 1 ] && continue
+  [ "$pid" = "$me" ] && continue
+  kill -9 "$pid" 2>/dev/null && killed=$((killed+1))
+done
+sleep 1
+left=0
+for p in /proc/[0-9]*; do
+  pid=${p#/proc/}
+  [ "$pid" = 1 ] && continue
+  [ "$pid" = "$me" ] && continue
+  state=$(awk '{print $3}' "$p/stat" 2>/dev/null || echo gone)
+  [ "$state" = Z ] || [ "$state" = gone ] || left=$((left+1))
+done
+echo "$killed $left"
+"""
 DEFAULT_IMAGE = "arbos-harness"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "arbos-harness"
 
@@ -88,6 +114,9 @@ class ArbosHarnessConfig(HarnessConfig):
     at $4 the cap cut three hard rollouts that had solved at $6 before (cycle 9), so $8."""
     changes_before_done: bool = False
     """Nudge a final reply after edits to run `changes` first (`ARBOS_CHANGES_BEFORE_DONE`)."""
+    allow_open_egress: bool = False
+    """Run even when the runtime's egress is unrestricted. Off: setup refuses, the
+    rollout is an error and gets no score. On: it runs, and `arbos_egress_open` is 1.0."""
     artifacts: str = "outputs/arbos"
     """Host folder that receives each rollout's `/logs/artifacts/arbos` (patch,
     rollout bundle, kernel log, result.json) under `<task>--<trace id>/`. Empty = keep
@@ -108,6 +137,12 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         return kernel_from_image(self.config.image)
 
     async def setup(self, runtime: Runtime) -> None:
+        if not runtime.network_restricted and not self.config.allow_open_egress:
+            raise RuntimeError(
+                "arbos: the runtime's egress is open, so the agent could fetch the upstream "
+                "fix; this rollout is not a measurement and is refused. Pass "
+                "--env.agent.runtime.block '[\"*\"]' (or allow-open-egress true to run anyway)."
+            )
         kernel = self.kernel_path()
         logger.info("arbos: installing %s into the runtime", kernel)
         await runtime.write(KERNEL_BIN, kernel.read_bytes())
@@ -170,7 +205,37 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             raise ValueError(
                 "arbos: instructions_replace without instructions would leave the agent no rules"
             )
-        return await runtime.run_program([PROGRAM_BIN, prompt], env)
+        result = await runtime.run_program([PROGRAM_BIN, prompt], env)
+        if runtime.network_restricted:
+            # verifiers grades in this same container, and SWE-bench's verifier
+            # (`uv run parser.py`, swebench from PyPI) needs the network the agent
+            # was denied: under the cut every rollout graded 0 with a patch in
+            # place (cycle 12). Egress comes back for the grader only once nothing
+            # of the agent is alive to use it: the kernel has exited, but a job it
+            # backgrounded would outlive it, so every process but PID 1 is killed
+            # and /proc is checked. If anything survives, the network stays cut
+            # and the rollout is an error rather than a score.
+            await self.sweep(runtime)
+            await runtime.prepare_execution(None)
+        return result
+
+    async def sweep(self, runtime: Runtime) -> None:
+        swept = await runtime.run(["sh", "-c", SWEEP], {})
+        parts = swept.stdout.strip().split()
+        try:
+            killed, left = int(parts[0]), int(parts[1])
+        except (IndexError, ValueError):
+            raise RuntimeError(
+                f"arbos: process sweep before grading failed: {swept.stderr.strip()[-300:]}"
+            ) from None
+        await runtime.write(
+            f"{OUT_DIR}/sweep.json", json.dumps({"killed": killed, "left": left}).encode()
+        )
+        if left:
+            raise RuntimeError(
+                f"arbos: {left} process(es) of the agent's survive its exit; egress stays "
+                "cut and this rollout is not graded"
+            )
 
     async def result(self, runtime: Runtime) -> dict:
         try:
@@ -191,11 +256,11 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         Also brings the rollout's artifacts to the host when `artifacts` is set."""
         r = await self.result(runtime)
         code = int(r.get("kernel_exit", -1))
-        if not runtime.network_restricted:
-            logger.warning(
-                "arbos: runtime egress is open; the agent could fetch upstream releases. "
-                "Pass --env.agent.runtime.block '[\"*\"]' for a clean measurement."
-            )
+        swept = {}
+        try:
+            swept = json.loads((await runtime.read(f"{OUT_DIR}/sweep.json")).decode())
+        except Exception:
+            pass
         collected = 0
         if self.config.artifacts:
             collected = await self.collect(task, trace, runtime)
@@ -209,6 +274,7 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "arbos_cost_capped": float(r.get("cost_capped", 0)),
             "arbos_artifact_bytes": float(collected),
             "arbos_egress_open": 0.0 if runtime.network_restricted else 1.0,
+            "arbos_survivors_killed": float(swept.get("killed", 0)),
         }
 
     async def collect(self, task: TaskData, trace: Trace, runtime: Runtime) -> int:
