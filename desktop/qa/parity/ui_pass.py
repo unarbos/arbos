@@ -1345,7 +1345,7 @@ class Pass:
         self.check("alt-cmd-down", sc, "alt-cmd-down", "steps to the next agent", lambda: self.app.key("alt-cmd-down"), lambda a, b: b["active_session"] != a["active_session"])
         self.check("panel-scroll", sc, "scroll the panel", "no error", lambda: self.app.scroll("panel-scroll", dy=-200), None)
         rows = self.ids("panel-agent-*")
-        if rows:
+        if rows and self.reveal(rows[0], "panel-scroll"):
             self.app.click(rows[0])
 
     def phase_settings(self) -> None:
@@ -1357,6 +1357,12 @@ class Pass:
         self.go_project()
         if not any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
             for row in self.ids("panel-agent-*"):
+                # A row scrolled out of the drawer (a run that opened many
+                # chats) is brought back or skipped, never a crash that
+                # takes the phase with it (cycle 37: phases R and W died on
+                # `panel-agent-27 … clipped away`).
+                if not self.reveal(row, "panel-scroll"):
+                    continue
                 self.app.click(row); time.sleep(0.5)
                 if any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
                     break
