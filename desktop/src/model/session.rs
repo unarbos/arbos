@@ -1575,6 +1575,13 @@ impl ChatSession {
     /// before a draw; the flag is set when a `status` lands while a child
     /// is working.
     pub fn settle_status_over_workers(&mut self, any_working: bool) {
+        // A status that stood while a worker worked is about the workers,
+        // whether it was set before the spawn or after it (the rig's
+        // coordinator set "Waiting on one sorting worker" and then spawned;
+        // Jacob's spawned and then set it).
+        if any_working && self.status.is_some() {
+            self.status_over_workers = true;
+        }
         if self.status_over_workers && !any_working && !self.children.is_empty() {
             self.status = None;
             self.status_over_workers = false;
