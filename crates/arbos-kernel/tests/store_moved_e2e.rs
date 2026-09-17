@@ -59,6 +59,15 @@ fn a_place_renamed_mid_turn_is_not_recreated_at_its_old_path_and_the_kernel_stop
         transcript.contains("folder was moved from") && transcript.contains("kernel stopped"),
         "the moved store carries the notice: {transcript}"
     );
+    // No lock left behind where the store went (QA's `state:lock-leftover`
+    // on every run): the stopping kernel takes its own files with it.
+    for p in arbos_core::Place::new(moved.clone()).lock_paths() {
+        assert!(
+            !p.exists(),
+            "lock file left in the moved store: {}",
+            p.display()
+        );
+    }
     let _ = k.child.kill();
 }
 
