@@ -575,12 +575,14 @@ fn archive_finished_inner(hooks: &KernelHooks, reported: &[String]) {
         for (pid, job) in &running {
             let _ = arbos_engine::repoint_leash(&store, *pid, &dest.join("jobs").join(job));
         }
-        let result = std::fs::create_dir_all(&dir).and_then(|_| {
-            if dest.exists() {
-                return Err(std::io::Error::other("already archived"));
-            }
-            std::fs::rename(&src, &dest)
-        });
+        let result = arbos_core::check_store(&hooks.place.arbos())
+            .and_then(|_| std::fs::create_dir_all(&dir))
+            .and_then(|_| {
+                if dest.exists() {
+                    return Err(std::io::Error::other("already archived"));
+                }
+                std::fs::rename(&src, &dest)
+            });
         if result.is_err() {
             for (pid, _) in &running {
                 let _ = std::fs::remove_file(

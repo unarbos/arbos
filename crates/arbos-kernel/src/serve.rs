@@ -364,6 +364,13 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     };
     bootstrap(&place)?;
     klog::init(klog::log_path_for(&place.arbos()));
+    // Which folder this store is (device, inode): every later look at the
+    // path compares against it, so a store renamed out from under the
+    // kernel is told apart from a folder recreated where it was.
+    let store_id = place
+        .store_id()
+        .context("the place's .arbos folder could not be identified")?;
+    arbos_core::remember_opened(store_id);
     let host = Host::load()?;
     host.remember_place(place.path());
     match (host.api_key(), host.config.api_base()) {
@@ -847,6 +854,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(id) = done_rx.recv() => {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
+                // The turn's tail — the plan write, the roll, the commit,
+                // the idle frame's usage read — is the write that recreated
+                // a moved place at its old path (desktop gate, cycle 35).
+                // Not one byte of it lands at a path that is not the store
+                // this kernel opened.
+                if place.store_state(store_id) != arbos_core::StoreState::Intact {
+                    say_store_moved(&place, store_id);
+                    crate::remote::stop_all(&hooks).await;
+                    exit_code = 4;
+                    break;
+                }
                 // A turn superseded before it did anything is cut from
                 // the record once its folder has closed (below), so the
                 // fuller message that follows is the only user line.
@@ -936,19 +954,31 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 // writing into unlinked logs. QA's machine: 164 GB. Exit;
                 // the leashes see the parent go and end the jobs. Said on
                 // stderr, since the log lived in the store.
-                if !place.arbos().is_dir() {
-                    store_gone += 1;
-                    if store_gone >= 2 {
-                        eprintln!(
-                            "arbos-kernel stopping: the place's .arbos store is gone ({}); its jobs end with this kernel",
-                            place.arbos().display()
-                        );
+                match place.store_state(store_id) {
+                    arbos_core::StoreState::Gone => {
+                        store_gone += 1;
+                        if store_gone >= 2 {
+                            eprintln!(
+                                "arbos-kernel stopping: the place's .arbos store is gone ({}); its jobs end with this kernel",
+                                place.arbos().display()
+                            );
+                            crate::remote::stop_all(&hooks).await;
+                            exit_code = 4;
+                            break;
+                        }
+                    }
+                    // The folder was renamed and something made a new
+                    // `.arbos/` where it was — a kernel's own late write,
+                    // through `create_dir_all` on the absolute path, is the
+                    // usual maker. One look decides: an inode does not
+                    // change and change back. Stop before more lands there.
+                    arbos_core::StoreState::Moved => {
+                        say_store_moved(&place, store_id);
                         crate::remote::stop_all(&hooks).await;
                         exit_code = 4;
                         break;
                     }
-                } else {
-                    store_gone = 0;
+                    arbos_core::StoreState::Intact => store_gone = 0,
                 }
                 // The binary replaced under this kernel (an update, an
                 // install into the shared PATH): it serves stale code until
@@ -1994,6 +2024,36 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     });
 }
 
+/// The store is not at its path any more — said on stderr, since the log
+/// lived in it; and into the store itself where it is now, when the
+/// kernel can tell (its cwd followed the folder), so the person opening
+/// the moved project reads why its kernel stopped. Nothing is written at
+/// the old path: that would be the ghost.
+fn say_store_moved(place: &Place, opened: arbos_core::StoreId) {
+    let now_at = arbos_core::store_now_at(opened);
+    let where_ = match &now_at {
+        Some(p) => format!("it is now at {}", p.display()),
+        None => "where it went, this kernel cannot tell".to_string(),
+    };
+    eprintln!(
+        "arbos-kernel stopping: the .arbos store at {} is not the one this kernel opened (the folder was moved or replaced; {where_}); nothing more is written here, and its jobs end with this kernel",
+        place.arbos().display()
+    );
+    if let Some(p) = now_at {
+        let moved = Place::new(p);
+        let _ = arbos_core::append_event(
+            &Layout::new(&moved, arbos_core::ROOT_ID).transcript(),
+            &arbos_core::Event::new(EventKind::Notice {
+                text: format!(
+                    "This project's folder was moved from {} while its kernel ran. The kernel stopped rather than write into the old path; open the project here to start a new one.",
+                    place.path.display()
+                ),
+                failed: true,
+            }),
+        );
+    }
+}
+
 fn snapshot(place: &Place, hooks: &KernelHooks) -> Frame {
     let focus = arbos_core::read_focus(place);
     // The focused agent's last measured context, so a client attaching
@@ -2282,6 +2342,7 @@ fn write_kernel_json(
     open: bool,
     access: &access::Access,
 ) -> Result<()> {
+    arbos_core::check_store(&place.arbos())?;
     let info = KernelJson {
         url: access::local_url(addr),
         bind: open.then(|| addr.to_string()),

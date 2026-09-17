@@ -57,6 +57,7 @@ pub fn record(
     title: &str,
     body: &str,
 ) -> Result<Notification> {
+    crate::check_store(&place.arbos())?;
     std::fs::create_dir_all(place.arbos())?;
     let mut all = load(place);
     let id = all.last().map(|n| n.id).unwrap_or(0) + 1;
