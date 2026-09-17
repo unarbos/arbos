@@ -1181,6 +1181,11 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         // will move. `panel_open` stays under its old name — the parity loop
         // and the journeys assert on it.
         "panel_open": workspace.panel().is_some_and(|panel| panel.open),
+        // Whether the drawer is on screen: open *and* the window wide enough
+        // to give it room. At 900 wide `panel_open` read true while nothing
+        // was drawn (F-161, rig audit R1) — a rig must assert on what shows.
+        "panel_shown": workspace.panel().is_some_and(|panel| panel.open)
+            && f32::from(window.viewport_size().width) >= crate::view::panel::PANEL_MIN_WINDOW,
         "panel": panel_json(this, workspace, window, cx),
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
