@@ -236,6 +236,36 @@ fn a_record_that_cannot_be_kept_never_turns_the_refusal_into_spam() {
         short, 6,
         "each start says, in short, that the record could not be kept"
     );
+
+    // The third shape, the realistic one: the folder was writable at
+    // first and stopped being so. A stale record sits in runtime/; the
+    // live one goes to the temp folder; the next start must read the
+    // live one, not the escalation-ready stale one, on every relaunch.
+    let record = runtime.join("place-held.json");
+    let (code, _) = relaunch_env(&k, &[("TMPDIR", tmp_s.as_str())]);
+    assert_eq!(code, 3);
+    let mut stale: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    // Six minutes old, never escalated, said long ago — the shape that
+    // would escalate on the next read if it were believed.
+    stale["first_ms"] = serde_json::json!(stale["first_ms"].as_i64().unwrap() - 360_000);
+    stale["last_said_ms"] = serde_json::json!(stale["last_said_ms"].as_i64().unwrap() - 360_000);
+    stale["escalated"] = serde_json::json!(false);
+    std::fs::write(&record, stale.to_string()).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let mut escalations = 0;
+    for _ in 0..6 {
+        let (code, err) = relaunch_env(&k, &[("TMPDIR", tmp_s.as_str())]);
+        assert_eq!(code, 3, "{err}");
+        if err.contains("a person needs to look") {
+            escalations += 1;
+        }
+    }
+    restore(&k);
+    assert!(
+        escalations <= 1,
+        "the stale runtime copy was believed over the live temp copy: {escalations} escalations in six relaunches"
+    );
     let _ = k.child.kill();
     let _ = k.child.wait();
 }
