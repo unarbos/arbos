@@ -2873,11 +2873,12 @@ impl Render for Arbos {
                     .map(|row| match self.front() {
                         // No panel beside it: the panel is a view of a
                         // project's `.arbos/`, and Settings has none.
-                        Front::Settings => row
-                            .children(self.settings_tab.as_ref().map(|tab| tab.pane.clone())),
-                        Front::Project => {
-                            row.child(self.detail(window, cx)).children(self.panel(window, cx))
+                        Front::Settings => {
+                            row.children(self.settings_tab.as_ref().map(|tab| tab.pane.clone()))
                         }
+                        Front::Project => row
+                            .child(self.detail(window, cx))
+                            .children(self.panel(window, cx)),
                     }),
             )
             // Under everything, the width of the window: settings and the
