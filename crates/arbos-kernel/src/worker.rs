@@ -282,9 +282,15 @@ fn start_kernel(
         eprintln!("worker: {} already served on port {port}", place.display());
         return Ok((served, place));
     }
-    let me = std::env::current_exe().context("locate this binary")?;
+    // Not `current_exe()` alone: on arboslife the daemon had outlived its
+    // own binary (replaced by an update) and every spawn was refused
+    // with ENOENT for two days (JB-6).
+    let chosen = crate::binary::kernel_binary().context("locate arbos-kernel")?;
+    if let Some(note) = &chosen.note {
+        eprintln!("worker: {note}");
+    }
     let log = std::fs::File::create(place.join(".arbos").join("kernel.log"))?;
-    let mut cmd = Command::new(me);
+    let mut cmd = Command::new(&chosen.path);
     cmd.arg("serve")
         .arg(&place)
         .arg("--hub")
