@@ -31,7 +31,7 @@ The working sound, in one paragraph. The gateway sends `agent.activity { agent, 
 
 ## What I could not do here
 
-This worker has no Xcode, so the PR's first compile is CI's "iPhone (build, simulator)" job on macOS. The change is small and additive: one new file, one new `VoiceEvent` case handled in the single exhaustive switch (`CallViewModel`); every other switch over `VoiceEvent` has a `default`. The mobile loop's rig is the right place to hear the tick on a real phone.
+This worker has no Xcode, so the PR's first compile was CI's "iPhone (build, simulator)" job on macOS: it passed (`xcodebuild build`, 1 min 8 s, [run 35261713981](https://github.com/unarbos/arbos/actions/runs/35261713981)). I could not hear the tick myself. The change is small and additive: one new file, one new `VoiceEvent` case handled in the single exhaustive switch (`CallViewModel`); every other switch over `VoiceEvent` has a `default`. The mobile loop's rig is the right place to hear the tick on a real phone.
 
 ## For the mobile and desktop loops
 
