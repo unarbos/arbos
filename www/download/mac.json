@@ -1,0 +1,13 @@
+{
+  "url": "https://github.com/unarbos/arbos/releases/download/dev/Arbos-0.2.0-1478-macos-arm64.zip",
+  "name": "Arbos-0.2.0-1478-macos-arm64.zip",
+  "size": 25888349,
+  "tag": "dev",
+  "channel": "dev",
+  "version": "0.2.0",
+  "build": 1478,
+  "commit": "f451cbe",
+  "minimum_system_version": "13.0",
+  "published": "2026-09-17T14:21:39Z",
+  "format": "zip"
+}
