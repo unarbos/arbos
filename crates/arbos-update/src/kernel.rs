@@ -51,6 +51,52 @@ pub struct Running {
     pub protocol: u32,
 }
 
+/// Run `<binary> --version`, waiting out a file that was only just written.
+///
+/// Everything this module does runs a binary moments after putting it
+/// there: a payload is unpacked and probed, a candidate is copied beside
+/// its target and probed again. On Linux that can fail with `ETXTBSY`,
+/// "Text file busy" — the kernel refuses to execute a file while any
+/// process holds it open for writing.
+///
+/// Our own descriptor is closed by then. The one that is not is a
+/// *stranger's*: a thread that forks between another thread's `open` and
+/// `close` gives its child an inherited writable descriptor to the file,
+/// and until that child execs or exits the file cannot be run. Nothing the
+/// writing code does can prevent it, because the fork is somewhere else
+/// entirely — in a program with threads, which is what the desktop is, it
+/// is a matter of luck.
+///
+/// The window is the length of somebody else's fork-to-exec, so it closes
+/// on its own in well under a millisecond. Waiting it out is the whole
+/// remedy. Only `ETXTBSY` is retried: a binary that is genuinely broken
+/// must still fail on the first try and say so.
+///
+/// Seen as a flake in `the_place_probe_allows_a_build_that_reads_it_no_worse`,
+/// where 69 sibling tests supply the forks, and reported as
+/// `Text file busy (os error 26)` on 2026-09-17.
+fn run_version(binary: &Path) -> Result<std::process::Output> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match Command::new(binary).arg("--version").output() {
+            Ok(out) => return Ok(out),
+            Err(e)
+                if e.raw_os_error() == Some(TEXT_FILE_BUSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("running {} --version", binary.display()));
+            }
+        }
+    }
+}
+
+/// `ETXTBSY`. 26 on Linux, where this happens; on macOS it is the same
+/// number, and on anything else the comparison simply never matches.
+const TEXT_FILE_BUSY: i32 = 26;
+
 impl Running {
     /// Ask a binary what it is, by running it.
     ///
@@ -59,10 +105,7 @@ impl Running {
     /// so this doubles as the check that a staged payload works before it is
     /// moved into place.
     pub fn read(binary: &Path) -> Result<Self> {
-        let out = Command::new(binary)
-            .arg("--version")
-            .output()
-            .with_context(|| format!("running {} --version", binary.display()))?;
+        let out = run_version(binary)?;
         if !out.status.success() {
             bail!("{} --version exited {}", binary.display(), out.status);
         }
@@ -778,6 +821,52 @@ mod tests {
             .to_string();
         assert!(err.contains("2 problems"), "{err}");
         assert!(err.contains("refusing"), "{err}");
+    }
+
+    /// The flake, made to happen on purpose.
+    ///
+    /// A writable descriptor anywhere on the file is what makes the kernel
+    /// refuse to execute it, so holding one here is the same condition a
+    /// stranger's forked child creates — and the only way to produce it
+    /// without a race.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_binary_that_is_only_briefly_busy_is_waited_for_rather_than_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let bin = stub(&home.path().join("k"), "0.2.0", 0);
+
+        let held = std::fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        assert_eq!(
+            std::process::Command::new(&bin)
+                .arg("--version")
+                .output()
+                .expect_err("a file held open for writing cannot be executed")
+                .raw_os_error(),
+            Some(super::TEXT_FILE_BUSY),
+            "the condition under test did not arise, so the rest proves nothing"
+        );
+
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            drop(held);
+        });
+        let running = Running::read(&bin).expect("waited the busy file out");
+        assert_eq!(running.sha, "abc123def456");
+    }
+
+    /// And the wait must not become a way to be slow about real failures.
+    #[cfg(unix)]
+    #[test]
+    fn a_binary_that_will_never_run_fails_at_once() {
+        let home = tempfile::tempdir().unwrap();
+        let missing = home.path().join("not-here");
+        let started = std::time::Instant::now();
+        assert!(Running::read(&missing).is_err());
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "waited {:?} for a file that does not exist",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]
