@@ -1603,10 +1603,11 @@ def place_window() -> None:
             subprocess.run(["xdotool", "windowactivate", "--sync", wid], env=ENV)
             subprocess.run(["xdotool", "windowsize", wid, "1600", "1000"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV)
-            # Read the geometry back: the window manager once left the
-            # window a third off the left edge, and every still and every
-            # `visible` of that run was about a clipped window (rig audit
-            # R13, cycle 31). Fail loudly rather than measure a fragment.
+            # Read the geometry back rather than trust the move. (Added
+            # after a false alarm: a crop of a still, cut at x=200 while the
+            # window sits at x=100, read as "the window is off-screen"; the
+            # raw still showed it whole. The guard is right anyway — a
+            # coordinate the rig set is not one it verified — rig audit R13.)
             time.sleep(0.4)
             geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
             pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
