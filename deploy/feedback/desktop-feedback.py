@@ -464,7 +464,7 @@ def plural(n: int, one: str, many: str = "") -> str:
 def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
     """What a person reads first. The machine-readable form is beside it."""
     app = report.get("app", {})
-    kernel = report.get("kernel", {})
+    kernel = report.get("kernel") or {}
     turn = report.get("turn", {})
     red = report.get("redacted", {})
     inc = report.get("included", {})
