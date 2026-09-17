@@ -14,6 +14,10 @@
          nothing runs on its own, `plan_op run` sends it as its own turn (#358, kernel half).
   sq-02  the same in the desktop, where the two halves can disagree: what the window shows as held must exist in
          the kernel's inbox, or Send now sends nothing (#354 in, #358 in flight).
+  im-01  an attached bash yields to the user's words within seconds and streams `job` frames while it runs; the same
+         line typed twice is filed once with an "Already queued" notice (#362 — the impatient user).
+  im-02  in the desktop: while a command streams, the quiet-line hint ("Nothing has arrived in …", blaming the key)
+         must not appear; when a command is truly silent the hint names the command, not the model key.
   fb-01  the desktop feedback chain (#336, #345, #331): the sheet opens from a thumbs-down and the window keeps
          answering; the report is on disk before anything is sent; with no credentials it waits ("saved, and
          waiting"); with credentials it is delivered through `store put` into a store a kernel serves; the poller
@@ -387,6 +391,95 @@ def register(scenario, registry, transcript, now_ms, branch):
         finally:
             rig.close(folders=[folder])
             cx.rec.snapshot(folder, "stop-after")
+
+
+    # ── #362: the impatient user ──────────────────────────────────────────
+    @reg("im-01-bash-yields-to-the-users-words", tags=("impatient",))
+    def im01(cx):
+        """An attached bash streams its output as `job` frames while it holds the turn; a user line (steer) while it runs is answered within 8 s, not after the command; the same line sent twice is one user line plus an "Already queued … not added again" notice."""
+        lines = [
+            {"agent": "root", "content": "running it", "calls": [{"name": "bash", "arguments": {"command": "for i in $(seq 1 40); do echo tick $i; sleep 0.5; done", "description": "ticks"}}]},
+            {"agent": "root", "content": "It is running — 20 seconds in, still going; I will report when it ends."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "start it")
+        cx.rec.expect(c.wait_turn("root", "running", 10) is not None, "im-01-turn-never-started", "no running turn")
+        job = c.wait(lambda f: f.get("type") == "job" and f.get("agent") == "root" and "tick" in str(f.get("delta", "")), 10, "a job frame with output")
+        cx.rec.notes["first_job_frame"] = {k_: str(v)[:60] for k_, v in (job or {}).items()}
+        cx.rec.expect(job is not None and job.get("running") is True, "im-01-no-job-stream", "the attached command's output did not arrive as `job` frames while it ran", "arbos-kernel serve.rs / bash.rs (#362)")
+        time.sleep(1.5)
+        asked = time.time()
+        c.user("root", "run it", steer=True)
+        c.user("root", "run it", steer=True)
+        reply = c.wait(lambda f: f.get("type") == "event" and f.get("agent") == "root" and f.get("event", {}).get("kind") == "assistant" and str(f.get("event", {}).get("text", "")).startswith("It is running"), 12, "the turn answers while the command runs")
+        took = round(time.time() - asked, 1)
+        cx.rec.notes["answered_after_s"] = took
+        cx.rec.expect(reply is not None and took < 8, "im-01-typing-unanswered", f"the user's words were not answered while the command ran (answered={reply is not None}, after {took} s; the command itself runs 20 s)", "arbos-kernel bash.rs yield (#362)")
+        time.sleep(1)
+        evs, _ = transcript(cx.place, "root")
+        runs = [e for e in evs if e.get("kind") == "user" and e.get("text") == "run it"]
+        dup = [e for e in evs if e.get("kind") == "notice" and str(e.get("text", "")).startswith("Already queued: \"run it\"")]
+        cx.rec.notes.update({"run_it_lines": len(runs), "already_queued_notice": [e.get("text", "")[:120] for e in dup]})
+        cx.rec.expect(len(runs) == 1, "im-01-repeat-stacked", f"the same line typed twice is on the transcript {len(runs)} time(s)", "arbos-core inbox.rs dedupe (#362)")
+        cx.rec.expect(bool(dup) and "not added again" in dup[0].get("text", ""), "im-01-repeat-unacknowledged", "the repeat was dropped without the 'Already queued … not added again' notice")
+
+    @reg("im-02-desktop-no-quiet-line-while-streaming", needs_model=True, tags=("impatient", "desktop"))
+    def im02(cx):
+        """In the desktop: a command that prints every second for 80 s holds the turn; the stall hint ("Nothing has arrived in …, check the model key") must not appear while output streams (it did twice on Jacob's screen). Control: a command that prints nothing for 80 s — the hint appears after a minute and names the command, never the model key."""
+        if not desktop_available():
+            cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
+            return
+        from journey_scenarios import Rig
+
+        folder = cx.scratch / "impatient-project"
+        folder.mkdir(parents=True, exist_ok=True)
+        rig = Rig(cx, [folder], tag="app-impatient")
+        try:
+            time.sleep(3)
+            rig.focus(folder)
+            rig.wait_idle(folder, 60)
+
+            def watch(seconds):
+                seen = []
+                end = time.time() + seconds
+                while time.time() < end:
+                    try:
+                        hint = rig.app.find("stall-hint")
+                    except Exception:  # noqa: BLE001
+                        hint = None
+                    if hint:
+                        seen.append((round(seconds - (end - time.time())), {k_: str(v)[:100] for k_, v in hint.items() if k_ in ("text", "label", "path")}))
+                    if not rig.busy(folder):
+                        break
+                    time.sleep(3)
+                return seen
+
+            # Streaming: no hint may appear.
+            rig.send("Run exactly this with bash: `for i in $(seq 1 80); do echo tick $i; sleep 1; done`. Then say done.")
+            cx.rec.expect(rig.wait_busy(folder, 20), "im-02-turn-never-started", "the streaming command's turn never started")
+            seen = watch(85)
+            rig.pulse("after 85 s of a streaming command")
+            cx.rec.notes["hint_while_streaming"] = seen[:3]
+            cx.rec.expect(not seen, "im-02-quiet-line-over-a-streaming-command", f"the stall hint appeared while the command was printing every second: {seen[:2]}", "desktop transcript.rs stall hint / session.rs quiet_for counts job frames (#362)")
+            rig.wait_idle(folder, 60)
+            # Silent: the hint appears after a minute and names the command, not the key.
+            rig.send("Run exactly this with bash: `sleep 80`. Then say done.")
+            cx.rec.expect(rig.wait_busy(folder, 20), "im-02-silent-turn-never-started", "the silent command's turn never started")
+            seen = watch(85)
+            rig.pulse("after 85 s of a silent command")
+            cx.rec.notes["hint_while_silent"] = seen[:3]
+            texts = " ".join(str(h.get("text", "")) + str(h.get("label", "")) for _, h in seen)
+            cx.rec.expect(bool(seen), "im-02-no-hint-for-a-silent-command", "no stall hint appeared in 85 s of a command that printed nothing")
+            if seen:
+                cx.rec.expect("model key" not in texts.lower() and "nothing has arrived" not in texts.lower(), "im-02-silent-command-blamed-on-the-key", f"the hint over a silent command sends the user to the model key: {texts[:160]!r}")
+                cx.rec.expect("printed nothing" in texts.lower() or "sleep" in texts.lower() or texts.strip() == "", "im-02-hint-does-not-name-the-command", f"the hint does not name the running command: {texts[:160]!r}")
+            rig.wait_idle(folder, 60)
+        finally:
+            rig.close(folders=[folder])
+            cx.rec.snapshot(folder, "impatient-after")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))
