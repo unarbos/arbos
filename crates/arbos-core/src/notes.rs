@@ -58,6 +58,13 @@ pub struct Notes {
     /// kept `DONE_KEPT`: `(section, item line)`, oldest first. The saver
     /// moves them to `archived.md` (the protocol: move, never delete).
     overflow: Vec<(String, String)>,
+    /// Why this page is empty although its file may not be: the read
+    /// failed (EIO, EACCES, a partial view on a mount). A page in this
+    /// state is shown as empty and is **never written back**: one bad
+    /// read of `.arbos/notes.md` and the next `plan` call rewrote the
+    /// coordinator's 293-byte page as its one new item (qal-j09). See
+    /// `crate::record` for the rule.
+    unread: Option<String>,
 }
 
 /// `<tldr>` is kept by the tool only once the page is big: this many
@@ -163,8 +170,10 @@ pub fn is_project_page(place_root: &Path, candidate: &Path) -> bool {
 
 pub const PAGE_REFUSAL: &str = ".arbos/notes.md is the project page, written by root only; keep your own checklist with the plan tool and tell root with say to=root";
 
+/// The page as it stands: parsed when read, empty when absent, and an
+/// `unread` page — empty, unsaveable — when the read failed.
 pub fn load(place: &Place, agent: &str) -> Notes {
-    Notes::parse(&std::fs::read_to_string(path(place, agent)).unwrap_or_default())
+    read_path(&path(place, agent))
 }
 
 pub fn save(place: &Place, agent: &str, notes: &Notes) -> Result<()> {
@@ -242,17 +251,23 @@ pub fn save_todo(place: &Place, agent: &str, notes: &Notes) -> Result<()> {
 }
 
 fn save_path(p: &Path, notes: &Notes) -> Result<()> {
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
+    // The rule (`crate::record`): a page whose read failed is a question,
+    // not a value, and is not written over the file it stands in for.
+    if let Some(why) = &notes.unread {
+        anyhow::bail!(
+            "{why} — {} not written; the page keeps its bytes. Read it again, or fix what blocks the read.",
+            p.display()
+        );
     }
-    let tmp = p.with_extension(format!("md.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, notes.render()).with_context(|| format!("write {}", tmp.display()))?;
-    std::fs::rename(&tmp, p).with_context(|| format!("replace {}", p.display()))?;
-    Ok(())
+    crate::record::write_atomic(p, notes.render().as_bytes())
 }
 
 pub fn read_path(path: &Path) -> Notes {
-    Notes::parse(&std::fs::read_to_string(path).unwrap_or_default())
+    match crate::record::read_text(path) {
+        crate::record::Read::Present(text) => Notes::parse(&text),
+        crate::record::Read::Absent => Notes::parse(""),
+        crate::record::Read::Unknown(why) => Notes::unread(why),
+    }
 }
 
 /// `[label](target) …` → `label`.
@@ -336,7 +351,23 @@ impl Notes {
         Self {
             lines: text.lines().map(str::to_string).collect(),
             overflow: Vec::new(),
+            unread: None,
         }
+    }
+
+    /// An empty page standing in for one that could not be read. It
+    /// displays as empty and refuses to be saved.
+    pub fn unread(why: String) -> Self {
+        Self {
+            lines: Vec::new(),
+            overflow: Vec::new(),
+            unread: Some(why),
+        }
+    }
+
+    /// The read this page came from failed: the reason.
+    pub fn unread_reason(&self) -> Option<&str> {
+        self.unread.as_deref()
     }
 
     /// Checked items that left the page since the last `take_overflow`,

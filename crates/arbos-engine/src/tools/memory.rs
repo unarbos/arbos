@@ -334,7 +334,7 @@ fn write_entry(kind: Kind, path: &Path, text: &str) -> Result<ToolOut> {
         .collect::<String>();
     if let Some(index) = user_preferences() {
         let marker = format!("- {}: [{name}]({rel})", kind.label());
-        let current = load(&index);
+        let current = load_for_rewrite(&index)?;
         let kept: Vec<&str> = current
             .lines()
             .filter(|l| !l.trim().starts_with(&marker))
@@ -376,7 +376,7 @@ fn forget_entry(kind: Kind, path: &Path) -> Result<ToolOut> {
         .unwrap_or_default();
     if let Some(index) = user_preferences() {
         let marker = format!("- {}: [{name}](", kind.label());
-        let current = load(&index);
+        let current = load_for_rewrite(&index)?;
         let kept: Vec<&str> = current
             .lines()
             .filter(|l| !l.trim().starts_with(&marker))
@@ -404,8 +404,19 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The file's text for display: empty when absent or unreadable.
 pub fn load(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// The file's text for a rewrite: empty when absent, an error when the
+/// read failed — `remember` used to rewrite `memory.md` from an empty
+/// read, wiping every memory on one transient EIO (the qal-j08 family).
+fn load_for_rewrite(path: &Path) -> Result<String> {
+    Ok(arbos_core::record::read_text(path)
+        .confirmed()
+        .map_err(|e| anyhow::anyhow!("remember: {e}"))?
+        .unwrap_or_default())
 }
 
 fn memory_lines(text: &str) -> impl Iterator<Item = &str> {
@@ -416,7 +427,7 @@ fn memory_lines(text: &str) -> impl Iterator<Item = &str> {
 
 fn add(path: &Path, text: &str) -> Result<ToolOut> {
     let fact = one_line(text);
-    let current = load(path);
+    let current = load_for_rewrite(path)?;
     if memory_lines(&current).any(|l| l[2..].trim() == fact) {
         return Ok(ToolOut::text(format!(
             "already remembered ({}): {fact}",
