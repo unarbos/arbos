@@ -265,6 +265,41 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         for line in &found.reaped {
             crate::klog::warn("job_reaped", Some(agent.id.as_str()), line);
         }
+        // A subscription's run that the last kernel did not see end — its
+        // task died with the image, so its outcome never landed. The
+        // subscription says so on its row and fires again at its next
+        // due; the log names it (the self-update design's sixth item).
+        for job in root.list() {
+            let Ok(sub_id) = std::fs::read_to_string(job.dir.join(crate::subs::SUB_MARKER))
+                .map(|t| t.trim().parse::<u32>())
+            else {
+                continue;
+            };
+            let Ok(sub_id) = sub_id else { continue };
+            if job.dir.join("settled").exists() {
+                continue;
+            }
+            let _ = std::fs::write(job.dir.join("settled"), "cut by a restart\n");
+            let state = if job.running() {
+                "still running, its outcome will not be read"
+            } else {
+                "ended, its outcome was never read"
+            };
+            crate::klog::warn(
+                "subscription_run_cut",
+                Some(agent.id.as_str()),
+                format!(
+                    "#{sub_id} job {}: {state} (kernel restarted mid-run)",
+                    job.id
+                ),
+            );
+            if let Some(mut sub) = arbos_core::subscription::get(&place, agent.id.as_str(), sub_id)
+            {
+                sub.last =
+                    format!("run cut by a kernel restart ({state}); fires again at its next due",);
+                let _ = arbos_core::subscription::save(&place, agent.id.as_str(), &sub);
+            }
+        }
         for line in &found.foreign {
             crate::klog::info("job_pid_reused", Some(agent.id.as_str()), line);
         }

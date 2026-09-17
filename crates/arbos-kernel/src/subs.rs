@@ -32,6 +32,48 @@ fn in_flight() -> &'static Mutex<HashSet<String>> {
     SET.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// What each in-flight run is doing and since when, keyed like
+/// `in_flight`: the words for the update gate's refusal.
+fn in_flight_what() -> &'static Mutex<std::collections::HashMap<String, (String, i64)>> {
+    static MAP: OnceLock<Mutex<std::collections::HashMap<String, (String, i64)>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn note_in_flight(key: &str, what: String) {
+    in_flight_what()
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), (what, arbos_core::now_ms()));
+}
+
+fn forget_in_flight(key: &str) {
+    in_flight().lock().unwrap().remove(key);
+    in_flight_what().lock().unwrap().remove(key);
+}
+
+/// The runs in flight, for the update gate: `root#3 shell \`curl …\`
+/// (12s)`. Empty when none.
+pub fn in_flight_lines() -> Vec<String> {
+    let now = arbos_core::now_ms();
+    let what = in_flight_what().lock().unwrap();
+    let mut lines: Vec<String> = in_flight()
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|k| match what.get(k) {
+            Some((w, since)) => format!("{k} {w} ({}s)", (now - since).max(0) / 1000),
+            None => k.clone(),
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// The marker a subscription's run leaves in its job folder, so a kernel
+/// that finds the job at boot — cut by a restart mid-run — knows whose
+/// run it was and can say so (`subscription_run_cut`).
+pub const SUB_MARKER: &str = "subscription";
+
 /// The command of the weekly `git gc` of the `.arbos/` repository.
 pub const GC_CMD: &str = "git -C .arbos gc --auto --quiet";
 
@@ -394,6 +436,13 @@ fn fire_with_note(
                 }
                 set.insert(key.clone());
             }
+            note_in_flight(
+                &key,
+                format!(
+                    "goal check `{}`",
+                    text::clip(sub.cmd.as_deref().unwrap_or(""), 60)
+                ),
+            );
             let mut scheduled = sub.clone();
             scheduled.schedule_next(now);
             if scheduled.next_due.is_some() {
@@ -407,7 +456,7 @@ fn fire_with_note(
                 let (met, detail) =
                     match sub.cmd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
                         Some(cmd) => {
-                            let (_job, code, tail) = run_job(&hooks, &agent, cmd).await;
+                            let (_job, code, tail) = run_job(&hooks, &agent, cmd, sub.id).await;
                             let tail = tail.trim().to_string();
                             (
                                 code == 0,
@@ -476,7 +525,7 @@ fn fire_with_note(
                         let _ = subscription::save(&hooks.place, id, &current);
                     }
                 }
-                in_flight().lock().unwrap().remove(&key);
+                forget_in_flight(&key);
                 hooks.plan_changed(id);
                 hooks.kick();
             });
@@ -490,6 +539,13 @@ fn fire_with_note(
                 }
                 set.insert(key.clone());
             }
+            note_in_flight(
+                &key,
+                format!(
+                    "shell `{}`",
+                    text::clip(sub.cmd.as_deref().unwrap_or(""), 60)
+                ),
+            );
             // Rescheduled before it runs, so a slow command is not fired
             // twice; the outcome lands when it ends.
             let mut scheduled = sub.clone();
@@ -501,7 +557,7 @@ fn fire_with_note(
             let agent = agent.clone();
             tokio::spawn(async move {
                 let cmd = sub.cmd.clone().unwrap_or_default();
-                let (job, code, tail) = run_job(&hooks, &agent, &cmd).await;
+                let (job, code, tail) = run_job(&hooks, &agent, &cmd, sub.id).await;
                 let id = agent.id.as_str();
                 let to_user = sub.deliver_to == "user";
                 // What the command printed last time, for a message or a
@@ -594,7 +650,7 @@ fn fire_with_note(
                         let _ = subscription::save(&hooks.place, id, &current);
                     }
                 }
-                in_flight().lock().unwrap().remove(&key);
+                forget_in_flight(&key);
                 crate::snapshot::commit_later(
                     &hooks.place,
                     format!("{id} subscription #{}: {}", sub.id, text::clip(&cmd, 60)),
@@ -613,11 +669,12 @@ fn fire_with_note(
                 }
                 set.insert(key.clone());
             }
+            note_in_flight(&key, "github_prs poll".to_string());
             let hooks = Arc::clone(hooks);
             let agent_id = id.to_string();
             tokio::task::spawn_blocking(move || {
                 let outcome = poll_github_prs(&hooks, &agent_id, &sub);
-                in_flight().lock().unwrap().remove(&key);
+                forget_in_flight(&key);
                 if let Some(mut current) = subscription::get(&hooks.place, &agent_id, sub.id) {
                     current.seen = outcome.seen.or(current.seen);
                     current.error = outcome.error;
@@ -641,11 +698,12 @@ fn fire_with_note(
                 }
                 set.insert(key.clone());
             }
+            note_in_flight(&key, format!("{} poll", sub.kind));
             let hooks = Arc::clone(hooks);
             let agent_id = id.to_string();
             tokio::task::spawn_blocking(move || {
                 let outcome = poll_github(&hooks, &agent_id, &sub);
-                in_flight().lock().unwrap().remove(&key);
+                forget_in_flight(&key);
                 if let Some(current) = subscription::get(&hooks.place, &agent_id, sub.id) {
                     let mut current = current;
                     current.seen = outcome.seen.or(current.seen);
@@ -874,7 +932,12 @@ fn poll_github(hooks: &KernelHooks, agent: &str, sub: &Subscription) -> Polled {
 }
 
 /// Run `cmd` as a job of `agent` and wait for it (with a cap).
-async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<String>, i32, String) {
+async fn run_job(
+    hooks: &KernelHooks,
+    agent: &Agent,
+    cmd: &str,
+    sub_id: u32,
+) -> (Option<String>, i32, String) {
     let cwd = agent
         .cwd
         .clone()
@@ -892,6 +955,8 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
         Ok(x) => x,
         Err(e) => return (None, -1, format!("could not start: {e}")),
     };
+    // Whose run this is, for a kernel that finds the job at boot.
+    let _ = std::fs::write(job.dir.join(SUB_MARKER), sub_id.to_string());
     let id = job.id.clone();
     let timed_out = tokio::time::timeout(CMD_TIMEOUT, child.wait())
         .await
@@ -914,6 +979,8 @@ async fn run_job(hooks: &KernelHooks, agent: &Agent, cmd: &str) -> (Option<Strin
     if timed_out {
         tail = format!("timed out after {}s\n{tail}", CMD_TIMEOUT.as_secs());
     }
+    // Seen to its end by this kernel: not a run a restart cut.
+    let _ = std::fs::write(job.dir.join("settled"), "ok\n");
     (Some(id), code, tail)
 }
 
