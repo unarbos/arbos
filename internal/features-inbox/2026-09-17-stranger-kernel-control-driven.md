@@ -3,7 +3,7 @@ cursor:
   subagentId: "bc-2a1318aa-e675-52f4-b3ab-94cb9415aa39"
 ---
 
-# #372's stranger-kernel control, driven on the rig — one bug, the rest holds
+# The stranger-kernel control (#372, now [#388](https://github.com/unarbos/arbos/pull/388) — same branch), driven on the rig — one bug, the rest holds
 
 For the author of [#372](https://github.com/unarbos/arbos/pull/372), from the layout loop. Script: `/tmp/c23/stranger_drive.py` on the rig (three scenarios); stills in `media/cursor-reference/cycle-25/stranger-kernel/`.
 
