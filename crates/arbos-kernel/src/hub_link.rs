@@ -181,6 +181,35 @@ pub async fn register(
     }
 }
 
+/// The registrant's build, said again: a `Register` with only the build
+/// fields filled, sent on the open link when `binary_gone()` changes. The
+/// hub reads a second `Register` on a link as a revision of that
+/// registrant's `builds` entry, so the roster says what the socket's
+/// `hello` already says — the state is made *by* a replacement while the
+/// process runs, so a fact from connection time is wrong for exactly the
+/// runs it was added to explain (iPhone loop, cycle 41).
+pub fn build_revision(cfg: &HubConfig, kind: RegistrantKind, project: Option<String>) -> HubFrame {
+    HubFrame::Register {
+        machine: cfg.machine.clone(),
+        kind,
+        user: String::new(),
+        host: String::new(),
+        project,
+        place: None,
+        projects: Vec::new(),
+        identities: Default::default(),
+        shares: Default::default(),
+        kinds: Default::default(),
+        labels: Vec::new(),
+        capabilities: Vec::new(),
+        version: klog::version().to_string(),
+        git_sha: klog::git_sha().to_string(),
+        built_at: klog::built_at().to_string(),
+        binary_gone: arbos_core::binary_gone(),
+        protocol: HUB_PROTOCOL,
+    }
+}
+
 /// Retry delays for a lost hub: 2, 4, 8, 16, 32, then 60 s, for ever.
 pub fn backoff(attempt: u32) -> Duration {
     Duration::from_secs(match attempt {
@@ -309,6 +338,7 @@ async fn session(
     let mut chans: HashMap<u64, (mpsc::UnboundedSender<String>, Arc<AtomicBool>)> = HashMap::new();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
+    let mut said_gone = arbos_core::binary_gone();
     let result = loop {
         tokio::select! {
             out = from_clients.recv() => {
@@ -377,6 +407,17 @@ async fn session(
             _ = ping.tick() => {
                 if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break Ok(());
+                }
+                // The binary replaced under this process since the last
+                // word: the roster hears it now, not at the next connect.
+                let gone = arbos_core::binary_gone();
+                if gone != said_gone {
+                    said_gone = gone;
+                    let f = build_revision(cfg, RegistrantKind::Kernel, Some(project.to_string()));
+                    if let Err(e) = send_json(&mut ws, &f).await {
+                        break Err(e);
+                    }
+                    klog::info("hub_build_revised", None, format!("binary_gone={gone}"));
                 }
             }
         }
