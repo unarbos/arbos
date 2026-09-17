@@ -234,6 +234,13 @@ impl Tool for Bash {
             // from then on (the desktop's undispatched restart action,
             // 2026-09-17: an anchor a merged PR had reworded).
             let inplace_before = inplace_edit_targets(cmd, &dir);
+            // The tracked files a command may change, before it runs: an
+            // edit made through the shell (`sed -i`, a redirect, `patch`,
+            // a script) is an edit however it was made, and is recorded as
+            // one — on the tool event's paths, so the coverage hook and the
+            // transcript's readers see it (SWE-bench cycle 21: four
+            // rollouts edited with sed and no edit was on the record).
+            let tracked_before = tracked_dirty(&dir);
             let asked_background = opt_bool(&args, "background").unwrap_or(false);
             let background = asked_background && looks_like_server(cmd);
             let background_ignored = asked_background && !background;
@@ -435,7 +442,24 @@ impl Tool for Bash {
             } else {
                 crate::repro::note_failing(&cx.place, &cx.agent.id, cmd, &dir, exit);
             }
-            Ok(ToolOut::with_paths(body, vec![journal]))
+            let mut paths = vec![journal];
+            if let Some(before) = tracked_before
+                && let Some(after) = tracked_dirty(&dir)
+            {
+                let changed = changed_between(&before, &after);
+                if !changed.is_empty() {
+                    body.push_str(&format!(
+                        "\n[files changed by this command: {} — an edit made through the shell is recorded as an edit]",
+                        changed
+                            .iter()
+                            .map(|p| p.strip_prefix(&dir).unwrap_or(p).display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    paths.extend(changed.iter().map(|p| p.display().to_string()));
+                }
+            }
+            Ok(ToolOut::with_paths(body, paths))
         })
     }
 }
@@ -964,6 +988,61 @@ fn inplace_edit_targets(cmd: &str, dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 /// The note for each in-place target whose bytes did not change.
+/// Tracked files with uncommitted changes under `dir`'s repository, each
+/// with a hash of its bytes — the state a command's edits are read
+/// against (bytes, not mtime: `sed -i` rewrites a file it did not change,
+/// and that is not an edit). None when `dir` is not inside a git
+/// repository (nothing to compare). Untracked files are not listed: a
+/// build tree's are many, and the coverage hook reads only what git
+/// tracks.
+fn tracked_dirty(dir: &Path) -> Option<std::collections::BTreeMap<PathBuf, u64>> {
+    let root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+    let out = std::process::Command::new("git")
+        .args(["diff", "--name-only", "HEAD"])
+        .current_dir(&root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let mut map = std::collections::BTreeMap::new();
+    for name in String::from_utf8_lossy(&out.stdout).lines() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let p = root.join(name);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            // A deleted tracked file hashes as absent, which still differs
+            // from any content.
+            std::fs::read(&p).ok().hash(&mut h);
+            h.finish()
+        };
+        map.insert(p, hash);
+    }
+    Some(map)
+}
+
+/// Files dirty after the command that were clean before, or dirty before
+/// and changed again. Files the command reverted to HEAD are not listed:
+/// nothing is left to record about them.
+fn changed_between(
+    before: &std::collections::BTreeMap<PathBuf, u64>,
+    after: &std::collections::BTreeMap<PathBuf, u64>,
+) -> Vec<PathBuf> {
+    after
+        .iter()
+        .filter(|(p, stamp)| before.get(*p) != Some(stamp))
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
 fn inplace_unchanged(before: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
     before
         .iter()
