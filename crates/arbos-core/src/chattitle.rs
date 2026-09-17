@@ -1,12 +1,28 @@
 //! Bounds and output contract for chat titles.
 //!
-//! Same rules as Go `internal/chattitle`: a single line of at most four
-//! words, no label or wrapping quotes.
+//! A single line of a few words, no label or wrapping quotes. A model
+//! title is taken as given (bounded at four words). A first prompt is cut
+//! at its first clause and never ends on a function word: "This project is
+//! a research notebook about…" labels the chat "This project is a research
+//! notebook", not "This project is a" (F-156).
 
 const MAX_WORDS: usize = 4;
+const PROMPT_MAX_WORDS: usize = 6;
+const PROMPT_MAX_CHARS: usize = 40;
 
-/// Turn a model title or a first user prompt into a sidebar label.
+/// Words a label must not end on.
+const TRAILING_STOP: &[&str] = &[
+    "a", "an", "the", "of", "to", "in", "on", "at", "by", "for", "with", "and", "or", "is", "are",
+    "be", "was", "were", "as", "that", "this", "it", "its", "into", "from", "about", "my", "our",
+    "your",
+];
+
+/// Turn a model title into a sidebar label.
 pub fn normalize(title: &str) -> Option<String> {
+    bound(title, MAX_WORDS)
+}
+
+fn bound(title: &str, max_words: usize) -> Option<String> {
     let mut title = title.trim();
     // `get`, not a slice: byte 6 may fall inside a multibyte char.
     if title
@@ -24,8 +40,8 @@ pub fn normalize(title: &str) -> Option<String> {
         })
         .to_string();
     let mut words: Vec<&str> = trimmed.split_whitespace().collect();
-    if words.len() > MAX_WORDS {
-        words.truncate(MAX_WORDS);
+    if words.len() > max_words {
+        words.truncate(max_words);
     }
     let mut title = words.join(" ");
     while title
@@ -48,7 +64,47 @@ pub fn from_prompt(prompt: &str) -> Option<String> {
     if line.starts_with('/') {
         return None;
     }
-    normalize(line)
+    let clause = first_clause(line);
+    let mut words: Vec<&str> = clause.split_whitespace().collect();
+    words.truncate(PROMPT_MAX_WORDS);
+    while words.len() > 1 && words.join(" ").chars().count() > PROMPT_MAX_CHARS {
+        words.pop();
+    }
+    while words.len() > 1
+        && words
+            .last()
+            .is_some_and(|w| TRAILING_STOP.contains(&stem(w).as_str()))
+    {
+        words.pop();
+    }
+    let cut = words.join(" ");
+    bound(&cut, PROMPT_MAX_WORDS).or_else(|| bound(line, MAX_WORDS))
+}
+
+/// The text before the first clause break, when what is before it is more
+/// than one word; else the whole line.
+fn first_clause(line: &str) -> &str {
+    let at = line
+        .char_indices()
+        .find(|(i, c)| {
+            matches!(c, ':' | ';' | '—' | '–' | '(' | '?' | '!')
+                || (*c == '.' && line[i + 1..].starts_with(char::is_whitespace))
+                || (*c == ',' && line[i + 1..].starts_with(char::is_whitespace))
+                || (*c == '-'
+                    && *i > 0
+                    && line[..*i].ends_with(' ')
+                    && line[i + 1..].starts_with(' '))
+        })
+        .map(|(i, _)| i);
+    match at {
+        Some(i) if line[..i].split_whitespace().count() >= 2 => &line[..i],
+        _ => line,
+    }
+}
+
+fn stem(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase()
 }
 
 /// Folder id, agent identity, or the project name — not a chat title.
@@ -76,5 +132,31 @@ mod slash_tests {
         assert_eq!(from_prompt("/mode haiku"), None);
         assert_eq!(from_prompt("  /review the diff"), None);
         assert!(from_prompt("Fix the login bug").is_some());
+    }
+
+    #[test]
+    fn a_prompt_title_never_ends_on_a_function_word() {
+        assert_eq!(
+            from_prompt("This project is a research notebook about container image formats (OCI).")
+                .as_deref(),
+            Some("This project is a research notebook")
+        );
+        assert_eq!(
+            from_prompt("Use two workers: one writes docs/oci-layout.md").as_deref(),
+            Some("Use two workers")
+        );
+        assert_eq!(
+            from_prompt("Add a Decisions section to the project page with one decision").as_deref(),
+            Some("Add a Decisions section")
+        );
+        assert_eq!(
+            from_prompt("write and run bubble sort").as_deref(),
+            Some("write and run bubble sort")
+        );
+        assert_eq!(from_prompt("Fix the").as_deref(), Some("Fix"));
+        assert_eq!(
+            normalize("Restructure notes into five sections now").as_deref(),
+            Some("Restructure notes into five")
+        );
     }
 }
