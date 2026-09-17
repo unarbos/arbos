@@ -763,6 +763,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 klog::info("kernel_stop", None, "signal");
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
+                end_jobs_for_stop(&place);
                 break;
             }
             _ = sigterm.recv() => {
@@ -770,11 +771,44 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 klog::info("kernel_stop", None, "signal");
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
+                end_jobs_for_stop(&place);
                 break;
             }
         }
     }
     Ok(exit_code)
+}
+
+/// A stopping kernel ends its jobs itself, now, with the reason in each
+/// folder — not by leaving them for the leash to notice its pid gone.
+/// The leash is the backstop for a kernel that dies; a kernel that is
+/// asked to stop knows what it started. (SWE-bench cycle 14: 4–10 test
+/// processes alive after the kernel had exited, reparented to init.)
+fn end_jobs_for_stop(place: &Place) {
+    let agents = arbos_core::list_agents(place).unwrap_or_default();
+    let mut ended = 0usize;
+    for a in agents {
+        let root = arbos_engine::JobsRoot::for_agent(place, &a.id);
+        for job in root.list() {
+            if !job.running() {
+                continue;
+            }
+            if root.kill(&job) {
+                let _ = std::fs::write(
+                    job.dir.join("killed"),
+                    "killed: the kernel was stopped and ended its jobs with it\n",
+                );
+                ended += 1;
+            }
+        }
+    }
+    if ended > 0 {
+        klog::info(
+            "kernel_stop_jobs",
+            None,
+            format!("{ended} running job(s) ended"),
+        );
+    }
 }
 
 /// A graceful stop ends every running turn the way the stop button does:

@@ -665,6 +665,11 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 ///   leash stays with the survivors — same cap, same kernel and store
 ///   checks — until the group is empty, and writes the wrapper's exit
 ///   if the wrapper could not (its exit path was the old folder).
+/// - The kernel dead but not reaped (a container whose PID 1 is `sleep
+///   infinity`, a parent that never waits): `kill -0` on a zombie
+///   succeeds, so the leash reads the process state and treats `Z` as
+///   gone. SWE-bench cycle 14 found 4–10 live test processes per rollout
+///   after the kernel had exited, for exactly this reason.
 fn leashed(dir: &Path, program: String, args: Vec<String>) -> (String, Vec<String>) {
     const LEASH: &str = r#"D=$1; P=$2; shift 2; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0; L=0; X=; T=0.25
 export ARBOS_LEASH=$$
@@ -673,6 +678,7 @@ ended() { trap '' INT TERM; echo "killed: a signal to the job's pid $$ ended it 
 trap ended INT TERM
 die() { kill -9 "$F" 2>/dev/null; rm -f "$P/runtime/leash/$$" 2>/dev/null; kill -9 -$$ 2>/dev/null; exit 137; }
 note() { printf '{"ts":%s000,"level":"warn","event":"%s","detail":"%s"}\n' "$(date +%s)" "$1" "$2" >> "$P/runtime/kernel.log" 2>/dev/null; }
+alive() { kill -0 "$1" 2>/dev/null || return 1; if [ -r "/proc/$1/stat" ]; then case "$(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null)" in Z) return 1;; esac; else case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1;; esac; fi; return 0; }
 while :; do
   if ! kill -0 "$F" 2>/dev/null; then
     if [ -z "$X" ]; then
@@ -699,7 +705,7 @@ while :; do
       fi
     fi
   fi
-  if ! kill -0 "$K" 2>/dev/null; then
+  if ! alive "$K"; then
     echo "killed: the kernel exited and the job was ended with it" > "$D/killed" 2>/dev/null
     die
   fi

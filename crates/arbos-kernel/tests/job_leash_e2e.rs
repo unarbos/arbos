@@ -498,3 +498,187 @@ fn a_subscription_command_that_backgrounds_a_child_still_delivers_at_once() {
         "and dies with the kernel"
     );
 }
+
+/// SWE-bench loop, cycle 14: in 4 of 40 rollouts the sweep after the
+/// kernel had exited found its job shells and the tests under them alive,
+/// reparented to PID 1. The container's PID 1 is `sleep infinity`, which
+/// reaps nothing, so the exited kernel stayed a zombie — and `kill -0` on
+/// a zombie succeeds, so the leash's "is my kernel alive" said yes for
+/// ever. Staged here with a parent that never waits: the job must end
+/// all the same, and its folder must say why.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_kernel_left_a_zombie_by_a_parent_that_never_reaps_still_takes_its_jobs_with_it() {
+    let scratch = common::scratch_dir("zombie-kernel");
+    let place = scratch.join("place");
+    let replies = format!(
+        "{{\"agent\":\"root\",\"content\":\"\",\"calls\":[{{\"name\":\"bash\",\"arguments\":{{\"command\":\"{LOOP}\",\"description\":\"Ticks forever\"}}}}]}}\n"
+    );
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    std::fs::write(scratch.join("xdg/arbos/config.toml"), "trace = false\n").unwrap();
+    // The non-reaping parent: Popen, never wait(), sleep. Its child is
+    // the kernel; when the kernel dies it is a zombie until this exits.
+    let mut parent = std::process::Command::new("python3")
+        .args([
+            "-c",
+            "import subprocess,sys,time; subprocess.Popen(sys.argv[1:]); time.sleep(600)",
+            env!("CARGO_BIN_EXE_arbos-kernel"),
+            "serve",
+        ])
+        .arg(&place)
+        .args(["--provider", "replay", "--replies"])
+        .arg(&file)
+        .env("XDG_CONFIG_HOME", scratch.join("xdg"))
+        .env("HOME", scratch.join("home"))
+        .env_remove("OPENROUTER_API_KEY")
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("python3");
+    let kernel_json = place.join(".arbos/runtime/kernel.json");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let (kpid, url) = loop {
+        if let Ok(text) = std::fs::read_to_string(&kernel_json)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && let (Some(pid), Some(url)) = (v["pid"].as_u64(), v["url"].as_str())
+        {
+            break (pid as u32, url.to_string());
+        }
+        assert!(Instant::now() < deadline, "kernel never wrote kernel.json");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut a = Attach::connect(&url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    a.send(
+        serde_json::json!({"type":"user","agent":"root","text":"tick forever","attachments":[]}),
+    );
+    assert!(a.wait_turn("root", "running", Duration::from_secs(10)));
+    let pid = job_pid(&place);
+    assert!(group_alive(pid));
+
+    // The harness's shape: the kernel dies hard, and nobody reaps it.
+    unsafe {
+        libc::kill(kpid as libc::pid_t, libc::SIGKILL);
+    }
+    let zombie_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let stat = std::fs::read_to_string(format!("/proc/{kpid}/stat")).unwrap_or_default();
+        if stat.split_whitespace().nth(2) == Some("Z") {
+            break;
+        }
+        assert!(
+            Instant::now() < zombie_deadline,
+            "the kernel did not become a zombie: {stat:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // `kill -0` still says the zombie is there; the leash must not believe it.
+    assert_eq!(unsafe { libc::kill(kpid as libc::pid_t, 0) }, 0);
+    let gone = wait_group_gone(pid, Duration::from_secs(6));
+    let killed = std::fs::read_dir(place.join(".arbos/agents/root/jobs"))
+        .unwrap()
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("killed")).ok());
+    let _ = parent.kill();
+    let _ = parent.wait();
+    assert!(gone, "the job's group outlived a kernel that was a zombie");
+    let killed = killed.expect("the folder says what ended it");
+    assert!(killed.contains("the kernel exited"), "{killed}");
+}
+
+/// A kernel asked to stop (TERM, the way `arbos-kernel stop` and the
+/// harness do it) ends the jobs it started itself, now, and each folder
+/// says so — not by leaving them for the leash to notice.
+#[test]
+fn a_kernel_asked_to_stop_ends_its_jobs_itself_and_says_so() {
+    let (mut k, pid) = start_loop("stop-ends-jobs");
+    common::sigint(&k.child);
+    let gone = wait_group_gone(pid, Duration::from_secs(6));
+    let status = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(Some(s)) = k.child.try_wait() {
+                break Some(s);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let killed = std::fs::read_dir(k.place.join(".arbos/agents/root/jobs"))
+        .unwrap()
+        .flatten()
+        .find_map(|e| std::fs::read_to_string(e.path().join("killed")).ok());
+    let _ = k.child.kill();
+    let _ = k.child.wait();
+    assert!(status.is_some(), "the kernel stopped");
+    assert!(gone, "the job's group outlived the kernel's stop");
+    let killed = killed.expect("the folder says what ended it");
+    assert!(killed.contains("the kernel was stopped"), "{killed}");
+}
+
+/// `arbos-kernel run` that started the kernel says, at exit, that the
+/// kernel serves on and which jobs still run under it, with how to end
+/// them. Before, it exited with nothing said and a person learned from
+/// `ps` that tests were still running (SWE-bench cycle 14).
+#[test]
+fn run_that_started_the_kernel_says_what_it_leaves_running() {
+    let scratch = common::scratch_dir("run-leaves");
+    let place = scratch.join("place");
+    let replies = format!(
+        "{{\"agent\":\"root\",\"content\":\"\",\"calls\":[{{\"name\":\"bash\",\"arguments\":{{\"command\":\"{LOOP}\",\"background\":true,\"description\":\"Ticks forever\"}}}}]}}\n{{\"agent\":\"root\",\"content\":\"Ticking in the background.\"}}\n"
+    );
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    std::fs::write(scratch.join("xdg/arbos/config.toml"), "trace = false\n").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_arbos-kernel"))
+        .args(["run", "--place"])
+        .arg(&place)
+        .args(["--timeout", "60", "tick forever"])
+        .env("XDG_CONFIG_HOME", scratch.join("xdg"))
+        .env("HOME", scratch.join("home"))
+        .env("ARBOS_PROVIDER", "replay")
+        .env("ARBOS_REPLIES", &file)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pid = job_pid(&place);
+    let kpid = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(place.join(".arbos/runtime/kernel.json")).unwrap(),
+    )
+    .unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    let cleanup = || unsafe {
+        libc::kill(kpid as libc::pid_t, libc::SIGTERM);
+    };
+    assert_eq!(out.status.code(), Some(0), "{stderr}\n{stdout}");
+    assert!(
+        group_alive(pid),
+        "the background job runs on under the kernel"
+    );
+    let said = stderr
+        .lines()
+        .skip_while(|l| !l.starts_with("run: the kernel started for this command is still serving"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if said.is_empty() {
+        cleanup();
+        panic!("run said nothing about what it left running:\n{stderr}");
+    }
+    assert!(said.contains(&format!("(pid {kpid})")), "{said}");
+    assert!(said.contains("1 job(s) still running"), "{said}");
+    assert!(said.contains("root j1: while :; do echo tick"), "{said}");
+    assert!(said.contains("arbos-kernel stop"), "{said}");
+    // And the TERM it names ends the kernel and the job with it.
+    cleanup();
+    assert!(
+        wait_group_gone(pid, Duration::from_secs(6)),
+        "the TERM did not end the job"
+    );
+}
