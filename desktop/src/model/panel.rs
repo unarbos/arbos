@@ -100,12 +100,16 @@ impl Panel {
             .unwrap_or(PanelTab::Project)
     }
 
-    /// How wide to draw, given nothing the person chose.
+    /// How wide to draw: what the person dragged it to, held inside the range
+    /// a drag may take, or the measure the tab in front was drawn for.
     pub fn width(&self) -> f32 {
-        self.width.unwrap_or(match self.active_tab() {
-            PanelTab::Project => PAGE_WIDTH,
-            PanelTab::Surface(_) | PanelTab::New(_) => SURFACE_WIDTH,
-        })
+        match self.width {
+            Some(chosen) => chosen.clamp(MIN_WIDTH, MAX_WIDTH),
+            None => match self.active_tab() {
+                PanelTab::Project => PAGE_WIDTH,
+                PanelTab::Surface(_) | PanelTab::New(_) => SURFACE_WIDTH,
+            },
+        }
     }
 
     pub fn select(&mut self, ix: usize) {

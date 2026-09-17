@@ -14,7 +14,7 @@
 
 use crate::{
     model::{
-        panel::{MAX_WIDTH, MIN_WIDTH, PanelTab},
+        panel::PanelTab,
         surface::{Surface, SurfaceId},
     },
     view::{
@@ -63,8 +63,6 @@ enum Card {
 }
 
 impl Card {
-    const ALL: [Card; 4] = [Card::Project, Card::Terminal, Card::Browser, Card::File];
-
     fn title(self) -> &'static str {
         match self {
             Self::Project => "Project",
@@ -110,9 +108,11 @@ impl Arbos {
         let active = panel.active();
         // The chat's measure wins: a drawer that would squeeze it below
         // `CHAT_MIN_WIDTH` is narrowed instead.
+        // The chat's measure wins over the drawer's: one that would squeeze it
+        // below `CHAT_MIN_WIDTH` is narrowed instead. The range a width may
+        // hold is the model's business (`Panel::width`).
         let width = panel
             .width()
-            .clamp(PANEL_WIDTH.min(MIN_WIDTH), MAX_WIDTH)
             .min((viewport - CHAT_MIN_WIDTH).max(PANEL_WIDTH));
         let on_project = tabs.get(active) == Some(&PanelTab::Project);
         let body = match tabs.get(active).copied().unwrap_or(PanelTab::Project) {
