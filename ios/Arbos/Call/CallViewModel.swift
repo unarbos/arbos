@@ -548,6 +548,11 @@ final class CallViewModel: ObservableObject {
                 await MainActor.run {
                     self.framesFromClip += 1
                     self.audio.onCapture?(frame)
+                    // Periodically, because a scripted run ends by killing
+                    // the process and teardown never gets to say anything.
+                    if self.framesFromClip % 50 == 0 {
+                        print("metric mic_frames clip=\(self.framesFromClip) sent=\(self.framesSent)")
+                    }
                 }
                 sent += 1
                 let due = started.advanced(by: .milliseconds(DebugInjector.frameMilliseconds * sent))
