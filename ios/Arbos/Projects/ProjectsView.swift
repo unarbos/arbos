@@ -39,8 +39,17 @@ struct ProjectsView: View {
                     if !working.isEmpty {
                         section("Working", open: $workingOpen, rows: working)
                     }
-                    section("Read", open: $readOpen, rows: read)
-                    if projects.entries.isEmpty { emptyState }
+                    // An empty "Read" header over nothing reads as a section
+                    // somebody collapsed, not as "nothing matched", so it
+                    // stands down when a filter empties the list.
+                    if !read.isEmpty || projects.entries.isEmpty {
+                        section("Read", open: $readOpen, rows: read)
+                    }
+                    if projects.entries.isEmpty {
+                        emptyState
+                    } else if visible.isEmpty {
+                        nothingMatches
+                    }
                     Color.clear.frame(height: 90)
                 }
             }
@@ -189,6 +198,19 @@ struct ProjectsView: View {
         .foregroundStyle(ArbosTheme.textFaint)
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 8)
+    }
+
+    /// A search or a filter that matches nothing. Without this the screen
+    /// went blank under the search box and said nothing at all, which reads
+    /// as a list still loading rather than an answer.
+    private var nothingMatches: some View {
+        Text(query.isEmpty
+             ? "No project is live. Turn the filter off to see the rest."
+             : "No project matches “\(query)”.")
+            .font(ArbosTheme.callout)
+            .foregroundStyle(ArbosTheme.textFaint)
+            .padding(.horizontal, ArbosTheme.gutter)
+            .padding(.top, 8)
     }
 
     /// The reference's bottom composer: words typed here go to the
