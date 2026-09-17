@@ -1650,6 +1650,26 @@ pub struct ChildSummary {
 }
 
 impl ChatSession {
+    /// The status line the agent named — unless it has since moved on to a
+    /// tool of its own that is still running: then that tool is the truer
+    /// line. Jacob's report 2026-09-17-6: "Waiting on three sorting
+    /// workers" stood over three "Done" lines for minutes while the
+    /// coordinator itself sat in `sleep 75`; the line that was true was
+    /// "Running sleep 75; echo waited".
+    pub fn live_status(&self) -> Option<String> {
+        for item in self.items.iter().rev() {
+            if let ChatItem::Tool { label, status, .. } = item {
+                if label.split_whitespace().next() == Some("status") {
+                    break;
+                }
+                if *status == ToolStatus::Running {
+                    return Some(step_label(label));
+                }
+            }
+        }
+        self.status.clone().filter(|s| !s.trim().is_empty())
+    }
+
     /// The one line that says what this chat is doing: the kernel's status
     /// event, else the running tool's title, else the last tool's.
     pub fn current_step(&self) -> Option<String> {
