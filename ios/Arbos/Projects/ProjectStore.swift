@@ -14,6 +14,10 @@ struct ProjectEntry: Identifiable, Equatable {
     /// to start — the state behind JB-6, which looked healthy from outside
     /// for days. A live fact from the roster, never cached.
     var needsRestart = false
+    /// The roster no longer lists this project, but Jacob has opened it
+    /// before, so the row stays and says what it is waiting on rather than
+    /// disappearing. Empty when the project is live.
+    var waitingOn: String = ""
 
     var id: String { target.stored }
     var title: String { identity.label ?? folder }
@@ -54,6 +58,7 @@ final class ProjectStore: ObservableObject {
             do {
                 let machines = try await HubClient.list(hubURL: settings.hubURL, token: settings.hubToken)
                 hubAnswered = true
+                rosterMachines = machines.map(\.name)
                 #if DEBUG
                 print("roster: \(machines.count) machines, \(machines.flatMap(\.projects).count) projects")
                 #endif
@@ -89,6 +94,24 @@ final class ProjectStore: ObservableObject {
                 #if DEBUG
                 print("roster \(settings.hubURL): \(error)")
                 #endif
+            }
+        }
+        // A project he has opened before does not vanish because its machine
+        // went off. It went quiet, which is a different thing and reads very
+        // differently: the row disappearing says his work is gone, and a
+        // stopped kernel says it is asleep. It is also the only way he ever
+        // sees why — the refusal wording is unreachable when there is no row
+        // to tap (M-151, M-168).
+        if hubAnswered {
+            let machines = Set(rosterMachines)
+            for target in openedBefore where !list.contains(where: { $0.target == target }) {
+                guard case .hub(let machine, let project) = target else { continue }
+                var row = entry(target: target, folder: project, machine: machine,
+                                place: "", live: false, remote: true)
+                row.waitingOn = machines.contains(machine)
+                    ? "\(project) isn't running on \(machine)"
+                    : "\(machine) is off"
+                list.append(row)
             }
         }
         if !hubAnswered {
@@ -143,6 +166,26 @@ final class ProjectStore: ObservableObject {
 
     /// `<machine>/<project>` the pod row is another door to, once known.
     private var podTwin: String? { defaults.string(forKey: "pod.twin") }
+
+    /// Machines the last roster listed, for telling "the machine is off"
+    /// from "the machine is up and this project is not running".
+    private var rosterMachines: [String] = []
+
+    /// Projects Jacob has opened at least once. Only these keep a row when
+    /// the roster stops listing them; everything he has never opened can
+    /// come and go without cluttering his list.
+    private var openedBefore: [KernelTarget] {
+        (defaults.array(forKey: "projects.opened") as? [String] ?? []).map(KernelTarget.init(stored:))
+    }
+
+    /// Called when a project is opened, so its row survives its machine.
+    func remember(opened target: KernelTarget) {
+        guard case .hub = target else { return }
+        var seen = defaults.array(forKey: "projects.opened") as? [String] ?? []
+        guard !seen.contains(target.stored) else { return }
+        seen.append(target.stored)
+        defaults.set(seen.suffix(40).map { $0 }, forKey: "projects.opened")
+    }
 
     /// One project, one row: the pod row goes when its twin is in the list.
     private func fold(_ list: inout [ProjectEntry]) {
