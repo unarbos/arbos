@@ -1470,6 +1470,14 @@ class Pass:
                         self.app.click(el); time.sleep(0.6); off = flag()
                         self.record("bionic-reading", "settings", "click the toggle off again", "bionic_reading false", f"bionic_reading={off}", "pass" if off is False else "fail")
                         continue
+                    if short.startswith("reveal-"):
+                        # Opens the folder in the system file manager — a
+                        # window the rig cannot read and that stays over
+                        # the display (five Thunar windows after cycle
+                        # 37c's run, R13's occlusion class). Skipped, like
+                        # composer-attach.
+                        self.skip(short, "settings", "click", "opens the system file manager (a window outside the app)")
+                        continue
                     if short in ("key-forget", "config-reveal", "key-paste"):
                         self.skip(short, "settings", "click", "destructive or opens a file manager / pastes clipboard into the key field")
                         continue
