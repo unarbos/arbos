@@ -1,0 +1,8 @@
+# The desktop on a machine that is not on the hub (no `machine` in hub.toml) names the tab by
+# path, as PR #490 sends it: machine "", the folder's name and its path on that Mac. The path is
+# not a folder on the gateway's host and no machine can be looked up on the roster, so nothing can
+# reach that kernel. The call is refused with project_not_on_hub and a message that says how to
+# register; the gateway's own kernel hears nothing. Jacob's Mac, 2026-09-17.
+title = "A path-named project from a machine off the hub is refused, never rerouted"
+project = { machine = "", project = "discord_backups", path = "/Users/jacob/discord_backups", name = "discord_backups" }
+refused = "project_not_on_hub"

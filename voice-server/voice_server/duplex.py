@@ -154,7 +154,8 @@ class DuplexSession(BaseSession):
                     "input": {"format": {"type": "audio/pcm", "rate": UPSTREAM_RATE}},
                     "output": {"format": {"type": "audio/pcm", "rate": UPSTREAM_RATE}},
                 },
-                "instructions": _ascii(self.instructions or (CALL_INSTRUCTIONS if self.call_mode else DEFAULT_INSTRUCTIONS)),
+                "instructions": _ascii(self.instructions or (CALL_INSTRUCTIONS if self.call_mode else DEFAULT_INSTRUCTIONS))
+                + (("\n\n" + self.context_text()) if self.call_mode and self.context_text() else ""),
                 "tools": tools,
             },
         }))

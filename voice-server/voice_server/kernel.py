@@ -36,6 +36,33 @@ class AgentState:
     started_at: float = field(default_factory=time.monotonic)
 
 
+def kernel_url_of(place: str | Path) -> str | None:
+    """The `tcp://` address of the kernel serving `place`, from `.arbos/runtime/kernel.json`
+    (or the older `.arbos/kernel.json`); None when the folder has none."""
+    arbos = Path(place) / ".arbos"
+    for candidate in (arbos / "runtime" / "kernel.json", arbos / "kernel.json"):
+        try:
+            info = json.loads(candidate.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        url = str(info.get("url") or "")
+        if url:
+            return url
+    return None
+
+
+def kernel_alive(url: str, timeout: float = 0.3) -> bool:
+    """Whether something listens at a `tcp://host:port` kernel address."""
+    import socket
+
+    try:
+        host, port = url.removeprefix("tcp://").rsplit(":", 1)
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def hub_attach_url(hub: str, project: str, token: str = "") -> str:
     """`wss://<hub>/attach/<machine>/<project>?token=…` for a hub name `<machine>/<project>`
     (`<machine>` alone when the machine runs one kernel)."""
@@ -85,8 +112,9 @@ class KernelClient:
     def _resolve(self) -> tuple[str, int]:
         url = self.url
         if not url:
-            info = json.loads((Path(self.place) / ".arbos" / "kernel.json").read_text())
-            url = info["url"]
+            url = kernel_url_of(self.place)
+            if not url:
+                raise RuntimeError(f"no kernel.json under {self.place}/.arbos")
         host, port = url.removeprefix("tcp://").rsplit(":", 1)
         return host, int(port)
 

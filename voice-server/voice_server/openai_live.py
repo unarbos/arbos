@@ -71,6 +71,16 @@ HISTORY_TOTAL_CHARS = 6000
 CONTEXT_MIN_GAP_S = 3.0
 
 
+def _context_agents(context: dict) -> str:
+    """The sub-agents the client showed at session.start, one line, for the brief."""
+    agents = [a for a in (context or {}).get("agents", []) if isinstance(a, dict) and a.get("name")]
+    parts = [f"{a['name']} ({a.get('state', '')}{': ' + str(a['step'])[:60] if a.get('step') else ''})" for a in agents]
+    line = ("Sub-agents on the caller's screen when the call started: " + "; ".join(parts) + ".") if parts else ""
+    if (context or {}).get("running"):
+        line += " The main agent had a turn running when the call started."
+    return line.strip()
+
+
 class OpenAILiveSession(DuplexSession):
     engine = "openai"
     HOLD_MODEL_WHILE_DECIDING = False  # GPT-Live decides itself; never delay its first word
@@ -163,23 +173,29 @@ class OpenAILiveSession(DuplexSession):
         the hub roster when the call named a project; the gateway's own kernel is named as
         such, never presented as the caller's project."""
         info = self.project_info or {}
-        if info.get("via") == "hub":
+        folder = info.get("path") or info.get("place") or ""
+        if info.get("via") in ("hub", "local", "own"):
             name = info.get("name") or info.get("project")
-            label = f"{info.get('machine')}/{info.get('project')}"
+            machine = info.get("machine") or ""
+            label = f"{machine}/{info.get('project')}" if machine else str(info.get("project"))
+            where = f"on the machine '{machine}'" if machine else "on the caller's own machine"
             lines = [
                 "PROJECT CONTEXT (authoritative; never invent or guess any of it):",
-                f"This call is about the project '{name}' ({label}) on the machine '{info.get('machine')}'.",
+                f"This call is about the project '{name}' ({label}) {where}.",
             ]
-            if info.get("place"):
-                lines.append(f"Its folder, the working directory of everything the backend runs for this call, is {info['place']}.")
+            if folder:
+                lines.append(f"Its folder, the working directory of everything the backend runs for this call, is {folder}.")
             else:
                 lines.append("Its folder is not known to you; the backend knows it. If asked, delegate.")
             if info.get("store"):
                 lines.append(f"Its Arbos address is {info['store']}.")
             lines.append("If asked where you are, which folder, which machine or which project: answer from this, and only this.")
+            screen = _context_agents(self.start_context)
+            if screen:
+                lines.append(screen)
             return " ".join(lines)
         if info:
-            where = f"serving the folder {info['place']}" if info.get("place") else f"at {info.get('url') or 'its address'}"
+            where = f"serving the folder {folder}" if folder else f"at {info.get('url') or 'its address'}"
             return (
                 "PROJECT CONTEXT: no project was named for this call, so the backend is the voice server's "
                 f"default kernel, {where}. Do not present it as the caller's project or machine. If the caller "
@@ -195,14 +211,21 @@ class OpenAILiveSession(DuplexSession):
         was said in the project before the call. User lines and Arbos replies only; nothing from
         a different kernel."""
         kernel = self.kernel
-        if kernel is None or HISTORY_LINES <= 0:
+        if HISTORY_LINES <= 0:
             return []
-        try:
-            events = await asyncio.wait_for(kernel.transcript_tail("root", bytes_=80_000), 4.0)
-        except Exception as exc:
-            log.warning("[%s] no chat history for the seed: %s", self.sid, type(exc).__name__)
-            return []
-        lines = [e for e in events if e.get("kind") in ("user", "assistant") and str(e.get("text") or "").strip()]
+        lines: list[dict] = []
+        if kernel is not None:
+            try:
+                events = await asyncio.wait_for(kernel.transcript_tail("root", bytes_=80_000), 4.0)
+                lines = [e for e in events if e.get("kind") in ("user", "assistant") and str(e.get("text") or "").strip()]
+            except Exception as exc:
+                log.warning("[%s] no chat history from the kernel for the seed: %s", self.sid, type(exc).__name__)
+        if not lines:
+            # The client's view of the chat at session.start (the desktop sends its last lines): the
+            # same project, second-hand. Only when the kernel's own record could not be read.
+            recent = (self.start_context or {}).get("recent") or []
+            lines = [{"kind": "user" if l.get("role") == "user" else "assistant", "text": l.get("text")}
+                     for l in recent if isinstance(l, dict) and l.get("role") in ("user", "assistant") and str(l.get("text") or "").strip()]
         lines = lines[-HISTORY_LINES:]
         seed: list[dict] = []
         total = 0

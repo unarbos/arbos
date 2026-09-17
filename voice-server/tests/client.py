@@ -70,7 +70,7 @@ class Record:
 
 class Caller:
     def __init__(self, url: str, *, token: str, screen: str = "on your screen", mode: str = "call",
-                 channel: str = "voice", project: str = "", keep_audio: bool = False, device: str = "desktop"):
+                 channel: str = "voice", project: "str | dict" = "", keep_audio: bool = False, device: str = "desktop"):
         self.url = url
         self.keep_audio = keep_audio
         self.device = device
@@ -82,6 +82,7 @@ class Caller:
         self.rec = Record()
         self.ready: dict = {}
         self.refused: dict | None = None  # the error frame when the gateway refused the call
+        self.closed: tuple[int, str] | None = None  # the socket's close code and reason, once it closed
         self.speaking = False
         self._ws = None
         self._queue: asyncio.Queue[tuple[bytes, asyncio.Future]] = asyncio.Queue()
@@ -102,10 +103,17 @@ class Caller:
         self._tasks.append(asyncio.create_task(self._receiver()))
         self._tasks.append(asyncio.create_task(self._mic()))
         deadline = time.monotonic() + timeout
-        while not self.ready and self.refused is None and time.monotonic() < deadline:
+        while not self.ready and self.refused is None and self.closed is None and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
         if self.refused is not None:
-            return self.refused  # the gateway refused the call: an error frame with a code, then close 4404
+            # The gateway refused the call: an error frame with a code, then close 4404. Give the close a moment
+            # so a scenario can check its code too.
+            until = time.monotonic() + 1.5
+            while self.closed is None and time.monotonic() < until:
+                await asyncio.sleep(0.05)
+            return self.refused
+        if self.closed is not None and not self.ready:
+            return {}  # closed before ready with no coded error: the frames are in rec.frames, the close code in self.closed
         if not self.ready:
             raise TimeoutError("no session.ready from the gateway")
         return self.ready
@@ -172,6 +180,14 @@ class Caller:
     # ------------------------------------------------------------------ ears
 
     async def _receiver(self) -> None:
+        try:
+            await self._receive()
+        finally:
+            ws = self._ws
+            if ws is not None and self.closed is None:
+                self.closed = (getattr(ws, "close_code", None) or 0, str(getattr(ws, "close_reason", "") or ""))
+
+    async def _receive(self) -> None:
         async for message in self._ws:
             at = self.now()
             if isinstance(message, (bytes, bytearray)):

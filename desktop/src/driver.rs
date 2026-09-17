@@ -1109,6 +1109,8 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
             "mic_device": voice.mic_device,
             "mic_error": voice.mic_error,
             "speaker_device": voice.speaker_device,
+            "project_path": voice.project_path,
+            "project_label": voice.project_label,
             "work": {
                 "active": voice.work_active,
                 "agents": voice.work_agents,

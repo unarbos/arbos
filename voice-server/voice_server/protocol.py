@@ -59,22 +59,31 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     <binary>                       microphone audio
           "instructions": "..."  system prompt for the speech model (duplex engine)
           "answerer": "auto"|"kernel"|"model"  duplex call mode: who answers a spoken turn (see Engines)
-          "project": {"machine":"arboslife","project":"demo"}   SCOPE THE CALL: attach to that
-                kernel through the hub (--hub) for the life of this call instead of the server's
-                default kernel. Also accepted: "kernel":"arboslife/demo" or an "arbos://…/" store
-                address. If the project is not on the roster, not live, or does not answer, the
+          "project": {"machine":"arboslife","project":"demo","path":"/Users/j/demo","host":null,
+                      "name":"demo","context":{...}}   SCOPE THE CALL to the folder the client has
+                open. The path decides: the server's own kernel when it serves that very folder;
+                else, for a folder on the server's machine with a live kernel, a direct attach to
+                it; else the hub (--hub), matched by the roster's `place` when known, by
+                machine/project otherwise. Also accepted: "project":"arboslife/demo",
+                "kernel":"arboslife/demo" or an "arbos://…/" store address (name only; no path).
+                If the folder has no running kernel, is not on the roster, or does not answer, the
                 server sends {"type":"error","code":"project_unknown"|"project_offline"|
                 "project_unreachable"|"no_hub","project":"machine/project","message":…} and
-                closes the socket with code 4404. It never answers from another project.
+                closes the socket with code 4404. A dict without "machine" (the client is off the
+                hub) whose path is not a folder on the server's machine gets "project_not_on_hub"
+                with a message saying how to register. It never answers from another project.
+                "context" (optional): what the client shows when the call starts, so the narrator
+                and the speech model know the chat: {"recent":[{"role":"user"|"assistant"|"worker"|
+                "tool","text":"..."}], "agents":[{"name","state","step"}], "running":bool}.
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
           "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
           "project": "<machine>/<project>"  which project the call is for. A hub name, when the gateway has --hub:
                                             the call attaches to that kernel through the hub (session.ready says
                                             "via":"hub"). Empty, or the gateway's own project: its kernel ("via":"gateway").
-                                            A bare folder name the gateway does not serve ("discord_backups" from a
-                                            machine that is not on the hub) is REFUSED: error {"code":"project_not_on_hub",
-                                            "project":"discord_backups","message":...} then close 4404. The call never
-                                            lands on another kernel; register the machine on the hub and call again.
+                                            A bare folder name the gateway does not serve ("discord_backups" from an
+                                            older client on a machine that is not on the hub) is REFUSED the same way:
+                                            error {"code":"project_not_on_hub","project":"discord_backups","message":...}
+                                            then close 4404. The call never lands on another kernel.
           "channel": "voice"  what the caller's utterances are filed as in the agent's inbox (voice | text)
           "device": "desktop"  which client this is (phone | desktop); written beside channel on every message
           "screen": "on your screen"  how the narrator refers to the client's display ("in the chat" on a phone)
@@ -92,15 +101,21 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
   server -> client
     {"type":"session.ready","rate":24000,"engine":"duplex"|"pipeline","asr":"...","tts":"...",
      "reply":"...","text":"...","tools":["send_agent","agent_status","ask_arbos"],"kernel":true,
-     "answerer":"auto","project":"arboslife/demo"|"","via":"hub"|"gateway",
+     "answerer":"auto","project":"arboslife/demo"|"","via":"own"|"local"|"hub"|"gateway",
+     "project_path":"/home/const/arbos-hub/projects/demo",
      "project_info":{"machine":"arboslife","project":"demo","name":"demo","icon":"folder",
-     "store":"arbos://arboslife/demo/","kind":"project","place":"/home/const/arbos-hub/projects/demo",
-     "via":"hub"} | {...,"kind":"gateway","via":"gateway","place":"/srv/x"|null,"url":"tcp://..."|null} | null}
-                                   project_info describes the kernel on the line: from the hub roster when the
-                                   call named a project ("place" = the folder it serves = the call's working
-                                   directory); the gateway's own kernel, named as such, when none was named;
-                                   null when the gateway has no kernel. With --engine openai the same brief goes
-                                   to GPT-Live as instructions (see CALL MODE below).
+     "store":"arbos://arboslife/demo/","kind":"project","path":"/home/const/arbos-hub/projects/demo",
+     "place":"/home/const/arbos-hub/projects/demo","via":"hub"}
+       | {...,"kind":"gateway","via":"gateway","place":"/srv/x"|null,"url":"tcp://..."|null} | null}
+                                   project is the label the call was scoped to ("" = none named). project_path
+                                   is the folder the call is bound to: a client compares it with the folder it
+                                   asked for and hangs up on a mismatch. project_info describes the kernel on
+                                   the line: from the hub roster or the local folder when the call named a
+                                   project ("path" = "place" = the folder it serves = the call's working
+                                   directory; via own|local|hub says how it was reached); the gateway's own
+                                   kernel, named as such (kind gateway), when none was named; null when the
+                                   gateway has no kernel. With --engine openai the same brief goes to GPT-Live
+                                   as instructions (see CALL MODE below).
     {"type":"speech.started"}      server VAD heard the user start talking. If a
                                    reply was playing it is cancelled at the same
                                    moment (barge-in) and response.done follows.
@@ -110,8 +125,11 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"transcript.final","text":"Whole cleaned-up utterance."}
                                    REPLACES the open user line and closes it.
                                    May be "" when the audio held no words.
-    {"type":"response.started"}    only when the server answers on its own
-                                   (--reply openrouter); never for "speak"
+    {"type":"response.started","speaker":"narrator"?}
+                                   only when the server answers on its own
+                                   (--reply openrouter); never for "speak". In call mode
+                                   speaker="narrator" marks the narrator's lines (already sent
+                                   as narrator.say); absent = the speech model's own words.
     <binary>                       reply audio, sent as fast as it is synthesised;
                                    the client buffers and plays it
     {"type":"response.transcript","text":"..."}

@@ -68,6 +68,7 @@ class Engines:
             "icon": None,
             "store": f"arbos://{self.hub_machine}/{leaf}/" if (self.hub_machine and leaf) else None,
             "kind": "gateway",
+            "path": place or "",
             "place": place or None,
             "url": url or None,
             "via": "gateway",
