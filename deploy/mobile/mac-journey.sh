@@ -26,7 +26,54 @@ hist() {
 seq_of() { python3 ~/kernel.py $TARGET history 120 2>/dev/null | grep -E "$1" | tail -1 | awk '{print $1}'; }
 score() { echo "$1 $2 $3" | tee -a $O/score.txt; }
 wait_hist() { local s=$1 re=$2 secs=$3 t=0; while [ $t -lt $secs ]; do if hist | grep -qE "$re"; then score "$s" PASS "/$re/ after ${t}s"; return 0; fi; sleep 5; t=$((t+5)); done; score "$s" FAIL "no /$re/ within ${secs}s"; return 1; }
-type_send() { idb ui tap 200 788 --udid $U; sleep 0.8; idb ui text "$1" --udid $U; sleep 0.3; idb ui key 40 --udid $U; }
+# Type a line and make sure the whole of it is in the box before sending it.
+#
+# Cycle 48 lost six of its eight typed lines here and the journey scored the
+# app for it. Three faults, all in the one line of shell this replaces.
+# The tap point was fixed at 200,788: the composer sits near y=470 with the
+# keyboard down, and 200,788 is the space bar with it up. Tapping a text
+# box's centre puts the caret in the middle of what is already written, so a
+# second line wove itself through the first. And nothing read the field
+# back, so whatever had landed when the return key fired is what went.
+#
+# Counted on a four-line probe, twice each: 6 of 8 lines reached the kernel
+# the old way, 8 of 8 the new way.
+ui() { python3 ~/arbos/deploy/mobile/ui.py $U "$@"; }
+field_len() { local v; v=$(ui field 2>/dev/null); echo ${#v}; }
+clear_field() {
+  local n
+  for _ in 1 2 3 4 5; do
+    n=$(field_len); [ "$n" -gt 0 ] || return 0
+    ui focus >/dev/null 2>&1; sleep 0.6
+    idb ui key-sequence $(for _ in $(seq 1 $((n + 5))); do printf '42 '; done) --udid $U >/dev/null 2>&1
+    sleep 0.8
+  done
+}
+type_send() {
+  local want=$1 got why
+  for _ in 1 2 3; do
+    clear_field
+    if ! why=$(ui focus 2>&1 >/dev/null); then
+      # Name what is in the way. A run that only says "gave up" sends the
+      # next cycle looking at the app: this one was iOS's own notifications
+      # alert sitting over the chat, which no amount of tapping gets past.
+      echo "type_send: no composer to type into — $why" | tee -a $O/run.txt
+      ui dump 2>/dev/null | tail -5 | sed 's/^/  on screen: /' | tee -a $O/run.txt
+      sleep 1; continue
+    fi
+    sleep 0.7
+    idb ui text "$want" --udid $U >/dev/null 2>&1
+    for _ in $(seq 1 40); do [ "$(ui field plain 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
+    got=$(ui field plain 2>/dev/null)
+    if [ "$got" = "$want" ]; then
+      ui tap "Up" >/dev/null 2>&1 || idb ui key 40 --udid $U >/dev/null 2>&1
+      return 0
+    fi
+    echo "type_send: the box held ${#got} of ${#want} characters; clearing and retrying" | tee -a $O/run.txt
+  done
+  echo "type_send: gave up on a line after three tries" | tee -a $O/run.txt
+  return 1
+}
 rd() { python3 ~/kernel.py $TARGET read "$1" 2>/dev/null; }
 echo "run $RUN id $ID target $TARGET dir $DIR" | tee $O/run.txt
 # Which kernel this run is measured against. Asked of the kernel on the
@@ -38,10 +85,14 @@ echo "kernel $(head -1 $O/kernel-version.txt)" | tee -a $O/run.txt
 
 # J1 — open the project from the list (the phone's "create": the project lives on a machine's kernel)
 xcrun simctl terminate $U $B 2>/dev/null; sleep 1
-xcrun simctl launch --console-pty $U $B -hubURL "$H" -hubToken "$T" -dictateWav ~/mobile-clips/note.wav -injectWav ~/mobile-clips/ask.wav > $O/console.log 2>&1 &
+xcrun simctl launch --console-pty $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" -dictateWav ~/mobile-clips/note.wav -injectWav ~/mobile-clips/ask.wav > $O/console.log 2>&1 &
 sleep 7; shot J1-list
-Y=$(python3 ~/find_row.py $O/J1-list.png $ROW); [ "$Y" != "0" ] || { score J1 FAIL "no $ROW row"; Y=234; }
-idb ui tap 120 $Y --udid $U; sleep 5; shot J1-open
+# By name, not by measuring the still. `find_row.py` knew project names by
+# glyph colour and divided by 3 for a screenshot that is 1.2x the point
+# size, and cycle 49 opened `pod` twice while believing it had opened a
+# fixture project. A run that opens the wrong project scores the wrong one.
+ui tap "$ROW" || score J1 FAIL "no $ROW row on the list"
+sleep 5; shot J1-open
 # seed the failing project (QA's rig seeds a folder; the phone asks the kernel to)
 type_send "$ID setup, do this yourself without workers: create $DIR/ with mathlib.py defining area(w, h) that wrongly returns w + h, tests/test_math.py (unittest) asserting area(3, 4) == 12, and git init with one commit on main containing both. No CHANGELOG. Reply 'seeded' when done."
 wait_hist J1 "user +$ID setup" 30; AFTER=$(seq_of "user +$ID setup"); echo "anchor $AFTER" | tee -a $O/run.txt
@@ -136,8 +187,9 @@ if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v erro
 ~/push-check.sh 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null
 V=$(grep "PUSH verdict" $O/push-check.txt | head -1); case "$V" in *PASS*) score PUSH PASS "$V";; *OFF*) score PUSH U "$V";; *) score PUSH U "$(grep -m1 'PUSH status' $O/push-check.txt)";; esac
 # J6' — kill and reopen: nothing lost
-xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
-Y=$(python3 ~/find_row.py $O/J6k-list.png $ROW); [ "$Y" = "0" ] && Y=234; idb ui tap 120 $Y --udid $U; sleep 6; shot J6k-reopened
+xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
+ui tap "$ROW" || score J6k FAIL "no $ROW row after the relaunch"
+sleep 6; shot J6k-reopened
 score J6k EYE "reopened chat ends where it ended; no pending cards"
 python3 ~/kernel.py $TARGET history 150 > $O/transcript-tail.txt 2>/dev/null
 # Again, now the run is over: a kernel replaced under a run has happened
