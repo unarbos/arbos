@@ -109,20 +109,52 @@ pub fn run(hooks: &crate::hooks::KernelHooks) -> Vec<String> {
         let plan = layout.plan_jsonl();
         match claim(&plan) {
             Claim::Taken(source) => {
-                if let Some(line) = migrate_plan(hooks, id, &source) {
-                    report.push(line);
+                if let Some(c) = migrate_plan(hooks, id, &source, false) {
+                    // The person hears what now runs or waits from the
+                    // old plan; the log keeps the count.
+                    if c.subs + c.inbox + c.asks + c.notes > 0 {
+                        let _ = arbos_core::append_event(
+                            &layout.transcript(),
+                            &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                                text: format!(
+                                    "Carried over from the old plan (plan.jsonl): {}. The old file is kept as plan.jsonl.migrated.",
+                                    c.said()
+                                ),
+                                failed: false,
+                            }),
+                        );
+                    }
+                    report.push(c.line(id));
                 }
                 finish(&source);
             }
             Claim::Cut(source) => {
-                crate::klog::warn(
-                    "migrate_cut",
-                    Some(id),
-                    format!(
-                        "an earlier migration of plan.jsonl was cut mid-way; the nodes it wrote stand, and its source is kept at {} for a person to read. It is not run again: a second pass would double every cron and task it already wrote (qal-j12).",
-                        source.display()
-                    ),
-                );
+                // An earlier start moved the file aside and died before it
+                // finished. Finishing it blind would double what it had
+                // already written (qal-j12); leaving it would lose the
+                // rest and say so only in the log (qal-j13). So it is
+                // finished with the records it already wrote recognised
+                // and not written again, and the person hears both counts.
+                if let Some(c) = migrate_plan(hooks, id, &source, true) {
+                    let _ = arbos_core::append_event(
+                        &layout.transcript(),
+                        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                            text: format!(
+                                "An earlier start began carrying over the old plan (plan.jsonl) and was cut before it finished. Finished now: {} carried over this time; {} were already in place and were not written again. The old file is kept as plan.jsonl.migrated.",
+                                c.said(),
+                                c.already
+                            ),
+                            failed: false,
+                        }),
+                    );
+                    crate::klog::warn(
+                        "migrate_cut",
+                        Some(id),
+                        format!("finished a cut migration: {}", c.line(id)),
+                    );
+                    report.push(c.line(id));
+                }
+                finish(&source);
             }
             Claim::Blocked(why) => {
                 // The completion record could not be written, so nothing
@@ -255,20 +287,111 @@ fn finish(source: &Path) {
     }
 }
 
-fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> Option<String> {
+/// What a migration carried over, for the log line and the transcript.
+struct Carried {
+    asks: usize,
+    notes: usize,
+    subs: usize,
+    inbox: usize,
+    dropped: usize,
+    /// Records found already in place and not written again (a resumed
+    /// migration, qal-j13).
+    already: usize,
+    nodes: usize,
+}
+
+impl Carried {
+    fn line(&self, agent: &str) -> String {
+        format!(
+            "{agent}: {} node(s) → {} notes line(s), {} subscription(s), {} inbox file(s), {} parked question(s); {} closed node(s) dropped{}",
+            self.nodes,
+            self.notes,
+            self.subs,
+            self.inbox,
+            self.asks,
+            self.dropped,
+            if self.already > 0 {
+                format!(
+                    "; {} already carried over by an earlier, cut migration",
+                    self.already
+                )
+            } else {
+                String::new()
+            }
+        )
+    }
+
+    /// The person's sentence: what is now running or waiting from the old
+    /// plan.
+    fn said(&self) -> String {
+        let mut parts = Vec::new();
+        if self.subs > 0 {
+            parts.push(format!("{} standing subscription(s)", self.subs));
+        }
+        if self.inbox > 0 {
+            parts.push(format!("{} pending task(s)", self.inbox));
+        }
+        if self.asks > 0 {
+            parts.push(format!("{} open question(s)", self.asks));
+        }
+        if self.notes > 0 {
+            parts.push(format!("{} checklist line(s)", self.notes));
+        }
+        if parts.is_empty() {
+            "nothing open".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
+}
+
+/// Migrate the old plan at `path`. With `resume`, records an earlier
+/// (cut) migration already wrote are recognised and not written again:
+/// a subscription with the same kind, period and command (or prompt); an
+/// inbox file with the same sender and body; a parked question with the
+/// same id; a checklist line with the same text (`Notes::add` de-dups on
+/// its own).
+fn migrate_plan(
+    hooks: &crate::hooks::KernelHooks,
+    agent: &str,
+    path: &Path,
+    resume: bool,
+) -> Option<Carried> {
     let place = &hooks.place;
     let nodes = load_old(path);
-    let mut n_asks = 0;
-    let mut n_notes = 0;
-    let mut n_subs = 0;
-    let mut n_inbox = 0;
-    let mut n_dropped = 0;
+    let mut c = Carried {
+        asks: 0,
+        notes: 0,
+        subs: 0,
+        inbox: 0,
+        dropped: 0,
+        already: 0,
+        nodes: nodes.len(),
+    };
+    let have_subs = if resume {
+        subscription::list(place, agent)
+    } else {
+        Vec::new()
+    };
+    let have_inbox = if resume {
+        inbox::list(place, agent)
+    } else {
+        Vec::new()
+    };
+    let have_asks: Vec<String> = if resume {
+        arbos_core::waiting::asks(place, agent)
+            .into_iter()
+            .map(|w| w.id)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut notes_file = notes::load(place, agent);
     let now = arbos_core::now_ms();
     for n in &nodes {
         let open = matches!(n.status.as_str(), "pending" | "active" | "blocked");
         if !open {
-            n_dropped += 1;
+            c.dropped += 1;
             continue;
         }
         // An open question for the user parks as a waiting file with its
@@ -277,6 +400,10 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
         // put to anyone (qa-028).
         if matches!(n.do_, OldDo::Ask) {
             let call_id = format!("migrated-{}", n.id);
+            if have_asks.iter().any(|id| *id == call_id) {
+                c.already += 1;
+                continue;
+            }
             match hooks.ask(&arbos_core::AgentId::new(agent), &n.goal, &[], &call_id) {
                 Ok(_) => {
                     let _ = arbos_core::append_event(
@@ -289,11 +416,11 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
                             failed: false,
                         }),
                     );
-                    n_asks += 1;
+                    c.asks += 1;
                 }
                 Err(e) => {
                     crate::klog::warn("migrate_ask", Some(agent), format!("node #{}: {e:#}", n.id));
-                    n_dropped += 1;
+                    c.dropped += 1;
                 }
             }
             continue;
@@ -384,18 +511,33 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
                 sub.once = false;
             }
             if sub.every.is_none() && sub.next_due.is_none() {
-                n_dropped += 1;
+                c.dropped += 1;
+                continue;
+            }
+            // The same standing subscription: kind and period, and the
+            // command when there is one (its prompt is a label), else the
+            // prompt (a timer's whole content).
+            if have_subs.iter().any(|s| {
+                s.kind == sub.kind
+                    && s.every == sub.every
+                    && if sub.cmd.is_some() {
+                        s.cmd == sub.cmd
+                    } else {
+                        s.prompt == sub.prompt
+                    }
+            }) {
+                c.already += 1;
                 continue;
             }
             match subscription::add(place, agent, sub, None) {
-                Ok(_) => n_subs += 1,
+                Ok(_) => c.subs += 1,
                 Err(e) => {
                     crate::klog::warn(
                         "migrate_subscription",
                         Some(agent),
                         format!("node #{}: {e:#}", n.id),
                     );
-                    n_dropped += 1;
+                    c.dropped += 1;
                 }
             }
             continue;
@@ -413,8 +555,15 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
             msg.hops = n.hops;
             msg.attachments = n.attachments.clone();
             msg.sent = inbox::rfc3339(if n.created_ms > 0 { n.created_ms } else { now });
+            if have_inbox
+                .iter()
+                .any(|f| f.msg.from == msg.from && f.msg.body == msg.body)
+            {
+                c.already += 1;
+                continue;
+            }
             if inbox::deliver(place, agent, &msg).is_ok() {
-                n_inbox += 1;
+                c.inbox += 1;
                 continue;
             }
         }
@@ -436,18 +585,18 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
         } else {
             format!("{} — {}", n.goal, arbos_core::text::clip(&n.outcome, 120))
         };
-        notes_file.add(&section, &text);
-        n_notes += 1;
+        if notes_file.add(&section, &text).replaced {
+            c.already += 1;
+        } else {
+            c.notes += 1;
+        }
     }
-    if n_notes > 0
+    if c.notes > 0
         && let Err(e) = notes::save(place, agent, &notes_file)
     {
         crate::klog::warn("migrate_notes", Some(agent), format!("{e:#}"));
     }
-    Some(format!(
-        "{agent}: {} node(s) → {n_notes} notes line(s), {n_subs} subscription(s), {n_inbox} inbox file(s), {n_asks} parked question(s); {n_dropped} closed node(s) dropped",
-        nodes.len()
-    ))
+    Some(c)
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,19 +820,43 @@ mod tests {
         assert_eq!(count("subscriptions"), 1, "one cron, not two");
         assert_eq!(count("inbox"), 1, "one task, not two");
 
-        // Cut mid-way: a `.migrating` file and no plan. Not run again.
+        // Cut mid-way: a `.migrating` file and no plan, with the cron
+        // already written and the task not (its inbox file removed, as if
+        // the start died between the two). Finished: the cron is not
+        // written again, the task is, and the transcript says both.
         std::fs::rename(
             plan.with_extension("jsonl.migrated"),
             plan.with_extension("jsonl.migrating"),
         )
         .unwrap();
+        for e in std::fs::read_dir(agent_dir.join("inbox"))
+            .unwrap()
+            .flatten()
+        {
+            std::fs::remove_file(e.path()).unwrap();
+        }
+        let before = std::fs::read_to_string(agent_dir.join("transcript.jsonl")).unwrap();
         let report = run(&h);
-        assert!(report.is_empty(), "{report:?}");
-        assert_eq!(count("subscriptions"), 1);
-        assert_eq!(count("inbox"), 1);
+        assert_eq!(report.len(), 1, "{report:?}");
+        assert!(report[0].contains("already carried over"), "{report:?}");
+        assert_eq!(
+            count("subscriptions"),
+            1,
+            "the cron was recognised, not doubled"
+        );
+        assert_eq!(count("inbox"), 1, "the task was carried over this time");
         assert!(
-            plan.with_extension("jsonl.migrating").exists(),
-            "kept for a person"
+            !plan.with_extension("jsonl.migrating").exists()
+                && plan.with_extension("jsonl.migrated").exists(),
+            "finished"
+        );
+        let after = std::fs::read_to_string(agent_dir.join("transcript.jsonl")).unwrap();
+        let said = &after[before.len()..];
+        assert!(
+            said.contains("cut before it finished")
+                && said.contains("1 pending task(s) carried over this time")
+                && said.contains("1 were already in place"),
+            "{said}"
         );
     }
 }

@@ -292,3 +292,82 @@ fn a_failed_migration_record_writes_nothing_and_a_completed_one_is_not_repeated(
     );
     let _ = k4.child.kill();
 }
+
+/// qal-j13: a `plan.jsonl.migrating` with no `plan.jsonl` — an earlier
+/// start cut between moving the file aside and finishing — was correctly
+/// never migrated blind and its source correctly kept, but only the log
+/// said so: the window showed an ordinary place and a standing cron the
+/// person had was simply gone from what runs. Now the cut migration is
+/// finished with what it already wrote recognised, and the transcript
+/// says what was carried over this time and what was already in place.
+#[test]
+fn a_cut_migration_is_finished_without_doubling_and_the_transcript_says_so() {
+    let now = arbos_core::now_ms();
+    let legacy = format!(
+        "{{\"id\":1,\"goal\":\"tick\",\"when\":{{\"every_ms\":30000,\"next_due_ms\":{}}},\"do\":{{\"kind\":\"shell\",\"cmd\":\"echo legacy-tick >> ticks.txt\",\"report\":\"tick: {{output}}\"}},\"status\":\"pending\"}}\n\
+         {{\"id\":2,\"goal\":\"Reply with the single word MIGRATED.\",\"status\":\"pending\",\"origin\":\"user\",\"when\":{{\"wake\":true}}}}\n",
+        now + 3_600_000
+    );
+    // The cut, as it stands on disk: the source moved aside, the cron
+    // written, the task not, and no plan.jsonl.
+    let mut k = start_kernel_replay_prepared(
+        "cut-migration",
+        "{\"agent\":\"root\",\"content\":\"MIGRATED\"}\n",
+        "",
+        |place| {
+            let agent = place.join(".arbos/agents/root");
+            std::fs::create_dir_all(agent.join("subscriptions")).unwrap();
+            std::fs::write(agent.join("agent.md"), "name: root\nmodel: inherit\n").unwrap();
+            std::fs::write(agent.join("plan.jsonl.migrating"), &legacy).unwrap();
+            std::fs::write(
+                agent.join("subscriptions/0001-tick.toml"),
+                format!(
+                    "kind = \"shell\"\nevery = \"30s\"\ncmd = \"echo legacy-tick >> ticks.txt\"\ndeliver_to = \"user\"\nnotify = \"tick: {{output}}\"\nnext_due = \"{}\"\n",
+                    arbos_core::inbox::rfc3339(now + 3_600_000)
+                ),
+            )
+            .unwrap();
+        },
+    );
+    let agent = k.place.join(".arbos/agents/root");
+    let mut a = Attach::connect(&k.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    // The task was carried over this time and runs (at boot, before any
+    // window attaches: read the record).
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !std::fs::read_to_string(agent.join("transcript.jsonl"))
+        .unwrap_or_default()
+        .contains("\"text\":\"MIGRATED\"")
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pending task, missed by the cut start, ran"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let crons = std::fs::read_dir(agent.join("subscriptions"))
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            std::fs::read_to_string(e.path())
+                .unwrap_or_default()
+                .contains("legacy-tick")
+        })
+        .count();
+    assert_eq!(
+        crons, 1,
+        "the cron the cut start had written was recognised, not doubled"
+    );
+    assert!(
+        !agent.join("plan.jsonl.migrating").exists() && agent.join("plan.jsonl.migrated").exists(),
+        "finished"
+    );
+    let transcript = std::fs::read_to_string(agent.join("transcript.jsonl")).unwrap();
+    assert!(
+        transcript.contains("cut before it finished")
+            && transcript.contains("1 pending task(s) carried over this time")
+            && transcript.contains("1 were already in place"),
+        "the loss is visible, with both counts: {transcript}"
+    );
+    let _ = k.child.kill();
+}
