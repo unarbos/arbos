@@ -17,6 +17,7 @@ from websockets.asyncio.server import ServerConnection, serve
 from . import protocol as P
 from .base import SessionDefaults, Tuning
 from .duplex import DuplexSession
+from .openai_live import OpenAILiveSession
 from .engines import Engines
 from .pipeline import PipelineSession
 
@@ -37,8 +38,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                      help="shared secret; clients pass ?token= or Authorization: Bearer. Empty = no auth (env VOICE_TOKEN)")
 
     engine = parser.add_argument_group("engine")
-    engine.add_argument("--engine", default="auto", choices=["auto", "duplex", "pipeline"],
-                        help="duplex: NemotronLabs VoiceChat via --duplex-url; pipeline: VAD+ASR+TTS; auto: duplex if healthy")
+    engine.add_argument("--engine", default="auto", choices=["auto", "duplex", "pipeline", "openai"],
+                        help="duplex: NemotronLabs VoiceChat via --duplex-url; pipeline: VAD+ASR+TTS; auto: duplex if healthy; "
+                             "openai: OpenAI GPT-Live with the kernel as backend (client delegation; env OPENAI_API_KEY)")
+    engine.add_argument("--openai-model", default=os.environ.get("VOICE_OPENAI_MODEL", "gpt-live-1"), help="GPT-Live model for --engine openai")
+    engine.add_argument("--openai-voice", default=os.environ.get("VOICE_OPENAI_VOICE", "marin"), help="GPT-Live voice for --engine openai")
     engine.add_argument("--duplex-url", default=os.environ.get("VOICE_DUPLEX_URL", "ws://127.0.0.1:9000/v1/realtime"),
                         help="NemotronLabs VoiceChat container realtime endpoint")
     engine.add_argument("--instructions", default=None, help="system prompt for the duplex model (text or @file)")
@@ -195,7 +199,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
         out_target_dbfs=args.out_target_dbfs,
     )
 
-    session_class = DuplexSession if engines.engine == "duplex" else PipelineSession
+    session_class = {"duplex": DuplexSession, "openai": OpenAILiveSession}.get(engines.engine, PipelineSession)
 
     async def handler(ws: ServerConnection) -> None:
         # Dictation (`session.start {mode: "dictation"}`) is the ASR pipeline whatever the engine:

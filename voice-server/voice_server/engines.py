@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 
@@ -29,6 +30,8 @@ class Engines:
     engine: str  # "duplex" or "pipeline"
     duplex_url: str
     duplex_name: str
+    openai_model: str = "gpt-live-1"
+    openai_voice: str = "marin"
     hub_url: str = ""
     hub_token: str = ""
     hub_machine: str = ""
@@ -72,7 +75,11 @@ class Engines:
 
         engine = args.engine
         duplex_name = ""
-        if engine in ("duplex", "auto"):
+        if engine == "openai":
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise SystemExit("--engine openai needs OPENAI_API_KEY in the environment")
+            duplex_name = f"openai/{args.openai_model}"
+        elif engine in ("duplex", "auto"):
             duplex_name = await probe_duplex(args.duplex_url)
             if duplex_name:
                 engine = "duplex"
@@ -87,6 +94,7 @@ class Engines:
         )
         return cls(vad=vad, asr=asr, tts=tts, reply=reply, kernel=kernel, engine=engine,
                    duplex_url=args.duplex_url, duplex_name=duplex_name,
+                   openai_model=getattr(args, "openai_model", "gpt-live-1"), openai_voice=getattr(args, "openai_voice", "marin"),
                    hub_url=(getattr(args, "hub", None) or ""), hub_token=getattr(args, "hub_token", "") or "",
                    hub_machine=getattr(args, "hub_machine", "") or "", auto_approve=False)
 

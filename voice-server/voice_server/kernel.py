@@ -309,6 +309,9 @@ class KernelClient:
         elif kind == "turn":
             state = self.agents.setdefault(frame["agent"], AgentState(name=frame["agent"], parent=None))
             state.running = frame.get("state") == "running"
+            budget = frame.get("budget") or {}
+            if frame.get("state") == "idle" and budget.get("cost") is not None:
+                log.info("turn cost %s: $%.5f (%s tokens in context)", frame["agent"], float(budget["cost"]), budget.get("used"))
         elif kind == "assistant_delta":  # kernels >= 0.2 stream text this way
             state = self.agents.setdefault(frame["agent"], AgentState(name=frame["agent"], parent=None))
             state.assistant += frame.get("text") or ""

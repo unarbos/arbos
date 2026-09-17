@@ -67,6 +67,7 @@ CALL_INSTRUCTIONS = (
 
 class DuplexSession(BaseSession):
     engine = "duplex"
+    HOLD_MODEL_WHILE_DECIDING = True  # hold the model's reply until Whisper says who answers
 
     def arbos_talking(self) -> bool:
         return self.response_open
@@ -367,7 +368,7 @@ class DuplexSession(BaseSession):
                     self.cap_ms = len(self.cap_buf) * WINDOW_MS
                     self.cap_silence_ms = 0
                     self.our_speech_started_at = time.monotonic()
-                    self.decision = "pending"
+                    self.decision = "pending" if self.HOLD_MODEL_WHILE_DECIDING else "model"
                     self.model_hold = []
                     self.user_talking = True
                     self._emit(P.SPEECH_STARTED)

@@ -26,6 +26,7 @@ AGENT_EVENT = "agent.event"
 AGENT_TURN = "agent.turn"
 AGENT_TREE = "agent.tree"
 AGENT_DONE = "agent.done"
+AGENT_ACTIVITY = "agent.activity"
 NARRATOR_SAY = "narrator.say"
 
 # server -> client
@@ -129,6 +130,10 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                                    "assistant" = streamed increment, "assistant_final" = the whole reply
                                    once the turn ends (replace the streamed line with it)
     {"type":"agent.turn","agent":"root","state":"running"|"idle"}
+    {"type":"agent.activity","agent":"root","state":"working"|"tool"|"idle","tool":"bash"|null,"detail":"pytest -q"|null}
+                                   what the call's agent is doing, sent on every change: working =
+                                   thinking or generating, tool = inside a tool call (which one, and one
+                                   line of what), idle = done. Play a working sound while state != idle.
     {"type":"agent.tree","agents":[{"id","name","parent"}]}
 
     call mode (session.start {"mode":"call"}; session.ready then has "mode":"call","narrator":true)
@@ -158,6 +163,16 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
         model's own reply for that turn is dropped and its tool calls are answered "already
         handled". Small talk (greetings, thanks, "can you hear me") is left to the model. The
         model still hears the user, so barge-in over a kernel answer works the same way.
+    openai (GPT-Live, --engine openai, env OPENAI_API_KEY): OpenAI's full-duplex model handles
+        listening, speaking and *deciding when to hand off*; the Arbos kernel is the backend
+        (client delegation). Small talk is answered by the model at once; anything about the
+        user's work is delegated: the model says "one sec, let me check" only once a delegation
+        exists (the gateway delegates itself if it says so without one), the kernel's answer is
+        appended as commentary and spoken unprompted when it arrives, even after a barge-in;
+        barge-ins never cancel kernel work (a new question does, via stop). Approvals and asks
+        are still ours: spoken in the model's voice, answered by the caller's yes or no. Our VAD +
+        Whisper still produce transcript.final. Billing: $0.05 per minute of session, per second,
+        plus the kernel's own model calls.
     pipeline (fallback, any GPU or CPU): Silero VAD -> faster-whisper -> optional reply hop
         (OpenRouter with the same tools, or the kernel) -> Kokoro. Explicit turns; barge-in is
         server-side cancellation on speech.started.

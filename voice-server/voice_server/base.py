@@ -201,8 +201,7 @@ class BaseSession:
             self.tools.rebind(kernel)
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
-            if self.mirror_agents:
-                kernel.listeners.append(self._mirror)
+            kernel.listeners.append(self._mirror)
         self.narrator = Narrator(
             kernel,
             speak=self.speak_narration,
@@ -280,8 +279,7 @@ class BaseSession:
         self.tools.rebind(kernel)
         if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
             self.engines.kernel.listeners.remove(self._mirror)
-        if self.mirror_agents:
-            kernel.listeners.append(self._mirror)
+        kernel.listeners.append(self._mirror)
         identity = info.get("identity") or {}
         self.project_info = {
             "machine": machine, "project": project,
@@ -330,8 +328,8 @@ class BaseSession:
             if first is not None:
                 stop = await self._take(first)
             if not self.dictation:
-                if self.mirror_agents and self.engines.kernel:
-                    self.engines.kernel.listeners.append(self._mirror)
+                if self.engines.kernel and self._mirror not in self.engines.kernel.listeners:
+                    self.engines.kernel.listeners.append(self._mirror)  # transcript mirror + agent.activity
                 self._ensure_asker()
             if not stop:
                 async for message in self.ws:
@@ -625,7 +623,34 @@ class BaseSession:
         except Exception:
             log.exception("[%s] could not voice the agent report", self.sid)
 
+    def _activity(self, state: str, tool: str = "", detail: str = "", agent: str = "root") -> None:
+        """agent.activity: what the call's agent is doing right now, on every change. The desktop
+        plays its working sound while state != idle. states: working (thinking/generating),
+        tool (inside a tool call; tool + detail say which), idle."""
+        key = (state, tool, detail)
+        if getattr(self, "_activity_key", None) == key:
+            return
+        self._activity_key = key
+        self._emit(P.AGENT_ACTIVITY, agent=agent, state=state, tool=tool or None, detail=detail or None)
+
+    def _track_activity(self, frame: dict) -> None:
+        if frame.get("agent") != "root":
+            return
+        kind = frame.get("type")
+        if kind == "turn":
+            self._activity("working" if frame.get("state") == "running" else "idle")
+        elif kind == "assistant_delta":
+            self._activity("working")
+        elif kind == "event":
+            event = frame.get("event") or {}
+            if event.get("kind") == "tool" and event.get("name"):
+                if event.get("ended"):
+                    self._activity("working")
+                else:
+                    self._activity("tool", event["name"], _tool_detail(event))
+
     def _mirror(self, frame: dict) -> None:
+        self._track_activity(frame)  # activity goes out even when the transcript mirror is off
         if not self.mirror_agents:
             return
         kind = frame.get("type")
@@ -681,3 +706,14 @@ def _parse_target(msg: dict) -> tuple[str, str] | None:
     if not machine or not project:
         return None
     return machine, project
+
+
+def _tool_detail(event: dict) -> str:
+    """One short line about a tool call: the command, the path, or the brief."""
+    args = event.get("args") or {}
+    for key in ("command", "cmd", "path", "file", "brief", "query", "pattern", "url", "id"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            value = value.strip().splitlines()[0]
+            return value if len(value) <= 80 else value[:77] + "..."
+    return ""
