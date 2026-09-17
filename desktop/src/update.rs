@@ -144,6 +144,15 @@ pub struct Updater {
     state: State,
     /// The build this binary is, which is what "newer" is measured against.
     current: Version,
+    /// A kernel this window is restarting, and why the last attempt failed.
+    ///
+    /// The restart itself is `Arbos::restart_stranger`'s; this is only what
+    /// the bar shows while it happens. Stopping a kernel and starting its
+    /// replacement takes long enough that without a state to show, a click on
+    /// the control is indistinguishable from a click that did nothing —
+    /// which is how the undispatched click was reported in the first place.
+    restarting: Option<Place>,
+    restart_failed: Option<(Place, String)>,
     /// Kernels serving open places that are not the build this app ships.
     ///
     /// Cached, and refreshed on a timer rather than per frame: finding one
@@ -175,6 +184,8 @@ impl Updater {
             channel,
             state: State::Idle,
             current: build::version(),
+            restarting: None,
+            restart_failed: None,
             strangers: Vec::new(),
             looked: None,
             checked: None,
@@ -215,6 +226,30 @@ impl Updater {
     /// Kernels serving open places that are not this build.
     pub fn strangers(&self) -> &[crate::kernel::Skew] {
         &self.strangers
+    }
+
+    /// The place whose kernel is being restarted, if any.
+    pub fn restarting(&self) -> Option<&Place> {
+        self.restarting.as_ref()
+    }
+
+    /// Why the last restart failed, if it did.
+    pub fn restart_failed(&self) -> Option<&(Place, String)> {
+        self.restart_failed.as_ref()
+    }
+
+    /// Mark a restart as under way, so the bar can say so.
+    pub fn restart_began(&mut self, place: Place, cx: &mut Context<Self>) {
+        self.restarting = Some(place);
+        self.restart_failed = None;
+        cx.notify();
+    }
+
+    /// And as finished, with the reason when it did not work.
+    pub fn restart_ended(&mut self, place: Place, why: Option<String>, cx: &mut Context<Self>) {
+        self.restarting = None;
+        self.restart_failed = why.map(|why| (place, why));
+        cx.notify();
     }
 
     /// Drop what was found, so the next frame looks again — after a restart
