@@ -109,6 +109,11 @@ enum VoiceEvent {
     case assistantAudio(Data)
     case assistantTranscript(delta: String)
     case responseDone(ResponseEnd)
+    /// What the call's agent is doing, from the gateway (`agent.activity`).
+    /// The only signal for a delegated turn: GPT-Live says "one sec" and
+    /// then nothing is heard until the kernel answers, which can be many
+    /// seconds. `state` is `working`, `tool` or `idle`.
+    case activity(state: String, tool: String?, detail: String?)
     /// Text channel.
     case textDelta(String)
     case textDone(text: String, cancelled: Bool)

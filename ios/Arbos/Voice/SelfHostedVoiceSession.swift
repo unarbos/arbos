@@ -169,6 +169,10 @@ final class SelfHostedVoiceSession: VoiceSession {
             sink.emit(.userTranscript(text: text, final: false))
         case "transcript.final":
             sink.emit(.userTranscript(text: text, final: true))
+        case "agent.activity":
+            sink.emit(.activity(state: object["state"] as? String ?? "",
+                                tool: object["tool"] as? String,
+                                detail: object["detail"] as? String))
         case "response.started":
             sink.emit(.thinking)
         case "response.transcript":

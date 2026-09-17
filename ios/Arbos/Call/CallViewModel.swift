@@ -400,6 +400,20 @@ final class CallViewModel: ObservableObject {
         case .assistantTranscript(let delta):
             trace("reply: \(delta)")
             append(delta, to: .arbos)
+        case .activity(let state, let tool, _):
+            // On GPT-Live a project question is delegated: it says "one sec,
+            // let me check" and then there is silence until the kernel
+            // answers, which was measured at many seconds. The orb sat in
+            // listening for all of it, so the call looked finished and the
+            // caller had no reason to wait. This is the gateway's only
+            // signal for that stretch.
+            trace("event agent.activity \(state)\(tool.map { " \($0)" } ?? "")")
+            kernelBusy = state != "idle"
+            if state == "idle" {
+                settle()
+            } else if phase != .speaking {
+                phase = .thinking
+            }
         case .responseDone(let end):
             let levels = audio.replyLevelsAndReset()
             trace("event response.done reason=\(end.rawValue) playing=\(audio.isPlaying) reply peak=\(Int(levels.peak))dBFS rms=\(Int(levels.rms))dBFS out=\(Int(levels.out))dBFS")
