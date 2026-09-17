@@ -1,6 +1,12 @@
 # arbos-harness: the kernel, headless, for benchmark containers.
 #
-#   docker build -f harness/Dockerfile -t arbos-harness .
+#   docker build -f harness/Dockerfile -t arbos-harness \
+#     --build-arg ARBOS_GIT_SHA=$(git rev-parse --short=12 HEAD) .
+#
+# The build context excludes .git, so the kernel cannot learn its own commit;
+# pass it as ARBOS_GIT_SHA and `arbos-kernel --version` will say it. Without
+# the argument the binary says "unknown", and the harness's kernel_sha check
+# cannot pass — a labelled binary must prove its label (QA, 2026-09-17).
 #
 # Standalone, against a repository checkout:
 #   docker run --rm -e OPENROUTER_API_KEY -e ARBOS_MODEL=<model> \
@@ -28,6 +34,8 @@ COPY vendor vendor
 # `[patch.crates-io]` in the workspace points at this path; the desktop
 # crate itself is not built.
 COPY desktop/vendor/bezel-markdown desktop/vendor/bezel-markdown
+ARG ARBOS_GIT_SHA=
+ENV ARBOS_GIT_SHA=$ARBOS_GIT_SHA
 RUN cargo build --release -p arbos-kernel --target x86_64-unknown-linux-musl \
     && strip target/x86_64-unknown-linux-musl/release/arbos-kernel
 

@@ -22,6 +22,7 @@ the `arbos_egress_open` metric then marks those rollouts.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -123,6 +124,11 @@ class ArbosHarnessConfig(HarnessConfig):
     at $4 the cap cut three hard rollouts that had solved at $6 before (cycle 9), so $8."""
     changes_before_done: bool = False
     """Nudge a final reply after edits to run `changes` first (`ARBOS_CHANGES_BEFORE_DONE`)."""
+    kernel_sha: str = ""
+    """The git sha (12 hex chars, as `arbos-kernel --version` prints it) the kernel binary
+    must report. Set it for every measured run: the harness refuses a binary that says
+    anything else — including "unknown", the word a build without ARBOS_GIT_SHA says —
+    so a run labelled with a commit ran that commit. Empty = record, do not check."""
     allow_open_egress: bool = False
     """Run even when the runtime's egress is unrestricted. Off: setup refuses, the
     rollout is an error and gets no score. On: it runs, and `arbos_egress_open` is 1.0."""
@@ -130,6 +136,28 @@ class ArbosHarnessConfig(HarnessConfig):
     """Host folder that receives each rollout's `/logs/artifacts/arbos` (patch,
     rollout bundle, kernel log, result.json) under `<task>--<trace id>/`. Empty = keep
     them in the container only."""
+
+
+def kernel_identity(path: Path, data: bytes) -> dict[str, str]:
+    """What the binary says it is (`arbos-kernel --version`: name, semver, git sha,
+    protocol) and what it is (sha256 of the bytes installed). The label a run
+    carries is checked against the first; the second identifies the artefact
+    whatever it was called."""
+    version = "unavailable"
+    try:
+        out = subprocess.run([str(path), "--version"], capture_output=True, text=True, timeout=20)
+        version = (out.stdout or out.stderr).strip().splitlines()[0] if (out.stdout or out.stderr).strip() else "unavailable"
+    except (OSError, subprocess.SubprocessError):
+        pass
+    parts = version.split()
+    git_sha = parts[2] if len(parts) >= 3 and parts[0] == "arbos-kernel" else "unavailable"
+    return {
+        "path": str(path),
+        "version": version,
+        "git_sha": git_sha,
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": str(len(data)),
+    }
 
 
 class ArbosHarness(Harness[ArbosHarnessConfig]):
@@ -153,8 +181,19 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
                 "--env.agent.runtime.block '[\"*\"]' (or allow-open-egress true to run anyway)."
             )
         kernel = self.kernel_path()
-        logger.info("arbos: installing %s into the runtime", kernel)
-        await runtime.write(KERNEL_BIN, kernel.read_bytes())
+        data = kernel.read_bytes()
+        identity = kernel_identity(kernel, data)
+        if self.config.kernel_sha and identity["git_sha"] != self.config.kernel_sha.strip():
+            raise RuntimeError(
+                f"arbos: kernel {kernel} reports git sha {identity['git_sha']!r}, the run is "
+                f"labelled {self.config.kernel_sha!r}; refusing to measure a binary that does not "
+                "prove its label (build the image with --build-arg ARBOS_GIT_SHA=<sha>)."
+            )
+        logger.info(
+            "arbos: installing %s (%s, sha256 %s) into the runtime",
+            kernel, identity["version"], identity["sha256"][:16],
+        )
+        await runtime.write(KERNEL_BIN, data)
         await runtime.write(PROGRAM_BIN, PROGRAM.read_bytes())
         result = await runtime.run(
             ["sh", "-c", f"chmod +x {KERNEL_BIN} {PROGRAM_BIN} && mkdir -p {OUT_DIR}"],
@@ -162,6 +201,9 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         )
         if result.exit_code != 0:
             raise RuntimeError(f"arbos install failed: {result.stderr.strip()[-500:]}")
+        # Beside the rollout's own outputs, so `collect` carries it to the host:
+        # the bytes that ran, not the path they were read from.
+        await runtime.write(f"{OUT_DIR}/kernel-identity.json", json.dumps(identity).encode())
 
     async def launch(
         self,
