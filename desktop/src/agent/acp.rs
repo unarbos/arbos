@@ -320,6 +320,47 @@ impl Launch {
     }
 }
 
+/// A `feedback_bundle` frame as the CLI prints it — one JSON line — turned into
+/// the same `Bundle` the frame path produces.
+///
+/// One parser, not two: the CLI prints the identical frame
+/// ([#466](https://github.com/unarbos/arbos/pull/466)), so the desktop drops it
+/// in where the attach's own answer would have gone.
+pub fn feedback_bundle_from_json(line: &str) -> Option<crate::feedback::Bundle> {
+    match serde_json::from_str::<Frame>(line).ok()? {
+        Frame::FeedbackBundle {
+            agent,
+            turn,
+            events,
+            tail,
+            children,
+            log,
+            place,
+            agents,
+            kernel,
+            note,
+            redacted,
+            truncated,
+            bytes,
+        } => Some(crate::feedback::Bundle {
+            agent,
+            turn,
+            events,
+            tail,
+            children,
+            log,
+            place,
+            agents,
+            kernel,
+            note,
+            redacted,
+            truncated,
+            bytes,
+        }),
+        _ => None,
+    }
+}
+
 impl Session {
     pub async fn spawn(launch: Launch) -> Result<(Self, Events)> {
         launch.say("attaching to arbos");
