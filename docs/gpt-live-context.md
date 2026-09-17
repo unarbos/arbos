@@ -22,7 +22,7 @@ Jacob's Mac is not on the hub. So the desktop named the project by its bare fold
 
 ## The fix ([PR #492](https://github.com/unarbos/arbos/pull/492), branch `cursor/voice-server`, deployed to the production gateway 2026-09-17 19:39Z)
 
-1. **The call's kernel is the caller's project or nothing.** A bare name the gateway does not serve is refused: `error {code: "project_not_on_hub", project, message}` then close 4404. The message says what to do. No other kernel takes the call. A `machine/project` name attaches through the hub to that kernel, and only that kernel. An empty name still means the gateway's own kernel, and the gateway says so plainly to the model and to the client.
+1. **The call's kernel is the caller's project or nothing.** The desktop now sends the tab's identity (machine, folder name, **path**, and the chat so far; desktop [PR #490](https://github.com/unarbos/arbos/pull/490), merged into #492). The path binds: the gateway's own kernel if it serves that very folder; a kernel on the gateway's host serving that folder; else the hub, matched by the roster's folder. Anything it cannot reach is refused, never rerouted: a machine off the hub → `project_not_on_hub` (the message says what to do); a folder with no kernel → `project_offline`; not on the roster → `project_unknown`. Then close 4404. A bare name from an older client is refused the same way. An empty name still means the gateway's own kernel, and the gateway says so plainly to the model and to the client. `session.ready` returns `project_path`; the desktop hangs up if it is not the folder it asked for.
 2. **GPT Live is told where it is.** From the hub roster the gateway learns the project's folder (`place`). It writes a PROJECT CONTEXT brief into the session instructions: name, `machine/project`, folder (= working directory of everything the backend runs), `arbos://` address, and the rule "answer place questions from this and only this".
 3. **GPT Live is given the chat.** The last 12 user and Arbos lines of that project's main chat go in as startup history (`session.input`), behind a developer note saying they are context from before the call.
 4. **GPT Live follows the project during the call.** Quiet context appends, at most one every 3 seconds: lines typed in the project chat, Arbos's text replies it did not relay itself, sub-agents (workers) starting and finishing, and the tools they run.
@@ -32,7 +32,8 @@ Proof on the live gateway (2026-09-17 19:36Z–19:39Z), with the ArbosLife `demo
 | Probe | Result |
 |---|---|
 | `session.start project: "discord_backups"` | `error project_not_on_hub`, close 4404, no kernel touched |
-| `session.start project: {arboslife, demo}` | `session.ready.project_info.place = /home/const/arbos-hub/projects/demo`, `via: hub` |
+| `session.start project: {machine: "", project: "discord_backups", path: "/Users/jacob/discord_backups"}` (what the new desktop sends from a Mac off the hub) | `error project_not_on_hub`, close 4404 |
+| `session.start project: {arboslife, demo, path: /home/const/arbos-hub/projects/demo}` | `session.ready.project_path = /home/const/arbos-hub/projects/demo`, `project_info.path = place = the same`, `via: hub`; GPT Live: "We're in `/home/const/arbos-hub/projects/demo`." 619 ms after the question |
 | Spoken: "Which project and folder are we in right now?" | GPT Live, from the brief, 861 ms after the question ended: "We're in the demo project, in the folder `/home/const/arbos-hub/projects/demo`." The kernel, asked independently, gave the same folder. |
 | Typed `text.input` during the call | Reached the demo kernel as a `user` line with `channel: text, device: desktop` |
 | Kernel's own transcript | The spoken question filed with `channel: voice, device: desktop` |
@@ -71,7 +72,7 @@ Where the model's knowledge of place comes from, in order: the instructions brie
 
 For the desktop and the phone. The gateway already sends every frame needed.
 
-1. Draw the caller's spoken line from `transcript.final` and Arbos's spoken line from the accumulated `response.transcript` up to `response.done`. Mark them as voice. **Display only. Never send those words to the kernel.** The gateway already did, if they needed the kernel.
+1. Draw the caller's spoken line from `transcript.final` and Arbos's spoken line from the accumulated `response.transcript` up to `response.done`. Mark them as voice. **Display only. Never send those words to the kernel.** The gateway already did, if they needed the kernel. `response.started`/`response.done` carry `speaker: "narrator"` for the narrator's own lines (already in the chat via `narrator.say`); GPT Live's words carry no `speaker` and are the ones to write as voice rows.
 2. The kernel's own `user` event with `channel: "voice"` for the same words is the same line. Show one row, not two.
 3. Small talk ("hey" → "hey") never reaches the kernel, so it exists only as voice rows. That is correct: the kernel was not woken for it.
 4. A typed line in the composer during a call goes to the kernel as usual (`channel: text`; steer if a turn runs). The gateway learns of it from the kernel's event and passes it to GPT Live as quiet context; do not also send it to the gateway.
