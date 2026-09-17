@@ -1657,11 +1657,12 @@ fn handle_frame(
                 .unwrap_or_else(|| place.path.clone());
             // The mark must be the last turn's: its start line is the
             // last checkpoint's (qal-j10).
-            let turn_line = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
+            let last = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
                 .last()
-                .map(|cp| cp.line)
-                .unwrap_or(0);
-            match arbos_engine::git::undo(&cwd, turn_line) {
+                .cloned();
+            let turn_line = last.as_ref().map(|cp| cp.line).unwrap_or(0);
+            let turn_ts = last.as_ref().map(|cp| cp.ts);
+            match arbos_engine::git::undo(&cwd, turn_line, turn_ts) {
                 Ok(out) => klog::info("undo", Some(&agent), arbos_core::text::clip(&out.body, 200)),
                 Err(e) => refuse(hooks, Some(&agent), format!("undo: {e:#}")),
             }
