@@ -22,6 +22,11 @@ final class Dictation: ObservableObject {
     private var startedAt: Date?
     #if DEBUG
     private var injector: DebugInjector?
+    /// Transcript segments seen in this take, and how many of them made the
+    /// text shorter. A take that grows monotonically has appended; one that
+    /// shrinks has replaced, which is the build-956 fault.
+    private var segments = 0
+    private var shrinks = 0
     #endif
 
     func start(settings: AppSettings) {
@@ -30,6 +35,10 @@ final class Dictation: ObservableObject {
         committed = ""
         partial = ""
         text = ""
+        #if DEBUG
+        segments = 0
+        shrinks = 0
+        #endif
         guard settings.provider == .selfHosted, !settings.selfHostedURL.isEmpty, !settings.voiceToken.isEmpty else {
             problem = "Set the speech server in Settings to dictate."
             return
@@ -83,6 +92,9 @@ final class Dictation: ObservableObject {
             partial = ""
             text = committed
         }
+        #if DEBUG
+        print("metric dictation_take segments=\(segments) shrinks=\(shrinks) chars=\(text.count)")
+        #endif
     }
 
     /// The field took the words: start clean next time.
@@ -106,6 +118,18 @@ final class Dictation: ObservableObject {
             } else {
                 partial = join(partial, words)
             }
+            #if DEBUG
+            // Counted rather than eyeballed. The build-956 fault was a
+            // delta replacing the take instead of extending it, which looks
+            // like a plausible short sentence on screen and is only obvious
+            // as a length that goes down. A scripted run asserts on these.
+            let was = text.count
+            defer {
+                segments += 1
+                if text.count < was { shrinks += 1 }
+                print("metric dictation seg=\(segments) final=\(final) was=\(was) now=\(text.count) shrinks=\(shrinks)")
+            }
+            #endif
             text = join(committed, partial)
         case .error(let message):
             fail(message)
