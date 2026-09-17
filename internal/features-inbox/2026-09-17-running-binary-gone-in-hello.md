@@ -29,6 +29,19 @@ phone's machine row) can show it.
 
 ## Smallest version
 
+> **Corrected 2026-09-17 05:57 UTC, from #385's review.** The check first
+> proposed here was a path-existence test, and that is wrong on macOS in the
+> case that matters. `current_exe()` there is the start *path*; our installer
+> stages a build and renames it over that same path, so after an update the
+> path exists and holds the new file while the process runs the old one — a
+> path check says "not gone" at exactly that moment. A path check catches a
+> file *moved away*, not one *replaced in place*. On Linux the ` (deleted)`
+> suffix happens to cover both, which is why the sweep worked there and hid
+> the flaw. #385 compares the running file's identity — device, inode, size
+> and mtime recorded at start — against the file now at the path, which gives
+> the same answer on both systems. The text below is kept as written for the
+> record; read "no longer exists" as "is no longer the same file".
+
 One optional boolean, computed live at every send (the state changes while the
 process runs; a value cached at start would be wrong the moment it matters):
 
@@ -41,8 +54,9 @@ fn binary_gone() -> bool {
 }
 ```
 
-Works on both platforms: on Linux the path ends in ` (deleted)` and does not
-exist; on macOS `current_exe()` returns the start path, which no longer exists.
+~~Works on both platforms: on Linux the path ends in ` (deleted)` and does not
+exist; on macOS `current_exe()` returns the start path, which no longer exists.~~
+Wrong for macOS after an in-place replace; see the correction above.
 
 Put it in three places, each `#[serde(default, skip_serializing_if = "std::ops::Not::not")]`
 so an old client never sees a new key unless it is true:
