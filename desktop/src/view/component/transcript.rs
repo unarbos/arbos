@@ -1238,8 +1238,8 @@ fn from_block(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
-    if let Some((ok, words)) = done_report(text) {
-        return worker_card(chat, ix, who, ok, &words, theme, window, cx);
+    if let Some((verdict, words)) = done_report(text) {
+        return worker_card(chat, ix, who, verdict, &words, theme, window, cx);
     }
     div()
         .self_start()
@@ -1264,23 +1264,45 @@ fn from_block(
         .into_any_element()
 }
 
+/// How a worker's turn ended, as its report to the parent says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    Done,
+    Failed,
+    /// Paused by the user's Stop (kernel #324): not a failure, and the
+    /// kernel's advice to the coordinator on how to resume is not for the
+    /// user's eyes.
+    Stopped,
+}
+
 /// The kernel's done file for a worker, as it lands in the parent's chat:
-/// `Turn ended. Last words: … (transcript: …)`, or `Turn ended badly.
-/// …`. The verdict and the words, without the file pointer.
-fn done_report(text: &str) -> Option<(bool, String)> {
+/// `Turn ended. Last words: … (transcript: …)`, `Turn ended badly. …`, or
+/// `Turn stopped by the user. …`. The verdict and the words, without the
+/// file pointer and whatever the kernel wrote after it (F-116).
+fn done_report(text: &str) -> Option<(Verdict, String)> {
     let text = text.trim();
-    let (ok, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
-        (true, rest)
+    let (verdict, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
+        (Verdict::Done, rest)
     } else if let Some(rest) = text.strip_prefix("Turn ended badly. Last words:") {
-        (false, rest)
+        (Verdict::Failed, rest)
+    } else if let Some(rest) = text.strip_prefix("Turn stopped by the user.") {
+        (Verdict::Stopped, rest.trim_start().strip_prefix("Last words:").unwrap_or(rest))
     } else {
         return None;
     };
     let mut words = rest.trim().to_string();
-    if let Some(at) = words.rfind("(transcript:") {
+    if let Some(at) = words.find("(transcript:") {
         words.truncate(at);
     }
-    Some((ok, words.trim().trim_end_matches('…').trim().to_string()))
+    let words = words.trim().trim_end_matches('…').trim().to_string();
+    // "stopped by the user (Stop)" as the last words says what the verdict
+    // already says.
+    let words = if verdict == Verdict::Stopped && words.to_lowercase().starts_with("stopped by the user") {
+        String::new()
+    } else {
+        words
+    };
+    Some((verdict, words))
 }
 
 /// A worker's completion, as Cursor draws it: the worker's last words as
@@ -1289,7 +1311,7 @@ fn worker_card(
     chat: &ChatSession,
     ix: usize,
     who: &str,
-    ok: bool,
+    verdict: Verdict,
     words: &str,
     theme: &Theme,
     window: &mut Window,
@@ -1304,10 +1326,13 @@ fn worker_card(
     // last words. The chip is a link to the worker's chat (`agents/<id>`
     // dresses as an agent chip), so the name is the way in.
     let name = chat.who_label(who);
-    let head = format!(
-        "[{name}](agents/{who}) {}",
-        if ok { "done" } else { "ended badly" }
-    );
+    let said = match verdict {
+        Verdict::Done => "done",
+        Verdict::Failed => "ended badly",
+        Verdict::Stopped => "stopped by you",
+    };
+    let head = format!("[{name}](agents/{who}) {said}");
+    let ok = verdict != Verdict::Failed;
     let words = if words.is_empty() {
         head
     } else {
@@ -1466,6 +1491,7 @@ fn children_lines(
     chat: &ChatSession,
     spawned: &[String],
     running: bool,
+    step_above: bool,
     theme: &Theme,
     cx: &mut Context<Workspace>,
 ) -> (AnyElement, bool) {
@@ -1499,13 +1525,23 @@ fn children_lines(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        // The coordinator's step only where nothing above says it: under a
+        // live "Working <step>" headline the line names the workers instead
+        // (cycle 23: "Working Updating the plan" over "2 Working Updating
+        // the plan" said one thing twice).
+        let own = own.filter(|_| !step_above);
         let step = match live.as_slice() {
             [only] => only
                 .step
                 .clone()
                 .or(own)
                 .unwrap_or_else(|| only.title.clone()),
-            _ => own.unwrap_or_else(|| format!("Waiting on {working} workers")),
+            _ => own.unwrap_or_else(|| {
+                live.iter()
+                    .map(|c| c.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }),
         };
         let target = match live.as_slice() {
             [only] => Some(only.id),
@@ -3822,13 +3858,18 @@ fn zone(
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
         let id = chat.id;
+        // Cursor's Project chat keeps the live fold shut: "Working
+        // Planning next moves" alone, the checklist behind the chevron
+        // until asked (F-115, cycle 23). A worker's chat streams its tool
+        // rows live, so its fold starts open.
+        let auto = !project_style;
         open = chat
             .transcript
             .work
             .get(&first)
             .copied()
             .unwrap_or_default()
-            .get(true);
+            .get(auto);
         zone = zone.child(
             fold_row(
                 &theme,
@@ -3843,12 +3884,15 @@ fn zone(
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.with_session(id, cx, |chat| {
-                    chat.transcript.work.entry(first).or_default().toggle(true);
+                    chat.transcript.work.entry(first).or_default().toggle(auto);
                 });
             }))
             .into_any_element(),
         );
         header_drawn = true;
+        // The headline carries the step; a heartbeat under it would say
+        // it twice, whether the fold is open or shut.
+        live_fold_shown = true;
     }
     // The worker's report that woke this segment, under its header.
     if let Some(ix) = report
@@ -3883,6 +3927,11 @@ fn zone(
             .iter()
             .enumerate()
             .map(|(n, seg)| match seg {
+                // Cursor's Project chat shows no thoughts: they live behind
+                // the "Worked" headline, and where no headline was drawn
+                // (a turn with no time to its name) they are not drawn at
+                // all (cycle 23, J08: "Thought briefly" bare over the answer).
+                Seg::Thought(_) if project_style && !header_drawn => div().into_any_element(),
                 Seg::Thought(ix) => thought(chat, *ix, false, window, cx),
                 Seg::Prose(ix) => {
                     let ChatItem::Agent(text) = &chat.items[*ix] else {
@@ -3920,6 +3969,23 @@ fn zone(
         if !kids.is_empty() {
             zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(kids));
         }
+    } else if header_drawn {
+        // The fold is shut, but the person's own words typed into the turn
+        // — steers — are not the agent's work to hide: they stay in view
+        // under the headline (a shut live fold swallowed three "run it"
+        // bubbles on the rig, cycle 23).
+        let steers: Vec<AnyElement> = segs
+            .iter()
+            .filter_map(|seg| match seg {
+                Seg::Other(ix) if inline_user(&chat.items, *ix) => {
+                    Some(work_other(chat, *ix, &theme, window, cx))
+                }
+                _ => None,
+            })
+            .collect();
+        if !steers.is_empty() {
+            zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(steers));
+        }
     }
     // Cursor's sub-agent lines: "1 Working  <task>" per live child, and a
     // check for each one that finished. Under the turn that spawned them,
@@ -3942,7 +4008,7 @@ fn zone(
         }
     }
     let workers = (!spawned.is_empty() && !chat.children.is_empty())
-        .then(|| children_lines(chat, &spawned, running, &theme, cx));
+        .then(|| children_lines(chat, &spawned, running, live_headline, &theme, cx));
     if let Some((_, live_line)) = &workers {
         // The "N Working  <step>" line carries the shimmer while the root
         // waits on its workers; a heartbeat under it would say it twice.
@@ -4025,6 +4091,12 @@ fn zone(
             ChatItem::Nudge(text) => page_nudge(text, &theme),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
+            // A steer typed after the answer began streaming: its bubble,
+            // where the kernel's "Already queued" notice can hang under it
+            // (it was dropped here, and the notice stood alone, cycle 23).
+            ChatItem::User(_) if inline_user(&chat.items, ix) => {
+                work_other(chat, ix, &theme, window, cx)
+            }
             _ => div().into_any_element(),
         });
     }
@@ -5516,10 +5588,28 @@ fn heartbeat(
     // gave up, F-77) — says how long, and past a minute what to do. The
     // clock ticks, so it never reads as frozen.
     let quiet = since >= STALL_CLOCK_AFTER;
-    let stalled = since >= STALL_HINT_AFTER;
+    // The hint's clock is the quiet since the last visible progress — a
+    // token, a tool row, a running command's output — not the turn's age:
+    // "Nothing has arrived in 2m 26s" over a command that had been
+    // streaming was wrong (Jacob's Mac, 09-16, kernel #362).
+    let silent = chat.quiet_for();
+    let stalled = silent >= STALL_HINT_AFTER;
     if quiet {
         Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
     }
+    // While a command holds the turn the wait is the command's, not the
+    // model's: name it, and do not send the person to the key.
+    let hint = match chat.running_command() {
+        Some(command) => format!(
+            "{} has printed nothing in {}. Stop ends it.",
+            crate::model::session::command_short(command),
+            since_short(silent)
+        ),
+        None => format!(
+            "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
+            since_short(silent)
+        ),
+    };
     // The agent's own step reads as Cursor's "Working  Launching three
     // sort writers": the verb a shade brighter, the step faint and
     // shimmering, no chevron — there is nothing under it to fold.
@@ -5572,10 +5662,7 @@ fn heartbeat(
                     .id("stall-hint")
                     .text_style(TextStyle::Callout)
                     .text_color(theme.text_faint)
-                    .child(SharedString::from(format!(
-                        "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
-                        since_short(since)
-                    ))),
+                    .child(SharedString::from(hint)),
             )
         })
         .into_any_element()

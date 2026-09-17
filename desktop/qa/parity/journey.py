@@ -33,6 +33,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from rig import DisplayHung, pulse as display_pulse, still as display_still  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 DRIVER_PY = Path(os.environ.get("ARBOS_DRIVER_PY", HERE.parent.parent / "driver" / "arbosdriver.py"))
 DISPLAY = os.environ.get("DISPLAY", ":1")
@@ -93,10 +96,12 @@ class Journey:
         self.args = args
         self.run = run
         self.label = args.label
-        self.out = Path("/tmp/journey") / args.label / f"run-{run:03d}"
+        stamp = datetime.now().strftime("%H%M%S")
+        # Stamped, so a second invocation under the same label keeps the
+        # first run's stills (cycle 23 lost its before-fix set this way).
+        self.out = Path("/tmp/journey") / args.label / f"run-{stamp}-{run:03d}"
         shutil.rmtree(self.out, ignore_errors=True)
         self.out.mkdir(parents=True)
-        stamp = datetime.now().strftime("%H%M%S")
         self.proj = Path(os.path.expanduser(f"~/journeys/{args.label}-{stamp}"))
         self.xdg = Path(f"/tmp/journey-xdg-{args.label}")
         self.app = None
@@ -108,6 +113,9 @@ class Journey:
 
     def score(self, step: str, expected: str, ok: bool, observed: str, t0: float) -> bool:
         self.n += 1
+        # The rig's pulse at every step: a display that has stopped
+        # answering ends the run as a named failure, not a quiet pass.
+        display_pulse(DISPLAY)
         still = self.still(step)
         row = {
             "run": self.run, "label": self.label, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -120,7 +128,7 @@ class Journey:
 
     def still(self, name: str) -> str:
         path = self.out / f"{self.n:02d}-{name}.png"
-        subprocess.run(["scrot", "-o", str(path)], env=ENV, check=False)
+        display_still(path, DISPLAY)
         return str(path)
 
     # -- helpers ------------------------------------------------------------
@@ -225,6 +233,16 @@ class Journey:
                 self.j10b_notification_away()
                 self.j11_close_reopen()
                 self.j12_after_reopen()
+        except DisplayHung as err:
+            log(f"DISPLAY HUNG — run aborted: {err}")
+            self.rows.append({
+                "run": self.run, "label": self.label, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "step": "R00-display-hung", "expected": "the X display answers within 8 s", "observed": str(err)[:400],
+                "result": "fail", "secs": 0, "still": "",
+            })
+            # The app is blocked on the same display; do not wait on it.
+            subprocess.run(["pkill", "-x", "arbos-desktop"], check=False)
+            self.app = None
         finally:
             try:
                 if self.app:

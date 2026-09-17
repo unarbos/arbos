@@ -561,6 +561,12 @@ pub struct ChatSession {
     /// keyed on it lies; this is keyed on what the person cares about —
     /// whether the kernel is answering.
     pub last_frame_at: Instant,
+    /// When the turn last made progress the person could see: a token, a
+    /// tool row, a step, a line of a running command's output (`job`
+    /// frames count — Jacob's Mac read "Nothing has arrived in 2m 26s …
+    /// check the model key" while `bubble_sort.py` was running and the key
+    /// was fine). Not a probe's answer, not `Alive`. The stall hint's clock.
+    pub progress_at: Instant,
     /// When the last liveness probe (`list`) went out, so one goes per
     /// quiet window rather than every frame.
     probe_at: Cell<Option<Instant>>,
@@ -707,6 +713,7 @@ impl ChatSession {
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
             last_frame_at: Instant::now(),
+            progress_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             awaiting_echo: VecDeque::new(),
@@ -797,6 +804,7 @@ impl ChatSession {
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
             last_frame_at: Instant::now(),
+            progress_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             awaiting_echo: VecDeque::new(),
@@ -887,6 +895,7 @@ impl ChatSession {
             step_items: HashMap::new(),
             step_thoughts: HashMap::new(),
             last_frame_at: Instant::now(),
+            progress_at: Instant::now(),
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             awaiting_echo: VecDeque::new(),
@@ -1179,6 +1188,37 @@ impl ChatSession {
                     ..
                 }
             )
+        })
+    }
+
+    /// How long since the turn last made visible progress (see
+    /// [`Self::progress_at`]).
+    pub fn quiet_for(&self) -> Duration {
+        self.progress_at.elapsed()
+    }
+
+    /// A running command printed something: progress, even though the
+    /// `job` frame is drawn by the process row and never reaches `apply`.
+    pub fn mark_progress(&mut self) {
+        self.progress_at = Instant::now();
+    }
+
+    /// The command the turn is waiting on, if the last thing the turn did
+    /// was start one that has not returned: the stall hint names it rather
+    /// than blaming the model key.
+    pub fn running_command(&self) -> Option<&str> {
+        let start = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, ChatItem::User(_)))
+            .unwrap_or(0);
+        self.items[start..].iter().rev().find_map(|item| match item {
+            ChatItem::Tool {
+                label,
+                status: ToolStatus::Running,
+                ..
+            } => Some(label.as_str()),
+            _ => None,
         })
     }
 
@@ -1538,6 +1578,31 @@ impl ChatSession {
 /// A tool's title as a step: "Reading main.py", "Running python3 main.py",
 /// "Searching for foo" — the verb Cursor's status lines use, from the tool
 /// name the label starts with.
+/// The kernel's notice for a line typed again while its first copy still
+/// waits (#362): `Already queued: "run it" waits for the running step …`.
+pub fn is_already_queued(text: &str) -> bool {
+    text.trim_start().starts_with("Already queued:")
+}
+
+/// The command a running tool row holds, short enough for one line of the
+/// stall hint: "cd iota && python3 bubble_sort.py"; a tool that is not a
+/// shell is "The running step".
+pub fn command_short(label: &str) -> String {
+    let label = label.trim();
+    let (name, rest) = label.split_once(' ').unwrap_or((label, ""));
+    let rest = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !matches!(name, "bash" | "terminal" | "run" | "exec") || rest.is_empty() {
+        return "The running step".to_string();
+    }
+    const MAX: usize = 48;
+    if rest.chars().count() > MAX {
+        let short: String = rest.chars().take(MAX - 1).collect();
+        format!("{}…", short.trim_end())
+    } else {
+        rest
+    }
+}
+
 fn step_label(label: &str) -> String {
     let label = label.trim();
     let (name, rest) = label.split_once(' ').unwrap_or((label, ""));
@@ -1775,11 +1840,42 @@ impl ChatSession {
             self.flush();
             return;
         }
+        // The same words again while the first copy still waits to be
+        // read — "run it" four times into a silent turn (Jacob's Mac,
+        // 09-16). One bubble: the kernel files the line once and answers
+        // the repeat with an "Already queued" notice, which lands under
+        // that bubble (#362).
+        if self.repeats_waiting_steer(&content.text) {
+            self.updated = SystemTime::now();
+            self.flush();
+            return;
+        }
         let mut message = content.message();
         message.steer = true;
         self.items.push(ChatItem::User(message));
         self.updated = SystemTime::now();
         self.flush();
+    }
+
+    /// Whether `text` is the words of the newest steer card, and nothing
+    /// but the kernel's "Already queued" notices has landed since — the
+    /// steer has not been read yet, so a second card would be a repeat.
+    fn repeats_waiting_steer(&self, text: &str) -> bool {
+        let squash = |s: &str| s.split_whitespace().collect::<String>();
+        let wanted = squash(text);
+        if wanted.is_empty() {
+            return false;
+        }
+        for item in self.items.iter().rev() {
+            match item {
+                ChatItem::Notice { text, .. } if is_already_queued(text) => continue,
+                ChatItem::User(message) if message.steer => {
+                    return squash(&message.text) == wanted;
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn prompt(&mut self, content: Prompt) {
@@ -2549,6 +2645,9 @@ impl ChatSession {
     fn apply(&mut self, event: Event) {
         self.updated = SystemTime::now();
         self.last_frame_at = Instant::now();
+        if !matches!(event, Event::Alive) {
+            self.progress_at = Instant::now();
+        }
         match event {
             Event::Alive => {}
             Event::History(replay) => {
@@ -2929,7 +3028,14 @@ impl ChatSession {
                 self.flush();
             }
             Event::Aside(text) => {
-                self.notice(false, &text);
+                // The kernel says the repeated line was already queued
+                // (#362): once under the bubble is the answer; the third
+                // and fourth "run it" do not stack notices either.
+                let repeat = is_already_queued(&text)
+                    && matches!(self.items.last(), Some(ChatItem::Notice { text: last, .. }) if *last == text);
+                if !repeat {
+                    self.notice(false, &text);
+                }
                 self.flush();
             }
             Event::Nudge(text) => {

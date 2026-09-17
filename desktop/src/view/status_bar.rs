@@ -50,8 +50,9 @@ impl Arbos {
             .w_full()
             .h(px(HEIGHT))
             .px(px(PAD_X))
-            .border_t_1()
-            .border_color(theme.border)
+            // No tray behind it and no rule over it: the gear and the
+            // version float on the chat's surface, legible by their own
+            // muted tone and the spacing above (Jacob, 09-16).
             .bg(crate::view::root::chrome_bg(&theme))
             .flex()
             .flex_row()

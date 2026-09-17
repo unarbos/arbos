@@ -117,11 +117,9 @@ fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField
     })
 }
 
-/// How thick each column's material sits. Nothing paints beneath them, so these
-/// are absolute and independent: the tab bar and the panel are chrome and hold
-/// no long-form text, the chat is the column whose text has to win against
-/// the desktop.
-const CHROME_MATERIAL: Material = Material::Thick;
+/// How thick the window's one material sits. Nothing paints beneath it, so
+/// this is absolute: thick enough for the chat's text to win against the
+/// desktop, and the chrome takes the same so the strips are not bands.
 const CONTENT_MATERIAL: Material = Material::UltraThick;
 
 /// The header strip's height, measured off `../desktop`: between Cursor's 34
@@ -174,12 +172,15 @@ pub(crate) const COMPOSER_HIT: f32 = 28.;
 /// How far the floating composer stands off the column's bottom edge.
 pub(crate) const COMPOSER_BOTTOM: f32 = 12.;
 
-/// The chrome's fill — the tab bar and the panel. Opaque, it takes the
-/// chrome tone: the light palette's `surface` is the grey the content
-/// plane's white sits inside, and falling back to the panel would leave
-/// the columns one flat sheet.
+/// The chrome's fill — the tab bar, the bar under the window, the panel,
+/// and on macOS the title band. One surface with the content: Jacob, from
+/// his Mac (09-16), "the top bar and the bottom bar can't be seen as a
+/// separation" — Cursor's strips are the chat's own background with the
+/// controls floating in it, no tray, no edge; the separation is spacing.
+/// (Before this the chrome took the thinner material and, without
+/// vibrancy, the light palette's `surface` grey around the content's white.)
 pub(crate) fn chrome_bg(theme: &Theme) -> Hsla {
-    material(theme, CHROME_MATERIAL).unwrap_or(theme.surface)
+    content_bg(theme)
 }
 
 /// The content column's fill.

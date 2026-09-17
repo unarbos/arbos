@@ -103,9 +103,9 @@ impl Arbos {
             .flex_none()
             .h(px(root::HEADER_HEIGHT))
             .w_full()
+            // No rule under it: the strip is the chat's own surface and the
+            // tabs float in it, as Cursor's do (Jacob, 09-16).
             .bg(root::chrome_bg(&theme))
-            .border_b_1()
-            .border_color(theme.border)
             .flex()
             .flex_row()
             .items_center()

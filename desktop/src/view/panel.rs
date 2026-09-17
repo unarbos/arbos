@@ -1154,8 +1154,6 @@ impl Arbos {
             .flex_none()
             .h(px(40.))
             .px(px(PAD_X))
-            .border_t_1()
-            .border_color(theme.border)
             .flex()
             .flex_row()
             .items_center()
