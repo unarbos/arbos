@@ -208,7 +208,9 @@ impl Default for State {
     }
 }
 
-fn path() -> Option<PathBuf> {
+/// `~/.config/arbos-desktop/state.toml`. `None` where there is no directory to
+/// put it in, which is also the only case where nothing is remembered.
+pub fn path() -> Option<PathBuf> {
     settings::dir().ok().map(|dir| dir.join("state.toml"))
 }
 

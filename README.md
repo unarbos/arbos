@@ -38,10 +38,10 @@ arbos-desktop
 
 `cargo build --release -p arbos-kernel` and `cd desktop && cargo build --release` build without installing. On macOS, `cd desktop && make bundle` produces `Arbos.app` and `make dmg` the disk image (ad-hoc signed unless `.env.release` names a certificate).
 
-Linux packages for the desktop (Debian/Ubuntu names):
+Linux packages for the desktop (Debian/Ubuntu names; `build-essential` is what a stock machine lacks — `g++` owns the `libstdc++.so` the link step needs). The why of each, and the `-lstdc++` failure a fresh Ubuntu 24.04 hits, are in [`desktop/BUILDING.md`](desktop/BUILDING.md):
 
 ```bash
-sudo apt install pkg-config clang cmake libssl-dev libasound2-dev libxkbcommon-dev \
+sudo apt install build-essential pkg-config clang cmake libssl-dev libasound2-dev libxkbcommon-dev \
   libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev libxcb1-dev \
   libfontconfig1-dev libfreetype6-dev libvulkan-dev libgl1-mesa-dev libegl1-mesa-dev \
   libudev-dev libdbus-1-dev

@@ -8,12 +8,12 @@
 
 use crate::{
     model::{watch, workspace::Resident},
-    view::settings::{self, SettingsPane},
+    view::settings::{self, Line, SettingsPane},
 };
 use bezel::{
     gpui::{AnyElement, Context, div, prelude::*, px},
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{Controls, Scaffolding},
+    ui::widgets::Controls,
 };
 
 /// The watch delays the row offers, named for what they buy rather than for
@@ -27,14 +27,12 @@ const BOUNCES: [(u64, &str); 3] = [
 
 impl SettingsPane {
     pub(super) fn performance_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
         div()
             .flex()
             .flex_col()
             .gap(px(settings::GROUP_GAP))
             .child(
-                theme
-                    .group_box()
+                settings::rows()
                     .child(self.meter_row(cx))
                     .child(self.watch_bounce_row(cx)),
             )
@@ -45,23 +43,12 @@ impl SettingsPane {
     fn meter_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let on = self.workspace.read(cx).meter;
-        theme
-            .card_row(true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("Frame meter"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child("What this window draws while you use it."),
-                    ),
-            )
+        settings::row(true, &theme)
+            .child(settings::label_block(
+                "Frame meter",
+                vec![Line::say("What this window draws while you use it.")],
+                &theme,
+            ))
             .child(
                 div()
                     .id("meter")
@@ -90,23 +77,12 @@ impl SettingsPane {
         // of the range are enforced on the way out of it, and a row reporting
         // the number it was given would be reporting one nothing honours.
         let ms = watch::bounce(self.workspace.read(cx).settings.watch_bounce).as_millis();
-        theme
-            .card_row(false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("Watch delay"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child(format!("Re-read after {ms} ms of quiet.")),
-                    ),
-            )
+        settings::row(false, &theme)
+            .child(settings::label_block(
+                "Watch delay",
+                vec![Line::say(format!("Re-read after {ms} ms of quiet."))],
+                &theme,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -154,14 +130,9 @@ impl SettingsPane {
             items,
             ..
         } = self.workspace.read(cx).resident(cx);
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(settings::LABEL_GAP))
-            .child(theme.field_label("Resident"))
+        settings::group("Resident", &theme)
             .child(
-                theme
-                    .group_box()
+                settings::rows()
                     .child(self.stat_row(
                         true,
                         "Projects",
@@ -189,23 +160,8 @@ impl SettingsPane {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
-        theme
-            .card_row(first)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title(title))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child(note),
-                    ),
-            )
+        settings::row(first, &theme)
+            .child(settings::label_block(title, vec![Line::say(note)], &theme))
             .child(
                 div()
                     .flex_none()

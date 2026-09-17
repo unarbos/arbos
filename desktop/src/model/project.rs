@@ -6,6 +6,7 @@
 
 use crate::{
     data::{Data, Page, Table},
+    kernel::KernelBuild,
     model::{
         article::Article,
         board::Board,
@@ -265,6 +266,22 @@ impl Project {
 
     pub fn active_session(&self) -> Option<&ChatSession> {
         self.focus.and_then(|focus| self.session(focus.agent))
+    }
+
+    /// Which kernel this place is being served by, as that kernel described
+    /// itself on the socket. `None` means nothing is attached — an answer, and
+    /// not the same as a kernel that did not say which build it is, which comes
+    /// back as a [`KernelBuild`] with no commit in it.
+    ///
+    /// Every session of a place shares its kernel, so the first live one
+    /// answers for all of them. Asking the connection is the whole point: the
+    /// binary the app would launch is a different fact and cannot see a kernel
+    /// that was already running.
+    pub fn kernel_build(&self) -> Option<&KernelBuild> {
+        self.sessions
+            .iter()
+            .filter(|chat| chat.live())
+            .find_map(|chat| chat.kernel_build.as_ref())
     }
 
     pub fn focused_agent(&self) -> Option<u64> {

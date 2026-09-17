@@ -117,12 +117,10 @@ impl PtyHub {
             PtyPage {
                 writer: Mutex::new(writer),
                 pid,
-                // #461 carries who asked beside the owner; #468 keeps both on
-                // the page so `surfaces` can report them. The tuple is
-                // (owner, by), and an absent one is a page with no owner
-                // recorded rather than a page owned by nobody in particular.
+                // #461 carries (owner, by) together; #468 records both on
+                // the page so `surfaces` can report who asked.
                 owner: owner.map(|(o, _)| o.to_string()).unwrap_or_default(),
-                by: owner.map(|(_, by)| by.to_string()).unwrap_or_default(),
+                by: owner.map(|(_, b)| b.to_string()).unwrap_or_default(),
                 cwd: cwd.to_path_buf(),
                 started_ms: arbos_core::now_ms(),
             },
