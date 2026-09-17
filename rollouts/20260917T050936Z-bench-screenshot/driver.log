@@ -1,0 +1,6 @@
+1789621776462 kernel started pid 1270278
+1789622382381 timeout waiting for turn root idle after 240s
+1789622383672 BREAK turn-never-ended: turn never reached idle
+1789622488377 BREAK wrong-output: no screenshot image produced; browser errors: []
+1789622488444 kernel stopped with code 0
+1789622488512 bugs: new d7368198d9.md, seen 00c922a645.md

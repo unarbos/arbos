@@ -1,0 +1,38 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-_6blll7k/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8138 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-_6blll7k/home/.cache/arbos/tgrep/3110ea4bf1dc865f
+tools fix-hello-py: 4 calls, wall 3ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 3 calls, wall 276ms, sum 272ms, speedup 1.0x
+tools fix-hello-py: 3 calls, wall 26ms, sum 23ms, speedup 0.9x
+tools fix-hello-py: 3 calls, wall 276ms, sum 272ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 9ms, sum 4ms, speedup 0.4x
+snapshot_failed: git add: warning: could not open directory 'agents/fix-hello-py/jobs/j13/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j8/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j19/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j15/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j4/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j20/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j26/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j7/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j9/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j28/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j10/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j22/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j17/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j6/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j21/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j18/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j2/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j25/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j5/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j3/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j16/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/jobs/j11/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/turns/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/inflight/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/inbox/': No such file or directory
+warning: could not open directory 'agents/fix-hello-py/pages/': No such file or directory
+fatal: unable to stat 'agents/fix-hello-py/jobs/j1/exit': No such file or directory

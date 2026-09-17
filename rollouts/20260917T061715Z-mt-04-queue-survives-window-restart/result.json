@@ -1,0 +1,23 @@
+{
+  "scenario": "mt-04-queue-survives-window-restart",
+  "doc": "Item 4. A follow-up typed during a turn survives quitting and relaunching the desktop: it runs when the turn ends.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-04-queue-lost-on-restart",
+      "detail": "the follow-up typed during the turn never reached the transcript after quit + relaunch",
+      "where": "desktop queue must be an inbox file, not window memory"
+    }
+  ],
+  "notes": {
+    "inbox_before_quit": []
+  },
+  "duration_s": 164.8,
+  "place": "/tmp/arbos-qa-mt-04-queue-survives-window-restart-9l47xt95/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T061715Z-mt-04-queue-survives-window-restart",
+  "branch": "main",
+  "usd": 0.01106
+}
