@@ -803,6 +803,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
+                arbos_engine::kernel_is_stopping();
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
                 end_jobs_for_stop(&place);
@@ -811,6 +812,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
+                arbos_engine::kernel_is_stopping();
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
                 end_jobs_for_stop(&place);

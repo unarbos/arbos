@@ -23,9 +23,32 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 use tokio::process::{Child, Command};
+
+/// Set once the kernel has been asked to stop, before it ends its turns.
+/// From then on every job the kernel ends — through a turn's interrupted
+/// `bash` as much as through the final sweep — says it was the stop that
+/// ended it. Without this the sweep found nothing left to end (the turn
+/// stop had already taken the job) and the folder kept the generic
+/// wording, or not, depending on which path won the race.
+static KERNEL_STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// The kernel is stopping: jobs ended from here on are ended by the stop.
+pub fn kernel_is_stopping() {
+    KERNEL_STOPPING.store(true, Ordering::SeqCst);
+}
+
+/// What a `killed` marker says for a job the kernel ends right now.
+pub fn killed_wording() -> &'static str {
+    if KERNEL_STOPPING.load(Ordering::SeqCst) {
+        "killed: the kernel was stopped and ended its jobs with it\n"
+    } else {
+        "killed by the kernel\n"
+    }
+}
 
 /// The author a commit gets when the machine has none: workers on a
 /// fresh machine reported "the author identity (user.name / user.email)
@@ -398,7 +421,7 @@ impl JobsRoot {
         // Said before the signal, so a reader that comes between never
         // sees "no exit recorded" (qa-024).
         let marker = job.dir.join("killed");
-        let _ = fs::write(&marker, "killed by the kernel\n");
+        let _ = fs::write(&marker, killed_wording());
         if let Err(e) = crate::tools::kill_job(job.meta.pid) {
             // The claim is withdrawn: a job the kernel could not signal is
             // still running, and must read as such.
