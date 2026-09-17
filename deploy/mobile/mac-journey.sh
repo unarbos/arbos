@@ -21,6 +21,12 @@ wait_hist() { local s=$1 re=$2 secs=$3 t=0; while [ $t -lt $secs ]; do if hist |
 type_send() { idb ui tap 200 788 --udid $U; sleep 0.8; idb ui text "$1" --udid $U; sleep 0.3; idb ui key 40 --udid $U; }
 rd() { python3 ~/kernel.py $TARGET read "$1" 2>/dev/null; }
 echo "run $RUN id $ID target $TARGET dir $DIR" | tee $O/run.txt
+# Which kernel this run is measured against. Asked of the kernel on the
+# attach socket, not of the hub: the roster's git_sha is whichever process
+# registered last and has named a current build for a node that had been
+# running a deleted binary for two days.
+python3 ~/kernel.py $TARGET hello > $O/kernel-version.txt 2>&1 || echo "no hello" > $O/kernel-version.txt
+echo "kernel $(head -1 $O/kernel-version.txt)" | tee -a $O/run.txt
 
 # J1 — open the project from the list (the phone's "create": the project lives on a machine's kernel)
 xcrun simctl terminate $U $B 2>/dev/null; sleep 1
@@ -123,4 +129,9 @@ xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -hubURL "$H" -h
 Y=$(python3 ~/find_row.py $O/J6k-list.png $ROW); [ "$Y" = "0" ] && Y=234; idb ui tap 120 $Y --udid $U; sleep 6; shot J6k-reopened
 score J6k EYE "reopened chat ends where it ended; no pending cards"
 python3 ~/kernel.py $TARGET history 150 > $O/transcript-tail.txt 2>/dev/null
+# Again, now the run is over: a kernel replaced under a run has happened
+# here, and a run that measured two builds must say so rather than pick one.
+python3 ~/kernel.py $TARGET hello > $O/kernel-version-end.txt 2>&1 || true
 echo "--- score"; cat $O/score.txt
+echo "--- kernel"; head -1 $O/kernel-version.txt
+python3 ~/journey-record.py "$O" "$TARGET" "${APP_BUILD:-main@unknown}" "${RUN_NOTES:-}"

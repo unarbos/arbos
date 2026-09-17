@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""kernel.py <target> history [n] | read <path> | frames <secs>
+"""kernel.py <target> history [n] | read <path> | frames <secs> | hello
          | feedback <agent> [seq=N|call=ID] [tail=N] [note...]
 target: "pod" (the direct kernel in Secrets.plist) or "<machine>/<project>" through the hub.
+hello: the kernel's own `--version` line, read off this very socket. Use it,
+never the hub's `/list`: the roster keeps one row per machine and takes
+git_sha from whichever process registered last, so it can name a build the
+process you are talking to is not running. The hub relays a kernel's hello
+frame verbatim, so this is the kernel's own word.
 feedback: asks the kernel for the bundle of the exchange holding seq/call
 (or the last one); the root agent is named "root" here (history aliases
 "main", feedback does not). Writes it to ~/mobile-bundles/<utc>-<target>-<agent>.json
@@ -83,6 +88,29 @@ elif cmd == "feedback":
         if t == "error": print("ERROR", f.get("detail")); sys.exit(2)
     else:
         print("no feedback_bundle within 30 s"); sys.exit(3)
+elif cmd == "hello":
+    # The kernel sends `hello` unprompted on connect. Print the same shape
+    # `arbos-kernel --version` prints, so a verdict can be compared with a
+    # commit, plus built_at because semver moves rarely.
+    for f in frames(15):
+        if f.get("type") != "hello": continue
+        line = f"arbos-kernel {f.get('kernel','?')} {f.get('git_sha') or 'unknown'} protocol {f.get('protocol','?')}"
+        if f.get("binary_gone"): line += " BINARY-GONE"
+        print(line)
+        print(json.dumps({
+            "version_line": line,
+            "kernel": f.get("kernel"), "git_sha": f.get("git_sha") or None,
+            "built_at": f.get("built_at") or None, "protocol": f.get("protocol"),
+            # #385: the kernel's own word that the file it started from is
+            # gone. It serves happily in that state and refuses every spawn
+            # (JB-6), so a run scored against it is measuring a ghost.
+            "binary_gone": bool(f.get("binary_gone")),
+            "target": target, "asked": "attach socket (not the hub roster)",
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }))
+        break
+    else:
+        print("no hello frame within 15 s"); sys.exit(3)
 elif cmd == "frames":
     kinds = {}
     for f in frames(int(sys.argv[3])):
