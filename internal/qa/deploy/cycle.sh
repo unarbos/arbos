@@ -303,6 +303,29 @@ else:
     else:
         print(f"-- store views agree across {len(fresh)} machines: {', '.join(sorted(fresh))} ({'whole' if whole else 'all broken'})")
 PY
+# The second readers' verdicts (store-watch branch, one file per client): a FAULT from any client in the last
+# 40 minutes is an alarm here, and two clients disagreeing is the per-session shape named in the fault report.
+git -C "$ROOT/repo" fetch -q origin "+refs/heads/store-watch:refs/remotes/origin/store-watch" 2>/dev/null || true
+python3 - "$ROOT/repo" <<'PY' || true
+import json, subprocess, sys, time
+repo = sys.argv[1]
+def git(*a): return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True).stdout
+files = [l for l in git("ls-tree", "-r", "--name-only", "origin/store-watch").splitlines() if l.startswith("readers/") and l.endswith(".jsonl")]
+now = time.time(); latest = {}
+for f in files:
+    rows = [json.loads(l) for l in git("show", f"origin/store-watch:{f}").splitlines() if l.strip()]
+    if rows: latest[rows[-1].get("client", f)] = rows[-1]
+def age(r):
+    try: return now - (time.mktime(time.strptime(r["ts"], "%Y-%m-%dT%H:%M:%SZ")) - time.timezone)
+    except Exception: return 1e9
+fresh = {c: r for c, r in latest.items() if age(r) < 2400}
+faults = {c: r for c, r in fresh.items() if r.get("verdict") == "FAULT"}
+if faults:
+    print("!! STORE SECOND READER FAULT: " + "; ".join(f"{c} at {r['ts']}: {r.get('reason','')[:100]}" for c, r in faults.items()))
+    if len(fresh) > len(faults):
+        print("!! STORE VIEWS DISAGREE (per-session shape): " + ", ".join(f"{c}={r.get('verdict')}" for c, r in sorted(fresh.items())))
+print(f"-- store second readers ({len(fresh)} fresh of {len(latest)}): " + ", ".join(f"{c}={r.get('verdict')}@{r['ts'][11:16]}" for c, r in sorted(fresh.items())) + ("" if len(fresh) >= 2 else " — a second machine's view is needed to see a per-client fault"))
+PY
 # Everything the runners shouted (!! SKIPPED / BUDGET BOUND / MODULE MISSING / HEADLINE NOT RUN) in one
 # block at the end, so a cycle that measured less than it claims cannot look green in the log's tail.
 if grep -q '^!!' "$LOG" 2>/dev/null; then
