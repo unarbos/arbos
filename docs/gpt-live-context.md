@@ -72,10 +72,11 @@ Where the model's knowledge of place comes from, in order: the instructions brie
 
 For the desktop and the phone. The gateway already sends every frame needed.
 
-1. Draw the caller's spoken line from `transcript.final` and Arbos's spoken line from the accumulated `response.transcript` up to `response.done`. Mark them as voice. **Display only. Never send those words to the kernel.** The gateway already did, if they needed the kernel. `response.started`/`response.done` carry `speaker: "narrator"` for the narrator's own lines (already in the chat via `narrator.say`); GPT Live's words carry no `speaker` and are the ones to write as voice rows.
+1. Draw the caller's spoken line from `transcript.final` and Arbos's spoken line from the accumulated `response.transcript` up to `response.done`. Mark them as voice. **Display only. Never send those words to the kernel.** The gateway already did, if they needed the kernel. `response.started`/`response.done` carry `speaker: "narrator"` for the narrator's own lines (already in the chat via `narrator.say`); GPT Live's words carry no `speaker` and are the ones to write as voice rows. Short Live replies ("hey") are drawn. The narrator's bare "On it." is not (`narrator.say/ack`).
 2. The kernel's own `user` event with `channel: "voice"` for the same words is the same line. Show one row, not two.
 3. Small talk ("hey" → "hey") never reaches the kernel, so it exists only as voice rows. That is correct: the kernel was not woken for it.
 4. A typed line in the composer during a call goes to the kernel as usual (`channel: text`; steer if a turn runs). The gateway learns of it from the kernel's event and passes it to GPT Live as quiet context; do not also send it to the gateway.
+5. Those rows go only in the chat of the project the call is attached to (that project's main chat). Home and other projects do not get them.
 
 ## What Jacob must do for the Mac
 
