@@ -36,6 +36,11 @@ BUGS = QA_DIR / "bugs"
 SCENARIOS_DIR = QA_DIR / "scenarios"
 INBOX = QA_DIR / "inbox"
 STAGING = os.environ.get("ARBOS_QA_STAGING", "/tmp/arbos-qa-rollouts")
+# Neither the harness's git calls nor the kernels under test may depend on this host's global git config
+# (2026-09-17: the host's ~/.gitconfig signs commits with a helper under ~/.cursor/bin; the helper was
+# deleted, every `git commit` on the VM failed, and every scenario that needs a HEAD silently had none).
+os.environ["GIT_CONFIG_GLOBAL"] = "/dev/null"
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 # --integration: the kernel under test carries every feature branch, so no
 # inbox scenario is gated. Set from the command line.
 INTEGRATION = False

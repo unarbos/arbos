@@ -55,6 +55,8 @@ echo "== cycle start $(date -u +%FT%TZ) root=$ROOT budget=\$$BUDGET_USD"
 
 # Secrets: two values, 0600, never echoed.
 set -a; . "$ROOT/secrets.env"; set +a
+# The loop never depends on this host's global git config (signing helpers, aliases, fsmonitor).
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 if [ -z "${ARBOS_QA_SYSTEM_TOOLCHAIN:-}" ]; then
   export RUSTUP_HOME="$ROOT/toolchain/rustup" CARGO_HOME="$ROOT/toolchain/cargo"
   # No system C compiler on ArbosLife: zig (user-space tarball) is cc, ar and

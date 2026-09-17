@@ -92,6 +92,15 @@ Rules from it, now enforced:
 - **A restore is safe only when you can name why no newer version can exist** — your own unedited copy, of a file nothing else writes. A mirror copied over a live tree is not that: our 07:01 restore wrote 06:41 versions over the phone loop's newer files (M-141) and could not bring back a file newer than the mirror (M-142). Restores stay staged-only; a restore of a *missing* file from the mirror is allowed and announced; an *existing* file is never overwritten.
 - **The mirror never accepts a smaller tree without a reason.** A directory on the tip that does not list here refuses the pass; any fall in file count refuses it unless `MIRROR_ALLOW_SHRINK='<reason>'`. The old one-tenth allowance accepted a 454-for-492 view.
 
+## Rewind and undo: the general property is asserted (2026-09-17 09:30) — evidenced (`rw-08`, `rw-09`, every `rw-*`)
+
+After #419 (the seventh destructive bug around `restore()`), every rewind the `rw-*` scenarios send records the working tree, HEAD and index before, and if the restore reports an error, requires them unchanged after (`<name>-failed-restore-changed-the-tree`). `rw-08` forces the failure #419 names (the work-tree object made unreadable) and `rw-09` a `clean` that cannot remove a folder. Result: #419's two claims hold against a `main` control; the property does not — `reset --hard` still runs before `read-tree` can fail, so a failed restore moves HEAD and drops the person's later commits from the tree (`qal-j16`). The eighth was found by the property, not by reading.
+
+Two measurement rules from the same hour:
+
+- **A fix and its control never share a `CARGO_TARGET_DIR`.** Two worktrees built into one target directory gave a `main`-labelled binary with the PR's code (cargo reused the artifacts); `strings <binary> | grep <a string only the PR has>` is the check.
+- **Neither the harness nor a kernel under test reads this host's global git config.** `run.py` and `cycle.sh` set `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1`. The host's `~/.gitconfig` signs commits with a helper under `~/.cursor/bin`; after the 08:13 wipe took `~/.cursor`, every `git commit` on the VM failed and every scenario that needs a HEAD silently had none — a scenario passing or failing on the host's dotfiles is not measuring the kernel.
+
 ## Phases (each shippable) — evidenced (recovered fragment)
 
 1. **Done this turn**: runner, checker, 11 scenarios (8 no-model, 3 model incl. headline), 12 rollouts, 7 bug files (`internal/qa/bugs/qa-001` to `qa-007`), first fix PR with a repo test ([#7](https://github.com/unarbos/arbos/pull/7), `qa-001`). Headline scored 6/12 (items 1, 2, 6, 7, 10, 11 pass; `internal/qa/kickoff-history.jsonl`). Runs on demand on any machine with the kernel built: `python3 internal/qa/run.py --kernel <arbos-kernel> [--with-model]`.

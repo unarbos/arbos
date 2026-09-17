@@ -780,6 +780,34 @@ def register(scenario, registry, transcript, now_ms, branch):
     # ── rewind keeps the history (the standing_pass_e2e lead) ──────────────
     import threading
 
+    # ── the general property: a rewind that fails leaves the tree where it was ──────────
+    def tree_state(place):
+        """Every file outside .arbos/ and .git/ with its bytes, plus HEAD and the index: what the person has."""
+        files = {}
+        for p_ in sorted(place.rglob("*")):
+            rel = p_.relative_to(place)
+            if rel.parts and rel.parts[0] in (".arbos", ".git"):
+                continue
+            if p_.is_file():
+                files[str(rel)] = p_.read_bytes()
+        git_ = lambda *a: subprocess.run(["git", *a], cwd=place, capture_output=True, text=True).stdout.strip()
+        return {"files": files, "head": git_("rev-parse", "HEAD"), "index": git_("ls-files", "-s")}
+
+    def tree_diff(before, after):
+        out = []
+        for f in sorted(set(before["files"]) | set(after["files"])):
+            if f not in after["files"]:
+                out.append(f"{f}: GONE")
+            elif f not in before["files"]:
+                out.append(f"{f}: NEW")
+            elif before["files"][f] != after["files"][f]:
+                out.append(f"{f}: CHANGED ({before['files'][f][:40]!r} -> {after['files'][f][:40]!r})")
+        if before["head"] != after["head"]:
+            out.append(f"HEAD: {before['head'][:10]} -> {after['head'][:10]}")
+        if before["index"] != after["index"]:
+            out.append("index: changed")
+        return out
+
     def rewind_round(cx, k, c, keep_texts, rewind_turn, sample_s=8.0):
         """Send one rewind with files: true, sample the transcript file every 50 ms for sample_s, and return what
         a person could have seen: the lowest line count observed, any read that came back empty, the settled
@@ -802,6 +830,7 @@ def register(scenario, registry, transcript, now_ms, branch):
 
         th = threading.Thread(target=sampler, daemon=True)
         before_n = sum(1 for l in tr.read_text(errors="replace").splitlines() if l.strip())
+        tree_before = tree_state(cx.place)
         th.start()
         t0 = time.time()
         c.send({"type": "rewind", "agent": "root", "turn": rewind_turn, "files": True})
@@ -824,7 +853,11 @@ def register(scenario, registry, transcript, now_ms, branch):
         texts = [e.get("text", "") for e in evs if e.get("kind") in ("user", "assistant")]
         missing = [t for t in keep_texts if t not in texts]
         nums = [n for _, n, _ in samples if n >= 0]
+        failed = bool(follow) and follow.get("type") == "error"
         return {
+            # The general property (2026-09-17, after #419): a restore that failed must leave the tree as it was.
+            "restore_failed": failed,
+            "tree_changed_by_failed_restore": tree_diff(tree_before, tree_state(cx.place)) if failed else [],
             "before_lines": before_n,
             "after_lines": len(evs),
             "rewound_ms": round((first.get("_at", time.time()) - t0) * 1000) if first else None,
@@ -911,6 +944,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                     cx.rec.expect(r["empty_reads"] == 0 and r["missing_reads"] == 0, f"{name}-history-briefly-gone", f"round {i}: the transcript read empty {r['empty_reads']} time(s) / missing {r['missing_reads']} time(s) during the rewind ({r['samples']} reads at 50 ms) — what a person sees as their history vanishing, even if it comes back")
                     cx.rec.expect(r["settled_on_turn_complete"], f"{name}-not-settled", f"round {i}: the transcript did not end on turn_complete within 10 s of the rewind (ends with {r['ends_with']})")
                     cx.rec.expect(r["restore_reported"] == "rewound", f"{name}-restore-not-reported", f"round {i}: the file restore reported {r['restore_reported']} {r['restore_error'] or ''}")
+                    cx.rec.expect(not r["tree_changed_by_failed_restore"], f"{name}-failed-restore-changed-the-tree", f"round {i}: the restore failed ({r['restore_error']}) and the tree is not where it was: " + "; ".join(r["tree_changed_by_failed_restore"]), "arbos-engine tools::git restore — destroy-before-deliver")
                 cx.rec.expect(len(window_has) == 4, f"{name}-window-missing-history", f"a fresh window's history lacks {sorted(set(('one', 'first', 'two', 'second')) - set(window_has))}")
                 cx.rec.expect(rounds and rounds[0]["files_after"] == ["f1.txt", "f2.txt"], f"{name}-files-not-restored", f"after rewinding to turn 3 the files are {rounds[0]['files_after'] if rounds else None}, expected f1, f2")
             finally:
@@ -924,6 +958,143 @@ def register(scenario, registry, transcript, now_ms, branch):
     rw_scenario("rw-01-rewind-with-files-keeps-the-history", "Rewind with files: true, no load: the turns before the rewind point stay on the transcript, the file every 50 ms never reads empty, the restore reports, and a fresh window's history shows them.", "none")
     rw_scenario("rw-02-rewind-with-files-keeps-the-history-pinned", "The same rewind with the kernel pinned to one core beside four spinners — the shape in which standing_pass_e2e read the transcript as empty.", "pinned")
     rw_scenario("rw-03-rewind-with-files-keeps-the-history-under-churn", "The same rewind under disk churn (200 MB fsync loops) and a spinner per core.", "churn")
+    @reg("rw-08-failed-restore-leaves-the-tree-where-it-was", tags=("rewind", "destructive-order"))
+    def rw08(cx):
+        """#419's property, probed past its happy path: the checkpoint's work-tree object is made unreadable (one
+        loose object removed, a corrupt repository), then rewind with files: true. `git read-tree` fails. The person
+        must be told the restore failed, and must still have exactly what they had: the later turn's files, their
+        own uncommitted edit, their own untracked note, and HEAD where it was. Anything else is a restore that
+        destroyed before it delivered."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["config", "gc.auto", "0"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        replies = []
+        for i, word in enumerate(("first", "second", "third"), 1):
+            replies.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {word} > f{i}.txt", "description": f"write f{i}"}}]})
+            replies.append({"agent": "root", "content": word})
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        # Every git the kernel runs, with its cwd, exit code and output: the evidence for what a restore did.
+        shim = cx.scratch / "git-shim"
+        shim.mkdir(exist_ok=True)
+        gitlog = cx.rec.dir / "kernel-git.log"
+        real_git = shutil.which("git")
+        (shim / "git").write_text(f'#!/bin/sh\n{{ printf "cwd=%s args=" "$PWD"; printf "%s " "$@"; echo; }} >> "{gitlog}"\n"{real_git}" "$@" > "{gitlog}.out" 2>&1; rc=$?\ncat "{gitlog}.out"; {{ echo "rc=$rc"; sed "s/^/  | /" "{gitlog}.out"; }} >> "{gitlog}"; exit $rc\n')
+        (shim / "git").chmod(0o755)
+        k.env["PATH"] = f"{shim}:{k.env.get('PATH', '')}"
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        for t in ("one", "two", "three"):
+            c.user("root", t)
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", f"turn {t!r} never ended")
+        # The person's own work after turn three: a commit, an edit, a note nobody else knows about.
+        g("add", "f2.txt")
+        g("commit", "-q", "-m", "keep f2")
+        (place / "f1.txt").write_text("first, edited by hand\n")
+        (place / "my-notes.txt").write_text("do not lose this\n")
+        before = tree_state(place)
+        cx.rec.notes["files_before"] = sorted(before["files"])
+        cx.rec.notes["index_before"] = before["index"].splitlines()
+        cx.rec.notes["status_before"] = g("status", "--porcelain", "--ignored").stdout.splitlines()
+        cx.rec.notes["clean_dry_run_by_harness"] = g("clean", "-fdn", "-e", ".arbos", "-e", ".arbos/**").stdout.splitlines()
+        cx.rec.notes["excludes"] = (place / ".git" / "info" / "exclude").read_text().splitlines()[-5:] if (place / ".git" / "info" / "exclude").exists() else None
+        # Break the checkpoint's record of the tree: the work commit for turn 3 loses its loose object.
+        cps = place / ".arbos" / "agents" / "root" / "checkpoints.jsonl"
+        recs = [json.loads(l) for l in cps.read_text().splitlines() if l.strip()] if cps.exists() else []
+        # Turn 1's checkpoint saw a clean tree (no work commit); turns 2 and 3 have one. Turn 3's is the target.
+        target = recs[2] if len(recs) >= 3 else {}
+        cx.rec.expect(bool(target.get("work")), "no-work-checkpoint", f"expected a work tree on turn 3's checkpoint, got {[r.get('work') for r in recs]}")
+        if not target.get("work"):
+            k.stop()
+            return
+        work = target["work"]
+        obj = place / ".git" / "objects" / work[:2] / work[2:]
+        cx.rec.notes["work_commit"] = work
+        cx.rec.notes["work_object_loose"] = obj.exists()
+        if obj.exists():
+            obj.unlink()
+        else:
+            # packed: unpack is not worth it here; corrupt by pointing the ref at a missing object instead
+            g("update-ref", "-d", f"refs/arbos/cp/root/{target.get('line', 0)}")
+        probe = g("cat-file", "-t", work)
+        cx.rec.notes["work_object_readable_after"] = probe.returncode == 0
+        cx.rec.expect(probe.returncode != 0, "object-still-readable", f"could not make the work commit unreadable: {probe.stdout.strip()}")
+        # Rewind to turn 3 with files: the restore must fail, and fail cleanly.
+        c.send({"type": "rewind", "agent": "root", "turn": 3, "files": True})
+        first = c.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+        follow = c.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 30, "the restore's report")
+        time.sleep(1.0)
+        after = tree_state(place)
+        diff = tree_diff(before, after)
+        cx.rec.notes["rewound_frame"] = first
+        cx.rec.notes["restore_report"] = follow
+        cx.rec.notes["tree_diff_after_failed_restore"] = diff
+        reported = json.dumps(follow or {})
+        said_failed = bool(follow) and (follow.get("type") == "error" or "fail" in reported.lower() or "could not" in reported.lower())
+        said_restored = bool(follow) and follow.get("type") == "rewound" and follow.get("restored") and not said_failed
+        cx.rec.expect(said_failed, "failed-restore-not-reported", f"read-tree of a missing object must be reported as a failed restore; the client got {reported[:300]}", "arbos-engine tools::git restore / arbos-kernel serve rewind")
+        cx.rec.expect(not said_restored, "failed-restore-called-restored", f"the restore could not have happened (work commit {work[:10]} is unreadable) yet the client was told restored: {reported[:300]}")
+        cx.rec.expect(not diff, "failed-restore-changed-the-tree", "a restore that failed left the person somewhere new: " + "; ".join(diff), "arbos-engine tools::git restore — a destructive step (reset --hard, clean) runs before the step that can fail (read-tree); check the objects first, or take them back")
+        evs, bad = transcript(cx.place, "root")
+        cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
+        k.stop()
+        cx.check()
+
+    @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
+    def rw09(cx):
+        """#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write
+        bit, a file inside). Rewind with files: true. The tree restore itself works; `git clean` fails on that folder.
+        The person must be told the leftover exists — "restored" alone is a false claim."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        replies = []
+        for i, word in enumerate(("first", "second", "third"), 1):
+            replies.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {word} > f{i}.txt", "description": f"write f{i}"}}]})
+            replies.append({"agent": "root", "content": word})
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        for t in ("one", "two", "three"):
+            c.user("root", t)
+            cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", f"turn {t!r} never ended")
+        stuck = place / "later-dir"
+        stuck.mkdir()
+        (stuck / "keep.txt").write_text("cannot be removed\n")
+        stuck.chmod(0o555)
+        try:
+            c.send({"type": "rewind", "agent": "root", "turn": 3, "files": True})
+            c.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+            follow = c.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 30, "the restore's report")
+            time.sleep(0.5)
+            still_there = (stuck / "keep.txt").exists()
+            files = sorted(p_.name for p_ in place.glob("f*.txt"))
+            cx.rec.notes["restore_report"] = follow
+            cx.rec.notes["files_after"] = files
+            cx.rec.notes["leftover_still_there"] = still_there
+            said = json.dumps(follow or {})
+            cx.rec.expect(files == ["f1.txt", "f2.txt"], "files-not-restored", f"after rewinding to turn 3 the files are {files}, expected f1, f2")
+            cx.rec.expect(still_there, "probe-did-not-hold", "the unremovable folder was removed after all; this probe did not exercise a failing clean")
+            if still_there and follow:
+                cx.rec.expect("remain" in said or "clean" in said.lower() or follow.get("type") == "error", "failed-clean-called-restored", f"git clean could not remove later-dir/ yet the client was told: {said[:300]}", "arbos-engine tools::git restore — clean's status was let _ (#419)")
+        finally:
+            stuck.chmod(0o755)
+        evs, bad = transcript(cx.place, "root")
+        cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
+        k.stop()
+        cx.check()
+
     rw_scenario("rw-04-rewind-with-files-in-a-repo-without-git-identity", "The same rewind in a repository with no git user.name/user.email (a new user's fresh place): the checkpoint's work-tree commit fails silently, so `files: true` resets to HEAD and cleans — deleting the kept turns' uncommitted files too — and reports success (qal-j08).", "no-identity")
 
 
