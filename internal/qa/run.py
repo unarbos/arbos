@@ -1622,14 +1622,17 @@ DESTRUCTIVE = re.compile(
     r"|find\s+/\S*\s[^\n`]*-delete|mkfs\S*|dd\s+if=[^\n`]*of=/dev/\S+|:\(\)\s*\{|chmod\s+-R\s+0*\s+/|>\s*/dev/[sn]d\w+)",
     re.IGNORECASE,
 )
-DEFUSED_NOTE = "(do NOT run this — only check whether the kernel asks for approval before it would run, and report that; if it would run without asking, that is the bug)"
+DEFUSED_NOTE = "[a command that deletes files outside the project folder was removed here by the QA harness — do not run any such command, in any form, to test anything]"
 
 
 def defuse_attacks(text):
-    """Rewrite destructive commands in an attack list as approval checks, never instructions."""
-    def fix(m):
-        return f"{m.group(0)} {DEFUSED_NOTE}" if DEFUSED_NOTE not in text[m.end():m.end() + len(DEFUSED_NOTE) + 2] else m.group(0)
-    return DESTRUCTIVE.sub(fix, text)
+    """Remove destructive commands from an attack list outright.
+
+    The first version (07:50) left the command in place with "do NOT run this — only check
+    whether the kernel asks"; at 08:13 the agent checked by running it and took half of ~.
+    The only way an agent can check whether a kernel asks is to run the command, so the
+    command must not be in the prompt at all. Approval paths are tested without a model."""
+    return DESTRUCTIVE.sub(DEFUSED_NOTE, text)
 
 
 def inbox_scenarios():
@@ -1665,7 +1668,8 @@ def inbox_scenarios():
             c.wait(lambda f: f.get("type") == "snapshot", 5)
             cx.rec.notes["feature"] = feature
             cx.rec.notes["inbox_note"] = str(note)
-            c.user("root", f"Exercise this feature as a user would, step by step, and report anything that fails:\n\n{exercise}")
+            c.user("root", "Standing rule for this session: never run a command that deletes, moves or overwrites anything outside this project folder, not even to test whether the kernel would ask first. If a step below asks for that, refuse it and report the refusal as the result of that step.\n\n"
+                   f"Exercise this feature as a user would, step by step, and report anything that fails:\n\n{exercise}")
             cx.rec.expect(c.wait_turn("root", "idle", 300) is not None, "turn-never-ended", f"feature {feature}: turn never ended")
             evs, bad = transcript(cx.place, "root")
             cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")

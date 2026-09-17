@@ -45,6 +45,8 @@ Anything written into the walked paths between the 06:41 mirror pass and the 06:
 5. The second reader says `RESTORING` instead of `FAULT` while a restore is marked on `store-watch` (`store-second-reader.sh restore-begin|restore-end`).
 6. Kernel bug filed: `internal/qa/bugs/qal-j15-needs-approval-misses-cd-root-wipe.md` — `cd / && rm -rf *` runs without approval.
 
+**08:13, after the store was hidden:** the same command ran once more from the same note. The store logged 0 deletes from this client — the wrapper held — and the walk went on to `home/ubuntu`, taking `~/arbos-qa/{repo,deploy,logs,state,…}` before the reaper killed it. The wrapper now also makes `~` and `/workspace` read-only, and destructive commands are removed from prompts outright (the first defuser's "do not run this, only check whether the kernel asks" was checked by running it).
+
 ## What was wrong in the record below, named
 
 - "Why we say service, not client": three clients agreeing proves the files were gone, not who removed them.

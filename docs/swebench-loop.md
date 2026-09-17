@@ -7,9 +7,15 @@ cursor:
 
 # SWE-bench improvement loop — living doc
 
-> **CORRECTION (2026-09-17, cycle 12).** Every number in this document from cycle 1 through cycle 11 was measured with the container on the Docker host network. The agent used it: in 133 of 948 rollouts it downloaded the newer release of the package under repair — the one carrying the fix — and 114 of those were graded solved. The score board below is left as it was written, as the record of what was claimed; none of those figures is a measure of the agent. The per-cycle count is in [`swebench-open-network-audit.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-open-network-audit.md). **The baseline is the cycle-12/13 figure: 24 of 40 rollouts (60%) on the regression 20 at `-r 2`, network cut, kernel `864d6b00`.** The 74% that cycles 10–11 reported was wrong and is not to be compared against.
+> **CORRECTION (2026-09-17, cycle 12).** Every number in this document from cycle 1 through cycle 11 was measured with the container on the Docker host network. The agent used it: in 133 of 948 rollouts it downloaded the newer release of the package under repair — the one carrying the fix — and 114 of those were graded solved. The score board below is left as it was written, as the record of what was claimed; none of those figures is a measure of the agent. The per-cycle count is in [`swebench-open-network-audit.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-open-network-audit.md). **The baseline on the old regression 20 is the cycle-12/13 figure: 24 of 40 rollouts (60%), network cut, kernel `864d6b00`. From cycle 14 the loop's instrument is regression 20b: 28 of 40 (70%), network cut, kernel `30eef166`.** The 74% that cycles 10–11 reported was wrong and is not to be compared against.
 
 One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every loss, fix the top cause in the agent, re-run, record the delta. Model: Claude Sonnet 5 via OpenRouter (cache breakpoints on). Grader: `primeintellect/swebench-verified` (Harbor). Data: [`media/swebench/loop/`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop/) (`loop-state.json` = stratified order and slices; `cycle-N/` = traces, A-vs-B table, scripts), history in [`media/swebench/loop-history.jsonl`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop-history.jsonl). Failing bundles for QA: `internal/qa/rollouts/swebench/loop-cycle-N/`.
+
+## Two findings about the method, stated once
+
+**1. The "wrong mechanism" class was an artefact of contaminated data.** Cycles 3, 4, 5, 9 and 11 built levers for the failure class "right file, wrong fix": a prose rule, a kernel-enforced `mechanism` argument on the first edit, a reproduction gate, a `changes`-before-done nudge, a second-model critique. The class was defined by reading rollouts on the regression set that, the audit later showed, had in many cases downloaded the upstream fix: the agent's own reasoning was being compared against a copied answer, and where the copy and the reasoning diverged the reasoning read as "the wrong mechanism". When the network was cut (cycle 12) and the twelve honest failures were read against the gold patches (cycle 13), the class did not appear in a single one of them. Five cycles and $279 of model spend (cycles 3, 4, 5, 9, 11, from the history file) went to a class the contaminated data invented. The lesson is about method, not about the levers: a failure class must be defined on rollouts whose provenance is sound, and the first check on any new class is whether the rollouts that define it could have seen the answer.
+
+**2. This benchmark has a ceiling for Arbos well below 100%, and it is not the agent's.** Of the twelve honest failures on the regression 20, eight are on instances where the hidden tests grade something the issue text does not determine: the exact error string on a malformed input (pylint-8898 — the agent's more thorough splitter errors differently), an ID-mangling scheme the issue never mentions (sphinx-7590), a twelve-test redesign behind a one-line symptom (xarray-6992), and a feature whose accepted scope grew past the issue (astropy-13398: refraction and topocentric ITRS). A stronger agent would fail these the same way; the only route past them anyone found was the upstream diff. Two more are the agent preserving behaviour the maintainers chose to change (django-15022). Only two of twelve — django-14792, root cause named and the consumers fixed instead — are reachable by a behaviour lever. Anyone reading the loop's numbers should read them against that ceiling: on this set it is about 34 of 40, and the agent stands at 24.
 
 ## Score board
 
@@ -254,7 +260,7 @@ One arm, no lever. Pre-registered before the run ([preregistration](/cursor/stor
 |---|---|---|---|---|---|
 | Regression 20 at `-r 2`, network cut | 36 of 40 | **21 (58%)** | 18 of 20 | $37.14 | $1.03 |
 
-Not reached: sympy-20590 and sympy-13878 (both solved 2/2 in every earlier cycle; they would likely have made it 25/40 = 62%, but that is a guess and the number stands at 21/36). Soundness: `arbos_egress_open` = 0.0 on all 36; the transcript audit finds no fetch; five rollouts tried pip or git and were refused; no rollout capped or timed out.
+Not reached: sympy-20590 and sympy-13878 (both solved 2/2 in every earlier cycle; they would likely have made it 25/40 = 62%, but that is a guess and the number stands at 21/36). Soundness: `arbos_egress_open` = 0.0 on all 36; the transcript audit finds no fetch; five rollouts tried pip or git and were refused; no rollout timed out. *Corrected in cycle 14:* one rollout (django-15252, the solved one, $8.09) hit the per-turn cap; the harness's detector was still matching the pre-#349 notice wording and reported 0 ([#413](https://github.com/unarbos/arbos/pull/413)).
 
 | Instance | Result | Cost | | Instance | Result | Cost |
 |---|---|---|---|---|---|---|
@@ -320,9 +326,61 @@ Keep the old regression 20 as a yearly-style check, not the loop's instrument: r
 
 Spend $10.83 (finish $9.89, sweep smokes $0.94). Cycle total for 12+13: $67.12; the overrun is the ungraded run.
 
-## Next (cycle 14)
+## Cycle 14 (2026-09-17) — regression 20b's baseline: 28/40, 70%
 
-1. Pre-register and baseline regression 20b under the cut at `-r 2` on one pinned kernel. That becomes the loop's instrument; regression 20 stays as the per-kernel check.
-2. First lever against 20b, chosen from *its* failures, not from the old set's. The only agent-addressable pattern the twelve clean failures showed — root cause named, fix applied to the consumers — is a candidate if 20b shows it too.
-3. The mechanism gate should reject a mechanism that names nothing (a word, a placeholder); that is a kernel change for the features agent.
+One arm, no lever; pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-14-preregistration.md)). Kernel `main` `30eef166` (#393 merged; the kernel proper is #380's plus #390's rewind work), harness with #397's sweep. One reproduction, mechanism gate, $8 cap, network cut, `-r 2`, concurrency 3. Cap $45; the run finished all 40 at $37.48.
+
+| | Rollouts | Solved | Cost | Per rollout |
+|---|---|---|---|---|
+| Regression 20b at `-r 2`, network cut | 40 of 40 | **28 (70%)** | $37.48 | $0.94 |
+
+Soundness: `arbos_egress_open` 0.0 on all 40; transcript audit finds no fetch; every sweep reports `left` 0; every rollout `ok`. One rollout hit the $8 cap (django-15252, 134 tool calls, ended mid-work).
+
+| Instance | Result | $ | | Instance | Result | $ |
+|---|---|---|---|---|---|---|
+| astropy-13236 | S. | 1.17 | | sympy-18698 | .S | 1.38 |
+| astropy-14182 | SS | 1.09 | | pylint-8898 | S. | 1.71 |
+| django-11728 | SS | 1.00 | | scikit-learn-25102 | SS | 2.72 |
+| django-16454 | SS | 0.48 | | django-15022 | .. | 3.96 |
+| matplotlib-24870 | SS | 1.85 | | django-15252 | .. | 9.34 |
+| pylint-6386 | .S | 0.52 | | scikit-learn-10908 | SS | 0.24 |
+| scikit-learn-14629 | .S | 1.00 | | django-13033 | SS | 1.49 |
+| sphinx-8035 | SS | 3.61 | | sympy-13615 | SS | 0.93 |
+| sphinx-8265 | SS | 0.90 | | pytest-6197 | SS | 1.96 |
+| sympy-15017 | S. | 0.85 | | sympy-17318 | .. | 1.27 |
+
+The instrument moves: eight instances split 1/1 or fell to 0/2 from a 1/2 history, and the four never-run instances all went 2/2 — the fresh draw was easier than intended, and cycle 15 may swap two of them for harder ones from the same order. Twelve of forty rollouts are decided (ten instances at 2/2 that were 1/2 before — variance in our favour this time, not a ceiling); the other twenty-eight can go either way.
+
+### The twelve failures, read against gold and FAIL_TO_PASS
+
+| Instance | What the agent did | What the tests want | Gap |
+|---|---|---|---|
+| sympy-17318 ×2 | Guarded `split_surds` against an empty surd list (the crash site) | Gold fixes `_sqrt_match`'s condition so `I` is never treated as a surd; the test checks `_sqrt_match(4 + I) == []` | **Root named, symptom guarded.** Both mechanism statements say the Add branch in `_sqrt_match` is "over-eager"; both patches guard downstream. |
+| scikit-learn-14629 | A fallback in `_validation.py` that reads `estimators_[i].classes_` when `classes_` is missing | Gold gives `MultiOutputClassifier` a `classes_` attribute; the test checks the attribute | **Root named, consumer patched.** The issue itself pointed at the consumer; the agent followed the issue rather than the shape of the fix. |
+| pylint-6386 | `_DoNothingAction` takes `nargs=0`, so `-v` no longer demands an argument | `-v` must *turn verbose on* ("Using config file" in stderr); gold maps `-v` to `_set_verbose_mode` | **Reproduction proved the crash gone, not the behaviour present.** The agent's check was "does `-v` error?". |
+| sympy-15017 | Special-cased `__len__`/`__iter__` for rank-0 arrays, leaving `_loop_size` 0 | Gold sets `_loop_size` to 1 for rank 0; the test also asserts `rank_zero_array[0] == x` | **An existing test encoded the bug and the agent obeyed it.** The transcript shows the agent trying the gold fix first, seeing `assert len(rank_zero_array) == 0` fail in the existing suite, and reverting to a special case that kept the old test green. The cycle-1 rule "a test never vetoes the requested change" did not hold. |
+| django-15252 (capped) | Router gating in `recorder.py` plus executor changes and new tests; ended at the $8 cap mid-work | — | **Capped.** 134 tool calls; the second rollout of the same instance (below) finished and lost. |
+| django-15252 | Gated `ensure_schema`/`record_*` on `router.allow_migrate_model`, as the issue asks | Gold does not consult routers: it stops the executor creating `django_migrations` when there is nothing to migrate | **Maintainers' fix differs from the issue's ask.** |
+| django-15022 ×2 | Kept per-term semantics for multi-valued lookups (Exists / pk__in subqueries) | Gold: one `filter(Q(*term_queries))`, accepting the semantic change | **Preserved behaviour the maintainers changed** (same as cycle 13). |
+| astropy-13236 | The `FutureWarning` the issue proposes as step one | Gold makes the behaviour change directly; tests check the new behaviour | **Maintainers skipped the issue's proposed path.** The other rollout read it the maintainers' way and solved. |
+| sympy-18698 | Combined equal-multiplicity factors, deliberately excluding multiplicity 1 | Gold combines all multiplicities; test checks `sqf_list(x*(x + y))` | **Scope the issue did not state**; the agent's exclusion was a choice, not an oversight. |
+| pylint-8898 | Depth-aware splitter (parens, brackets, braces) | Exact error text on a malformed input that only a brace-only splitter produces | **Hidden test pins an incidental detail** (same as cycle 13). |
+
+By kind: **agent-addressable 6** (root named and symptom fixed ×3, reproduction of the crash rather than the behaviour ×1, existing test obeyed over the issue ×1, capped ×1); **the issue does not determine the fix 5** (maintainers chose a different path, scope, or semantics); **incidental detail pinned 1**. Half the failures are reachable, against two of twelve on the old set — that is the difference between an instrument and a floor.
+
+**Wrong mechanism, again: 0 of 12.** And the pattern that does recur is now in five rollouts across both sets (django-14792 ×2, sympy-17318 ×2, scikit-learn-14629): the agent writes the root cause down — in its `mechanism` argument or its summary — and then edits somewhere else: a guard at the crash site, a fallback in the consumer. The mechanism gate made the agent *say* where the fault is; nothing checks that the diff goes there.
+
+### Also found
+
+- **Job shells outlive the kernel.** In 4 of 40 rollouts (all scikit-learn), the sweep found 4–10 live processes after `arbos-kernel run` had exited: the kernel's own job-runner shells (`sh -c D=$1; P=$2 ... ARBOS_JOB_LOG_CAP`) with test runs still going. The network stayed cut until they were dead and every rollout graded; without the sweep they would have had the network back. Filed for the kernel: `run` should not exit with jobs running, or should kill them.
+- `cost_capped` missed the cap notice since #349 reworded it: two capped rollouts (cycles 12 and 14) read as 0. Fixed ([#413](https://github.com/unarbos/arbos/pull/413)); cycle 12's line corrected above.
+- **Two unlanded commits, declared.** A steward check (2026-09-17 08:54 UTC) found two of this loop's commits pushed after their PR had merged. `3608f49a` on `swebench-loop-c7` — "two failing reproductions before the first edit is the default", the cycle-8 decision — **is dead**: cycle 10 reversed it (N=2 does not hold at the $8 cap), the harness default on `main` is and was one reproduction, and every run script in this loop passes `--env.agent.harness.repro-required` explicitly (1, or `REPRO_N` for the N=2 arms), with the harness checkout for every run taken from a `main`-based branch, never from `c7`. No measurement in cycles 8–14 depended on it; the branch is deleted. `2f6f0fcf` on `swebench-sweep-zombies-7c9c` — the `cost_capped` fix — is the same change as [#413](https://github.com/unarbos/arbos/pull/413) line for line; the branch is deleted. `swebench-loop-c12-7c9c` was also removed: its one post-merge commit is in `main` by patch through #397. The habit that caused all three: pushing a follow-up to a branch whose PR the steward had already merged, which looks identical to pushing before the merge. From here, a follow-up after a merge starts a new branch off `main`, and `git cherry origin/main <branch>` over every loop branch is part of each cycle's close.
+
+Spend $37.48.
+
+## Next (cycle 15)
+
+1. **The lever, pre-registered before the run:** a content check between the mechanism and the diff. At the first final reply after edits, the kernel extracts the identifiers the mechanism names (functions, methods, file paths) and checks whether the diff touches any of them; if none, one nudge: "Your mechanism names `_sqrt_match`; your diff does not touch it. Fix there, or say in one line why the fix belongs where it is." Adopt at +3 rollouts on the shared 2×-covered instances of regression 20b at no more than 1.3× cost; drop at +2 or less. The five rollouts above are the class it aims at; on 20b that is three of twelve failures, so the most it can move the set is about 3 — the adopt threshold is at the edge of what is possible, and that is stated now rather than argued later. If the features agent's mechanism-gate fix (content, not length) lands first, the lever builds on it.
+2. Swap two of the four fresh instances (all 2/2, easier than intended) for the next two "1–4 hours" instances in `order_remaining`, and state the set's composition again; the baseline for the swapped pair is measured in the same run as the lever's A arm.
+3. The old regression 20 runs once on this kernel base as the sanity check (ten pass, five fail) when budget allows; not before the lever.
 4. Still open: requests-2317's grader hang; Django `runtests.py` to the timeout; `bash_wait_ms` 600 s for headless runs.

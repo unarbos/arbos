@@ -5,6 +5,8 @@
 - Feature: `needs_approval` (`tools/bash.rs`), from inbox note `2026-09-13-swebench-loop-cycle-1.md`, item 4, which names this exact gap: "`cd / && rm -rf *` — the last one is not caught; decide whether it should be".
 - Cost to us: fifteen runs of the loop's own inbox scenario between 09-13 and 09-17 07:33 handed that note to a live agent as an attack list; the agent ran the command each time it got to it; from 09-16 09:02 it reached the store mount at `/cursor/stores/<id>` (the first user-writable tree under `/` in glob order) and deleted 99–229 files per run, ≈1,300 on the last, 40-minute run. Written up as `docs/store-fault-report-2026-09-17.md`, which blamed the service for a day.
 
+- 09-17 08:13, second occurrence after the store was hidden: the same command from the same note took `~/arbos-qa/{repo,deploy,logs,state,…}` and `~/.cargo`, `~/.ssh` on the QA VM before the harness reaper killed it. The store logged 0 deletes. Kernels now run with `~` and `/workspace` read-only as well.
+
 ## Repro (do this on a throwaway VM — it is a root wipe)
 
 ```

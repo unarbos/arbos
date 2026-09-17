@@ -159,7 +159,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | 16 | 9 (F-71 … F-75, F-78 … F-81) | 2 (F-76 raw provider error, F-77 kickoff stall) |
 | 17 (opened) | 17 so far (F-83, F-84, F-92, F-93, F-99 from QA; F-85 … F-91, F-94, F-96 from seven journey runs; F-95 from the gate; F-97, F-98 from the probes) | 1 (F-82, the bubble-sort turn) |
 | 18 – 22 | F-100 … F-112 (feedback sheet F-100/F-101, hub kinds, F-103 … F-112 from journeys and gates) | 1 (F-102 Jacob's Mac, the frosted popover) |
-| 32 (running) | F-129 (design, noted), F-130, F-131, F-132, F-133 (fixed) | 0 |
+| 32 | F-129 (design, noted), F-130, F-131, F-132, F-133 (fixed); rig R3 (settings rows), R17 (`send` reads back) | 0 |
 | 31 | 0 app findings; rig: R13 withdrawn, R14 (eight assertions that could not fail), R15, R16; R10 closed — the fold row passes | 0 |
 | 30 | 0 (F-128 noted, model-side); ArbosLife on `main`'s kernel | 0 |
 | 29 | 0 new; F-122b traced and fixed; R11, R12 | 0 |
