@@ -484,6 +484,16 @@ pub fn dir(project: &Path) -> PathBuf {
 /// Every path that creates the directory comes through here. A second
 /// `create_dir_all` elsewhere would make it without the ignore file.
 pub fn init(project: &Path) -> std::io::Result<PathBuf> {
+    // The sidecar lives inside the project; it never makes the project.
+    // A session flush after the folder moved recreated `<old>/.arbos/desktop/`
+    // through this create_dir_all, which is what let the old path
+    // canonicalize again and be bootstrapped into a ghost (F-165).
+    if !project.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("project folder is gone: {}", project.display()),
+        ));
+    }
     adopt(project);
     let dir = dir(project);
     std::fs::create_dir_all(&dir)?;
