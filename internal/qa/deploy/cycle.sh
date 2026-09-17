@@ -279,7 +279,7 @@ EOF
 
 # 6. Mirror the store again at the end of the cycle.
 # Two or more clients' views of the store, compared: the per-client fault (2026-09-17 05:35) is visible only this way.
-python3 - "${ARBOS_QA_STORE_ROOT:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983}/internal/qa/store-probes" "$ROOT/loop/store-probe-qa-vm.jsonl" <<'PY' || true
+python3 - "${ARBOS_QA_STORE_ROOT:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983}/internal/qa/store-probes" "$ROOT/loop/store-probe-${ARBOS_QA_MACHINE:-qa-vm}.jsonl" <<'PY' || true
 import glob, json, os, sys, time
 probes_dir, mine = sys.argv[1], sys.argv[2]
 rows = {}

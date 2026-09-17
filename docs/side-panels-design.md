@@ -289,9 +289,17 @@ Each of these is a client-visible gap, not an internal refactor.
 
 ## Against Cursor
 
-"Copy exactly how Cursor is doing this" is being measured rather than remembered: the parity loop is timing its side panel — tab behaviour, what its chords do, widths, drag and reorder, the empty state, one tab and many — and will write it up for this. Where their measurement and this document disagree, Cursor wins and the difference gets noted here. Three questions are already out to them: whether its tab cycling wraps (ours does, following our own project tabs), what the two other icons at the top right of your screenshot are, and its width floor and ceiling.
+"Copy exactly how Cursor is doing this" was measured rather than remembered. The parity loop timed Cursor's own side panel at a 1440-wide window, pixel by pixel: `internal/cursor-side-panel-measured.md`, with stills in `media/cursor-reference/side-panel/`. What it found, and what this took:
 
-One note on the screenshot: the four-card empty state in it is not in Arbos today — it is Cursor's own. The cards here are built fresh.
+**Taken.** A surface tab opens at **592** and a drag clamps between **377 and 766**, with the chat's floor at **418** — Cursor's divider stops there and never squeezes the chat under it. A new tab opens **beside the one in front**, not at the end. The row is **40** with a **26** pill, and a panel tab **hugs its label** rather than sitting in an equal cell the way our project tabs do. The empty tab is a **2×2 of tiles**, icon over label, low in the panel — which is exactly the empty state in your screenshot, so that state is Cursor's rather than ours; ours is built fresh to match. And the **⤢ expand** control joins the row's right side, which answers two of the three icons at the top right of your still. The third is Cursor's Ports popover, and we have nothing to put in it.
+
+**Confirmed.** Cursor cycles its panel tabs with **the same chord as its project strip, and which set moves follows focus** — the rule here, arrived at independently.
+
+**Not taken, with reasons.** Cursor throws the whole tab set away when you close its last tab, while keeping it when you toggle the panel shut: two answers for "the panel went away". Ours keeps it either way. And Cursor shows **nothing** about which tab set its chord will move — no focus ring, no difference in the active pill. That is the one place their own measurer judged us better, and it is why the focused row here is lit and the other muted.
+
+**Different by your instruction.** Cursor has no generic new-tab chord: it opens panel tabs by kind (⌘G file, ⌘J terminal, ⌘⇧B browser, ⌘E changes) and never uses ⌘T. You asked for ⌘T by name, so ⌘T it is, landing on the same four choices Cursor's `+` menu offers. Their kind chords are worth adding beside it later, and their `+` menu's search field — *"Open any file, URL, …"* — is the better half of that menu and worth taking when the File and Browser tabs are real.
+
+**Still open with them:** whether a second Browser tab can be opened from the `+` menu, drag between the two tab sets, and Retina metrics, which none of this was measured at.
 
 ---
 

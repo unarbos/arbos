@@ -14,7 +14,9 @@ set -euo pipefail
 ROOT="${ARBOS_QA_ROOT:-$HOME/arbos-qa}"
 RESULTS="$ROOT/results"
 BRANCH=qa-results
-REMOTE=https://github.com/unarbos/arbos.git
+# Overridable so the destructive path can be driven against a scratch remote instead of the live
+# branch (the rule of 2026-09-17: never test a destructive path against the live artifact).
+REMOTE="${ARBOS_QA_RESULTS_REMOTE:-https://github.com/unarbos/arbos.git}"
 : "${ARBOS_GITHUB:?ARBOS_GITHUB not set (source secrets.env)}"
 
 git_auth() {
@@ -54,6 +56,19 @@ case "${1:-}" in
     # Mirror: a draft removed from loop/bugs (folded into a curated file) must
     # not come back from the branch on the next pull.
     # (plain cp, not rsync: the VM has no rsync and publish had failed six cycles running on 2026-09-16)
+    # The mirror never removes without a reason (the store mirror's rule, 2026-09-16, now here too).
+    # A second machine standing the loop up seeds loop/bugs from the store's curated files only, so
+    # its tree held 75 of the branch's 208 and this line would have deleted 133 bug files — 130 of
+    # them auto-drafts — with "-- publish: pushed" as the only output. Folding a draft into a curated
+    # file is still a removal; it just has to be said.
+    gone=$(comm -23 <(ls "$RESULTS/bugs" 2>/dev/null | sort) <(ls "$ROOT/loop/bugs" | sort) | head -400)
+    if [ -n "$gone" ] && [ -z "${ARBOS_QA_ALLOW_BUGS_SHRINK:-}" ]; then
+      echo "!! PUBLISH REFUSED: $(echo "$gone" | wc -l) bug file(s) on $BRANCH are not in $ROOT/loop/bugs;" \
+           "pushing would delete them. First $(echo "$gone" | head -5 | tr '\n' ' ')." \
+           "Seed loop/bugs from the branch and the store, or set ARBOS_QA_ALLOW_BUGS_SHRINK='<reason>'." >&2
+      exit 4
+    fi
+    [ -n "$gone" ] && echo "-- publish: removing $(echo "$gone" | wc -l) bug file(s) — reason: $ARBOS_QA_ALLOW_BUGS_SHRINK"
     rm -rf "$RESULTS/bugs" && mkdir -p "$RESULTS/bugs" && cp -r "$ROOT/loop/bugs/." "$RESULTS/bugs/"
     for f in kickoff-history.jsonl spend.jsonl call-mode-history.jsonl pod-health.jsonl store-mirror-history.jsonl store-mirror-losses.jsonl journey-history.jsonl; do
       [ -f "$ROOT/loop/$f" ] && cp "$ROOT/loop/$f" "$RESULTS/$f"

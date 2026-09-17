@@ -247,6 +247,14 @@ that swapped the bundle leaves every kernel started before it `GONE`. If the
 desktop ever names its kernel process something other than `arbos-kernel`,
 change the two `pgrep -x` names to `pgrep -f arbos-kernel`.
 
+**One more line the Linux sweep prints (13:10 UTC): `DOUBLE-SERVED <place> by
+pids: a(sha) b(sha)`.** Finding 2 of the bootstrap run: the place lock moved
+from `.arbos/lock` to `.arbos/runtime/lock` with no fallback in
+`Place::lock_path()`, so an old kernel and a new one serve the same place at
+once, and by finding 3 the older one was invisible. Until the kernel honours
+the legacy lock, the sweep is the only thing that says so; any such line is
+an outage in progress.
+
 ### Reading either output
 
 - Any `GONE` line is a process to restart from the file now at its start path.

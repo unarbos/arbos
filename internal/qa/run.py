@@ -2005,6 +2005,9 @@ def register_multitasking():
         import landing_scenarios
 
         landing_scenarios.register(scenario, SCENARIOS, transcript, now_ms, "main")
+        import uw_scenarios
+
+        uw_scenarios.register(scenario, SCENARIOS, transcript, now_ms, "main")
     except Exception as e:
         MODULES_MISSING.append(f"multitasking/remote/batch/crossproject/journey: {e}")
         print(f"multitasking scenarios unavailable: {e}", file=sys.stderr)

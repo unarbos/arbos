@@ -19,13 +19,13 @@ pass() {
   local prev new mrc ts deleted
   ts="$(date -u +%FT%TZ)"
   # This client's view, one JSON line, beside the mirror: the row other machines' probes are compared with.
-  MACHINE="${MACHINE:-qa-vm}" STORE_PROBE_LOG="$ROOT/loop/store-probe-qa-vm.jsonl" bash "$ROOT/deploy/store-probe.sh" >/dev/null 2>&1 || true
+  MACHINE="${ARBOS_QA_MACHINE:-${MACHINE:-qa-vm}}" STORE_PROBE_LOG="$ROOT/loop/store-probe-${ARBOS_QA_MACHINE:-${MACHINE:-qa-vm}}.jsonl" bash "$ROOT/deploy/store-probe.sh" >/dev/null 2>&1 || true
   # The second reader (the mesh worker's, internal/store-second-reader.md), run from THIS client too, so the
   # store-watch branch carries two machines' verdicts of the same half hour and a third can join by CLIENT name.
   # The script is fetched from the branch each pass — it rides there because the store copy is taken in episodes.
   if git -C "$REPO" fetch -q origin "+refs/heads/store-watch:refs/remotes/origin/store-watch" 2>/dev/null \
      && git -C "$REPO" show origin/store-watch:store-second-reader.sh > "$ROOT/deploy/store-second-reader.sh" 2>/dev/null; then
-    CLIENT="${CLIENT:-qa-vm}" REPO="$REPO" timeout 8m bash "$ROOT/deploy/store-second-reader.sh" run 2>&1 | tail -2 | sed 's/^/[second-reader qa-vm] /' || true
+    CLIENT="${CLIENT:-${ARBOS_QA_MACHINE:-qa-vm}}" REPO="$REPO" timeout 8m bash "$ROOT/deploy/store-second-reader.sh" run 2>&1 | tail -2 | sed "s/^/[second-reader ${CLIENT:-${ARBOS_QA_MACHINE:-qa-vm}}] /" || true
   fi
   git -C "$REPO" fetch -q origin store-docs 2>/dev/null || true
   prev="$(git -C "$REPO" rev-parse origin/store-docs 2>/dev/null || echo none)"

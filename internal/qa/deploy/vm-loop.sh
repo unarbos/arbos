@@ -9,6 +9,11 @@ set -uo pipefail
 ROOT="${ARBOS_QA_ROOT:-$HOME/arbos-qa}"
 STORE="${ARBOS_QA_STORE:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/qa}"
 export ARBOS_QA_ROOT="$ROOT" ARBOS_QA_SYSTEM_TOOLCHAIN=1 ARBOS_QA_STAGING="$ROOT/staging"
+# This machine's name, in the store-probe file, the ledger names and the cycle log. `qa-vm` is the
+# machine that ran the loop until 2026-09-17; a second machine must pick another name before it runs
+# a cycle, or it writes over the first one's record.
+export ARBOS_QA_MACHINE="${ARBOS_QA_MACHINE:-qa-vm}"
+LEDGER=""; [ "$ARBOS_QA_MACHINE" = "qa-vm" ] || LEDGER="-$ARBOS_QA_MACHINE"
 export ARBOS_QA_TRACK_BRANCHES="${ARBOS_QA_TRACK_BRANCHES:-main}"  # main is canonical since 2026-09-13 23:50 UTC (#58, #104, #106, #105 merged)
 export ARBOS_QA_BUDGET_USD="${ARBOS_QA_BUDGET_USD:-20}"  # $20/day approved by Jacob 2026-09-16; report when it binds, do not raise
 export ARBOS_QA_DESKTOP="${ARBOS_QA_DESKTOP:-1}" ARBOS_QA_DRIVER_DIR="${ARBOS_QA_DRIVER_DIR:-$([ -f /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py ] && echo /cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity || echo /home/ubuntu/arbos-qa/repo/desktop/driver)}"
@@ -99,6 +104,12 @@ while true; do
   mkdir -p "$ROOT/loop/scenarios" "$ROOT/loop/bugs" "$ROOT/loop/inbox"
   cp -f "$STORE"/scenarios/*.json "$ROOT/loop/scenarios/" 2>/dev/null
   cp -f "$STORE"/bugs/qa-*.md "$STORE"/bugs/qal-*.md "$ROOT/loop/bugs/" 2>/dev/null
+  # Everything else the store holds — the auto-drafts and the ui-* pass — only where this tree has no
+  # copy: never over a local one, which may carry "seen" lines the store has not taken yet. Without
+  # this a fresh machine's loop/bugs is the curated set alone (75 of 208), and publish.sh mirrors that
+  # smaller tree onto qa-results (see its refusal; qal-j21).
+  cp -n "$STORE"/bugs/*.md "$ROOT/loop/bugs/" 2>/dev/null
+  cp -n "$STORE"/bugs/seen.jsonl "$ROOT/loop/bugs/" 2>/dev/null
   cp -f "$STORE"/inbox/*.md "$ROOT/loop/inbox/" 2>/dev/null
   cp -f "$STORE"/deploy/cycle.sh "$STORE"/deploy/publish.sh "$STORE"/deploy/kill-shim.sh "$STORE"/deploy/ns-wrap.sh "$ROOT/deploy/" 2>/dev/null
   chmod +x "$ROOT"/deploy/*.sh
@@ -114,10 +125,16 @@ while true; do
   # Bug files go to the store only when it is sound and does not already hold them. Never staged: the loop's
   # copies are the store's copies from the last sync, and a stale copy staged over a hand edit is a rollback.
   if store_sound; then for f in "$ROOT"/loop/bugs/*.md; do b="$(basename "$f")"; [ -e "$STORE/bugs/$b" ] || store_put "$f" "internal/qa/bugs/$b"; done; fi
-  store_put "$ROOT/loop/kickoff-history.jsonl" "internal/qa/vm-kickoff-history.jsonl"
-  store_put "$ROOT/loop/spend.jsonl" "internal/qa/vm-spend.jsonl"
-  store_put "$ROOT/loop/rollouts/index.jsonl" "internal/qa/rollouts/vm-index.jsonl"
-  for h in journey-history.jsonl store-mirror-losses.jsonl store-mirror-history.jsonl; do [ -f "$ROOT/loop/$h" ] && store_put "$ROOT/loop/$h" "internal/qa/$h"; done
+  # One writer per file. Every ledger carries the machine that wrote it, because store_put's sound-store
+  # path is a plain cp with no content check: two machines running the loop at once, as on 2026-09-17
+  # during the handover, means the last one to finish a cycle overwrites the other's runs. $LEDGER is
+  # empty for the historical machine, so its files keep the names the documents already cite.
+  store_put "$ROOT/loop/kickoff-history.jsonl" "internal/qa/vm${LEDGER}-kickoff-history.jsonl"
+  store_put "$ROOT/loop/spend.jsonl" "internal/qa/vm${LEDGER}-spend.jsonl"
+  store_put "$ROOT/loop/rollouts/index.jsonl" "internal/qa/rollouts/vm${LEDGER}-index.jsonl"
+  for h in journey-history.jsonl store-mirror-losses.jsonl store-mirror-history.jsonl; do
+    [ -f "$ROOT/loop/$h" ] && store_put "$ROOT/loop/$h" "internal/qa/${h%.jsonl}${LEDGER}.jsonl"
+  done
   apply_pending
   now=$(date +%s); next=$(( (now / 3600 + 1) * 3600 ))
   echo "== next cycle at $(date -u -d @$next +%FT%TZ)"
