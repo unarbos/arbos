@@ -53,12 +53,315 @@ struct KernelJson {
     log: String,
 }
 
+/// The place lock, or the exit code for a place another kernel holds.
+enum Held {
+    Taken(PlaceLock),
+    /// Another kernel kept the place for the whole wait: exit 3, so a
+    /// supervisor can tell "held" from "crashed".
+    StillHeld(i32),
+}
+
+/// Exit code of a serve that found its place held and gave up waiting.
+pub const EXIT_PLACE_HELD: i32 = 3;
+
+/// The place's lock — or, when another kernel holds it, a refusal that
+/// says who holds it **once**, falls to a heartbeat, and after a few
+/// minutes says plainly that a person needs to look. A supervisor
+/// relaunching `serve` every two seconds against a place a stale kernel
+/// held logged `place already served` 1411 times over 32 minutes (the pod
+/// test, 2026-09-17): the useful facts — who holds it, which build,
+/// whether its file is gone — were nowhere, and nothing said that no one
+/// was coming. Each relaunch is a fresh process, so "once" lives in
+/// `runtime/place-held.json`, keyed on the holder's pid.
+///
+/// By default the refusal exits at once with `EXIT_PLACE_HELD` (a
+/// desktop that lost the spawn race attaches to the winner and must not
+/// be kept waiting, nor left a standby kernel that would serve a place
+/// the user has since closed). `ARBOS_LOCK_WAIT_SECS=N` makes a
+/// supervised kernel wait in-process instead, with the same words.
+fn acquire_or_wait(place: &Place) -> Held {
+    let wait_secs: u64 = std::env::var("ARBOS_LOCK_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let started = std::time::Instant::now();
+    loop {
+        match PlaceLock::acquire(place) {
+            Ok(lock) => {
+                if let Some(h) = HeldRecord::load(place) {
+                    let line = format!(
+                        "the place is free after {}s held by pid {}; serving {}",
+                        (arbos_core::now_ms() - h.first_ms) / 1000,
+                        h.holder_pid,
+                        place.path.display()
+                    );
+                    eprintln!("arbos-kernel: {line}");
+                    log_line_to_place(place, "info", "place_freed", &line);
+                    HeldRecord::clear(place);
+                }
+                return Held::Taken(lock);
+            }
+            Err(e) if e.to_string().contains("place already served") => {
+                say_held(place, wait_secs);
+                if started.elapsed() >= Duration::from_secs(wait_secs) {
+                    return Held::StillHeld(EXIT_PLACE_HELD);
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Err(e) => {
+                eprintln!("arbos-kernel: cannot lock {}: {e:#}", place.path.display());
+                return Held::StillHeld(1);
+            }
+        }
+    }
+}
+
+/// Seconds a held place is reported at: the first refusal in full, then
+/// one heartbeat a minute, then — after this long — the plain word that a
+/// person needs to look, repeated every ten minutes.
+const HELD_ESCALATE_SECS: i64 = 300;
+
+/// What was said so far about a held place, across relaunches.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct HeldRecord {
+    holder_pid: u32,
+    first_ms: i64,
+    last_said_ms: i64,
+    /// Refusals seen (each is one relaunch, or one poll of a waiter).
+    refusals: u64,
+    escalated: bool,
+}
+
+impl HeldRecord {
+    /// Where the record lives: the place's runtime folder, else — when
+    /// that cannot be written (qal-j19: `runtime/` read-only turned the
+    /// say-once into the long line on every relaunch, then the error
+    /// line for ever, because a save that failed was treated as done) —
+    /// the machine's temp folder, keyed on the place's path.
+    fn paths(place: &Place) -> [std::path::PathBuf; 2] {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&place.path, &mut h);
+        [
+            place.runtime_dir().join("place-held.json"),
+            std::env::temp_dir().join(format!(
+                "arbos-place-held-{:016x}.json",
+                std::hash::Hasher::finish(&h)
+            )),
+        ]
+    }
+    /// The newest copy wherever it lies. A first-match read took a stale
+    /// copy in `runtime/` over a live one in the temp folder once the
+    /// runtime folder had stopped being writable (qal-j19, the third
+    /// shape: writable at first, then not — a full disk, a permission
+    /// change), and said the escalation on every relaunch. A write that
+    /// landed somewhere other than where the reader looks first is a
+    /// write the reader must still find.
+    fn load(place: &Place) -> Option<Self> {
+        Self::paths(place)
+            .iter()
+            .filter_map(|p| serde_json::from_str::<Self>(&std::fs::read_to_string(p).ok()?).ok())
+            .max_by_key(|r| (r.last_said_ms, r.refusals))
+    }
+    /// Saved where, or why nowhere. A record that could not be kept is
+    /// not a record: the caller says so and speaks as if there were none.
+    fn save(&self, place: &Place) -> Result<std::path::PathBuf, String> {
+        let text = serde_json::to_string(self).map_err(|e| e.to_string())?;
+        let mut why = Vec::new();
+        for p in Self::paths(place) {
+            let tmp = p.with_extension("json.tmp");
+            match std::fs::write(&tmp, &text).and_then(|()| std::fs::rename(&tmp, &p)) {
+                Ok(()) => return Ok(p),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    why.push(format!("{}: {e}", p.display()));
+                }
+            }
+        }
+        Err(why.join("; "))
+    }
+    fn clear(place: &Place) {
+        for p in Self::paths(place) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// How long the holder has had the place, with no record at all: the
+/// lock file is written by the holder when it takes the lock.
+fn held_since_lock(place: &Place) -> Option<i64> {
+    let modified = place
+        .lock_paths()
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+        .max()?;
+    Some(modified.elapsed().ok()?.as_secs() as i64)
+}
+
+/// One refusal of a held place, said according to the record: in full
+/// the first time for this holder, a heartbeat once a minute, the
+/// escalation after `HELD_ESCALATE_SECS`, and otherwise nothing at all.
+fn say_held(place: &Place, wait_secs: u64) {
+    let now = arbos_core::now_ms();
+    let holder_pid = PlaceLock::holder_pid(place).unwrap_or(0);
+    let mut rec = match HeldRecord::load(place) {
+        Some(r) if r.holder_pid == holder_pid => r,
+        _ => HeldRecord {
+            holder_pid,
+            first_ms: now,
+            last_said_ms: 0,
+            refusals: 0,
+            escalated: false,
+        },
+    };
+    rec.refusals += 1;
+    let held_for = (now - rec.first_ms) / 1000;
+    let holder = describe_holder(place);
+    // The record is what makes "once" possible. When it cannot be kept
+    // anywhere, this process cannot know what an earlier one said, so it
+    // says the short form — one warn line, the holder and the reason the
+    // record failed — and never the long line or the escalation, which
+    // would otherwise come on every relaunch (qal-j19: 6 of 6, at error
+    // level, for ever).
+    let saved = rec.save(place);
+    if let Err(why) = &saved {
+        let age = held_since_lock(place).unwrap_or(held_for);
+        let text = format!(
+            "held by {holder} for about {age}s; the held record could not be written ({why}), so this is said in short on every start"
+        );
+        eprintln!("arbos-kernel: place already served — {text}");
+        log_line_to_place(place, "warn", "place_held", &text);
+        return;
+    }
+    let waiting = if wait_secs > 0 {
+        format!(
+            " This process waits up to {wait_secs}s for the place to be freed (ARBOS_LOCK_WAIT_SECS), then exits {EXIT_PLACE_HELD}."
+        )
+    } else {
+        format!(
+            " This process exits {EXIT_PLACE_HELD}; a supervisor that relaunches it will read this once, not every time."
+        )
+    };
+    let line = if rec.refusals == 1 {
+        Some((
+            "warn",
+            format!(
+                "another kernel already serves {}: {holder}.{waiting}",
+                place.path.display()
+            ),
+        ))
+    } else if held_for >= HELD_ESCALATE_SECS
+        && (!rec.escalated || now - rec.last_said_ms >= 600_000)
+    {
+        rec.escalated = true;
+        Some((
+            "error",
+            format!(
+                "a person needs to look: {} has been held for {held_for}s by {holder}; {} start(s) were refused in that time. Stop that kernel (arbos-kernel stop, or kill -TERM its pid) or point this supervisor at another place.",
+                place.path.display(),
+                rec.refusals
+            ),
+        ))
+    } else if now - rec.last_said_ms >= 60_000 {
+        Some((
+            "warn",
+            format!(
+                "still held after {held_for}s: {holder} ({} start(s) refused so far)",
+                rec.refusals
+            ),
+        ))
+    } else {
+        None
+    };
+    match line {
+        Some((level, text)) => {
+            rec.last_said_ms = now;
+            // The exact phrase stays on stderr every time: the desktop
+            // reads it to tell a lost spawn race from a crash.
+            eprintln!("arbos-kernel: place already served — {text}");
+            log_line_to_place(place, level, "place_held", &text);
+        }
+        None => eprintln!(
+            "arbos-kernel: place already served by pid {holder_pid} ({held_for}s; said in full in kernel.log)"
+        ),
+    }
+    // Said, so the record must show it: the words above were chosen from
+    // the record as loaded; what changed (last_said_ms, escalated) is
+    // saved now, and a save that fails here is said in the same breath.
+    if let Err(why) = rec.save(place) {
+        eprintln!(
+            "arbos-kernel: the held record could not be updated ({why}); the next start may say this again"
+        );
+    }
+}
+
+/// Who holds the place, from what is on disk: the pid in the lock file,
+/// whether it is alive, which build it runs (kernel.json), whether its
+/// file has been replaced under it (a stale image), and its url.
+fn describe_holder(place: &Place) -> String {
+    let pid = PlaceLock::holder_pid(place);
+    let Some(pid) = pid else {
+        return "a holder whose pid the lock file does not say".to_string();
+    };
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    let mut parts = vec![format!(
+        "pid {pid}{}",
+        if alive {
+            ""
+        } else {
+            " (not alive — the lock should be free momentarily)"
+        }
+    )];
+    if let Ok(text) = std::fs::read_to_string(place.kernel_json_read())
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        && v["pid"].as_u64() == Some(pid as u64)
+    {
+        if let Some(sha) = v["git_sha"].as_str().filter(|s| !s.is_empty()) {
+            parts.push(format!("build {}", &sha[..sha.len().min(12)]));
+        }
+        if let Some(url) = v["url"].as_str() {
+            parts.push(format!("url {url}"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        let s = exe.to_string_lossy();
+        if s.ends_with(" (deleted)") {
+            parts.push("its file replaced under it — a stale image that restarts onto the new one when idle".to_string());
+        }
+    }
+    parts.join(", ")
+}
+
+/// One line into the place's kernel.log before this process has its own
+/// logger: the holder's log is the one a person reads.
+fn log_line_to_place(place: &Place, level: &str, event: &str, detail: &str) {
+    let path = klog::log_path_for(&place.arbos());
+    let line = serde_json::json!({
+        "ts": arbos_core::now_ms(),
+        "level": level,
+        "event": event,
+        "detail": detail,
+        "pid": std::process::id(),
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let place = Place::new(
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
     );
-    let _lock = PlaceLock::acquire(&place)?;
+    let _lock = match acquire_or_wait(&place) {
+        Held::Taken(lock) => lock,
+        Held::StillHeld(code) => return Ok(code),
+    };
     bootstrap(&place)?;
     klog::init(klog::log_path_for(&place.arbos()));
     let host = Host::load()?;
@@ -135,6 +438,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
     ptys.bind(place.path.clone(), pty_tx);
+    let _ = hooks.ptys.set(Arc::clone(&ptys));
     let mut registry = kernel_registry(&hooks, &ptys);
     // MCP: every tool of every configured server (`.arbos/mcp.toml`,
     // `.cursor/mcp.json`, `~/.config/arbos/mcp.toml`, `ARBOS_MCP_CMD`)
@@ -441,7 +745,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // appended since the last one.
     let mut tails: std::collections::HashMap<String, TranscriptTail> =
         std::collections::HashMap::new();
-    shutdown_backstop(place.lock_path());
+    shutdown_backstop(place.lock_paths().to_vec());
     // How far each detached job's journal has been streamed (`agent/jN` →
     // bytes, and whether its final frame went out).
     let mut offsets: std::collections::HashMap<String, (u64, bool)> =
@@ -554,6 +858,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 if let Some(lo) = superseded_at {
                     supersede_cut(&place, &hooks, &mut tails, &id, lo);
                 }
+                // A chat nobody named gets its label from the model after
+                // its first turn (F-156); decided on disk, called off-loop.
+                crate::title::after_turn(&hooks, &id);
                 // A standing agent's transcript past the cap rolls into the
                 // archive now, between turns; attached windows reload from
                 // the short file the way they do after a rewind.
@@ -669,8 +976,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                         idle::Verdict::Idle
                     )
                 {
-                    reexec_backoff_until = arbos_core::now_ms() + REEXEC_RETRY_MS;
-                    reexec_onto_new_binary(&place, &hooks);
+                    // A new file still being written (the app's swap is a
+                    // directory rename, then a copy; an installer streams
+                    // the binary) is not a failed restart: look again in
+                    // a moment. Only an exec that returned an error waits
+                    // the full minute. A restart that missed its window
+                    // by a few milliseconds used to wait sixty seconds
+                    // for it (binary_gone_e2e red one run in six).
+                    reexec_backoff_until = arbos_core::now_ms()
+                        + match reexec_onto_new_binary(&place, &hooks) {
+                            Reexec::NotReady => REEXEC_LOOK_AGAIN_MS,
+                            Reexec::Failed => REEXEC_RETRY_MS,
+                        };
                 }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
@@ -742,6 +1059,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: Some(job.meta.cwd.display().to_string()),
                             title: Some(job.meta.command.replace('\n', " ")),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                     }
                     // Output streams for every job, attached or detached:
@@ -767,6 +1085,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: None,
                             title: Some(job.status_line()),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                         let text = format!(
                             "job {} {} — `{}` — log: {}",
@@ -1162,7 +1481,7 @@ fn handle_frame(
         Frame::Pause { agent, paused } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.paused = paused;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "pause", a.save(&place.agent_dir(&agent)));
             }
             if paused {
                 sched.stop(&agent);
@@ -1351,12 +1670,22 @@ fn handle_frame(
                 .ok()
                 .and_then(|a| a.cwd)
                 .unwrap_or_else(|| place.path.clone());
-            let _ = arbos_engine::git::undo(&cwd);
+            // The mark must be the last turn's: its start line is the
+            // last checkpoint's (qal-j10).
+            let last = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
+                .last()
+                .cloned();
+            let turn_line = last.as_ref().map(|cp| cp.line).unwrap_or(0);
+            let turn_ts = last.as_ref().map(|cp| cp.ts);
+            match arbos_engine::git::undo(&cwd, turn_line, turn_ts) {
+                Ok(out) => klog::info("undo", Some(&agent), arbos_core::text::clip(&out.body, 200)),
+                Err(e) => refuse(hooks, Some(&agent), format!("undo: {e:#}")),
+            }
         }
         Frame::SetModel { agent, model } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.model = model;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "model", a.save(&place.agent_dir(&agent)));
             }
         }
         Frame::SetMode { agent, mode } => {
@@ -1366,7 +1695,7 @@ fn handle_frame(
             };
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.mode = mode;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "mode", a.save(&place.agent_dir(&agent)));
                 // On the record, so the transcript says when the leash changed.
                 let _ = append_event(
                     &Layout::new(place, &agent).transcript(),
@@ -1470,6 +1799,60 @@ fn handle_frame(
                 let _ = ptys.write(&agent, &page, &bytes);
             }
         }
+        Frame::Shell { owner, cwd } => {
+            // A person's own shell, asked for from a window: the same
+            // `PtyHub` shell the `terminal` tool mints, announced with
+            // `by: user` so the drawer opens for it.
+            let owner = owner.unwrap_or_else(|| "root".to_string());
+            if !arbos_core::agent_exists(place, &owner) {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: no agent {owner:?} in this place"),
+                );
+                return;
+            }
+            let dir = match cwd.as_deref().filter(|c| !c.trim().is_empty()) {
+                Some(c) => {
+                    let p = std::path::PathBuf::from(c);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        place.path.join(p)
+                    }
+                }
+                None => place.path.clone(),
+            };
+            if !dir.is_dir() {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: {} is not a directory", dir.display()),
+                );
+                return;
+            }
+            let id = ptys.next_id();
+            match ptys.spawn_shell(&id, &dir, &owner, "user") {
+                Ok(_) => {
+                    klog::info(
+                        "shell_opened",
+                        Some(&owner),
+                        format!("{id} in {}", dir.display()),
+                    );
+                    hooks.broadcast(Frame::Board {
+                        owner,
+                        action: "open".into(),
+                        panel: "terminal".into(),
+                        terminal_ids: vec![id],
+                        cwd: Some(dir.display().to_string()),
+                        title: None,
+                        url: None,
+                        by: "user".into(),
+                    });
+                }
+                Err(e) => refuse(hooks, Some(&owner), format!("shell: {e:#}")),
+            }
+        }
         _ => {}
     }
 }
@@ -1479,7 +1862,7 @@ fn handle_frame(
 /// if the loop has not returned a few seconds later, drop the lock file
 /// (the `PlaceLock` guard would have) and exit, rather than leave a kernel
 /// the user cannot stop.
-fn shutdown_backstop(lock_path: std::path::PathBuf) {
+fn shutdown_backstop(lock_paths: Vec<std::path::PathBuf>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
         let (Ok(mut int), Ok(mut term)) = (
@@ -1494,7 +1877,9 @@ fn shutdown_backstop(lock_path: std::path::PathBuf) {
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("arbos-kernel: serve loop did not stop within 5s of the signal; exiting");
-        let _ = std::fs::remove_file(&lock_path);
+        for p in &lock_paths {
+            let _ = std::fs::remove_file(p);
+        }
         std::process::exit(130);
     });
 }
@@ -1698,6 +2083,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
         .map(|a| TreeNode {
             id: a.id.to_string(),
             name: a.name.clone(),
+            title: a.title.clone(),
             // Never an agent as its own ancestor: a parent that is itself,
             // is missing, or leads back around reads as top-level.
             parent: sane_parent(&agents, a),
@@ -2333,6 +2719,39 @@ pub async fn serve_client(
                                 bytes: b.bytes,
                             });
                         }
+                        // What this kernel holds, for a window reconciling
+                        // its rows after a kernel's death: answered to the
+                        // asker alone, read now, never from a cache.
+                        Frame::Surfaces { agent } => {
+                            if let Some(a) = agent.as_deref()
+                                && !arbos_core::agent_exists(&place_for_history, a)
+                            {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(a.to_string()),
+                                    detail: format!("surfaces: no agent is named {a}"),
+                                });
+                                continue;
+                            }
+                            let surfaces = crate::surfaces::list(
+                                &place_for_history,
+                                &hooks_for_feedback,
+                                agent.as_deref(),
+                            );
+                            klog::info(
+                                "surfaces",
+                                agent.as_deref(),
+                                format!(
+                                    "who={who_name} rows={} running={}",
+                                    surfaces.len(),
+                                    surfaces.iter().filter(|s| s.running).count()
+                                ),
+                            );
+                            let _ = out_for_history.send(Frame::SurfaceList {
+                                agent,
+                                surfaces,
+                                at_ms: arbos_core::now_ms(),
+                            });
+                        }
                         // Files under .arbos/, answered here too; a slow
                         // disk stalls this client alone. `put` is a peer's
                         // write by address; the store rules apply inside.
@@ -2415,27 +2834,67 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
 /// about to fire is a reason to wait), and how long between attempts.
 const REEXEC_HORIZON_MS: i64 = 60_000;
 const REEXEC_RETRY_MS: i64 = 60_000;
+/// How soon to look again when the new file was not there or was still
+/// being written.
+const REEXEC_LOOK_AGAIN_MS: i64 = 2_000;
+
+/// Why a re-exec did not happen (a successful one never returns).
+enum Reexec {
+    /// No usable new file yet, or one whose bytes were still changing.
+    NotReady,
+    /// `execv` itself returned an error; the old image serves on.
+    Failed,
+}
 
 /// Replace this process with the arbos-kernel now at its own path, same
 /// arguments, same environment. Returns only when the exec failed — the
 /// old image then serves on. Set `ARBOS_NO_REEXEC=1` to keep a kernel on
 /// its old image (a test of the notice alone, or a person who wants to
 /// choose the moment).
-fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
+fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) -> Reexec {
     if std::env::var_os("ARBOS_NO_REEXEC").is_some() {
-        return;
+        return Reexec::NotReady;
     }
     let chosen = match crate::binary::kernel_binary() {
         Ok(c) => c,
         Err(e) => {
-            klog::warn(
-                "reexec_failed",
+            klog::info(
+                "reexec_wait",
                 None,
-                format!("no binary to restart onto: {e:#}"),
+                format!("no binary to restart onto yet: {e:#}; looking again"),
             );
-            return;
+            return Reexec::NotReady;
         }
     };
+    // The file must be whole and at rest: the same size and mtime across
+    // a short pause, executable, and not this process's own image.
+    let settled = {
+        let first = arbos_core::binary_identity::of(&chosen.path);
+        std::thread::sleep(Duration::from_millis(250));
+        let second = arbos_core::binary_identity::of(&chosen.path);
+        match (first, second) {
+            (Some(a), Some(b))
+                if a == b
+                    && std::fs::metadata(&chosen.path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    };
+    if !settled {
+        klog::info(
+            "reexec_wait",
+            None,
+            format!(
+                "{} is still being written or is not there; looking again",
+                chosen.path.display()
+            ),
+        );
+        return Reexec::NotReady;
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     klog::info(
         "reexec",
@@ -2469,6 +2928,7 @@ fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
             format!("{}: {err}; the old image serves on", chosen.path.display()),
         );
     }
+    Reexec::Failed
 }
 
 /// A running turn that has shown nothing for [`crate::hooks::stall_secs`] gets
@@ -2669,6 +3129,21 @@ fn configure(
 /// done here (fast: two file writes); the tail is moved to the new end;
 /// files are restored on the blocking pool, and `rewound` goes out to
 /// every client when that is done.
+/// A setting the client asked for that did not reach the agent's file:
+/// the window shows it set, the next start would not — said as an
+/// error frame instead of believed (the unchecked-write pass).
+fn say_if_unsaved(hooks: &KernelHooks, agent: &str, what: &str, saved: anyhow::Result<()>) {
+    if let Err(e) = saved {
+        klog::warn("agent_save_failed", Some(agent), format!("{what}: {e:#}"));
+        hooks.broadcast(Frame::Error {
+            agent: Some(agent.to_string()),
+            detail: format!(
+                "{what} changed for this run only: the agent's file could not be written ({e:#}); it would revert at the next start"
+            ),
+        });
+    }
+}
+
 /// The `reason` on a `stop` that replaces a message rather than ending work.
 pub const SUPERSEDED: &str = "superseded";
 
@@ -2799,6 +3274,34 @@ fn rewind_live(
         let restored = if files {
             match rewind::restore_files(&place, &agent, &done.checkpoint) {
                 Ok(what) => Some(what),
+                Err(e) if e.downcast_ref::<arbos_engine::git::NoTree>().is_some() => {
+                    // Not a failure: the record for this turn has no tree
+                    // (recorded before the kernel kept one, or its save
+                    // failed and was said at the time). The transcript is
+                    // cut; the files stand; and on Jacob's existing places
+                    // most old-turn rewinds land here. A notice, drawn as
+                    // a kernel line, that also says when it stops — not
+                    // an `error` frame that draws the rewind as a crash.
+                    let text = format!(
+                        "Rewound the transcript. Files were not restored: {e}. This turn was recorded before the kernel kept each turn's working tree; turns recorded from now on restore their files."
+                    );
+                    let _ = arbos_core::append_event(
+                        &Layout::new(&place, &agent).transcript(),
+                        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                            text,
+                            failed: false,
+                        }),
+                    );
+                    klog::info("rewind_files_skipped", Some(&agent), format!("{e}"));
+                    hooks.broadcast(Frame::Rewound {
+                        agent: agent.clone(),
+                        line: done.checkpoint.line,
+                        dropped: done.dropped,
+                        restored: None,
+                        pending: false,
+                    });
+                    None
+                }
                 Err(e) => {
                     hooks.broadcast(Frame::Error {
                         agent: Some(agent.clone()),
@@ -2853,7 +3356,15 @@ fn resolve_approve(
         tool,
         allowed: allow,
     });
-    let _ = append_event(&Layout::new(place, &agent).transcript(), &event);
+    // The decision drove the tool whether or not this line lands; a
+    // record without it would show a tool that ran with no one's say-so.
+    if let Err(e) = append_event(&Layout::new(place, &agent).transcript(), &event) {
+        klog::warn(
+            "approval_unrecorded",
+            Some(&agent),
+            format!("allowed={allow}: the decision could not be written to the transcript: {e:#}"),
+        );
+    }
     hooks.broadcast(Frame::Event { agent, event });
 }
 

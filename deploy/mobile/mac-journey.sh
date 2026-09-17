@@ -14,7 +14,15 @@ RUN=$(date -u +%m%d-%H%M%S); O=$HOME/mobile-out/journey/$RUN; mkdir -p $O
 T=$(plutil -extract hubToken raw -o - ~/arbos/ios/Arbos/Secrets.plist); H=$(plutil -extract hubURL raw -o - ~/arbos/ios/Arbos/Secrets.plist)
 ID=J$(date -u +%H%M%S); DIR="journey_$ID"
 shot() { xcrun simctl io "$U" screenshot "$O/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
-hist() { python3 ~/kernel.py $TARGET history 120 2>/dev/null | awk -v a="${AFTER:-0}" '$1+0 > a+0'; }
+# Lines this run put there, never the ones before it. With no anchor this
+# used to fall back to the whole transcript, and cycle 48 scored a spawn
+# refusal that belonged to two runs earlier — in a run where no spawn ever
+# happened. An unknown anchor now yields nothing, so a check that needs one
+# fails for want of evidence instead of finding somebody else's.
+hist() {
+  if [ -z "${AFTER:-}" ]; then echo "hist: no anchor set; refusing to read the whole transcript" >&2; return 0; fi
+  python3 ~/kernel.py $TARGET history 120 2>/dev/null | awk -v a="$AFTER" '$1+0 > a+0'
+}
 seq_of() { python3 ~/kernel.py $TARGET history 120 2>/dev/null | grep -E "$1" | tail -1 | awk '{print $1}'; }
 score() { echo "$1 $2 $3" | tee -a $O/score.txt; }
 wait_hist() { local s=$1 re=$2 secs=$3 t=0; while [ $t -lt $secs ]; do if hist | grep -qE "$re"; then score "$s" PASS "/$re/ after ${t}s"; return 0; fi; sleep 5; t=$((t+5)); done; score "$s" FAIL "no /$re/ within ${secs}s"; return 1; }
@@ -49,10 +57,13 @@ xcrun simctl io "$U" recordVideo --codec h264 --force "$O/j2-raw.mp4" >/dev/null
 (python3 ~/frame-log.py $TARGET 400 > $O/frames.log 2>&1 &)
 type_send "$ID challenge: in $DIR, through one worker you wait for: fix the failing test, then add perimeter(w, h) and diagonal(w, h) to mathlib.py with three unit tests each (including edge cases), add a CHANGELOG.md entry describing every change, make 'python3 -m unittest -q' from the project folder pass (fix discovery if needed), and commit the work on a branch (not main). Tell me the branch name and the test output's last line."
 wait_hist J2 "user +$ID challenge" 30; C=$(seq_of "user +$ID challenge"); AFTER=$C
+# Without the challenge line there is no run to score: everything below would
+# be reading the transcript from before it started.
+if [ -z "$C" ]; then score J2 FAIL "the challenge never reached the kernel — nothing below this line was exercised"; fi
 sleep 8; shot J2-busy
 t=0; while [ $t -lt 120 ]; do grep -qE '"state": "running"' $O/frames.log 2>/dev/null && break; hist | grep -qE "tool +spawn" && break; hist | grep -qE "turn_complete" && break; sleep 1; t=$((t+1)); done
 sleep 3; SPAWNERR=$(hist | grep -E "tool +spawn.*ERROR:" | head -1 | sed 's/.*ERROR: //')
-if [ -n "$SPAWNERR" ]; then score J2 FAIL "spawn refused: $SPAWNERR (run 30: the daemon's binary was gone from disk)"; elif grep -qE '"state": "running"' $O/frames.log 2>/dev/null || hist | grep -qE "tool +spawn"; then score J2 PASS "worker running after ${t}s"; else score J2 U "no worker: the root did it itself (allowed)"; fi
+if [ -z "$C" ]; then :; elif [ -n "$SPAWNERR" ]; then score J2 FAIL "spawn refused: $SPAWNERR"; elif grep -qE '"state": "running"' $O/frames.log 2>/dev/null || hist | grep -qE "tool +spawn"; then score J2 PASS "worker running after ${t}s"; else score J2 U "no worker: the root did it itself (allowed)"; fi
 shot J2-workers
 
 kill -INT $REC 2>/dev/null; ffmpeg -v error -y -i "$O/j2-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-challenge-workers.mp4" && rm -f "$O/j2-raw.mp4"

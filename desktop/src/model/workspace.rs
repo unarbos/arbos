@@ -558,7 +558,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The settings window's choice. bezel repaints on `set_mode`; the state
+    /// The Settings tab's choice. bezel repaints on `set_mode`; the state
     /// file is what makes it survive a relaunch.
     pub fn set_appearance(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
         self.appearance = mode;
@@ -1715,6 +1715,29 @@ impl Workspace {
     /// filed parent. Done after every session is read, so order does not
     /// matter.
     fn resolve_parents(&mut self, ix: usize) {
+        // The filed parent is this window's cache of the kernel's record;
+        // where the kernel's `agent.md` says otherwise, the kernel wins.
+        // A parentless agent the file had under root stays a chat of its
+        // own and loses its delegate number (F-137).
+        let place = self.projects[ix].place();
+        for chat in &mut self.projects[ix].sessions {
+            let Some(sid) = chat.agent_session.as_deref() else {
+                continue;
+            };
+            if let Some(kernel_parent) = kernel::agent_parent(&place, sid)
+                && chat.parent_kernel != kernel_parent
+            {
+                eprintln!(
+                    "session {} ({sid}): filed parent {:?}, the kernel's record says {:?}; the record wins",
+                    chat.id, chat.parent_kernel, kernel_parent
+                );
+                chat.parent_kernel = kernel_parent;
+                if chat.parent_kernel.is_none() {
+                    chat.delegate_number = None;
+                }
+                chat.flush();
+            }
+        }
         let by_kernel: HashMap<String, u64> = self.projects[ix]
             .sessions
             .iter()
@@ -2385,6 +2408,98 @@ impl Workspace {
 
     /// Any session, in whichever project holds it — the pump that feeds a
     /// session knows only its id, and must not care which tab it sits behind.
+    /// Everything this window knows about `place`, for a report to carry.
+    ///
+    /// Jacob's ruling: package the state needed to debug into the bug itself.
+    /// The test is whether a reader could reconstruct what he was looking at and
+    /// what each side believed — so this holds the rows as the window has them,
+    /// the session records on disk behind them, and where the focus was. The
+    /// kernel's own roster and agent list ride in the same bundle, so the two
+    /// can be set against each other; a report carrying one side cannot show a
+    /// disagreement, and a disagreement is what F-137 was.
+    ///
+    /// `budget` bounds the on-disk records. They hold whole chats, so their
+    /// messages are counted rather than copied and the result says so.
+    /// `store` is the place's own local folder — `Project::store()` — and not its
+    /// path.
+    ///
+    /// A remote place's path belongs to the far machine: `ArbosLife:~` has the
+    /// path `~`, which is not even absolute here. Reading records from it reads a
+    /// relative path against the app's working directory, so a remote report
+    /// would carry either nothing or whatever happened to sit there. `store()` is
+    /// the local sidecar the desktop already keeps a remote project's records in.
+    pub fn desktop_state(&self, store: &std::path::Path, budget: usize) -> serde_json::Value {
+        let place = store;
+        let project = self
+            .projects
+            .iter()
+            .find(|project| project.store() == store);
+        let rows: Vec<serde_json::Value> = project
+            .map(|project| project.sessions.iter().map(ChatSession::row_facts).collect())
+            .unwrap_or_default();
+
+        // The records are what the window will draw again after a relaunch, so
+        // a row that disagrees with the kernel disagrees here too. Their
+        // `items` are whole chats; the metadata is the part that explains a
+        // wrong row, so the messages are counted and left out.
+        let mut records = Vec::new();
+        let mut records_clipped = 0usize;
+        let mut bytes = 0usize;
+        for (path, record) in crate::model::record::list(place) {
+            let row = serde_json::json!({
+                "file": path.file_name().and_then(|n| n.to_str()),
+                "agent": record.agent,
+                "session": record.session,
+                "parent": record.parent,
+                "delegate_number": record.delegate_number,
+                "title": record.title,
+                "name": record.name,
+                "closed": record.closed,
+                "rank": record.rank,
+                "updated": record.updated,
+                "items": record.items.len(),
+                "draft_chars": record.draft.chars().count(),
+            });
+            let size = row.to_string().len();
+            if bytes + size > budget {
+                records_clipped += 1;
+                continue;
+            }
+            bytes += size;
+            records.push(row);
+        }
+
+        serde_json::json!({
+            "place": place.to_string_lossy(),
+            // The rows on screen, and the facts each label and status came from.
+            "rows": rows,
+            "records": records,
+            // Never a silent drop: what went, and why.
+            "records_clipped": records_clipped,
+            "records_note": if records_clipped > 0 {
+                serde_json::Value::String(format!(
+                    "{records_clipped} session record(s) left out for size; every record's messages are counted rather than copied"
+                ))
+            } else {
+                serde_json::Value::String(
+                    "every session record is here; their messages are counted rather than copied".into(),
+                )
+            },
+            "focus": project.and_then(|p| p.focus.as_ref()).map(|f| serde_json::json!({
+                "agent": f.agent,
+                "surface": f.surface.map(|s| format!("{s:?}")),
+            })),
+            "archived_shown": project.map(|p| p.archive_open),
+            // The tabs, so "which project was in front" is answerable.
+            "tabs": self.projects.iter().map(|p| serde_json::json!({
+                "path": p.path.to_string_lossy(),
+                "host": p.host,
+                "sessions": p.sessions.len(),
+            })).collect::<Vec<_>>(),
+            "active_tab": self.active,
+        })
+    }
+
     pub fn session(&self, id: u64) -> Option<&ChatSession> {
         self.projects.iter().find_map(|project| project.session(id))
     }
@@ -3065,25 +3180,65 @@ impl Workspace {
         if self.projects[ix].dismissed.contains(&kernel_id) {
             return None;
         }
+        // The kernel's record decides. A local agent it has no `agent.md`
+        // for does not get a row — the spawn tool names its child before
+        // the spawn has returned, and a spawn that failed would otherwise
+        // leave a session behind with nothing under it (F-137, Jacob's
+        // capture: three session files stamped before the spawn results).
+        // The roster brings it round within two seconds once it exists.
+        // And a kernel record that names no parent is a chat of its own,
+        // not `owner`'s delegate, whatever row was clicked: the
+        // "Delegate 1" of F-137 was a parentless `chat-…` adopted under
+        // root by a panel click and numbered from then on.
+        let place = self.projects[ix].place();
+        let owner_kernel = self.projects[ix]
+            .session(owner)
+            .and_then(|chat| chat.agent_session.clone());
+        let kernel_parent = kernel::agent_parent(&place, &kernel_id);
+        if place.host.is_none() && kernel_parent.is_none() {
+            return None;
+        }
+        // The kernel's parent, in this window's ids: `owner` when the
+        // record agrees with the caller, none when the record says the
+        // agent stands alone.
+        let parent_of = |workspace: &Self| -> Option<u64> {
+            match &kernel_parent {
+                None => Some(owner),
+                Some(None) => None,
+                Some(Some(sid)) if Some(sid) == owner_kernel.as_ref() => Some(owner),
+                Some(Some(sid)) => workspace.projects[ix]
+                    .sessions
+                    .iter()
+                    .find(|chat| chat.agent_session.as_deref() == Some(sid.as_str()))
+                    .map(|chat| chat.id)
+                    .or(Some(owner)),
+            }
+        };
         if let Some(id) = self.projects[ix]
             .sessions
             .iter()
             .find(|chat| chat.agent_session.as_deref() == Some(&kernel_id))
             .map(|chat| chat.id)
         {
-            let parent_kernel = self.projects[ix]
-                .session(owner)
-                .and_then(|chat| chat.agent_session.clone());
+            let parent = parent_of(self);
+            let parent_kernel = match &kernel_parent {
+                Some(parent) => parent.clone(),
+                None => owner_kernel.clone(),
+            };
             let mut dirty = false;
-            let ring = !self.projects[ix].can_parent(id, owner);
+            let ring = parent.is_some_and(|parent| !self.projects[ix].can_parent(id, parent));
             if ring {
                 eprintln!(
                     "session {id} ({kernel_id}) listed as a child of {owner}, its own descendant; the link stays as it was"
                 );
             }
             if let Some(chat) = self.projects[ix].session_mut(id) {
-                if !ring && chat.parent != Some(owner) {
-                    chat.parent = Some(owner);
+                if !ring && chat.parent != parent {
+                    chat.parent = parent;
+                    // A delegate's number belongs to a delegate.
+                    if parent.is_none() {
+                        chat.delegate_number = None;
+                    }
                     dirty = true;
                 }
                 if chat.parent_kernel != parent_kernel {
@@ -3112,22 +3267,24 @@ impl Workspace {
             .session(owner)
             .map(|chat| chat.entry.clone())
             .unwrap_or_else(settings::kernel_agent);
-        let parent_kernel = self.projects[ix]
-            .session(owner)
-            .and_then(|chat| chat.agent_session.clone());
+        let parent = parent_of(self);
+        let parent_kernel = match &kernel_parent {
+            Some(parent) => parent.clone(),
+            None => owner_kernel.clone(),
+        };
         let id = self.next_id;
         self.next_id += 1;
         // The kernel named the child after its brief; the row says that,
         // not "Delegate N", from the first frame.
-        let name = kernel::agent_name(&self.projects[ix].place(), &kernel_id);
-        let brief = kernel::agent_brief(&self.projects[ix].place(), &kernel_id);
-        let flags = kernel::agent_flags(&self.projects[ix].place(), &kernel_id);
+        let name = kernel::agent_name(&place, &kernel_id);
+        let brief = kernel::agent_brief(&place, &kernel_id);
+        let flags = kernel::agent_flags(&place, &kernel_id);
         let mut chat = ChatSession::adopt(
             id,
             entry,
-            self.projects[ix].place(),
+            place.clone(),
             kernel_id,
-            Some(owner),
+            parent,
             parent_kernel,
             cx,
         );
@@ -3146,7 +3303,7 @@ impl Workspace {
                     brief,
                 )));
         }
-        chat.rank = self.projects[ix].front_rank(Some(owner));
+        chat.rank = self.projects[ix].front_rank(parent);
         self.projects[ix].sessions.push(chat);
         self.number_delegates(ix);
         self.push_snapshot(ix);
@@ -3235,10 +3392,38 @@ impl Workspace {
     /// them without reaching into other sessions. Cheap; call before a draw.
     pub fn refresh_children(&mut self, id: u64) {
         let kids = self.child_summaries(id);
-        if let Some(chat) = self.session_mut(id)
-            && chat.children != kids
-        {
-            chat.children = kids;
+        // The command this chat has running as a job — an attached `bash`
+        // is a process row, not a tool item, until it returns — so the
+        // live line can say "Running sleep 75; echo waited" over a status
+        // the agent set before it (F-139; Jacob's report 2026-09-17-6).
+        let job = self.project_of(id).and_then(|ix| {
+            self.projects[ix]
+                .surfaces
+                .iter()
+                .rev()
+                .find(|surface| {
+                    surface.owner == Some(id)
+                        && matches!(surface.bind, Bind::Process { done: None, .. })
+                })
+                .map(|surface| surface.title.clone())
+        });
+        if let Some(chat) = self.session_mut(id) {
+            // A status the agent set over its workers loses its subject
+            // when the last of them finishes: "Waiting on three sorting
+            // workers" over three Done lines (Jacob's report 2026-09-17-6;
+            // the drawing half of #432). The kernel writes no waiting line
+            // while the agent's own status stands, so the children's
+            // states are the signal here.
+            let any_working = kids
+                .iter()
+                .any(|child| matches!(child.state, session::ChildState::Working));
+            chat.settle_status_over_workers(any_working);
+            if chat.children != kids {
+                chat.children = kids;
+            }
+            if chat.running_job != job {
+                chat.running_job = job;
+            }
         }
     }
 

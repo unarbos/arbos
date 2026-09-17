@@ -67,6 +67,39 @@ def still(path: Path | str, display: str | None = None) -> None:
         ) from e
 
 
+def desktop_build(desktop_bin: str | Path) -> str:
+    """The desktop's own word on its build — `arbos-desktop --version`,
+    e.g. `0.2.0 1462 42cb975-dirty` (version, build number, short sha,
+    `-dirty` when the tree had uncommitted changes). Read from the binary
+    the run will launch. A build that failed leaves the previous binary in
+    `target/`, and a gate that never reads the binary's sha runs green on
+    a build that is not the PR's (rig audit R21)."""
+    try:
+        out = subprocess.run([str(desktop_bin), "--version"], capture_output=True, text=True, timeout=10)
+        line = (out.stdout or out.stderr).strip().splitlines()
+        return line[0] if line else f"{desktop_bin}: no version line"
+    except Exception as e:  # noqa: BLE001
+        return f"{desktop_bin}: --version failed ({e})"
+
+
+def tree_sha(src: str | Path) -> str:
+    """Short sha of the checkout the binary should have been built from."""
+    try:
+        out = subprocess.run(["git", "-C", str(src), "rev-parse", "--short=7", "HEAD"], capture_output=True, text=True, timeout=10)
+        return out.stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def binary_matches_tree(build_line: str, sha: str) -> bool:
+    """`0.2.0 1462 42cb975-dirty` matches tree `42cb975`; a `-dirty` build
+    still counts as the tree's (the rig builds uncommitted work to drive it)."""
+    if not sha:
+        return False
+    parts = build_line.split()
+    return any(p.split("-")[0].startswith(sha) or sha.startswith(p.split("-")[0]) for p in parts if len(p.split("-")[0]) >= 7)
+
+
 def kernel_build(kernel_bin: str | Path) -> str:
     """The kernel's own word on its build — `arbos-kernel --version`, e.g.
     `arbos-kernel 0.2.0 d73a25aea876 protocol 1` — read from the binary the

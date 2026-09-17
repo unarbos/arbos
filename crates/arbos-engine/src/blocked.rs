@@ -44,23 +44,32 @@ pub fn host_of(base: &str) -> String {
     b.split('/').next().unwrap_or(b).to_ascii_lowercase()
 }
 
+/// The marks as they stand: empty when absent or unreadable (the block
+/// is then simply not known this run — the fallback path handles a 403
+/// live).
 pub fn load() -> Blocked {
-    std::fs::read_to_string(path())
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    load_for_rewrite().unwrap_or_default()
+}
+
+/// For `mark`/`clear`, which write the file back: an unreadable file is
+/// not rewritten from empty (the qal-j08 family — `arbos_core::record`).
+fn load_for_rewrite() -> Option<Blocked> {
+    match arbos_core::record::read_json::<Blocked>(&path()) {
+        arbos_core::record::Read::Present(b) => Some(b),
+        arbos_core::record::Read::Absent => Some(Blocked::default()),
+        arbos_core::record::Read::Unknown(why) => {
+            eprintln!("blocked models: {why}; not rewritten");
+            None
+        }
+    }
 }
 
 fn save(b: &Blocked) {
     let p = path();
-    if let Some(dir) = p.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(text) = serde_json::to_string_pretty(b) {
-        let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, &p);
-        }
+    if let Ok(text) = serde_json::to_string_pretty(b)
+        && let Err(e) = arbos_core::record::write_atomic(&p, text.as_bytes())
+    {
+        eprintln!("blocked models: {e:#}");
     }
 }
 
@@ -82,7 +91,9 @@ pub fn mark(base: &str, model: &str, message: &str) {
     if fam.is_empty() {
         return;
     }
-    let mut b = load();
+    let Some(mut b) = load_for_rewrite() else {
+        return;
+    };
     b.hosts.entry(host_of(base)).or_default().insert(
         fam.to_string(),
         Mark {
@@ -101,7 +112,9 @@ pub fn clear(base: &str, model: &str) {
     if fam.is_empty() {
         return;
     }
-    let mut b = load();
+    let Some(mut b) = load_for_rewrite() else {
+        return;
+    };
     let host = host_of(base);
     let Some(m) = b.hosts.get_mut(&host) else {
         return;

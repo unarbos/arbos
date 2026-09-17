@@ -28,6 +28,7 @@ pub mod sandbox;
 pub mod secrets;
 mod step;
 pub mod summarise;
+pub mod title;
 mod tool;
 mod tools;
 mod turn;

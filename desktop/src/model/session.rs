@@ -425,6 +425,12 @@ pub struct ChatSession {
     /// Where `.arbos` extras are written. A remote place uses a local sidecar.
     pub store: PathBuf,
     pub connection: Connection,
+    /// Which kernel answered on this socket, as its `hello` described it.
+    /// `None` until the handshake and again as soon as the socket is gone, so
+    /// it is never a build nothing is attached to. Read it through
+    /// [`crate::model::project::Project::kernel_build`], which asks the
+    /// connection rather than this field.
+    pub kernel_build: Option<crate::kernel::KernelBuild>,
     pub items: Vec<ChatItem>,
     /// The agent's plan as the kernel last sent it: every node, inbox
     /// rows included. The strip above the composer draws the open ones.
@@ -604,6 +610,25 @@ pub struct ChatSession {
     /// worker is live (#366). Runtime only; the kernel clears it the
     /// moment no worker is live.
     pub waiting: Option<String>,
+    /// The agent set its `status` while a worker of its was live: the step
+    /// is about the workers, and goes when the last of them finishes —
+    /// "Waiting on three sorting workers" stood over three Done lines for
+    /// minutes (Jacob's report 2026-09-17-6; #432's author handed the
+    /// drawing here). Runtime only.
+    status_over_workers: bool,
+    /// The highest record line (`seq`) this pane has taken from the kernel's
+    /// transcript. A recorded line at or below it is one the pane already
+    /// holds: a replay reaching a live pane appended the record's head a
+    /// second time (F-135, cycle 33). Reset when the kernel rewinds, since
+    /// the numbering starts again below. Runtime only; primed from the
+    /// cards' own `seq` at load.
+    record_seq: u64,
+    /// Models the kernel has said are "not available to this key" in this
+    /// chat: dropped from the picker until the key changes. Runtime only.
+    pub unavailable_models: HashSet<String>,
+    /// The attached command this chat has running as a job, by title —
+    /// set by the workspace before a draw, like `children`. Runtime only.
+    pub running_job: Option<String>,
     /// When each running tool call began, by call id, so its finished
     /// item can say how long it took.
     tool_started: HashMap<String, Instant>,
@@ -675,6 +700,7 @@ impl ChatSession {
             host: place.host.clone(),
             cwd: place.path,
             connection: Connection::Connecting,
+            kernel_build: None,
             items: Vec::new(),
             plan: Vec::new(),
             answering: None,
@@ -742,6 +768,10 @@ impl ChatSession {
             kickoff_wanted: false,
             status: None,
             waiting: None,
+            status_over_workers: false,
+            record_seq: 0,
+            unavailable_models: HashSet::new(),
+            running_job: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -769,6 +799,7 @@ impl ChatSession {
             host: place.host.clone(),
             cwd: place.path,
             connection: Connection::Idle,
+            kernel_build: None,
             items: record.items,
             plan: Vec::new(),
             answering: None,
@@ -836,6 +867,10 @@ impl ChatSession {
             kickoff_wanted: false,
             status: None,
             waiting: None,
+            status_over_workers: false,
+            record_seq: 0,
+            unavailable_models: HashSet::new(),
+            running_job: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -863,6 +898,7 @@ impl ChatSession {
             host: place.host.clone(),
             cwd: place.path,
             connection: Connection::Idle,
+            kernel_build: None,
             items,
             plan: Vec::new(),
             answering: None,
@@ -930,6 +966,10 @@ impl ChatSession {
             kickoff_wanted: false,
             status: None,
             waiting: None,
+            status_over_workers: false,
+            record_seq: 0,
+            unavailable_models: HashSet::new(),
+            running_job: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -1138,6 +1178,9 @@ impl ChatSession {
 
     fn forget_socket(&mut self) {
         self.connection = Connection::Lost;
+        // The build belonged to that socket. Nothing is attached now, and
+        // "nothing is attached" is an answer; last week's version is not.
+        self.kernel_build = None;
         self.streaming = false;
         self.turn_open = false;
         self.flight = None;
@@ -1222,7 +1265,7 @@ impl ChatSession {
         self.streaming || self.turn_open || self.has_running_tool() || !self.live.is_empty()
     }
 
-    fn has_running_tool(&self) -> bool {
+    pub(crate) fn has_running_tool(&self) -> bool {
         self.items.iter().any(|item| {
             matches!(
                 item,
@@ -1545,6 +1588,32 @@ impl ChatSession {
         self.flush();
     }
 
+    /// Whether a recorded line at `seq` is one this pane already holds. A
+    /// line above the high-water mark moves it and is news; `0` (a live
+    /// frame, an older kernel) is never a record and always passes.
+    fn record_held(&mut self, seq: u64) -> bool {
+        if seq == 0 {
+            return false;
+        }
+        if self.record_seq == 0 {
+            // Primed once, from the cards the record already matched.
+            self.record_seq = self
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    ChatItem::User(message) => message.seq,
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+        }
+        if seq <= self.record_seq {
+            return true;
+        }
+        self.record_seq = seq;
+        false
+    }
+
     /// Lines held while the place was away are still waiting, the socket is
     /// back and nothing is in flight: a new line queues behind them so they
     /// go in the order they were typed.
@@ -1554,6 +1623,24 @@ impl ChatSession {
             && !self.streaming
             && !self.has_running_tool()
             && !self.queue.is_empty()
+    }
+
+    /// The workers this status was about have all finished: the status
+    /// goes. Called by the workspace with the children's current states
+    /// before a draw; the flag is set when a `status` lands while a child
+    /// is working.
+    pub fn settle_status_over_workers(&mut self, any_working: bool) {
+        // A status that stood while a worker worked is about the workers,
+        // whether it was set before the spawn or after it (the rig's
+        // coordinator set "Waiting on one sorting worker" and then spawned;
+        // Jacob's spawned and then set it).
+        if any_working && self.status.is_some() {
+            self.status_over_workers = true;
+        }
+        if self.status_over_workers && !any_working && !self.children.is_empty() {
+            self.status = None;
+            self.status_over_workers = false;
+        }
     }
 
     /// Whether the newest notice already says the place is gone — one
@@ -1658,6 +1745,9 @@ impl ChatSession {
     /// coordinator itself sat in `sleep 75`; the line that was true was
     /// "Running sleep 75; echo waited".
     pub fn live_status(&self) -> Option<String> {
+        if let Some(job) = &self.running_job {
+            return Some(step_label(&format!("bash {job}")));
+        }
         for item in self.items.iter().rev() {
             if let ChatItem::Tool { label, status, .. } = item {
                 if label.split_whitespace().next() == Some("status") {
@@ -1749,7 +1839,11 @@ fn step_label(label: &str) -> String {
 impl ChatSession {
     /// The state a parent shows for this chat.
     pub fn child_state(&self) -> ChildState {
-        if self.busy() {
+        // "Working" is drawn from something: frames on a live socket, a
+        // tool this window saw start, or the kernel's own activity list —
+        // never a flag alone on a chat nothing is attached to (F-137).
+        let evidence = self.live() || self.has_running_tool() || !self.live.is_empty();
+        if self.busy() && evidence {
             ChildState::Working
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking
@@ -1969,6 +2063,18 @@ impl ChatSession {
             self.updated = SystemTime::now();
             self.flush();
             return;
+        }
+        // The kernel records the steer as a `user` line a moment later;
+        // that record is this card's echo. Matched only against the newest
+        // card, a second steer typed before the first was recorded made
+        // the first land twice (F-149, cycle 34: three lines typed fast
+        // while the first ran, two of them doubled).
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
         }
         let mut message = content.message();
         message.steer = true;
@@ -2864,7 +2970,12 @@ impl ChatSession {
                 ts,
                 seq,
                 channel,
-            } => self.foreign_prompt(text, attachments, ts, seq, channel),
+            } => {
+                if self.record_held(seq) {
+                    return;
+                }
+                self.foreign_prompt(text, attachments, ts, seq, channel)
+            }
             Event::Provider {
                 provider,
                 model,
@@ -2896,6 +3007,9 @@ impl ChatSession {
                 restored,
                 pending,
             } => {
+                // The record is shorter now and numbers on from where it
+                // was cut: the lines to come are new however low they sit.
+                self.record_seq = 0;
                 // The second frame of a rewind with files: the restore is
                 // done. The chat was already cut on the first; only the
                 // line changes.
@@ -2939,8 +3053,13 @@ impl ChatSession {
                 self.notice(false, &what);
                 self.flush();
             }
-            Event::Handshake { protocol, kernel } => {
+            Event::Handshake { protocol, build } => {
                 let ok = protocol.is_some_and(|p| p >= crate::kernel::PROTOCOL);
+                let kernel = build.version.clone();
+                // Which kernel is on the other end of this socket, in its own
+                // words. Kept only while the socket is: `forget_socket` drops
+                // it, so the field cannot outlive the connection it describes.
+                self.kernel_build = ok.then_some(build);
                 // An empty root on a place opened for the first time wants
                 // the kickoff turn once. It goes when the kernel says it has
                 // a key (the `provider` frame follows hello): on a fresh
@@ -2988,7 +3107,10 @@ impl ChatSession {
                     self.flush();
                 }
             }
-            Event::Woke { kind, text, at } => {
+            Event::Woke { kind, text, at, seq } => {
+                if self.record_held(seq) {
+                    return;
+                }
                 self.new_turn_steps();
                 self.turn_ended = None;
                 // The kernel writes `wake` then `user` for a prompt: the
@@ -3115,7 +3237,10 @@ impl ChatSession {
                 }
                 self.flush();
             }
-            Event::AssistantFinal { text, step } => {
+            Event::AssistantFinal { text, step, seq } => {
+                if self.record_held(seq) {
+                    return;
+                }
                 self.finish_thinking();
                 // The kernel cuts tool markup from the settled line (#278);
                 // the same cut here covers a kernel from before it.
@@ -3367,9 +3492,26 @@ impl ChatSession {
             }
             Event::Status(text) => {
                 let text = text.trim().to_string();
+                self.status_over_workers = self.waiting.is_some()
+                    || self
+                        .children
+                        .iter()
+                        .any(|child| matches!(child.state, ChildState::Working));
                 self.status = (!text.is_empty()).then_some(text);
             }
-            Event::Waiting(line) => self.waiting = line,
+            Event::Waiting(line) => {
+                // The kernel clears its waiting line the moment no worker
+                // is live: a status the agent set over its workers has
+                // lost its subject and goes with it. The kernel's own
+                // derived steps (a checkpoint being saved) arrive as
+                // status too and are told apart by nothing here — they
+                // never outlive what they describe on the kernel's side.
+                if line.is_none() && self.waiting.is_some() && self.status_over_workers {
+                    self.status = None;
+                    self.status_over_workers = false;
+                }
+                self.waiting = line;
+            }
             Event::TurnEndedAt(ended) => {
                 // The turn read back is the newest opener's: a prompt, or a
                 // wake — a worker's whole first turn opens on its `plan`
@@ -3557,6 +3699,34 @@ impl ChatSession {
 
     pub fn take_feedback_error(&mut self) -> Option<String> {
         self.feedback_error.take()
+    }
+
+    /// This chat as the window holds it: the facts behind the row it draws.
+    ///
+    /// Enough to explain a row the kernel has no agent for. F-137 was a
+    /// `Delegate 1 · Working` line for an agent the kernel had never heard of,
+    /// and it could not be diagnosed from a report — the window's own view had
+    /// to be fetched from Jacob's machine by hand. Everything the label and its
+    /// status are computed from is here, so the two sides can be compared
+    /// without asking him for anything.
+    pub fn row_facts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "label": self.label(),
+            "agent": self.agent_session,
+            "parent": self.parent,
+            "parent_kernel": self.parent_kernel,
+            "delegate_number": self.delegate_number,
+            "is_delegate": self.is_delegate(),
+            "title": self.title,
+            "closed": self.closed,
+            "connected": self.connected(),
+            "streaming": self.streaming,
+            "running_tool": self.has_running_tool(),
+            "live_work": self.live.len(),
+            "items": self.items.len(),
+            "status": self.status,
+        })
     }
 
     /// What this window believes the chat holds, for a report to carry beside
@@ -3984,6 +4154,11 @@ impl ChatSession {
     }
 
     pub(crate) fn notice(&mut self, failed: bool, text: &str) {
+        // "openai/gpt-6-astra-pro is not available to this key, so … answers
+        // this turn": the model named first is one this key cannot use.
+        if let Some(model) = unavailable_model_in(text) {
+            self.unavailable_models.insert(model);
+        }
         // The kernel's parked-ask line after the question is already
         // answered (a replay, a late frame) says nothing true.
         if !failed && is_waiting_line(text) && self.questions.is_none() {
@@ -4385,12 +4560,19 @@ fn pump(
                 }
                 for event in surfaces {
                     match event {
+                        // `by` (user | agent) is on the event for the drawer's
+                        // rule — open when the person asked, stay quiet when
+                        // the agent did; the drawer reads it when it lands.
                         Event::Open {
                             path,
                             title,
                             kind,
                             cwd,
                             url,
+                            // `by` says whether he asked for this; reading it
+                            // is the reconcile branch's work. Here every
+                            // kernel row is the agent's: listed, nothing moves.
+                            by: _,
                         } => workspace
                             .open_shown(id, path, title, kind, cwd, url, OpenedBy::Agent, cx),
                         Event::Hide { path, kind } => {
@@ -4492,6 +4674,14 @@ fn pump(
 /// after a worker started or reported.
 pub fn is_page_nudge(text: &str) -> bool {
     text.trim_start().starts_with("project page not updated")
+}
+
+/// The model a kernel notice says this key cannot use: the id before
+/// " is not available to this key".
+pub fn unavailable_model_in(text: &str) -> Option<String> {
+    let (head, _) = text.split_once(" is not available to this key")?;
+    let model = head.trim().rsplit(' ').next()?.trim_matches(|c| c == '`' || c == '"');
+    (!model.is_empty() && model.contains('/')).then(|| model.to_string())
 }
 
 /// The kernel's "… — retrying in 2.4s (attempt 4/5)" line.

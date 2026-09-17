@@ -92,18 +92,14 @@ pub fn init(cx: &mut App) {
             .is_some();
         if closing_main {
             crate::kernel::shutdown_tunnels();
-            for window in cx.windows() {
-                if let Some(handle) = window.downcast::<crate::view::settings::SettingsWindow>() {
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
-                }
-            }
         }
         front(cx, |window| window.remove_window());
     });
 
     // Both are handled in the workspace window as well. A global handler runs
     // only once every element in the focused path has declined, so these are
-    // what answers when the window in front is the settings one.
+    // what answers while another window is in front — an open panel, a system
+    // dialog.
     cx.on_action(|_: &OpenProject, cx: &mut App| {
         workspace(cx, |this, window, cx| {
             this.open_project_action(&OpenProject, window, cx)
@@ -114,8 +110,8 @@ pub fn init(cx: &mut App) {
             this.open_settings_action(&OpenSettings, window, cx)
         })
     });
-    // Zoom is one size for the whole app, so it answers from any window —
-    // settings included, where the stepper sits next to it.
+    // Zoom is one size for the whole app, so it answers from any window,
+    // whichever one is in front.
     cx.on_action(|_: &ZoomIn, cx: &mut App| workspace_quiet(cx, |this, cx| this.zoom_by(1., cx)));
     cx.on_action(|_: &ZoomOut, cx: &mut App| workspace_quiet(cx, |this, cx| this.zoom_by(-1., cx)));
     cx.on_action(|_: &ZoomReset, cx: &mut App| {
@@ -265,6 +261,9 @@ impl Arbos {
         let workspace = self.workspace.read(cx);
         let project = workspace.active.is_some();
         let entries = self.showing(cx).is_some();
+        // ⌘W has a tab to close whenever the strip holds one, and the Settings
+        // tab can be the last one standing.
+        let closable = project || self.settings_tab.is_some();
 
         root.on_action(cx.listener(Self::toggle_panel_action))
             .on_action(cx.listener(Self::zoom_panel_action))
@@ -286,11 +285,14 @@ impl Arbos {
             .on_action(cx.listener(Self::zoom_in_action))
             .on_action(cx.listener(Self::zoom_out_action))
             .on_action(cx.listener(Self::zoom_reset_action))
-            .when(project, |root| {
+            .when(closable, |root| {
                 root.on_action(cx.listener(Self::close_project_action))
-                    .on_action(cx.listener(Self::new_session_action))
+                    .on_action(cx.listener(Self::close_settings_action))
                     .on_action(cx.listener(Self::next_tab))
                     .on_action(cx.listener(Self::prev_tab))
+            })
+            .when(project, |root| {
+                root.on_action(cx.listener(Self::new_session_action))
             })
             .when(entries, |root| {
                 root.on_action(cx.listener(Self::next_entry))

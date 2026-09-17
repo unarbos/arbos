@@ -19,6 +19,24 @@ pub struct PtyHub {
 struct PtyPage {
     writer: Mutex<Box<dyn Write + Send>>,
     pid: u32,
+    /// The agent the row docks under, and who asked (`user` | `agent`);
+    /// empty for a page a client wrote to before any shell was opened.
+    owner: String,
+    by: String,
+    cwd: std::path::PathBuf,
+    started_ms: i64,
+}
+
+/// One live shell, as `surfaces` reports it.
+pub struct PtyRow {
+    pub agent: String,
+    pub page: String,
+    pub pid: u32,
+    pub alive: bool,
+    pub owner: String,
+    pub by: String,
+    pub cwd: std::path::PathBuf,
+    pub started_ms: i64,
 }
 
 impl PtyHub {
@@ -45,15 +63,23 @@ impl PtyHub {
     }
 
     /// Start a shell the Mac pane can attach to (`PtyIn` agent `root`).
-    /// `owner` is the agent that asked; it gets the close when the shell ends.
-    pub fn spawn_shell(&self, page: &str, cwd: &std::path::Path, owner: &str) -> Result<u32> {
+    /// `owner` is the agent the row docks under; it gets the close when the
+    /// shell ends. `by` is who asked for it — `user` or `agent` — and rides
+    /// on that close, so the window can pair it with the open.
+    pub fn spawn_shell(
+        &self,
+        page: &str,
+        cwd: &std::path::Path,
+        owner: &str,
+        by: &str,
+    ) -> Result<u32> {
         let frames = self
             .out
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| anyhow!("pty hub not bound"))?;
-        self.open("root", page, cwd, frames, Some(owner))
+        self.open("root", page, cwd, frames, Some((owner, by)))
     }
 
     pub fn open(
@@ -62,7 +88,7 @@ impl PtyHub {
         page: &str,
         cwd: &std::path::Path,
         frames: mpsc::UnboundedSender<Frame>,
-        owner: Option<&str>,
+        owner: Option<(&str, &str)>,
     ) -> Result<u32> {
         let pair = NativePtySystem::default().openpty(PtySize {
             rows: 32,
@@ -91,11 +117,17 @@ impl PtyHub {
             PtyPage {
                 writer: Mutex::new(writer),
                 pid,
+                // #461 carries (owner, by) together; #468 records both on
+                // the page so `surfaces` can report who asked.
+                owner: owner.map(|(o, _)| o.to_string()).unwrap_or_default(),
+                by: owner.map(|(_, b)| b.to_string()).unwrap_or_default(),
+                cwd: cwd.to_path_buf(),
+                started_ms: arbos_core::now_ms(),
             },
         );
         let agent = agent.to_string();
         let page = page.to_string();
-        let owner = owner.map(str::to_string);
+        let owner = owner.map(|(o, by)| (o.to_string(), by.to_string()));
         let pages = Arc::clone(&self.inner);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -119,7 +151,7 @@ impl PtyHub {
             // EOF: the shell is gone. Forget the page so a later write
             // starts a fresh one, and tell the desktop to drop the row.
             pages.lock().unwrap().remove(&key);
-            if let Some(owner) = owner {
+            if let Some((owner, by)) = owner {
                 let _ = frames.send(Frame::Board {
                     owner,
                     action: "close".into(),
@@ -128,6 +160,7 @@ impl PtyHub {
                     cwd: None,
                     title: None,
                     url: None,
+                    by,
                 });
             }
         });
@@ -149,6 +182,31 @@ impl PtyHub {
             p.writer.lock().unwrap().write_all(bytes)?;
         }
         Ok(())
+    }
+
+    /// Every shell this kernel has opened and not yet seen end. `alive` is
+    /// the process, checked now: a shell whose reader thread has not yet
+    /// noticed the EOF still lists, as gone.
+    pub fn list(&self) -> Vec<PtyRow> {
+        let guard = self.inner.lock().unwrap();
+        let mut rows: Vec<PtyRow> = guard
+            .iter()
+            .map(|(key, p)| {
+                let (agent, page) = key.split_once(':').unwrap_or((key.as_str(), ""));
+                PtyRow {
+                    agent: agent.to_string(),
+                    page: page.to_string(),
+                    pid: p.pid,
+                    alive: p.pid != 0 && unsafe { libc::kill(p.pid as i32, 0) == 0 },
+                    owner: p.owner.clone(),
+                    by: p.by.clone(),
+                    cwd: p.cwd.clone(),
+                    started_ms: p.started_ms,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.started_ms.cmp(&b.started_ms).then(a.page.cmp(&b.page)));
+        rows
     }
 
     pub fn pid(&self, agent: &str, page: &str) -> Option<u32> {

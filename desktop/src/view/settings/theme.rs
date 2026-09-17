@@ -2,7 +2,7 @@
 
 use crate::{
     model::workspace::Workspace,
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, Line, SettingsPane},
 };
 use bezel::{
     gpui::{AnyElement, Context, DragMoveEvent, Empty, div, prelude::*, px},
@@ -10,7 +10,7 @@ use bezel::{
         TextStyle, Theme, Tint, Typeset,
         appearance::{self, AppearanceMode},
     },
-    ui::widgets::{self, Controls, Scaffolding, SliderDrag},
+    ui::widgets::{self, Controls, SliderDrag},
 };
 
 /// The tint's ceiling: Slate's chroma, the most coloured of the five neutrals
@@ -29,18 +29,17 @@ const MODES: [AppearanceMode; 3] = [
     AppearanceMode::Dark,
 ];
 
-impl SettingsWindow {
+impl SettingsPane {
     /// The whole page: the mode it paints in, then the colours it mixes, the
     /// size it reads at, and how the caret behaves in what it writes.
     /// Typography is a group here rather than a section of its own — a size is
     /// a question about appearance.
     pub(super) fn appearance_body(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
         div()
             .flex()
             .flex_col()
             .gap(px(settings::GROUP_GAP))
-            .child(theme.group_box().child(self.theme_row(cx)))
+            .child(settings::rows().child(self.theme_row(cx)))
             .child(self.colors_group(cx))
             .child(self.typography_group(cx))
             .child(self.editor_group(cx))
@@ -51,23 +50,12 @@ impl SettingsWindow {
     pub(super) fn theme_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let current = appearance::mode(cx);
-        theme
-            .card_row(true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("Theme"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child("Follow the system, or pick one."),
-                    ),
-            )
+        settings::row(true, &theme)
+            .child(settings::label_block(
+                "Theme",
+                vec![Line::say("Follow the system, or pick one.")],
+                &theme,
+            ))
             .child(
                 // A segmented control rather than a select: three options that
                 // all fit are worth showing at once.
@@ -109,14 +97,9 @@ impl SettingsWindow {
     /// What the greys are mixed from, and whether they are see-through.
     fn colors_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(settings::LABEL_GAP))
-            .child(theme.field_label("Colors"))
+        settings::group("Colors", &theme)
             .child(
-                theme
-                    .group_box()
+                settings::rows()
                     .child(self.transparency_row(cx))
                     .child(self.hue_row(cx))
                     .child(self.intensity_row(cx)),
@@ -127,12 +110,8 @@ impl SettingsWindow {
     /// How the caret behaves — the editor's and every field's alike.
     fn editor_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(settings::LABEL_GAP))
-            .child(theme.field_label("Editor"))
-            .child(theme.group_box().child(self.cursor_row(cx)))
+        settings::group("Editor", &theme)
+            .child(settings::rows().child(self.cursor_row(cx)))
             .into_any_element()
     }
 
@@ -141,23 +120,14 @@ impl SettingsWindow {
     pub(super) fn transparency_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let on = self.workspace.read(cx).reduce_transparency;
-        theme
-            .card_row(true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("Reduce transparency"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child("Replace translucent surfaces with opaque backgrounds."),
-                    ),
-            )
+        settings::row(true, &theme)
+            .child(settings::label_block(
+                "Reduce transparency",
+                vec![Line::say(
+                    "Replace translucent surfaces with opaque backgrounds.",
+                )],
+                &theme,
+            ))
             .child(
                 div()
                     .id("reduce-transparency")
@@ -177,23 +147,14 @@ impl SettingsWindow {
     pub(super) fn cursor_row(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = Theme::of(cx).clone();
         let on = self.workspace.read(cx).cursor_blink;
-        theme
-            .card_row(true)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title("Blink the cursor"))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child("Off holds the text caret lit while it has focus."),
-                    ),
-            )
+        settings::row(true, &theme)
+            .child(settings::label_block(
+                "Blink the cursor",
+                vec![Line::say(
+                    "Off holds the text caret lit while it has focus.",
+                )],
+                &theme,
+            ))
             .child(
                 div()
                     .id("cursor-blink")
@@ -250,23 +211,8 @@ impl SettingsWindow {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        theme
-            .card_row(false)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(theme.row_title(title))
-                    .child(
-                        div()
-                            .mt(px(4.))
-                            .text_style(TextStyle::Subheadline)
-                            .text_color(theme.text_muted)
-                            .child(note),
-                    ),
-            )
+        settings::row(false, &theme)
+            .child(settings::label_block(title, vec![Line::say(note)], &theme))
             .child(
                 div()
                     .id(id)

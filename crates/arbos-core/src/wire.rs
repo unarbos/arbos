@@ -601,12 +601,96 @@ pub enum Frame {
         /// Where the panel points: a browser's URL, a process's log path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        /// Who asked for this panel: `user` (a `shell` frame from a client,
+        /// or a `terminal` tool call the agent marked as the user's request)
+        /// or `agent` (the agent's own work: its jobs, its browser page, a
+        /// terminal it opened for itself). A window opens its drawer for
+        /// `user` and stays quiet for `agent`. Empty on frames from a kernel
+        /// before this field: read as unknown, not as `user`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        by: String,
+    },
+    /// A client asks for a shell of its own — the person's `$SHELL`,
+    /// interactive, in `cwd` (absolute, or relative to the place; the place
+    /// itself when absent). The kernel answers with a `board` frame for
+    /// panel `terminal` with `by: user`, then `pty` output on the new page;
+    /// a directory that does not exist is an `error` frame. `owner` is the
+    /// agent the row docks under (`root` when absent).
+    Shell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+    /// Client → kernel: what surfaces does this kernel hold — its jobs, its
+    /// terminals, its browser pages, with their states — so a window that
+    /// reattaches after a kernel died (and a replacement answered) can
+    /// reconcile its rows against the kernel's record instead of its own
+    /// memory. A job row ticking for a job no kernel runs, a terminal with
+    /// no shell behind it, are what this frame ends. `agent` scopes the
+    /// answer to one owner; absent, every agent of the place.
+    Surfaces {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+    },
+    /// Kernel → client: the answer to `surfaces`. Every row the kernel has
+    /// and nothing it does not: a row a window holds that is not here has
+    /// no process behind it. Answered on the asking connection only.
+    SurfaceList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
+        surfaces: Vec<Surface>,
+        at_ms: i64,
     },
     /// A frame type this build does not know. A kernel newer than the
     /// client (or the reverse) adds frames; an old reader must skip them,
     /// not drop the connection. Never sent on purpose.
     #[serde(other)]
     Unknown,
+}
+
+/// One surface a kernel holds, as `surface_list` reports it. The first
+/// seven fields are the `board` frame's, so a window keys the row the same
+/// way; the rest is what a row needs to be titled honestly (side panels,
+/// kernel handover 3): who ran it, since when, how it ended, whether its
+/// journal is still on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Surface {
+    /// The agent the row docks under.
+    pub owner: String,
+    /// `process` (a job) | `terminal` (a shell) | `browser` (a page).
+    pub panel: String,
+    /// The row's id: the job id, the pty page, the browser page.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// A job's command line, a page's title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A page's URL, a job's journal path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// `user` | `agent`: who asked for it. Empty when not recorded.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub by: String,
+    /// A process is behind it now: the job's process is alive, the shell
+    /// is alive, the page is registered.
+    pub running: bool,
+    /// The kernel's own words for its state: a job's status line
+    /// ("running for 41s (pid 4812)", "exited with code 0 after 41s"),
+    /// "shell alive (pid N)" / "shell gone", "page open".
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
+    /// A job's output journal: `present` | `gone`. Absent for other panels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
 }
 
 /// A plan node as the window draws it. Strings are pre-rendered so the
@@ -640,6 +724,12 @@ pub struct PlanNode {
 pub struct TreeNode {
     pub id: String,
     pub name: String,
+    /// The chat's label when nobody named it: the model's summary after
+    /// the first turn (F-156), or a client's own cut of the first prompt
+    /// until that lands. Empty when the agent has a real `name`, or before
+    /// any label exists. A window prefers `name`, then this.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     pub parent: Option<String>,
     pub paused: bool,
     pub model: String,
