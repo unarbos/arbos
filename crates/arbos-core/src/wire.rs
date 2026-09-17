@@ -177,6 +177,14 @@ pub enum Frame {
         archived: bool,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         path: String,
+        /// The folder id the request resolved to when `agent` was a name
+        /// (or another spelling) rather than the id; empty when the same.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        id: String,
+        /// No agent, live or archived, by that id or name: `total` is 0
+        /// because there is no record, not because the record is empty.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unknown: bool,
     },
     /// Client → kernel: one file under `.arbos/`, as text. `path` is
     /// relative to `.arbos/` (`agents/root/plan.md`). Answered with `file`;
