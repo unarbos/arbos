@@ -340,7 +340,14 @@ class Pass:
         if not busy(self.state()):
             return
         if self.app.exists("composer-stop"):
-            self.app.click("composer-stop")
+            # The turn can end between the check and the click; a vanished
+            # disc is not a failure of the recover (it aborted phase T once,
+            # cycle 32).
+            try:
+                self.app.click("composer-stop")
+            except self.drv.DriverError:
+                if not busy(self.state()):
+                    return
             if self.wait(lambda s: not busy(s), 10, what="stop"):
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop ended it", "pass", self.still("recover-stop"))
                 return
