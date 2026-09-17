@@ -28,9 +28,10 @@ use bezel::{
 use std::path::PathBuf;
 
 actions!(
-    cydonia_composer,
+    arbos_composer,
     [
         Send,
+        QueueNext,
         CommandNext,
         CommandPrevious,
         CommandDismiss,
@@ -41,8 +42,8 @@ actions!(
 
 /// Claimed on top of `TextField`/`TextArea`, so `enter` sends here and stays a
 /// newline in every other multi-line field.
-const KEY_CONTEXT: &str = "CydoniaComposer";
-const MODEL_SEARCH_CONTEXT: &str = "CydoniaModelSearch";
+const KEY_CONTEXT: &str = "ArbosComposer";
+const MODEL_SEARCH_CONTEXT: &str = "ArbosModelSearch";
 
 /// What the pill and the agent mark are cut from — and every card that floats
 /// in the same stack over the transcript, which is why it is not private.
@@ -71,6 +72,8 @@ pub fn init(cx: &mut App) {
     let search = Some(MODEL_SEARCH_CONTEXT);
     cx.bind_keys([
         KeyBinding::new("enter", Send, ctx),
+        // Enter steers a running turn; this holds the words for the next one.
+        KeyBinding::new("cmd-shift-enter", QueueNext, ctx),
         // Bound explicitly: the field's own `enter` is what usually inserts a
         // newline, and the composer has just taken it.
         KeyBinding::new("shift-enter", input::InsertNewline, ctx),
@@ -100,7 +103,8 @@ pub struct Agent {
 /// same idea.
 #[derive(Clone, PartialEq, Eq)]
 pub enum SwitchId {
-    /// Leftover ACP mode switch. Unused: the kernel has no session modes.
+    /// The kernel's permission mode (auto / ask / plan), or an ACP agent's
+    /// session mode.
     Mode,
     /// Leftover ACP config switch. Unused: the model is [`SwitchId::Model`].
     Config(SharedString),
@@ -113,6 +117,10 @@ pub enum SwitchId {
 pub struct SwitchOption {
     pub id: SharedString,
     pub name: SharedString,
+    /// For a model: whether it takes image input. None for other switches.
+    pub vision: Option<bool>,
+    /// For a model: a free endpoint, whose provider may train on prompts.
+    pub free: bool,
 }
 
 /// One switchable thing the session offers: the agent's mode, or a config
@@ -131,14 +139,18 @@ pub struct Switch {
 #[derive(Clone)]
 pub enum ComposerEvent {
     Submit(Prompt),
-    /// Stop the in-flight turn and send this plus the queue, now.
-    Force(Prompt),
+    /// Hold this for the next turn: the kernel keeps it and runs it when
+    /// the turn in flight ends.
+    Queue(Prompt),
     Cancel,
     /// Leftover. The chip is a model picker; this is never emitted.
     Agent(usize),
     /// Leftover. Catalog ACP agents are not installed as chat runtimes.
     /// Set a switch to one of its values, by id.
     Switch(SwitchId, SharedString),
+    /// Pin a skill to the chat as its mode (`/mode <skill>`), or none
+    /// (`/mode off`). The kernel does the work; this is the chip's pick.
+    Mode(Option<String>),
     Voice,
     Attach,
     /// No slash or model menu: the arrow keys step the sidebar.
@@ -162,11 +174,10 @@ struct ChatChip {
     markdown: String,
 }
 
-/// A sidebar session on its way to another row or the composer. Dropped on
-/// a sibling it reorders; dropped on the composer it becomes a chip.
+/// A panel agent on its way to the composer, where it lands as a chip
+/// carrying the chat's link.
 #[derive(Clone)]
 pub(crate) struct SessionDrag {
-    pub id: u64,
     pub markdown: SharedString,
 }
 
@@ -299,6 +310,48 @@ fn slash_entries(commands: &[Command]) -> Vec<SlashEntry> {
 /// Rank a model against a search query. Every whitespace token must appear
 /// in the visible name or the catalog id (case-insensitive). Prefix of the
 /// name ranks first, then any other hit.
+/// Most provider chips the picker shows before the current model's own.
+const MODEL_PROVIDER_CHIPS: usize = 7;
+
+/// The vendor part of an OpenRouter-style id: `openai/gpt-4.1` → `openai`.
+/// An id with no slash (OpenAI's own host) reads as `openai`.
+fn model_provider(id: &str) -> &str {
+    match id.split_once('/') {
+        Some((vendor, _)) => vendor,
+        None => "openai",
+    }
+}
+
+/// How a vendor prefix is spelled on a chip.
+fn vendor_label(vendor: &str) -> String {
+    match vendor {
+        "openai" => "OpenAI".into(),
+        "anthropic" => "Anthropic".into(),
+        "google" => "Google".into(),
+        "meta-llama" => "Meta".into(),
+        "mistralai" => "Mistral".into(),
+        "x-ai" => "xAI".into(),
+        "deepseek" => "DeepSeek".into(),
+        "qwen" => "Qwen".into(),
+        "inception" => "Inception".into(),
+        "cohere" => "Cohere".into(),
+        "perplexity" => "Perplexity".into(),
+        "amazon" => "Amazon".into(),
+        "microsoft" => "Microsoft".into(),
+        "nvidia" => "NVIDIA".into(),
+        "moonshotai" => "Moonshot".into(),
+        "z-ai" => "Z.ai".into(),
+        "minimax" => "MiniMax".into(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn model_rank(query: &str, option: &SwitchOption) -> Option<usize> {
     let query = query.trim().to_lowercase();
     let haystack = format!("{} {}", option.name, option.id).to_lowercase();
@@ -367,8 +420,6 @@ pub struct Composer {
     scroll: ScrollHandle,
     /// Whether a turn is in flight — what the button does when pressed.
     streaming: bool,
-    /// A follow-up is sitting above the card, waiting for this turn.
-    queued: bool,
     /// The configured agents, and which one the session runs on.
     agents: Vec<Agent>,
     agent: Option<usize>,
@@ -401,11 +452,34 @@ pub struct Composer {
     voice: VoiceState,
     /// Partial transcript shown muted after the caret while the mic is down.
     voice_preview: String,
+    /// What went wrong with the microphone or the speech server, said
+    /// under the field where the mic button is — not in the transcript,
+    /// which is the conversation's. Cleared when a take starts or the
+    /// field changes.
+    voice_note: Option<String>,
+    /// The send in flight is a dictated take: its prompt goes out marked
+    /// `channel = voice`, `device = desktop`.
+    dictated: bool,
     /// Byte offset in the field where this take should land. Snapshotted
     /// when recording starts so later peek updates stay at the caret.
     voice_at: usize,
     /// A lost connection can be woken by an empty send.
     reconnect: bool,
+    /// The skill pinned to this chat as its mode (`agent.md skill:`), and
+    /// the skills the place offers, for the chip beside the model picker.
+    mode_skill: Option<String>,
+    skills: Vec<String>,
+    /// The mode chip's menu is open.
+    mode_menu: bool,
+    /// Provider filter for the model picker: the vendor prefix of the id
+    /// (`openai/…` → `openai`). None: every provider.
+    model_provider: Option<String>,
+    /// Vision-only filter for the model picker.
+    model_vision_only: bool,
+    /// A model for the next send only: the user took "switch to <vision
+    /// model> for this turn" because the tray holds an image the current
+    /// model cannot see. Cleared on send and when the images go.
+    turn_model: Option<SharedString>,
     /// Hint shown when the field is empty. Cursor keeps "Send follow-up"
     /// visible on an empty focused composer; the caret sits at the start.
     hint: SharedString,
@@ -464,7 +538,6 @@ impl Composer {
             entries,
             scroll: ScrollHandle::new(),
             streaming: false,
-            queued: false,
             agents: Vec::new(),
             agent: None,
             switches: Vec::new(),
@@ -476,12 +549,20 @@ impl Composer {
             model_hits: Vec::new(),
             model_active: 0,
             model_pointer: None,
+            turn_model: None,
+            model_provider: None,
+            model_vision_only: false,
             attachments: AttachmentDrafts::default(),
             chat_links: Vec::new(),
             voice: VoiceState::Idle,
             voice_preview: String::new(),
+            voice_note: None,
+            dictated: false,
             voice_at: 0,
             reconnect: false,
+            mode_skill: None,
+            skills: Vec::new(),
+            mode_menu: false,
             hint: "Send follow-up".into(),
             painted_hint: "".into(),
             watching_focus: false,
@@ -524,6 +605,17 @@ impl Composer {
         self.slash_dismissed = false;
         self.slash_query.clear();
         self.slash_pointer = None;
+        self.close_menu(cx);
+        cx.notify();
+    }
+
+    /// Replace the field's text for the bound session (a follow-up taken
+    /// back, a rewind handing the prompt back).
+    pub fn take_draft(&mut self, draft: &str, cx: &mut Context<Self>) {
+        self.voice_preview.clear();
+        self.field
+            .update(cx, |field, cx| field.set_content(draft.to_string(), cx));
+        self.command = None;
         self.close_menu(cx);
         cx.notify();
     }
@@ -580,13 +672,6 @@ impl Composer {
         }
     }
 
-    pub fn set_queued(&mut self, queued: bool, cx: &mut Context<Self>) {
-        if self.queued != queued {
-            self.queued = queued;
-            cx.notify();
-        }
-    }
-
     pub fn set_reconnect(&mut self, reconnect: bool, cx: &mut Context<Self>) {
         if self.reconnect != reconnect {
             self.reconnect = reconnect;
@@ -615,6 +700,24 @@ impl Composer {
 
     /// What the session can be switched between, and how much context it has
     /// spent. Both belong to a live connection, so both go empty with one.
+    /// The pinned mode and the skills on offer, from the session.
+    pub fn set_mode_skill(
+        &mut self,
+        pinned: Option<String>,
+        skills: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mode_skill == pinned && self.skills == skills {
+            return;
+        }
+        self.mode_skill = pinned;
+        self.skills = skills;
+        if self.mode_skill.is_none() {
+            self.mode_menu = false;
+        }
+        cx.notify();
+    }
+
     pub fn set_switches(&mut self, switches: &[Switch], cx: &mut Context<Self>) {
         if self.switches == switches {
             return;
@@ -634,7 +737,9 @@ impl Composer {
 
     pub fn set_usage(&mut self, usage: Option<Usage>, cx: &mut Context<Self>) {
         let same = match (self.usage, usage) {
-            (Some(held), Some(next)) => held.used == next.used && held.size == next.size,
+            (Some(held), Some(next)) => {
+                held.used == next.used && held.size == next.size && held.spent == next.spent
+            }
             (None, None) => true,
             _ => false,
         };
@@ -670,6 +775,7 @@ impl Composer {
             let content = self.field.read(cx).content();
             self.voice_at = floor_char(&content, self.field.read(cx).cursor());
             self.voice_preview.clear();
+            self.voice_note = None;
         }
         if voice == VoiceState::Idle {
             self.voice_preview.clear();
@@ -678,7 +784,21 @@ impl Composer {
         cx.notify();
     }
 
+    /// The live words of the open take, as the strip paints them.
+    pub fn voice_preview(&self) -> &str {
+        &self.voice_preview
+    }
+
     /// Live words from the kernel, shown muted after the caret until release.
+    /// A microphone or speech-server failure, one line under the field.
+    pub fn set_voice_note(&mut self, note: Option<String>, cx: &mut Context<Self>) {
+        if self.voice_note == note {
+            return;
+        }
+        self.voice_note = note;
+        cx.notify();
+    }
+
     pub fn set_voice_preview(&mut self, text: &str, cx: &mut Context<Self>) {
         let next = text.trim().to_string();
         if self.voice_preview == next {
@@ -702,6 +822,14 @@ impl Composer {
 
     /// Hold-Fn (and the mic) land here: put the words in the field and send
     /// them, the same two-step as the web composer's dictation final.
+    /// Dictation that stays in the field: the words are shown, not sent
+    /// (a duplex voice server already answered them).
+    pub fn dictation_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.close_menu(cx);
+        self.voice_preview.clear();
+        self.insert_text_at(self.voice_at, text, cx);
+    }
+
     pub fn dictation_final(&mut self, text: &str, cx: &mut Context<Self>) {
         self.close_menu(cx);
         self.command = None;
@@ -710,7 +838,9 @@ impl Composer {
         if self.is_empty(cx) {
             return;
         }
+        self.dictated = true;
         self.submit(cx);
+        self.dictated = false;
     }
 
     /// Drop dictation at the caret. A space separates it from whatever was
@@ -968,21 +1098,27 @@ impl Composer {
             cx.emit(ComposerEvent::Submit(Prompt::default()));
             return;
         }
-        let prompt = Prompt::compose(
+        let mut prompt = Prompt::compose(
             &join_chat_links(&self.chat_links, &content),
             std::mem::take(&mut self.attachments.get_mut(id).items),
         );
+        prompt.model = self.turn_model.take().map(|m| m.to_string());
+        // A take that ends in a send is spoken: the kernel's line says so.
+        if std::mem::take(&mut self.dictated) {
+            prompt = prompt.dictated();
+        }
         self.field.update(cx, |field, cx| field.clear(cx));
         self.attachments.get_mut(id).error = None;
+        self.voice_note = None;
         self.chat_links.clear();
         self.command = None;
         cx.emit(ComposerEvent::Submit(prompt));
         cx.notify();
     }
 
-    /// Stop the running turn and send the queue plus whatever is in the
-    /// field. Empty field is fine: the queue alone is enough.
-    pub(crate) fn force(&mut self, cx: &mut Context<Self>) {
+    /// Hold what is in the field for the next turn. Nothing to hold, nothing
+    /// sent.
+    pub(crate) fn queue(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.bound else {
             return;
         };
@@ -1000,21 +1136,24 @@ impl Composer {
                 .get(self.bound)
                 .is_none_or(|tray| tray.items.is_empty() && tray.loading == 0)
             && self.chat_links.is_empty();
-        let prompt = if empty {
-            Prompt::default()
-        } else {
-            let prompt = Prompt::compose(
-                &join_chat_links(&self.chat_links, &content),
-                std::mem::take(&mut self.attachments.get_mut(id).items),
-            );
-            self.field.update(cx, |field, cx| field.clear(cx));
-            self.attachments.get_mut(id).error = None;
-            self.chat_links.clear();
-            self.command = None;
-            prompt
-        };
-        cx.emit(ComposerEvent::Force(prompt));
+        if empty {
+            return;
+        }
+        let mut prompt = Prompt::compose(
+            &join_chat_links(&self.chat_links, &content),
+            std::mem::take(&mut self.attachments.get_mut(id).items),
+        );
+        prompt.model = self.turn_model.take().map(|m| m.to_string());
+        self.field.update(cx, |field, cx| field.clear(cx));
+        self.attachments.get_mut(id).error = None;
+        self.chat_links.clear();
+        self.command = None;
+        cx.emit(ComposerEvent::Queue(prompt));
         cx.notify();
+    }
+
+    fn queue_next(&mut self, _: &QueueNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.queue(cx);
     }
 
     fn send(&mut self, _: &Send, window: &mut Window, cx: &mut Context<Self>) {
@@ -1283,14 +1422,140 @@ impl Composer {
             self.model_active = 0;
             return;
         };
+        let provider = self.model_provider.clone();
+        let vision_only = self.model_vision_only;
         let mut ranked: Vec<(usize, usize)> = switch
             .options
             .iter()
             .enumerate()
+            .filter(|(_, option)| {
+                provider
+                    .as_deref()
+                    .is_none_or(|p| model_provider(&option.id) == p)
+            })
+            .filter(|(_, option)| !vision_only || option.vision == Some(true))
             .filter_map(|(ix, option)| model_rank(query, option).map(|rank| (rank, ix)))
             .collect();
         ranked.sort_by_key(|&(rank, ix)| (rank, ix));
         self.model_hits = ranked.into_iter().map(|(_, ix)| ix).collect();
+    }
+
+    /// Provider chips under the search line: All, the vendors the catalog
+    /// has (most models first, the current model's vendor always shown),
+    /// and Vision. One click narrows the list; the search still applies.
+    fn provider_chips(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let switch = self.model_switch()?;
+        if switch.options.len() < 8 {
+            return None;
+        }
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for option in &switch.options {
+            *counts
+                .entry(model_provider(&option.id).to_string())
+                .or_default() += 1;
+        }
+        let current_vendor = switch
+            .current
+            .as_ref()
+            .map(|c| model_provider(c).to_string());
+        let mut vendors: Vec<(String, usize)> = counts.into_iter().collect();
+        vendors.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        let mut shown: Vec<String> = vendors
+            .iter()
+            .take(MODEL_PROVIDER_CHIPS)
+            .map(|(v, _)| v.clone())
+            .collect();
+        if let Some(v) = &current_vendor
+            && !shown.contains(v)
+            && vendors.iter().any(|(x, _)| x == v)
+        {
+            shown.push(v.clone());
+        }
+        if let Some(v) = &self.model_provider
+            && !shown.contains(v)
+        {
+            shown.push(v.clone());
+        }
+        let has_vision = switch.options.iter().any(|o| o.vision == Some(true));
+        let chip = |id: SharedString, label: SharedString, on: bool, theme: &Theme| {
+            div()
+                .id(id)
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(9.))
+                .cursor_pointer()
+                .text_style(TextStyle::Caption)
+                .text_color(if on { theme.text } else { theme.text_muted })
+                .bg(if on {
+                    theme.element_active
+                } else {
+                    theme.element_hover
+                })
+                .hover(|b| b.bg(theme.element_active))
+                .child(label)
+        };
+        let mut row = div()
+            .id("composer-model-providers")
+            .w_full()
+            .px(px(10.))
+            .pb(px(6.))
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(4.))
+            .child(
+                chip(
+                    "composer-model-provider-all".into(),
+                    "All".into(),
+                    self.model_provider.is_none() && !self.model_vision_only,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_provider = None;
+                    this.model_vision_only = false;
+                    this.refilter_models(cx);
+                })),
+            );
+        for vendor in shown {
+            let on = self.model_provider.as_deref() == Some(vendor.as_str());
+            let id: SharedString = format!("composer-model-provider-{vendor}").into();
+            let picked = vendor.clone();
+            row = row.child(chip(id, vendor_label(&vendor).into(), on, theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.model_provider = if this.model_provider.as_deref() == Some(picked.as_str())
+                    {
+                        None
+                    } else {
+                        Some(picked.clone())
+                    };
+                    this.refilter_models(cx);
+                }),
+            ));
+        }
+        if has_vision {
+            row = row.child(
+                chip(
+                    "composer-model-provider-vision".into(),
+                    "Vision".into(),
+                    self.model_vision_only,
+                    theme,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.model_vision_only = !this.model_vision_only;
+                    this.refilter_models(cx);
+                })),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
+    fn refilter_models(&mut self, cx: &mut Context<Self>) {
+        let query = self.model_query.clone();
+        self.rebuild_model_hits(&query);
+        self.model_active = 0;
+        self.model_pointer = None;
+        self.scroll.scroll_to_item(0);
+        cx.notify();
     }
 
     fn highlight_current_model(&mut self) {
@@ -1343,15 +1608,18 @@ impl Composer {
     /// with a chevron, at the right end of the pill. Falls back to the agent
     /// mark when no model catalog has landed.
     fn chip(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let label: Option<SharedString> = self.model_switch().and_then(|switch| {
-            let current = switch.current.as_ref()?;
-            switch
-                .options
-                .iter()
-                .find(|option| &option.id == current)
-                .map(|option| option.name.clone())
-                .or_else(|| Some(current.clone()))
-        });
+        let label: Option<SharedString> = match &self.turn_model {
+            Some(id) => Some(format!("{} · this turn", self.model_name(id)).into()),
+            None => self.model_switch().and_then(|switch| {
+                let current = switch.current.as_ref()?;
+                switch
+                    .options
+                    .iter()
+                    .find(|option| &option.id == current)
+                    .map(|option| option.name.clone())
+                    .or_else(|| Some(current.clone()))
+            }),
+        };
         let tip = if self.reconnect { "Reconnect" } else { "Model" };
         div()
             .id("composer-model")
@@ -1396,6 +1664,120 @@ impl Composer {
                     .into_any_element(),
             )
             .into_any_element()
+    }
+
+    /// The pinned mode, as a chip beside the model picker: `◆ haiku`. A
+    /// press opens a short list — the place's skills and Off — and a pick
+    /// becomes `/mode <skill>` or `/mode off` for the kernel. No chip when
+    /// nothing is pinned (the `/mode` command still works).
+    fn mode_chip(
+        &self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let pinned = self.mode_skill.clone()?;
+        let label: SharedString = format!("◆ {pinned}").into();
+        let tip: SharedString =
+            format!("Mode: {pinned} is pinned to this chat. Click to change or turn off.").into();
+        let chip = div()
+            .id("composer-mode")
+            .relative()
+            .flex_none()
+            .h(px(root::COMPOSER_HIT))
+            .px(px(6.))
+            .rounded(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(3.))
+            .cursor_pointer()
+            .text_style(TextStyle::Body)
+            .text_color(theme.text_muted)
+            .hover(|button| button.bg(theme.element_hover))
+            .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+            .on_click(cx.listener(|composer, _, _, cx| {
+                composer.mode_menu = !composer.mode_menu;
+                cx.notify();
+            }))
+            .child(div().truncate().max_w(px(160.)).child(label))
+            .children(self.mode_menu_card(theme, window, cx));
+        Some(chip.into_any_element())
+    }
+
+    fn mode_menu_card(
+        &self,
+        theme: &Theme,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.mode_menu {
+            return None;
+        }
+        let pinned = self.mode_skill.clone();
+        let mut rows: Vec<AnyElement> = self
+            .skills
+            .iter()
+            .enumerate()
+            .map(|(ix, name)| {
+                let picked = pinned.as_deref() == Some(name.as_str());
+                let choice = name.clone();
+                popover::menu_row(theme, false, None)
+                    .id(SharedString::from(format!("composer-mode-{ix}")))
+                    .gap(px(8.))
+                    .py(px(4.))
+                    .cursor_pointer()
+                    .hover(|row| row.bg(theme.element_hover))
+                    .on_click(cx.listener(move |composer, _, _, cx| {
+                        composer.mode_menu = false;
+                        cx.emit(ComposerEvent::Mode(Some(choice.clone())));
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text)
+                            .child(name.clone()),
+                    )
+                    .when(picked, |row| {
+                        row.child(div().flex_none().text_color(theme.text_muted).child("✓"))
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        rows.push(
+            popover::menu_row(theme, false, None)
+                .id("composer-mode-off")
+                .gap(px(8.))
+                .py(px(4.))
+                .cursor_pointer()
+                .hover(|row| row.bg(theme.element_hover))
+                .on_click(cx.listener(|composer, _, _, cx| {
+                    composer.mode_menu = false;
+                    cx.emit(ComposerEvent::Mode(None));
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text_muted)
+                        .child("Off — no mode pinned"),
+                )
+                .into_any_element(),
+        );
+        let card = popover::popover_card(theme)
+            .id("composer-mode-card")
+            .w(px(240.))
+            .max_h(px(PICKER_HEIGHT))
+            .overflow_y_scroll()
+            .children(rows);
+        Some(popover::anchored_menu_above(
+            "composer-mode-menu",
+            card.into_any_element(),
+            None,
+        ))
     }
 
     fn model_switch(&self) -> Option<&Switch> {
@@ -1463,6 +1845,9 @@ impl Composer {
                             composer.close_menu(cx);
                             window.focus(&composer.field.read(cx).focus_handle(cx), cx);
                             if let Some(switch_id) = switch_id.clone() {
+                                if switch_id == SwitchId::Model {
+                                    composer.turn_model = None;
+                                }
                                 cx.emit(ComposerEvent::Switch(switch_id, id.clone()));
                             }
                             cx.notify();
@@ -1475,6 +1860,32 @@ impl Composer {
                                 .text_color(theme.text)
                                 .child(name),
                         )
+                        .when(option.vision == Some(true), |row| {
+                            row.child(
+                                div()
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child("vision"),
+                            )
+                        })
+                        .when(option.free, |row| {
+                            row.child(
+                                div()
+                                    .id(("model-free-tag", ix))
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .tooltip(|window, cx| {
+                                        Tooltip::text(
+                                            "Free endpoint: its provider may train on your prompts. OpenRouter's privacy settings govern free models separately; data_policy = \"deny\" in config.toml keeps every request off such providers.",
+                                            window,
+                                            cx,
+                                        )
+                                    })
+                                    .child("free · may train"),
+                            )
+                        })
                         .when(picked, |row| {
                             row.child(div().flex_none().text_color(theme.text_muted).child("✓"))
                         })
@@ -1527,9 +1938,11 @@ impl Composer {
                 theme,
                 self.model_search.clone().into_any_element(),
             ))
+            .children(self.provider_chips(theme, cx))
             .child(list)
             .child(popover::divider())
-            .child(self.usage_row(theme));
+            .child(self.usage_row(theme))
+            .child(self.cost_row(theme));
         // `anchored_menu_above` puts 6px between the card and the 4-box.
         // The shield covers that button too, so this hit sits on the
         // floating layer over it — a second press still toggles shut.
@@ -1663,6 +2076,43 @@ impl Composer {
             .into_any_element()
     }
 
+    /// "Cost  $0.0123" under the context row, when the provider prices
+    /// turns. The tooltip has the last turn's price.
+    fn cost_row(&self, theme: &Theme) -> AnyElement {
+        let Some(usage) = self.usage else {
+            return div().into_any_element();
+        };
+        let Some(spent) = usage.spent else {
+            return div().into_any_element();
+        };
+        let last = usage.last_cost.map(dollars).unwrap_or_else(|| "—".into());
+        div()
+            .id("composer-cost")
+            .px(px(8.))
+            .py(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .text_style(TextStyle::Body)
+            .text_color(theme.text_muted)
+            .tooltip(move |window, cx| {
+                Tooltip::text(
+                    format!("last turn {last}; this chat since it was opened"),
+                    window,
+                    cx,
+                )
+            })
+            .child(div().flex_1().min_w_0().child("Cost"))
+            .child(
+                div()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(dollars(spent)),
+            )
+            .into_any_element()
+    }
+
     fn tray_chip(
         &self,
         id: impl Into<gpui::ElementId>,
@@ -1719,6 +2169,108 @@ impl Composer {
     /// Chat links and files waiting on the card. One chip each, with an ✕.
     /// Nothing when the tray is empty — the row must not occupy space as a
     /// blank band.
+    /// The catalog's display name for a model id, or the id.
+    fn model_name(&self, id: &SharedString) -> SharedString {
+        self.model_switch()
+            .and_then(|switch| switch.options.iter().find(|o| &o.id == id))
+            .map(|o| o.name.clone())
+            .unwrap_or_else(|| id.clone())
+    }
+
+    /// Whether the tray holds an image right now.
+    fn has_image_attached(&self) -> bool {
+        self.attachments
+            .get(self.bound)
+            .is_some_and(|tray| tray.items.iter().any(|a| a.is_image()))
+    }
+
+    /// The current model, when the catalog says it takes no image input
+    /// (by the host's word or, failing that, by name).
+    fn current_model_blind(&self) -> bool {
+        let Some(switch) = self.model_switch() else {
+            return false;
+        };
+        let Some(current) = switch.current.as_ref() else {
+            return false;
+        };
+        match switch.options.iter().find(|o| &o.id == current) {
+            Some(option) => option.vision == Some(false),
+            None => !arbos_core::models::looks_vision(current),
+        }
+    }
+
+    /// A vision model to offer for one turn: the first preferred one the
+    /// catalog has, else the first the catalog marks as seeing.
+    fn vision_offer(&self) -> Option<SwitchOption> {
+        let switch = self.model_switch()?;
+        let current = switch.current.as_ref();
+        let seeing: Vec<&SwitchOption> = switch
+            .options
+            .iter()
+            .filter(|o| o.vision == Some(true) && Some(&o.id) != current)
+            .collect();
+        arbos_core::models::VISION_PREFERRED
+            .iter()
+            .find_map(|want| seeing.iter().find(|o| o.id.as_ref() == *want))
+            .or_else(|| seeing.first())
+            .map(|o| (*o).clone())
+    }
+
+    /// "switch to <vision model> for this turn": shown above the tray
+    /// while an image is attached and the current model cannot see it.
+    fn vision_offer_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.turn_model.is_some() || !self.has_image_attached() || !self.current_model_blind() {
+            return None;
+        }
+        let offer = self.vision_offer()?;
+        let current = self
+            .model_switch()
+            .and_then(|s| s.current.clone())
+            .map(|c| self.model_name(&c))
+            .unwrap_or_else(|| "this model".into());
+        let id = offer.id.clone();
+        Some(
+            div()
+                .id("composer-vision-offer")
+                .w_full()
+                .mb(px(6.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_muted)
+                .child(
+                    icons::icon(icons::files::PAPERCLIP)
+                        .size(px(11.))
+                        .text_color(theme.text_faint),
+                )
+                .child(SharedString::from(format!(
+                    "{current} does not take images; they will be described in words."
+                )))
+                .child(
+                    div()
+                        .id("composer-vision-switch")
+                        .px(px(6.))
+                        .py(px(1.))
+                        .rounded(px(5.))
+                        .cursor_pointer()
+                        .text_color(theme.text)
+                        .bg(theme.element_hover)
+                        .hover(|b| b.bg(theme.element_active))
+                        .on_click(cx.listener(move |composer, _, _, cx| {
+                            composer.turn_model = Some(id.clone());
+                            cx.notify();
+                        }))
+                        .child(SharedString::from(format!(
+                            "Switch to {} for this turn",
+                            offer.name
+                        ))),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn chips(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self
             .attachments
@@ -1735,6 +2287,7 @@ impl Composer {
             .flex_row()
             .flex_wrap()
             .gap(px(6.))
+            .children(self.vision_offer_row(theme, cx))
             .children(self.chat_links.iter().enumerate().map(|(ix, chip)| {
                 let title = chip.title.clone();
                 self.tray_chip(
@@ -1765,32 +2318,59 @@ impl Composer {
                             .and_then(|name| name.to_str())
                             .unwrap_or("file")
                             .to_string();
-                        super::attachment::chip(
-                            ("composer-file", ix),
-                            name,
-                            attachment.preview.clone(),
-                            theme,
-                        )
-                        .child(
+                        // Cursor's tray: a picture is a bare rounded thumbnail
+                        // with an ✕ badge on its corner when hovered; a file is
+                        // a small chip with its name. Neither shows the ✕ at
+                        // rest (cycle 21, `cursor-reference/composer-attachments/`).
+                        let group = SharedString::from(format!("composer-attachment-{ix}"));
+                        let close = |badge: bool| {
                             div()
                                 .id(("composer-file-x", ix))
-                                .size(px(14.))
+                                .size(px(if badge { 18. } else { 14. }))
                                 .rounded_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
+                                .when(badge, |el| {
+                                    el.absolute()
+                                        .top(px(-5.))
+                                        .right(px(-5.))
+                                        .bg(theme.surface_raised_hover)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                })
+                                .invisible()
+                                .group_hover(group.clone(), |el| el.visible())
                                 .hover(|hit| hit.bg(theme.element_active))
                                 .child(
                                     icons::icon(icons::system::CLOSE)
                                         .size(px(10.))
-                                        .text_color(theme.text_faint),
+                                        .text_color(theme.text_muted),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.remove_attachment(ix, cx);
-                                })),
-                        )
-                        .into_any_element()
+                                }))
+                        };
+                        if attachment.preview.is_some() {
+                            div()
+                                .group(group.clone())
+                                .relative()
+                                .child(super::attachment::thumb(
+                                    ("composer-file", ix),
+                                    attachment.preview.clone(),
+                                    64.,
+                                    120.,
+                                    theme,
+                                ))
+                                .child(close(true))
+                                .into_any_element()
+                        } else {
+                            super::attachment::chip(("composer-file", ix), name, None, theme)
+                                .group(group.clone())
+                                .child(close(false))
+                                .into_any_element()
+                        }
                     }),
             )
             .into_any_element()
@@ -1803,8 +2383,10 @@ impl Composer {
         let busy = self.voice == VoiceState::Busy;
         let tip = if recording {
             "Stop dictation"
-        } else {
+        } else if cfg!(target_os = "macos") {
             "Hold Fn to talk"
+        } else {
+            "Dictation (macOS only for now)"
         };
         let disc = div()
             .id("composer-voice")
@@ -1853,14 +2435,14 @@ impl Composer {
     /// Send sits at the end of the tool row. Empty: a faint arrow. Ready or
     /// stopping: one filled disc, never a second colour.
     ///
-    /// A turn in flight used to steal this disc for Stop, so a follow-up
-    /// had no button. Stop stays while it is running; Send comes back the
-    /// moment there is text, and queues. Force sits beside Stop when there
-    /// is something to push now — a queued line, or text in the field.
+    /// While a turn runs, Stop is its own disc and never shares one with
+    /// Send. Send comes back the moment there is text and steers the turn —
+    /// the words reach the agent at its next step, Cursor's default. Queue
+    /// sits between them: hold the words for the next turn instead.
     fn button(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let streaming = self.streaming;
         let empty = self.is_empty(cx);
-        let can_force = streaming && (self.queued || !empty);
+        let can_queue = streaming && !empty;
         div()
             .flex()
             .flex_row()
@@ -1877,15 +2459,15 @@ impl Composer {
                     |_, cx| cx.emit(ComposerEvent::Cancel),
                 ))
             })
-            .when(can_force, |row| {
+            .when(can_queue, |row| {
                 row.child(self.disc(
-                    "composer-force",
+                    "composer-queue",
                     icons::media::SKIP_NEXT,
                     true,
-                    "Force",
+                    "Queue for the next turn (⇧⌘↩)",
                     theme,
                     cx,
-                    |composer, cx| composer.force(cx),
+                    |composer, cx| composer.queue(cx),
                 ))
             })
             .when(!streaming || !empty, |row| {
@@ -1894,7 +2476,7 @@ impl Composer {
                     icons::arrows::ARROW_UP,
                     !empty || self.reconnect,
                     if streaming {
-                        "Queue"
+                        "Send now: the running turn reads this at its next step"
                     } else if self.reconnect {
                         "Reconnect"
                     } else {
@@ -2029,6 +2611,7 @@ impl Composer {
 
         div()
             .on_action(cx.listener(Self::send))
+            .on_action(cx.listener(Self::queue_next))
             .on_action(cx.listener(Self::command_next))
             .on_action(cx.listener(Self::command_previous))
             .on_action(cx.listener(Self::command_dismiss))
@@ -2045,7 +2628,10 @@ impl Composer {
                 // send arrow the moment there is something to send.
                 div()
                     .id("composer-card")
-                    .w_full()
+                    // No explicit width: the column stretches it, and the
+                    // negative margins then bleed both edges like the
+                    // strips above it do. `w_full` pinned it to the column
+                    // width and only shifted it left.
                     .flex_none()
                     .min_h(px(root::composer_height()))
                     .rounded(px(root::COMPOSER_RADIUS))
@@ -2090,6 +2676,13 @@ impl Composer {
                                     .child(message)
                             }),
                     )
+                    .children(self.voice_note.clone().map(|note| {
+                        div()
+                            .id("composer-voice-note")
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.danger)
+                            .child(note)
+                    }))
                     .child(
                         div()
                             .flex()
@@ -2139,12 +2732,16 @@ impl Composer {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(4.))
+                                    .children(self.mode_chip(&theme, window, cx))
                                     .child(
                                         div()
                                             .relative()
                                             .children(self.menu_card(&theme, window, cx))
                                             .child(self.chip(&theme, cx)),
                                     )
+                                    // One round button: mic while the field
+                                    // is empty, send once there is text,
+                                    // stop while a turn streams.
                                     .when(empty && !streaming, |row| {
                                         row.child(self.voice_btn(&theme, cx))
                                     })
@@ -2178,6 +2775,10 @@ impl Focusable for Composer {
 
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The one-turn model rides with the image that asked for it.
+        if self.turn_model.is_some() && !self.has_image_attached() {
+            self.turn_model = None;
+        }
         if !self.watching_focus {
             self.watching_focus = true;
             let handle = self.field.read(cx).focus_handle(cx);
@@ -2187,5 +2788,16 @@ impl Render for Composer {
         }
         self.paint_placeholder(window, cx);
         self.body(window, cx)
+    }
+}
+
+/// `$0.0041` under a cent, `$0.12` above, `$3.40` at dollars.
+pub fn dollars(amount: f64) -> String {
+    if amount < 0.01 {
+        format!("${amount:.4}")
+    } else if amount < 1.0 {
+        format!("${amount:.3}")
+    } else {
+        format!("${amount:.2}")
     }
 }

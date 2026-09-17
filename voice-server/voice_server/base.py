@@ -15,8 +15,9 @@ from . import protocol as P
 from .audio import Normalizer, float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
-from .kernel import KernelClient
-from .tools import ToolRunner
+from .kernel import KernelClient, hub_attach_url
+from .narrator import Narrator, is_conversational, openrouter_key
+from .tools import CALL_TOOLS, TOOLS, ToolRunner
 
 log = logging.getLogger("voice.session")
 
@@ -50,7 +51,21 @@ class SessionDefaults:
     speed: float = 1.0
     reply: str = "none"
     instructions: str | None = None
-    answerer: str = "auto"  # duplex call mode: kernel | model | auto (kernel unless small talk)
+    # Narrator model for `more_detail` answers (OpenRouter id); None = extractive answers only.
+    narrator_model: str | None = None
+    # Highlights by the narrator model (True) or by the policy alone (False).
+    model_highlights: bool = False
+    # Seconds an `allow …` ask waits for the caller before it is denied.
+    approval_timeout: float = 45.0
+    # JSONL of question-shaped utterances that went to the agent right after a highlight (for
+    # growing the drill-down phrase list). Empty = off.
+    escalations_log: str = ""
+    # Call mode, duplex engine: how much of the speech model's own voice the caller hears.
+    # `auto` = its answers to small talk and general questions (the phone's feel), while work
+    # requests are narrated; `ack` = short acknowledgements only; `full` = everything; `off` = none.
+    model_voice: str = "auto"
+    # Duplex engine outside call mode: who answers a spoken turn. kernel | model | auto (kernel unless small talk).
+    answerer: str = "auto"
 
 
 class BaseSession:
@@ -73,15 +88,24 @@ class BaseSession:
         self.ready_sent = False
         self.history: list[dict] = []  # text-channel conversation (OpenAI message shape)
         self.text_task: asyncio.Task | None = None
-        self.kernel = engines.kernel  # replaced per call when session.start names a project
-        self.project: dict | None = None
-        self.tools = ToolRunner(self.kernel, on_report=self._on_agent_report)
+        self.tools = ToolRunner(engines.kernel, on_report=self._on_agent_report)
         self.tools.on_call = self._on_tool_call
         self.tools.on_result = self._on_tool_result
-        self.mirror_agents = self.kernel is not None
-        self.running_children: set[str] = set()
+        self.mirror_agents = engines.kernel is not None
         self.echo = EchoGate(self.rate, tuning.echo_margin) if tuning.echo_gate else None
         self.normalizers: dict[str, Normalizer] = {}
+        # Call mode: the caller talks to a project's main agent; the narrator speaks highlights.
+        self.call_mode = False
+        self.channel = "voice"  # what the caller's utterances are filed as in the inbox
+        self.device = ""  # the client on the call: phone | desktop (session.start.device)
+        self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
+        self.screen = "on your screen"
+        self.narrator: Narrator | None = None
+        self.call_kernel: KernelClient | None = None  # a per-call attach through the hub, when the call names one
+        self.project_info: dict | None = None  # machine/project/name/icon/store/kind from the hub roster, when scoped
+        self.dictation = False  # ASR only: words to the client, no reply, no agent, no asks
+        self.last_conversational = False  # the last utterance was small talk (auto model voice lets it through)
+        self.user_talking = False
 
     # ------------------------------------------------------------------ hooks for engines
 
@@ -89,6 +113,26 @@ class BaseSession:
 
     async def on_start(self) -> None:
         """After session.start was applied (rate/voice/... may have changed)."""
+
+    def _ensure_asker(self) -> None:
+        """Outside call mode a kernel still asks questions and for approvals. Nobody auto-fills
+        them: a narrator that speaks only asks and approvals takes the caller's yes or no."""
+        if self.narrator is not None or self.engines.kernel is None or self.dictation:
+            return
+        self.narrator = Narrator(
+            self.engines.kernel,
+            speak=self.speak_narration,
+            emit=self._emit,
+            screen=self.screen,
+            device=self.device,
+            user_talking=lambda: self.user_talking,
+            arbos_talking=self.arbos_talking,
+            ack=False,
+            speak_details=False,
+            only_asks=True,
+            approval_timeout=self.defaults.approval_timeout,
+        )
+        self.narrator.start()
 
     async def on_audio(self, data: bytes) -> None: ...
 
@@ -99,32 +143,211 @@ class BaseSession:
     async def on_report_speech(self, text: str) -> None:
         """Voice an agent's report. Default: the gateway's own TTS."""
         await self._speak(text, self.gen)
-        self._emit_for_gen(self.gen, P.RESPONSE_DONE, reason="completed")
+        self._emit_for_gen(self.gen, P.RESPONSE_DONE)
+
+    def arbos_talking(self) -> bool:
+        """Is reply audio (the model's or ours) on its way to the caller right now?"""
+        return False
 
     async def on_close(self) -> None: ...
 
+    @property
+    def kernel(self) -> KernelClient | None:
+        """The kernel this call talks to: the per-call hub attach when there is one, else the gateway's."""
+        return self.call_kernel or self.engines.kernel
+
+    # ------------------------------------------------------------------ call mode
+
+    def on_user_final(self, text: str) -> None:
+        """A finished caller utterance. In call mode it goes to the main agent as a `voice` message;
+        outside it, only a pending approval or question takes it (as the yes/no or the answer)."""
+        self.user_talking = False
+        if not text.strip() or self.narrator is None:
+            return
+        self.last_conversational = is_conversational(text)
+        if self.call_mode:
+            self.narrator.user_said_later(text, channel=self.channel)
+        elif self.narrator.pending_ask is not None:
+            self.narrator.user_said(text, channel=self.channel)
+
+    def note_interrupt(self) -> None:
+        """The caller cut in (barge-in or an `interrupt` frame): the narrator drops what it was saying."""
+        if self.narrator is not None:
+            self.narrator.interrupted()
+
+    async def speak_narration(self, text: str) -> None:
+        """Voice one narrator line as a reply turn the client can play: response.started,
+        response.transcript, audio, response.done. Interrupted audio is dropped by the gen tag."""
+        gen = self.gen
+        self._emit_for_gen(gen, P.RESPONSE_STARTED)
+        self._emit_for_gen(gen, P.RESPONSE_TRANSCRIPT, text=text)
+        await self._speak(text, gen)
+        self._emit_for_gen(gen, P.RESPONSE_DONE)
+
+    async def _start_call(self) -> None:
+        if self.narrator is not None and not self.narrator.only_asks:
+            return
+        if self.narrator is not None:
+            self.narrator.close()
+            self.narrator = None
+        kernel = await self._kernel_for(self.project)
+        if kernel is None:
+            self._emit(P.ERROR, message="call mode needs a kernel behind the gateway; staying in plain voice mode")
+            self.call_mode = False
+            return
+        if kernel is not self.engines.kernel:
+            # The call's own attach: the tools and the agent mirror follow it.
+            self.call_kernel = kernel
+            self.tools.rebind(kernel)
+            if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
+                self.engines.kernel.listeners.remove(self._mirror)
+            if self.mirror_agents:
+                kernel.listeners.append(self._mirror)
+        self.narrator = Narrator(
+            kernel,
+            speak=self.speak_narration,
+            emit=self._emit,
+            screen=self.screen,
+            device=self.device,
+            model=self.defaults.narrator_model,
+            api_key=openrouter_key() if self.defaults.narrator_model else None,
+            user_talking=lambda: self.user_talking,
+            arbos_talking=self.arbos_talking,
+            # With the speech model's voice off (or cut to acks), the narrator says "On it." and
+            # reads more_detail answers itself; with it in full, the model does both.
+            ack=self.defaults.model_voice != "full",
+            speak_details=self.defaults.model_voice != "full",
+            model_highlights=self.defaults.model_highlights,
+            approval_timeout=self.defaults.approval_timeout,
+            escalations_log=self.defaults.escalations_log,
+            conversation_to_model=self.defaults.model_voice == "auto",
+        )
+        self.tools.narrator = self.narrator
+        self.tools.schemas = CALL_TOOLS
+        self.narrator.start()
+        log.info("[%s] call mode: narrating %s (channel %s)", self.sid, self.project or "the gateway's kernel", self.channel)
+
+    async def _kernel_for(self, project: str) -> KernelClient | None:
+        """The kernel a call is for. Empty, or a name for this gateway's own kernel: that one. A hub
+        name (`<machine>/<project>`) with a hub configured: a fresh attach through the hub, owned
+        by this call. A hub name with no hub: the own kernel, and the caller is told."""
+        own = self.engines.kernel
+        if self.call_kernel is not None:
+            return self.call_kernel  # session.start named the project and _attach_project already attached
+        if not project or project in self.engines.own_project_names():
+            return own
+        if "/" not in project and own is not None:
+            return own
+        if not self.engines.hub_url:
+            self._emit(P.ERROR, message=f"project {project!r} names another kernel but the gateway has no --hub; using its own kernel")
+            return own
+        url = hub_attach_url(self.engines.hub_url, project, self.engines.hub_token)
+        client = KernelClient(url=url, auto_approve=self.engines.auto_approve, token=self.engines.hub_token, name=project)
+        try:
+            await client.connect()
+        except Exception as exc:
+            log.warning("[%s] hub attach to %s failed: %s", self.sid, project, exc)
+            self._emit(P.ERROR, message=f"could not reach {project} through the hub ({_ascii_short(exc)}); using the gateway's own kernel")
+            return own
+        log.info("[%s] call attached to %s through the hub", self.sid, project)
+        return client
+
+    # ------------------------------------------------------------------ project scoping (hub)
+
+    async def _attach_project(self, machine: str, project: str) -> bool:
+        """Attach this call to `<machine>/<project>` through the hub. Refuses (error frame, then
+        close 4404) when there is no hub or the project is not on the roster, not live, or
+        does not answer; never falls back to another kernel."""
+        hub, token = self.engines.hub_url, self.engines.hub_token
+        label = f"{machine}/{project}"
+        if not hub:
+            return await self._refuse("no_hub", label, "this voice server has no hub configured, so it cannot scope a call to a project")
+        info = await self._roster_lookup(hub, token, machine, project)
+        if info is None:
+            return await self._refuse("project_unknown", label, f"{label} is not on the hub roster")
+        if not info.get("live", True):
+            return await self._refuse("project_offline", label, f"{label} is on the roster but its kernel is not running")
+        url = hub_attach_url(hub, label, token)
+        kernel = KernelClient(url=url, auto_approve=self.engines.auto_approve, token=token, name=label)
+        try:
+            await asyncio.wait_for(kernel.connect(), 15)
+        except Exception as exc:
+            await kernel.close()
+            return await self._refuse("project_unreachable", label, f"could not attach to {label}: {_ascii_short(exc)}")
+        # swap the call over: tools and the agent mirror follow it
+        self.call_kernel = kernel
+        self.project = label
+        self.tools.rebind(kernel)
+        if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
+            self.engines.kernel.listeners.remove(self._mirror)
+        if self.mirror_agents:
+            kernel.listeners.append(self._mirror)
+        identity = info.get("identity") or {}
+        self.project_info = {
+            "machine": machine, "project": project,
+            "name": identity.get("name") or project, "icon": identity.get("icon"),
+            "store": info.get("store") or f"arbos://{machine}/{project}/",
+            "kind": info.get("kind", "project"),
+        }
+        log.info("[%s] call scoped to %s (%s)", self.sid, label, self.project_info["name"])
+        return True
+
+    async def _roster_lookup(self, hub: str, token: str | None, machine: str, project: str) -> dict | None:
+        base = hub.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                roster = (await client.get(f"{base}/list", headers=headers)).json()
+        except Exception as exc:
+            log.warning("[%s] hub roster unavailable: %s", self.sid, type(exc).__name__)
+            return {"live": True}  # cannot check; let the attach itself decide
+        for m in roster.get("machines", []):
+            if m.get("name") != machine:
+                continue
+            for pr in m.get("projects", []):
+                if pr.get("name") == project:
+                    return pr
+        return None
+
+    async def _refuse(self, code: str, label: str, message: str) -> bool:
+        log.warning("[%s] refused call for %s: %s", self.sid, label, code)
+        self._emit(P.ERROR, code=code, project=label, message=message)
+        await asyncio.sleep(0.2)  # let the error frame leave before the close
+        try:
+            await self.ws.close(4404, f"project unreachable: {code}")
+        except Exception:
+            pass
+        return False
+
     # ------------------------------------------------------------------ lifecycle
 
-    async def run(self) -> None:
+    async def run(self, first: str | bytes | None = None) -> None:
         sender = asyncio.create_task(self._sender(), name=f"send-{self.sid}")
         log.info("[%s] connected (%s)", self.sid, self.engine)
-        if self.kernel:
-            self.kernel.listeners.append(self._mirror)
         try:
             await self.on_open()
-            async for message in self.ws:
-                if isinstance(message, (bytes, bytearray)):
-                    if not self.ready_sent:
-                        self._send_ready()
-                    await self.on_audio(self._gate_uplink(bytes(message)))
-                elif await self._on_control(message):
-                    break
+            stop = False
+            if first is not None:
+                stop = await self._take(first)
+            if not self.dictation:
+                if self.mirror_agents and self.engines.kernel:
+                    self.engines.kernel.listeners.append(self._mirror)
+                self._ensure_asker()
+            if not stop:
+                async for message in self.ws:
+                    if await self._take(message):
+                        break
         finally:
-            if self.kernel and self._mirror in self.kernel.listeners:
-                self.kernel.listeners.remove(self._mirror)
-            if self.kernel is not None and self.kernel is not self.engines.kernel:
-                await self.kernel.close()  # the per-call attach
+            if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
+                self.engines.kernel.listeners.remove(self._mirror)
+            if self.narrator is not None:
+                log.info("[%s] narrator: %s %s", self.sid, self.narrator.stats,
+                         {k: v for k, v in self.narrator.bench.items() if v})
+                self.narrator.close()
             self.tools.close()
+            if self.call_kernel is not None:
+                await self.call_kernel.close()
+                self.call_kernel = None
             if self.text_task:
                 self.text_task.cancel()
             try:
@@ -134,6 +357,15 @@ class BaseSession:
             if self.echo:
                 log.info("[%s] echo gate: %s", self.sid, self.echo.stats)
             log.info("[%s] closed", self.sid)
+
+    async def _take(self, message: str | bytes) -> bool:
+        """One frame from the client. True when the session should end."""
+        if isinstance(message, (bytes, bytearray)):
+            if not self.ready_sent:
+                self._send_ready()
+            await self.on_audio(self._gate_uplink(bytes(message)))
+            return False
+        return await self._on_control(message)
 
     def _gate_uplink(self, data: bytes) -> bytes:
         """Silence frames that are our own reply coming back through the mic."""
@@ -185,16 +417,22 @@ class BaseSession:
             reply=reply,
             text=reply if reply != "none" else "none",
             tools=[t["name"] for t in self.tools_available()],
-            kernel=bool(self.kernel and self.kernel.connected),
-            project=self.project,
-            answerer=getattr(self, "answerer", "n/a"),
+            kernel=bool((self.call_kernel or self.engines.kernel) and (self.call_kernel or self.engines.kernel).connected),
             voice=self.voice,
+            mode="call" if self.call_mode else ("dictation" if self.dictation else "voice"),
+            narrator=self.narrator is not None,
+            channel=self.channel,
+            device=self.device,
+            project=(self.call_kernel.name if self.call_kernel else (self.project or "")),
+            project_info=self.project_info,
+            answerer=getattr(self, "answerer", "n/a"),
+            via=("hub" if self.call_kernel else "gateway"),
         )
 
     def tools_available(self) -> list[dict]:
-        from .tools import TOOLS
-
-        return TOOLS if self.kernel else []
+        if not self.engines.kernel:
+            return []
+        return CALL_TOOLS if self.call_mode else TOOLS
 
     # ------------------------------------------------------------------ control
 
@@ -210,9 +448,11 @@ class BaseSession:
         if kind == P.SESSION_START:
             self._apply_start(msg)
             target = _parse_target(msg)
-            if target is not None:
+            if target is not None and self.call_kernel is None and "/".join(target) not in self.engines.own_project_names():
                 if not await self._attach_project(*target):
-                    return True  # refused: the caller asked for a project we cannot reach
+                    return True  # refused: the caller asked for a project we cannot reach; never another one
+            if self.call_mode and (self.narrator is None or self.narrator.only_asks):
+                await self._start_call()
             await self.on_start()
             self._send_ready()
         elif kind == P.SPEAK:
@@ -220,15 +460,21 @@ class BaseSession:
             if text:
                 await self.on_speak(text)
         elif kind == P.INTERRUPT:
+            self.note_interrupt()
             await self.on_interrupt("client")
         elif kind == P.TEXT_INPUT:
             text = str(msg.get("text", "")).strip()
-            if text:
+            if text and self.call_mode and self.narrator is not None:
+                # Typed during a call: the same inbox as the spoken words, filed as `text`.
+                self.narrator.user_said(text, channel="text")
+                self._emit(P.TEXT_DONE, text="", cancelled=False, forwarded=True)
+            elif text:
                 self._start_text_turn(text)
         elif kind == P.TEXT_CANCEL:
             if self.text_task and not self.text_task.done():
                 self.text_task.cancel()
         elif kind == P.CLIENT_SPEAKING:
+            log.debug("[%s] client.speaking %s", self.sid, bool(msg.get("speaking", False)))
             if self.echo is not None:
                 self.echo.client_speaking = bool(msg.get("speaking", False))
                 route = str(msg.get("route", "") or "").lower()
@@ -266,85 +512,37 @@ class BaseSession:
         if isinstance(msg.get("instructions"), str) and msg["instructions"].strip():
             self.instructions = msg["instructions"].strip()
         if "agents" in msg:
-            self.mirror_agents = bool(msg["agents"]) and self.kernel is not None
-        answerer = msg.get("answerer")
-        if answerer in ("kernel", "model", "auto") and hasattr(self, "answerer"):
-            self.answerer = answerer
+            self.mirror_agents = bool(msg["agents"]) and self.engines.kernel is not None
         reply = msg.get("reply")
         if reply in ("none", "openrouter", "kernel"):
             if reply != "none" and not self.engines.reply:
                 self._emit(P.ERROR, message="server started without a reply backend; staying speech-only")
             else:
                 self.reply_kind = reply
-
-    # ------------------------------------------------------------------ project scoping (hub)
-
-    async def _attach_project(self, machine: str, project: str) -> bool:
-        """Attach this call to `<machine>/<project>` through the hub. Refuses (error frame, then
-        close 4404) when there is no hub or the project is not on the roster, not live, or
-        does not answer; never falls back to another kernel."""
-        hub, token = self.engines.hub_url, self.engines.hub_token
-        label = f"{machine}/{project}"
-        if not hub:
-            return await self._refuse("no_hub", label, "this voice server has no hub configured, so it cannot scope a call to a project")
-        info = await self._roster_lookup(hub, token, machine, project)
-        if info is None:
-            return await self._refuse("project_unknown", label, f"{label} is not on the hub roster")
-        if not info.get("live", True):
-            return await self._refuse("project_offline", label, f"{label} is on the roster but its kernel is not running")
-        url = f"{hub.rstrip('/')}/attach/{machine}/{project}"
-        kernel = KernelClient(url=url, token=token, auto_approve=self.engines.kernel.auto_approve if self.engines.kernel else True)
-        try:
-            await asyncio.wait_for(kernel.connect(redial=True), 15)
-        except Exception as exc:
-            await kernel.close()
-            return await self._refuse("project_unreachable", label, f"could not attach to {label}: {type(exc).__name__}: {exc}")
-        # swap the call over: tools, mirror, and the kernel every engine hook reads
-        if self.kernel is not None and self._mirror in self.kernel.listeners:
-            self.kernel.listeners.remove(self._mirror)
-        self.tools.close()
-        self.kernel = kernel
-        self.tools = ToolRunner(kernel, on_report=self._on_agent_report)
-        self.tools.on_call = self._on_tool_call
-        self.tools.on_result = self._on_tool_result
-        kernel.listeners.append(self._mirror)
-        self.mirror_agents = True
-        identity = info.get("identity") or {}
-        self.project = {
-            "machine": machine, "project": project,
-            "name": identity.get("name") or project, "icon": identity.get("icon"),
-            "store": info.get("store") or f"arbos://{machine}/{project}/",
-            "kind": info.get("kind", "project"),
-        }
-        log.info("[%s] call scoped to %s (%s)", self.sid, label, self.project["name"])
-        return True
-
-    async def _roster_lookup(self, hub: str, token: str | None, machine: str, project: str) -> dict | None:
-        base = hub.replace("wss://", "https://").replace("ws://", "http://").rstrip("/")
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        try:
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                roster = (await client.get(f"{base}/list", headers=headers)).json()
-        except Exception as exc:
-            log.warning("[%s] hub roster unavailable: %s", self.sid, type(exc).__name__)
-            return {"live": True}  # cannot check; let the attach itself decide
-        for m in roster.get("machines", []):
-            if m.get("name") != machine:
-                continue
-            for pr in m.get("projects", []):
-                if pr.get("name") == project:
-                    return pr
-        return None
-
-    async def _refuse(self, code: str, label: str, message: str) -> bool:
-        log.warning("[%s] refused call for %s: %s", self.sid, label, code)
-        self._emit(P.ERROR, code=code, project=label, message=message)
-        await asyncio.sleep(0.2)  # let the error frame leave before the close
-        try:
-            await self.ws.close(4404, f"project unreachable: {code}")
-        except Exception:
-            pass
-        return False
+        target = _parse_target(msg)
+        if target is not None:
+            self.project = "/".join(target)  # dict, "machine/project" or arbos:// forms all land here
+        elif isinstance(msg.get("project"), str):
+            self.project = msg["project"].strip()  # a bare name: this gateway's own kernel
+        answerer = msg.get("answerer")
+        if answerer in ("kernel", "model", "auto") and hasattr(self, "answerer"):
+            self.answerer = answerer
+        if msg.get("channel") in ("voice", "text"):
+            self.channel = msg["channel"]
+        if isinstance(msg.get("device"), str):
+            self.device = msg["device"].strip()[:24]
+        if isinstance(msg.get("screen"), str) and msg["screen"].strip():
+            self.screen = msg["screen"].strip()
+        mode = msg.get("mode")
+        if mode == "call":
+            self.call_mode = True
+        elif mode == "voice":
+            self.call_mode = False
+        elif mode == "dictation":
+            self.dictation = True
+            self.call_mode = False
+            self.reply_kind = "none"
+            self.mirror_agents = False
 
     # ------------------------------------------------------------------ gateway TTS (Kokoro)
 
@@ -387,10 +585,6 @@ class BaseSession:
 
     async def _text_turn(self, text: str) -> None:
         backend = self.engines.reply if self.reply_kind != "none" else None
-        if self.reply_kind == "kernel" and self.kernel is not None:
-            from .reply import KernelReply
-
-            backend = KernelReply(self.kernel)  # the call's own kernel, not the server default
         if backend is None:
             self._emit(P.ERROR, message="no text backend: start the server with --reply openrouter or --reply kernel")
             self._emit(P.TEXT_DONE, text="", cancelled=False)
@@ -431,27 +625,7 @@ class BaseSession:
         except Exception:
             log.exception("[%s] could not voice the agent report", self.sid)
 
-    def _watch_child(self, frame: dict) -> None:
-        """Any sub-agent of root that finishes gets reported, whoever dispatched it (a voice
-        tool, the kernel's own spawn during a kernel-answered turn, or the phone's chat)."""
-        name = frame.get("agent")
-        if not name or name == "root" or self.kernel is None:
-            return
-        state = self.kernel.agents.get(name)
-        if frame.get("state") == "running":
-            self.running_children.add(name)
-        elif name in self.running_children:
-            self.running_children.discard(name)
-            if state is None or (state.parent not in (None, "root")):
-                return
-            report = state.says[-1] if state.says else state.assistant.strip()
-            if report:
-                from .tools import _clip
-                asyncio.create_task(self._on_agent_report(name, _clip(report, 500)))
-
     def _mirror(self, frame: dict) -> None:
-        if frame.get("type") == "turn":
-            self._watch_child(frame)
         if not self.mirror_agents:
             return
         kind = frame.get("type")
@@ -478,6 +652,10 @@ class BaseSession:
             ])
 
 
+def _ascii_short(exc: BaseException) -> str:
+    return str(exc).encode("ascii", "ignore").decode()[:120]
+
+
 def _speak_name(agent: str) -> str:
     """Kernel agent ids are squashed words ('writeahaikuaboutriversto'); say something shorter."""
     return agent[:24]
@@ -485,7 +663,7 @@ def _speak_name(agent: str) -> str:
 
 def _parse_target(msg: dict) -> tuple[str, str] | None:
     """session.start may name the project as {"project": {"machine","project"|"place"}},
-    {"kernel": "machine/project"}, or an "arbos://machine/project/" store address."""
+    "project": "machine/project", {"kernel": "machine/project"}, or an "arbos://machine/project/" address."""
     raw = msg.get("project") or msg.get("kernel")
     if not raw:
         return None
@@ -497,7 +675,9 @@ def _parse_target(msg: dict) -> tuple[str, str] | None:
         if text.startswith("arbos://"):
             text = text[len("arbos://"):]
         parts = [p for p in text.strip("/").split("/") if p]
-        machine, project = (parts + ["", ""])[:2]
+        if len(parts) < 2:
+            return None  # a bare name means the gateway's own kernel (see Engines.own_project_names)
+        machine, project = parts[:2]
     if not machine or not project:
         return None
     return machine, project

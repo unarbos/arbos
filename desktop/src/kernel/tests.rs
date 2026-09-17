@@ -158,3 +158,63 @@ fn concurrent_remote_attach_live_websockets() {
         infos.len()
     );
 }
+
+#[test]
+fn a_lost_lock_race_is_not_a_kernel_failure() {
+    let failed = Command::new("sh").arg("-c").arg("exit 1").status().unwrap();
+    let ok = Command::new("sh").arg("-c").arg("exit 0").status().unwrap();
+    let held = format!("\n  Error: {LOCK_HELD} (/x/.arbos/runtime/lock)");
+    assert!(lost_lock_race(&failed, &held));
+    assert!(!lost_lock_race(&failed, "\n  Error: no such file"));
+    assert!(!lost_lock_race(&ok, &held));
+}
+
+/// Opening a place attaches the chat, the board and the terminal at once.
+/// Only one kernel may be spawned; the rest attach to it, and nobody's
+/// kernel exits with "place already served".
+#[test]
+fn concurrent_local_attaches_spawn_one_kernel() {
+    let bin = match arbos_bin() {
+        Ok(bin) if bin.is_file() => bin,
+        _ => {
+            eprintln!(
+                "skipped: no arbos-kernel binary (build the workspace, or set ARBOS_KERNEL_BIN)"
+            );
+            return;
+        }
+    };
+    let dir = std::env::temp_dir().join(format!("arbos-attach-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let spawns_before = spawn_count();
+    let started = Barrier::new(6);
+    let infos: Vec<WebInfo> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                scope.spawn(|| {
+                    started.wait();
+                    attach_or_spawn(&dir).unwrap()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let pid = infos[0].pid;
+    let _ = Command::new("kill").arg(pid.to_string()).status();
+    let log = std::fs::read_to_string(dir.join(".arbos").join("kernel.log")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        infos.iter().all(|i| i.url == infos[0].url && i.pid == pid),
+        "{infos:?} (bin {})",
+        bin.display()
+    );
+    assert_eq!(
+        spawn_count() - spawns_before,
+        1,
+        "six attachers must start one kernel, not race for the lock"
+    );
+    assert!(
+        !log.contains(LOCK_HELD),
+        "a second kernel lost the lock race:\n{log}"
+    );
+}

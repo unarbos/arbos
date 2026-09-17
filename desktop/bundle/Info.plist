@@ -5,31 +5,83 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
-	<string>Cydonia</string>
+	<string>Arbos</string>
+	<!-- The Makefile copies target/release/arbos-desktop to this name. The
+	     kernel sits beside it as arbos-kernel and is found there first
+	     (desktop/src/kernel.rs, arbos_bin). -->
 	<key>CFBundleExecutable</key>
-	<string>cydonia</string>
-	<!-- Names Resources/cydonia.icns. The extension is implied; adding it
-	     is accepted, leaving the file out is not — the app falls back to the
-	     generic executable icon. -->
+	<string>Arbos</string>
+	<!-- Names Resources/AppIcon.icns, drawn by bundle/artwork.swift from the
+	     trunk mark. The extension is implied. -->
 	<key>CFBundleIconFile</key>
-	<string>cydonia</string>
+	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>app.cydonia</string>
+	<string>life.arbos.desktop</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
-	<!-- The app menu's title, which is why it is lowercase: it replaces the
-	     one `set_menus` builds in bin/main.rs. -->
+	<!-- The app menu's title. -->
 	<key>CFBundleName</key>
-	<string>cydonia</string>
+	<string>Arbos</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<!-- Marketing version from Cargo.toml; build number is the commit count
+	     on the branch, so two builds of one version still sort. Both are
+	     stamped by the Makefile. -->
 	<key>CFBundleShortVersionString</key>
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
-	<string>@VERSION@</string>
+	<string>@BUILD@</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Arbos. MIT License.</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<!-- gpui's Metal renderer and the APIs the desktop links (AVFoundation
+	     capture, ScreenCaptureKit through the kernel) are all present from
+	     Monterey on; Ventura is the oldest release still receiving fixes. -->
 	<key>LSMinimumSystemVersion</key>
-	<string>11.0</string>
+	<string>13.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<!-- Privacy strings: what the system shows on the permission dialogs.
+	     The microphone is read in-process (CoreAudio); the rest are the
+	     kernel's tools, which run as this bundle's children. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Arbos uses the microphone when you hold Fn to dictate, or start a voice call with an agent.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Arbos drives other apps on your behalf when an agent uses the automation tools.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Arbos can transcribe dictation on this Mac when no speech server is configured.</string>
+	<!-- arbos://<machine>/<project>[/<agent>] opens (or focuses) a chat. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>life.arbos.desktop.url</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>arbos</string>
+			</array>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+		</dict>
+	</array>
+	<!-- Opening a folder with Arbos adds it as a project. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Folder</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.folder</string>
+			</array>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+		</dict>
+	</array>
 </dict>
 </plist>

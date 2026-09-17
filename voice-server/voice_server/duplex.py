@@ -35,6 +35,11 @@ UPSTREAM_CHUNK_BYTES = UPSTREAM_RATE * 80 // 1000 * 2  # the container likes 80 
 LOUD_RMS = 0.004  # about -48 dBFS: below this the model is "not talking"
 TAIL_S = 0.7  # silence after the last loud frame that closes a spoken burst
 STASH_S = 1.0  # transcript text older than this when the audio starts is not what is being said
+# Call mode, model voice "ack": the speech model may speak for this long per burst, and only
+# within this long of the caller finishing. Longer or later bursts are the model filling silence
+# or answering for the agent; they are cut (the narrator speaks for the agent).
+ACK_MAX_S = 3.0
+ACK_WINDOW_S = 6.0
 
 DEFAULT_INSTRUCTIONS = (
     "You are Arbos, a voice assistant for a software engineer, talking on the phone. Be brief, warm, "
@@ -48,9 +53,23 @@ DEFAULT_INSTRUCTIONS = (
     "the user to speak. Silence from the user means they are listening or thinking; do not fill it."
 )
 
+CALL_INSTRUCTIONS = (
+    "You are the voice of Arbos on a call with a software engineer about one project. Everything the user "
+    "says is already delivered to the project's main agent, which does the work and dispatches sub-agents; "
+    "results are read out to the user by a narrator, not by you. Your job: acknowledge in at most one short "
+    "sentence ('On it.' 'One moment.' 'Noted.'), then wait quietly. Never do work yourself, never invent tasks, "
+    "never summarise results you have not been given. When the user asks for more about something that was "
+    "reported (why, what exactly, say it again), call more_detail with their question and read its answer "
+    "back in one or two plain sentences. When they ask how things are going, call agent_status. For a quick "
+    "general-knowledge question, answer in one sentence. Silence means the user is listening; do not fill it."
+)
+
 
 class DuplexSession(BaseSession):
     engine = "duplex"
+
+    def arbos_talking(self) -> bool:
+        return self.response_open
 
     async def on_open(self) -> None:
         self.up: websockets.ClientConnection | None = None
@@ -80,6 +99,9 @@ class DuplexSession(BaseSession):
         self.cap_ms = 0
         self.gateway_speaking = False
         self.pending_text = ""  # kernel-bound words waiting for the user to finish
+        # With a real ASR loaded, our VAD + Whisper produce the transcript (the model drops first
+        # syllables and splits at pauses); with --asr none, the model's own transcript events are used.
+        self.own_asr = getattr(self.engines.asr, "name", "none") != "none"
         self.decision = "model"  # who answers the current turn: pending (user speaking / transcribing) | model | kernel
         self.model_hold: list[bytes] = []  # model audio held while the decision is pending
         self.kernel_launched_at = 0.0
@@ -92,6 +114,8 @@ class DuplexSession(BaseSession):
         self.quiet_task: asyncio.Task | None = None
         self.first_audio_at: float | None = None
         self.user_stopped_at: float | None = None
+        self.response_opened_at: float | None = None
+        self.model_voice = self.defaults.model_voice
 
     async def on_start(self) -> None:
         self.to_up = Resampler(self.rate, UPSTREAM_RATE)
@@ -120,7 +144,7 @@ class DuplexSession(BaseSession):
         created = json.loads(await asyncio.wait_for(self.up.recv(), 20))
         if created.get("type") != "session.created":
             log.warning("[%s] upstream first message was %s", self.sid, created.get("type"))
-        tools = [t for t in TOOLS] if self.tools_available() else []
+        tools = list(self.tools_available())
         await self.up.send(json.dumps({
             "type": "session.update",
             "event_id": str(uuid.uuid4()),
@@ -129,7 +153,7 @@ class DuplexSession(BaseSession):
                     "input": {"format": {"type": "audio/pcm", "rate": UPSTREAM_RATE}},
                     "output": {"format": {"type": "audio/pcm", "rate": UPSTREAM_RATE}},
                 },
-                "instructions": _ascii(self.instructions or DEFAULT_INSTRUCTIONS),
+                "instructions": _ascii(self.instructions or (CALL_INSTRUCTIONS if self.call_mode else DEFAULT_INSTRUCTIONS)),
                 "tools": tools,
             },
         }))
@@ -154,9 +178,18 @@ class DuplexSession(BaseSession):
     def _translate(self, msg: dict) -> None:
         kind = msg.get("type", "")
         if kind == "input_audio_buffer.speech_started":
-            pass  # our VAD announces speech.started ~1 s sooner (see _uplink)
+            if not self.own_asr:
+                self.user_talking = True
+                self.decision = "pending"
+                self.model_hold = []
+                self._emit(P.SPEECH_STARTED)
+            # else: our VAD announces speech.started ~1 s sooner (see _uplink)
         elif kind == "input_audio_buffer.speech_stopped":
-            pass  # our VAD ends the utterance; the model's endpointing splits sentences at pauses
+            if not self.own_asr:
+                self.user_stopped_at = time.monotonic()
+                self.user_talking = False
+                self._emit(P.SPEECH_STOPPED)
+            # else: our VAD ends the utterance; the model's endpointing splits sentences at pauses
         elif kind == "conversation.item.input_audio_transcription.delta":
             self._emit(P.TRANSCRIPT_DELTA, text=msg.get("delta", ""))  # live words; the final replaces them
         elif kind == "conversation.item.input_audio_transcription.completed":
@@ -164,6 +197,10 @@ class DuplexSession(BaseSession):
             # and cuts at pauses, measured with the model alone. It is logged for comparison only;
             # the transcript the client and the kernel get comes from Whisper on our VAD segment.
             log.info("[%s] model heard: %r", self.sid, msg.get("transcript", ""))
+            if not self.own_asr:
+                text = str(msg.get("transcript", "")).strip()
+                self._emit(P.TRANSCRIPT_FINAL, text=text)
+                self._route_final(text, source="model")
         elif kind == "response.created":
             pass  # the model's "response" spans long stretches of silence; we derive turns from the audio
         elif kind == "response.output_audio.delta":
@@ -220,9 +257,18 @@ class DuplexSession(BaseSession):
             if now - self.last_loud_at > TAIL_S:
                 self.muted = False  # the model has gone quiet; the next burst is a fresh reply
             return
+        if loud and not self.response_open and self._cut_model_voice(now, opening=True):
+            self.muted = True  # a burst the call does not want: swallow it whole
+            self.last_loud_at = now
+            return
         if loud:
             self.last_loud_at = now
             self._open_response()
+            if self._cut_model_voice(now, opening=False):
+                # The acknowledgement ran long: stop it here; the narrator has the floor.
+                self.muted = True
+                self._close_response()
+                return
         elif not self.response_open:
             return  # silence while idle: nothing to send
         if not self.from_up.identity:
@@ -237,11 +283,30 @@ class DuplexSession(BaseSession):
         if not loud and now - self.last_loud_at > TAIL_S:
             self._close_response()
 
+    def _cut_model_voice(self, now: float, *, opening: bool) -> bool:
+        """Call mode: is this burst of the speech model's own voice one the caller should not hear?
+        `full`: never. `off`: always. `ack`: anything but a short acknowledgement right after the
+        caller. `auto`: an answer to small talk passes whole; a burst after a work request (which
+        the main agent got, and the narrator speaks for) or unprompted chatter is cut."""
+        if not self.call_mode or self.model_voice == "full":
+            return False
+        if self.model_voice == "off":
+            return True
+        since_user = now - self.user_stopped_at if self.user_stopped_at else 1e9
+        if self.model_voice == "auto":
+            if opening:
+                return since_user > ACK_WINDOW_S or not self.last_conversational
+            return not self.last_conversational and self.response_opened_at is not None and now - self.response_opened_at > ACK_MAX_S
+        if opening:
+            return since_user > ACK_WINDOW_S
+        return self.response_opened_at is not None and now - self.response_opened_at > ACK_MAX_S
+
     def _open_response(self) -> None:
         if self.response_open:
             return
         now = time.monotonic()
         self.response_open = True
+        self.response_opened_at = now
         self.last_loud_at = now
         self.first_audio_at = None
         self._emit_for_gen(self.gen, P.RESPONSE_STARTED)
@@ -291,7 +356,9 @@ class DuplexSession(BaseSession):
                     self._emit(P.RESPONSE_DONE, interrupted=True, reason="interrupted")
                     log.info("[%s] speak cut (barge-in, vad)", self.sid)
                 talking = False
-            # utterance capture
+            # utterance capture (only when we transcribe ourselves)
+            if not self.own_asr:
+                continue
             if not self.cap_active:
                 self.cap_preroll.append(window)
                 if prob >= t.start_threshold and self.vad_run_ms >= t.min_speech_ms:
@@ -302,6 +369,7 @@ class DuplexSession(BaseSession):
                     self.our_speech_started_at = time.monotonic()
                     self.decision = "pending"
                     self.model_hold = []
+                    self.user_talking = True
                     self._emit(P.SPEECH_STARTED)
             else:
                 self.cap_buf.append(window)
@@ -316,6 +384,7 @@ class DuplexSession(BaseSession):
                     self.cap_buf = []
                     self.cap_preroll.clear()
                     self.user_stopped_at = time.monotonic()
+                    self.user_talking = False
                     self._emit(P.SPEECH_STOPPED)
                     asyncio.create_task(self._utterance_done(audio))
 
@@ -329,10 +398,21 @@ class DuplexSession(BaseSession):
             text = ""
         text = text.strip()
         self._emit(P.TRANSCRIPT_FINAL, text=text)
+        self._route_final(text, source=f"{audio.size / P.ASR_RATE * 1000:.0f}ms audio, asr {(time.monotonic() - started) * 1000:.0f}ms")
+
+    def _route_final(self, text: str, *, source: str) -> None:
+        """A finished caller utterance: who answers it."""
         if not text:
             self._release_model()
             return
         self.user_turns += 1
+        self.on_user_final(text)  # call mode: the narrator's inbox; otherwise a pending ask/approval
+        if self.call_mode:
+            # In call mode the narrator (over the main agent) answers; the speech model's voice is
+            # governed by --call-model-voice in _on_model_audio.
+            log.info("[%s] user (call, %s): %r", self.sid, source, text)
+            self._release_model()
+            return
         route = "kernel" if self._kernel_answers(text) else "model"
         answering = self.kernel_task is not None and not self.kernel_task.done()
         if route == "kernel" and answering and not self.kernel_announced \
@@ -343,8 +423,7 @@ class DuplexSession(BaseSession):
         elif (route == "kernel" and len(text.split()) <= 3 and self.kernel_task is not None
                 and time.monotonic() - self.kernel_launched_at < 4.0):
             route = "fragment"  # a tail of the question we already asked
-        log.info("[%s] user (%s, %.0fms audio, asr %.0fms): %r", self.sid, route,
-                 audio.size / P.ASR_RATE * 1000, (time.monotonic() - started) * 1000, text)
+        log.info("[%s] user (%s, %s): %r", self.sid, route, source, text)
         if route in ("kernel", "continuation"):
             self.decision = "kernel"
             self.model_hold = []

@@ -32,7 +32,7 @@ pub const UNNAMED: &str = "Untitled";
 
 /// Claimed on the title field, so `enter` there moves to the body and stays a
 /// newline in every other field.
-pub const TITLE_CONTEXT: &str = "CydoniaArticleTitle";
+pub const TITLE_CONTEXT: &str = "ArbosArticleTitle";
 
 /// Where a project's articles live, and what the document is called inside the
 /// directory that is one.

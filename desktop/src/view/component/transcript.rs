@@ -8,7 +8,7 @@
 use crate::{
     model::{
         attachment::{MessageImage, Prompt, UserMessage},
-        session::{ChatItem, ChatSession, ToolStatus},
+        session::{Artifact, ArtifactKind, ChatItem, ChatSession, PlanNode, ToolStatus},
         workspace::Workspace,
     },
     reading,
@@ -17,7 +17,8 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, ClipboardItem, Context, Empty, Hsla, Pixels, ScrollHandle, SharedString,
-        StyledText, TextRun, Window, canvas, div, font, img, point, prelude::*, px, rgb,
+        StyledText, TextRun, Window, canvas, div, font, img, linear_color_stop, linear_gradient,
+        point, prelude::*, px, rgb, svg,
     },
     motion::Painter,
     theme::{HighlightKind, TextStyle, Theme, Typeset, ink},
@@ -25,7 +26,7 @@ use bezel::{
         icons,
         scroll::{FOLLOW_SLACK, at_bottom},
         tooltip::Tooltip,
-        widgets::{Layout, Status, Takeover},
+        widgets::{Buttons, Layout, Status, Takeover},
     },
 };
 use cacp::schema::ToolKind;
@@ -49,6 +50,15 @@ const CARD_PAD_X: f32 = 12.;
 const CARD_PAD_Y: f32 = 6.;
 const CARD_RADIUS: f32 = 8.;
 const PROMPT_PAD_Y: f32 = 10.;
+/// The user's card: Cursor's ~10 px corners, and no wider than most of the
+/// reading column so the answer under it reads as a reply.
+const PROMPT_RADIUS: f32 = 10.;
+/// Jacob's Mac reference (`chat-2026-09-14/03`, 2x): the bubble is 483 pt
+/// of a 689 pt column — 70 % — with 12 pt side padding and a 10 pt radius.
+const PROMPT_MAX_WIDTH: f32 = (root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER) * 0.70;
+const PROMPT_PAD_X: f32 = 12.;
+/// How many of a worker's brief's lines show before the fade (F-132).
+const BRIEF_LINES: f32 = 3.;
 /// Web diff/terminal: `text-[11.5px] leading-[1.5]`.
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
@@ -86,6 +96,17 @@ const SHIMMER_FPS: f32 = 30.;
 /// so the band can fall between letters. `since` sets the phase, so a row
 /// that re-renders keeps its place in the sweep. Under Reduce Motion the
 /// label sits still in the muted colour.
+/// A shimmering line for another view (the kickoff view's "Setting up
+/// environment"): the same paint as the heartbeat's words.
+pub(crate) fn shimmer_line<V: 'static>(
+    text: &str,
+    since: Duration,
+    theme: &Theme,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    shimmer_label(text, since, theme, cx).into_any_element()
+}
+
 fn shimmer_label<V: 'static>(
     text: impl AsRef<str>,
     since: Duration,
@@ -180,9 +201,9 @@ pub struct State {
     follow: Follow,
     /// Keyed by the turn's first item index.
     work: HashMap<usize, Takeover>,
-    /// Thoughts the user flipped away from their default (open while
-    /// streaming, folded once done).
-    closed_thoughts: HashSet<usize>,
+    /// A thought the person folded or unfolded by hand, and which way.
+    /// Absent means the default: open while it streams, folded once done.
+    thoughts: HashMap<usize, bool>,
     /// Tool items whose output is showing, by item index.
     output: HashSet<usize>,
     /// Low-signal groups whose member names are showing, keyed by the first
@@ -264,7 +285,11 @@ impl<T> Memo<T> {
 impl State {
     /// The parsed markdown of item `ix`, whose prose is `text`.
     fn doc(&self, ix: usize, text: &str) -> Rc<Doc> {
-        self.docs.get(ix, text, markdown::parse)
+        // Links go in as chips — `⛓ #139`, `⚙ chat doors`, `📄 notes` — the
+        // targets as written, so a click still opens the same thing.
+        self.docs.get(ix, text, |text| {
+            markdown::parse(&crate::view::chips::dress(text))
+        })
     }
 
     /// The reveal for item `ix`: started while the item is `live` — the
@@ -300,15 +325,15 @@ impl State {
     }
 
     /// Cursor: a thought streams open, then folds to `Thought 10s`. A
-    /// click flips whichever state is on screen.
+    /// click flips whichever state is on screen, and that choice sticks —
+    /// one folded by hand while streaming stays folded when it settles.
     fn thought_open(&self, ix: usize, done: bool) -> bool {
-        self.closed_thoughts.contains(&ix) != !done
+        self.thoughts.get(&ix).copied().unwrap_or(!done)
     }
 
-    fn toggle_thought(&mut self, ix: usize, _done: bool) {
-        if !self.closed_thoughts.insert(ix) {
-            self.closed_thoughts.remove(&ix);
-        }
+    fn toggle_thought(&mut self, ix: usize, done: bool) {
+        let open = self.thought_open(ix, done);
+        self.thoughts.insert(ix, !open);
     }
 
     fn toggle_group(&mut self, start: usize) {
@@ -379,7 +404,14 @@ impl State {
     /// collapsed without a drag behind it.
     pub fn copied(&self, chat: &ChatSession) -> Option<String> {
         let (ix, selection) = self.selection?;
-        let doc = self.doc(ix, item_text(chat.items.get(ix)?)?);
+        let item = chat.items.get(ix)?;
+        // The prompt card is set from the escaped text; copy from the same
+        // document, so the offsets line up (the escapes do not paste).
+        let shown: std::borrow::Cow<str> = match item {
+            ChatItem::User(message) => plain_markdown(&message.text).into(),
+            other => item_text(other)?.into(),
+        };
+        let doc = self.doc(ix, &shown);
         let text = selectable::copied(&doc, selection);
         (!text.is_empty()).then_some(text)
     }
@@ -459,7 +491,18 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
     let mut turns = Vec::new();
     let mut start = 0;
     for ix in 1..=items.len() {
-        if ix < items.len() && !matches!(items[ix], ChatItem::User(_) | ChatItem::From { .. }) {
+        // A worker's report right after the wake it caused is that
+        // segment's first line, not a boundary of its own.
+        let report_in_segment = ix < items.len()
+            && matches!(items[ix], ChatItem::From { .. })
+            && matches!(items[ix - 1], ChatItem::Wake { .. });
+        if ix < items.len()
+            && (!matches!(
+                items[ix],
+                ChatItem::User(_) | ChatItem::From { .. } | ChatItem::Wake { .. }
+            ) || inline_user(items, ix)
+                || report_in_segment)
+        {
             continue;
         }
         let interim =
@@ -479,6 +522,13 @@ fn turns(items: &[ChatItem]) -> Vec<Turn> {
 
 /// The assistant reply that belongs to this step — Agent prose after the
 /// tools and thoughts, not the chat name and not earlier turns.
+/// The answer text of the turn whose prompt sits at `first`, for a vote's
+/// record. Empty when the turn has no answer yet.
+pub fn answer_of(items: &[ChatItem], first: usize) -> Option<String> {
+    let turn = turns(items).into_iter().find(|t| t.range.start == first)?;
+    turn_answer(items, &turn)
+}
+
 fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
     let parts: Vec<&str> = (turn.answer_from..turn.range.end)
         .filter_map(|ix| match items.get(ix) {
@@ -490,6 +540,56 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
         return None;
     }
     Some(parts.join("\n\n"))
+}
+
+/// The kernel's "project page not updated" reminder (a `nudge` event, or
+/// the notice older kernels wrote): one dim line with a ↻ glyph, the
+/// reason only — the instruction half is the agent's to act on, not the
+/// reader's. No strip, no retry.
+fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
+    // "project page not updated last turn: a worker was started or
+    // reported and .arbos/notes.md did not change — update it" is the
+    // kernel's whole sentence; the reader needs the first clause, as a
+    // sentence of its own.
+    let clause = text
+        .split(" — ")
+        .next()
+        .unwrap_or(text)
+        .split(':')
+        .next()
+        .unwrap_or(text)
+        .trim();
+    let mut shown = String::with_capacity(clause.len());
+    let mut chars = clause.chars();
+    if let Some(first) = chars.next() {
+        shown.extend(first.to_uppercase());
+        shown.push_str(chars.as_str());
+    }
+    let shown = if shown.starts_with("Project page not updated") {
+        "Project page not updated this turn".to_string()
+    } else {
+        shown
+    };
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::media::REPEAT)
+                .size(px(11.))
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(shown)),
+        )
+        .into_any_element()
 }
 
 /// What the session has to say for itself. Cursor keeps failures as a
@@ -506,15 +606,32 @@ fn notice(
     if !failed && text == "done" {
         return div().into_any_element();
     }
+    if !failed && crate::model::session::is_page_nudge(text) {
+        return page_nudge(text, theme);
+    }
+    // The kernel turned an answer down ("answer refused: no question is
+    // pending"): that belongs to the question's card, as one faint line in
+    // its shape, not a free line with Retry.
+    if let Some(reason) = text.strip_prefix("answer refused:") {
+        return asked_line("answer", &format!("refused — {}", reason.trim()), theme);
+    }
+    // A failure's raw wording — a provider's refusal, two model ids, a
+    // documentation link — is never the line (F-76); Cursor shows a short
+    // sentence and keeps the detail behind a disclosure. The same for the
+    // kernel's "switched to <model> for this turn: <the whole reason>",
+    // Jacob's first line on a new project. The disclosure is there
+    // whenever the short line dropped something.
     let shown = if failed {
         short_error(text)
     } else {
-        text.to_owned()
+        short_notice(text)
     };
+    let detail = (shown.trim() != text.trim()).then(|| text.trim().to_string());
+    let open = detail.is_some() && chat.transcript.groups.contains(&ix);
     let retry = failed.then(|| last_user_prompt(&chat.items)).flatten();
     let can_retry = retry.is_some() && !chat.busy();
     let id = chat.id;
-    div()
+    let row = div()
         .self_start()
         .w_full()
         .max_w(px(root::CHAT_MAX_WIDTH))
@@ -524,7 +641,50 @@ fn notice(
         .gap(px(8.))
         .text_style(TextStyle::Callout)
         .text_color(theme.text_muted)
-        .child(spaced_label(shown, theme.text_muted, theme))
+        // In a flex box the words need a shrinkable cell to wrap in; without
+        // it a long notice ("mode: ask — …") ran off the right edge (Mac
+        // cycle 11).
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(spaced_label(shown, theme.text_muted, theme)),
+        )
+        .when(detail.is_some(), |row| {
+            row.child(
+                div()
+                    .id(SharedString::from(format!("notice-details-{id}-{ix}")))
+                    .flex_none()
+                    .cursor_pointer()
+                    .rounded(px(4.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .hover(|el| el.bg(theme.element_hover))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.with_session(id, cx, |chat| chat.transcript.toggle_group(ix));
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(3.))
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.text_faint)
+                            .child("Details")
+                            .child(
+                                icons::icon(if open {
+                                    icons::arrows::ALT_ARROW_DOWN
+                                } else {
+                                    icons::arrows::ALT_ARROW_RIGHT
+                                })
+                                .size(px(10.))
+                                .text_color(theme.text_faint),
+                            ),
+                    ),
+            )
+        })
         .when_some(retry, |row, prompt| {
             row.child(
                 div()
@@ -549,8 +709,29 @@ fn notice(
                             .child("Retry"),
                     ),
             )
-        })
-        .into_any_element()
+        });
+    match detail.filter(|_| open) {
+        Some(detail) => div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(row)
+            .child(
+                div()
+                    .id(SharedString::from(format!("notice-detail-{id}-{ix}")))
+                    .w_full()
+                    .max_w(px(root::CHAT_MAX_WIDTH))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(6.))
+                    .bg(theme.surface_raised)
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(detail)),
+            )
+            .into_any_element(),
+        None => row.into_any_element(),
+    }
 }
 
 fn last_user_prompt(items: &[ChatItem]) -> Option<Prompt> {
@@ -564,8 +745,63 @@ fn last_user_prompt(items: &[ChatItem]) -> Option<Prompt> {
 }
 
 /// Cursor errors are one short line, not the kernel's full wrap.
+/// A notice that is not a failure, cut to its news: "switched to
+/// <model> for this turn" without the provider's paragraph after the colon;
+/// anything else that runs long, to its first sentence. The whole text
+/// stays behind the Details disclosure.
+fn short_notice(text: &str) -> String {
+    let text = text.trim();
+    // "google/gemini-2.5-flash: connection failed: error sending request
+    // for url (…) — retrying in 2.4s (attempt 4/5)": the attempt is the
+    // news; the URL and the model id are the detail.
+    // Cursor's line for the same moment is soft and counts nothing: "We
+    // are having difficulties reaching the AI provider. Retrying
+    // automatically…" (F-114, `cycle-23/cursor-04-working-12s.png`). The
+    // attempt and the URL stay behind Details.
+    if crate::model::session::is_retry_line(text) {
+        let what = if text.contains("connection failed") {
+            "Having trouble reaching the model provider"
+        } else {
+            "The model provider did not answer"
+        };
+        return format!("{what}. Retrying automatically…");
+    }
+    if let Some(rest) = text.strip_prefix("switched to ")
+        && let Some((model, _)) = rest.split_once(" for this turn")
+    {
+        let model = model.rsplit('/').next().unwrap_or(model);
+        return format!("Switched to {model} for this turn.");
+    }
+    if text.chars().count() > 160 {
+        let first = text
+            .split_inclusive(['.', ':'])
+            .next()
+            .unwrap_or(text)
+            .trim_end_matches(':')
+            .trim();
+        return shorten(first, 100);
+    }
+    text.to_owned()
+}
+
 fn short_error(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
+    // A provider turning the request down — a policy block, a bad key, a
+    // quota, a rate limit: the model did not answer, and the reason is a
+    // sentence, not a paragraph with model ids and a documentation link
+    // (Jacob's first line on a new project, F-76).
+    if lower.contains("policy violation")
+        || lower.contains("has been blocked")
+        || lower.contains("content_policy")
+    {
+        return "The model provider refused the request.".into();
+    }
+    if lower.contains("no api key") || lower.contains("invalid api key") || lower.contains("401") {
+        return "No working model key on this kernel.".into();
+    }
+    if lower.contains("rate limit") || lower.contains("429") || lower.contains("quota") {
+        return "The model provider is rate-limiting requests.".into();
+    }
     if lower.contains("cut off") || lower.contains("mid-stream") {
         return "Answer was cut off. Send the message again.".into();
     }
@@ -574,6 +810,14 @@ fn short_error(text: &str) -> String {
     }
     if lower.contains("attach writer closed") {
         return "Stopped.".into();
+    }
+    // The kernel's rewind refusal names the agent id and a version note;
+    // the reader needs only what to do.
+    if lower.starts_with("rewind:") && lower.contains("no checkpoints yet") {
+        return "Nothing to rewind to yet: checkpoints are written when a turn starts.".into();
+    }
+    if lower.starts_with("rewind:") && lower.contains("checkpoint") {
+        return "Rewind failed: no checkpoint for that turn.".into();
     }
     // The kernel's job line: "job j9 exited with code 1 after 1s — `pm2
     // status` — log: …". Cursor names the command and the code, no
@@ -617,6 +861,159 @@ fn message_images(images: &[MessageImage]) -> impl Iterator<Item = AnyElement> +
     })
 }
 
+/// Widest an artifact card grows. Two fit side by side in the column.
+const ARTIFACT_W: f32 = 296.;
+const ARTIFACT_H: f32 = 180.;
+
+/// Files a tool made for the user — screenshots, clips — as cards in a
+/// wrapping row: the picture (a clip shows its last frame with a play
+/// badge), the file name, and the tool's measurements. Click opens the
+/// file with the system's viewer.
+fn artifacts_row(
+    chat: &ChatSession,
+    ix: usize,
+    files: &[Artifact],
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let id = chat.id;
+    div()
+        .id(SharedString::from(format!("artifacts-{id}-{ix}")))
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap(px(8.))
+        .children(
+            files
+                .iter()
+                .enumerate()
+                .map(|(n, file)| artifact_card(id, ix, n, file, theme, cx)),
+        )
+        .into_any_element()
+}
+
+fn artifact_card(
+    id: u64,
+    ix: usize,
+    n: usize,
+    file: &Artifact,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let path = file.path.clone();
+    let preview = file.thumb.as_ref().and_then(MessageImage::preview);
+    let (w, h) = file
+        .thumb
+        .as_ref()
+        .map(|thumb| {
+            let (tw, th) = thumb.display_size();
+            let scale = (ARTIFACT_W / tw.max(1.))
+                .min(ARTIFACT_H / th.max(1.))
+                .min(1.);
+            (tw * scale, th * scale)
+        })
+        .unwrap_or((ARTIFACT_W, 72.));
+    let is_clip = file.kind == ArtifactKind::Video;
+    let picture = div()
+        .relative()
+        .w(px(w))
+        .h(px(h))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.surface_raised)
+        .rounded_t(px(Theme::control_radius()))
+        .overflow_hidden()
+        .child(match preview {
+            Some(preview) => img(preview).w(px(w)).h(px(h)).into_any_element(),
+            None => div()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(if is_clip { "Recording" } else { "Image" })
+                .into_any_element(),
+        })
+        .when(is_clip, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .left(px(w / 2. - 16.))
+                    .top(px(h / 2. - 16.))
+                    .size(px(32.))
+                    .rounded_full()
+                    .bg(rgb(0x000000).opacity(0.55))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        icons::icon(icons::media::PLAY_BOLD)
+                            .size(px(14.))
+                            .text_color(rgb(0xffffff)),
+                    ),
+            )
+        });
+    let caption = div()
+        .w_full()
+        .px(px(8.))
+        .py(px(5.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .min_w(px(0.))
+                .flex_1()
+                .font_family(theme.font_mono.clone())
+                .text_size(px(MONO_SIZE))
+                .line_height(px(MONO_LEAD))
+                .text_color(theme.text_muted)
+                .truncate()
+                .child(SharedString::from(file.name.clone())),
+        )
+        .when(!file.caption.is_empty(), |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(file.caption.clone())),
+            )
+        });
+    div()
+        .id(SharedString::from(format!("artifact-{id}-{ix}-{n}")))
+        .flex()
+        .flex_col()
+        .w(px(w.max(160.)))
+        .border_1()
+        .border_color(theme.border)
+        .rounded(px(Theme::control_radius()))
+        .overflow_hidden()
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .child(picture)
+        .child(caption)
+        .on_click(cx.listener(move |_, _, _, _| open_external(&path)))
+        .into_any_element()
+}
+
+/// Hand a file to the system viewer. Fire and forget: a missing viewer
+/// shows the OS's own message, not ours.
+fn open_external(path: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener)
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Web prompt-card: the plate bleeds by its own padding so the words
 /// share the left edge with the answer. `-mx-3 px-3 py-2.5`.
 fn user_prompt(
@@ -630,74 +1027,188 @@ fn user_prompt(
     let id = chat.id;
     let prompt = message.to_prompt();
     let (slash, body) = split_slash(&message.text);
-    div()
-        .id(SharedString::from(format!("prompt-{id}-{ix}")))
-        .group("prompt")
-        .w_full()
-        .ml(px(-root::COMPOSER_PAD_X))
-        .mr(px(-root::COMPOSER_PAD_X))
-        .px(px(root::COMPOSER_PAD_X))
+    let group = SharedString::from(format!("prompt-{id}-{ix}"));
+    // A worker's brief is the column's width and folded to its first
+    // lines, the rest behind a fade; a click shows it whole. Cursor's
+    // worker tab draws its brief so (F-132,
+    // `cycle-22/cursor-worker-chat-collapsed.png`); a brief is the length
+    // of a page, and whole it pushed the work off the screen. The project
+    // chat's own prompts stay bubbles.
+    let brief = chat.parent.is_some() && ix == 0;
+    let brief_open = chat.transcript.output.contains(&ix);
+    // The card's colour as painted, for the fade to end in.
+    let card_bg = theme
+        .bg
+        .blend(root::content_bg(theme))
+        .blend(theme.ink(0.06));
+    let content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .when(message.has_attachments(), |el| {
+            el.child(user_attachments(message, theme))
+        })
+        .when(!message.described.is_empty(), |el| {
+            el.child(described_note(message, theme))
+        })
+        .when_some(slash, |el, cmd| {
+            el.child(
+                div()
+                    .text_style(TextStyle::Body)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(cmd)),
+            )
+        })
+        .when(!body.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(6.))
+                    // Spoken on a call: a small microphone leads the line.
+                    .when(message.channel == "voice", |row| {
+                        row.child(
+                            div()
+                                .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
+                                .flex_none()
+                                .mt(px(3.))
+                                .tooltip(|window, cx| Tooltip::text("Spoken on a call", window, cx))
+                                .child(
+                                    icons::icon(icons::media::MICROPHONE)
+                                        .size(px(12.))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_style(TextStyle::Body)
+                            .text_color(theme.text)
+                            // Cursor shows the prompt as typed —
+                            // backticks and stars stay characters,
+                            // nothing is set as code or bold.
+                            .child(prose(chat, ix, &plain_markdown(body), window, cx)),
+                    ),
+            )
+        });
+    // Folded: the first lines, the last of them under a fade into the
+    // card, so the cut reads as "more below" and not as the brief's end.
+    let content = if brief && !brief_open {
+        // Prose leads its lines wider than the role's own box; the fade
+        // covers the last line only, as Cursor's does.
+        let line = TextStyle::Body.painted_line_height() * 1.3;
+        let clip = BRIEF_LINES * line;
+        div()
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .max_h(px(clip))
+            .overflow_hidden()
+            .child(content)
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(line))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(card_bg.opacity(0.), 0.),
+                        linear_color_stop(card_bg, 1.),
+                    )),
+            )
+            .into_any_element()
+    } else {
+        content.into_any_element()
+    };
+    // Cursor's user bubble: a card at the column's right edge, flush with
+    // the composer's, no wider than most of the column. The edit pencil
+    // sits outside the card, to its left, and shows on hover — inside, it
+    // widened the card and moved the text's right edge (Jacob's still).
+    let card = div()
+        .id(group.clone())
+        .when(!brief, |el| el.max_w(px(PROMPT_MAX_WIDTH)))
+        .when(brief, |el| {
+            el.w_full()
+                .border_1()
+                .border_color(theme.hairline(0.6))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.with_session(id, cx, |chat| {
+                        if !chat.transcript.output.insert(ix) {
+                            chat.transcript.output.remove(&ix);
+                        }
+                    });
+                }))
+        })
+        .px(px(PROMPT_PAD_X))
         .py(px(PROMPT_PAD_Y))
-        .rounded(px(Theme::surface_radius()))
-        .bg(ink(0.05))
+        .rounded(px(PROMPT_RADIUS))
+        // Cursor's prompt card: one step up from the page (#212121 on its
+        // #161514), no border, no shadow.
+        .bg(theme.ink(0.06))
         .flex()
         .flex_row()
         .items_end()
         .gap(px(ROW_GAP))
+        .child(content);
+    let pencil = div()
+        .id(SharedString::from(format!("replay-prompt-{id}-{ix}")))
+        .flex_none()
+        .size(px(24.))
+        .mb(px(4.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        // Hidden until the pointer is over the row, then faint beside the
+        // card's bottom-left corner; the card's own width never changes.
+        .invisible()
+        .group_hover(group.clone(), |el| el.visible())
+        .hover(|el| el.bg(theme.element_hover))
+        .tooltip(move |window, cx| Tooltip::text("Edit and resubmit from here", window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if prompt.is_empty() {
+                return;
+            }
+            this.edit_in_composer(prompt.text.clone(), cx);
+        }))
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .when(message.has_attachments(), |el| {
-                    el.child(user_attachments(message, theme))
-                })
-                .when_some(slash, |el, cmd| {
-                    el.child(
-                        div()
-                            .text_style(TextStyle::Body)
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(cmd)),
-                    )
-                })
-                .when(!body.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .text_style(TextStyle::Body)
-                            .text_color(theme.text)
-                            .child(prose(chat, ix, body, window, cx)),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("replay-prompt-{id}-{ix}")))
-                .flex_none()
-                .size(px(24.))
-                .mt(px(-2.))
-                .rounded(px(4.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .cursor_pointer()
-                // Always shown, faint, at the card's bottom-right — where
-                // Cursor keeps its restore arrow.
-                .hover(|el| el.bg(theme.element_hover))
-                .tooltip(move |window, cx| Tooltip::text("Edit and resubmit from here", window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if prompt.is_empty() {
-                        return;
-                    }
-                    this.edit_in_composer(prompt.text.clone(), cx);
-                }))
-                .child(
-                    icons::icon(icons::editing::PEN)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                ),
-        )
+            icons::icon(icons::editing::PEN)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
+    // A row with the card at its end: the card takes its content's width
+    // up to PROMPT_MAX_WIDTH and its right edge is the composer's — the
+    // composer's plate bleeds past the column gutter by its own pad.
+    // A brief spans the column and takes no pencil: a worker's words come
+    // from its parent, not from this composer.
+    if brief {
+        return div()
+            .group(group)
+            .w_full()
+            .max_w(px(root::CHAT_MAX_WIDTH))
+            .child(card)
+            .into_any_element();
+    }
+    div()
+        .group(group)
+        .w_full()
+        .relative()
+        .left(px(root::COMPOSER_PAD_X))
+        .flex()
+        .flex_row()
+        .justify_end()
+        .items_end()
+        .gap(px(6.))
+        .child(pencil)
+        .child(card.flex_none())
         .into_any_element()
 }
 
@@ -723,14 +1234,61 @@ fn user_attachments(message: &UserMessage, theme: &Theme) -> AnyElement {
                 .into_any_element()
         }))
         .children(message.images.iter().enumerate().map(|(ix, image)| {
-            attachment::chip(
-                ("history-image", ix),
-                image.label().to_string(),
-                image.preview(),
-                theme,
-            )
-            .into_any_element()
+            attachment::thumb(("history-image", ix), image.preview(), 40., 40., theme)
+                .into_any_element()
         }))
+        .into_any_element()
+}
+
+/// The turn's model could not see the attached image(s); another model
+/// put them into words. A paperclip and a dim caption inside the card —
+/// hover for which model and what it said. Never a line of the transcript.
+fn described_note(message: &UserMessage, theme: &Theme) -> AnyElement {
+    let n = message.described.len();
+    let model = message
+        .described
+        .first()
+        .map(|d| d.model.clone())
+        .unwrap_or_default();
+    let caption: SharedString = if n == 1 {
+        format!("image described by {model}").into()
+    } else {
+        format!("{n} images described by {model}").into()
+    };
+    let tip: SharedString = message
+        .described
+        .iter()
+        .map(|d| {
+            let name = std::path::Path::new(&d.path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(d.path.as_str());
+            format!(
+                "{name} — described by {}:\n{}",
+                d.model,
+                shorten(d.text.trim(), 400)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        .into();
+    div()
+        .id("described-images")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(4.))
+        .text_style(TextStyle::Caption)
+        .text_color(theme.text_faint)
+        .cursor_default()
+        .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+        .child(
+            icons::icon(icons::files::PAPERCLIP)
+                .size(px(11.))
+                .text_color(theme.text_faint)
+                .into_any_element(),
+        )
+        .child(caption)
         .into_any_element()
 }
 
@@ -746,6 +1304,9 @@ fn from_block(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
+    if let Some((verdict, words)) = done_report(text) {
+        return worker_card(chat, ix, who, verdict, &words, theme, window, cx);
+    }
     div()
         .self_start()
         .max_w(px(520.))
@@ -756,7 +1317,8 @@ fn from_block(
             div()
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
-                .child(SharedString::from(who.to_owned())),
+                // A sub-agent's title, not its folder id.
+                .child(SharedString::from(chat.who_label(who))),
         )
         .child(
             div()
@@ -766,6 +1328,474 @@ fn from_block(
         )
         .children(message_images(images))
         .into_any_element()
+}
+
+/// How a worker's turn ended, as its report to the parent says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    Done,
+    Failed,
+    /// Paused by the user's Stop (kernel #324): not a failure, and the
+    /// kernel's advice to the coordinator on how to resume is not for the
+    /// user's eyes.
+    Stopped,
+}
+
+/// The kernel's done file for a worker, as it lands in the parent's chat:
+/// `Turn ended. Last words: … (transcript: …)`, `Turn ended badly. …`, or
+/// `Turn stopped by the user. …`. The verdict and the words, without the
+/// file pointer and whatever the kernel wrote after it (F-116).
+fn done_report(text: &str) -> Option<(Verdict, String)> {
+    let text = text.trim();
+    let (verdict, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
+        (Verdict::Done, rest)
+    } else if let Some(rest) = text.strip_prefix("Turn ended badly. Last words:") {
+        (Verdict::Failed, rest)
+    } else if let Some(rest) = text.strip_prefix("Turn stopped by the user.") {
+        (Verdict::Stopped, rest.trim_start().strip_prefix("Last words:").unwrap_or(rest))
+    } else {
+        return None;
+    };
+    let mut words = rest.trim().to_string();
+    if let Some(at) = words.find("(transcript:") {
+        words.truncate(at);
+    }
+    let words = words.trim().trim_end_matches('…').trim().to_string();
+    // "stopped by the user (Stop)" as the last words says what the verdict
+    // already says.
+    let words = if verdict == Verdict::Stopped && words.to_lowercase().starts_with("stopped by the user") {
+        String::new()
+    } else {
+        words
+    };
+    Some((verdict, words))
+}
+
+/// A worker's completion, as Cursor draws it: the worker's last words as
+/// one dim line in the flow — no box, no header — that opens the worker.
+fn worker_card(
+    chat: &ChatSession,
+    ix: usize,
+    who: &str,
+    verdict: Verdict,
+    words: &str,
+    theme: &Theme,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let child = chat
+        .children
+        .iter()
+        .find(|c| c.kernel_id.as_deref() == Some(who))
+        .map(|c| c.id);
+    // Cursor's line for a finished sub-agent: its chip, "done —", its
+    // last words. The chip is a link to the worker's chat (`agents/<id>`
+    // dresses as an agent chip), so the name is the way in.
+    let name = chat.who_label(who);
+    let said = match verdict {
+        Verdict::Done => "done",
+        Verdict::Failed => "ended badly",
+        Verdict::Stopped => "stopped by you",
+    };
+    let head = format!("[{name}](agents/{who}) {said}");
+    let ok = verdict != Verdict::Failed;
+    let words = if words.is_empty() {
+        head
+    } else {
+        format!("{head} — {words}")
+    };
+    div()
+        .id(("worker-line", chat.id * 100_000 + ix as u64))
+        .self_start()
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .text_style(TextStyle::Callout)
+        .text_color(if ok { theme.text_muted } else { theme.danger })
+        .when(child.is_some(), |el| el.cursor_pointer())
+        .child(prose(chat, ix, &words, window, cx))
+        .when_some(child, |el, id| {
+            el.on_mouse_down(
+                bezel::gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.select_session(id, cx)
+                }),
+            )
+        })
+        .into_any_element()
+}
+
+/// A subscription the agent set up in this turn, as a small card under
+/// the work: what stands now and when it fires. The Project panel keeps
+/// the full list; this is the moment it was made.
+fn subscription_cards(chat: &ChatSession, body: Range<usize>, theme: &Theme) -> Vec<AnyElement> {
+    chat.items[body]
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Tool {
+                label,
+                status: ToolStatus::Success,
+                output,
+                ..
+            } if label.starts_with("subscribe") && !label.starts_with("subscribe remove") => {
+                let line = output
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .split(". ")
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('.')
+                    .to_string();
+                (!line.is_empty() && line.starts_with("Subscribed")).then_some(line)
+            }
+            _ => None,
+        })
+        .map(|line| {
+            div()
+                .self_start()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .rounded(px(Theme::surface_radius()))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.surface_raised)
+                .px(px(10.))
+                .py(px(6.))
+                .child(
+                    icons::icon(icons::media::REPEAT)
+                        .size(px(12.))
+                        .text_color(theme.text_muted),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .child("standing"),
+                )
+                .child(
+                    div()
+                        .text_style(TextStyle::Callout)
+                        .text_color(theme.text)
+                        .child(SharedString::from(line)),
+                )
+                .into_any_element()
+        })
+        .collect()
+}
+
+/// The kernel ids of the sub-agents a turn's body spawned — the `spawn`
+/// calls in `body` and the child each one made.
+fn spawned_in(items: &[ChatItem], body: Range<usize>) -> Vec<String> {
+    items[body]
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::Tool {
+                child_session: Some(child),
+                ..
+            } => Some(child.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The parent's view of the sub-agents one turn spawned — Cursor's inline
+/// status lines, one per worker, in the flow of the conversation: `1 Working
+/// Reading project context and secrets inventory` while it runs, the step
+/// text moving as the worker moves; `Asking …`, `Waiting …`; a finished
+/// worker whose report is on the page below says nothing here, one without
+/// a report reads `Done  <title>`. Dim, no box, no glyph; the press opens
+/// the worker.
+/// The mark after a worker that cannot write: it reads and reports, nothing
+/// more. A project whose workers all carry it is a project that will
+/// produce no code (F-56), and that should be visible while it runs.
+pub(crate) fn readonly_mark(theme: &Theme, size: f32) -> AnyElement {
+    div()
+        .id("readonly-mark")
+        .flex_none()
+        .child(
+            icons::icon(icons::system::MAGNIFER)
+                .size(px(size))
+                .text_color(theme.text_faint),
+        )
+        .tooltip(|window, cx| {
+            Tooltip::text("read-only: reads and reports, writes nothing", window, cx)
+        })
+        .into_any_element()
+}
+
+/// The kind chip's word, or none: a plain writing worker carries no kind,
+/// and a coordinator's line already reads as a sub-project.
+pub(crate) fn kind_chip_text(kind: Option<&str>) -> Option<&str> {
+    kind.filter(|k| !k.is_empty() && *k != "coordinator" && *k != "code" && *k != "default")
+}
+
+/// A low-contrast chip with the worker's kind, the model chip's weight.
+pub(crate) fn kind_chip(kind: &str, theme: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .px(px(5.))
+        .rounded(px(4.))
+        .bg(theme.surface_raised)
+        .text_style(TextStyle::Caption)
+        .text_color(theme.text_faint)
+        .child(SharedString::from(kind.to_string()))
+        .into_any_element()
+}
+
+/// The lines under a turn for the workers it started. While the root's own
+/// turn still runs (it is waiting on them) Cursor draws one line for all of
+/// them — `3 Working  Waiting on three writers`: the count, then the
+/// coordinator's own step — and keeps the per-worker rows behind the
+/// Working pill. Once the root's turn has ended and workers run on in the
+/// background, each has its own line with its step. Returns the element
+/// and whether a live (shimmering) line was drawn.
+fn children_lines(
+    chat: &ChatSession,
+    spawned: &[String],
+    running: bool,
+    step_above: bool,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> (AnyElement, bool) {
+    use crate::model::session::ChildState;
+    let children: Vec<_> = chat
+        .children
+        .iter()
+        .filter(|c| {
+            c.kernel_id
+                .as_deref()
+                .is_some_and(|id| spawned.iter().any(|s| s == id))
+        })
+        .collect();
+    // A worker just spawned and not yet on its first token is working
+    // while the root's turn runs — the pill counts it so (`pill_counts`),
+    // and Cursor says "2 Working" from the spawn; "Waiting" is for a worker
+    // idle between turns under an idle root (F-86, journey run 2).
+    let is_working = |c: &&crate::model::session::ChildSummary| {
+        c.state == ChildState::Working || (running && c.state == ChildState::Waiting)
+    };
+    let working = children.iter().filter(|c| is_working(c)).count();
+    let one_line = running && working > 0;
+    let live_line = one_line.then(|| {
+        let live: Vec<_> = children.iter().filter(|c| is_working(c)).collect();
+        // One worker: its own live step (Jacob's Cursor still reads "1
+        // Working  Reading project context…"); several: the coordinator's
+        // step over all of them ("Waiting on three writers").
+        let own = chat
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        // The coordinator's step only where nothing above says it: under a
+        // live "Working <step>" headline the line names the workers instead
+        // (cycle 23: "Working Updating the plan" over "2 Working Updating
+        // the plan" said one thing twice).
+        let own = own.filter(|_| !step_above);
+        let step = match live.as_slice() {
+            [only] => only
+                .step
+                .clone()
+                .or(own)
+                .unwrap_or_else(|| only.title.clone()),
+            _ => own.unwrap_or_else(|| {
+                live.iter()
+                    .map(|c| c.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }),
+        };
+        let target = match live.as_slice() {
+            [only] => Some(only.id),
+            _ => None,
+        };
+        let root = chat.id;
+        div()
+            .id("child-line-live")
+            .self_start()
+            .max_w_full()
+            .flex()
+            .flex_row()
+            .items_baseline()
+            .gap(px(6.))
+            .py(px(2.))
+            .cursor_pointer()
+            .text_style(TextStyle::Body)
+            .text_size(px(root::CURSOR_PROSE_SIZE))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!("{working} Working"))),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(theme.text_faint)
+                    .child(shimmer_label(step, live_phase(), theme, cx)),
+            )
+            .when(live.len() == 1 && live[0].readonly, |el| {
+                el.child(readonly_mark(theme, 12.))
+            })
+            // One worker: the line opens it. Several: the Working card,
+            // with a row per worker, the way the pill opens it.
+            .on_mouse_down(
+                bezel::gpui::MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    match target {
+                        Some(id) => this.select_session(id, cx),
+                        None => {
+                            this.working_card_open = if this.working_card_open == Some(root) {
+                                None
+                            } else {
+                                Some(root)
+                            };
+                            cx.notify();
+                        }
+                    }
+                }),
+            )
+            .into_any_element()
+    });
+    let reported: Vec<&str> = chat
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ChatItem::From { who, text, .. } if done_report(text).is_some() => Some(who.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut first_working = true;
+    let rows: Vec<AnyElement> = children
+        .iter()
+        .filter_map(|child| {
+            let id = child.id;
+            let (verb, rest, tone) = match child.state {
+                ChildState::Working | ChildState::Waiting if one_line => return None,
+                ChildState::Working => {
+                    let verb = if first_working && working > 1 {
+                        format!("{working} Working")
+                    } else if first_working {
+                        "1 Working".to_string()
+                    } else {
+                        "Working".to_string()
+                    };
+                    first_working = false;
+                    // One worker: "1 Working  <step>", as Jacob's Cursor
+                    // still reads. Several: each line names its worker
+                    // before the step, so three "Reading project context"
+                    // lines are not one worker said thrice.
+                    let rest = match (&child.step, working > 1) {
+                        (Some(step), true) => format!("{} · {step}", child.title),
+                        (Some(step), false) => step.clone(),
+                        (None, _) => child.title.clone(),
+                    };
+                    (verb, rest, theme.text_muted)
+                }
+                ChildState::Asking => ("Asking".to_string(), child.title.clone(), theme.accent),
+                ChildState::Waiting => {
+                    ("Waiting".to_string(), child.title.clone(), theme.text_faint)
+                }
+                ChildState::Done => {
+                    if child
+                        .kernel_id
+                        .as_deref()
+                        .is_some_and(|k| reported.contains(&k))
+                    {
+                        return None;
+                    }
+                    ("Done".to_string(), child.title.clone(), theme.text_faint)
+                }
+            };
+            Some(
+                div()
+                    .id(("child-line", id))
+                    .self_start()
+                    .max_w_full()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .py(px(2.))
+                    .cursor_pointer()
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(tone)
+                            .child(SharedString::from(verb)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(rest)),
+                    )
+                    .when(child.readonly, |el| el.child(readonly_mark(theme, 12.)))
+                    .when_some(kind_chip_text(child.agent_kind.as_deref()), |el, kind| {
+                        el.child(kind_chip(kind, theme))
+                    })
+                    // On the press, as a source list selects: while the turn
+                    // streams, the transcript grows and scrolls between a
+                    // press and its release.
+                    .on_mouse_down(
+                        bezel::gpui::MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.select_session(id, cx)
+                        }),
+                    )
+                    .into_any_element(),
+            )
+        })
+        .collect();
+    // A worker the kernel has archived and this window never had a session
+    // for (a transcript read back after a relaunch): still one line, "Done"
+    // and its name, so the fan-out reads whole. Nothing to open.
+    let known: Vec<&str> = children
+        .iter()
+        .filter_map(|c| c.kernel_id.as_deref())
+        .collect();
+    let gone: Vec<AnyElement> = spawned
+        .iter()
+        .filter(|id| !known.contains(&id.as_str()) && !reported.contains(&id.as_str()))
+        .map(|id| {
+            div()
+                .self_start()
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(6.))
+                .py(px(2.))
+                .text_style(TextStyle::Body)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_color(theme.text_faint)
+                .child("Done")
+                .child(SharedString::from(sentence_case(
+                    &crate::model::session::worker_name(id).unwrap_or_else(|| id.clone()),
+                )))
+                .into_any_element()
+        })
+        .collect();
+    let drawn_live = live_line.is_some();
+    (
+        div()
+            .flex()
+            .flex_col()
+            .children(live_line)
+            .children(rows)
+            .children(gone)
+            .into_any_element(),
+        drawn_live,
+    )
 }
 
 /// One message, selectable. The transcript's two prose items — what you asked
@@ -803,10 +1833,19 @@ fn prose(
         move |workspace, pointer, cx| {
             let mut url = None;
             workspace.with_session(id, cx, |chat| {
-                let Some(text) = chat.items.get(ix).and_then(item_text) else {
+                let Some(item) = chat.items.get(ix) else {
                     return;
                 };
-                url = chat.transcript.point(ix, text, pointer);
+                // The prompt card was set from the escaped text; the hit
+                // test must read the same document.
+                let shown: std::borrow::Cow<str> = match item {
+                    ChatItem::User(message) => plain_markdown(&message.text).into(),
+                    other => match item_text(other) {
+                        Some(text) => text.into(),
+                        None => return,
+                    },
+                };
+                url = chat.transcript.point(ix, &shown, pointer);
             });
             // `arbos://` stays in the app; anything else is the browser's.
             match url {
@@ -997,6 +2036,33 @@ fn display_parts(
     output: &str,
     running: bool,
 ) -> (String, Option<String>) {
+    display_parts_for(kind, label, output, running, false)
+}
+
+/// A refused call never reads as an empty step: the row says `refused:`
+/// and the error's first line; the fold body holds the whole error.
+fn display_parts_for(
+    kind: ToolKind,
+    label: &str,
+    output: &str,
+    running: bool,
+    failed: bool,
+) -> (String, Option<String>) {
+    if failed {
+        let first = output
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("no result");
+        let (verb, arg) = display_parts_for(kind, label, "", false, false);
+        let mut detail = arg.unwrap_or_default();
+        if !detail.is_empty() {
+            detail.push_str(" · ");
+        }
+        detail.push_str("refused: ");
+        detail.push_str(&shorten(first, 90));
+        return (verb, Some(detail));
+    }
     if waited_title(label, output).is_some() {
         return (display_title(kind, label, output, running), None);
     }
@@ -1881,6 +2947,9 @@ fn segments(items: &[ChatItem], body: Range<usize>) -> Vec<Seg> {
                     segs.push(Seg::Run(head..ix));
                 }
             }
+            // Artifacts are for the user, not part of the work: the turn
+            // zone paints them below the fold whether it is open or not.
+            ChatItem::Artifacts(_) => ix += 1,
             _ => {
                 segs.push(Seg::Other(ix));
                 ix += 1;
@@ -1896,14 +2965,23 @@ struct WorkStats {
     edits: usize,
     searches: usize,
     commands: usize,
+    /// The kernel's own calls — plan items added or checked, workers
+    /// spawned — which Cursor would fold into the run line rather than
+    /// list as rows.
+    plans: usize,
+    todos: usize,
+    spawns: usize,
     add: usize,
     del: usize,
     first_file: Option<String>,
     first_edit: Option<String>,
+    /// The model's own words for the first command that had some (`bash`'s
+    /// description): "Ran List repo contents and recent commits".
+    first_desc: Option<String>,
     /// What the last tool of the range does — the verb a live header leads with.
     last_kind: Option<ToolKind>,
     /// Seconds the turn's tools and thoughts took, added up: the settled
-    /// "Worked for …" figure when the live clock is gone.
+    /// "Worked …" figure for records that predate the stamped wall time.
     secs: u64,
     /// The last tool's title, for a live run with nothing else to count
     /// (an `ask`, a `say`): "Ask Coffee or tea?" beats "Working".
@@ -1912,8 +2990,61 @@ struct WorkStats {
 
 /// Cursor: the timeline is on screen while the turn runs, then folds to
 /// one line above the answer. A click takes over from there.
+/// Cursor leaves the newest turn's timeline open — "Worked 6s ⌄" with its
+/// Thought / Explored / Edited lines — until the next prompt folds it.
 fn auto_work_open(_items: &[ChatItem], _first: usize, running: bool) -> bool {
+    // Open while it runs; shut once settled — the last turn too. Cursor's
+    // settled headline is "Worked 1m 15s" with the timeline behind it in
+    // both chat styles (`cycle-23/cursor-13-reopened-settled.png`, the
+    // worker tab in `cycle-22/`); ours kept the newest turn open (cycle 3),
+    // which read as a timeline the person had asked for (F-127, cycle 28).
     running
+}
+
+/// The files a chat's own edit calls in `body` wrote, one row per path
+/// with the lines its diffs added and removed — the worker chat's Files
+/// Changed card (F-111), where no working tree of its own can be read.
+fn worker_changes(items: &[ChatItem], body: Range<usize>) -> crate::model::changes::GitChanges {
+    use crate::model::changes::{FileChange, GitChanges};
+    let mut files: Vec<FileChange> = Vec::new();
+    for item in &items[body] {
+        let ChatItem::Tool {
+            kind,
+            label,
+            output,
+            diff,
+            status: ToolStatus::Success,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if coalesce_kind(*kind, label).unwrap_or(*kind) != ToolKind::Edit {
+            continue;
+        }
+        let path = tool_rest(label).split_whitespace().next().unwrap_or("").to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let counted = diff
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(output);
+        let (add, del) = diff_counts(counted).unwrap_or((0, 0));
+        match files.iter_mut().find(|f| f.path == path) {
+            Some(file) => {
+                file.add += add as u32;
+                file.del += del as u32;
+            }
+            None => files.push(FileChange {
+                path,
+                add: add as u32,
+                del: del as u32,
+                new: false,
+            }),
+        }
+    }
+    GitChanges { files, ahead: 0 }
 }
 
 fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
@@ -1926,10 +3057,14 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
         add: 0,
         del: 0,
         first_file: None,
+        first_desc: None,
         first_edit: None,
         last_kind: None,
         secs: 0,
         last_label: None,
+        plans: 0,
+        todos: 0,
+        spawns: 0,
     };
     let mut edited: HashSet<String> = HashSet::new();
     for item in &items[body] {
@@ -1945,10 +3080,17 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
             output,
             diff,
             secs,
+            desc,
             ..
         } = item
         {
+            if is_status_call(label) {
+                continue;
+            }
             stats.tools += 1;
+            if stats.first_desc.is_none() {
+                stats.first_desc = desc.clone();
+            }
             stats.secs += u64::from(secs.unwrap_or(0));
             stats.last_label = Some(label.clone());
             let kind = coalesce_kind(*kind, label).unwrap_or(*kind);
@@ -1979,7 +3121,12 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
                 }
                 ToolKind::Search => stats.searches += 1,
                 ToolKind::Execute => stats.commands += 1,
-                _ => {}
+                _ => match label.split_whitespace().next().unwrap_or(label) {
+                    "plan" => stats.plans += 1,
+                    "todo" => stats.todos += 1,
+                    "spawn" => stats.spawns += 1,
+                    _ => {}
+                },
             }
         }
     }
@@ -2013,22 +3160,183 @@ fn tool_icon(kind: ToolKind) -> &'static str {
 
 /// The transcript of one session, rendered from the model that owns it —
 /// expanding a work section or a tool's output writes back through `cx`.
-pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspace>) -> AnyElement {
+/// `tail` is what belongs at the end of the conversation right now — a
+/// question the agent is asking, an approval it needs — drawn as cards in
+/// the flow, in the reading column, not pinned over the composer.
+pub fn render(
+    chat: &ChatSession,
+    changes: Option<crate::model::changes::GitChanges>,
+    head: Option<AnyElement>,
+    tail: Vec<AnyElement>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
     let id = chat.id;
     let turns = turns(&chat.items);
     let last = turns.len().saturating_sub(1);
     let mut zones: Vec<AnyElement> = Vec::new();
+    // Cursor's Project chat opens on the project itself: icon, name, one
+    // line, and the way to its page. A subagent's chat has none.
+    if let Some(head) = head {
+        zones.push(head);
+    }
     // The reading column is the composer's: `CHAT_MAX_WIDTH` less its
     // gutter on each side. Each turn centres itself in the scroller.
     let column = root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER;
+    let theme = Theme::of(cx).clone();
+    let mut last_day: Option<i64> = None;
+    // Copy, fork, thumbs once per response: a worker's report wakes the
+    // agent into another turn, and a footer under each of those read as
+    // three replies to one prompt. In each run of turns between two
+    // prompts, the last one with an answer carries the footer.
+    let mut footer_at: Vec<bool> = vec![false; turns.len()];
+    {
+        let mut run_start = 0;
+        for position in 0..=turns.len() {
+            let starts_run = position == turns.len()
+                || (position > run_start
+                    && matches!(
+                        chat.items.get(turns[position].range.start),
+                        Some(ChatItem::User(_))
+                    ));
+            if starts_run {
+                if let Some(answered) = (run_start..position)
+                    .rev()
+                    .find(|p| turn_answer(&chat.items, &turns[*p]).is_some())
+                {
+                    footer_at[answered] = true;
+                }
+                run_start = position;
+            }
+        }
+    }
+    // Workers still running count as the turn still going: no footer yet.
+    let workers_busy_now = chat
+        .children
+        .iter()
+        .any(|c| c.state == crate::model::session::ChildState::Working);
     for (position, turn) in turns.iter().enumerate() {
         let running = position == last && chat.busy();
+        let footer = footer_at[position] && !(position == last && workers_busy_now);
+        // Cursor's Agents chat draws no date line over a turn; the footer's
+        // "2m ago" is the only clock. The divider stays for a day crossing
+        // inside one conversation, where "Yesterday" earns its line.
+        // The kickoff turn has no prompt; its clock is when it was asked for.
+        let kickoff_at = (turn.range.start == 0
+            && !matches!(chat.items.first(), Some(ChatItem::User(_))))
+        .then(|| chat.kickoff_at)
+        .flatten()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64);
+        let sent_at = match chat.items.get(turn.range.start) {
+            Some(ChatItem::User(message)) => message.sent_at.filter(|at| *at > 0),
+            Some(ChatItem::Wake { at, .. }) => *at,
+            _ => kickoff_at,
+        };
+        if let Some(at) = sent_at {
+            let day = local_day(at);
+            // Cursor's Project chat draws "Today 11:35 PM" over the first
+            // turn; a subagent's chat does not. Both draw one at a day
+            // crossing.
+            let first_of_root = last_day.is_none() && chat.parent.is_none();
+            if first_of_root || (last_day.is_some_and(|previous| previous != day)) {
+                zones.push(
+                    div()
+                        .w_full()
+                        .max_w(px(column))
+                        .self_center()
+                        .child(day_divider(at, &theme))
+                        .into_any_element(),
+                );
+            }
+            last_day = Some(day);
+        }
         zones.push(
             div()
                 .w_full()
                 .max_w(px(column))
                 .self_center()
-                .child(zone(chat, turn, running, window, cx))
+                .child(zone(chat, turn, running, footer, window, cx))
+                .into_any_element(),
+        );
+    }
+    // Cursor's "2 Files Changed · Review" card under the last answer: the
+    // working tree's uncommitted files with their line counts, while the
+    // chat is idle. The main chat of a local repository only.
+    let workers_busy = chat
+        .children
+        .iter()
+        .any(|c| c.state == crate::model::session::ChildState::Working);
+    // Cursor's card follows a turn that changed files: an edit of its own,
+    // or a worker (whose edits land in the tree, not in this chat's items).
+    // A turn that only ran a test or read a file gets none.
+    let newest_worked = turns.last().is_some_and(|turn| {
+        let stats = work_stats(&chat.items, turn.range.clone());
+        stats.edits > 0
+            || stats.spawns > 0
+            || chat.items[turn.range.clone()]
+                .iter()
+                .any(|item| matches!(item, ChatItem::From { .. }))
+            || !spawned_in(&chat.items, turn.range.clone()).is_empty()
+    });
+    // A worker's chat has no tree of its own to read: its card is built
+    // from its own edits — one row per file it wrote, with the lines its
+    // diffs added and removed — as Cursor's worker tab shows "1 File
+    // Changed · Review" with `test_todo.py +88` (F-111, cycle 22).
+    let own_edits = (chat.parent.is_some() && !chat.busy())
+        .then(|| turns.last().map(|turn| worker_changes(&chat.items, turn.range.clone())))
+        .flatten()
+        .filter(|c| !c.files.is_empty());
+    let changes = if chat.parent.is_some() {
+        own_edits.as_ref()
+    } else {
+        changes.as_ref()
+    };
+    if !chat.busy()
+        && !workers_busy
+        && (newest_worked || own_edits.is_some())
+        && (chat.parent.is_none() || own_edits.is_some())
+        && chat.host.is_none()
+        && !turns.is_empty()
+        && let Some(changes) = changes.filter(|c| !c.is_empty())
+    {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(files_changed_card(chat.cwd.clone(), changes, &theme, cx))
+                .into_any_element(),
+        );
+    }
+    for node in chat.plan_open().filter(|n| n.do_kind == "ask") {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(ask_card(chat, node, &theme, cx))
+                .into_any_element(),
+        );
+    }
+    if let Some(card) = approve_card(chat, &theme, cx) {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .child(card)
+                .into_any_element(),
+        );
+    }
+    for card in tail {
+        zones.push(
+            div()
+                .w_full()
+                .max_w(px(column))
+                .self_center()
+                .mt(px(8.))
+                .child(card)
                 .into_any_element(),
         );
     }
@@ -2054,6 +3362,20 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
                         .size_full()
                         .overflow_y_scroll()
                         .track_scroll(&chat.transcript.scroll)
+                        // The wheel decides the follow: up while a turn
+                        // streams unpins (Cursor lets you read back and
+                        // shows ↓); back to the end pins again. Without
+                        // this, growing content kept the old pin and
+                        // snapped the reader to the bottom.
+                        .on_scroll_wheel({
+                            let handle = chat.transcript.scroll.clone();
+                            let follow = chat.transcript.follow.clone();
+                            move |_, _, _| {
+                                let max = handle.max_offset().y;
+                                let now = handle.offset().y.clamp(-max, px(0.));
+                                follow.0.set((at_bottom(max, now, FOLLOW_SLACK), max));
+                            }
+                        })
                         .px(px(root::CHAT_GUTTER))
                         .pt(px(PAD))
                         .pb(px(PAD))
@@ -2083,6 +3405,264 @@ pub fn render(chat: &ChatSession, window: &mut Window, cx: &mut Context<Workspac
         .into_any_element()
 }
 
+/// An answer bubble a window from before this one wrote under its folded
+/// question (the same words as the card's answer): drawn nowhere now.
+/// A card that does not open a turn of its own: a steer typed into the
+/// running turn (Cursor keeps the turn whole, the card inside its work), or
+/// an older window's echo of an answered ask.
+fn inline_user(items: &[ChatItem], ix: usize) -> bool {
+    matches!(&items[ix], ChatItem::User(m) if m.steer) || is_ask_echo(items, ix)
+}
+
+fn is_ask_echo(items: &[ChatItem], ix: usize) -> bool {
+    ix > 0
+        && matches!(
+            (&items[ix - 1], &items[ix]),
+            (ChatItem::Asked { answer, .. }, ChatItem::User(message))
+                if !answer.is_empty() && message.text.trim() == answer.trim()
+        )
+}
+
+/// A question once answered: the card folded to one faint line, the
+/// chosen answer (or "skipped") at its end — Cursor keeps the pick inside
+/// the collapsed card, not in a bubble of yours.
+fn asked_line(question: &str, answer: &str, theme: &Theme) -> AnyElement {
+    div()
+        .self_start()
+        .w_full()
+        .max_w(px(520.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::system::CHAT_ROUND_LINE)
+                .size(px(11.))
+                .text_color(theme.text_faint),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(format!(
+                    "Question · {}",
+                    question.trim()
+                ))),
+        )
+        .child(
+            div()
+                .flex_none()
+                .text_style(TextStyle::Caption)
+                .text_color(if answer.is_empty() {
+                    theme.text_faint
+                } else {
+                    theme.text_muted
+                })
+                .child(if answer.is_empty() {
+                    "skipped".to_string()
+                } else {
+                    let mut short: String = answer.trim().chars().take(60).collect();
+                    if answer.trim().chars().count() > 60 {
+                        short.push('…');
+                    }
+                    short
+                }),
+        )
+        .into_any_element()
+}
+
+/// Plan mode with approval: the agent wrote its checklist read-only and
+/// the turn is over. One card at the end of the conversation — how many
+/// steps stand — with Approve and run, which switches the chat to auto and
+/// starts the work.
+fn approve_card(
+    chat: &ChatSession,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> Option<AnyElement> {
+    let plan_mode = chat
+        .modes
+        .as_ref()
+        .is_some_and(|m| m.current_mode_id.to_string() == "plan");
+    if !plan_mode || chat.busy() {
+        return None;
+    }
+    let steps = chat
+        .plan_open()
+        .filter(|n| !n.standing && n.do_kind != "ask")
+        .count();
+    if steps == 0 {
+        return None;
+    }
+    let id = chat.id;
+    Some(
+        div()
+            .mt(px(8.))
+            .rounded(px(Theme::surface_radius()))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.surface_raised)
+            .px(px(12.))
+            .py(px(10.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                icons::icon(icons::editing::CHECKLIST)
+                    .size(px(12.))
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(SharedString::from(format!(
+                        "Plan ready · {}",
+                        plural(steps, "step", "steps")
+                    ))),
+            )
+            .child(
+                theme
+                    .ghost(SharedString::from(format!("plan-approve-{id}")))
+                    .flex_none()
+                    .px(px(8.))
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(Theme::control_radius()))
+                    .border_1()
+                    .border_color(theme.border)
+                    .tooltip(|window, cx| {
+                        Tooltip::text("Switch to auto and run the checklist", window, cx)
+                    })
+                    .child(
+                        icons::icon(icons::media::PLAY)
+                            .size(px(10.))
+                            .text_color(theme.text),
+                    )
+                    .child(
+                        div()
+                            .text_style(TextStyle::Caption)
+                            .text_color(theme.text)
+                            .child("Approve and run"),
+                    )
+                    .on_click(cx.listener(move |workspace, _, _, cx| {
+                        workspace.approve_plan(id, cx);
+                    })),
+            )
+            .into_any_element(),
+    )
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// A question the agent parked for you — an `ask` node — as a card at the
+/// turn it belongs to, after the last one. Answer points the composer's next
+/// send at it (the placeholder says so); ✕ drops the question.
+fn ask_card(
+    chat: &ChatSession,
+    node: &PlanNode,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let id = chat.id;
+    let ask = node.id;
+    let answering = chat.answering == Some(ask);
+    let group = SharedString::from(format!("ask-card-{id}-{ask}"));
+    let head = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            icons::icon(icons::system::CHAT_ROUND_LINE)
+                .size(px(12.))
+                .text_color(theme.accent),
+        )
+        .child(
+            div()
+                .flex_1()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child("Question for you"),
+        )
+        .child(
+            theme
+                .ghost(SharedString::from(format!("ask-drop-{id}-{ask}")))
+                .flex_none()
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .tooltip(|window, cx| Tooltip::text("Drop this question", window, cx))
+                .child(
+                    icons::icon(icons::system::CLOSE)
+                        .size(px(11.))
+                        .text_color(theme.text_faint.opacity(0.35))
+                        .group_hover(group.clone(), |el| el.text_color(theme.text)),
+                )
+                .on_click(cx.listener(move |workspace, _, _, cx| {
+                    workspace.with_session(id, cx, |c| c.plan_op(ask, "cancel", ""));
+                    cx.notify();
+                })),
+        );
+    let answer = theme
+        .ghost(SharedString::from(format!("ask-answer-{id}-{ask}")))
+        .px(px(8.))
+        .h(px(22.))
+        .flex()
+        .items_center()
+        .rounded(px(Theme::control_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .text_style(TextStyle::Caption)
+        .text_color(if answering { theme.accent } else { theme.text })
+        .child(if answering {
+            "Answering below…"
+        } else {
+            "Answer"
+        })
+        .on_click(cx.listener(move |workspace, _, _, cx| {
+            workspace.with_session(id, cx, |c| {
+                c.answering = if c.answering == Some(ask) {
+                    None
+                } else {
+                    Some(ask)
+                };
+            });
+            cx.notify();
+        }));
+    div()
+        .group(group)
+        .mt(px(8.))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.surface_raised)
+        .px(px(12.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(head)
+        .child(
+            div()
+                .text_style(TextStyle::Body)
+                .text_color(theme.text)
+                .child(SharedString::from(node.goal.clone())),
+        )
+        .child(div().flex().flex_row().child(answer))
+        .into_any_element()
+}
+
 /// Cursor's `↓` disc, low and centred over the transcript, while the view
 /// is scrolled away from the end. A click goes back to the bottom and pins.
 fn jump_to_end(
@@ -2102,7 +3682,10 @@ fn jump_to_end(
         div()
             .absolute()
             .bottom(px(10.))
-            .right(px(RAIL_INSET + MARK + 12.))
+            .left_0()
+            .right(px(RAIL_INSET + MARK))
+            .flex()
+            .justify_center()
             .child(
                 div()
                     .id(("jump-to-end", id))
@@ -2145,6 +3728,11 @@ const MARK_HIT: f32 = MARK_THICK + MARK_GAP;
 
 /// One dash per turn. A press jumps the transcript to that turn and unpins
 /// stick-to-bottom, the same way a scrollbar click should feel.
+///
+/// Quiet until wanted: Cursor's chat has no rail, and on a long project a
+/// dozen dashes down the right edge read as a second scrollbar (F-59). Only
+/// the turn in view is drawn, faintly; the rest appear when the pointer is
+/// over the rail's strip, where the jumps are.
 fn rail(
     id: SharedString,
     handle: &ScrollHandle,
@@ -2157,6 +3745,7 @@ fn rail(
         return Empty.into_any_element();
     }
     let at = visible_turn(handle, count);
+    let strip = SharedString::from(format!("{id}-strip"));
     div()
         .absolute()
         .top_0()
@@ -2168,7 +3757,9 @@ fn rail(
         .items_center()
         .justify_center()
         .overflow_hidden()
+        .group(strip.clone())
         .children((0..count).map(|ix| {
+            let strip = strip.clone();
             let handle = handle.clone();
             let follow = follow.clone();
             let tip = turn_label(items, &turns[ix], ix);
@@ -2194,8 +3785,11 @@ fn rail(
                         .w(px(MARK))
                         .h(px(MARK_THICK))
                         .rounded_full()
-                        .bg(if ix == at { ink(0.6) } else { ink(0.2) })
-                        .group_hover(group, |mark| mark.bg(ink(0.32))),
+                        .bg(if ix == at { ink(0.35) } else { ink(0.0) })
+                        .group_hover(strip, move |mark| {
+                            mark.bg(if ix == at { ink(0.6) } else { ink(0.2) })
+                        })
+                        .group_hover(group, |mark| mark.bg(ink(0.45))),
                 )
         }))
         .into_any_element()
@@ -2285,14 +3879,35 @@ fn zone(
     chat: &ChatSession,
     turn: &Turn,
     running: bool,
+    footer: bool,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let theme = Theme::of(cx).clone();
     let first = turn.range.start;
-    let body = (first + 1).min(turn.range.end)..turn.answer_from;
+    // The kickoff turn (Cursor's "Setting up environment") opens the
+    // transcript with no prompt: its first item is work, not a card, and
+    // it folds to "Worked Ns" once settled — Cursor shows no detail of it.
+    let kickoff_turn = first == 0
+        && chat.kickoff_at.is_some()
+        && !matches!(
+            chat.items.first(),
+            Some(ChatItem::User(_) | ChatItem::From { .. })
+        );
+    // A worker's report under the wake it caused is the segment's first
+    // line, drawn under the header where Cursor draws its "<agent> done —
+    // …" line, not inside the fold.
+    let report = (matches!(chat.items.get(first), Some(ChatItem::Wake { .. }))
+        && matches!(chat.items.get(first + 1), Some(ChatItem::From { .. })))
+    .then_some(first + 1);
+    let body_start = if kickoff_turn {
+        first
+    } else {
+        (first + 1 + usize::from(report.is_some())).min(turn.range.end)
+    };
+    let body = body_start..turn.answer_from.max(body_start);
     let stats = work_stats(&chat.items, body.clone());
-    let auto_open = auto_work_open(&chat.items, first, running);
+    let auto_open = auto_work_open(&chat.items, first, running) && !kickoff_turn;
     let open = chat
         .transcript
         .work
@@ -2321,21 +3936,129 @@ fn zone(
     // folds to one summary line above the answer.
     let segs = segments(&chat.items, body.clone());
     let mut live_fold_shown = false;
+    // A wake segment always carries its "Worked Ns" line, as Cursor's do,
+    // even when the coordinator only read the report and moved on.
     let foldable = segs
         .iter()
-        .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)));
+        .any(|seg| matches!(seg, Seg::Run(_) | Seg::Prose(_)))
+        || matches!(chat.items.get(first), Some(ChatItem::Wake { .. }));
+    // Cursor's Project chat (the root) shows no tool calls at all — the
+    // coordinator's quick reads and commands are hidden work; its checklist
+    // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
+    // every call.
+    let project_style = chat.parent.is_none();
+    // Whether the body draws rows a headline could fold: a thought, a run
+    // with tool rows, a checklist card. Prose alone is not folded.
+    let rows_under = segs.iter().any(|seg| match seg {
+        Seg::Thought(_) => true,
+        Seg::Run(range) => !project_style
+            || own_calls(&chat.items, range.clone())
+            || range.clone().any(
+                |ix| matches!(&chat.items[ix], ChatItem::Tool { label, .. } if is_todo_call(label)),
+            ),
+        Seg::Prose(_) | Seg::Other(_) => false,
+    });
+    let mut header_drawn = false;
+    let mut open = open;
     if !running && foldable {
-        zone = zone.child(work_header(chat.id, first, &stats, open, running, chat, cx));
+        match work_header(chat.id, first, &stats, open, auto_open, running, rows_under, chat, cx) {
+            Some(header) => {
+                zone = zone.child(header);
+                header_drawn = true;
+            }
+            // No headline to fold under: the body stands as it is.
+            None => open = true,
+        }
+    }
+    // Cursor's live headline over the timeline: "Working <step> ⌄" — the
+    // step the agent named, else the kernel's; the rows of work under it,
+    // and the chevron folds them. Over nothing (a root waiting on its
+    // workers, prose alone) there is no headline: a chevron that discloses
+    // nothing is worse than none (F-82); the step is said by the workers'
+    // line or the heartbeat instead.
+    let live_headline = running && foldable && !kickoff_turn && rows_under;
+    if live_headline {
+        let step = chat
+            .status
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| chat.current_step())
+            .unwrap_or_else(|| "Planning next moves".to_string());
+        let id = chat.id;
+        // Cursor's Project chat keeps the live fold shut: "Working
+        // Planning next moves" alone, the checklist behind the chevron
+        // until asked (F-115, cycle 23). A worker's chat streams its tool
+        // rows live, so its fold starts open.
+        let auto = !project_style;
+        open = chat
+            .transcript
+            .work
+            .get(&first)
+            .copied()
+            .unwrap_or_default()
+            .get(auto);
+        zone = zone.child(
+            fold_row(
+                &theme,
+                "work",
+                first,
+                "Working".to_string(),
+                step,
+                None,
+                true,
+                open,
+                cx,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.with_session(id, cx, |chat| {
+                    chat.transcript.work.entry(first).or_default().toggle(auto);
+                });
+            }))
+            .into_any_element(),
+        );
+        header_drawn = true;
+        // The headline carries the step; a heartbeat under it would say
+        // it twice, whether the fold is open or shut.
+        live_fold_shown = true;
+    }
+    // The worker's report that woke this segment, under its header.
+    if let Some(ix) = report
+        && let Some(ChatItem::From { who, text, images }) = chat.items.get(ix)
+    {
+        zone = zone.child(from_block(chat, ix, who, text, images, &theme, window, cx));
     }
     if open || !foldable {
         let last_run = segs.iter().rposition(|seg| matches!(seg, Seg::Run(_)));
         // A run still taking calls already shows a live line; a second
         // "Working" under it would say the same thing twice.
-        live_fold_shown = running && last_run.is_some() && last_run == Some(segs.len() - 1);
+        // The run still taking calls is the last one with nothing but
+        // inline cards (a steer's bubble) after it: the steer must not turn
+        // "Running" into "Ran" before any output arrives.
+        let tail_is_run = last_run.is_some_and(|at| {
+            segs[at + 1..]
+                .iter()
+                .all(|seg| matches!(seg, Seg::Other(_)))
+        });
+        live_fold_shown = (running && tail_is_run) || live_headline;
+        // Cursor's kickoff shows one shimmering line and nothing of the
+        // work until it ends.
+        let segs: Vec<Seg> = if kickoff_turn && running {
+            Vec::new()
+        } else {
+            segs
+        };
+        if kickoff_turn && running {
+            live_fold_shown = false;
+        }
         let kids: Vec<AnyElement> = segs
             .iter()
             .enumerate()
             .map(|(n, seg)| match seg {
+                // Cursor's Project chat shows no thoughts: they live behind
+                // the "Worked" headline, and where no headline was drawn
+                // (a turn with no time to its name) they are not drawn at
+                // all (cycle 23, J08: "Thought briefly" bare over the answer).
+                Seg::Thought(_) if project_style && !header_drawn => div().into_any_element(),
                 Seg::Thought(ix) => thought(chat, *ix, false, window, cx),
                 Seg::Prose(ix) => {
                     let ChatItem::Agent(text) = &chat.items[*ix] else {
@@ -2349,9 +4072,22 @@ fn zone(
                         .child(prose(chat, *ix, text, window, cx))
                         .into_any_element()
                 }
+                Seg::Run(range) if project_style && !own_calls(&chat.items, range.clone()) => {
+                    // The root's kernel calls — spawn, say, plan, status —
+                    // are the worker lines, the page, the live step; the
+                    // run itself draws nothing but the checklist it wrote.
+                    match todo_card(chat, range.clone(), &theme) {
+                        Some(card) => card,
+                        None => div().into_any_element(),
+                    }
+                }
+                // The root's own quick call (a read-only command, a read)
+                // shows as Cursor's Project chat shows it: "Running 1
+                // command ⌄", then "Ran <what> ⌄" with the command card and
+                // its output; the next prompt folds it under "Worked".
                 Seg::Run(range) => {
                     // Present tense only on the run still taking calls.
-                    let live = running && last_run == Some(n) && segs.len() == n + 1;
+                    let live = running && last_run == Some(n) && tail_is_run;
                     run_fold(chat, range.clone(), live, window, cx)
                 }
                 Seg::Other(ix) => work_other(chat, *ix, &theme, window, cx),
@@ -2359,6 +4095,59 @@ fn zone(
             .collect();
         if !kids.is_empty() {
             zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(kids));
+        }
+    } else if header_drawn {
+        // The fold is shut, but the person's own words typed into the turn
+        // — steers — are not the agent's work to hide: they stay in view
+        // under the headline (a shut live fold swallowed three "run it"
+        // bubbles on the rig, cycle 23).
+        let steers: Vec<AnyElement> = segs
+            .iter()
+            .filter_map(|seg| match seg {
+                Seg::Other(ix) if inline_user(&chat.items, *ix) => {
+                    Some(work_other(chat, *ix, &theme, window, cx))
+                }
+                _ => None,
+            })
+            .collect();
+        if !steers.is_empty() {
+            zone = zone.child(div().flex().flex_col().gap(px(ITEM_GAP)).children(steers));
+        }
+    }
+    // Cursor's sub-agent lines: "1 Working  <task>" per live child, and a
+    // check for each one that finished. Under the turn that spawned them,
+    // once; the panel keeps the whole tree. Drawn after the turn's prose
+    // (below), where Cursor draws them — "On it — writing a bubble sort…"
+    // then "1 Working  Delegating bubble sort task" (F-85).
+    let mut spawned = spawned_in(&chat.items, body.clone());
+    // A `spawn wait=true` names its child only when it returns; until then
+    // the worker is running under this turn with no record to hang from.
+    // The running turn takes every child no turn has named yet.
+    if running {
+        let named = spawned_in(&chat.items, 0..chat.items.len());
+        for child in &chat.children {
+            if let Some(id) = &child.kernel_id
+                && !named.contains(id)
+                && !spawned.contains(id)
+            {
+                spawned.push(id.clone());
+            }
+        }
+    }
+    let workers = (!spawned.is_empty() && !chat.children.is_empty())
+        .then(|| children_lines(chat, &spawned, running, live_headline, &theme, cx));
+    if let Some((_, live_line)) = &workers {
+        // The "N Working  <step>" line carries the shimmer while the root
+        // waits on its workers; a heartbeat under it would say it twice.
+        live_fold_shown = live_fold_shown || *live_line;
+    }
+    // Standing work the turn set up: a small card at the moment it was made.
+    zone = zone.children(subscription_cards(chat, body.clone(), &theme));
+    // Screenshots and clips the work produced stay in view when the work
+    // folds: they are what the user asked to see.
+    for ix in body.clone() {
+        if let ChatItem::Artifacts(files) = &chat.items[ix] {
+            zone = zone.child(artifacts_row(chat, ix, files, &theme, cx));
         }
     }
     // ChatView `group/msg`: copy sits on the answer, hidden until
@@ -2371,8 +4160,48 @@ fn zone(
         .flex_col()
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
-    for ix in turn.answer_from..turn.range.end {
+    // The tail starts where the body ended: the report line under a wake
+    // segment's header is drawn above, not again here.
+    for ix in turn.answer_from.max(body_start)..turn.range.end {
+        // The interruption is on the fold line already; once is enough.
+        if header_drawn
+            && let ChatItem::Notice { text, .. } = &chat.items[ix]
+            && crate::model::session::is_interrupt_notice(text)
+        {
+            continue;
+        }
         has_tail = true;
+        // The turn's own end: say how long it had run before the cut.
+        if let ChatItem::Notice { text, failed } = &chat.items[ix]
+            && crate::model::session::is_interrupt_notice(text)
+        {
+            let secs = chat.items[..=first]
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    ChatItem::User(message) => message.worked_secs,
+                    _ => None,
+                });
+            let line = match secs {
+                Some(s) if s > 0 => format!(
+                    "{text} · after {}",
+                    since(Duration::from_secs(u64::from(s)))
+                ),
+                _ => text.clone(),
+            };
+            tail = tail.child(notice(chat, ix, &line, *failed, &theme, cx));
+            continue;
+        }
+        // The model's regret about a stop the kernel imposed: the cap line
+        // that follows says it once (qal-j05).
+        if let ChatItem::Agent(text) = &chat.items[ix]
+            && crate::model::session::is_cap_apology(text)
+            && chat.items[ix + 1..turn.range.end].iter().any(|item| {
+                matches!(item, ChatItem::Notice { text, .. } if crate::model::session::is_cap_notice(text))
+            })
+        {
+            continue;
+        }
         tail = tail.child(match &chat.items[ix] {
             ChatItem::Agent(text) => div()
                 .self_start()
@@ -2386,12 +4215,36 @@ fn zone(
                 from_block(chat, ix, who, text, images, &theme, window, cx)
             }
             ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
+            ChatItem::Nudge(text) => page_nudge(text, &theme),
+            ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
+            ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
+            // A steer typed after the answer began streaming: its bubble,
+            // where the kernel's "Already queued" notice can hang under it
+            // (it was dropped here, and the notice stood alone, cycle 23).
+            ChatItem::User(_) if inline_user(&chat.items, ix) => {
+                work_other(chat, ix, &theme, window, cx)
+            }
             _ => div().into_any_element(),
         });
     }
-    if let Some(answer) = turn_answer(&chat.items, turn) {
+    // Copy, fork, thumbs and "2m ago" belong to a finished turn. While
+    // the turn still runs — a long model call with nothing streaming, a
+    // job in flight — an interim reply already has words, and the footer
+    // under them read as "done" next to a live Stop button.
+    // The worker lines after the prose, then the footer — copy, fork,
+    // thumbs, "2m ago" — the last thing in the turn. All inside the
+    // answer's hover group: fork and rewind show while the pointer is over
+    // the answer, and an element outside the group can never be revealed
+    // (the fork went dead for an hour when the footer sat outside, F-95).
+    if let Some((lines, _)) = workers {
         has_tail = true;
-        // Always shown, faint, as Cursor's are: copy, then fork.
+        tail = tail.child(lines);
+    }
+    if !running
+        && footer
+        && let Some(answer) = turn_answer(&chat.items, turn)
+    {
+        has_tail = true;
         tail = tail.child(turn_footer(chat, first, answer, &theme, cx));
     }
     if has_tail {
@@ -2406,7 +4259,46 @@ fn zone(
             zone = zone.child(heartbeat(&theme, label, chat, cx));
         }
     }
+    // The stall hint is its own element, whatever else is drawn: it used
+    // to live inside the heartbeat line, which is not drawn over a running
+    // tool row unless the chat has a named step — so a silent `sleep 80`
+    // on the chat's own bash could never show it, and QA's control could
+    // not fail (im-02). Keyed on the progress clock, not the turn's age.
+    if running && let Some(hint) = stall_hint(chat, &theme, cx) {
+        zone = zone.child(hint);
+    }
     zone.into_any_element()
+}
+
+/// "Nothing has arrived in 1m 05s …" once the turn has made no visible
+/// progress for `STALL_HINT_AFTER`; over a running command, the command
+/// is named instead of the model key. `None` before that.
+fn stall_hint(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let silent = chat.quiet_for();
+    if silent < STALL_HINT_AFTER {
+        return None;
+    }
+    Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+    let hint = match chat.running_command() {
+        Some(command) => format!(
+            "{} has printed nothing in {}. Stop ends it.",
+            crate::model::session::command_short(command),
+            since_short(silent)
+        ),
+        None => format!(
+            "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
+            since_short(silent)
+        ),
+    };
+    Some(
+        div()
+            .id("stall-hint")
+            .py(px(2.))
+            .text_style(TextStyle::Callout)
+            .text_color(theme.text_faint)
+            .child(SharedString::from(hint))
+            .into_any_element(),
+    )
 }
 
 /// Quiet row under a step: ChatView shows only the copy control on hover.
@@ -2436,60 +4328,269 @@ fn turn_footer(
         .justify_start()
         .gap(px(6.))
         .pt(px(6.))
-        .pb(px(2.))
-        .child(
-            div()
-                .id(SharedString::from(format!("copy-turn-{id}-{turn}")))
-                .cursor_pointer()
-                .rounded(px(4.))
-                .p(px(3.))
-                .hover(|el| el.bg(theme.element_hover))
-                .active(|el| el.bg(theme.element_active))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(answer.clone()));
+        .pb(px(2.));
+    let copy = div()
+        .id(SharedString::from(format!("copy-turn-{id}-{turn}")))
+        .cursor_pointer()
+        .rounded(px(4.))
+        .p(px(3.))
+        .hover(|el| el.bg(theme.element_hover))
+        .active(|el| el.bg(theme.element_active))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(answer.clone()));
+            this.with_session(id, cx, |chat| {
+                chat.transcript.copy_flash.insert(turn, Instant::now());
+            });
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(COPY_FLASH).await;
+                let _ = this.update(cx, |this, cx| {
                     this.with_session(id, cx, |chat| {
-                        chat.transcript.copy_flash.insert(turn, Instant::now());
+                        if chat
+                            .transcript
+                            .copy_flash
+                            .get(&turn)
+                            .is_some_and(|at| at.elapsed() >= COPY_FLASH)
+                        {
+                            chat.transcript.copy_flash.remove(&turn);
+                        }
                     });
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(COPY_FLASH).await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.with_session(id, cx, |chat| {
-                                if chat
-                                    .transcript
-                                    .copy_flash
-                                    .get(&turn)
-                                    .is_some_and(|at| at.elapsed() >= COPY_FLASH)
-                                {
-                                    chat.transcript.copy_flash.remove(&turn);
-                                }
-                            });
-                        });
-                    })
-                    .detach();
-                }))
-                .child(
-                    icons::icon(glyph)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                ),
-        )
+                });
+            })
+            .detach();
+        }))
+        .child(
+            icons::icon(glyph)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
+    let msg_for_fork = SharedString::from(format!("msg-{turn}"));
+    let fork = div()
+        .id(SharedString::from(format!("fork-turn-{id}-{turn}")))
+        // Cursor's Project and subagent footers have no fork; the
+        // classic chat's does. Ours shows when the pointer is over
+        // the answer, so the feature stays a reach away.
+        .invisible()
+        .group_hover(msg_for_fork, |el| el.visible())
+        .cursor_pointer()
+        .rounded(px(4.))
+        .p(px(3.))
+        .hover(|el| el.bg(theme.element_hover))
+        .active(|el| el.bg(theme.element_active))
+        .tooltip(|window, cx| Tooltip::text("Fork chat from here", window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| this.fork_session(id, cx)))
+        .child(
+            icons::icon(icons::editing::GIT_BRANCH)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
+    // Cursor keeps the checkpoint restore on the prompt card, not here; the
+    // footer's copy shows only while the pointer is over the answer.
+    let msg = SharedString::from(format!("msg-{turn}"));
+    let rewind = div()
+        .id(SharedString::from(format!("rewind-turn-{id}-{turn}")))
+        .invisible()
+        .group_hover(msg, |el| el.visible())
+        .cursor_pointer()
+        .rounded(px(4.))
+        .p(px(3.))
+        .hover(|el| el.bg(theme.element_hover))
+        .active(|el| el.bg(theme.element_active))
+        .tooltip(|window, cx| {
+            Tooltip::text(
+                "Rewind here: chat and files back to before this prompt",
+                window,
+                cx,
+            )
+        })
+        .on_click(cx.listener(move |this, _, _, cx| this.rewind_turn(id, turn, cx)))
+        .child(
+            icons::icon(icons::system::RESTART)
+                .size(px(12.))
+                .text_color(theme.text_faint),
+        );
+    // Cursor's order: thumbs up, thumbs down, copy, fork, then "Just now".
+    let (vote, sent_at, reported) = match chat.items.get(turn) {
+        Some(ChatItem::User(message)) => (
+            message.feedback,
+            message.sent_at,
+            message.reported.is_some(),
+        ),
+        _ => (None, None, false),
+    };
+    let thumb = |up: bool, cx: &mut Context<Workspace>| {
+        let value: i8 = if up { 1 } else { -1 };
+        // A sent report keeps the thumbs-down lit whatever the vote does
+        // since: Cursor's stays marked after Submit, and a feature about
+        // showing him what happened should leave a mark on what he pressed.
+        let lit = vote == Some(value) || (!up && reported);
+        let (name, path, tip) = if up {
+            ("up", crate::assets::THUMBS_UP_ICON, "Good answer")
+        } else if reported {
+            ("down", crate::assets::THUMBS_DOWN_ICON, "Reported")
+        } else {
+            ("down", crate::assets::THUMBS_DOWN_ICON, "Bad answer")
+        };
+        div()
+            .id(SharedString::from(format!("vote-{name}-{id}-{turn}")))
+            .cursor_pointer()
+            .rounded(px(4.))
+            .p(px(3.))
+            .hover(|el| el.bg(theme.element_hover))
+            .active(|el| el.bg(theme.element_active))
+            .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.vote_turn(id, turn, value, cx);
+                // 👎 asks what was wrong: the review sheet over this exchange,
+                // anchored on the prompt that began the turn.
+                if value < 0 {
+                    let seq = this.session(id).and_then(|chat| {
+                        chat.items
+                            .iter()
+                            .take(turn + 1)
+                            .rev()
+                            .find_map(|item| match item {
+                                ChatItem::User(message) => Some(message.seq),
+                                _ => None,
+                            })
+                            .flatten()
+                    });
+                    window
+                        .dispatch_action(Box::new(crate::view::root::ReportProblemAt { seq }), cx);
+                }
+            }))
+            .child(svg().path(path).size(px(12.)).text_color(if lit {
+                theme.accent
+            } else {
+                theme.text_faint
+            }))
+    };
+    let row = row
+        .child(thumb(true, cx))
+        .child(thumb(false, cx))
+        .child(copy)
+        .child(fork)
+        .child(rewind)
+        .when_some(sent_at.and_then(relative_time), |row, when| {
+            row.child(
+                div()
+                    .id(SharedString::from(format!("turn-time-{id}-{turn}")))
+                    .pl(px(4.))
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(when)),
+            )
+        });
+    row.into_any_element()
+}
+
+/// Seconds east of UTC for the local clock at `at_secs`, from the C
+/// library's `localtime_r` — the one source that knows this machine's zone
+/// and its summer time.
+fn local_offset_secs(at_secs: i64) -> i64 {
+    let t: libc::time_t = at_secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+    if ok { tm.tm_gmtoff as i64 } else { 0 }
+}
+
+/// The local calendar day of an instant, as days since the epoch.
+fn local_day(at_ms: i64) -> i64 {
+    let secs = at_ms / 1000;
+    (secs + local_offset_secs(secs)).div_euclid(86_400)
+}
+
+/// "Today 4:22 PM", "Yesterday 9:10 AM", "Sep 12, 4:22 PM" — the line
+/// Cursor draws over the first message of a day.
+fn day_label(at_ms: i64) -> String {
+    let secs = at_ms / 1000;
+    let local = secs + local_offset_secs(secs);
+    let day = local.div_euclid(86_400);
+    let today = local_day(arbos_core::now_ms());
+    let tod = local.rem_euclid(86_400);
+    let (h24, m) = (tod / 3600, (tod % 3600) / 60);
+    let (h12, ampm) = match h24 {
+        0 => (12, "AM"),
+        1..=11 => (h24, "AM"),
+        12 => (12, "PM"),
+        _ => (h24 - 12, "PM"),
+    };
+    let clock = format!("{h12}:{m:02} {ampm}");
+    if day == today {
+        format!("Today {clock}")
+    } else if day == today - 1 {
+        format!("Yesterday {clock}")
+    } else {
+        let (y, mo, d) = civil_from_days(day);
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let this_year = civil_from_days(today).0;
+        if y == this_year {
+            format!("{} {d}, {clock}", MONTHS[(mo - 1) as usize])
+        } else {
+            format!("{} {d}, {y}, {clock}", MONTHS[(mo - 1) as usize])
+        }
+    }
+}
+
+fn day_divider(at_ms: i64, theme: &Theme) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .pt(px(4.))
+        .pb(px(10.))
         .child(
             div()
-                .id(SharedString::from(format!("fork-turn-{id}-{turn}")))
-                .cursor_pointer()
-                .rounded(px(4.))
-                .p(px(3.))
-                .hover(|el| el.bg(theme.element_hover))
-                .active(|el| el.bg(theme.element_active))
-                .tooltip(|window, cx| Tooltip::text("Fork chat from here", window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| this.fork_session(id, cx)))
-                .child(
-                    icons::icon(icons::editing::GIT_BRANCH)
-                        .size(px(12.))
-                        .text_color(theme.text_faint),
-                ),
-        );
-    row.into_any_element()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .child(SharedString::from(day_label(at_ms))),
+        )
+        .into_any_element()
+}
+
+/// "Just now", "2m ago", "3h ago", "Yesterday", "3d ago", then a date.
+/// `None` for a missing or absurd time (an old transcript with `ts: 0`).
+fn relative_time(at_ms: i64) -> Option<String> {
+    if at_ms <= 0 {
+        return None;
+    }
+    let now = arbos_core::now_ms();
+    let secs = (now - at_ms).max(0) / 1000;
+    Some(match secs {
+        s if s < 60 => "Just now".to_owned(),
+        s if s < 3600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3600),
+        s if s < 2 * 86_400 => "Yesterday".to_owned(),
+        s if s < 7 * 86_400 => format!("{}d ago", s / 86_400),
+        _ => {
+            let days = at_ms / 86_400_000;
+            let (y, m, d) = civil_from_days(days);
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
+            let this_year = civil_from_days(now / 86_400_000).0;
+            if y == this_year {
+                format!("{} {d}", MONTHS[(m - 1) as usize])
+            } else {
+                format!("{} {d}, {y}", MONTHS[(m - 1) as usize])
+            }
+        }
+    })
+}
+
+/// Days since 1970-01-01 → (year, month, day). Howard Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 /// The settled turn's one line above the answer: everything that happened,
@@ -2499,28 +4600,89 @@ fn work_header(
     turn: usize,
     stats: &WorkStats,
     open: bool,
+    auto: bool,
     running: bool,
+    rows: bool,
     chat: &ChatSession,
     cx: &mut Context<Workspace>,
-) -> AnyElement {
+) -> Option<AnyElement> {
     let theme = Theme::of(cx).clone();
-    // Live: the clock since the turn began. Settled: what the record says
-    // the tools and thoughts took.
+    // Live: the clock since the turn began. Settled: the turn's wall time
+    // stamped on its prompt; for records that predate the stamp, what the
+    // tools and thoughts took.
+    let stamped = match chat.items.get(turn) {
+        Some(ChatItem::User(message)) => message.worked_secs.map(u64::from),
+        Some(ChatItem::Wake { secs, .. }) => secs.map(u64::from),
+        // The kickoff turn opens the transcript with no prompt.
+        _ if turn == 0 => chat.kickoff_secs.map(u64::from),
+        _ => None,
+    };
     let elapsed = chat
         .elapsed()
         .filter(|_| running)
-        .unwrap_or_else(|| Duration::from_secs(stats.secs));
-    let (verb, rest) = work_summary(stats, running, elapsed, true);
-    let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
-    fold_row(&theme, "work", turn, verb, rest, diff, false, open, cx)
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.with_session(id, cx, |chat| {
-                let running = chat.busy();
-                let auto = auto_work_open(&chat.items, turn, running);
-                chat.transcript.work.entry(turn).or_default().toggle(auto);
-            });
-        }))
-        .into_any_element()
+        .unwrap_or_else(|| Duration::from_secs(stamped.unwrap_or(stats.secs)));
+    let (mut verb, mut rest) = work_summary(stats, running, elapsed, true);
+    // A turn that was cut short says so on its one line, with the time it
+    // had run, instead of a bare "Worked" over nothing. Without a time the
+    // summary's words were a verb phrase ("explored the project page") whose
+    // verb the label replaces — "Stopped by you the project page" (cycle
+    // 22); Cursor's line is "Stopped by you" alone.
+    if !running && let Some(label) = interrupt_label_of(&chat.items, turn) {
+        verb = label;
+        if elapsed.as_secs() == 0 {
+            rest = String::new();
+        }
+    }
+    // Nothing to say — no time, no tools worth a word: Cursor draws no
+    // line at all; the caller shows the body as it is.
+    if verb == "Worked" && rest.is_empty() {
+        return None;
+    }
+    // Cursor's worker tab reads "Worked for 46s"; its Project chat "Worked
+    // 25s" (F-111, `cycle-22/cursor-worker-chat-*.png`). Not on a stopped
+    // line, whose label stands alone (F-110).
+    if verb == "Worked" && chat.parent.is_some() && elapsed.as_secs() > 0 {
+        rest = format!("for {rest}");
+    }
+    // Cursor's headline is "Worked 12s ⌄" alone; the +3 −3 sits on the
+    // "Edited 2 files" run line inside the fold.
+    // Over nothing foldable — a turn that only delegated, prose alone —
+    // Cursor's line is bare: "Worked 6s" with no chevron and nothing to
+    // click (F-104, `cycle-22/cursor-worked-bare.png`).
+    if !rows {
+        return Some(
+            fold_row(&theme, "work-bare", turn, verb, rest, None, false, open, cx).into_any_element(),
+        );
+    }
+    // The toggle flips what is on screen, so it must use the same default
+    // the drawing used: recomputing it in the listener with `chat.busy()`
+    // (not this turn's `running`) made a click over a busy chat set the
+    // fold to the state it was already in — "no state change" on the
+    // `work` gate row, cycles 23–25.
+    Some(
+        fold_row(&theme, "work", turn, verb, rest, None, false, open, cx)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.with_session(id, cx, |chat| {
+                    chat.transcript.work.entry(turn).or_default().toggle(auto);
+                });
+            }))
+            .into_any_element(),
+    )
+}
+
+/// The interruption notice of the turn whose prompt is at `first`, if the
+/// turn ended that way: "Stopped by you" or "Interrupted: …".
+fn interrupt_label_of(items: &[ChatItem], first: usize) -> Option<String> {
+    let turn = turns(items).into_iter().find(|t| t.range.start == first)?;
+    items[turn.range.clone()]
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text) => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
 }
 
 /// One run of tool calls as Cursor shows it: `Editing foo.rs, explored 7
@@ -2538,19 +4700,36 @@ fn run_fold(
     let key = range.start;
     let stats = work_stats(&chat.items, range.clone());
     let (verb, rest) = work_summary(&stats, live, Duration::ZERO, false);
+    // Cursor's run lines start with a capital: "Explored 2 files, 2 searches".
+    let verb = {
+        let mut chars = verb.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            None => verb,
+        }
+    };
     let diff = (stats.add + stats.del > 0).then_some((stats.add, stats.del));
-    let open = chat.transcript.groups.contains(&key);
+    // A run with nothing to say for itself — a spawn, a call the stats do
+    // not count — has no line; Cursor shows the rows, never a bare
+    // "Worked" over them.
+    let bare = !live && verb == "Worked" && rest.is_empty();
+    // The headline of a turn without a stamped time already says what
+    // this run did; one run under it would say it twice. Show the rows.
+    let bare = bare || (!live && headline_describes(chat, range.start));
+    let open = bare || chat.transcript.groups.contains(&key);
     div()
         .flex()
         .flex_col()
         .gap(px(ITEM_GAP))
-        .child(
-            fold_row(&theme, "run", key, verb, rest, diff, live, open, cx).on_click(cx.listener(
-                move |this, _, _, cx| {
-                    this.with_session(id, cx, |chat| chat.transcript.toggle_group(key));
-                },
-            )),
-        )
+        .when(!bare, |el| {
+            el.child(
+                fold_row(&theme, "run", key, verb, rest, diff, live, open, cx).on_click(
+                    cx.listener(move |this, _, _, cx| {
+                        this.with_session(id, cx, |chat| chat.transcript.toggle_group(key));
+                    }),
+                ),
+            )
+        })
         .when(open, |el| {
             el.child(
                 div()
@@ -2559,12 +4738,63 @@ fn run_fold(
                     .gap(px(ITEM_GAP))
                     .children(range.map(|ix| match &chat.items[ix] {
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
+                        // A `status` call is the live step, not a row (#185).
+                        ChatItem::Tool { label, .. } if is_status_call(label) => {
+                            div().into_any_element()
+                        }
+                        // The root's kernel calls are drawn elsewhere (worker
+                        // lines, the panel's page): no row for them here.
+                        ChatItem::Tool { label, .. }
+                            if chat.parent.is_none() && is_kernel_call(label) =>
+                        {
+                            div().into_any_element()
+                        }
+                        // A worker's `todo` call is its checklist card
+                        // (Cursor's TodoWrite in a classic chat), not a
+                        // bare "todo" row.
+                        // A worker's `plan` writes its own notes file, so in
+                        // its chat that call is a checklist card as well.
+                        ChatItem::Tool { label, .. }
+                            if is_todo_call(label)
+                                || (chat.parent.is_some() && is_plan_call(label)) =>
+                        {
+                            let theme = Theme::of(cx).clone();
+                            todo_card(chat, ix..ix + 1, &theme)
+                                .unwrap_or_else(|| tool(chat, ix, false, cx))
+                        }
                         ChatItem::Tool { .. } => tool(chat, ix, false, cx),
                         _ => div().into_any_element(),
                     })),
             )
         })
         .into_any_element()
+}
+
+/// Whether the turn holding item `ix` draws a headline that is the run
+/// description itself (no time to say "Worked 12s") and that turn has this
+/// one run — the case where a run line would repeat the headline.
+fn headline_describes(chat: &ChatSession, ix: usize) -> bool {
+    let Some(turn) = turns(&chat.items)
+        .into_iter()
+        .find(|t| t.range.contains(&ix))
+    else {
+        return false;
+    };
+    let stamped = match chat.items.get(turn.range.start) {
+        Some(ChatItem::User(message)) => message.worked_secs.unwrap_or(0),
+        Some(ChatItem::Wake { secs, .. }) => secs.unwrap_or(0),
+        _ if turn.range.start == 0 => chat.kickoff_secs.unwrap_or(0),
+        _ => 0,
+    };
+    if stamped > 0 {
+        return false;
+    }
+    let body = (turn.range.start + 1).min(turn.range.end)..turn.answer_from;
+    let runs = segments(&chat.items, body.clone())
+        .iter()
+        .filter(|seg| matches!(seg, Seg::Run(_)))
+        .count();
+    runs == 1 && work_stats(&chat.items, body).secs == 0
 }
 
 /// Cursor's fold line: the verb a shade brighter than what follows, the
@@ -2581,6 +4811,10 @@ fn fold_row(
     cx: &mut Context<Workspace>,
 ) -> bezel::gpui::Stateful<bezel::gpui::Div> {
     let group = SharedString::from(format!("{name}-{key}"));
+    // Cursor sets "Worked 23s", "Running 1 command", "Ran …" all in the
+    // prose size (14 px on the Mac, the bubble's own): one size for the
+    // work lines, none a step smaller.
+    let style = TextStyle::Body;
     div()
         .id((name, key))
         .group(group.clone())
@@ -2592,17 +4826,20 @@ fn fold_row(
         .gap(px(ROW_GAP))
         .py(px(2.))
         .rounded(px(Theme::control_radius()))
-        .cursor_pointer()
-        .hover(|el| el.bg(theme.element_hover))
+        .when(name != "work-bare", |el| {
+            el.cursor_pointer().hover(|el| el.bg(theme.element_hover))
+        })
         .child(
             div()
-                .text_style(TextStyle::Callout)
+                .text_style(style)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
                 .text_color(theme.text_muted)
                 .child(if live {
                     shimmer_label(verb, live_phase(), theme, cx)
                 } else {
-                    // Settled, the whole line is one faint colour.
-                    spaced_label(verb, theme.text_faint, theme)
+                    // Settled: Cursor paints "Worked" a shade brighter than
+                    // the "23s" after it.
+                    spaced_label(verb, theme.text_muted, theme)
                 }),
         )
         .when(!rest.is_empty(), |el| {
@@ -2612,28 +4849,34 @@ fn fold_row(
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_style(TextStyle::Callout)
+                    .text_style(style)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
                     .text_color(theme.text_faint)
                     .child(spaced_label(rest, theme.text_faint, theme)),
             )
         })
         .when_some(diff, |el, (add, del)| el.child(diff_badge(theme, add, del)))
-        .child(
-            div()
-                .invisible()
-                .group_hover(group, |el| el.visible())
-                .child(Layout::disclosure(theme, open)),
-        )
+        .when(name != "work-bare", |el| {
+            el.child(
+                // The turn's headline wears its chevron ("Worked 6m 44s ›"); a
+                // run inside the opened timeline shows one on hover.
+                div()
+                    .when(name != "work", |el| {
+                        el.invisible().group_hover(group, |el| el.visible())
+                    })
+                    .child(Layout::disclosure(theme, open)),
+            )
+        })
 }
 
 /// A clock every live shimmer shares, so rows sweep together.
-fn live_phase() -> Duration {
+pub(crate) fn live_phase() -> Duration {
     static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     START.get_or_init(Instant::now).elapsed()
 }
 
-/// Cursor's fold label. Finished: "Worked for 15m 20s", as the Agents
-/// window puts it — what was done is one click away in the fold. Live:
+/// Cursor's fold label. Finished: "Worked 21s", as the Agents window
+/// puts it — what was done is one click away in the fold. Live:
 /// "Editing transcript.rs, 4 searches, ran 5 commands", present tense, so
 /// the row says what is happening right now. Returned as (verb, rest) so the
 /// verb can paint brighter than the rest.
@@ -2645,12 +4888,11 @@ fn work_summary(
 ) -> (String, String) {
     // The turn's one settled line says how long; a run inside the opened
     // timeline still says what it did.
-    if !running && headline {
-        return if elapsed.as_secs() == 0 {
-            ("Worked".to_owned(), String::new())
-        } else {
-            ("Worked".to_owned(), format!("for {}", since(elapsed)))
-        };
+    // A settled turn with a known time is "Worked 23s"; one without (a
+    // record older than the stamp, a worker's report) says what it did
+    // instead — Cursor never shows a bare "Worked".
+    if !running && headline && elapsed.as_secs() > 0 {
+        return ("Worked".to_owned(), since(elapsed));
     }
     let mut parts: Vec<String> = Vec::new();
     if stats.edits > 0 {
@@ -2683,11 +4925,42 @@ fn work_summary(
         }
     }
     if stats.commands > 0 {
+        // One command that described itself: Cursor's "Ran List repo
+        // contents and recent commits". Several, or none described: the count.
+        // Live it counts ("Running 1 command"); the words come once it
+        // settles ("Ran List repo contents and recent commits"), as in Cursor.
+        match (&stats.first_desc, stats.commands, stats.tools, running) {
+            (Some(desc), 1, 1, false) => parts.push(format!("ran {desc}")),
+            _ => parts.push(format!(
+                "ran {} {}",
+                stats.commands,
+                count_word(stats.commands, "command", "commands")
+            )),
+        }
+    }
+    if stats.spawns > 0 {
         parts.push(format!(
-            "ran {} {}",
-            stats.commands,
-            count_word(stats.commands, "command", "commands")
+            "started {} {}",
+            stats.spawns,
+            count_word(stats.spawns, "worker", "workers")
         ));
+    }
+    if stats.plans > 0 {
+        parts.push(
+            format!(
+                "updated the project page {}",
+                if stats.plans == 1 {
+                    String::new()
+                } else {
+                    format!("{} times", stats.plans)
+                }
+            )
+            .trim_end()
+            .to_string(),
+        );
+    }
+    if stats.todos > 0 {
+        parts.push("kept its checklist".to_string());
     }
     if parts.is_empty() {
         return if running {
@@ -2698,10 +4971,17 @@ fn work_summary(
                 }
                 _ => ("Working".to_owned(), String::new()),
             }
-        } else if elapsed.as_secs() == 0 {
-            ("Worked".to_owned(), String::new())
         } else {
-            ("Worked".to_owned(), format!("for {}", since(elapsed)))
+            // With no time and nothing to describe there is no line; the
+            // caller drops the header and shows the body open.
+            (
+                "Worked".to_owned(),
+                if elapsed.as_secs() == 0 {
+                    String::new()
+                } else {
+                    since(elapsed)
+                },
+            )
         };
     }
     let first = parts.remove(0);
@@ -2715,6 +4995,10 @@ fn work_summary(
         ("searched", false) => "Searched",
         ("ran", true) => "Running",
         ("ran", false) => "Ran",
+        ("started", true) => "Starting",
+        ("started", false) => "Started",
+        ("updated", true) => "Updating",
+        ("updated", false) => "Updated",
         (other, _) => other,
     };
     let mut rest = arg.to_owned();
@@ -2761,6 +5045,12 @@ fn work_other(
             from_block(chat, ix, who, text, images, theme, window, cx)
         }
         ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, theme, cx),
+        ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, theme, cx),
+        // A steer's card, inside the turn it steered.
+        ChatItem::User(message) if message.steer => {
+            user_prompt(chat, ix, message, theme, window, cx)
+        }
+        ChatItem::Asked { question, answer } => asked_line(question, answer, theme),
         _ => div().into_any_element(),
     }
 }
@@ -2804,7 +5094,10 @@ fn thought_line(
         return div().into_any_element();
     };
     let id = chat.id;
-    let open = chat.transcript.thought_open(ix, done);
+    // A streaming thought opens its tail in a worker's chat; the root
+    // (Cursor's Project chat) keeps to the "Thinking" line unless clicked.
+    let folded = done || chat.parent.is_none();
+    let open = chat.transcript.thought_open(ix, folded);
     let live = chat
         .thought_elapsed()
         .or_else(|| chat.elapsed())
@@ -2832,12 +5125,13 @@ fn thought_line(
                 .hover(|el| el.bg(theme.element_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.with_session(id, cx, |chat| {
-                        chat.transcript.toggle_thought(ix, done);
+                        chat.transcript.toggle_thought(ix, folded);
                     });
                 }))
                 .child(
                     div()
-                        .text_style(TextStyle::Callout)
+                        .text_style(TextStyle::Body)
+                        .text_size(px(root::CURSOR_PROSE_SIZE))
                         .text_color(theme.text_muted)
                         // Live, "Thinking" shimmers as Cursor's does; settled,
                         // the line is one faint colour.
@@ -2950,7 +5244,7 @@ fn tool(chat: &ChatSession, ix: usize, first: bool, cx: &mut Context<Workspace>)
     // Reads get a cheap peek, not a highlighter — a 400-line file dump
     // is what froze the machine. Searches stay title-only.
     let file_view = display_kind == ToolKind::Read && !output.trim().is_empty();
-    let show_output = (explore.is_none() || file_view) && !output.is_empty();
+    let show_output = (explore.is_none() || file_view || failed) && !output.is_empty();
     let _ = first;
     if display_kind == ToolKind::Edit && edit_body {
         return diff_card(
@@ -2985,7 +5279,13 @@ fn tool(chat: &ChatSession, ix: usize, first: bool, cx: &mut Context<Workspace>)
             tool_row(
                 &theme,
                 tool_icon(display_kind),
-                display_parts(display_kind, label, output, *status == ToolStatus::Running),
+                display_parts_for(
+                    display_kind,
+                    label,
+                    output,
+                    *status == ToolStatus::Running,
+                    failed,
+                ),
                 tone,
                 meta,
                 diff,
@@ -3309,6 +5609,22 @@ pub fn spinner<V: 'static>(since: Duration, color: Hsla, cx: &mut Context<V>) ->
         .into_any_element()
 }
 
+/// The same cell for a row drawn from another view's state: the caller's
+/// painter keeps that view ticking.
+pub fn spinner_with(
+    painter: Painter,
+    since: Duration,
+    color: Hsla,
+    cx: &mut bezel::gpui::App,
+) -> AnyElement {
+    painter.lease(BRAILLE_FPS, BRAILLE_LEASE, cx);
+    div()
+        .text_style(TextStyle::Callout)
+        .text_color(color)
+        .child(spinner_frame(since, cx.reduce_motion()))
+        .into_any_element()
+}
+
 /// How long a streaming tail may sit still before the heartbeat comes
 /// back. Web `STALE_TAIL_MS`: long enough to ignore between-token
 /// pauses, short enough that a tool-argument gap does not look frozen.
@@ -3316,7 +5632,32 @@ const STALE_TAIL_MS: u128 = 1000;
 
 /// Web WorkingIndicator copy. A fresh prompt is "Planning next moves";
 /// a lull mid-turn is "Working".
-fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<&'static str> {
+fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
+    // The kickoff turn (no prompt of the user's, the chat's first) reads
+    // as Cursor's "Setting up environment" whatever step the kernel derives
+    // — and whatever is running: its first `ls` left the transcript blank
+    // under the date line for the seconds it took (F-87, journey run 3).
+    let kickoff = turn.range.start == 0
+        && chat.kickoff_at.is_some()
+        && !matches!(chat.items.first(), Some(ChatItem::User(_)));
+    if kickoff {
+        return Some("Setting up environment".to_string());
+    }
+    // The kernel says the model is thinking in silence: always show it,
+    // whatever the last item is.
+    if chat.working.is_some() {
+        return Some("Thinking".to_string());
+    }
+    // The agent named its step (Cursor's UpdateCurrentStep on the
+    // timeline: "Copying stills to artifacts"): that is the line.
+    if let Some(step) = chat
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(step.to_string());
+    }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
     let tool_running = matches!(
         last,
@@ -3349,34 +5690,142 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<&'static str> {
     if tool_running {
         return None;
     }
-    Some(match last {
-        ChatItem::User(_) => "Planning next moves",
-        _ => "Working",
-    })
+    Some(
+        match last {
+            ChatItem::User(_) => "Planning next moves",
+            _ => "Working",
+        }
+        .to_string(),
+    )
 }
 
 /// Web: spinner + shimmering label under the last item while the turn
 /// is live and nothing else is moving.
 fn heartbeat(
     theme: &Theme,
-    label: &'static str,
+    label: String,
     chat: &ChatSession,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let since = chat.elapsed().unwrap_or_default();
+    // The kernel owes this chat a reply and has said nothing for twenty
+    // seconds, probe included: the wire is cut and the socket has not
+    // noticed yet. Said calmly, keyed on what the person cares about; the
+    // next frame of any kind clears it (F-81, the phone's rule).
+    if let Some(quiet) = chat.not_answering() {
+        Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+        let who = chat
+            .host
+            .clone()
+            .unwrap_or_else(|| "This computer".to_string());
+        return div()
+            .id("not-answering")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(ROW_GAP))
+            .py(px(2.))
+            .child(
+                div()
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(format!(
+                        "{who} is not answering — waiting · {}",
+                        since_short(quiet)
+                    ))),
+            )
+            .into_any_element();
+    }
+    // A silent model call: the braille spinner and "Thinking for 42s",
+    // ticking, so a minute of thought never looks like a dead turn.
+    if let Some(thinking) = chat.thinking_for() {
+        Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+        let text = format!("Thinking for {}", since_short(thinking));
+        return div()
+            .id("thinking-heartbeat")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(ROW_GAP))
+            .py(px(2.))
+            .child(spinner(since, theme.text_muted, cx))
+            .child(
+                div()
+                    .text_style(TextStyle::Body)
+                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_color(theme.text_muted)
+                    .child(shimmer_label(text, since, theme, cx)),
+            )
+            .into_any_element();
+    }
+    // A turn that has produced nothing for a while — a kickoff whose
+    // provider is not answering (Jacob waited 98 s on a silent shimmer and
+    // gave up, F-77) — says how long, and past a minute what to do. The
+    // clock ticks, so it never reads as frozen.
+    let quiet = since >= STALL_CLOCK_AFTER;
+    // The agent's own step reads as Cursor's "Working  Launching three
+    // sort writers": the verb a shade brighter, the step faint and
+    // shimmering, no chevron — there is nothing under it to fold.
+    let is_step = chat
+        .status
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|step| step == label);
+    let label = if quiet {
+        format!("{label} · {}", since_short(since))
+    } else {
+        label
+    };
     div()
         .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(ROW_GAP))
-        .py(px(2.))
+        .flex_col()
+        .gap(px(4.))
         .child(
             div()
-                .text_style(TextStyle::Callout)
-                .text_color(theme.text_muted)
-                .child(shimmer_label(label, since, theme, cx)),
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .gap(px(ROW_GAP))
+                .py(px(2.))
+                .text_style(TextStyle::Body)
+                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .when(is_step, |el| {
+                    el.child(
+                        div()
+                            .flex_none()
+                            .text_color(theme.text_muted)
+                            .child("Working"),
+                    )
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(if is_step {
+                            theme.text_faint
+                        } else {
+                            theme.text_muted
+                        })
+                        .child(shimmer_label(label, since, theme, cx)),
+                ),
         )
         .into_any_element()
+}
+
+/// When a silent turn's heartbeat starts showing its clock, and when it
+/// adds the hint.
+const STALL_CLOCK_AFTER: Duration = Duration::from_secs(20);
+const STALL_HINT_AFTER: Duration = Duration::from_secs(60);
+
+/// `42s`, `1m 05s`: the thinking clock.
+pub(crate) fn since_short(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
 }
 
 /// Cursor: `Thinking` while it streams, `Thought 10s` once it is done.
@@ -3385,9 +5834,10 @@ fn thought_label(done: bool, secs: Option<u32>, _live: Duration) -> (String, Str
     if !done {
         return ("Thinking".to_owned(), String::new());
     }
+    // Cursor: "Thought briefly" under a few seconds, "Thought for 12s" past.
     let time = match secs {
-        Some(s) if s > 0 => format!("for {}", since(Duration::from_secs(u64::from(s)))),
-        _ => String::new(),
+        Some(s) if s >= 5 => format!("for {}", since(Duration::from_secs(u64::from(s)))),
+        _ => "briefly".to_owned(),
     };
     ("Thought".to_owned(), time)
 }
@@ -3409,27 +5859,82 @@ mod selection_tests {
     use super::*;
 
     #[test]
-    fn long_runs_fold_to_the_last_rows_until_opened() {
-        // Twelve distinct steps; only the tail stays on screen.
-        let items: Vec<ChatItem> = (0..12)
+    fn a_steer_stays_inside_the_turn_it_steered() {
+        let mut steer = UserMessage::from("Also print the date at the end.".to_string());
+        steer.steer = true;
+        let items = vec![
+            ChatItem::User(UserMessage::from("Run the loop.".to_string())),
+            ChatItem::Tool {
+                id: "t1".into(),
+                kind: ToolKind::Execute,
+                label: "bash for i in 1 2 3".into(),
+                status: ToolStatus::Success,
+                output: "step 1".into(),
+                diff: None,
+                child_session: None,
+                secs: None,
+                desc: None,
+            },
+            ChatItem::User(steer),
+            ChatItem::Agent("Done, with the date.".into()),
+            ChatItem::User(UserMessage::from("Thanks.".to_string())),
+        ];
+        let turns = turns(&items);
+        assert_eq!(turns.len(), 2, "a steer opens no turn of its own");
+        assert_eq!(turns[0].range, 0..4);
+        assert_eq!(turns[1].range, 4..5);
+    }
+
+    #[test]
+    fn a_settled_run_folds_and_a_click_pins_it_open() {
+        // Twelve thoughts that lead the turn each stand on their own line;
+        // a tool call after them starts the run they lead into.
+        let mut items: Vec<ChatItem> = (0..12)
             .map(|i| ChatItem::Thinking {
                 text: format!("step {i}"),
                 done: true,
                 secs: Some(1),
             })
             .collect();
-        let bits = work_bits(&items, 0..items.len());
-        assert_eq!(bits.len(), 12);
-        let key = work_bit_index(&bits[0]);
-        let mut state = State::default();
-        let folded = bits.len() > WORK_ROWS && !state.groups.contains(&key);
-        assert!(folded);
-        assert_eq!(bits.len() - WORK_ROWS, 4);
-        state.toggle_group(key);
+        items.push(ChatItem::Tool {
+            id: "t1".into(),
+            kind: ToolKind::Read,
+            label: "read a.rs".into(),
+            status: ToolStatus::Success,
+            output: String::new(),
+            diff: None,
+            child_session: None,
+            secs: None,
+            desc: None,
+        });
+        let segs = segments(&items, 0..items.len());
+        assert_eq!(
+            segs.iter()
+                .filter(|seg| matches!(seg, Seg::Thought(_)))
+                .count(),
+            12
+        );
+        assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
+        // Cursor: the timeline shows while the turn runs and folds once it
+        // settles — the newest turn too (F-127); from there a click owns
+        // the fold.
+        assert!(auto_work_open(&items, 0, true));
         assert!(
-            state.groups.contains(&key),
+            !auto_work_open(&items, 0, false),
+            "a settled turn folds, the newest too"
+        );
+        let mut older = items.clone();
+        older.push(ChatItem::User("Next".to_string().into()));
+        assert!(!auto_work_open(&older, 0, false), "an older turn folds");
+        let mut state = State::default();
+        assert!(!state.groups.contains(&0));
+        state.toggle_group(0);
+        assert!(
+            state.groups.contains(&0),
             "opening the fold pins the run open"
         );
+        state.toggle_group(0);
+        assert!(!state.groups.contains(&0));
     }
 
     #[test]
@@ -3555,7 +6060,15 @@ mod selection_tests {
             ChatItem::User(UserMessage {
                 text: String::new(),
                 images: vec![image.clone(), image],
+                described: Vec::new(),
+                seq: None,
+                reported: None,
+                steer: false,
                 files: Vec::new(),
+                worked_secs: None,
+                channel: String::new(),
+                sent_at: None,
+                feedback: None,
             }),
             ChatItem::Agent("two pictures".into()),
         ];
@@ -3630,5 +6143,374 @@ mod selection_tests {
             selectable::copied(&markdown::parse(text), state.selection(1).unwrap()),
             "hello"
         );
+    }
+}
+
+/// Cursor's card under an answer that changed files: "2 Files Changed" with
+/// Review on the right, then one row per file — its glyph, name, and
+/// `+N −M`. A row opens that file's diff; Review opens the whole tree's.
+fn files_changed_card(
+    root: std::path::PathBuf,
+    changes: &crate::model::changes::GitChanges,
+    theme: &Theme,
+    cx: &mut Context<Workspace>,
+) -> AnyElement {
+    let n = changes.files.len();
+    let head = format!("{n} File{} Changed", if n == 1 { "" } else { "s" });
+    let review_root = root.clone();
+    let mut card = div()
+        .id("files-changed")
+        .w_full()
+        .mt(px(4.))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.ink(0.02))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(12.))
+                .py(px(8.))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_style(TextStyle::Callout)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text)
+                        .child(SharedString::from(head)),
+                )
+                .child(
+                    div()
+                        .id("files-changed-review")
+                        .cursor_pointer()
+                        .text_color(theme.text_muted)
+                        .hover(|el| el.text_color(theme.text))
+                        .child("Review")
+                        .on_mouse_down(
+                            bezel::gpui::MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.review_changes(&review_root, None, cx);
+                            }),
+                        ),
+                ),
+        );
+    const SHOWN: usize = 8;
+    for (ix, file) in changes.files.iter().take(SHOWN).enumerate() {
+        let path = file.path.clone();
+        let review_root = root.clone();
+        let name = std::path::Path::new(&file.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.path.clone());
+        card = card.child(
+            div()
+                .id(("files-changed-row", ix))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(5.))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.element_hover))
+                .text_style(TextStyle::Callout)
+                .child(
+                    icons::icon(icons::files::DOCUMENT)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(theme.text_faint),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(theme.text)
+                        .child(SharedString::from(name)),
+                )
+                .child(crate::view::detail::diff_marks(theme, file.add, file.del))
+                .on_mouse_down(
+                    bezel::gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| {
+                        this.review_changes(&review_root, Some(&path), cx);
+                    }),
+                ),
+        );
+    }
+    if changes.files.len() > SHOWN {
+        let more = changes.files.len() - SHOWN;
+        let review_root = root.clone();
+        card = card.child(
+            div()
+                .id("files-changed-more")
+                .px(px(12.))
+                .py(px(5.))
+                .cursor_pointer()
+                .text_style(TextStyle::Caption)
+                .text_color(theme.text_faint)
+                .hover(|el| el.text_color(theme.text_muted))
+                .child(SharedString::from(format!("+{more} more")))
+                .on_mouse_down(
+                    bezel::gpui::MouseButton::Left,
+                    cx.listener(move |this, _, _, cx| this.review_changes(&review_root, None, cx)),
+                ),
+        );
+    }
+    card.into_any_element()
+}
+
+/// The text with markdown's marks escaped, so it renders as it was typed:
+/// a prompt is the user's words, not a document. Line breaks stay.
+pub(crate) fn plain_markdown(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            // Two spaces before the break: a hard line break in CommonMark.
+            out.push_str("  \n");
+        }
+        let trimmed = line.trim_start();
+        let lead = &line[..line.len() - trimmed.len()];
+        out.push_str(lead);
+        let mut chars = trimmed.chars().peekable();
+        let mut at_start = true;
+        while let Some(c) = chars.next() {
+            match c {
+                '`' | '*' | '_' | '~' | '[' | ']' | '\\' => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '#' | '>' | '-' | '+' if at_start => {
+                    out.push('\\');
+                    out.push(c);
+                }
+                '0'..='9' if at_start => {
+                    // "1. " would start a list; keep the digits, escape the dot.
+                    out.push(c);
+                    while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+                        out.push(d);
+                        chars.next();
+                    }
+                    if chars.peek() == Some(&'.') {
+                        out.push('\\');
+                    }
+                }
+                _ => out.push(c),
+            }
+            at_start = false;
+        }
+    }
+    out
+}
+
+/// The kernel's `status` tool: what the agent says it is doing, carried
+/// by the worker line and the panel. Never a row of its own.
+pub(crate) fn is_status_call(label: &str) -> bool {
+    label
+        .split_whitespace()
+        .next()
+        .is_some_and(|first| first == "status")
+}
+
+/// Cursor's TodoWrite card, from the root's `todo` calls in a run (the
+/// thread's own checklist, `agents/root/todo.md`): the list the kernel
+/// echoed back, one row per item with its box. The last call's echo is the
+/// list's state. `plan` edits the project page, which the panel shows.
+fn todo_card(chat: &ChatSession, range: Range<usize>, theme: &Theme) -> Option<AnyElement> {
+    let key = range.start;
+    let (title, items) = range
+        .rev()
+        .filter_map(|ix| match &chat.items[ix] {
+            ChatItem::Tool { label, output, .. }
+                if is_todo_call(label) || (chat.parent.is_some() && is_plan_call(label)) =>
+            {
+                plan_items(output)
+            }
+            _ => None,
+        })
+        .next()?;
+    if items.is_empty() {
+        return None;
+    }
+    let done = items.iter().filter(|(d, _)| *d).count();
+    let mut card = div()
+        .id(("todo-card", key))
+        .w_full()
+        .max_w(px(root::CHAT_MAX_WIDTH))
+        .rounded(px(Theme::surface_radius()))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.ink(0.02))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .px(px(12.))
+                .py(px(7.))
+                .border_b_1()
+                .border_color(theme.border)
+                .text_style(TextStyle::Callout)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(theme.text)
+                        .child(SharedString::from(title)),
+                )
+                .child(
+                    div()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(format!("{done}/{}", items.len()))),
+                ),
+        );
+    for (done, text) in items {
+        card = card.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(4.))
+                .text_style(TextStyle::Callout)
+                .child(if done {
+                    icons::icon(icons::status::CHECK)
+                        .size(px(12.))
+                        .flex_none()
+                        .mt(px(3.))
+                        .text_color(theme.success)
+                        .into_any_element()
+                } else {
+                    // Cursor's open item: a hollow circle.
+                    div()
+                        .size(px(10.))
+                        .flex_none()
+                        .mt(px(4.))
+                        .rounded_full()
+                        .border_1()
+                        .border_color(theme.text_faint)
+                        .into_any_element()
+                })
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(if done { theme.text_faint } else { theme.text })
+                        .child(SharedString::from(text)),
+                ),
+        );
+    }
+    Some(card.into_any_element())
+}
+
+/// The kernel names a call by its tool and first argument: `todo`,
+/// `todo add`, `todo check 2`.
+fn is_todo_call(label: &str) -> bool {
+    label == "todo" || label.starts_with("todo ")
+}
+
+/// A call to the kernel about the project rather than to the world: it
+/// shows as a worker line, the page, a checklist or the live step, never as
+/// a tool row of the root's.
+fn is_kernel_call(label: &str) -> bool {
+    matches!(
+        label.split_whitespace().next().unwrap_or(label),
+        "spawn"
+            | "say"
+            | "plan"
+            | "todo"
+            | "status"
+            | "subscribe"
+            | "remember"
+            | "agents"
+            | "transcript"
+            | "ask"
+    )
+}
+
+/// Whether a run holds a call of the root's own — a command, a read, a
+/// search — that Cursor's Project chat would show, as against kernel calls
+/// only (which draw as worker lines and cards).
+fn own_calls(items: &[ChatItem], range: Range<usize>) -> bool {
+    items[range].iter().any(|item| {
+        matches!(item, ChatItem::Tool { label, .. } if !is_kernel_call(label) && !is_status_call(label))
+    })
+}
+
+fn is_plan_call(label: &str) -> bool {
+    label == "plan" || label.starts_with("plan ")
+}
+
+/// The kernel's echo of a checklist after a `todo` (or `plan`) call:
+/// "## Maintenance" then lines "[ ] 1 - [ ] [label](target) — readout".
+/// Returns the section title and (done, words) per item.
+fn plan_items(output: &str) -> Option<(String, Vec<(bool, String)>)> {
+    let mut title = "Todos".to_string();
+    let mut items = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(heading) = line.strip_prefix("## ") {
+            title = heading.trim().to_string();
+            continue;
+        }
+        let (done, rest) = if let Some(rest) = line.strip_prefix("[x] ") {
+            (true, rest)
+        } else if let Some(rest) = line.strip_prefix("[ ] ") {
+            (false, rest)
+        } else {
+            continue;
+        };
+        // "1 - [ ] [label](target) — readout": drop the index and the inner box.
+        let rest = rest
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .trim_start();
+        let rest = rest.strip_prefix("- ").unwrap_or(rest);
+        let rest = rest
+            .strip_prefix("[ ] ")
+            .or_else(|| rest.strip_prefix("[x] "))
+            .unwrap_or(rest);
+        let words = strip_link(rest);
+        if !words.is_empty() {
+            items.push((done, words));
+        }
+    }
+    (!items.is_empty()).then_some((title, items))
+}
+
+/// "[label](target) — readout" → "label — readout".
+fn strip_link(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match (after.find("]("), after.find(')')) {
+            (Some(close), Some(end)) if end > close => {
+                out.push_str(&after[..close]);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.trim().to_string()
+}
+
+/// "set explainer" → "Set explainer": a worker's folder name as a title.
+fn sentence_case(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
     }
 }

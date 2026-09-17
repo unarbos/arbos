@@ -31,7 +31,8 @@ impl Tool for ApplyPatch {
                         "patch": {
                             "type": "string",
                             "description": "Full patch text, including *** Begin Patch and *** End Patch."
-                        }
+                        },
+                        "mechanism": crate::mechanism::schema_property()
                     },
                     "required": ["patch"]
                 }
@@ -46,12 +47,12 @@ impl Tool for ApplyPatch {
         }
         let resolved = paths
             .iter()
-            .map(|p| cx.resolve(p))
+            .map(|p| cx.resolve_write(p))
             .collect::<Result<Vec<_>>>()?;
         Ok(ToolPlan::access(Access::writes(resolved)))
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || apply(cx.place.path(), &cx.cwd, req(&args, "patch")?))
+        blocking(move || apply(cx.root(), &cx.cwd, req(&args, "patch")?))
     }
 }
 

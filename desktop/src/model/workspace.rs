@@ -16,16 +16,18 @@ use crate::{
         article::{self, Article},
         attachment::Prompt,
         board::{self, Board},
+        identity::Identity,
         place::Place,
         project::Project,
         record,
-        session::{self, ChatSession, Command},
+        session::{self, ChatItem, ChatSession, Command},
         settings::{self, Feature, Settings},
         state::{self, State},
         surface::{self, Bind, Surface, SurfaceId, SurfaceKind},
         watch::{self, Watch},
     },
     reading,
+    view::component::transcript,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bezel::{
@@ -94,12 +96,22 @@ pub struct Workspace {
     /// The body size the type ladder is scaled against, in points.
     pub text_size: f32,
     /// Whether the agent's prose is weighted for bionic reading.
+    /// The window's last frame (x, y, w, h in points), persisted.
+    pub frame: Option<[f32; 4]>,
     pub bionic_reading: bool,
     /// The hue the greys carry, and how much of it.
     pub tint: Tint,
     /// Whether the window is showing the frame meter. Runtime only — a switch
     /// you left on is not a preference worth restoring.
     pub meter: bool,
+    /// Uncommitted changes per local project root, as the poll last read
+    /// them — Cursor's Changes pill and Files Changed card.
+    pub changes: HashMap<std::path::PathBuf, crate::model::changes::GitChanges>,
+    /// The root chat whose Working card (one row per running worker, Stop
+    /// All) is open over the pills. Cursor keeps the card behind the
+    /// "Working N" pill and never opens it by itself; neither does this.
+    /// The transcript's "N Working" line opens it too.
+    pub working_card_open: Option<u64>,
     /// The registry's mark for each configured agent, by name. Empty until the
     /// catalog lands, and stays empty offline.
     agent_icons: HashMap<String, SharedString>,
@@ -128,7 +140,13 @@ pub struct Workspace {
     /// Pencil: a past prompt to drop into the composer on the next sync.
     /// Taken by the chrome; not persisted.
     pub pending_composer: Option<String>,
+    /// Whether the permissions sheet has been shown once.
+    pub permissions_seen: bool,
 }
+
+/// Under a fork's trailing prompt when the original was still answering it.
+pub const FORKED_MID_TURN: &str =
+    "Forked while the original chat was still answering this — it keeps that work. Send a message to continue here.";
 
 impl Workspace {
     pub fn new(settings: Settings, state: State, cx: &mut Context<Self>) -> Self {
@@ -137,12 +155,32 @@ impl Workspace {
             .iter()
             .filter_map(|raw| Place::parse(raw))
             .collect();
-        let projects: Vec<Project> = state
+        // The tab that was in front when the window last closed: a launch
+        // lands there again ("close it and come back" is a step of the
+        // journey and what Jacob does all day); the home tab only when that
+        // place is gone.
+        let was_front = state
+            .projects
+            .get(state.active)
+            .and_then(|raw| Place::parse(raw));
+        let mut projects: Vec<Project> = state
             .projects
             .into_iter()
             .filter_map(|raw| Place::parse(&raw).map(Project::open))
             .collect();
-        let active = (!projects.is_empty()).then_some(state.active);
+        // The home tab: `~/.arbos`, always open and first in the strip; the
+        // tabs that were open last time follow it, each with its state
+        // where it was left.
+        let home = Self::home_place().filter(|home| std::fs::create_dir_all(&home.path).is_ok());
+        if let Some(home) = home {
+            projects.retain(|project| project.place() != home);
+            projects.insert(0, Project::open(home));
+        }
+        let active = (!projects.is_empty()).then(|| {
+            was_front
+                .and_then(|front| projects.iter().position(|project| project.place() == front))
+                .unwrap_or(0)
+        });
         let restore: Vec<usize> = (0..projects.len()).collect();
         let mut this = Self {
             settings,
@@ -153,8 +191,11 @@ impl Workspace {
             cursor_blink: state.cursor_blink,
             text_size: state.text_size,
             bionic_reading: state.bionic_reading,
+            frame: state.frame,
             tint: Tint::new(state.hue, state.chroma),
             meter: false,
+            changes: HashMap::new(),
+            working_card_open: None,
             next_id: 0,
             agent_icons: HashMap::new(),
             last: state.last,
@@ -167,6 +208,7 @@ impl Workspace {
             kernel_syncing: HashSet::new(),
             dismissed: state.dismissed,
             pending_composer: None,
+            permissions_seen: state.permissions_seen,
         };
         for ix in restore {
             this.restore_sessions(ix);
@@ -177,6 +219,8 @@ impl Workspace {
             this.apply_dismissed(ix);
         }
         this.open_last_entry(cx);
+        // Only where there is no home to land on — a machine with no home
+        // directory — does the launch fall back to where it was started.
         if this.projects.is_empty()
             && let Ok(cwd) = std::env::current_dir()
         {
@@ -185,24 +229,32 @@ impl Workspace {
         for ix in 0..this.projects.len() {
             this.sync_kernel_sessions(ix, true, cx);
         }
+        // Names typed under the old sidebar lived in state.toml. A folder
+        // that has no project.toml yet takes its name from there, once, and
+        // the file is the record from then on.
         for project in &mut this.projects {
+            if project.identity_saved {
+                continue;
+            }
             if let Some(name) = state
                 .names
                 .get(&project.place().encode())
                 .map(|name| name.trim())
                 .filter(|name| !name.is_empty())
             {
-                project.nickname = Some(name.to_string());
+                let mut identity = project.identity.clone();
+                identity.name = Some(name.to_string());
+                project.set_identity(identity);
             }
         }
         this.load_agent_icons(cx);
         this.watch_activity(cx);
         this.refresh_slash_commands(cx);
         this.refresh_models(cx);
-        // Temporary dev hook: `CYDONIA_TEST_PROMPT` sends a prompt on launch
+        // Temporary dev hook: `ARBOS_TEST_PROMPT` sends a prompt on launch
         // so a turn can be verified without a composer. Here rather than on
         // connect, which a resume would fire again.
-        if let Ok(prompt) = std::env::var("CYDONIA_TEST_PROMPT") {
+        if let Ok(prompt) = std::env::var("ARBOS_TEST_PROMPT") {
             let id = this
                 .active_id()
                 .or_else(|| this.new_session(settings::kernel_agent(), None, cx));
@@ -215,6 +267,7 @@ impl Workspace {
 
     fn save(&self) {
         state::save(&State {
+            version: state::STATE_VERSION,
             projects: self.projects.iter().map(|p| p.place().encode()).collect(),
             recents: self.recents.iter().map(|p| p.encode()).collect(),
             active: self.active.unwrap_or_default(),
@@ -226,16 +279,19 @@ impl Workspace {
             hue: self.tint.hue,
             chroma: self.tint.chroma,
             last: self.last.clone(),
-            names: self
-                .projects
-                .iter()
-                .filter_map(|project| {
-                    let name = project.nickname.as_deref()?.trim();
-                    (!name.is_empty()).then(|| (project.place().encode(), name.to_string()))
-                })
-                .collect(),
+            // Names live in each project's `.arbos/project.toml` now; the
+            // map stays readable for the one-time migration above.
+            names: BTreeMap::new(),
             dismissed: self.dismissed.clone(),
+            permissions_seen: self.permissions_seen,
+            frame: self.frame,
         });
+    }
+
+    /// The first-launch sheet has been shown; it will not open on its own again.
+    pub fn mark_permissions_seen(&mut self) {
+        self.permissions_seen = true;
+        self.save();
     }
 
     // ── agents ───────────────────────────────────────────────────────
@@ -453,6 +509,17 @@ impl Workspace {
     ///
     /// Nothing is re-armed. The pump reads the interval on each pass, so the
     /// next event to land uses whatever this leaves behind.
+    /// Which builds this machine updates itself to. The bar along the bottom
+    /// of the window reads it back on the next frame and asks the new
+    /// channel's feed what it has.
+    pub fn set_update_channel(&mut self, channel: arbos_update::Channel, cx: &mut Context<Self>) {
+        if settings::set_update_channel(channel).is_err() {
+            return;
+        }
+        self.settings.update.channel = channel.as_str().to_owned();
+        cx.notify();
+    }
+
     pub fn set_watch_bounce(&mut self, ms: u64, cx: &mut Context<Self>) {
         let ms = ms.clamp(watch::BOUNCE_RANGE.0, watch::BOUNCE_RANGE.1);
         if settings::set_watch_bounce(ms).is_err() {
@@ -480,6 +547,15 @@ impl Workspace {
     /// Kept as a global as well, the way the caret and the text size are: the
     /// transcript paints while this workspace is borrowed, so it cannot read
     /// the field off it.
+    /// The window moved or was resized: remember its frame for the next
+    /// launch.
+    pub fn set_frame(&mut self, frame: [f32; 4]) {
+        if self.frame != Some(frame) {
+            self.frame = Some(frame);
+            self.save();
+        }
+    }
+
     pub fn set_bionic_reading(&mut self, on: bool, cx: &mut Context<Self>) {
         self.bionic_reading = on;
         reading::set_bionic(on, cx);
@@ -515,6 +591,32 @@ impl Workspace {
     }
 
     // ── projects ─────────────────────────────────────────────────────
+
+    /// The home tab's place: `~/.arbos` on this machine. `None` only where
+    /// there is no home directory to put it in.
+    pub fn home_place() -> Option<Place> {
+        dirs::home_dir().map(|home| Place::local(home.join(".arbos")))
+    }
+
+    /// The Home tab's index, when it is open.
+    pub fn home_index(&self) -> Option<usize> {
+        self.projects.iter().position(Self::is_home)
+    }
+
+    /// Whether this project is the home tab.
+    pub fn is_home(project: &Project) -> bool {
+        Self::home_place().is_some_and(|home| home == project.place())
+    }
+
+    /// The tab's label: "Home" for an unnamed home tab, else the name the
+    /// project carries — from its `project.toml`, or its folder.
+    pub fn tab_label(project: &Project) -> String {
+        if Self::is_home(project) && project.identity.label().is_none() {
+            "Home".into()
+        } else {
+            project.name()
+        }
+    }
 
     /// A project just added starts talking to an agent; one already on the
     /// rail is only brought forward.
@@ -684,12 +786,13 @@ impl Workspace {
         if let Some(project) = self.projects.get_mut(ix)
             && project.focus.is_none()
         {
-            if let Some(id) = project
-                .sessions
-                .iter()
-                .find(|chat| !chat.closed)
-                .map(|chat| chat.id)
-            {
+            if let Some(id) = project.main_session().or_else(|| {
+                project
+                    .sessions
+                    .iter()
+                    .find(|chat| !chat.closed)
+                    .map(|chat| chat.id)
+            }) {
                 project.focus_on(id);
             }
         }
@@ -866,13 +969,53 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let ix = self.active_ix()?;
+        self.new_session_in(ix, entry, seed, cx)
+    }
+
+    /// Open a root chat in the project at `ix`, whichever is in front. The
+    /// launch merge makes a project's main chat this way.
+    fn new_session_in(
+        &mut self,
+        ix: usize,
+        entry: settings::Agent,
+        seed: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<u64> {
+        let place = self.projects.get(ix)?.place();
         let id = self.next_id;
         self.next_id += 1;
-        let mut chat = ChatSession::connect(id, entry, self.projects[ix].place(), seed, cx);
+        let mut chat = ChatSession::connect(id, entry, place, seed, cx);
         let project = &mut self.projects[ix];
         chat.rank = project.front_rank(None);
         project.sessions.push(chat);
         project.focus_on(id);
+        self.push_snapshot(ix);
+        cx.notify();
+        Some(id)
+    }
+
+    /// Open a chat nested under the active project's main chat — a side
+    /// thread of the person's own, listed with the sub-agents in the panel.
+    /// The project has one main chat; ⌘N does not make a second.
+    pub fn new_child_session(&mut self, cx: &mut Context<Self>) -> Option<u64> {
+        let ix = self.active_ix()?;
+        let Some(parent) = self.projects[ix].main_session() else {
+            return self.new_session_in(ix, settings::kernel_agent(), None, cx);
+        };
+        let parent_kernel = self.projects[ix]
+            .session(parent)
+            .and_then(|chat| chat.agent_session.clone());
+        let id = self.next_id;
+        self.next_id += 1;
+        let place = self.projects[ix].place();
+        let mut chat = ChatSession::connect(id, settings::kernel_agent(), place, None, cx);
+        chat.parent = Some(parent);
+        chat.parent_kernel = parent_kernel;
+        let project = &mut self.projects[ix];
+        chat.rank = project.front_rank(Some(parent));
+        project.sessions.push(chat);
+        project.focus_on(id);
+        self.number_delegates(ix);
         self.push_snapshot(ix);
         cx.notify();
         Some(id)
@@ -1071,6 +1214,12 @@ impl Workspace {
             .position(|project| project.session(id).is_some())
     }
 
+    /// The folder of the project that holds chat `id`, for a re-read by
+    /// path (`reload_project`).
+    pub fn project_root_of(&self, id: u64) -> Option<PathBuf> {
+        self.project_of(id).map(|ix| self.projects[ix].path.clone())
+    }
+
     /// Read the project's filed sessions back, minting an id for each — ids
     /// mean nothing across a launch, so a reloaded one is as new as any. The
     /// agent is resolved by name; a session whose agent has since left
@@ -1091,7 +1240,15 @@ impl Workspace {
             // Old files may still name a catalog agent. The runtime is
             // always this kernel.
             let entry = settings::kernel_agent();
-            let chat = ChatSession::restore(id, file, place.clone(), entry, stored);
+            let mut chat = ChatSession::restore(id, file, place.clone(), entry, stored);
+            // A worker's kind does not change; read it back off its
+            // `agent.md`, live or archived, so the mark survives a relaunch.
+            if let Some(sid) = chat.agent_session.clone()
+                && let Some((readonly, kind)) = kernel::agent_flags(&place, &sid)
+            {
+                chat.readonly = readonly;
+                chat.agent_kind = kind;
+            }
             self.projects[ix].sessions.push(chat);
         }
         self.resolve_parents(ix);
@@ -1128,6 +1285,23 @@ impl Workspace {
             && !load.contains(&sid)
         {
             load.push(sid);
+        }
+        // A chat this window kept whose prompts have no kernel clock yet
+        // (typed here, never read back): its history lends the stamps.
+        for chat in self
+            .projects
+            .get(ix)
+            .map(|p| p.sessions.as_slice())
+            .unwrap_or_default()
+        {
+            if let Some(sid) = chat.agent_session.clone()
+                && !load.contains(&sid)
+                && chat.items.iter().any(|item| {
+                    matches!(item, crate::model::session::ChatItem::User(m) if m.sent_at.is_none())
+                })
+            {
+                load.push(sid);
+            }
         }
         let known: HashSet<String> = self
             .projects
@@ -1230,8 +1404,17 @@ impl Workspace {
                     if chat.updated < updated {
                         chat.updated = updated;
                     }
+                    if row.readonly {
+                        chat.readonly = true;
+                    }
+                    if chat.agent_kind.is_none() {
+                        chat.agent_kind = row.agent_kind.clone();
+                    }
+                    // The kernel's parent wins where it names one. Where it
+                    // names none the desktop's stands: a ⌘N sub-chat is
+                    // nested here and nowhere the kernel can see.
                     let parent = row.parent.clone().filter(|p| !p.is_empty());
-                    if chat.parent_kernel != parent {
+                    if parent.is_some() && chat.parent_kernel != parent {
                         chat.parent_kernel = parent;
                         chat.parent = None;
                         chat.flush();
@@ -1262,8 +1445,10 @@ impl Workspace {
                     if chat.updated < updated {
                         chat.updated = updated;
                     }
-                    chat.parent_kernel = row.parent.clone().filter(|p| !p.is_empty());
-                    chat.parent = None;
+                    if let Some(parent) = row.parent.clone().filter(|p| !p.is_empty()) {
+                        chat.parent_kernel = Some(parent);
+                        chat.parent = None;
+                    }
                     chat.flush();
                 }
                 known.insert(row.id, id);
@@ -1282,6 +1467,8 @@ impl Workspace {
                 updated,
             );
             chat.parent_kernel = row.parent.filter(|p| !p.is_empty());
+            chat.readonly = row.readonly;
+            chat.agent_kind = row.agent_kind.clone();
             if let Some(model) = replay.model {
                 chat.model = Some(model);
             }
@@ -1304,12 +1491,22 @@ impl Workspace {
             self.drop_foreign_sessions(ix, &kernel_ids);
         }
         self.resolve_parents(ix);
+        // A project whose chats all came from the kernel has had nothing to
+        // focus until now. The main chat is what the column shows.
+        if self.projects[ix].focus.is_none()
+            && let Some(main) = self.projects[ix].main_session()
+        {
+            self.projects[ix].focus_on(main);
+        }
         if launch {
             let empty_focus = self.projects[ix]
                 .active_session()
                 .is_none_or(|chat| chat.items.is_empty());
-            if self.projects[ix].sessions.is_empty() {
-                self.new_session(settings::kernel_agent(), None, cx);
+            // Every project has one main chat. A folder opened for the
+            // first time, or one whose chats were all archived, gets it
+            // here — once the kernel has said what it already holds.
+            if self.projects[ix].main_session().is_none() {
+                self.new_session_in(ix, settings::kernel_agent(), None, cx);
             } else if empty_focus
                 && let Some(id) = self.projects[ix]
                     .sessions
@@ -1391,12 +1588,27 @@ impl Workspace {
             .iter()
             .filter_map(|chat| chat.agent_session.clone().map(|sid| (sid, chat.id)))
             .collect();
-        for chat in &mut self.projects[ix].sessions {
-            if chat.parent.is_none() {
-                chat.parent = chat
+        let wanted: Vec<(u64, u64)> = self.projects[ix]
+            .sessions
+            .iter()
+            .filter(|chat| chat.parent.is_none())
+            .filter_map(|chat| {
+                let parent = chat
                     .parent_kernel
                     .as_ref()
-                    .and_then(|sid| by_kernel.get(sid).copied());
+                    .and_then(|sid| by_kernel.get(sid).copied())?;
+                Some((chat.id, parent))
+            })
+            .collect();
+        for (id, parent) in wanted {
+            // A filed parent that is this chat's own descendant would close
+            // the tree into a ring; the file is wrong, the link stays off.
+            if !self.projects[ix].can_parent(id, parent) {
+                eprintln!("session {id}: parent {parent} would make a ring; left unparented");
+                continue;
+            }
+            if let Some(chat) = self.projects[ix].session_mut(id) {
+                chat.parent = Some(parent);
             }
         }
         self.number_delegates(ix);
@@ -1429,6 +1641,17 @@ impl Workspace {
         let Some(chat) = found else {
             return;
         };
+        // A worker the kernel archived has no agent to speak to; its
+        // transcript stays to read. Say so instead of holding the words.
+        if chat.agent_gone() {
+            chat.notice(
+                true,
+                "this agent is archived: its history stays, but it takes no more messages",
+            );
+            chat.flush();
+            cx.notify();
+            return;
+        }
         if chat.closed {
             chat.closed = false;
         }
@@ -1453,9 +1676,10 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Stop the in-flight turn and send `content` plus anything already
-    /// queued, as the next prompt on this chat.
-    pub fn force(&mut self, id: u64, content: impl Into<Prompt>, cx: &mut Context<Self>) {
+    /// Hold `content` for the next turn on this chat: the kernel keeps it
+    /// and runs it when the turn in flight ends. See
+    /// [`ChatSession::queue_next`].
+    pub fn queue_next(&mut self, id: u64, content: impl Into<Prompt>, cx: &mut Context<Self>) {
         let content = content.into();
         let found = self
             .projects
@@ -1471,10 +1695,7 @@ impl Workspace {
         if chat.idle() && chat.resumable() {
             chat.resume(cx);
         }
-        chat.force(content);
-        if chat.idle() && chat.resumable() && !chat.queue.is_empty() {
-            chat.resume(cx);
-        }
+        chat.queue_next(content);
         let file = chat.file.clone();
         if let (Some(file), Some(ix)) = (file, self.project_of(id)) {
             self.remember(
@@ -1488,6 +1709,64 @@ impl Workspace {
 
     /// Stop the in-flight turn. If the attach socket died, say Stopped
     /// and attach again so the next send works — no kernel jargon.
+    /// How many automatic reconnects a chat gets before it waits for a
+    /// hand.
+    pub const RECONNECT_TRIES: u32 = 30;
+
+    /// The connection failed or dropped: try again after 2, 4, 8, 16, 32,
+    /// then 60 s, up to [`Self::RECONNECT_TRIES`] times — a first start
+    /// that lost the spawn race to another row, a remote tunnel, a local
+    /// kernel that stopped. The row under the composer counts down; a Send
+    /// or Stop meanwhile tries at once.
+    pub fn schedule_reconnect(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(chat) = self.session_mut(id) else {
+            return;
+        };
+        if !matches!(chat.connection, crate::model::session::Connection::Lost) {
+            return;
+        }
+        // A timer already waits for this very connection generation.
+        if chat.reconnect_at.is_some() && chat.reconnect_gen == chat.attach_gen {
+            return;
+        }
+        if chat.reconnect_attempt >= Self::RECONNECT_TRIES {
+            chat.notice(
+                true,
+                "connection lost; retries stopped — send a message or press Reconnect to try again",
+            );
+            chat.flush();
+            return;
+        }
+        chat.reconnect_attempt += 1;
+        let attempt = chat.reconnect_attempt;
+        let delay = Duration::from_secs(2u64.saturating_pow(attempt.min(6)).min(60));
+        chat.reconnect_at = Some(std::time::Instant::now() + delay);
+        chat.reconnect_gen = chat.attach_gen;
+        let generation = chat.attach_gen;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |workspace, cx| {
+                let go = workspace.session_mut(id).is_some_and(|chat| {
+                    if chat.attach_gen != generation {
+                        // A newer generation owns the retry now.
+                        return false;
+                    }
+                    chat.reconnect_at = None;
+                    chat.resumable()
+                        && matches!(chat.connection, crate::model::session::Connection::Lost)
+                });
+                if go {
+                    if let Some(chat) = workspace.session_mut(id) {
+                        chat.resume(cx);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn cancel(&mut self, id: u64, cx: &mut Context<Self>) {
         let found = self
             .projects
@@ -1576,6 +1855,109 @@ impl Workspace {
         self.fork_session(id, cx);
     }
 
+    /// Thumbs on a turn's answer. Stored on the prompt that started the
+    /// turn (so it reopens lit) and appended to the agent's
+    /// `feedback.jsonl` in the place, for QA and the kernel. Clicking the
+    /// lit thumb clears the vote.
+    /// Try Live (A-02): open or close the live view of the agent's screen.
+    /// While open, the kernel is asked for a frame every two seconds; for
+    /// an agent on another machine the kernel forwards the request over
+    /// its link, so the window sees that machine's screen.
+    pub fn toggle_live(&mut self, id: u64, cx: &mut Context<Self>) {
+        let mut opened = false;
+        self.with_session(id, cx, |chat| {
+            chat.live_open = !chat.live_open;
+            opened = chat.live_open;
+            if opened {
+                chat.request_screen();
+            }
+        });
+        if !opened {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let keep = this
+                    .update(cx, |workspace, cx| {
+                        let mut open = false;
+                        workspace.with_session(id, cx, |chat| {
+                            open = chat.live_open;
+                            if open {
+                                chat.request_screen();
+                            }
+                        });
+                        open
+                    })
+                    .unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// "Rewind here" under a turn: chat and files back to before its prompt.
+    pub fn rewind_turn(&mut self, id: u64, turn: usize, cx: &mut Context<Self>) {
+        self.with_session(id, cx, |chat| chat.rewind(turn, true));
+    }
+
+    pub fn vote_turn(&mut self, id: u64, turn: usize, value: i8, cx: &mut Context<Self>) {
+        let mut line: Option<serde_json::Value> = None;
+        self.with_session(id, cx, |chat| {
+            let answer = transcript::answer_of(&chat.items, turn).unwrap_or_default();
+            // The footer's turn may start at a `From` block; the vote goes
+            // on the user prompt that began it.
+            let Some(start) = chat
+                .items
+                .iter()
+                .take(turn + 1)
+                .rposition(|item| matches!(item, ChatItem::User(_)))
+            else {
+                return;
+            };
+            let Some(ChatItem::User(message)) = chat.items.get_mut(start) else {
+                return;
+            };
+            let next = if message.feedback == Some(value) {
+                None
+            } else {
+                Some(value)
+            };
+            message.feedback = next;
+            chat.flush();
+            if chat.host.is_none() {
+                if let Some(agent) = chat.agent_session.as_deref() {
+                    line = Some(serde_json::json!({
+                        "ts": arbos_core::now_ms(),
+                        "agent": agent,
+                        "turn": turn,
+                        "vote": next.unwrap_or(0),
+                        "answer": answer.chars().take(200).collect::<String>(),
+                    }));
+                    let path = chat
+                        .cwd
+                        .join(".arbos")
+                        .join("agents")
+                        .join(agent)
+                        .join("feedback.jsonl");
+                    if let Some(v) = &line {
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
+                            use std::io::Write as _;
+                            let _ = writeln!(f, "{v}");
+                        }
+                    }
+                }
+            }
+        });
+        cx.notify();
+    }
+
     /// Whole-log copy of a chat as a new root. The source stays where it is.
     pub fn fork_session(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(ix) = self.project_of(id) else {
@@ -1591,13 +1973,16 @@ impl Workspace {
         };
         let place = self.projects[ix].place();
         let title = self.display_label(id);
+        // A fork taken mid-run copies the prompt the original is still
+        // answering; the copy says so under it (Jacob, 2026-09-17-1).
+        let source_busy = self.session(id).is_some_and(|chat| chat.busy());
         cx.spawn(async move |this, cx| {
             let cloned = cx
                 .background_executor()
                 .spawn(async move { kernel::clone_session(&place, &sid) })
                 .await;
             let _ = this.update(cx, |workspace, cx| match cloned {
-                Ok(new_sid) => workspace.adopt_clone(ix, &new_sid, &title, cx),
+                Ok(new_sid) => workspace.adopt_clone(ix, &new_sid, &title, source_busy, cx),
                 Err(err) => {
                     workspace.with_session(id, cx, |chat| {
                         chat.notice(true, &format!("could not fork: {err:#}"));
@@ -1613,6 +1998,7 @@ impl Workspace {
         ix: usize,
         kernel_id: &str,
         source_title: &str,
+        source_busy: bool,
         cx: &mut Context<Self>,
     ) {
         if self.projects.get(ix).is_some_and(|project| {
@@ -1651,6 +2037,14 @@ impl Workspace {
         );
         if let Some(model) = replay.model {
             chat.model = Some(model);
+        }
+        // The copy ends on a prompt the original is still answering: with
+        // nothing under it and an idle composer it read as a chat that
+        // never replied ("Forked the chat mid run no response from sub
+        // agent", Jacob's first report). Say what it is, once.
+        let unanswered_tail = matches!(chat.items.last(), Some(ChatItem::User(_)));
+        if source_busy && unanswered_tail {
+            chat.notice(false, FORKED_MID_TURN);
         }
         chat.rank = self.projects[ix].front_rank(None);
         chat.flush();
@@ -1698,17 +2092,14 @@ impl Workspace {
             .or_else(|| self.projects.iter().find_map(by_id))
     }
 
-    /// The name in the sidebar. Empty clears it back to the folder's name.
-    pub fn rename_project(&mut self, key: &str, name: String, cx: &mut Context<Self>) {
-        let name = name.trim().to_string();
-        if let Some(project) = self
-            .projects
-            .iter_mut()
-            .find(|project| project.place().encode() == key)
-        {
-            project.nickname = (!name.is_empty()).then_some(name);
+    /// Put a face on the project at `ix` — name, glyph, colour — and file
+    /// it in the folder's `.arbos/project.toml`. An empty name clears it
+    /// back to the folder's own.
+    pub fn set_identity(&mut self, ix: usize, mut identity: Identity, cx: &mut Context<Self>) {
+        identity.name = identity.label().map(str::to_string);
+        if let Some(project) = self.projects.get_mut(ix) {
+            project.set_identity(identity);
         }
-        self.save();
         cx.notify();
     }
 
@@ -1901,6 +2292,18 @@ impl Workspace {
         self.with_session(id, cx, |chat| chat.set_mode(&mode_id));
     }
 
+    /// Plan mode with approval (P-10): the agent wrote its checklist in
+    /// plan mode (read-only); the user approves, so the mode becomes auto
+    /// and the next turn executes the list.
+    pub fn approve_plan(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.with_session(id, cx, |chat| chat.set_mode("auto"));
+        self.send(
+            id,
+            "Plan approved. Execute your checklist now: work the open items in order, check each off with plan check and a one-line readout as you go, and report when done.".to_string(),
+            cx,
+        );
+    }
+
     /// Switch the model later turns run on. See [`ChatSession::set_model`].
     pub fn set_session_model(&mut self, id: u64, model: String, cx: &mut Context<Self>) {
         self.models.current = model.clone();
@@ -1927,15 +2330,53 @@ impl Workspace {
     /// conversation back.
     pub fn session_connected(&mut self, id: u64, cx: &mut Context<Self>) {
         self.with_session(id, cx, |chat| {
+            // The kernel's copy first: a "reconnected" line is this
+            // window's to say, not a transcript record to seed. And what it
+            // wrote while no window was attached comes in before anything
+            // live does (F-105).
+            chat.adopt_kernel_tail();
             chat.sync_kernel_history();
+            if chat.reconnect_attempt > 0 {
+                chat.notice(false, "reconnected");
+            }
+            chat.reconnect_attempt = 0;
+            chat.reconnect_at = None;
+            // What the agent is on right now, from its status file, so a
+            // fresh attach draws the line without waiting for a frame.
+            if chat.host.is_none()
+                && let Some(sid) = chat.agent_session.as_deref()
+            {
+                chat.status = arbos_core::status::read(&arbos_core::Place::new(&chat.cwd), sid)
+                    .map(|s| s.step);
+            }
+            // Whatever was typed while the connection was down goes now, in order.
             chat.drain();
             chat.flush();
         });
         if let Some(ix) = self.project_of(id) {
+            self.stamp_children(ix, id);
             self.resolve_parents(ix);
             self.push_snapshot(ix);
         }
         cx.notify();
+    }
+
+    /// A sub-chat opened under a parent that had no kernel id yet (⌘N on a
+    /// fresh main chat) was filed without one. Now the parent has it, write
+    /// it on each child so a relaunch nests them again.
+    fn stamp_children(&mut self, ix: usize, parent: u64) {
+        let Some(parent_kernel) = self.projects[ix]
+            .session(parent)
+            .and_then(|chat| chat.agent_session.clone())
+        else {
+            return;
+        };
+        for chat in &mut self.projects[ix].sessions {
+            if chat.parent == Some(parent) && chat.parent_kernel.is_none() {
+                chat.parent_kernel = Some(parent_kernel.clone());
+                chat.flush();
+            }
+        }
     }
 
     /// The session the chat pane would show. Gated, and it is the gate that
@@ -1998,6 +2439,41 @@ impl Workspace {
         project.surfaces.retain(|surface| surface.id != id);
         self.push_snapshot(ix);
         cx.notify();
+    }
+
+    /// Cursor's Review: the working tree's diff (one file, or all of it),
+    /// written under the project's desktop folder and opened in the column
+    /// as code.
+    pub fn review_changes(
+        &mut self,
+        root: &std::path::Path,
+        file: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let text = crate::model::changes::GitChanges::diff_text(root, file);
+        let path = crate::model::changes::GitChanges::review_path(root, file);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&path, text).is_err() {
+            return;
+        }
+        let title = match file {
+            Some(f) => format!("{f} · changes"),
+            None => "Changes".to_string(),
+        };
+        let Some(owner) = self.active_id() else {
+            return;
+        };
+        self.open_shown(
+            owner,
+            path.to_string_lossy().into_owned(),
+            title,
+            "code".to_string(),
+            None,
+            None,
+            cx,
+        );
     }
 
     /// Something the agent put under its chat: a file it `show`ed, or a
@@ -2066,6 +2542,8 @@ impl Workspace {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| self.job_log(ix, owner, &path)),
                 id: path,
+                live: String::new(),
+                done: None,
             },
             SurfaceKind::Panel => Bind::Path(PathBuf::from(path)),
         };
@@ -2088,9 +2566,24 @@ impl Workspace {
                 _ => false,
             },
         );
-        self.projects[ix].focus_surface(owner, id);
-        if self.active == Some(ix) {
-            cx.emit(PaneRequest::Surface(id));
+        // The surface comes to the column for the chat that is in front. A
+        // worker's terminal or job opening under its parent's turn goes to
+        // the panel's Processes and stays there: the view does not jump
+        // from the conversation to a sub-agent's shell.
+        let in_front = self.projects[ix]
+            .focused_agent()
+            .is_none_or(|focused| focused == owner);
+        // A process row never takes the column on its own: the kernel opens
+        // one for any command past twenty seconds (#362), and a board over
+        // the chat, composer gone, is not what a person mid-sentence wants
+        // — Jacob's screen would have swapped to `python3 bubble_sort.py`
+        // while he typed. It lands in the panel's Processes, one click away.
+        let takes_column = in_front && surface_kind != SurfaceKind::Process;
+        if takes_column {
+            self.projects[ix].focus_surface(owner, id);
+            if self.active == Some(ix) {
+                cx.emit(PaneRequest::Surface(id));
+            }
         }
         self.push_snapshot(ix);
         cx.notify();
@@ -2120,8 +2613,104 @@ impl Workspace {
         }
     }
 
+    /// A detached job ended: the kernel closes its board row, but the
+    /// output stays readable here. The row keeps its streamed tail and
+    /// exit status until the user closes it; only the oldest finished rows
+    /// go when more than `KEEP_FINISHED` of an owner's have piled up.
+    pub fn finish_shown_process(&mut self, owner: u64, kernel_id: &str, cx: &mut Context<Self>) {
+        const KEEP_FINISHED: usize = 3;
+        let Some(ix) = self.project_of(owner) else {
+            return;
+        };
+        let project = &mut self.projects[ix];
+        let Some(pos) = project.surfaces.iter().position(|surface| {
+            surface.owner == Some(owner) && surface.kernel_id() == Some(kernel_id)
+        }) else {
+            return;
+        };
+        if let Bind::Process { done, log, .. } = &mut project.surfaces[pos].bind
+            && done.is_none()
+        {
+            // The job frame with `running: false` usually came first; when
+            // it did not (a remote place, a missed tick), read the exit the
+            // wrapper shell wrote.
+            let code = log
+                .parent()
+                .and_then(|dir| std::fs::read_to_string(dir.join("exit")).ok())
+                .and_then(|s| s.trim().parse::<i32>().ok());
+            *done = Some(code);
+        }
+        let mut finished: Vec<(u128, SurfaceId)> = project
+            .surfaces
+            .iter()
+            .filter(|s| s.owner == Some(owner))
+            .filter_map(|s| match &s.bind {
+                Bind::Process { done: Some(_), .. } => Some((s.touched, s.id)),
+                _ => None,
+            })
+            .collect();
+        finished.sort_by_key(|(touched, _)| *touched);
+        let extra: Vec<SurfaceId> = finished
+            .iter()
+            .take(finished.len().saturating_sub(KEEP_FINISHED))
+            .map(|(_, id)| *id)
+            .collect();
+        for id in extra {
+            self.close_surface(id, cx);
+        }
+        self.push_snapshot(ix);
+        cx.notify();
+    }
+
     /// The agent's browser page moved, or sent a picture. Creates the row
     /// if the open was missed; never takes the column on its own.
+    /// New output from one of `owner`'s detached jobs. Appended to the
+    /// process row's streamed tail (capped), so the row shows the job as it
+    /// runs — on a remote place too, where the journal file is out of reach.
+    pub fn job_output(
+        &mut self,
+        owner: u64,
+        job: String,
+        delta: String,
+        running: bool,
+        exit: Option<i32>,
+        cx: &mut Context<Self>,
+    ) {
+        const LIVE_CAP: usize = 64 * 1024;
+        if !delta.is_empty()
+            && let Some(chat) = self.session_mut(owner)
+        {
+            chat.mark_progress();
+        }
+        let Some(ix) = self.project_of(owner) else {
+            return;
+        };
+        let held = self.projects[ix]
+            .surfaces
+            .iter_mut()
+            .find(|surface| surface.owner == Some(owner) && surface.kernel_id() == Some(&job));
+        let Some(surface) = held else {
+            return;
+        };
+        let Bind::Process { live, done, .. } = &mut surface.bind else {
+            return;
+        };
+        live.push_str(&delta);
+        if live.len() > LIVE_CAP {
+            let cut = live.len() - LIVE_CAP;
+            let at = live
+                .char_indices()
+                .map(|(i, _)| i)
+                .find(|&i| i >= cut)
+                .unwrap_or(cut);
+            live.replace_range(..at, "");
+        }
+        if !running {
+            *done = Some(exit);
+        }
+        cx.notify();
+    }
+
     pub fn browser_moved(
         &mut self,
         owner: u64,
@@ -2216,8 +2805,14 @@ impl Workspace {
                 .session(owner)
                 .and_then(|chat| chat.agent_session.clone());
             let mut dirty = false;
+            let ring = !self.projects[ix].can_parent(id, owner);
+            if ring {
+                eprintln!(
+                    "session {id} ({kernel_id}) listed as a child of {owner}, its own descendant; the link stays as it was"
+                );
+            }
             if let Some(chat) = self.projects[ix].session_mut(id) {
-                if chat.parent != Some(owner) {
+                if !ring && chat.parent != Some(owner) {
                     chat.parent = Some(owner);
                     dirty = true;
                 }
@@ -2255,6 +2850,8 @@ impl Workspace {
         // The kernel named the child after its brief; the row says that,
         // not "Delegate N", from the first frame.
         let name = kernel::agent_name(&self.projects[ix].place(), &kernel_id);
+        let brief = kernel::agent_brief(&self.projects[ix].place(), &kernel_id);
+        let flags = kernel::agent_flags(&self.projects[ix].place(), &kernel_id);
         let mut chat = ChatSession::adopt(
             id,
             entry,
@@ -2265,6 +2862,20 @@ impl Workspace {
             cx,
         );
         chat.name = name;
+        if let Some((readonly, kind)) = flags {
+            chat.readonly = readonly;
+            chat.agent_kind = kind;
+        }
+        // Cursor shows a subagent's brief as its first card; the kernel
+        // wrote it as the worker's first wake.
+        if chat.items.is_empty()
+            && let Some(brief) = brief
+        {
+            chat.items
+                .push(ChatItem::User(crate::model::attachment::UserMessage::from(
+                    brief,
+                )));
+        }
         chat.rank = self.projects[ix].front_rank(Some(owner));
         self.projects[ix].sessions.push(chat);
         self.number_delegates(ix);
@@ -2296,7 +2907,15 @@ impl Workspace {
         if self.reap_delegates(ix, cx) {
             cx.notify();
         }
-        if ended && delegate {
+        // Only a Go delegate (a one-shot run) leaves the tree when its
+        // turn ends. A rust-kernel child is an agent folder with a plan of
+        // its own: it stays, marked done, until archived — the parent's
+        // transcript and the task rail keep pointing at it.
+        let one_shot = self.projects[ix]
+            .session(id)
+            .and_then(|chat| chat.agent_session.as_deref().map(kernel::go_kernel_id))
+            .unwrap_or(false);
+        if ended && delegate && one_shot {
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(session::DELEGATE_GRACE + Duration::from_millis(100))
@@ -2308,6 +2927,48 @@ impl Workspace {
                 });
             })
             .detach();
+        }
+    }
+
+    /// This chat's direct sub-agents, in tree order, as the transcript and
+    /// the task rail show them. Finished ones stay: the record of what was
+    /// delegated is part of the parent's story.
+    pub fn child_summaries(&self, id: u64) -> Vec<session::ChildSummary> {
+        let Some(ix) = self.project_of(id) else {
+            return Vec::new();
+        };
+        let project = &self.projects[ix];
+        let mut kids: Vec<&ChatSession> = project
+            .sessions
+            .iter()
+            .filter(|chat| chat.parent == Some(id))
+            .collect();
+        kids.sort_by(|a, b| {
+            a.delegate_number
+                .cmp(&b.delegate_number)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        kids.into_iter()
+            .map(|chat| session::ChildSummary {
+                id: chat.id,
+                kernel_id: chat.agent_session.clone(),
+                title: self.display_label(chat.id),
+                state: chat.child_state(),
+                readonly: chat.readonly,
+                agent_kind: chat.agent_kind.clone(),
+                step: chat.current_step(),
+            })
+            .collect()
+    }
+
+    /// Put the current child summaries on `id` so the transcript can draw
+    /// them without reaching into other sessions. Cheap; call before a draw.
+    pub fn refresh_children(&mut self, id: u64) {
+        let kids = self.child_summaries(id);
+        if let Some(chat) = self.session_mut(id)
+            && chat.children != kids
+        {
+            chat.children = kids;
         }
     }
 

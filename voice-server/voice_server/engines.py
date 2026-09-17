@@ -14,14 +14,14 @@ from .kernel import KernelClient
 from .protocol import ASR_RATE
 from .reply import ReplyBackend, build_reply
 from .tts import TTS, build_tts
-from .vad import SileroVAD
+from .vad import EnergyVAD, SileroVAD, build_vad
 
 log = logging.getLogger("voice.engines")
 
 
 @dataclass
 class Engines:
-    vad: SileroVAD
+    vad: SileroVAD | EnergyVAD
     asr: ASR
     tts: TTS
     reply: ReplyBackend | None
@@ -29,26 +29,40 @@ class Engines:
     engine: str  # "duplex" or "pipeline"
     duplex_url: str
     duplex_name: str
-    hub_url: str | None = None
-    hub_token: str | None = None
+    hub_url: str = ""
+    hub_token: str = ""
+    hub_machine: str = ""
+    auto_approve: bool = False  # per-call hub attaches: never
+
+    def own_project_names(self) -> set[str]:
+        """How a caller may name this gateway's own kernel: the place folder's name, and
+        `<hub machine>/<name>` when the machine is known."""
+        place = str(getattr(self.kernel, "place", "") or "")
+        names: set[str] = set()
+        if place:
+            leaf = place.rstrip("/").rsplit("/", 1)[-1]
+            names.add(leaf)
+            if self.hub_machine:
+                names.add(f"{self.hub_machine}/{leaf}")
+        if self.hub_machine:
+            names.add(self.hub_machine)
+        return names
 
     @classmethod
     async def load(cls, args) -> "Engines":
         t0 = time.monotonic()
         kernel: KernelClient | None = None
         if args.kernel or args.kernel_place:
-            kernel = KernelClient(url=args.kernel, place=args.kernel_place, token=args.kernel_token,
-                                  auto_approve=not args.no_auto_approve)
+            kernel = KernelClient(url=args.kernel, place=args.kernel_place, auto_approve=bool(getattr(args, "auto_approve", False)),
+                                  token=getattr(args, "kernel_token", "") or "")
+            if kernel.auto_approve:
+                log.warning("--auto-approve: the gateway answers its own kernel's allow asks unasked")
             try:
                 await kernel.connect()
-            except PermissionError as exc:
-                raise SystemExit(f"could not attach to the Arbos kernel: {exc}")
             except Exception as exc:
-                # A remote kernel may be down right now; serve calls anyway and keep dialing.
-                log.warning("kernel %s not reachable at start (%s); will keep trying", kernel.display, type(exc).__name__)
-                kernel.start_background()
+                raise SystemExit(f"could not attach to the Arbos kernel: {exc}")
 
-        vad = SileroVAD(f"{args.model_dir}/silero_vad.onnx")
+        vad = build_vad(f"{args.model_dir}/silero_vad.onnx")
         asr = build_asr(
             args.asr, model=args.asr_model, device=args.device, compute_type=args.compute_type,
             beam_size=args.beam_size, threads=args.threads,
@@ -69,17 +83,18 @@ class Engines:
         log.info(
             "engines ready in %.1fs: engine=%s duplex=%s asr=%s tts=%s reply=%s kernel=%s",
             time.monotonic() - t0, engine, duplex_name or "-", asr.name, tts.name,
-            reply.name if reply else "none",
-            ("attached" if kernel.connected else "dialing") if kernel else "none",
+            reply.name if reply else "none", "attached" if kernel else "none",
         )
         return cls(vad=vad, asr=asr, tts=tts, reply=reply, kernel=kernel, engine=engine,
                    duplex_url=args.duplex_url, duplex_name=duplex_name,
-                   hub_url=args.hub, hub_token=args.hub_token)
+                   hub_url=(getattr(args, "hub", None) or ""), hub_token=getattr(args, "hub_token", "") or "",
+                   hub_machine=getattr(args, "hub_machine", "") or "", auto_approve=False)
 
     async def warm_up(self, voice: str) -> None:
         """First calls are slow (kernel selection, lazy loads). Pay that before the first caller."""
         t0 = time.monotonic()
-        self.asr.transcribe(np.zeros(ASR_RATE, dtype=np.float32), partial=False, language="en")
+        if self.asr.name not in ("none", "mock"):  # dictation uses it on either engine
+            self.asr.transcribe(np.zeros(ASR_RATE, dtype=np.float32), partial=False, language="en")
         async for _ in self.tts.stream("Ready.", voice, 1.0):
             pass
         log.info("warm-up done in %.1fs", time.monotonic() - t0)

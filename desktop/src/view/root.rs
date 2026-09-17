@@ -1,9 +1,10 @@
 //! Root view: the window's grid, the state the chrome owns, and the frame
-//! the sidebar and the chat column are hung in.
+//! the tab bar, the chat column and the right-hand panel are hung in.
 
 use crate::{
     kernel,
     model::{
+        permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
         settings::Settings,
         state::{self, State},
@@ -11,22 +12,25 @@ use crate::{
     },
     view::{
         component::{
+            chat_search::{ChatSearch, ChatSearchEvent, Hit, PaletteAction},
             composer::{Composer, ComposerEvent, VoiceState},
+            feedback_sheet::{FeedbackSheet, FeedbackSheetEvent, Unavailable},
             menu::Menu,
             meter,
             opener::{Opener, OpenerEvent},
+            permissions_sheet::{PermissionsSheet, PermissionsSheetEvent},
+            tab_sheet::{TabSheet, TabSheetEvent},
         },
+        naming::Renaming,
         settings::{self, Section, SettingsWindow},
-        sidebar::{Renaming, Row, SessionDrop},
     },
 };
 use anyhow::Result;
 use bezel::{
     gpui::{
-        self, AnyElement, App, Axis, Bounds, Context, DragMoveEvent, Empty, Entity, FocusHandle,
-        Focusable as _, Hsla, KeyBinding, PathPromptOptions, Render, Task, TitlebarOptions,
-        UniformListScrollHandle, Window, WindowBounds, WindowHandle, WindowOptions, actions, div,
-        point, prelude::*, px, size,
+        self, AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable as _, Hsla,
+        KeyBinding, PathPromptOptions, Pixels, PromptLevel, Render, Task, TitlebarOptions, Window,
+        WindowBounds, WindowHandle, WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
     theme::{Material, TextStyle, Theme, Typeset, appearance},
@@ -36,19 +40,26 @@ use bezel::{
         input::{FieldEvent, TextField},
         menu::Cursor,
         stats::Stats,
-        widgets::{ButtonStyle, Buttons, Content, Layout, SPLIT_HANDLE_HIT, SplitDrag, SplitStyle},
+        widgets::{ButtonStyle, Buttons, Content},
     },
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 actions!(
-    cydonia,
+    arbos,
     [
         NewSession,
+        NewTab,
         OpenProject,
         CloseProject,
+        NextTab,
+        PrevTab,
         OpenSettings,
-        ToggleSidebar,
+        ShowPermissions,
+        ReportProblem,
+        TogglePanel,
         ShowChat,
+        ShowProject,
+        SearchChats,
         CommitName,
         DismissName,
         DismissMenu,
@@ -60,18 +71,39 @@ actions!(
         DeleteChat,
         ZoomIn,
         ZoomOut,
-        ZoomReset
+        ZoomReset,
+        StartCall,
+        EndCall,
+        ToggleMute
     ]
 );
 
+/// Attach files to the composer without the system's file dialog: what a
+/// drop does, as an action, so the driver (and a keymap) can do it too.
+#[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = arbos)]
+pub struct AttachPaths {
+    pub paths: Vec<String>,
+}
+
+/// Report a problem with one answer: the thumbs-down under it opens the
+/// review sheet anchored on that exchange. `seq` is the transcript line of
+/// the prompt that began the turn; without one the sheet takes the latest
+/// exchange, as Help › Report a Problem… does.
+#[derive(Clone, PartialEq, serde::Deserialize, schemars::JsonSchema, gpui::Action)]
+#[action(namespace = arbos)]
+pub struct ReportProblemAt {
+    pub seq: Option<u64>,
+}
+
 /// Claimed on the window's rest focus so Delete/Backspace archive the
 /// highlighted chat when no field is in front.
-const WINDOW_CONTEXT: &str = "CydoniaWindow";
+const WINDOW_CONTEXT: &str = "ArbosWindow";
 
 /// Claimed on the rename field so `enter` files the name and `escape` drops it.
-const RENAME_CONTEXT: &str = "CydoniaSessionName";
+const RENAME_CONTEXT: &str = "ArbosSessionName";
 
-fn name_field_entity(heading: bool, cx: &mut Context<Cydonia>) -> Entity<TextField> {
+fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField> {
     cx.new(|cx| {
         let field = TextField::new(cx)
             .with_frame(false)
@@ -85,18 +117,9 @@ fn name_field_entity(heading: bool, cx: &mut Context<Cydonia>) -> Entity<TextFie
     })
 }
 
-/// Cursor's Agents sidebar measures 267pt at a 1728pt window.
-const SIDEBAR_WIDTH: f32 = 260.;
-const SIDEBAR_WIDTH_MIN: f32 = 180.;
-const SIDEBAR_WIDTH_MAX: f32 = 420.;
-
-/// The sidebar's gutter: a row's outer margin, and the padding inside it.
-pub(crate) const SIDEBAR_GUTTER: f32 = 8.;
-
-/// How thick each column's material sits. Nothing paints beneath them, so these
-/// are absolute and independent: the sidebar is chrome and holds no long-form
-/// text, the panel is the column whose text has to win against the desktop.
-const SIDEBAR_MATERIAL: Material = Material::Thick;
+/// How thick the window's one material sits. Nothing paints beneath it, so
+/// this is absolute: thick enough for the chat's text to win against the
+/// desktop, and the chrome takes the same so the strips are not bands.
 const CONTENT_MATERIAL: Material = Material::UltraThick;
 
 /// The header strip's height, measured off `../desktop`: between Cursor's 34
@@ -128,6 +151,17 @@ pub(crate) const COMPOSER_PAD_X: f32 = 8.;
 /// Transcript and composer share this reading column. Web: `max-w-4xl`
 /// on both `transcript-col` and `composer-col`.
 pub(crate) const CHAT_MAX_WIDTH: f32 = 720.;
+/// Cursor's chat prose is San Francisco at 14 px on a 23 px line (measured
+/// 14/22 on Jacob's Mac). Ours is Inter (`crate::fonts`), whose lowercase
+/// is 7 % taller at the same size: x-height 0.546 em against SF's 0.508.
+/// 13 px Inter puts the lowercase where Cursor's is — rendered at 2x, 15 px
+/// x-height and 20 px caps against SF 14's 14.2 and 19.7; at 14 px Inter
+/// it would be 16 and 21, almost a pixel over at 1x. The 23 px line box is
+/// kept: the line pitch is what the eye compares across the two windows.
+pub(crate) const CURSOR_PROSE_SIZE: f32 = 13.;
+/// How often the working tree is re-read for the Changes pill.
+const CHANGES_POLL: Duration = Duration::from_secs(4);
+pub(crate) const CURSOR_PROSE_LEADING: f32 = 23.;
 /// Web `px-3.5`. Cards bleed by `COMPOSER_PAD_X` so their words sit on
 /// this edge, same as the answer.
 pub(crate) const CHAT_GUTTER: f32 = 14.;
@@ -138,11 +172,15 @@ pub(crate) const COMPOSER_HIT: f32 = 28.;
 /// How far the floating composer stands off the column's bottom edge.
 pub(crate) const COMPOSER_BOTTOM: f32 = 12.;
 
-/// The sidebar's fill. Opaque, it takes the chrome tone: the light palette's
-/// `surface` is the grey the content plane's white sits inside, and falling
-/// back to the panel would leave the two columns one flat sheet.
-pub(crate) fn sidebar_bg(theme: &Theme) -> Hsla {
-    material(theme, SIDEBAR_MATERIAL).unwrap_or(theme.surface)
+/// The chrome's fill — the tab bar, the bar under the window, the panel,
+/// and on macOS the title band. One surface with the content: Jacob, from
+/// his Mac (09-16), "the top bar and the bottom bar can't be seen as a
+/// separation" — Cursor's strips are the chat's own background with the
+/// controls floating in it, no tray, no edge; the separation is spacing.
+/// (Before this the chrome took the thinner material and, without
+/// vibrancy, the light palette's `surface` grey around the content's white.)
+pub(crate) fn chrome_bg(theme: &Theme) -> Hsla {
+    content_bg(theme)
 }
 
 /// The content column's fill.
@@ -191,35 +229,78 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
 
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
+    crate::view::component::feedback_sheet::init(cx);
+    crate::view::component::permissions_sheet::init(cx);
+    // Cursor's chat measure, taken off its screens: prose one step above
+    // the UI ladder — 14 on 23 against the ladder's 13 — and fenced code
+    // as a bare plate with the copy control on hover, no language band.
+    {
+        let base = markdown::Typography::default();
+        let scale = CURSOR_PROSE_SIZE / bezel::theme::TextStyle::Body.size();
+        markdown::set_typography(
+            cx,
+            markdown::Typography {
+                body: bezel::theme::Metrics::new(
+                    bezel::theme::TextStyle::Body,
+                    CURSOR_PROSE_LEADING / CURSOR_PROSE_SIZE,
+                    bezel::gpui::FontWeight::NORMAL,
+                )
+                .scaled(scale),
+                ..base
+            },
+        );
+        markdown::set_code_band(cx, false);
+    }
     cx.bind_keys([
+        // A sub-chat under the project's main chat. The project has one
+        // main chat, so this never makes a second root.
         KeyBinding::new("cmd-n", NewSession, None),
+        // A tab is a project; both chords open the same machine-then-folder
+        // picker. ⌘T is the browser's word for it, ⌘O the Mac's.
+        KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-o", OpenProject, None),
+        // ⌘W closes the tab in front, as in a browser; the window itself
+        // closes on ⇧⌘W — see `menubar`.
+        KeyBinding::new("cmd-w", CloseProject, None),
+        // Browser tab cycling: ⇧⌘] and ⇧⌘[. macOS names the key `]` with
+        // shift held, and that is what the menu draws; Linux reports the
+        // shifted glyph itself and drops the shift, so `}` is the same
+        // chord there.
+        KeyBinding::new("cmd-shift-]", NextTab, None),
+        KeyBinding::new("cmd-shift-[", PrevTab, None),
+        KeyBinding::new("cmd-}", NextTab, None),
+        KeyBinding::new("cmd-{", PrevTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
         // What macOS binds Preferences to in every other app.
         KeyBinding::new("cmd-,", OpenSettings, None),
-        // What every app with a sidebar binds it to. It is claimed app-wide:
-        // the menu item carries it, so AppKit takes the chord before the
-        // window is offered it, and the editor's own `cmd-b` — bold — is not
-        // reached while this one is on the bar.
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
+        // Report a problem, from wherever he is. The moment he notices is
+        // the moment he will use it, so it answers app-wide rather than only
+        // where a turn footer happens to be on screen.
+        KeyBinding::new("cmd-shift-r", ReportProblem, None),
+        // What every app with a side panel binds it to. It is claimed
+        // app-wide: the menu item carries it, so AppKit takes the chord
+        // before the window is offered it, and the editor's own `cmd-b` —
+        // bold — is not reached while this one is on the bar.
+        KeyBinding::new("cmd-b", TogglePanel, None),
+        // Call the project in front: a full-duplex conversation with its
+        // main agent through the speech server. ⇧⌘C again hangs up.
+        KeyBinding::new("cmd-shift-c", StartCall, None),
+        KeyBinding::new("cmd-shift-m", ToggleMute, None),
         KeyBinding::new("cmd-1", ShowChat, None),
+        // Cursor's Project tab sits beside the chat; ⌘2 is the next slot.
+        KeyBinding::new("cmd-2", ShowProject, None),
+        KeyBinding::new("cmd-k", SearchChats, None),
         // What a browser binds its zoom to. `cmd-=` first so the menu
         // draws ⌘= like Safari; `cmd-+` is the same key with shift held.
         KeyBinding::new("cmd-=", ZoomIn, None),
         KeyBinding::new("cmd-+", ZoomIn, None),
         KeyBinding::new("cmd--", ZoomOut, None),
         KeyBinding::new("cmd-0", ZoomReset, None),
-        // Bound ahead of the `tab` pair below because the menu draws the first
-        // chord a command was given, and `tab` is the one it cannot draw: gpui
-        // has no macOS key equivalent for it, so AppKit is handed the word
-        // where the API takes one character and shows ⌃T. These are what the
-        // View menu carries.
-        KeyBinding::new("alt-cmd-right", NextEntry, None),
-        KeyBinding::new("alt-cmd-left", PrevEntry, None),
-        // What a browser binds its tabs to. Global, because the point is to
-        // move between documents without taking the hand out of the editor —
-        // where `tab` itself is indent.
-        KeyBinding::new("ctrl-tab", NextEntry, None),
-        KeyBinding::new("ctrl-shift-tab", PrevEntry, None),
+        // Step between the agents the panel lists. These are what the View
+        // menu carries; the bare arrows below answer where no field has them.
+        KeyBinding::new("alt-cmd-down", NextEntry, None),
+        KeyBinding::new("alt-cmd-up", PrevEntry, None),
         // Claimed app-wide and answered last: an editor and a field bind copy
         // on their own contexts, which gpui dispatches from the focus outward,
         // so this only runs where nothing else wanted it — which is exactly
@@ -229,8 +310,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-v", PasteChat, None),
         KeyBinding::new("delete", DeleteChat, Some(WINDOW_CONTEXT)),
         KeyBinding::new("backspace", DeleteChat, Some(WINDOW_CONTEXT)),
-        KeyBinding::new("up", PrevEntry, None),
-        KeyBinding::new("down", NextEntry, None),
+        // On the window's rest focus only. A binding with no context is
+        // the deepest match gpui knows, so a bare `up` here would beat the
+        // opener's and the sheet's own arrows while their field has the
+        // focus; the composer forwards its arrows itself.
+        KeyBinding::new("up", PrevEntry, Some(WINDOW_CONTEXT)),
+        KeyBinding::new("down", NextEntry, Some(WINDOW_CONTEXT)),
         // A context menu closes on Escape wherever the focus rests; the
         // composer forwards its own Escape here when it has nothing to close.
         KeyBinding::new("escape", DismissMenu, Some(WINDOW_CONTEXT)),
@@ -265,24 +350,27 @@ fn restore_usable_bounds(window: &mut Window) {
 /// strip's thumbnail, not the window, and pushing a frame at it does nothing
 /// useful; it is skipped by the `isOnActiveSpace`/key check below.
 #[cfg(target_os = "macos")]
+#[repr(C)]
+struct NsPoint {
+    x: f64,
+    y: f64,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct NsSize {
+    width: f64,
+    height: f64,
+}
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct NsRect {
+    origin: NsPoint,
+    size: NsSize,
+}
+
+#[cfg(target_os = "macos")]
 fn force_usable_ns_frame() {
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
-
-    #[repr(C)]
-    struct NsPoint {
-        x: f64,
-        y: f64,
-    }
-    #[repr(C)]
-    struct NsSize {
-        width: f64,
-        height: f64,
-    }
-    #[repr(C)]
-    struct NsRect {
-        origin: NsPoint,
-        size: NsSize,
-    }
 
     const YES: i8 = 1;
     unsafe {
@@ -304,7 +392,14 @@ fn force_usable_ns_frame() {
                 continue;
             }
             let frame: NsRect = msg_send![ns_window, frame];
+            // A saved frame that AppKit restored off the visible screens
+            // (a display that is gone, a window dragged half off the edge:
+            // Jacob saw only the left 40 %) comes back to the centre of
+            // the main display.
             if frame.size.width >= 600. && frame.size.height >= 320. {
+                if !frame_on_a_screen(&frame) {
+                    let _: () = msg_send![ns_window, center];
+                }
                 continue;
             }
             let screen: *mut Object = msg_send![ns_window, screen];
@@ -332,6 +427,58 @@ fn force_usable_ns_frame() {
             let _: () = msg_send![ns_window, setFrame: next display: YES];
         }
     }
+}
+
+/// Whether at least 70 % of `frame` lies on one of the displays gpui
+/// knows: the window can be seen and reached. Every platform.
+fn frame_mostly_on_a_display(frame: &Bounds<Pixels>, cx: &App) -> bool {
+    let area = f32::from(frame.size.width) * f32::from(frame.size.height);
+    if area <= 0. {
+        return false;
+    }
+    cx.displays().iter().any(|display| {
+        let screen = display.bounds();
+        let x0 = f32::from(frame.origin.x).max(f32::from(screen.origin.x));
+        let y0 = f32::from(frame.origin.y).max(f32::from(screen.origin.y));
+        let x1 = (f32::from(frame.origin.x) + f32::from(frame.size.width))
+            .min(f32::from(screen.origin.x) + f32::from(screen.size.width));
+        let y1 = (f32::from(frame.origin.y) + f32::from(frame.size.height))
+            .min(f32::from(screen.origin.y) + f32::from(screen.size.height));
+        x1 > x0 && y1 > y0 && (x1 - x0) * (y1 - y0) >= 0.7 * area
+    })
+}
+
+/// Whether at least 70 % of `frame` lies inside some screen's visible
+/// area: the window can be seen and reached.
+#[cfg(target_os = "macos")]
+fn frame_on_a_screen(frame: &NsRect) -> bool {
+    use objc::{class, msg_send, runtime::Object, sel, sel_impl};
+    let area = frame.size.width * frame.size.height;
+    if area <= 0. {
+        return true;
+    }
+    unsafe {
+        let screens: *mut Object = msg_send![class!(NSScreen), screens];
+        if screens.is_null() {
+            return true;
+        }
+        let count: usize = msg_send![screens, count];
+        for i in 0..count {
+            let screen: *mut Object = msg_send![screens, objectAtIndex: i];
+            if screen.is_null() {
+                continue;
+            }
+            let vis: NsRect = msg_send![screen, visibleFrame];
+            let x0 = frame.origin.x.max(vis.origin.x);
+            let y0 = frame.origin.y.max(vis.origin.y);
+            let x1 = (frame.origin.x + frame.size.width).min(vis.origin.x + vis.size.width);
+            let y1 = (frame.origin.y + frame.size.height).min(vis.origin.y + vis.size.height);
+            if x1 > x0 && y1 > y0 && (x1 - x0) * (y1 - y0) >= 0.7 * area {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Float the main window above other apps. For the driver only: with Stage
@@ -383,8 +530,19 @@ fn force_usable_ns_frame() {}
 
 /// Open the workspace window. Called at launch, and again when the Dock
 /// reopens an app whose window ⌘W closed.
-pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHandle<Cydonia>> {
-    let bounds = Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx);
+pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHandle<Arbos>> {
+    // Where the window was last time, when most of that frame is still on
+    // a screen; otherwise centred on the main display (a fresh install, a
+    // display that is gone, a frame dragged off the edge — Jacob saw only
+    // the left 40 % of one).
+    let bounds = state
+        .frame
+        .map(|[x, y, w, h]| Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(w.max(600.)), px(h.max(320.))),
+        })
+        .filter(|frame| frame_mostly_on_a_display(frame, cx))
+        .unwrap_or_else(|| Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx));
     let handle = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -405,7 +563,7 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
         |window, cx| {
             appearance::observe_window(window, cx).detach();
             window.resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
-            cx.new(|cx| Cydonia::new(settings, state, window, cx))
+            cx.new(|cx| Arbos::new(settings, state, window, cx))
         },
     )?;
     // macOS can apply a saved frame after the first paint — a 100×131
@@ -428,11 +586,15 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
 }
 
 /// Which pane the detail column shows. A property of the window, not of a
-/// project — switching projects must not teleport you to another pane.
+/// project; a tab click or a new tab lands on the chat (Jacob: a new or
+/// empty project never opens on the Project page).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     Chat,
     Surface,
+    /// The project page: the status page, the store's files, the context
+    /// document — Cursor's Project tab, full width in the column.
+    Project,
 }
 
 /// One step from `at` through `len` entries. Past either end is
@@ -452,12 +614,55 @@ fn stepped(at: Option<usize>, len: usize, step: isize) -> Option<usize> {
     Some(next as usize)
 }
 
-/// The root view. It owns no app state — only the chrome's own: how wide the
-/// sidebar is, which pane is showing, and whichever card is being written.
-pub struct Cydonia {
+/// The root view. It owns no app state — only the chrome's own: whether the
+/// panel is out, which pane is showing, and whichever name is being typed.
+/// A live call: one per window, to the project that was in front when it
+/// started. Everything spoken lands in that project's main chat.
+#[derive(Debug, Clone)]
+pub struct Call {
+    /// The project's session id whose chat takes the `voice ·` lines.
+    pub session: u64,
+    pub label: String,
+    pub since: std::time::Instant,
+    /// Start is in flight: the button shows a spinner, End is a no-op.
+    pub connecting: bool,
+}
+
+/// How long after opening a window activation still counts as the launch.
+const LAUNCH_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One OS notification the window asked the platform to show.
+#[derive(Debug, Clone)]
+pub(crate) struct PostedNotification {
+    pub at: i64,
+    pub title: String,
+    pub body: String,
+    /// The command could not be started; `None` when it was.
+    pub error: Option<String>,
+}
+
+pub struct Arbos {
     pub(crate) workspace: Entity<Workspace>,
+    /// Whether this window is the active one on the desktop: a kernel
+    /// notification for a chat the person is looking at is seen at once;
+    /// one for a chat they are not goes to the OS as a notification.
+    pub(crate) window_active: bool,
+    /// The person has done something in this window since it opened — a
+    /// press, a key, or coming back to it after leaving. Until then a chat
+    /// restored in front is on screen but not yet looked at, and its unseen
+    /// replies keep their dot (qal-j03): a reply that landed while the app
+    /// was shut is exactly the one a person needs telling about.
+    pub(crate) touched: bool,
+    /// When the window opened: activations in its first seconds are the
+    /// launch settling (X11 focuses a new window more than once), not a
+    /// return to it.
+    launched_at: std::time::Instant,
+    /// OS notifications this window posted (#293), newest last, capped:
+    /// what the driver shows a test so "an alert was posted" is a fact it
+    /// can read and check against the daemon, not a belief.
+    pub(crate) notifications_posted: Vec<PostedNotification>,
     /// The open session menu was opened from the chat header's `⋯`, so it
-    /// anchors there rather than at the sidebar row.
+    /// anchors there rather than at a panel row.
     pub(crate) menu_at_header: bool,
     /// The git branch of the last local place looked at, for the row under
     /// the composer. `(place path, branch or none)`.
@@ -465,10 +670,32 @@ pub struct Cydonia {
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
     active_terminal: Option<String>,
-    pub(crate) sidebar_open: bool,
-    pub(crate) sidebar_width: f32,
+    /// Whether the right-hand panel is out. ⌘B folds it away.
+    pub(crate) panel_open: bool,
+    /// The panel's "N archived" row is unfolded: finished workers the
+    /// kernel moved to `archive/agents/` are listed, faint.
+    pub(crate) archived_open: bool,
+    /// The root chat whose idle "Agents" card is open (Cursor's Agents pill
+    /// once the workers are done).
+    pub(crate) agents_card_open: Option<u64>,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
+    /// The sheet a tab's name, glyph and colour are set in.
+    pub(crate) tab_sheet: Entity<TabSheet>,
+    pub(crate) feedback_sheet: Entity<FeedbackSheet>,
+    /// What the last outbox pass found. Read by the driver so the loop can
+    /// assert the state he is in without photographing the window for it.
+    pub(crate) feedback_outbox: OutboxState,
+    /// Whether any chat held a live kernel on the last look — the edge
+    /// `drain_on_reconnect` watches for.
+    was_connected: bool,
+    /// The exchange the open report is about — chat id and the prompt's
+    /// `seq` — so a sent report can leave its mark on that prompt's footer.
+    report_anchor: Option<(u64, u64)>,
+    pub(crate) permissions_sheet: Entity<PermissionsSheet>,
+    pub(crate) permission_center: Entity<PermissionCenter>,
+    /// ⌘K: the palette over every open tab's chats.
+    pub(crate) chat_search: Entity<ChatSearch>,
     settings_window: Option<WindowHandle<SettingsWindow>>,
     pub(crate) pane: Pane,
     pub(crate) menu: Option<Menu>,
@@ -477,12 +704,12 @@ pub struct Cydonia {
     /// a cursor made afresh each paint would light nothing.
     pub(crate) menu_cursor: Cursor,
     /// Whether the press now being handled landed on the open menu's own
-    /// trigger — read by [`Cydonia::toggle_menu`] and nothing else.
+    /// trigger — read by [`Arbos::toggle_menu`] and nothing else.
     pub(crate) menu_pressed: bool,
     /// What the name field is attached to, and the field itself.
     pub(crate) renaming: Option<Renaming>,
     /// True when the empty-chat title is being edited, so the field lives
-    /// there — not also in the sidebar row, which would move and restyle it.
+    /// there — not also on a panel row, which would move and restyle it.
     pub(crate) rename_heading: bool,
     /// True when the chat header's title is being edited: the field sits on
     /// the header line, Body-sized, and nowhere else.
@@ -493,9 +720,9 @@ pub struct Cydonia {
     pub(crate) name_field: Entity<TextField>,
     meter: Entity<Stats>,
     meter_at: Floating,
-    /// The rail's scroll. A step taken from the keyboard has to bring its
-    /// landing into view; the list does not scroll itself.
-    pub(crate) rail: UniformListScrollHandle,
+    /// What the bar along the bottom draws: which build this is, and whether
+    /// the channel has a newer one. See [`crate::update`].
+    pub(crate) updater: Entity<crate::update::Updater>,
     /// Where the focus rests when no field holds it — a board, a table and a
     /// transcript have none — so the bindings below always have a path here.
     focus: FocusHandle,
@@ -509,26 +736,25 @@ pub struct Cydonia {
     fn_held: bool,
     /// Stop was asked while start was still in flight. Finish start, then stop.
     voice_want_stop: bool,
-    /// The plan strip above the composer shows one summary line only.
-    pub(crate) plan_folded: bool,
+    /// The last dictated take's clock, for the driver: press → first
+    /// partial, release → send. What "does it feel instant" measures.
+    pub(crate) dictation: Dictation,
+    /// The loop that carries the speech server's agent activity into the
+    /// chat is running.
+    voice_mirror_on: bool,
+    /// The call in progress: which project it is for, and since when.
+    pub(crate) call: Option<Call>,
+    /// The tab sheet is up for the Home tab's first-launch offer; when it
+    /// closes, the permissions sheet follows.
+    home_offer: bool,
     /// Native Fn monitor. Lives with the window so Drop removes it.
     #[cfg(target_os = "macos")]
     _fn_monitor: Option<crate::view::fn_key::Monitor>,
-    /// Where a dragged project will land: `0` is the top, `len` is after
-    /// the last. `None` when nothing is being carried.
-    pub(crate) drop_slot: Option<usize>,
-    /// Where a dragged chat will land among its siblings. `None` when
-    /// no chat is being carried, or the pointer has left the list.
-    pub(crate) session_drop: Option<SessionDrop>,
-    /// Which project heading the pointer is on, and whether it is the
-    /// pinned copy. The chevron and `+` mount only then — an invisible
-    /// control would still steal the click.
-    pub(crate) hovering_head: Option<(usize, bool)>,
     /// Debounced write of the composer line so a kill still has it.
     pub(crate) draft_flush: Task<()>,
 }
 
-impl Cydonia {
+impl Arbos {
     fn sync_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let workspace = self.workspace.read(cx);
         self.terminals.retain(|id, _| {
@@ -566,33 +792,146 @@ impl Cydonia {
         restore_usable_bounds(window);
         let composer = cx.new(Composer::new);
         let opener = cx.new(Opener::new);
-        cx.subscribe(&opener, |this, _, event: &OpenerEvent, cx| match event {
-            OpenerEvent::Open(place) => {
-                let place = place.clone();
-                this.workspace
-                    .update(cx, |workspace, cx| workspace.open_place(place, cx));
-            }
-            OpenerEvent::Browse => this.browse_local(cx),
-            OpenerEvent::Dismiss => {}
-        })
+        let tab_sheet = cx.new(TabSheet::new);
+        let permission_center = cx.new(|_| PermissionCenter::new(None));
+        cx.set_global(Permissions(permission_center.clone()));
+        let permissions_sheet = cx.new(|cx| PermissionsSheet::new(permission_center.clone(), cx));
+        cx.observe(&permission_center, |_, _, cx| cx.notify())
+            .detach();
+        cx.subscribe_in(
+            &permissions_sheet,
+            window,
+            |this, _, event: &PermissionsSheetEvent, window, cx| match event {
+                PermissionsSheetEvent::Closed => {
+                    this.workspace
+                        .update(cx, |workspace, _| workspace.mark_permissions_seen());
+                    this.focus_composer(window, cx);
+                }
+            },
+        )
+        .detach();
+        let feedback_sheet = cx.new(FeedbackSheet::new);
+        cx.subscribe_in(
+            &feedback_sheet,
+            window,
+            |this, sheet, event: &FeedbackSheetEvent, window, cx| match event {
+                FeedbackSheetEvent::Send(draft) => this.write_report(sheet.clone(), draft, cx),
+                FeedbackSheetEvent::Dismissed => this.focus_composer(window, cx),
+            },
+        )
+        .detach();
+        let chat_search = cx.new(ChatSearch::new);
+        cx.subscribe_in(
+            &chat_search,
+            window,
+            |this, _, event: &ChatSearchEvent, window, cx| match event {
+                ChatSearchEvent::Open { project, session } => {
+                    let (project, session) = (*project, *session);
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.active = Some(project);
+                        workspace.select_session(session, cx);
+                    });
+                    this.show_pane(Pane::Chat, cx);
+                    this.focus_composer(window, cx);
+                }
+                // The palette's actions are the menubar's, dispatched so
+                // the one handler each has stays the one handler.
+                ChatSearchEvent::Action(action) => {
+                    let action: Box<dyn gpui::Action> = match action {
+                        PaletteAction::NewTab => Box::new(NewTab),
+                        PaletteAction::OpenFolder => Box::new(OpenProject),
+                        PaletteAction::ProjectPage => Box::new(ShowProject),
+                        PaletteAction::Settings => Box::new(OpenSettings),
+                        PaletteAction::ReportProblem => Box::new(ReportProblem),
+                    };
+                    window.dispatch_action(action, cx);
+                }
+                ChatSearchEvent::Dismiss => this.focus_composer(window, cx),
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &opener,
+            window,
+            |this, _, event: &OpenerEvent, window, cx| match event {
+                OpenerEvent::Open(place) => {
+                    let place = place.clone();
+                    this.offer_store_out_of_sync(&place, window, cx);
+                    this.show_pane(Pane::Chat, cx);
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.open_place(place, cx));
+                    this.offer_tab_face(window, cx);
+                }
+                OpenerEvent::Browse => this.browse_local(window, cx),
+                OpenerEvent::Dismiss => {}
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &tab_sheet,
+            window,
+            |this, _, event: &TabSheetEvent, window, cx| {
+                match event {
+                    TabSheetEvent::Keep(ix, identity) => {
+                        let (ix, identity) = (*ix, identity.clone());
+                        this.workspace
+                            .update(cx, |workspace, cx| workspace.set_identity(ix, identity, cx));
+                    }
+                    // Skipped on the Home tab's one offer: the defaults are kept
+                    // as its face, so the sheet is not offered again.
+                    TabSheetEvent::Dismiss => {
+                        if this.home_offer {
+                            this.workspace.update(cx, |workspace, cx| {
+                                if let Some(ix) = workspace.home_index()
+                                    && let Some(project) = workspace.projects.get(ix)
+                                    && !project.identity_saved
+                                {
+                                    let mut identity = project.identity.clone();
+                                    identity.name = Some("Home".into());
+                                    workspace.set_identity(ix, identity, cx);
+                                }
+                            });
+                        }
+                    }
+                }
+                if std::mem::take(&mut this.home_offer) {
+                    this.permissions_once(window, cx);
+                }
+            },
+        )
         .detach();
         cx.subscribe_in(
             &composer,
             window,
             |this, _, event: &ComposerEvent, window, cx| match event {
-                ComposerEvent::Submit(text) => this.submit(text.clone(), cx),
-                ComposerEvent::Force(text) => this.force_turn(text.clone(), cx),
+                ComposerEvent::Submit(text) => {
+                    // A new prompt while a reply is being read: the reply stops.
+                    crate::voice_ws::interrupt();
+                    this.submit(text.clone(), cx)
+                }
+                ComposerEvent::Queue(text) => this.queue_turn(text.clone(), cx),
                 // Escape in the composer with no picker open: a menu, if one
                 // is up, goes first; only then does it mean "stop the turn".
                 ComposerEvent::Cancel => {
                     if this.menu.is_some() {
                         this.dismiss_menu(cx);
                     } else {
+                        crate::voice_ws::interrupt();
                         this.cancel_turn(cx);
                     }
                 }
                 ComposerEvent::Agent(ix) => this.pick_agent(*ix, cx),
                 ComposerEvent::Switch(id, value) => this.switch(id, value, cx),
+                // The kernel owns modes: the chip's pick is the `/mode`
+                // line, sent like any prompt (the kernel intercepts it and
+                // starts no turn).
+                ComposerEvent::Mode(skill) => {
+                    let line = match skill {
+                        Some(name) => format!("/mode {name}"),
+                        None => "/mode off".to_string(),
+                    };
+                    this.submit(crate::model::attachment::Prompt::from(line), cx)
+                }
                 ComposerEvent::Voice => this.toggle_voice(cx),
                 ComposerEvent::Attach => {}
                 ComposerEvent::Step(step) => this.cycle_entry(*step, window, cx),
@@ -602,12 +941,18 @@ impl Cydonia {
         .detach();
 
         let name_field = name_field_entity(false, cx);
+        // Read before the settings are handed to the workspace, and used to
+        // start the bar's updater below.
+        let channel = crate::update::channel_of(&settings);
         let workspace = cx.new(|cx| Workspace::new(settings, state, cx));
         // The model is the only thing that says a session appeared or a turn
         // ended; the composer's placeholder, commands and busy state are all
         // read back from it rather than pushed by whoever caused the change.
         cx.observe(&workspace, |this, _, cx| {
             this.sync_composer(cx);
+            this.reap_notifications(cx);
+            this.collect_feedback(cx);
+            this.drain_on_reconnect(cx);
             cx.notify();
         })
         .detach();
@@ -623,7 +968,7 @@ impl Cydonia {
         // The kernel opened a terminal, browser, or process under the chat,
         // or closed the one in front. Which pane shows is the window's to
         // decide, so the model asks and this answers — the same switch a
-        // click on the sidebar row makes.
+        // click on a panel row makes.
         cx.subscribe_in(
             &workspace,
             window,
@@ -634,16 +979,37 @@ impl Cydonia {
         )
         .detach();
 
+        // The updater is the window's, so closing the window stops it looking.
+        let updater = cx.new(move |cx| crate::update::Updater::new(channel, cx));
+        crate::view::status_bar::observe(cx, &updater);
+        // Settings is its own window and shows what the updater knows, so the
+        // entity is reachable from there the way the permission centre is.
+        cx.set_global(crate::update::Updates(updater.clone()));
+
         let mut this = Self {
             meter: cx.new(Stats::new),
             meter_at: Floating::new(Painter::of(cx)),
+            updater,
             workspace,
             terminals: Default::default(),
             active_terminal: None,
-            sidebar_open: true,
-            sidebar_width: SIDEBAR_WIDTH,
+            window_active: true,
+            notifications_posted: Vec::new(),
+            touched: false,
+            launched_at: std::time::Instant::now(),
+            panel_open: true,
+            archived_open: false,
+            agents_card_open: None,
             composer,
             opener,
+            tab_sheet,
+            feedback_sheet,
+            feedback_outbox: OutboxState::default(),
+            was_connected: false,
+            report_anchor: None,
+            permissions_sheet,
+            permission_center,
+            chat_search,
             settings_window: None,
             pane: Pane::Chat,
             menu: None,
@@ -656,18 +1022,17 @@ impl Cydonia {
             branch_cache: std::cell::RefCell::new(None),
             menu_at_header: false,
             name_field,
-            rail: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
             voice_gen: 0,
             voice_place: None,
             fn_held: false,
             voice_want_stop: false,
-            plan_folded: false,
+            dictation: Dictation::default(),
+            voice_mirror_on: false,
+            call: None,
+            home_offer: false,
             #[cfg(target_os = "macos")]
             _fn_monitor: None,
-            drop_slot: None,
-            session_drop: None,
-            hovering_head: None,
             draft_flush: Task::ready(()),
         };
         let field = this.composer.read(cx).text_field();
@@ -694,9 +1059,16 @@ impl Cydonia {
         // catching, so every project is re-read on the way in — see
         // [`Workspace::reload_projects`].
         cx.observe_window_activation(window, |this, window, cx| {
-            if window.is_window_active() {
+            this.window_active = window.is_window_active();
+            if this.window_active {
                 this.workspace
                     .update(cx, |workspace, cx| workspace.reload_projects(cx));
+                // Coming back to the window is looking at its chat; the
+                // launch's own activations are not.
+                if this.launched_at.elapsed() > LAUNCH_SETTLE {
+                    this.touched = true;
+                }
+                this.reap_notifications(cx);
             } else {
                 this.flush_composer_draft(cx);
             }
@@ -705,15 +1077,121 @@ impl Cydonia {
         // Entering or leaving a size — zoom, simple fullscreen — can drop the
         // blur view and the transparent titlebar. Put both back, and keep
         // Spaces fullscreen off: a style-mask change resets that too.
-        cx.observe_window_bounds(window, |_, window, cx| {
+        cx.observe_window_bounds(window, |this, window, cx| {
             appearance::reapply_window_background(cx);
             keep_macos_glass(window);
+            sync_macos_chrome(cx);
             restore_usable_bounds(window);
+            // Remember the frame for the next launch (not a fullscreen one).
+            if let WindowBounds::Windowed(bounds) = window.window_bounds() {
+                let frame = [
+                    f32::from(bounds.origin.x),
+                    f32::from(bounds.origin.y),
+                    f32::from(bounds.size.width),
+                    f32::from(bounds.size.height),
+                ];
+                this.workspace
+                    .update(cx, |workspace, _| workspace.set_frame(frame));
+            }
             cx.notify();
         })
         .detach();
+        // The palette moved (Settings › Appearance, or the OS at sunset):
+        // the window's own chrome follows it, so the title band the traffic
+        // lights sit in is the same surface as the tab strip.
+        cx.observe_global::<Theme>(|_, cx| sync_macos_chrome(cx))
+            .detach();
         keep_macos_glass(window);
+        sync_macos_chrome(cx);
         this.sync_composer(cx);
+        // First launch: the Home tab's face — name, glyph, colour, prefilled
+        // "Home", skippable — then the permissions sheet, each once. After
+        // the window has painted, so they open over something rather than
+        // before it.
+        let home_fresh = this.workspace.read(cx).home_index().is_some_and(|ix| {
+            this.workspace
+                .read(cx)
+                .projects
+                .get(ix)
+                .is_some_and(|project| !project.identity_saved)
+        });
+        // Cursor's Changes pill: what the project's working tree holds
+        // uncommitted, read from git off the UI thread every few seconds
+        // for the project in front.
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(CHANGES_POLL).await;
+                let Ok(root) = this.update(cx, |this, cx| {
+                    this.workspace
+                        .read(cx)
+                        .active_project()
+                        .filter(|project| !project.is_remote())
+                        .map(|project| project.path.clone())
+                }) else {
+                    break;
+                };
+                let Some(root) = root else { continue };
+                let read_root = root.clone();
+                let changes = cx
+                    .background_executor()
+                    .spawn(async move { crate::model::changes::GitChanges::read(&read_root) })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.workspace.update(cx, |workspace, cx| {
+                        let before = workspace.changes.get(&root).cloned();
+                        match changes {
+                            Some(changes) => {
+                                workspace.changes.insert(root.clone(), changes);
+                            }
+                            None => {
+                                workspace.changes.remove(&root);
+                            }
+                        }
+                        if workspace.changes.get(&root).cloned() != before {
+                            cx.notify();
+                        }
+                    });
+                });
+            }
+        })
+        .detach();
+        // The outbox, from launch onwards. A report he made before quitting, or
+        // while the link was down, goes now — and then every minute, which is
+        // what makes "it will go by itself" true rather than hopeful. The pass
+        // is a directory listing when there is nothing to do, and each report
+        // has its own widening delay, so a machine that is away is not
+        // hammered.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(3))
+                .await;
+            loop {
+                let alive = this.update(cx, |this, cx| this.drain_feedback(false, cx)).is_ok();
+                if !alive {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_secs(60))
+                    .await;
+            }
+        })
+        .detach();
+        if home_fresh || !this.workspace.read(cx).permissions_seen {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(600))
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if home_fresh && let Some(ix) = this.workspace.read(cx).home_index() {
+                        this.home_offer = true;
+                        this.edit_tab(ix, window, cx);
+                    } else {
+                        this.permissions_once(window, cx);
+                    }
+                });
+            })
+            .detach();
+        }
         // Where the caret starts. The composer is drawn only over a chat it can
         // send to, and focus on an element no frame draws is focus nowhere.
         let composer = this
@@ -723,8 +1201,23 @@ impl Cydonia {
             .is_some_and(ChatSession::resumable)
             .then(|| this.composer_focus_handle(cx));
         window.focus(composer.as_ref().unwrap_or(&this.focus), cx);
+        // A speech server is set up: open the session now, in the background,
+        // so the first Fn press has no connect to pay.
+        if crate::voice_ws::configured() {
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = crate::voice_ws::warm();
+                })
+                .detach();
+        }
         #[cfg(target_os = "macos")]
         {
+            // A speech server is configured, so the mic will be wanted:
+            // ask macOS now, from this process, so the one dialog comes up
+            // at start rather than mid-sentence on the first Fn press.
+            if crate::voice_ws::configured() {
+                crate::voice_ws::request_mic_permission();
+            }
             let (tx, rx) = futures::channel::mpsc::unbounded();
             this._fn_monitor = Some(crate::view::fn_key::Monitor::start(move |down| {
                 let _ = tx.unbounded_send(down);
@@ -752,6 +1245,8 @@ impl Cydonia {
         self.name_field = name_field_entity(heading, cx);
     }
 
+    /// ⌘N: a sub-chat under the project's main chat. It shows in the panel
+    /// with the sub-agents; the main chat stays the one root.
     pub(crate) fn new_session_action(
         &mut self,
         _: &NewSession,
@@ -760,11 +1255,42 @@ impl Cydonia {
     ) {
         self.show_pane(Pane::Chat, cx);
         self.workspace.update(cx, |workspace, cx| {
-            if let Some(entry) = workspace.preferred_agent() {
-                workspace.new_session(entry, None, cx);
-            }
+            workspace.new_child_session(cx);
         });
         self.focus_composer_after_create(window, cx);
+    }
+
+    /// ⌘T: a new tab, which is a project — pick the machine, then the
+    /// folder. Same picker as ⌘O.
+    pub(crate) fn new_tab_action(
+        &mut self,
+        _: &NewTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_project_action(&OpenProject, window, cx);
+    }
+
+    pub(crate) fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, cx);
+    }
+
+    pub(crate) fn prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, cx);
+    }
+
+    /// Step to the neighbouring tab, wrapping at either end as a browser
+    /// does.
+    fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+        let (at, len) = {
+            let workspace = self.workspace.read(cx);
+            (workspace.active, workspace.projects.len())
+        };
+        let (Some(at), true) = (at, len > 1) else {
+            return;
+        };
+        let next = (at as isize + step).rem_euclid(len as isize) as usize;
+        self.select_project(next, cx);
     }
 
     /// Copy what the transcript has selected. Bound app-wide and reached only
@@ -798,7 +1324,7 @@ impl Cydonia {
     }
 
     /// Archive an open chat, or kernel-delete an archived one. Always the
-    /// highlighted sidebar row — not whichever session last held the caret.
+    /// highlighted panel row — not whichever session last held the caret.
     fn delete_highlighted(&mut self, cx: &mut Context<Self>) {
         if self.renaming.is_some() {
             return;
@@ -841,54 +1367,43 @@ impl Cydonia {
         self.cycle_entry(-1, window, cx);
     }
 
-    /// Step to the next chat or board the sidebar draws, top to bottom
-    /// across every project. Headings, `+`, and the archive toggle are
-    /// skipped. The ends stay put — first visible chat, Up does nothing;
-    /// last visible chat, Down does nothing.
-    fn cycle_entry(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+    /// Step to the next agent the panel lists, top to bottom through the
+    /// project in front: the main chat, then each sub-agent under it. The
+    /// ends stay put — on the first, Up does nothing; on the last, Down
+    /// does nothing.
+    fn cycle_entry(&mut self, step: isize, _window: &mut Window, cx: &mut Context<Self>) {
         if self.renaming.is_some() {
             return;
         }
         // Nothing on screen is nothing to step from: the launch view is not an
         // entry, and its neighbour is not another one.
-        let Some(pane) = self.showing(cx) else {
+        if self.showing(cx).is_none() {
             return;
-        };
-        let workspace = self.workspace.read(cx);
-        let Some(project) = workspace.active else {
-            return;
-        };
-        let Some(open) = workspace.projects.get(project) else {
-            return;
-        };
-        let showing = match pane {
-            Pane::Chat => open.focused_agent().map(|id| Row::Session {
-                project,
-                id,
-                nested: open.session(id).is_some_and(|chat| !open.is_root(chat)),
-            }),
-            Pane::Surface => open
-                .focus
-                .and_then(|focus| focus.surface.map(|id| Row::Surface { project, id })),
-        };
-        // Same order as drawn. A project with no chats is skipped because
-        // it contributes no Session or Surface rows.
-        let list: Vec<Row> = self
-            .rows(cx)
+        }
+        let showing = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .and_then(|project| project.focused_agent());
+        let list: Vec<u64> = self
+            .visible_agent_rows(cx)
             .into_iter()
-            .filter(|row| matches!(row, Row::Session { .. } | Row::Surface { .. }))
+            .map(|row| row.id)
             .collect();
-        let at = showing.and_then(|row| list.iter().position(|entry| *entry == row));
+        let at = showing.and_then(|id| list.iter().position(|entry| *entry == id));
         let Some(landing) = stepped(at, list.len(), step).map(|ix| list[ix]) else {
             return;
         };
-        self.open_row(landing, window, cx);
-        self.reveal(landing, cx);
+        self.select_session(landing, cx);
     }
 
     /// Leaving a project is the moment a half-written card has to be filed:
     /// the spot it points at belongs to the board being navigated away from.
+    /// A tab click lands on the project's chat, whatever the column showed
+    /// before — the way back from the Project page or a document, and the
+    /// view a new tab opens on.
     pub(crate) fn select_project(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.show_pane(Pane::Chat, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_project(ix, cx));
     }
@@ -906,8 +1421,21 @@ impl Cydonia {
         }
     }
 
-    fn dismiss_menu_action(&mut self, _: &DismissMenu, _: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_menu(cx);
+    fn dismiss_menu_action(
+        &mut self,
+        _: &DismissMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.menu.is_some() {
+            self.dismiss_menu(cx);
+            return;
+        }
+        // Nothing to close: Escape leaves the Project page (or a document)
+        // for the chat, as ⌘1 does.
+        if self.pane != Pane::Chat {
+            self.show_chat(&ShowChat, window, cx);
+        }
     }
 
     pub(crate) fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
@@ -940,18 +1468,75 @@ impl Cydonia {
         self.open_settings(Section::General, cx);
     }
 
-    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.sidebar_open = !self.sidebar_open;
-        cx.notify();
+    /// Kernel notifications (#293), sorted the way Cursor sorts them: one
+    /// for the chat the person is looking at, in a focused window, is seen
+    /// the moment it arrives (`seen` goes to the kernel, every client's
+    /// badge drops); any other — window unfocused, another project's tab,
+    /// another chat of this project — becomes an OS notification and stays
+    /// on the tab's badge until that chat is opened.
+    pub(crate) fn reap_notifications(&mut self, cx: &mut Context<Self>) {
+        let window_active = self.window_active;
+        let touched = self.touched;
+        let mut post: Vec<(String, String)> = Vec::new();
+        self.workspace.update(cx, |workspace, _| {
+            let active = workspace.active_id();
+            let active_ix = workspace.active;
+            for (ix, project) in workspace.projects.iter_mut().enumerate() {
+                for chat in &mut project.sessions {
+                    let looking = window_active
+                        && touched
+                        && Some(ix) == active_ix
+                        && Some(chat.id) == active;
+                    if looking {
+                        if !chat.unseen.is_empty() {
+                            chat.mark_seen();
+                        }
+                        continue;
+                    }
+                    for note in chat.to_notify.drain(..) {
+                        post.push((note.title, note.body));
+                    }
+                }
+            }
+        });
+        for (title, body) in post {
+            let result = crate::notify_os::post(&title, &body);
+            self.notifications_posted.push(PostedNotification {
+                at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0),
+                title,
+                body,
+                error: result.err(),
+            });
+            if self.notifications_posted.len() > 50 {
+                self.notifications_posted.remove(0);
+            }
+        }
     }
 
-    pub(crate) fn toggle_sidebar_action(
+    pub(crate) fn attach_paths_action(
         &mut self,
-        _: &ToggleSidebar,
+        action: &AttachPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let paths: Vec<std::path::PathBuf> =
+            action.paths.iter().map(std::path::PathBuf::from).collect();
+        self.composer.update(cx, |composer, cx| {
+            composer.accept_paths(paths, window, cx);
+        });
+    }
+
+    pub(crate) fn toggle_panel_action(
+        &mut self,
+        _: &TogglePanel,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.toggle_sidebar(cx);
+        self.panel_open = !self.panel_open;
+        cx.notify();
     }
 
     /// Step the UI font size by `by` points. Every other size is a ratio of
@@ -991,8 +1576,8 @@ impl Cydonia {
         cx.notify();
     }
 
-    /// The menu's Close Project. The sidebar names a project by the row it was
-    /// pressed on; the menu bar has only the one in front.
+    /// ⌘W and the menu's Close Tab: the tab in front. A tab's own close
+    /// mark names its tab; the chord has only the one in front.
     pub(crate) fn close_project_action(
         &mut self,
         _: &CloseProject,
@@ -1003,6 +1588,65 @@ impl Cydonia {
             return;
         };
         self.close_project(ix, cx);
+    }
+
+    /// ⌘K and the panel's magnifier: search every open tab's chats by
+    /// title and first words; Enter opens the one lit, in its tab.
+    pub(crate) fn search_chats(
+        &mut self,
+        _: &SearchChats,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = self.workspace.read(cx);
+        let mut hits: Vec<Hit> = Vec::new();
+        for (ix, project) in workspace.projects.iter().enumerate() {
+            let tab = Workspace::tab_label(project);
+            let mut chats: Vec<&ChatSession> = project
+                .sessions
+                .iter()
+                .filter(|chat| !chat.closed)
+                .collect();
+            chats.sort_by(|a, b| b.updated.cmp(&a.updated));
+            for chat in chats {
+                let title = chat.label();
+                let first = crate::model::session::first_user_text(&chat.items)
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default();
+                let snippet: String = if first == title {
+                    String::new()
+                } else {
+                    first.chars().take(90).collect()
+                };
+                hits.push(Hit {
+                    project: ix,
+                    session: chat.id,
+                    title,
+                    snippet,
+                    tab: tab.clone(),
+                    updated: chat.updated,
+                    running: chat.busy(),
+                });
+            }
+        }
+        self.dismiss_menu(cx);
+        self.chat_search
+            .update(cx, |search, cx| search.show(hits, window, cx));
+    }
+
+    /// The composer takes the keyboard back, when there is one to take it.
+    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let composer = self
+            .workspace
+            .read(cx)
+            .active_session()
+            .map(|_| self.composer.read(cx).focus_handle(cx));
+        window.focus(composer.as_ref().unwrap_or(&self.focus), cx);
+    }
+
+    /// ⌘2 and the panel's Project header: the project page in the column.
+    pub(crate) fn show_project(&mut self, _: &ShowProject, _: &mut Window, cx: &mut Context<Self>) {
+        self.show_pane(Pane::Project, cx);
     }
 
     pub(crate) fn show_chat(&mut self, _: &ShowChat, _: &mut Window, cx: &mut Context<Self>) {
@@ -1018,10 +1662,80 @@ impl Cydonia {
 
     pub(crate) fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
         let workspace = self.workspace.clone();
+        let had = self.settings_window.is_some();
         self.settings_window = settings::open(workspace, self.settings_window, section, cx);
+        // When the window goes — Escape, ⌘W, the title bar — this window
+        // comes back forward and the composer takes the keyboard, so the
+        // settings never sit between the user and the chat.
+        if !had
+            && let Some(view) = self
+                .settings_window
+                .and_then(|handle| handle.entity(cx).ok())
+        {
+            cx.observe_release(&view, |this, _, cx| {
+                this.settings_window = None;
+                if let Some(main) = cx
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.downcast::<Self>().is_some())
+                {
+                    let _ = main.update(cx, |_, window, _| window.activate_window());
+                }
+                let composer = this.composer.read(cx).focus_handle(cx);
+                if let Some(main) = cx
+                    .windows()
+                    .into_iter()
+                    .find(|w| w.downcast::<Self>().is_some())
+                {
+                    let _ = main.update(cx, |_, window, cx| window.focus(&composer, cx));
+                }
+            })
+            .detach();
+        }
     }
 
     /// Mic button: start capture, or stop, put the words in the field, and send.
+    /// While a speech-server session is live, what its agent does
+    /// (`agent.*`, `tool.*`, `text.done`) lands in the active chat as
+    /// notices, a few times a second. Ends when the session does.
+    pub(crate) fn start_voice_mirror(&mut self, cx: &mut Context<Self>) {
+        if self.voice_mirror_on || !crate::voice_ws::configured() {
+            return;
+        }
+        self.voice_mirror_on = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                let lines = crate::voice_ws::drain_mirror();
+                let live = crate::voice_ws::status().phase.is_some();
+                let keep = this.update(cx, |this, cx| {
+                    if !lines.is_empty() {
+                        let id = this.workspace.read(cx).active_id();
+                        if let Some(id) = id {
+                            this.workspace.update(cx, |workspace, cx| {
+                                workspace.with_session(id, cx, |chat| {
+                                    for m in &lines {
+                                        chat.notice(false, &mirror_line(m));
+                                    }
+                                });
+                            });
+                        }
+                    }
+                    if !live {
+                        this.voice_mirror_on = false;
+                    }
+                    live
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn toggle_voice(&mut self, cx: &mut Context<Self>) {
         if self.composer.read(cx).is_recording() || self.voice_want_stop {
             self.stop_voice(cx);
@@ -1030,11 +1744,24 @@ impl Cydonia {
         }
     }
 
+    /// The Fn key, as the native monitor (or the driver) reports it.
+    pub(crate) fn fn_key(&mut self, down: bool, cx: &mut Context<Self>) {
+        if down {
+            self.fn_down(cx);
+        } else {
+            self.fn_up(cx);
+        }
+    }
+
     fn fn_down(&mut self, cx: &mut Context<Self>) {
         if self.fn_held {
             return;
         }
         self.fn_held = true;
+        self.dictation = Dictation {
+            pressed_at: Some(Instant::now()),
+            ..Dictation::default()
+        };
         if self.composer.read(cx).is_recording() || self.composer.read(cx).voice_busy() {
             return;
         }
@@ -1046,6 +1773,7 @@ impl Cydonia {
             return;
         }
         self.fn_held = false;
+        self.dictation.released_at = Some(Instant::now());
         self.stop_voice(cx);
     }
 
@@ -1084,6 +1812,7 @@ impl Cydonia {
                             composer.set_voice(VoiceState::Recording, cx);
                         });
                         this.poll_voice(stamp, started_at, cx);
+                        this.start_voice_mirror(cx);
                         if this.voice_want_stop {
                             this.stop_voice(cx);
                         }
@@ -1129,13 +1858,21 @@ impl Cydonia {
                         return;
                     }
                     if let Ok(text) = peeked {
+                        if !text.trim().is_empty() && this.dictation.first_partial_ms.is_none() {
+                            this.dictation.first_partial_ms = this
+                                .dictation
+                                .pressed_at
+                                .map(|at| at.elapsed().as_millis() as u64);
+                        }
                         this.composer.update(cx, |composer, cx| {
                             composer.set_voice_preview(&text, cx);
                         });
                     }
                 });
+                // Partials land within the first second; the poll keeps up
+                // with them.
                 cx.background_executor()
-                    .timer(Duration::from_millis(200))
+                    .timer(Duration::from_millis(80))
                     .await;
             }
         })
@@ -1176,14 +1913,39 @@ impl Cydonia {
                 if this.voice_gen != stamp {
                     return;
                 }
+                let spoken = matches!(&text, Ok(t) if !t.trim().is_empty());
+                // A duplex server answered the words itself (and may have
+                // sent them to its own kernel): the transcript goes into the
+                // composer for the record, but is neither sent nor read back.
+                let server_answers =
+                    crate::voice_ws::configured() && crate::voice_ws::server_answers();
+                if spoken && crate::voice_ws::configured() && !server_answers {
+                    // The answer to a dictated prompt is read aloud.
+                    if let Some(id) = this.workspace.read(cx).active_id() {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(id, cx, |chat| chat.voice_reply = true);
+                        });
+                    }
+                }
+                let sent = matches!(&text, Ok(t) if !t.trim().is_empty());
                 this.composer.update(cx, |composer, cx| {
                     composer.set_voice(VoiceState::Idle, cx);
                     if let Ok(text) = &text
                         && !text.trim().is_empty()
                     {
-                        composer.dictation_final(text, cx);
+                        if server_answers {
+                            composer.dictation_text(text, cx);
+                        } else {
+                            composer.dictation_final(text, cx);
+                        }
                     }
                 });
+                if sent {
+                    this.dictation.release_to_send_ms = this
+                        .dictation
+                        .released_at
+                        .map(|at| at.elapsed().as_millis() as u64);
+                }
                 if let Err(e) = text {
                     this.voice_error(&format!("voice failed: {e:#}"), cx);
                 }
@@ -1192,12 +1954,204 @@ impl Cydonia {
         .detach();
     }
 
+    /// A microphone or speech-server failure belongs under the mic button,
+    /// not in the transcript: the conversation did not fail, the take did.
     fn voice_error(&mut self, msg: &str, cx: &mut Context<Self>) {
-        if let Some(id) = self.workspace.read(cx).active_id() {
-            self.workspace.update(cx, |workspace, cx| {
-                workspace.with_session(id, cx, |chat| chat.notice(true, msg));
+        let note = msg
+            .strip_prefix("voice failed: ")
+            .unwrap_or(msg)
+            .to_string();
+        // The microphone was wanted and the system said no: after "Skip for
+        // now" this is what lights the dot on the gear.
+        if crate::voice_ws::mic_permission().advice().is_some() {
+            self.permission_center.update(cx, |center, cx| {
+                center.note_needed(crate::permissions::Permission::Microphone, cx)
             });
         }
+        self.composer
+            .update(cx, |composer, cx| composer.set_voice_note(Some(note), cx));
+    }
+
+    // ------------------------------------------------------------------ calls
+
+    /// Whether a call can start: a speech server is set up and a project
+    /// with a main chat is in front.
+    pub(crate) fn can_call(&self, cx: &App) -> bool {
+        crate::voice_ws::configured() && self.workspace.read(cx).active_id().is_some()
+    }
+
+    /// ⇧⌘C and the panel's handset: start a call to the project in front,
+    /// or hang up the one that is live.
+    pub(crate) fn start_call_action(
+        &mut self,
+        _: &StartCall,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.call.is_some() {
+            self.end_call(cx);
+        } else {
+            self.start_call(cx);
+        }
+    }
+
+    pub(crate) fn end_call_action(&mut self, _: &EndCall, _: &mut Window, cx: &mut Context<Self>) {
+        self.end_call(cx);
+    }
+
+    pub(crate) fn toggle_mute_action(
+        &mut self,
+        _: &ToggleMute,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_mute(cx);
+    }
+
+    /// Call the project in front. The gateway opens a call session to that
+    /// project's main agent; from then on the mic is open, the caller's
+    /// words go to the agent as `voice` messages, and the narrator's
+    /// highlights are spoken and written into the chat as `voice ·` lines.
+    pub(crate) fn start_call(&mut self, cx: &mut Context<Self>) {
+        if self.call.is_some() {
+            return;
+        }
+        let workspace = self.workspace.read(cx);
+        let Some(session) = workspace.active_id() else {
+            return;
+        };
+        let Some(project) = workspace.active_project() else {
+            return;
+        };
+        if !crate::voice_ws::configured() {
+            self.voice_error(
+                "no speech server: set voice_url (and voice_token) in ~/.config/arbos/config.toml to call a project",
+                cx,
+            );
+            return;
+        }
+        let label = Workspace::tab_label(project);
+        // What the gateway is told the call is for: the tab's hub name
+        // (`mac/arbos`), so a gateway on another machine can attach to this
+        // kernel through the hub; a gateway serving this very kernel takes
+        // the folder's name as its own.
+        let hub_name = kernel::hub_project_name(&project.place());
+        // Dictation, if a take is open, ends: the call owns the mic.
+        if self.composer.read(cx).is_recording() {
+            self.stop_voice(cx);
+        }
+        self.call = Some(Call {
+            session,
+            label: label.clone(),
+            since: std::time::Instant::now(),
+            connecting: true,
+        });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let started = cx
+                .background_executor()
+                .spawn(async move { crate::voice_ws::call_start(&hub_name) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match started {
+                    Ok(()) => {
+                        if let Some(call) = this.call.as_mut() {
+                            call.connecting = false;
+                        }
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(session, cx, |chat| {
+                                chat.notice(false, "voice · call started");
+                            });
+                        });
+                        this.start_call_mirror(cx);
+                    }
+                    Err(e) => {
+                        this.call = None;
+                        this.voice_error(&format!("call failed: {e:#}"), cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Hang up. The gateway closes the session; the chat keeps the record.
+    pub(crate) fn end_call(&mut self, cx: &mut Context<Self>) {
+        let Some(call) = self.call.take() else {
+            return;
+        };
+        crate::voice_ws::call_end();
+        let mins = call.since.elapsed().as_secs() / 60;
+        let secs = call.since.elapsed().as_secs() % 60;
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.with_session(call.session, cx, |chat| {
+                chat.notice(false, &format!("voice · call ended after {mins}:{secs:02}"));
+            });
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_mute(&mut self, cx: &mut Context<Self>) {
+        if self.call.is_none() {
+            return;
+        }
+        let muted = !crate::voice_ws::status().muted;
+        if let Err(e) = crate::voice_ws::call_mute(muted) {
+            self.voice_error(&format!("mute failed: {e:#}"), cx);
+        }
+        cx.notify();
+    }
+
+    /// While the call is live: the narrator's lines land in the call's chat
+    /// as `voice ·` notices, the strip repaints, and a dropped session ends
+    /// the call on this side too.
+    fn start_call_mirror(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(150))
+                    .await;
+                let lines = crate::voice_ws::drain_mirror();
+                let status = crate::voice_ws::status();
+                let live = crate::voice_ws::in_call();
+                let keep = this.update(cx, |this, cx| {
+                    let Some(call) = this.call.clone() else {
+                        return false;
+                    };
+                    if !lines.is_empty() {
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(call.session, cx, |chat| {
+                                for m in &lines {
+                                    if let Some(line) = call_line(m) {
+                                        chat.notice(false, &line);
+                                    }
+                                }
+                            });
+                        });
+                    }
+                    if let Some(e) = status.error.as_deref()
+                        && !live
+                    {
+                        this.voice_error(&format!("call dropped: {e}"), cx);
+                    }
+                    if !live && !call.connecting {
+                        this.call = None;
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(call.session, cx, |chat| {
+                                chat.notice(false, "voice · call ended");
+                            });
+                        });
+                    }
+                    cx.notify();
+                    this.call.is_some()
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn open_project_action(
@@ -1212,33 +2166,476 @@ impl Cydonia {
         window.focus(&self.opener.read(cx).focus_handle(cx), cx);
     }
 
-    fn browse_local(&mut self, cx: &mut Context<Self>) {
+    fn browse_local(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
             prompt: None,
         });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else {
                 return;
             };
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.offer_store_out_of_sync(
+                    &crate::model::place::Place::local(path.clone()),
+                    window,
+                    cx,
+                );
                 this.workspace
                     .update(cx, |workspace, cx| workspace.open_project(path, cx));
+                this.offer_tab_face(window, cx);
             });
         })
         .detach();
+    }
+
+    /// A folder inside iCloud / a file-provider sync: reads of `.arbos/`
+    /// there block for minutes on items the provider has not downloaded,
+    /// and the kernel stalls with them. Offer to keep the store out of the
+    /// sync before the kernel starts: `.arbos.nosync` beside the project
+    /// (iCloud skips `*.nosync`) with `.arbos` a symlink to it, or a folder
+    /// under `~/.arbos/stores/`. Nothing when the store is already out.
+    fn offer_store_out_of_sync(
+        &mut self,
+        place: &crate::model::place::Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if place.is_remote() {
+            return;
+        }
+        let path = place.path.clone();
+        let Some(sync) = arbos_core::cloudsync::detect(&path) else {
+            return;
+        };
+        if arbos_core::cloudsync::settled(&path) {
+            return;
+        }
+        let detail = format!(
+            "{} is inside {} sync. Reads of its .arbos folder can block for minutes on items {} has not downloaded, and Arbos would stall with them.\n\nKeep the store out of the sync? \"Beside the project\" renames .arbos to .arbos.nosync (which iCloud skips) and leaves .arbos as a link to it. \"In ~/.arbos/stores\" moves it out of the folder entirely.",
+            path.display(),
+            sync.label(),
+            sync.label()
+        );
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "This folder is synced by iCloud",
+            Some(&detail),
+            &[
+                "Beside the project (.arbos.nosync)",
+                "In ~/.arbos/stores",
+                "Leave as is",
+            ],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(choice) = answer.await else {
+                return;
+            };
+            let how = match choice {
+                0 => arbos_core::cloudsync::Relocation::Nosync,
+                1 => arbos_core::cloudsync::Relocation::Home,
+                _ => return,
+            };
+            let outcome = arbos_core::cloudsync::relocate(&path, how);
+            let _ = this.update_in(cx, |_this, window, cx| {
+                let (title, detail) = match &outcome {
+                    Ok(target) => (
+                        "Store moved",
+                        format!(".arbos is now a link to {}.", target.display()),
+                    ),
+                    Err(e) => ("Could not move the store", format!("{e:#}")),
+                };
+                let _ = window.prompt(PromptLevel::Info, title, Some(&detail), &["OK"], cx);
+            });
+        })
+        .detach();
+    }
+
+    /// A folder opened for the first time has no `project.toml`: offer the
+    /// sheet with the folder's own defaults filled in. A folder that has
+    /// one comes back wearing it, no questions.
+    /// The permissions sheet, the first time only. Skip for now marks it
+    /// seen; after that only the dot on the gear says a grant is wanted.
+    fn permissions_once(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace.read(cx).permissions_seen {
+            return;
+        }
+        self.show_permissions(window, cx);
+    }
+
+    /// The permissions sheet over the chat, for the open project's folder.
+    pub(crate) fn show_permissions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .filter(|project| !project.is_remote())
+            .map(|project| project.path.clone());
+        self.permission_center
+            .update(cx, |center, cx| center.set_project(project, cx));
+        self.permissions_sheet
+            .update(cx, |sheet, cx| sheet.show(window, cx));
+    }
+
+    pub(crate) fn show_permissions_action(
+        &mut self,
+        _: &ShowPermissions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_permissions(window, cx);
+    }
+
+    /// Report a problem: open the review sheet on the chat in front, ask the
+    /// kernel for the exchange behind it, and take a picture of this window.
+    ///
+    /// Nothing is sent here. The sheet shows him every part first and Send is
+    /// the only thing that writes anything.
+    pub(crate) fn report_problem(
+        &mut self,
+        _: &ReportProblem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_report(None, window, cx);
+    }
+
+    /// The thumbs-down under an answer: Cursor's 👎 asks what was wrong, and
+    /// so does ours — the same sheet, anchored on that exchange. The vote
+    /// itself is already recorded by the time this runs; dismissing the
+    /// sheet leaves a plain 👎 a plain 👎.
+    pub(crate) fn report_problem_at(
+        &mut self,
+        action: &ReportProblemAt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_report(action.seq, window, cx);
+    }
+
+    fn open_report(&mut self, seq: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        let (id, agent, place) = {
+            let workspace = self.workspace.read(cx);
+            let id = workspace.active_id();
+            let session = workspace.active_session();
+            (
+                id,
+                session.and_then(|chat| chat.agent_session.clone()),
+                workspace
+                    .active_project()
+                    .map(|project| arbos_core::Place::new(project.path.clone())),
+            )
+        };
+        // His last answer to the tool-argument control, so he does not decide
+        // it again every time.
+        let parts = place
+            .as_ref()
+            .map(crate::feedback::load_parts)
+            .unwrap_or_default();
+        self.report_anchor = id.zip(seq);
+        self.feedback_sheet.update(cx, |sheet, cx| {
+            sheet.show(agent, seq, parts, window, cx);
+            sheet.take_session(
+                self.workspace
+                    .read(cx)
+                    .active_session()
+                    .map(|chat| chat.drawn_view())
+                    .unwrap_or(serde_json::Value::Null),
+                cx,
+            );
+        });
+        if let Some(id) = id {
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.with_session(id, cx, |chat| {
+                    chat.request_feedback(seq, crate::feedback::TAIL_LINES)
+                });
+            });
+        }
+        // And a clock on the ask. A kernel that predates the frame refuses and
+        // is caught above; one that is down, wedged, or on a link that is not
+        // carrying says nothing at all, and the sheet must not wait on it in
+        // silence. Two and a half seconds is long enough for a local socket and
+        // short enough that he is still looking at the sheet when it answers.
+        let waiting_sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |_, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(2_500))
+                .await;
+            let _ = waiting_sheet.update(cx, |sheet, cx| {
+                if sheet.awaiting() {
+                    sheet.no_bundle(Unavailable::NoAnswer, cx);
+                }
+            });
+        })
+        .detach();
+        // The capture runs off the UI thread: it shells out, and the window
+        // must keep drawing — a frozen window is not the window he is
+        // complaining about.
+        let size = window.viewport_size();
+        let (w, h) = (f32::from(size.width), f32::from(size.height));
+        let sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |_, cx| {
+            let shot = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::feedback::capture_window(w, h).map_err(|e| format!("{e:#}"))
+                })
+                .await;
+            let _ = sheet.update(cx, |sheet, cx| sheet.take_shot(shot, cx));
+        })
+        .detach();
+    }
+
+    /// The kernel answered a `feedback` ask: hand it to the sheet.
+    fn collect_feedback(&mut self, cx: &mut Context<Self>) {
+        if !self.feedback_sheet.read(cx).is_open {
+            return;
+        }
+        let Some(id) = self.workspace.read(cx).active_id() else {
+            return;
+        };
+        // Look before taking: this runs inside the workspace's observer,
+        // and `with_session` notifies the workspace, so taking from a chat
+        // that holds nothing observed itself forever — the window froze
+        // the moment the sheet opened (found driving it on the rig).
+        if !self
+            .workspace
+            .read(cx)
+            .session(id)
+            .is_some_and(|chat| chat.feedback.is_some() || chat.feedback_error.is_some())
+        {
+            return;
+        }
+        let mut taken = None;
+        let mut refused = None;
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.with_session(id, cx, |chat| {
+                taken = chat.take_feedback();
+                refused = chat.take_feedback_error();
+            });
+        });
+        if let Some(bundle) = taken {
+            self.feedback_sheet
+                .update(cx, |sheet, cx| sheet.take_bundle(*bundle, cx));
+        } else if refused.is_some() {
+            // The kernel said it does not know the frame, which means it
+            // predates it. Certain, not guessed.
+            self.feedback_sheet
+                .update(cx, |sheet, cx| sheet.no_bundle(Unavailable::KernelTooOld, cx));
+        }
+    }
+
+    /// A kernel came back: try the outbox at once rather than waiting for the
+    /// minute to turn. This is the moment "it will go by itself when the link
+    /// is back" names, so it should not take a minute to honour.
+    ///
+    /// An edge, not a level: draining on every observer run while connected
+    /// would shell out to the kernel several times a second.
+    fn drain_on_reconnect(&mut self, cx: &mut Context<Self>) {
+        let connected = self
+            .workspace
+            .read(cx)
+            .projects
+            .iter()
+            .flat_map(|project| project.sessions.iter())
+            .any(|chat| chat.connected());
+        if connected && !self.was_connected {
+            self.was_connected = true;
+            self.drain_feedback(false, cx);
+        } else if !connected {
+            self.was_connected = false;
+        }
+    }
+
+    /// Send: write the report to the outbox on his own disk. On disk is what
+    /// "sent" means here — delivery reads the outbox, so a report made with
+    /// the network down is already safe and goes out when the link returns.
+    fn write_report(
+        &mut self,
+        sheet: Entity<FeedbackSheet>,
+        draft: &crate::feedback::Draft,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(place) = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .map(|project| arbos_core::Place::new(project.path.clone()))
+        else {
+            sheet.update(cx, |sheet, cx| {
+                sheet.settled(Err("no project open to file this against".into()), cx)
+            });
+            return;
+        };
+        crate::feedback::save_parts(&place, &draft.parts);
+        let id = crate::feedback::new_id(arbos_core::now_ms());
+        let written = crate::feedback::write(&place, draft, &id, arbos_core::now_ms());
+        if let Err(e) = written {
+            sheet.update(cx, |sheet, cx| {
+                sheet.settled(Err(format!("could not write the report: {e:#}")), cx)
+            });
+            return;
+        }
+        // The thumbs-down he pressed now reads as reported.
+        if let Some((chat_id, seq)) = self.report_anchor.take() {
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.with_session(chat_id, cx, |chat| chat.mark_reported(seq, &id));
+            });
+        }
+        // On disk is what Send means, so say so now and carry it the rest of
+        // the way behind him. Delivery shells out to the kernel and talks to
+        // the hub; neither belongs on the thread drawing the window.
+        let address = self.workspace.read(cx).settings.feedback.address.clone();
+        sheet.update(cx, |sheet, cx| {
+            sheet.settled(
+                Ok(if address.trim().is_empty() {
+                    format!(
+                        "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk. Reference {id}."
+                    )
+                } else {
+                    format!(
+                        "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
+                    )
+                }),
+                cx,
+            )
+        });
+        self.drain_feedback(true, cx);
+    }
+
+    /// Carry every waiting report to the store it goes to, off the UI thread.
+    ///
+    /// `tell_him` says whether a failure should be spoken: it should when he has
+    /// just pressed Send and is looking at the sheet, and should not when this
+    /// is the timer doing its rounds behind him.
+    ///
+    /// Every open project, not only the one in front: a report filed in one
+    /// project while another is on screen is still his report.
+    ///
+    /// QA found this path had exactly one call site — Send — so "it will go by
+    /// itself when the link is back" only came true if he happened to report
+    /// something else later (qal-j06). The wording was a promise the code did
+    /// not keep, which is the one thing this feature cannot afford, so the
+    /// callers now are Send, launch, a kernel coming back, and a timer.
+    fn drain_feedback(&mut self, tell_him: bool, cx: &mut Context<Self>) {
+        let (address, hub_home) = {
+            let feedback = &self.workspace.read(cx).settings.feedback;
+            (feedback.address.clone(), feedback.hub_home.clone())
+        };
+        if address.trim().is_empty() {
+            return;
+        }
+        // Every place that holds reports, open or not. Walking the open tabs
+        // meant a report from a project he had closed was never retried — and he
+        // closes a project because the thing he reported is over.
+        let mut places = crate::feedback::known_outboxes();
+        for project in &self.workspace.read(cx).projects {
+            let place = arbos_core::Place::new(project.path.clone());
+            if !places.iter().any(|p| p.path() == place.path()) {
+                places.push(place);
+            }
+        }
+        if places.is_empty() {
+            return;
+        }
+        let sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |this, cx| {
+            let results = cx
+                .background_executor()
+                .spawn(async move {
+                    let home = std::path::Path::new(&hub_home);
+                    let now = arbos_core::now_ms();
+                    places
+                        .iter()
+                        .flat_map(|place| {
+                            crate::feedback::deliver_pending(place, &address, home, now)
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            if results.is_empty() {
+                return;
+            }
+            let why = results.iter().find_map(|(_, state)| match state {
+                crate::feedback::Delivery::Waiting {
+                    last_error: Some(why),
+                    ..
+                } => Some(why.clone()),
+                _ => None,
+            });
+            let sent = results
+                .iter()
+                .filter(|(_, state)| matches!(state, crate::feedback::Delivery::Sent { .. }))
+                .count();
+            // Kept where the driver can read it, so the loop can assert the
+            // state Jacob is in rather than photographing the window for it.
+            let _ = this.update(cx, |this, cx| {
+                this.feedback_outbox = OutboxState {
+                    waiting: results.len() - sent,
+                    sent_this_run: sent,
+                    last_error: why.clone(),
+                    at: Some(Instant::now()),
+                };
+                cx.notify();
+            });
+            // Only a failure is worth saying to him, and only while he is
+            // looking: a delivered report already read as sent when it hit the
+            // disk, and the timer must not talk over whatever he is doing.
+            if tell_him && let Some(why) = why {
+                let _ = sheet.update(cx, |sheet, cx| {
+                    sheet.settled(
+                        Err(format!(
+                            "Saved, and waiting: it could not be sent yet — {why}. It will go by itself when the link is back."
+                        )),
+                        cx,
+                    )
+                });
+            }
+        })
+        .detach();
+    }
+
+    fn offer_tab_face(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fresh = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .is_some_and(|project| !project.identity_saved);
+        if let (true, Some(ix)) = (fresh, self.workspace.read(cx).active) {
+            self.edit_tab(ix, window, cx);
+        }
+    }
+
+    /// The sheet, on the tab at `ix`: its name, glyph and colour.
+    pub(crate) fn edit_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((identity, fallback)) = self.workspace.read(cx).projects.get(ix).map(|project| {
+            let mut identity = project.identity.clone();
+            // The Home tab's first offer comes prefilled, so Keep as-is
+            // names it "Home" in its project.toml.
+            if Workspace::is_home(project) && !project.identity_saved && identity.name.is_none() {
+                identity.name = Some("Home".into());
+            }
+            (identity, Workspace::tab_label(project))
+        }) else {
+            return;
+        };
+        self.dismiss_menu(cx);
+        self.tab_sheet
+            .update(cx, |sheet, cx| sheet.show(ix, &identity, fallback, cx));
+        window.focus(&self.tab_sheet.read(cx).focus_handle(cx), cx);
     }
 
     /// Which pane is on screen, as against [`Self::pane`], which is the one
     /// asked for. They part when what it points at is gone — deleted, switched
     /// off, or in a project that has none open — and whatever the project does
     /// have stands in, so a launch lands on the entry it was left on rather
-    /// than on an empty conversation. The sidebar reads this, not the request:
+    /// than on an empty conversation. The panel reads this, not the request:
     /// a row lit for a pane nobody can see is the second selection the eye
     /// finds.
     ///
@@ -1249,7 +2646,7 @@ impl Cydonia {
         if self.has_pane(self.pane, cx) {
             return Some(self.pane);
         }
-        [Pane::Chat, Pane::Surface]
+        [Pane::Chat, Pane::Surface, Pane::Project]
             .into_iter()
             .find(|&pane| self.has_pane(pane, cx))
     }
@@ -1266,6 +2663,8 @@ impl Cydonia {
                         .is_some_and(|focus| focus.surface.is_none())
             }
             Pane::Surface => workspace.active_surface().is_some(),
+            // Every open project has a page, written or not.
+            Pane::Project => workspace.active_project().is_some(),
         }
     }
 
@@ -1277,27 +2676,27 @@ impl Cydonia {
         theme
             .empty_state(
                 icons::files::FOLDER,
-                "No project open",
-                "A folder on this Mac, or host:folder over ssh.",
+                "No tab open",
+                "A tab is a folder on this Mac, or host:folder over ssh.",
             )
             .flex_1()
             .child(
                 theme
                     .button(
-                        "Open project…",
+                        "New tab…",
                         ButtonStyle::Prominent,
                         Some(Fade::new(painter, "open-project-empty")),
                     )
                     .id("open-project-empty")
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_project_action(&OpenProject, window, cx);
+                        this.new_tab_action(&NewTab, window, cx);
                     })),
             )
             .into_any_element()
     }
 }
 
-impl Render for Cydonia {
+impl Render for Arbos {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_terminal(window, cx);
         let theme = Theme::of(cx).clone();
@@ -1305,10 +2704,24 @@ impl Render for Cydonia {
             .size_full()
             .relative()
             .flex()
-            .flex_row()
+            .flex_col()
             .font_family(theme.font_sans.clone())
             .text_color(theme.text)
             .text_style(TextStyle::Body)
+            // The first press or key in the window: from here the chat in
+            // front counts as looked at (see `touched`).
+            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                if !this.touched {
+                    this.touched = true;
+                    this.reap_notifications(cx);
+                }
+            }))
+            .on_key_down(cx.listener(|this, _, _, cx| {
+                if !this.touched {
+                    this.touched = true;
+                    this.reap_notifications(cx);
+                }
+            }))
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::copy_chat))
             .on_action(cx.listener(Self::paste_chat))
@@ -1319,32 +2732,26 @@ impl Render for Cydonia {
             // Everything the menu bar names, and only under the conditions
             // that keep its items honest.
             .map(|root| self.commands(root, cx))
-            .on_drag_move(
-                cx.listener(|this, event: &DragMoveEvent<SplitDrag>, _, cx| {
-                    this.sidebar_width = f32::from(event.event.position.x)
-                        .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
-                    cx.notify();
-                }),
-            )
             // An action reaches the handlers above only through the focused
             // element's ancestors. Sized at nothing, so the pane that does hold
             // a field keeps its focus through a click anywhere else.
             .child(div().key_context(WINDOW_CONTEXT).track_focus(&self.focus))
-            .when(self.sidebar_open, |root| root.child(self.sidebar(cx)))
-            .child(self.detail(window, cx))
-            // Rides on the seam between the sidebar and the detail column
-            // rather than sitting in flow, so neither gives up a column.
-            .when(self.sidebar_open, |root| {
-                root.child(
-                    theme
-                        .split_handle(Axis::Horizontal, SplitStyle::Line { dragging: false })
-                        .id("sidebar-split")
-                        .absolute()
-                        .top_0()
-                        .left(px(self.sidebar_width - SPLIT_HANDLE_HIT / 2.))
-                        .on_drag(SplitDrag, |_, _, _, cx| cx.new(|_| Empty)),
-                )
-            })
+            // The strip of tabs across the top, then the chat column with
+            // the panel on its right.
+            .child(self.tab_bar(cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_row()
+                    .child(self.detail(window, cx))
+                    .children(self.panel(window, cx)),
+            )
+            // Under everything, the width of the window: settings and the
+            // update control, where Cursor keeps them.
+            .child(self.status_bar(cx))
             .children(
                 self.workspace
                     .read(cx)
@@ -1352,7 +2759,36 @@ impl Render for Cydonia {
                     .then(|| meter::panel("app-meter", &self.meter_at, &self.meter, window)),
             )
             .child(self.opener.clone())
+            .child(self.tab_sheet.clone())
+            .child(self.feedback_sheet.clone())
+            .child(self.permissions_sheet.clone())
+            .child(self.chat_search.clone())
     }
+}
+
+/// Where the feedback outbox stands, for the driver to read and the window to
+/// draw. Its own type rather than a tuple because the parity loop asserts on
+/// these names.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct OutboxState {
+    /// Reports written and not yet delivered.
+    pub waiting: usize,
+    /// How many went on the last pass.
+    pub sent_this_run: usize,
+    /// Why the last attempt did not go, in the kernel's own words.
+    pub last_error: Option<String>,
+    pub at: Option<Instant>,
+}
+
+/// The last dictated take's clock. `pressed_at` is the Fn press; the
+/// first partial and the release-to-send times are what the driver shows
+/// as `voice_latency`, so QA can measure "instant" instead of feeling it.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Dictation {
+    pub pressed_at: Option<Instant>,
+    pub released_at: Option<Instant>,
+    pub first_partial_ms: Option<u64>,
+    pub release_to_send_ms: Option<u64>,
 }
 
 /// Native Spaces fullscreen is a black desktop, so the frost has nothing to
@@ -1392,3 +2828,104 @@ fn keep_macos_glass(_window: &Window) {
 
 #[cfg(not(target_os = "macos"))]
 fn keep_macos_glass(_window: &Window) {}
+
+/// The window's own chrome in the theme's colour. AppKit paints the title
+/// band (the traffic lights' strip) from the `NSWindow`'s background colour
+/// and its appearance, not from what we draw under it, so a dark palette
+/// over a window left at AppKit's defaults kept a white band across the
+/// top. Every window takes the chrome surface as its background — clear
+/// where glass is on, so the frost still shows — and the palette's
+/// appearance, so the lights and the band are drawn for dark.
+#[cfg(target_os = "macos")]
+fn sync_macos_chrome(cx: &App) {
+    use objc::{
+        class, msg_send,
+        runtime::{Object, YES},
+        sel, sel_impl,
+    };
+    let theme = Theme::of(cx);
+    let chrome = chrome_bg(theme);
+    let rgba = chrome.to_rgb();
+    let dark = theme.appearance == bezel::theme::Appearance::Dark;
+    unsafe {
+        let name: *mut Object = msg_send![
+            class!(NSString),
+            stringWithUTF8String: if dark {
+                c"NSAppearanceNameDarkAqua".as_ptr()
+            } else {
+                c"NSAppearanceNameAqua".as_ptr()
+            }
+        ];
+        let appearance: *mut Object = msg_send![class!(NSAppearance), appearanceNamed: name];
+        let color: *mut Object = if theme.vibrancy {
+            msg_send![class!(NSColor), clearColor]
+        } else {
+            msg_send![
+                class!(NSColor),
+                colorWithSRGBRed: rgba.r as f64
+                green: rgba.g as f64
+                blue: rgba.b as f64
+                alpha: 1.0f64
+            ]
+        };
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let windows: *mut Object = msg_send![app, windows];
+        let count: usize = msg_send![windows, count];
+        for i in 0..count {
+            let ns_window: *mut Object = msg_send![windows, objectAtIndex: i];
+            if ns_window.is_null() {
+                continue;
+            }
+            let _: () = msg_send![ns_window, setAppearance: appearance];
+            let _: () = msg_send![ns_window, setBackgroundColor: color];
+            let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_macos_chrome(_cx: &App) {}
+
+/// One `voice ·` line for the chat during a call: what the narrator said,
+/// marked by kind so a question or a failure reads as one. Everything else
+/// the mirror carries (the agent bridge) is already in the chat, which is
+/// attached to the same kernel: nothing.
+fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
+    let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match m.kind.as_str() {
+        // "On it." is heard, not read: the caller's own line is the record.
+        "narrator.say/ack" => None,
+        "narrator.say/report" => Some(format!("voice · {text}")),
+        "narrator.say/ask" => Some(format!("voice · asked: {text}")),
+        "narrator.say/error" => Some(format!("voice · {text}")),
+        "narrator.say/detail" => Some(format!("voice · detail: {text}")),
+        k if k.starts_with("narrator.say") => Some(format!("voice · {text}")),
+        _ => None,
+    }
+}
+
+/// One notice line for a mirrored speech-server event: who, what, words.
+fn mirror_line(m: &crate::voice_ws::Mirror) -> String {
+    let who = if m.agent.is_empty() {
+        "voice".to_string()
+    } else {
+        format!("voice · {}", m.agent)
+    };
+    let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text: String = if text.chars().count() > 240 {
+        text.chars().take(240).collect::<String>() + "…"
+    } else {
+        text
+    };
+    match m.kind.as_str() {
+        "text.done" => format!("{who} answered: {text}"),
+        "agent.done" => format!("{who} finished: {text}"),
+        "agent.turn" => format!("{who} is {text}"),
+        "tool.call" => format!("{who} runs {text}"),
+        "tool.result" => format!("{who} got {text}"),
+        k if k.starts_with("agent.event/") => {
+            format!("{who} {}: {text}", k.trim_start_matches("agent.event/"))
+        }
+        _ => format!("{who}: {text}"),
+    }
+}

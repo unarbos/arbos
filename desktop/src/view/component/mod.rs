@@ -2,9 +2,13 @@
 //! [`crate::view::root::Pane`]: these are not places you can be.
 
 pub mod attachment;
+pub mod chat_search;
 pub mod composer;
+pub mod feedback_sheet;
 pub mod menu;
 pub mod meter;
 pub mod opener;
+pub mod permissions_sheet;
 pub mod surface;
+pub mod tab_sheet;
 pub mod transcript;

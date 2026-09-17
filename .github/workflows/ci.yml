@@ -1,0 +1,145 @@
+name: ci
+
+on:
+  push:
+    branches: [main, rust, "release/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  kernel:
+    name: kernel (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kernel
+      - name: System packages
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        # Tests run on the replay provider. No model key is set, so nothing
+        # here reaches the network.
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+        run: cargo test --workspace --locked
+
+  desktop:
+    name: desktop (build, Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop
+          workspaces: desktop
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pkg-config clang cmake libssl-dev libasound2-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libgl1-mesa-dev \
+            libegl1-mesa-dev libudev-dev libdbus-1-dev
+      - name: Build
+        working-directory: desktop
+        run: cargo build --locked
+
+  macos:
+    # The desktop's AppKit, CoreAudio and TCC code only compiles here.
+    # Required before a merge to main, like the two Linux jobs.
+    name: macOS (check kernel + desktop)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup toolchain install nightly --profile minimal && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+          workspaces: |
+            .
+            desktop
+      - name: Check kernel
+        run: cargo check --workspace --locked
+      - name: Check desktop
+        working-directory: desktop
+        run: cargo check --locked --all-targets
+
+  ios-changed:
+    # Decides whether the iPhone job below runs. Only `ios/` counts, so the
+    # Rust PRs never wait on an Xcode runner.
+    name: ios changed?
+    runs-on: ubuntu-latest
+    outputs:
+      ios: ${{ steps.check.outputs.ios }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="origin/${{ github.base_ref }}...HEAD"
+          else
+            # A push: compare with the commit before it, or run when there
+            # is nothing to compare with (a new branch).
+            range="${{ github.event.before }}..HEAD"
+            git cat-file -e "${{ github.event.before }}" 2>/dev/null || range=""
+          fi
+          if [ -z "$range" ] || git diff --name-only $range -- ios/ | grep -q .; then
+            echo "ios=true" >> "$GITHUB_OUTPUT"
+            echo "ios/ changed — the iPhone build runs"
+          else
+            echo "ios=false" >> "$GITHUB_OUTPUT"
+            echo "nothing under ios/ changed — the iPhone build is skipped"
+          fi
+
+  iphone:
+    # The iPhone app is Swift, and nothing else in CI compiles it. Before this
+    # job, a Swift error could only surface after a merge, in the TestFlight
+    # workflow, and the phone silently stopped receiving builds (2026-09-16:
+    # every build between 1021 and 1099 failed at archive on one such error).
+    # Required for a PR that touches `ios/`; skipped for everything else.
+    name: iPhone (build, simulator)
+    needs: ios-changed
+    if: needs.ios-changed.outputs.ios == 'true'
+    # The same runner as ios-testflight.yml: the app needs the current iOS
+    # SDK, and macos-14's newest Xcode (16.2) is too old for it.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the newest Xcode on the runner
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+      - name: Build for the simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild build -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)|Compiling|Linking" || true
+          grep -q "BUILD SUCCEEDED" "$RUNNER_TEMP/xcodebuild.log"
+      - name: Say plainly what broke
+        if: failure()
+        run: |
+          echo "::error title=The iPhone app does not compile::This is the iOS (Swift) build, not Rust. The kernel and desktop jobs are separate. The Swift errors are below; a PR touching ios/ cannot merge with this red."
+          grep -E "\.swift:[0-9]+:[0-9]+: error:" "$RUNNER_TEMP/xcodebuild.log" | sort -u | head -n 40 \
+            | sed -E 's#^/Users/runner/work/[^/]+/[^/]+/(.*):([0-9]+):([0-9]+): error: (.*)#::error file=\1,line=\2,col=\3,title=iPhone build::\4#'
+          exit 1

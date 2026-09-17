@@ -1,13 +1,21 @@
-//! Arbos desktop shell — Cydonia UI over the Rust kernel (`crates/arbos-kernel`).
+//! Arbos desktop shell — Arbos UI over the Rust kernel (`crates/arbos-kernel`).
 
 pub mod agent;
 pub mod assets;
 pub mod boardhub;
+pub mod build;
 pub mod data;
 pub mod driver;
+pub mod feedback;
+pub mod fonts;
 pub mod kernel;
+pub mod markup;
 pub mod memory;
 pub mod model;
+pub mod notify_os;
+pub mod permissions;
 pub mod reading;
+pub mod update;
 pub mod view;
 pub mod voice;
+pub mod voice_ws;

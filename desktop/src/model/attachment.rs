@@ -61,12 +61,15 @@ impl Attachment {
                     path.display()
                 );
             }
+            // A file that is not an image still has a size the kernel
+            // will hold it to (`PUT_MAX_BYTES` on a remote place): count it.
+            let bytes = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
             return Ok(Self {
                 path,
                 preview: None,
                 history_image: None,
                 image: None,
-                bytes: 0,
+                bytes,
             });
         }
         let format = format.unwrap();
@@ -141,6 +144,17 @@ impl MessageImage {
             name: None,
             preview: OnceLock::new(),
         })
+    }
+
+    /// A picture on disk, thumbnailed for the transcript; `name` is the
+    /// file name. Same limits as a dropped attachment.
+    pub fn from_file(path: PathBuf) -> Result<Self> {
+        let attachment = Attachment::load(path.clone())?;
+        let mut image = attachment
+            .history_image
+            .ok_or_else(|| anyhow::anyhow!("Not an image: {}", path.display()))?;
+        image.name = Some(file_name(&path));
+        Ok(image)
     }
 
     pub fn from_part(part: &Value) -> Result<Self> {
@@ -260,6 +274,48 @@ pub struct UserMessage {
     pub images: Vec<MessageImage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<MessageFile>,
+    /// Wall seconds the turn this message started took, once it ended:
+    /// the "Worked 21s" figure. Stamped live from the flight clock, or on
+    /// replay from the transcript's timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worked_secs: Option<u32>,
+    /// How the words arrived: `voice` when spoken on a call, empty when
+    /// typed. Drawn as a small microphone on the card.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub channel: String,
+    /// Unix millis when the prompt was sent (or, on replay, the transcript
+    /// line's time). The relative time under the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sent_at: Option<i64>,
+    /// The user's thumbs on this turn's answer: 1 up, -1 down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<i8>,
+    /// Attached images the turn's model could not see, put into words by
+    /// another model (the kernel's `image_described` lines). Drawn as a
+    /// paperclip inside this card, never as a line of the transcript.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub described: Vec<DescribedImage>,
+    /// The transcript line of the kernel's `user` record for this prompt
+    /// (1-based; None until the record comes back, or on a card from before
+    /// the kernel wrote seqs). A report anchors on it (`feedback` frame).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// The id of a problem report he sent about this exchange, once one has
+    /// gone. The thumbs-down stays lit for it, whatever the vote does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported: Option<String>,
+    /// Typed into a running turn (Cursor's steer): the card sits inside
+    /// that turn's work, and the turn stays one — no second "Worked".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steer: bool,
+}
+
+/// One image described for a model that takes no image input.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribedImage {
+    pub path: String,
+    pub model: String,
+    pub text: String,
 }
 
 impl UserMessage {
@@ -319,6 +375,14 @@ impl From<StoredMessage> for UserMessage {
                 text,
                 images: Vec::new(),
                 files: Vec::new(),
+                worked_secs: None,
+                channel: String::new(),
+                sent_at: None,
+                feedback: None,
+                described: Vec::new(),
+                seq: None,
+                reported: None,
+                steer: false,
             },
             StoredMessage::Images {
                 text,
@@ -328,6 +392,14 @@ impl From<StoredMessage> for UserMessage {
                 text,
                 images,
                 files,
+                worked_secs: None,
+                channel: String::new(),
+                sent_at: None,
+                feedback: None,
+                described: Vec::new(),
+                seq: None,
+                reported: None,
+                steer: false,
             },
         };
         out.lift_files();
@@ -341,6 +413,14 @@ impl From<String> for UserMessage {
             text,
             images: Vec::new(),
             files: Vec::new(),
+            worked_secs: None,
+            channel: String::new(),
+            sent_at: Some(arbos_core::now_ms()),
+            feedback: None,
+            described: Vec::new(),
+            seq: None,
+            reported: None,
+            steer: false,
         };
         message.lift_files();
         message
@@ -363,7 +443,7 @@ impl AttachmentTray {
             bail!("Attach at most 16 files per message");
         }
         if self.items.iter().map(|a| a.bytes).sum::<usize>() + attachment.bytes > MAX_TOTAL_BYTES {
-            bail!("Images in one message must total at most 20 MiB");
+            bail!("Attachments in one message must total at most 20 MiB");
         }
         self.items.push(attachment);
         Ok(())
@@ -389,6 +469,14 @@ impl AttachmentDrafts {
 pub struct Prompt {
     pub text: String,
     pub attachments: Vec<Attachment>,
+    /// A model for this one turn ("switch to <vision model> for this
+    /// turn"). None: the agent's own.
+    pub model: Option<String>,
+    /// Where the words came from: empty for typed, `voice` for a dictated
+    /// take. The kernel keeps it on the transcript line.
+    pub channel: String,
+    /// Which device spoke, when `channel` is voice: `desktop`.
+    pub device: String,
 }
 
 impl From<String> for Prompt {
@@ -396,6 +484,9 @@ impl From<String> for Prompt {
         Self {
             text,
             attachments: Vec::new(),
+            model: None,
+            channel: String::new(),
+            device: String::new(),
         }
     }
 }
@@ -422,7 +513,17 @@ impl Prompt {
                 .collect::<Vec<_>>()
                 .join("\n\n"),
             attachments,
+            model: None,
+            channel: String::new(),
+            device: String::new(),
         }
+    }
+
+    /// The same words, marked as spoken into this window.
+    pub fn dictated(mut self) -> Self {
+        self.channel = "voice".into();
+        self.device = "desktop".into();
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -433,15 +534,27 @@ impl Prompt {
     pub fn join(parts: impl IntoIterator<Item = Self>) -> Self {
         let mut text = Vec::new();
         let mut attachments = Vec::new();
+        let mut model = None;
+        let (mut channel, mut device) = (String::new(), String::new());
         for part in parts {
             if !part.text.trim().is_empty() {
                 text.push(part.text);
             }
             attachments.extend(part.attachments);
+            if part.model.is_some() {
+                model = part.model;
+            }
+            if !part.channel.is_empty() {
+                channel = part.channel;
+                device = part.device;
+            }
         }
         Self {
             text: text.join("\n\n"),
             attachments,
+            model,
+            channel,
+            device,
         }
     }
 
@@ -460,6 +573,7 @@ impl Prompt {
 
     pub fn message(&self) -> UserMessage {
         let mut message = UserMessage::from(self.text.clone());
+        message.channel = self.channel.clone();
         message.images = self
             .attachments
             .iter()

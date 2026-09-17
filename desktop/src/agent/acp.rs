@@ -1,23 +1,32 @@
 //! One Arbos session over the kernel's attach JSONL seam.
 //!
-//! The type names stay ACP-shaped so the Cydonia transcript and composer keep
+//! The type names stay ACP-shaped so the Arbos transcript and composer keep
 //! compiling. The transport is a loopback TCP socket on `arbos-kernel`.
 
 use crate::{
     kernel,
-    model::{attachment::Prompt, place::Place},
+    model::{
+        attachment::Prompt,
+        place::Place,
+        session::{Artifact, ArtifactKind},
+    },
 };
 use anyhow::{Result, anyhow};
 use arbos_core::wire::Frame;
 use cacp::{
     Error,
     schema::{
-        ContentBlock, Diff, RequestPermissionRequest, RequestPermissionResponse, SessionUpdate,
-        StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolKind, UsageUpdate,
+        ContentBlock, Cost, Diff, RequestPermissionRequest, RequestPermissionResponse,
+        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ToolKind, UsageUpdate,
     },
 };
 use serde_json::Value;
-use std::{path::PathBuf, sync::OnceLock, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
@@ -44,9 +53,125 @@ pub enum Event {
         who: String,
         text: String,
     },
+    /// A person's words the kernel recorded that this window did not send:
+    /// spoken through the voice gateway during a call, or typed on the
+    /// phone. The transcript's `user` line, with its time.
+    UserLine {
+        text: String,
+        attachments: Vec<String>,
+        ts: i64,
+        /// The record's transcript line: what a report anchors on.
+        seq: u64,
+        /// How the words arrived, from the transcript line: `voice` or `text`
+        /// (empty on lines from before the kernel wrote it).
+        channel: String,
+    },
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
+    /// A kernel reminder for the model ("project page not updated"): a
+    /// dim aside in the transcript, never a failure or a strip.
+    Nudge(String),
+    /// An attached image the turn's model could not see was described in
+    /// words by `model`. Belongs to the user card that carried the image.
+    ImageDescribed {
+        path: String,
+        model: String,
+        text: String,
+    },
+    /// The kernel refused or failed something this window asked for
+    /// (`error` frame): shown as a failed notice, kept on the pane.
+    Refused(String),
+    /// A whole assistant step as the transcript recorded it (an `event`
+    /// with a `seq`). Authoritative: it replaces whatever the deltas of
+    /// that step built, so the reply never shows twice.
+    AssistantFinal {
+        text: String,
+        step: u64,
+    },
+    /// Streamed text of model step `step` (1-based within the turn), from
+    /// a kernel that numbers its steps; the settled line of the same step
+    /// replaces what these built. `step` 0 never reaches here (the plain
+    /// chunk path takes it).
+    TextDelta {
+        text: String,
+        step: u64,
+    },
+    /// A thought's streamed words, by step, likewise.
+    ThoughtDelta {
+        text: String,
+        step: u64,
+    },
+    /// The settled thought of step `step` (recorded, with its seconds):
+    /// stamps the streamed item of that step; opens one when none streamed.
+    ThoughtFinal {
+        text: String,
+        step: u64,
+        secs: Option<u32>,
+    },
+    /// The kernel's notification for this agent (#293): a reply, a
+    /// question, a failure or a notice the user may have missed. Replayed
+    /// ones (unseen at attach) come oldest first with `replayed`.
+    Notify {
+        id: u64,
+        ts: i64,
+        kind: String,
+        title: String,
+        body: String,
+        replayed: bool,
+    },
+    /// The user has seen every notification with id ≤ `through`, on any
+    /// client; every window drops its badge.
+    Seen(u64),
+    /// Any frame at all arrived on this socket: the kernel is answering.
+    /// Sent ahead of the frame's own events so a quiet turn's liveness
+    /// clock restarts on frames that draw nothing (a `listing`, a `tree`).
+    Alive,
+    /// A recorded `wake`: a turn opens (a prompt, a child's report, a
+    /// subscription firing); the model's step numbers start again at 1.
+    /// A kind other than `user`/`kickoff` is a segment of its own.
+    Woke {
+        kind: String,
+        text: Option<String>,
+        at: Option<i64>,
+    },
+    /// The model call is alive and has been silent for this many seconds
+    /// (`working` frame). Live only.
+    Working(u64),
+    /// A recorded turn ended at this kernel time (ms): the "Worked 25s" of
+    /// a transcript read back is the gap from its prompt's `ts`, not the
+    /// seconds the replay took to stream.
+    TurnEndedAt(i64),
+    /// The agent's own word on what it is doing now — the kernel's `status`
+    /// event, one line, replaced by the next. Drawn on the parent's
+    /// "1 Working  …" line for a worker.
+    Status(String),
+    /// The parent's "waiting on <worker> — <the worker's step>" line (kernel
+    /// #366, `status` with `source: "waiting"`): someone else's step,
+    /// watched. `None` when no worker is live any more.
+    Waiting(Option<String>),
+    /// The kernel's model provider and whether it holds a key (`provider`
+    /// frame). `key: false` is the cue to offer this window's own key.
+    Provider {
+        provider: String,
+        model: String,
+        key: bool,
+        source: String,
+    },
+    /// The kernel cut the transcript (`rewound`): how many lines went, and
+    /// what project state came back, when files were restored.
+    Rewound {
+        dropped: u64,
+        restored: Option<String>,
+        /// Files are still being restored; a second `Rewound` follows.
+        pending: bool,
+    },
+    /// The first frame of a connection: the kernel's protocol (`hello`),
+    /// or `None` when the kernel predates the handshake.
+    Handshake {
+        protocol: Option<u32>,
+        kernel: String,
+    },
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
         request_id: String,
@@ -58,8 +183,22 @@ pub enum Event {
         title: String,
         questions: Vec<crate::model::session::AskQuestion>,
     },
+    /// The material for an in-app report, answered on this connection only:
+    /// the exchange the user pointed at, the log for its span, the earlier
+    /// transcript lines asked for, any children's lines, and which build
+    /// answered — all redacted of credentials by the kernel. Goes to the
+    /// review sheet, which shows it before anything is sent.
+    Feedback(Box<crate::feedback::Bundle>),
+    /// The kernel will not answer a `feedback` ask, in its own words — most
+    /// often because it predates the frame. A kernel older than the app is
+    /// ordinary: the app carries its own binary and Jacob's places may still be
+    /// serving last week's. Better than any version guess, since it is the
+    /// kernel itself saying it does not know the frame.
+    FeedbackUnavailable(String),
     /// Provider-generated pictures for the turn that just finished.
     Images(Vec<crate::model::attachment::MessageImage>),
+    /// Files a tool made for the user: screenshots, screen recordings.
+    Artifacts(Vec<crate::model::session::Artifact>),
     /// Web-search sources the provider grounded the last assistant message on.
     Citations(Vec<Citation>),
     /// The agent presented a file (`show`).
@@ -95,8 +234,29 @@ pub enum Event {
         url: String,
         screenshot: Option<String>,
     },
+    /// Try Live: one frame of the screen the agent works on (PNG bytes),
+    /// or why none could be taken.
+    Screen {
+        machine: String,
+        png: Vec<u8>,
+        mime: String,
+        width: u32,
+        height: u32,
+        error: Option<String>,
+    },
+    /// New output from one of the agent's detached jobs.
+    Job {
+        id: String,
+        delta: String,
+        running: bool,
+        exit: Option<i32>,
+    },
     /// The agent's plan, whole. Arrives on attach and after every change.
     Plan(Vec<arbos_core::wire::PlanNode>),
+    /// A file of the project store the panel draws moved (`changed`
+    /// frame for `notes.md`, `docs/project-context.md`, `archived.md`,
+    /// `project.toml`): re-read the store. `path` is relative to `.arbos/`.
+    StoreChanged(String),
 }
 
 /// One source the provider named. Title may be empty; URL is not.
@@ -127,6 +287,9 @@ pub struct Session {
     out: mpsc::UnboundedSender<String>,
     pub session_id: String,
     pub cwd: PathBuf,
+    /// The kernel runs on another machine: a path here means nothing
+    /// there, so attachments travel as bytes (`put` with `data`).
+    remote: bool,
 }
 
 #[derive(Default)]
@@ -198,8 +361,33 @@ impl Session {
         let agent = session_id.clone();
         let reader = runtime().spawn(async move {
             let mut lines = BufReader::new(reader).lines();
+            // The first frame tells what kernel this is: `hello` with a
+            // protocol number, or — from a build older than that — anything
+            // else. The window refuses to drive a kernel it cannot trust.
+            let mut first = true;
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Ok(frame) = serde_json::from_str::<Frame>(&line) {
+                    if first {
+                        first = false;
+                        let hand = match &frame {
+                            Frame::Hello {
+                                protocol, kernel, ..
+                            } => Event::Handshake {
+                                protocol: Some(*protocol),
+                                kernel: kernel.clone(),
+                            },
+                            _ => Event::Handshake {
+                                protocol: None,
+                                kernel: String::new(),
+                            },
+                        };
+                        if tx.send(hand).is_err() {
+                            return;
+                        }
+                    }
+                    if tx.send(Event::Alive).is_err() {
+                        return;
+                    }
                     for ev in frame_events(&agent, frame) {
                         if tx.send(ev).is_err() {
                             return;
@@ -214,33 +402,117 @@ impl Session {
                 reader,
                 out,
                 session_id,
+                remote: launch.place.is_remote(),
                 cwd: launch.place.path,
             },
             rx,
         ))
     }
 
+    /// A prompt for the next turn. While a turn runs the kernel holds it
+    /// as an inbox file and runs it when the turn ends.
     pub fn prompt(&self, content: &Prompt) -> Result<()> {
+        self.user(content, false)
+    }
+
+    /// Words for the turn in flight: the kernel takes them at its next
+    /// tool boundary. On an idle agent the kernel treats it as a prompt.
+    pub fn steer(&self, content: &Prompt) -> Result<()> {
+        self.user(content, true)
+    }
+
+    fn user(&self, content: &Prompt, steer: bool) -> Result<()> {
         // Every attachment goes over as a path, images included: the kernel's
         // projection loads image files itself and sends them as pixels
         // (arbos-engine `project::image_paths`). Filtering images out here
         // — a leftover from the base64 `parts` wire — made screenshots
         // arrive as text only. Absolute paths, since the agent's cwd is
         // the place, not wherever the file was picked from.
+        //
+        // On a remote place the file is sent first: a `put` with its bytes
+        // lands it under `.arbos/attachments/` on the kernel's machine, and
+        // the user frame names that path. The kernel takes frames in order,
+        // so the file is there before the words are. A refusal comes back
+        // as a `written` frame with `error`, shown in the chat.
+        // A local place gets the same treatment for a file outside it: the
+        // agent's tools are confined to the place and its `.arbos/`, so a
+        // path under ~/Desktop or /tmp was a file it could not read — it
+        // said so and answered without it, where Cursor reads the file
+        // (cycle 21). Putting the bytes lands the file under
+        // `.arbos/attachments/`, inside the fence.
+        let outside = |path: &Path| {
+            std::path::absolute(path)
+                .map(|abs| !abs.starts_with(&self.cwd))
+                .unwrap_or(true)
+        };
+        let attachments = content
+            .attachments
+            .iter()
+            .map(|a| {
+                if self.remote || outside(&a.path) {
+                    match self.put_attachment(&a.path) {
+                        Ok(stored) => return stored,
+                        Err(err) => {
+                            eprintln!("attachment {}: {err:#}; sending the path", a.path.display())
+                        }
+                    }
+                }
+                std::path::absolute(&a.path)
+                    .unwrap_or_else(|_| a.path.clone())
+                    .display()
+                    .to_string()
+            })
+            .collect();
         self.send_frame(&Frame::User {
             agent: self.session_id.clone(),
             text: content.text.clone(),
-            steer: false,
-            attachments: content
-                .attachments
-                .iter()
-                .map(|a| {
-                    std::path::absolute(&a.path)
-                        .unwrap_or_else(|_| a.path.clone())
-                        .display()
-                        .to_string()
-                })
-                .collect(),
+            steer,
+            attachments,
+            channel: content.channel.clone(),
+            device: content.device.clone(),
+            model: content.model.clone().unwrap_or_default(),
+        })
+    }
+
+    /// Send a file's bytes ahead of the prompt that names it. Returns the
+    /// relative path the kernel will know it by.
+    fn put_attachment(&self, path: &Path) -> Result<String> {
+        use base64::Engine;
+        // No size check here: the kernel holds the file to `PUT_MAX_BYTES`
+        // and its refusal comes back as a `written` frame the chat shows,
+        // where a silent fallback to a path the kernel cannot read would
+        // not. The tray caps the total before this point anyway.
+        let bytes = std::fs::read(path)?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let stored = format!("attachments/{stamp}-{name}");
+        self.send_frame(&Frame::Put {
+            path: stored.clone(),
+            text: String::new(),
+            data: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+            base_hash: None,
+        })?;
+        Ok(stored)
+    }
+
+    /// The user has seen every notification up to `through`: the kernel
+    /// records it and tells every other client.
+    pub fn seen(&self, through: u64) -> Result<()> {
+        self.send_frame(&Frame::Seen { through })
+    }
+
+    /// A probe while a turn is quiet: the kernel answers a `list` with a
+    /// `listing` at once, whatever the agent is doing, so silence past it
+    /// is the wire's, not the model's.
+    pub fn probe(&self) -> Result<()> {
+        self.send_frame(&Frame::List {
+            path: String::new(),
         })
     }
 
@@ -249,6 +521,15 @@ impl Session {
             agent: self.session_id.clone(),
         })
         .map_err(|e| Error::internal_error().data(e.to_string()))
+    }
+
+    /// Cursor's "Setting up environment" turn on a new Project: asks the
+    /// kernel for root's one bounded kickoff turn. A no-op there once root
+    /// has any turn on record.
+    pub fn kickoff(&self) -> Result<()> {
+        self.send_frame(&Frame::Kickoff {
+            agent: self.session_id.clone(),
+        })
     }
 
     pub fn approval(&self, request_id: &str, approved: bool) -> Result<()> {
@@ -286,6 +567,7 @@ impl Session {
         self.send_frame(&Frame::Answer {
             agent: self.session_id.clone(),
             text,
+            id: (request_id != self.session_id).then(|| request_id.to_string()),
         })
     }
 
@@ -300,6 +582,24 @@ impl Session {
         self.out
             .send(line)
             .map_err(|_| anyhow!("attach writer closed"))
+    }
+
+    /// Hand the kernel a provider and key (`configure`); owner only.
+    pub fn configure(
+        &self,
+        provider: &str,
+        api_base: &str,
+        model: &str,
+        api_key: &str,
+        remember: bool,
+    ) {
+        let _ = self.send_frame(&Frame::Configure {
+            provider: provider.to_string(),
+            api_base: api_base.to_string(),
+            model: model.to_string(),
+            api_key: api_key.to_string(),
+            remember,
+        });
     }
 
     pub fn set_model(&self, model: &str) {
@@ -322,11 +622,50 @@ impl Session {
         });
     }
 
+    /// Put the agent back to the start of its `turn`-th user turn
+    /// ("Rewind here"); `files` restores the project too.
+    pub fn rewind(&self, turn: u32, line: Option<u64>, files: bool) {
+        let _ = self.send_frame(&Frame::Rewind {
+            agent: self.session_id.clone(),
+            turn,
+            files,
+            line,
+        });
+    }
+
     /// Pause or resume the agent (`/pause`, `/resume`).
     pub fn set_paused(&self, paused: bool) {
         let _ = self.send_frame(&Frame::Pause {
             agent: self.session_id.clone(),
             paused,
+        });
+    }
+
+    /// Try Live: ask for the screen the agent works on. The answer comes
+    /// back as `Event::Screen`.
+    pub fn request_screen(&self) {
+        let _ = self.send_frame(&Frame::Screen {
+            agent: self.session_id.clone(),
+        });
+    }
+
+    /// Ask for the material behind a report: the exchange holding `seq` (a
+    /// line the user is looking at) or the last one he opened, `tail` lines
+    /// of transcript before it, and `call_id`'s whole output when he pointed
+    /// at a particular call. The answer comes back as `Event::Feedback`.
+    pub fn request_feedback(
+        &self,
+        seq: Option<u64>,
+        call_id: Option<String>,
+        tail: u32,
+        note: &str,
+    ) {
+        let _ = self.send_frame(&Frame::Feedback {
+            agent: self.session_id.clone(),
+            seq,
+            call_id,
+            tail,
+            note: note.to_string(),
         });
     }
 
@@ -340,8 +679,33 @@ impl Session {
         });
     }
 
-    /// No-op. The kernel has no ACP session modes.
-    pub fn set_mode(&self, _mode_id: &str) {}
+    /// The kernel's permission modes: auto, ask, plan.
+    pub fn set_mode(&self, mode_id: &str) {
+        let _ = self.send_frame(&Frame::SetMode {
+            agent: self.session_id.clone(),
+            mode: mode_id.to_string(),
+        });
+    }
+
+    /// The Mode switch the composer draws for a kernel chat: the three
+    /// permission modes, `current` from the agent's folder.
+    pub fn modes(current: &str) -> cacp::schema::SessionModeState {
+        use cacp::schema::{SessionMode, SessionModeId, SessionModeState};
+        let current = arbos_core::Mode::parse(current).unwrap_or_default();
+        SessionModeState {
+            current_mode_id: SessionModeId::from(current.as_str()),
+            available_modes: arbos_core::Mode::ALL
+                .iter()
+                .map(|m| SessionMode {
+                    id: SessionModeId::from(m.as_str()),
+                    name: m.label().to_string(),
+                    description: Some(m.describe().to_string()),
+                    meta: None,
+                })
+                .collect(),
+            meta: None,
+        }
+    }
 
     /// No-op. The kernel has no ACP config options; the model is `set_model`.
     pub fn set_config_option(
@@ -360,7 +724,61 @@ impl Drop for Session {
 
 fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
     match frame {
-        Frame::Event { agent: id, event } if id == agent || agent.is_empty() => kernel_event(event),
+        Frame::Event { agent: id, event } if id == agent || agent.is_empty() => {
+            kernel_event(&id, event)
+        }
+        // Streamed text, one chunk per frame (the kernel's live path); the
+        // whole step arrives later as an `event` with a seq, which
+        // `merge_stream_text` folds into what the chunks built.
+        Frame::AssistantDelta { agent: id, text, step } if id == agent || agent.is_empty() => {
+            if step > 0 {
+                vec![Event::TextDelta { text, step }]
+            } else {
+                vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
+                    text,
+                )))]
+            }
+        }
+        Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
+            vec![Event::Working(secs)]
+        }
+        Frame::Notify {
+            id: nid,
+            ts,
+            agent: who,
+            kind,
+            title,
+            body,
+            replayed,
+        } if who == agent => vec![Event::Notify {
+            id: nid,
+            ts,
+            kind,
+            title,
+            body,
+            replayed,
+        }],
+        Frame::Seen { through } => vec![Event::Seen(through)],
+        Frame::Provider {
+            provider,
+            model,
+            key,
+            source,
+        } => vec![Event::Provider {
+            provider,
+            model,
+            key,
+            source,
+        }],
+        Frame::ThinkingDelta { agent: id, text, step } if id == agent || agent.is_empty() => {
+            if step > 0 {
+                vec![Event::ThoughtDelta { text, step }]
+            } else {
+                vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
+                    text,
+                )))]
+            }
+        }
         Frame::Turn {
             agent: id,
             state,
@@ -384,8 +802,12 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             agent: id,
             question,
             options,
+            id: ask_id,
         } if id == agent => vec![Event::NeedQuestion {
-            request_id: id,
+            // The kernel's ask id when it sends one (qa-021): the answer
+            // echoes it, so a late or duplicate answer cannot resolve a
+            // different question. Older kernels: the agent id, sent blind.
+            request_id: ask_id.unwrap_or(id),
             title: question.clone(),
             questions: vec![crate::model::session::AskQuestion {
                 id: "q".into(),
@@ -400,8 +822,77 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                 allow_multiple: false,
             }],
         }],
-        Frame::Snapshot { .. } | Frame::Tree { .. } => Vec::new(),
+        // The desktop reads transcripts from the files; the replay that a
+        // file-less client needs is not for it. Skipped here so a replayed
+        // line is never appended a second time.
+        Frame::Snapshot { .. }
+        | Frame::Tree { .. }
+        | Frame::Hello { .. }
+        | Frame::Configure { .. }
+        | Frame::Replayed { .. }
+        | Frame::HistoryEnd { .. }
+        // Client → kernel, so it never arrives here. `feedback_bundle` does,
+        // and is taken below.
+        | Frame::Feedback { .. }
+        | Frame::ToolBody { .. }
+        | Frame::ToolBodyReply { .. }
+        // A newer kernel's frame: nothing to show, nothing to lose.
+        | Frame::Unknown => Vec::new(),
+        Frame::Rewound {
+            agent: id,
+            dropped,
+            restored,
+            pending,
+            ..
+        } if id == agent => vec![Event::Rewound {
+            dropped,
+            restored,
+            pending,
+        }],
+        // The kernel's answer to a bad ask (an unknown agent, a rewind it
+        // cannot do): the reason belongs in the chat, not in a log.
+        Frame::Error {
+            agent: Some(id),
+            detail,
+        } if id == agent => vec![Event::Refused(detail)],
+        // An unknown frame is refused with no agent on it, so this used to fall
+        // off the end of the match and be dropped — which is why a sheet on an
+        // old kernel sat reading "still reading the exchange" for ever instead
+        // of saying what was wrong.
+        Frame::Error {
+            agent: None,
+            detail,
+        } if detail.contains("unknown frame type") && detail.contains("feedback") => {
+            vec![Event::FeedbackUnavailable(detail)]
+        }
+        // A `put` of an attachment's bytes the kernel would not take (too
+        // large, a bad path): the words went through without the file, and
+        // the chat says so.
+        Frame::Written {
+            path,
+            error: Some(error),
+            ..
+        } if path.starts_with("attachments/") => {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            let name = name.split_once('-').map_or(name, |(_, rest)| rest);
+            vec![Event::Refused(format!("attachment {name} not sent: {error}"))]
+        }
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
+        // The agent's own line on what it is doing (or the kernel's guess
+        // from the tool in flight); an empty step means idle.
+        Frame::Status {
+            agent: id,
+            step,
+            source,
+            ..
+        } if id == agent && source == "waiting" => {
+            let step = step.trim().to_string();
+            vec![Event::Waiting((!step.is_empty()).then_some(step))]
+        }
+        Frame::Status { agent: id, step, .. } if id == agent => vec![Event::Status(step)],
+        // Not agent-scoped: every attached chat hears it, and the
+        // workspace's re-read is idempotent.
+        Frame::Changed { path, .. } if store_file(&path) => vec![Event::StoreChanged(path)],
         Frame::Board {
             owner,
             action,
@@ -442,32 +933,174 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             url,
             screenshot,
         }],
+        Frame::FeedbackBundle {
+            agent: id,
+            turn,
+            events,
+            tail,
+            children,
+            log,
+            kernel,
+            place,
+            agents,
+            note,
+            redacted,
+            truncated,
+            bytes,
+        } if id == agent => vec![Event::Feedback(Box::new(crate::feedback::Bundle {
+            agent: id,
+            turn,
+            events,
+            tail,
+            children,
+            log,
+            kernel,
+            place,
+            agents,
+            note,
+            redacted,
+            truncated,
+            bytes,
+        }))],
+        Frame::Screenshot {
+            agent: id,
+            machine,
+            png,
+            mime,
+            width,
+            height,
+            error,
+            ..
+        } if id == agent => {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(png.as_bytes())
+                .unwrap_or_default();
+            vec![Event::Screen {
+                machine,
+                png: bytes,
+                mime,
+                width,
+                height,
+                error,
+            }]
+        }
+        Frame::Job {
+            agent: id,
+            id: job,
+            delta,
+            running,
+            exit,
+        } if id == agent => vec![Event::Job {
+            id: job,
+            delta,
+            running,
+            exit,
+        }],
         _ => Vec::new(),
     }
 }
 
-fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
+/// The store files the right panel reads: the project page, the context
+/// document, the archive, and the project's face.
+fn store_file(path: &str) -> bool {
+    matches!(
+        path,
+        "notes.md" | "archived.md" | "docs/project-context.md" | "project.toml" | "GOALS.md"
+    )
+}
+
+fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
     use arbos_core::EventKind;
+    let recorded = event.seq > 0;
+    let ts = event.ts;
     match event.kind {
+        // Another client's prompt landed on the record. This window's own
+        // prompts are on the pane already; the session tells them apart.
+        EventKind::User {
+            text,
+            attachments,
+            channel,
+            ..
+        } if recorded => vec![Event::UserLine {
+            text,
+            attachments,
+            ts,
+            seq: event.seq,
+            channel,
+        }],
+        // The kickoff turn opening live: its step reads as Cursor's
+        // "Setting up environment" until the agent names one of its own.
+        EventKind::Wake { wake, .. } if wake == "kickoff" && !recorded => {
+            vec![Event::Status("Setting up environment".into())]
+        }
+        EventKind::Wake { wake, text, .. } if recorded => vec![Event::Woke {
+            kind: wake,
+            text,
+            at: (ts > 0).then_some(ts),
+        }],
+        // A transcript line (tailed or replayed) is the step's final text;
+        // a live emit without a seq is a delta (older kernels send those
+        // as events too).
+        EventKind::Assistant { text, step, .. } if recorded => {
+            vec![Event::AssistantFinal { text, step }]
+        }
         EventKind::Assistant { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
                 text,
             )))]
         }
-        EventKind::Thinking { text } => {
+        // A settled thinking record (recorded, with `secs`) follows the
+        // deltas that already built the thought: nothing to add live. A
+        // recorded thought without `secs` is an ACP worker's only form of
+        // it and still shows.
+        EventKind::Thinking {
+            text,
+            secs: Some(secs),
+            step,
+        } if recorded && step > 0 => vec![Event::ThoughtFinal {
+            text,
+            step,
+            secs: Some(secs.min(u32::MAX as u64) as u32),
+        }],
+        EventKind::Thinking { secs: Some(_), .. } if recorded => Vec::new(),
+        EventKind::Thinking { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentThoughtChunk(text_chunk(
                 text,
             )))]
         }
         EventKind::Say { from, text } => vec![Event::Incoming { who: from, text }],
+        // A keyless kernel kept the typed line for a key (#312): no turn
+        // was spent, so this is not a turn failure — the same words as its
+        // `error` frame, which the session reads once.
+        EventKind::Notice { text, failed: true }
+            if text.contains(crate::model::session::LINE_KEPT_FOR_KEY) =>
+        {
+            vec![Event::Refused(text)]
+        }
         EventKind::Notice { text, failed: true } => {
             vec![Event::TurnDone(Err(Error::internal_error().data(text)))]
         }
         EventKind::Notice { text, .. } => vec![Event::Aside(text)],
+        EventKind::ImageDescribed { path, model, text } => {
+            vec![Event::ImageDescribed { path, model, text }]
+        }
+        EventKind::Nudge { text, .. } => vec![Event::Nudge(text)],
+        // The turn was cut short; the pane says by whom (the fold line
+        // picks the same text up).
+        EventKind::Interrupted { detail } => vec![Event::Aside(
+            crate::model::session::interrupt_label(&detail),
+        )],
         EventKind::Ask {
-            question, options, ..
+            question,
+            options,
+            call_id,
         } => vec![Event::NeedQuestion {
-            request_id: "ask".into(),
+            // The transcript line carries the ask's id when the kernel
+            // wrote one; without it the answer goes blind (the agent id),
+            // which the kernel accepts while one question is pending. Never
+            // a made-up id: the kernel refuses those (ui-004).
+            request_id: call_id.unwrap_or_else(|| agent.to_string()),
             title: question.clone(),
             questions: vec![crate::model::session::AskQuestion {
                 id: "q".into(),
@@ -487,11 +1120,22 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
             tool.kind = tool_kind(&rec.name);
             let hint = tool_hint(&rec.name, &rec.paths, rec.args.as_ref());
             tool.title = tool_title(&rec.name, hint.as_deref());
+            if let Some(label) = rec
+                .label
+                .as_deref()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+            {
+                let mut meta = serde_json::Map::new();
+                meta.insert("label".into(), serde_json::Value::String(label.to_string()));
+                tool.meta = Some(meta);
+            }
             tool.status = if rec.error.is_some() {
                 ToolCallStatus::Failed
             } else {
                 ToolCallStatus::Completed
             };
+            let body_text = rec.body.clone();
             if let Some(body) = rec.body {
                 tool.content.push(ToolCallContent::Content {
                     content: ContentBlock::Text(TextContent {
@@ -510,6 +1154,10 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
                 }));
             }
             let mut out = vec![Event::Update(SessionUpdate::ToolCall(tool))];
+            let files = artifacts(&rec.name, &rec.paths, &rec.images, body_text.as_deref());
+            if !files.is_empty() {
+                out.push(Event::Artifacts(files));
+            }
             // `spawn` names the agent it minted. The row goes under the
             // parent now, not on the next activity poll.
             if let Some(child) = rec.child.filter(|id| !id.is_empty()) {
@@ -524,12 +1172,33 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
         // per job by the scheduler; the tailed `TurnComplete` arrives up to
         // 200 ms later and a second TurnDone would drain a queued follow-up
         // into a turn that is already running.
+        EventKind::TurnComplete { usage } if recorded => usage
+            .map(|u| {
+                vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {
+                    used: u.used,
+                    size: u.size,
+                    cost: u.cost.map(|amount| Cost {
+                        amount,
+                        currency: "USD".into(),
+                        meta: None,
+                    }),
+                    meta: None,
+                }))]
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .chain(std::iter::once(Event::TurnEndedAt(ts)))
+            .collect(),
         EventKind::TurnComplete { usage } => usage
             .map(|u| {
                 vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {
                     used: u.used,
                     size: u.size,
-                    cost: None,
+                    cost: u.cost.map(|amount| Cost {
+                        amount,
+                        currency: "USD".into(),
+                        meta: None,
+                    }),
                     meta: None,
                 }))]
             })
@@ -539,6 +1208,58 @@ fn kernel_event(event: arbos_core::Event) -> Vec<Event> {
 }
 
 fn _legacy_ws_removed() {}
+
+/// The files a tool call made for the user. Pictures the call produced
+/// (`images`) each get a card; a clip listed in `paths` gets one card with
+/// the call's picture as its poster. `read` on an image is looking, not
+/// making, so it adds nothing here.
+pub(crate) fn artifacts(
+    name: &str,
+    paths: &[String],
+    images: &[String],
+    body: Option<&str>,
+) -> Vec<Artifact> {
+    if !matches!(name, "screenshot" | "record" | "browser") {
+        return Vec::new();
+    }
+    let caption = body.map(artifact_caption).unwrap_or_default();
+    let clips: Vec<&String> = paths
+        .iter()
+        .filter(|p| ArtifactKind::of_path(p) == ArtifactKind::Video)
+        .collect();
+    if !clips.is_empty() {
+        return clips
+            .into_iter()
+            .map(|clip| Artifact::load(clip, images.first().map(String::as_str), &caption))
+            .collect();
+    }
+    images
+        .iter()
+        .map(|image| Artifact::load(image, None, &caption))
+        .collect()
+}
+
+/// `(10.2s, 177 KB, via ffmpeg x11grab)` → `10.2s · 177 KB`. The tools
+/// put their measurements in the first parenthesis; keep the sizes.
+fn artifact_caption(body: &str) -> String {
+    let Some(start) = body.find('(') else {
+        return String::new();
+    };
+    let Some(len) = body[start..].find(')') else {
+        return String::new();
+    };
+    body[start + 1..start + len]
+        .split(',')
+        .map(str::trim)
+        .filter(|part| {
+            !part.is_empty()
+                && !part.starts_with("via ")
+                && !part.starts_with("image/")
+                && part.chars().next().is_some_and(|c| c.is_ascii_digit())
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
 
 /// ChatView DiffCard: a write is every new line as an add. Prefer the
 /// kernel's stored `diff` when it exists (edits). Writes rarely have one.
@@ -616,7 +1337,19 @@ pub(crate) fn tool_title(name: &str, hint: Option<&str>) -> String {
     };
     let keep_full = matches!(
         name,
-        "bash" | "run" | "exec" | "grep" | "find" | "tgrep" | "glob"
+        "bash"
+            | "run"
+            | "exec"
+            | "grep"
+            | "find"
+            | "tgrep"
+            | "glob"
+            | "plan"
+            | "subscribe"
+            | "say"
+            | "ask"
+            | "spawn"
+            | "remember"
     );
     let shown = if keep_full {
         hint
@@ -654,6 +1387,10 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
         other => Some(other.clone()),
     });
     let obj = parsed.as_ref().filter(|value| value.is_object());
+    // The kernel's own tools: say what was asked, not a path.
+    if let Some(summary) = obj.and_then(|o| kernel_tool_hint(name, o)) {
+        return Some(summary);
+    }
     let command = obj
         .and_then(|obj| obj.get("command").and_then(Value::as_str))
         .map(clean_shell)
@@ -677,6 +1414,69 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
             .filter(|hint| !hint.is_empty())
             .map(str::to_owned)
     })
+}
+
+/// `plan set · 12 items`, `plan check 3`, `subscribe add timer every 1h`,
+/// `say to=root`, `ask "which name…"`, `spawn "brief…"`.
+fn kernel_tool_hint(name: &str, o: &Value) -> Option<String> {
+    let s = |k: &str| {
+        o.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
+    let count = |k: &str| o.get(k).and_then(Value::as_array).map(|a| a.len());
+    let head = |t: &str| {
+        let line = t.lines().next().unwrap_or("");
+        let cut: String = line.chars().take(40).collect();
+        if cut.chars().count() < line.chars().count() {
+            format!("{cut}…")
+        } else {
+            cut
+        }
+    };
+    match name {
+        "plan" => {
+            let op = s("op")
+                .or_else(|| s("action"))
+                .unwrap_or(if o.get("items").is_some() { "set" } else { "" });
+            let n = ["items", "goals", "nodes", "steps", "tasks"]
+                .iter()
+                .find_map(|k| count(k));
+            let mut out = op.to_string();
+            if let Some(n) = n {
+                out.push_str(&format!(" · {n} item{}", if n == 1 { "" } else { "s" }));
+            } else if let Some(k) = o.get("n").and_then(Value::as_u64) {
+                out.push_str(&format!(" {k}"));
+            } else if let Some(t) = s("text") {
+                out.push_str(&format!(" \"{}\"", head(t)));
+            }
+            Some(out.trim().to_string()).filter(|v| !v.is_empty())
+        }
+        "subscribe" => {
+            let mut out = s("op").unwrap_or("add").to_string();
+            if let Some(k) = s("kind") {
+                out.push(' ');
+                out.push_str(k);
+            }
+            if let Some(e) = s("every") {
+                out.push_str(&format!(" every {e}"));
+            } else if let Some(a) = s("after") {
+                out.push_str(&format!(" after {a}"));
+            }
+            if let Some(id) = o.get("id").and_then(Value::as_u64) {
+                out.push_str(&format!(" #{id}"));
+            }
+            Some(out)
+        }
+        "say" => s("to").map(|to| format!("to={to}")),
+        "ask" => s("question").map(|q| format!("\"{}\"", head(q))),
+        "spawn" => s("brief").map(|b| format!("\"{}\"", head(b))),
+        "remember" => s("fact")
+            .or_else(|| s("text"))
+            .map(|f| format!("\"{}\"", head(f))),
+        _ => None,
+    }
 }
 
 fn is_job_log(path: &str) -> bool {
@@ -731,6 +1531,7 @@ mod tests {
             out,
             session_id: "s1".into(),
             cwd: PathBuf::new(),
+            remote: false,
         };
         (session, rx)
     }

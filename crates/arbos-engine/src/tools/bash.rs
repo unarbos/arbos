@@ -18,6 +18,12 @@ use crate::tool::{
 /// `background: true` still waits this long so an instant failure
 /// (`command not found`) is reported without a second call.
 const BACKGROUND_GRACE: Duration = Duration::from_millis(500);
+/// The least an attached (foreground) call waits for its command before
+/// handing it to a job, whatever `wait_ms` the model sent: a "run this
+/// and show me the output" came back after the first line with
+/// wait_ms=3000 and the user saw one line of eight (remote track, F-37).
+/// A command that runs to its end within this is shown whole.
+const ATTACHED_WAIT_FLOOR: Duration = Duration::from_secs(120);
 const AWAIT_DEFAULT_MS: u64 = 30_000;
 const AWAIT_MAX_MS: u64 = 3_600_000;
 const AWAIT_POLL: Duration = Duration::from_millis(200);
@@ -43,32 +49,45 @@ impl Tool for Bash {
     fn schema(&self) -> Value {
         typed_schema(
             "bash",
-            "Run a shell command as a job. Returns output when it finishes within wait_ms; otherwise the command keeps running and you get a job id for await/jobs. The wait never kills; only timeout_ms does. Use background:true for servers and watchers.",
+            "Run a shell command. Output returns within wait_ms; otherwise it continues as a job (await/jobs). Only timeout_ms kills. background:true for servers.",
             &[
-                ("command", "Command.", true, "string"),
+                ("command", "", true, "string"),
                 (
-                    "cwd",
-                    "Working directory, relative to cwd.",
+                    "description",
+                    "What this command does, 5–10 words, for the line the user sees (\"List repo contents and recent commits\").",
                     false,
                     "string",
                 ),
+                ("cwd", "", false, "string"),
                 (
                     "wait_ms",
-                    "How long this call stays attached (default 600000 = 10 min). The command is not killed when it expires; it continues as a job.",
+                    "Attached wait, ms (default 600000; never under 120000 — a command the user asked to see runs to its end while they watch).",
                     false,
                     "integer",
                 ),
                 (
                     "background",
-                    "true: return after 500ms and keep the command running as a job.",
+                    "Return at once; keep running as a job. For a server or watcher only (something that never ends by itself); a loop, script, build, or test run is not, and runs attached whatever this says.",
+                    false,
+                    "boolean",
+                ),
+                (
+                    "keep",
+                    "Let the job outlive this kernel (default: it dies with it and is reaped at the next start).",
                     false,
                     "boolean",
                 ),
                 (
                     "timeout_ms",
-                    "Hard limit: kill the command when this expires, even after backgrounding.",
+                    "Hard kill after this many ms.",
                     false,
                     "integer",
+                ),
+                (
+                    "repro",
+                    "This command is a reproduction of the reported failure, derived from the request. Recorded with its exit code (it must be non-zero now); changes re-runs it after your edits.",
+                    false,
+                    "boolean",
                 ),
             ],
         )
@@ -84,27 +103,101 @@ impl Tool for Bash {
             Access::exclusive()
         };
         let plan = Plan::access(access);
-        Ok(if needs_approval(cmd) {
-            plan.interactive()
-        } else {
-            plan
-        })
+        // Interactive only when it will wait on a card (ask mode); in
+        // auto the same command is refused in `run`, no card. A root or
+        // home wipe is refused in `run` in every mode: never a card.
+        let home = home_dir();
+        let verdict = super::wipe::judge(cmd, &where_it_runs(&dir, cx.root, &home));
+        // Refused here, before any mode's approval card: in ask mode the
+        // card would otherwise come first, and a person could be asked to
+        // allow a wipe of their home (qal-j15, ra-01).
+        if let super::wipe::Verdict::Refuse(why) = &verdict {
+            bail!("bash: refused — {why}");
+        }
+        Ok(
+            if matches!(verdict, super::wipe::Verdict::Ask(_))
+                && cx.agent.mode == arbos_core::Mode::Ask
+            {
+                plan.interactive()
+            } else {
+                plan
+            },
+        )
     }
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         Box::pin(async move {
             let cmd = req(&args, "command")?;
-            if needs_approval(cmd) {
-                let allowed = tokio::select! {
-                    r = cx.hooks.approve(&cx.agent.id, "bash", cmd) => r?,
-                    _ = cx.cancel.cancelled() => bail!("interrupted while waiting for approval"),
-                };
-                if !allowed {
-                    bail!("user denied bash");
-                }
+            // A coordinator's shell is for the one quick command the user
+            // asked to see; a build or a test run is a worker's (decision
+            // 2026-09-14; the model ran pytest itself on cycle 6).
+            if cx.agent.role.as_deref() == Some(arbos_core::project::COORDINATOR)
+                && let Some(what) = build_or_test(cmd)
+            {
+                bail!(
+                    "bash: {what} is a worker's job, not the coordinator's — spawn a worker with the exact command (wait=true for a one-off) and relay its result. Your bash is for one quick command the user asked to see."
+                );
+            }
+            // A file this turn wrote is never moved or deleted to satisfy
+            // the brief's Output line: told its deliverable was "not
+            // written yet" at the brief's path, a worker moved the user's
+            // CHANGELOG.md out of their repository (qal-j04). The reminder
+            // is bookkeeping; the file stays where the task put it.
+            if let Some(why) = moves_a_delivered_file(&cx, cmd) {
+                bail!("{why}");
+            }
+            // `kill <pid>` on a pid `jobs` showed: the kernel ends that
+            // job — its whole process group, with a `killed` line that
+            // says so — instead of the shell signalling the leash alone.
+            // QA's 164 GB writer was exactly this: the model did the
+            // obvious thing with the pid it was shown, the leash forwarded
+            // the signal to the wrapper shell only, and the loop under it
+            // lived on with no supervisor. (The leash now ends its group
+            // on a signal too; this is the clean path with the clean
+            // record.)
+            if let Some(text) = kill_jobs_by_pid(&JobsRoot::for_agent(&cx.place, &cx.agent.id), cmd)
+            {
+                return Ok(ToolOut::text(text));
+            }
+            // Before the approval prompt: a refused command is not a
+            // question for the user.
+            {
+                let dir = opt_str(&args, "cwd")
+                    .map(|c| cx.cwd.join(c))
+                    .unwrap_or_else(|| cx.cwd.clone());
+                let place = cx.place.path().to_path_buf();
+                let cmd_owned = cmd.to_string();
+                tokio::task::spawn_blocking(move || {
+                    super::git_guard::check(&place, &dir, &cmd_owned)
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
             }
             let dir = opt_str(&args, "cwd")
                 .map(|c| cx.cwd.join(c))
                 .unwrap_or_else(|| cx.cwd.clone());
+            // The wipe guard reads the command from this directory, `cd`
+            // by `cd` (qal-j15: `cd / && rm -rf *` ran, seven times,
+            // because the pieces were read apart). A removal of the
+            // filesystem root, a home, or a top-level system tree is
+            // refused in every mode, ask included: there is no agent's
+            // reason for it. Sudo, mkfs, a fork bomb, a removal the
+            // kernel cannot place: in auto mode nothing waits on a card
+            // (decision 2026-09-15), so these are refused with the reason
+            // — the model can ask the user in words if it truly needs
+            // one. In ask mode the call was already allowed before it ran.
+            {
+                let home = home_dir();
+                match super::wipe::judge(cmd, &where_it_runs(&dir, cx.place.path(), &home)) {
+                    super::wipe::Verdict::Run => {}
+                    super::wipe::Verdict::Refuse(why) => bail!("bash: refused — {why}"),
+                    super::wipe::Verdict::Ask(why) if cx.agent.mode != arbos_core::Mode::Ask => {
+                        bail!(
+                            "bash: refused — this command {why}, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
+                        )
+                    }
+                    super::wipe::Verdict::Ask(_) => {}
+                }
+            }
             if !dir.is_dir() {
                 bail!(
                     "cwd {} does not exist; the working directory is {}. Use a path relative to it, or omit cwd.",
@@ -112,46 +205,113 @@ impl Tool for Bash {
                     cx.cwd.display()
                 );
             }
-            let background = opt_bool(&args, "background").unwrap_or(false);
+            // `background:true` is for a server. A loop, a script, a build
+            // marked background came back after its first line ("step 1")
+            // and the user saw one line of six (F-37, F-43): for anything
+            // that is not a server the call stays attached to the floor.
+            let asked_background = opt_bool(&args, "background").unwrap_or(false);
+            let background = asked_background && looks_like_server(cmd);
+            let background_ignored = asked_background && !background;
             let timeout_ms = opt_u64(&args, "timeout_ms");
             let wait = if background {
                 BACKGROUND_GRACE
+            } else if background_ignored {
+                // Attached, but not for the whole default: a long build
+                // the model wanted out of the way becomes a job at the floor.
+                ATTACHED_WAIT_FLOOR
             } else {
                 Duration::from_millis(opt_u64(&args, "wait_ms").unwrap_or(cx.bash_wait_ms))
+                    .max(ATTACHED_WAIT_FLOOR)
             };
 
             let root = JobsRoot::for_agent(&cx.place, &cx.agent.id);
-            let (job, mut child) = root.spawn(cmd, &dir, timeout_ms)?;
+            let sandbox = crate::sandbox::for_agent(&cx.place, &cx.agent);
+            let granted = crate::secrets::store()
+                .env_for(&arbos_core::lineage(&cx.place, cx.agent.id.as_str()));
+            let (job, mut child) = root.spawn(cmd, &dir, timeout_ms, sandbox.as_ref(), granted)?;
+            if opt_bool(&args, "keep").unwrap_or(false) {
+                let _ = std::fs::write(job.dir.join("keep"), "");
+            }
             let journal = job.journal().display().to_string();
 
             // Reap in the background so the call can return before the
             // command does. The exit code is the wrapper's job, not ours.
+            // The runtime's wait is signal-driven on macOS: a kernel whose
+            // SIGCHLD never arrives (Jacob's Mac, 2026-09-17: five jobs
+            // exited 0, five zombies, no tool result; `bubble_sort.py`
+            // returned at the 600 s floor as "still running" with `exit`
+            // long written) never hears from it. The wrapper's `exit`
+            // file is the truth about the command, so the wait below also
+            // watches for it, and reaps by pid.
             let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-            tokio::spawn(async move {
+            let waiter = tokio::spawn(async move {
+                if std::env::var_os("ARBOS_TEST_NO_CHILD_WAIT").is_some() {
+                    // Fault injection for the test of the exit-file path:
+                    // a reaper that never wakes.
+                    std::future::pending::<()>().await;
+                }
                 let _ = child.wait().await;
                 let _ = done_tx.send(());
             });
+            let job_pid = job.meta.pid;
             if let Some(ms) = timeout_ms {
                 let root = root.clone();
                 let id = job.id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms)).await;
-                    if let Ok(j) = root.load(&id) {
-                        root.kill(&j);
+                    if let Ok(j) = root.load(&id)
+                        && let Err(e) = root.kill(&j)
+                    {
+                        eprintln!("job timeout: {e:#}");
                     }
                 });
             }
 
             let mut done_rx = done_rx;
-            let finished = tokio::select! {
-                _ = &mut done_rx => true,
-                _ = tokio::time::sleep(wait) => false,
-                _ = cx.cancel.cancelled() => {
-                    // Stop while attached means stop: the user wants it gone.
-                    if let Ok(j) = root.load(&job.id) {
-                        root.kill(&j);
+            // The wait ends on the command, on `wait`, on Stop — or when
+            // the user speaks: a steer is read at the tool boundary, and
+            // an attached command can hold that boundary for ten minutes.
+            // Jacob typed "run it" four times into a worker's
+            // `python3 bubble_sort.py` and heard nothing for 2m 26s
+            // (2026-09-16); the command keeps running as a job and the
+            // turn answers now.
+            let deadline = tokio::time::Instant::now() + wait;
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut steered = false;
+            let finished = loop {
+                tokio::select! {
+                    _ = &mut done_rx => break true,
+                    _ = tokio::time::sleep_until(deadline) => break false,
+                    _ = cx.cancel.cancelled() => {
+                        // Stop while attached means stop: the user wants it gone.
+                        if let Ok(j) = root.load(&job.id)
+                            && let Err(e) = root.kill(&j)
+                        {
+                            bail!("bash interrupted; {e:#}");
+                        }
+                        bail!("bash interrupted; job {} killed", job.id);
                     }
-                    bail!("bash interrupted; job {} killed", job.id);
+                    _ = tick.tick() => {
+                        if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
+                            steered = true;
+                            break false;
+                        }
+                        // The command's own end is the `exit` file, and
+                        // the truth about it when the runtime never says
+                        // (a Mac deaf to its children). The leash stays
+                        // behind the file for a moment (its 250 ms look),
+                        // or for as long as children of the command still
+                        // run in its group (a server the command
+                        // backgrounded), so the wait ends here and the
+                        // leash is reaped when it does end, not only if
+                        // it already has.
+                        if root.load(&job.id).is_ok_and(|j| !j.running()) {
+                            reap_by_pid(job_pid);
+                            waiter.abort();
+                            break true;
+                        }
+                    }
                 }
             };
 
@@ -165,9 +325,14 @@ impl Tool for Bash {
                 } else {
                     "Still running"
                 };
+                let why = if steered {
+                    " The user said something while it ran — it follows this result. Answer them, then follow the command with await."
+                } else {
+                    ""
+                };
                 return Ok(ToolOut::with_paths(
                     format!(
-                        "{body}\n\n{verb} as job {id} (pid {pid}). Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
+                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
                         id = job.id,
                         pid = job.meta.pid,
                     ),
@@ -178,6 +343,11 @@ impl Tool for Bash {
             // Finished (or finished in the same instant the wait expired).
             let (text, skipped) = root.read_new(&job);
             let mut body = format_tail(&text, "(no output)", &journal, skipped);
+            if background_ignored {
+                body.push_str(
+                    "\n[background:true is for a server; this command is not one, so it ran attached to its end and the output above is all of it]",
+                );
+            }
             match job.status {
                 Status::Exited(0) => {
                     if let Some(file) = viewed_file(cmd) {
@@ -191,10 +361,10 @@ impl Tool for Bash {
                 }
                 Status::Exited(code) => body.push_str(&format!("\nexit {code}\n")),
                 Status::Killed => {
-                    let why = if timeout_ms.is_some() {
-                        "timed out"
-                    } else {
-                        "was killed"
+                    let why = match &job.killed_why {
+                        Some(why) => why.clone(),
+                        None if timeout_ms.is_some() => "timed out".to_string(),
+                        None => "was killed by a signal from outside the kernel".to_string(),
                     };
                     body.push_str(&format!(
                         "\nCommand {why} before completing (job {})\n",
@@ -202,6 +372,22 @@ impl Tool for Bash {
                     ));
                 }
                 Status::Running => unreachable!(),
+            }
+            let exit = match job.status {
+                Status::Exited(code) => Some(code),
+                _ => None,
+            };
+            if crate::repro::marked(&args) {
+                body.push('\n');
+                body.push_str(&crate::repro::record(
+                    &cx.place,
+                    &cx.agent.id,
+                    cmd,
+                    &dir,
+                    exit,
+                ));
+            } else {
+                crate::repro::note_failing(&cx.place, &cx.agent.id, cmd, &dir, exit);
             }
             Ok(ToolOut::with_paths(body, vec![journal]))
         })
@@ -215,19 +401,11 @@ impl Tool for Await {
     fn schema(&self) -> Value {
         simple_schema(
             "await",
-            "Wait on a job started by bash. Returns the output produced since you last saw it, as soon as the job exits, its new output matches pattern, or wait_ms elapses.",
+            "Wait on a bash job: new output when it exits, matches pattern, or wait_ms elapses.",
             &[
-                ("id", "Job id, e.g. j3.", true),
-                (
-                    "pattern",
-                    "Optional regex; return as soon as new output matches it.",
-                    false,
-                ),
-                (
-                    "wait_ms",
-                    "How long to block (default 30000, max 3600000).",
-                    false,
-                ),
+                ("id", "e.g. j3", true),
+                ("pattern", "Regex: return on match.", false),
+                ("wait_ms", "ms (30000, max 3600000).", false),
             ],
         )
     }
@@ -298,11 +476,7 @@ impl Tool for Jobs {
         "jobs"
     }
     fn schema(&self) -> Value {
-        simple_schema(
-            "jobs",
-            "List this agent's jobs: id, status, command, log path. Survives kernel restarts.",
-            &[],
-        )
+        simple_schema("jobs", "List this agent's jobs.", &[])
     }
     fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
         Ok(Plan::access(Access::none()))
@@ -444,24 +618,200 @@ fn human_bytes(n: u64) -> String {
 }
 
 /// Kill the job and everything it spawned. The job leads its own process
-/// group, so a negative pid reaches the whole tree.
-pub fn kill_job(pid: u32) {
-    let group = format!("-{pid}");
-    let ok = std::process::Command::new("kill")
-        .args(["-9", &group])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !ok {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
+/// group, so signalling the group reaches the whole tree.
+///
+/// This used to shell out to `kill -9 -<pid>`. Without `--`, procps `kill`
+/// read the negative pid as an option and sent `kill(-1, SIGKILL)`: every
+/// process the user may signal, twice on a production box (QA bug qa-020).
+/// No shell here: the syscalls take the numbers as numbers. Pids 0 and 1
+/// (and anything that does not fit) are refused outright, because
+/// `kill(0)` and `killpg(0)` also mean "my whole group" or "everything".
+///
+/// The result says whether the signal was *delivered*: `Ok` when the
+/// group or the pid took it, or was already gone (ESRCH); `Err` when the
+/// system refused (EPERM — a job that became another user's, `sudo` in
+/// its command) or the pid was never a job. A folder that said "killed by
+/// the kernel" before this was checked told the user a stop had worked
+/// when it had not.
+pub fn kill_job(pid: u32) -> std::io::Result<()> {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} out of range; refusing"),
+        ));
+    };
+    if pid <= 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} is not a job; refusing"),
+        ));
+    }
+    // SAFETY: plain syscalls on a validated positive pid; no memory involved.
+    if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let group_err = std::io::Error::last_os_error();
+    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    // Already gone is the outcome asked for.
+    if err.raw_os_error() == Some(libc::ESRCH) && group_err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err)
+}
+
+#[cfg(test)]
+mod kill_tests {
+    use super::kill_job;
+    use std::{os::unix::process::CommandExt, process::Command, time::Duration};
+
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[test]
+    fn kill_job_ends_the_jobs_group_and_nothing_else() {
+        // The job: a shell in its own process group with a child.
+        let mut job = Command::new("sh")
+            .args(["-c", "sleep 300 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        // A bystander in a different group: what `kill -1` would have taken.
+        let mut bystander = Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+
+        kill_job(job.id()).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(job.try_wait().unwrap().is_some(), "the job leader is dead");
+        assert!(
+            alive(bystander.id()),
+            "a process outside the job's group must survive"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+    }
+
+    #[test]
+    fn kill_job_refuses_pids_that_mean_everything() {
+        // 0 = own group, 1 = init; both must be no-ops. If either were
+        // signalled, this test process would not be here to assert.
+        assert!(kill_job(0).is_err());
+        assert!(kill_job(1).is_err());
     }
 }
 
+/// Where a command runs, for the wipe guard: the call's directory, the
+/// user's home, the place.
+fn where_it_runs<'a>(
+    cwd: &'a std::path::Path,
+    place: &'a std::path::Path,
+    home: &'a std::path::Path,
+) -> super::wipe::Where<'a> {
+    super::wipe::Where {
+        cwd,
+        home,
+        place: Some(place),
+    }
+}
+
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-home"))
+}
+
+/// Commands that ask the user first even in auto mode, or are refused in
+/// every mode: wiping the root of the filesystem, a home, or a top-level
+/// system tree (refused); sudo, mkfs, a fork bomb, a removal the kernel
+/// cannot place (asked). Read from a directory that is no tree, with
+/// `$HOME` as the home, for callers without a directory — the bash tool itself
+/// judges from the call's own directory (`wipe::judge`). `rm -rf
+/// /tmp/scratch` is an ordinary cleanup, not one of these.
 pub fn needs_approval(cmd: &str) -> bool {
-    let c = cmd.to_ascii_lowercase();
-    c.contains("rm -rf /") || c.contains("sudo ") || c.contains("mkfs") || c.contains(":(){")
+    let home = home_dir();
+    super::wipe::judge(
+        cmd,
+        &where_it_runs(
+            std::path::Path::new("/nonexistent-cwd/here"),
+            std::path::Path::new("/nonexistent-place"),
+            &home,
+        ),
+    ) != super::wipe::Verdict::Run
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::build_or_test;
+
+    /// Symmetry cycle 6: the coordinator ran `python3 -m pytest -q` itself.
+    #[test]
+    fn builds_and_test_runs_are_named_quick_commands_are_not() {
+        for cmd in [
+            "python3 -m pytest -q",
+            "pytest tests/",
+            "cd toy-repo && python3 -m pytest",
+            "cargo test -p arbos-kernel",
+            "RUST_LOG=debug cargo build --release",
+            "npm test",
+            "npm run build",
+            "make -j4",
+            "go test ./...",
+            "time npx vitest",
+        ] {
+            assert!(build_or_test(cmd).is_some(), "{cmd}");
+        }
+        for cmd in [
+            "ls -la",
+            "python3 hello.py",
+            "for i in 1 2 3; do echo step $i; sleep 2; done",
+            "git status",
+            "cat README.md | head",
+            "cargo --version",
+            "npm --version",
+            "go version",
+            "python3 -c 'print(1)'",
+        ] {
+            assert!(build_or_test(cmd).is_none(), "{cmd}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::needs_approval;
+
+    #[test]
+    fn root_wipes_ask_and_scratch_cleanups_do_not() {
+        for ask in [
+            "rm -rf /",
+            "rm -rf /*",
+            "rm -rf ~",
+            "cd /testbed && rm -rf /usr",
+            "rm -r --no-preserve-root /etc",
+            "sudo apt-get install x",
+            "mkfs.ext4 /dev/sda1",
+        ] {
+            assert!(needs_approval(ask), "{ask:?} should ask");
+        }
+        for free in [
+            "rm -rf /tmp/udltest && cd /testbed && git diff",
+            "rm -rf build/ dist/",
+            "rm -rf /var/tmp/x",
+            "rm -rf /testbed/.pytest_cache",
+            "rm -f /tmp/a.txt",
+            "grep -r foo /",
+            "python -c 'print(1)'",
+        ] {
+            assert!(!needs_approval(free), "{free:?} should run");
+        }
+    }
 }
 
 /// Commands whose first word is here never write the place.
@@ -546,6 +896,312 @@ const WRITE_MARKERS: &[&str] = &[
     ">", "$(", "`", "tee ", "xargs", "sudo ", "sed -i", "-exec", "-delete",
 ];
 
+/// Whether `cmd` is the kind of command `background:true` exists for: a
+/// server or watcher that would never end on its own. A loop, a script,
+/// a test or build run is not — the model marks those background too,
+/// and the user then sees one line of the output (F-37).
+pub fn looks_like_server(cmd: &str) -> bool {
+    let lower = cmd.to_ascii_lowercase();
+    let trimmed = lower.trim_end_matches([' ', ';']);
+    if trimmed.ends_with('&') || lower.contains("while true") || lower.contains("while :") {
+        return true;
+    }
+    // A bare `sleep N`: a wait with nothing to show, not a loop of output.
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() == 2 && words[0] == "sleep" {
+        return true;
+    }
+    let markers = [
+        "serve",
+        "server",
+        "--port",
+        "-p ",
+        "--host",
+        "listen",
+        "watch",
+        "tail -f",
+        "tail -F",
+        "npm start",
+        "npm run dev",
+        "pnpm dev",
+        "yarn dev",
+        "yarn start",
+        "vite",
+        "uvicorn",
+        "gunicorn",
+        "flask run",
+        "manage.py runserver",
+        "rails s",
+        "cargo run",
+        "node ",
+        "docker run",
+        "docker compose up",
+        "docker-compose up",
+        "nohup",
+        "daemon",
+        "ngrok",
+        "cloudflared",
+        "ssh -n",
+        "sleep infinity",
+    ];
+    markers.iter().any(|m| lower.contains(m))
+}
+
+/// The build and test runners a coordinator hands to a worker: what the
+/// command is, in words for the refusal, when its first program (after
+/// `cd x &&`, env assignments, `time`, `nice`) is one of them.
+/// After an "output owed" reminder this turn, a `mv`, `rm`, `git mv` or
+/// `git rm` whose operand is a file the turn wrote (or shares its name
+/// with an owed path) is refused with the reason. Only then: the
+/// guard is for the one shape that lost a user's file, not for every
+/// move a worker makes.
+/// `kill`, an optional signal, and one or more positive pids, nothing
+/// else: the pids. `kill -- -123` (a group) and anything compound are
+/// left to the shell.
+fn kill_of_pids(cmd: &str) -> Option<Vec<u32>> {
+    let mut words = cmd.split_whitespace();
+    if words.next()? != "kill" {
+        return None;
+    }
+    let mut pids = Vec::new();
+    for (i, w) in words.enumerate() {
+        if i == 0 && w.starts_with('-') && !w.starts_with("--") {
+            // `-9`, `-TERM`, `-s`… a signal; `-s SIG` would leave SIG as
+            // a non-number below and bail out.
+            continue;
+        }
+        pids.push(w.parse::<u32>().ok().filter(|&p| p > 1)?);
+    }
+    (!pids.is_empty()).then_some(pids)
+}
+
+/// `kill <pid…>` where every pid is a running job of this agent: the
+/// kernel's kill on each (the whole group, a `killed` line in the folder)
+/// and the result's text. None when the command is anything else, or any
+/// pid is not a job: the shell runs it as written.
+pub(crate) fn kill_jobs_by_pid(root: &JobsRoot, cmd: &str) -> Option<String> {
+    let pids = kill_of_pids(cmd)?;
+    let jobs: Vec<Job> = root
+        .list()
+        .into_iter()
+        .filter(|j| j.running() && pids.contains(&j.meta.pid))
+        .collect();
+    if jobs.len() != pids.len() {
+        return None;
+    }
+    let lines: Vec<String> = jobs
+        .iter()
+        .map(|j| match root.kill(j) {
+            Ok(_) => format!(
+                "job {} (pid {}) ended — the whole process group, not only its shell: `{}`",
+                j.id,
+                j.meta.pid,
+                arbos_core::text::clip(j.meta.command.trim(), 80)
+            ),
+            Err(e) => format!("{e:#} — it is still running"),
+        })
+        .collect();
+    Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod kill_by_pid_tests {
+    use super::{kill_jobs_by_pid, kill_of_pids};
+    use std::time::Duration;
+
+    #[test]
+    fn the_parser_takes_kill_and_pids_only() {
+        assert_eq!(kill_of_pids("kill 123"), Some(vec![123]));
+        assert_eq!(kill_of_pids("kill -9 123 456"), Some(vec![123, 456]));
+        assert_eq!(kill_of_pids("kill -TERM 123"), Some(vec![123]));
+        assert_eq!(kill_of_pids("kill -- -123"), None, "a group: the shell's");
+        assert_eq!(kill_of_pids("kill 1"), None, "never pid 1");
+        assert_eq!(kill_of_pids("kill $(cat pid)"), None);
+        assert_eq!(kill_of_pids("kill 123; echo done"), None);
+        assert_eq!(kill_of_pids("pkill yes"), None);
+    }
+
+    #[tokio::test]
+    async fn a_kill_on_a_jobs_pid_ends_its_whole_group_with_a_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-kill-by-pid-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        std::fs::create_dir_all(dir.join(".arbos/agents/root/jobs")).unwrap();
+        let root = crate::JobsRoot::new(dir.join(".arbos/agents/root/jobs"));
+        let (job, mut child) = root
+            .spawn(
+                "(while :; do sleep 0.1; done) & sleep 300",
+                &dir,
+                None,
+                None,
+                vec![],
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            kill_jobs_by_pid(&root, "kill 999999").is_none(),
+            "not a job"
+        );
+        assert!(
+            kill_jobs_by_pid(&root, &format!("kill {} 999999", job.meta.pid)).is_none(),
+            "one of them is not a job: the shell's"
+        );
+        let text = kill_jobs_by_pid(&root, &format!("kill {}", job.meta.pid)).expect("routed");
+        assert!(text.contains("the whole process group"), "{text}");
+        // The leash is our child: reaped here, or it counts as alive.
+        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let members = std::process::Command::new("pgrep")
+                .args(["-g", &job.meta.pid.to_string()])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter_map(|l| l.trim().parse::<u32>().ok())
+                        .filter(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == 0)
+                        .count()
+                })
+                .unwrap_or(0);
+            if members == 0 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the group lived on");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let killed = std::fs::read_to_string(job.dir.join("killed")).unwrap();
+        assert!(killed.contains("killed by the kernel"), "{killed}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn moves_a_delivered_file(cx: &RunCx, cmd: &str) -> Option<String> {
+    let toks: Vec<&str> = cmd.split_whitespace().collect();
+    let moving = toks.iter().any(|t| matches!(*t, "mv" | "rm" | "unlink"));
+    if !moving {
+        return None;
+    }
+    let transcript = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str()).transcript();
+    let events = arbos_core::load_transcript(&transcript).ok()?;
+    let start = events.iter().rposition(arbos_core::Event::is_wake)?;
+    let turn = &events[start..];
+    let nudged = turn.iter().any(|e| {
+        matches!(&e.kind, arbos_core::EventKind::Nudge { reason, .. } if reason == "output owed")
+    });
+    if !nudged {
+        return None;
+    }
+    let mut protected: Vec<String> = crate::turn::written_this_turn(turn)
+        .iter()
+        .map(|p| {
+            p.rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(p)
+                .to_ascii_lowercase()
+        })
+        .collect();
+    if let arbos_core::EventKind::Wake { text: Some(t), .. } = &events[start].kind {
+        protected.extend(
+            crate::turn::brief_output_paths(t)
+                .iter()
+                .map(|p| p.rsplit('/').next().unwrap_or(p).to_ascii_lowercase()),
+        );
+    }
+    let hit = toks.iter().find(|t| {
+        let base = t
+            .trim_matches(['"', '\''])
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        !base.is_empty() && protected.contains(&base)
+    })?;
+    Some(format!(
+        "bash: refused — this moves or deletes {hit}, a file this turn delivered, after a reminder about the brief's Output path. The reminder is bookkeeping, never a reason to relocate a user's file: leave {hit} where the task put it and name that path in your report (the brief's Output line is satisfied by the file existing)."
+    ))
+}
+
+/// `waitpid(pid, WNOHANG)`: clear a child that has exited when the
+/// runtime's own reaper did not — a zombie is what the process table
+/// shows otherwise, and it is what Jacob's Mac showed.
+pub fn reap_by_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        let mut status: libc::c_int = 0;
+        let r = libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+        if r == 0 {
+            // Still running: the leash outlives the command's `exit` file
+            // by one look, or by the life of what the command left in
+            // its group. A plain thread waits it out and reaps it the
+            // instant it ends; the runtime's own reaper, when it is
+            // awake, may get there first (ECHILD here, harmless).
+            std::thread::Builder::new()
+                .name(format!("reap-{pid}"))
+                .spawn(move || {
+                    let mut status: libc::c_int = 0;
+                    let _ = libc::waitpid(pid as libc::pid_t, &mut status, 0);
+                })
+                .ok();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+pub fn build_or_test(cmd: &str) -> Option<&'static str> {
+    for segment in cmd
+        .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split(';'))
+    {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .skip_while(|w| matches!(*w, "time" | "nice" | "sudo" | "env"))
+            .collect();
+        let Some(first) = words.first() else {
+            continue;
+        };
+        let prog = first.rsplit('/').next().unwrap_or(first);
+        let second = words.get(1).copied().unwrap_or("");
+        let what = match prog {
+            "pytest" | "py.test" | "tox" | "nox" => Some("a test run"),
+            "cargo"
+                if matches!(
+                    second,
+                    "test" | "build" | "check" | "clippy" | "bench" | "nextest"
+                ) =>
+            {
+                Some("a cargo build or test run")
+            }
+            "npm" | "pnpm" | "yarn" | "bun"
+                if matches!(second, "test" | "run" | "build" | "ci" | "install") =>
+            {
+                Some("an npm build, install, or test run")
+            }
+            "npx" | "jest" | "vitest" | "mocha" | "playwright" | "cypress" => Some("a test run"),
+            "make" | "cmake" | "ninja" | "gradle" | "gradlew" | "mvn" | "bazel" | "meson" => {
+                Some("a build")
+            }
+            "go" if matches!(second, "test" | "build" | "vet") => Some("a go build or test run"),
+            "python" | "python3" if matches!(second, "-m") => match words.get(2).copied() {
+                Some("pytest" | "unittest" | "tox" | "nox" | "build") => Some("a test run"),
+                _ => None,
+            },
+            "dotnet" if matches!(second, "test" | "build") => Some("a dotnet build or test run"),
+            "swift" if matches!(second, "test" | "build") => Some("a swift build or test run"),
+            "docker" if matches!(second, "build" | "compose") => Some("a docker build"),
+            _ => None,
+        };
+        if what.is_some() {
+            return what;
+        }
+    }
+    None
+}
+
 /// Conservative. A wrong answer here is only ever "too cautious".
 pub fn is_readonly_command(cmd: &str) -> bool {
     if cmd.trim().is_empty() || WRITE_MARKERS.iter().any(|m| cmd.contains(m)) {
@@ -576,4 +1232,38 @@ fn segment_is_readonly(seg: &str) -> bool {
             .any(|g| sub == *g || sub.starts_with(&format!("{g} ")));
     }
     READONLY_CMDS.contains(&first)
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::looks_like_server;
+
+    /// F-37 / F-43: a six-step loop marked `background:true` came back
+    /// after "step 1". Only a server or watcher is a background command.
+    #[test]
+    fn only_a_server_or_watcher_is_background() {
+        for cmd in [
+            "for i in 1 2 3 4 5 6; do echo \"step $i\"; sleep 2; done",
+            "python3 script.py",
+            "cargo test",
+            "make build",
+            "ls -la && git log --oneline | head",
+            "sleep 12; echo done",
+        ] {
+            assert!(!looks_like_server(cmd), "{cmd}");
+        }
+        for cmd in [
+            "python3 -m http.server 8000",
+            "npm run dev",
+            "uvicorn app:app --port 8080",
+            "cargo run --bin arbos-kernel serve .",
+            "tail -f /var/log/syslog",
+            "while true; do date; sleep 5; done",
+            "node index.js &",
+            "docker compose up",
+            "sleep 600",
+        ] {
+            assert!(looks_like_server(cmd), "{cmd}");
+        }
+    }
 }

@@ -1,31 +1,53 @@
-//! Arbos desktop — Cydonia look, Rust kernel (`arbos-kernel serve`).
+//! Arbos desktop — Arbos look, Rust kernel (`arbos-kernel serve`).
 
 use anyhow::Result;
+use arbos_desktop::{
+    assets, fonts, memory,
+    model::{settings, state, workspace},
+    reading,
+    view::{
+        component::{composer, opener, tab_sheet},
+        menubar, root,
+    },
+};
 use bezel::{
     gpui::App,
     gpui_platform,
     theme::{self, Tint, appearance},
     ui::{self, focus, input},
 };
-use cydonia::{
-    assets, memory,
-    model::{settings, state, workspace},
-    reading,
-    view::{
-        component::{composer, opener},
-        menubar, root,
-    },
-};
 
 fn main() -> Result<()> {
-    cydonia::kernel::install_shutdown();
-    let _tunnels = cydonia::kernel::TunnelGuard;
+    // `--version` before anything else opens, so a packaging script can ask a
+    // freshly built binary what it was stamped with rather than working the
+    // number out a second time and hoping the two agree. `desktop/Makefile`
+    // reads exactly this to check itself against the bundle it is writing.
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!(
+            "{} {} {}",
+            env!("CARGO_PKG_VERSION"),
+            arbos_desktop::build::BUILD,
+            arbos_desktop::build::COMMIT
+        );
+        return Ok(());
+    }
+    arbos_desktop::kernel::install_shutdown();
+    let _tunnels = arbos_desktop::kernel::TunnelGuard;
     let settings = settings::load().unwrap_or_else(|err| {
         eprintln!("settings: {err:#}; using defaults");
         settings::Settings::default()
     });
     let state = state::restore();
     let app = gpui_platform::application().with_assets(assets::Assets);
+    // `arbos://…` links (Info.plist CFBundleURLTypes) and folders opened
+    // with the app land here. Today that brings the window forward; routing
+    // a link to its chat is the next step, and a scheme nobody answers is
+    // what the bundle would otherwise advertise.
+    app.on_open_urls(|urls| {
+        for url in &urls {
+            eprintln!("open: {url}");
+        }
+    });
     // The Dock icon and a second launch both land here. ⌘W leaves the app
     // running with no window, as it does in every other mac app, so this is
     // the way back to one.
@@ -33,14 +55,15 @@ fn main() -> Result<()> {
         if cx
             .windows()
             .iter()
-            .any(|window| window.downcast::<root::Cydonia>().is_some())
+            .any(|window| window.downcast::<root::Arbos>().is_some())
         {
             return;
         }
         // ⌘W of the chat window used to leave Settings holding a dead
         // Workspace. Drop those leftovers before a new one is made.
         for window in cx.windows() {
-            if let Some(handle) = window.downcast::<cydonia::view::settings::SettingsWindow>() {
+            if let Some(handle) = window.downcast::<arbos_desktop::view::settings::SettingsWindow>()
+            {
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
         }
@@ -54,8 +77,12 @@ fn main() -> Result<()> {
         if let Err(err) = ui::register_fonts(cx) {
             eprintln!("font registration failed: {err:?}");
         }
+        // The UI face travels with the app; the theme names it below.
+        if let Err(err) = fonts::register(cx) {
+            eprintln!("bundled font registration failed: {err:?}");
+        }
         // Cursor's colours, registered before the first palette is built.
-        cydonia::view::palette::install(cx);
+        arbos_desktop::view::palette::install(cx);
         appearance::init(state.appearance, cx);
         // Before the window is opened: it reads its background appearance
         // on the way up, and vibrancy is what decides that.
@@ -74,6 +101,9 @@ fn main() -> Result<()> {
         focus::init(cx);
         composer::init(cx);
         opener::init(cx);
+        tab_sheet::init(cx);
+        bezel::ui::palette::init(cx);
+        arbos_desktop::view::settings::init(cx);
         editor::init(cx);
         root::init(cx);
         // Last: it reads every binding above off the keymap to put the
@@ -83,8 +113,8 @@ fn main() -> Result<()> {
         let window = root::open(settings, state, cx).expect("failed to open window");
         // Test harness: `ARBOS_DRIVER=1` / `ARBOS_DRIVER_SOCKET=…` opens the
         // control socket a driver program clicks and types through.
-        if cydonia::driver::socket_path().is_some()
-            && let Err(err) = cydonia::driver::start(window, cx)
+        if arbos_desktop::driver::socket_path().is_some()
+            && let Err(err) = arbos_desktop::driver::start(window, cx)
         {
             eprintln!("driver: {err:#}");
         }

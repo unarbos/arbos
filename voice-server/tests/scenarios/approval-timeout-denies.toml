@@ -1,0 +1,25 @@
+# The agent asks to run a command and the caller says nothing: after the approval timeout the
+# gateway denies it and says so. Nothing is ever allowed unasked.
+title = "Unanswered approval times out to deny, with a spoken note"
+gateway_args = ["--approval-timeout", "4"]
+
+[[steps]]
+say = "Delete the old logs."
+model = { ack = "On it." }
+[steps.kernel]
+approval = "bash: rm -rf /var/log/arbos/*.log"
+reply = "Old logs deleted."
+reply_denied = "I did not delete anything; the command was denied."
+
+[[steps]]
+wait_spoken = "wants to run bash"
+
+[[steps]]
+wait_spoken = "did not delete anything"
+timeout = 30
+
+[expect]
+spoken_contains = ["Arbos wants to run bash: rm -rf /var/log/arbos", "Allow?", "Still waiting on bash", "I deny it in 1 seconds", "No answer in 4 seconds; I denied bash", "I did not delete anything"]
+spoken_not_contains = ["Old logs deleted", "Allowed."]
+approvals = [false]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

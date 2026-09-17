@@ -2,15 +2,20 @@
 //! [`crate::model::workspace::Workspace`] and writes to it by name; none of
 //! them owns app state.
 
+pub mod chips;
 pub mod component;
 pub mod detail;
 #[cfg(target_os = "macos")]
 mod fn_key;
 pub mod menubar;
+pub mod naming;
 pub mod palette;
+pub mod panel;
+pub mod project_page;
 pub mod root;
 pub mod settings;
-pub mod sidebar;
+pub mod status_bar;
+pub mod tabs;
 pub mod terminal;
 
 use bezel::{
@@ -113,7 +118,7 @@ mod tests {
 
     #[test]
     fn single_line_shift_arrows_select_to_name_boundaries() {
-        let bindings = field_editing_bindings("CydoniaSessionName", false);
+        let bindings = field_editing_bindings("ArbosSessionName", false);
         assert_binding(&bindings, "shift-up", input::SelectHome);
         assert_binding(&bindings, "shift-down", input::SelectEnd);
     }

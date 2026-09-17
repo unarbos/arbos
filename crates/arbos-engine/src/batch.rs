@@ -53,7 +53,7 @@ pub enum Outcome {
 
 impl Outcome {
     /// The transcript record for this call.
-    pub fn into_event(self, call: &ToolCall) -> Event {
+    pub fn into_event(self, call: &ToolCall, step: u64) -> Event {
         let (body, paths, child, images, error, started, ended, diff) = match self {
             Outcome::Ran {
                 out: Ok(out),
@@ -94,21 +94,116 @@ impl Outcome {
                 None,
             ),
         };
-        Event::new(EventKind::Tool(ToolRec {
-            name: call.name.clone(),
-            call_id: call.id.clone(),
-            paths,
-            started,
-            ended,
-            result_size: Some(body.len() as u64),
-            error,
-            body: Some(body),
-            args: Some(call.arguments.clone()),
-            child,
-            images,
-            diff,
-        }))
+        // The transcript is the record the model and the user read: no
+        // granted secret, and not the kernel's own key, gets written into it.
+        let secrets = crate::secrets::store();
+        let (body, error) = if secrets.has_any() {
+            (secrets.redact(&body), error.map(|e| secrets.redact(&e)))
+        } else {
+            (body, error)
+        };
+        let result_size = body.len() as u64;
+        Event::new(EventKind::Tool(
+            ToolRec {
+                name: call.name.clone(),
+                call_id: call.id.clone(),
+                step,
+                paths,
+                started,
+                ended,
+                result_size: Some(result_size),
+                error,
+                body: Some(body),
+                args: Some(call.arguments.clone()),
+                child,
+                images,
+                diff,
+                label: call_label(&call.arguments),
+                output: None,
+            }
+            .with_output(),
+        ))
     }
+}
+
+/// The model's `description` of a call, trimmed to a line, when it gave
+/// one worth showing.
+pub(crate) fn call_label(args: &serde_json::Value) -> Option<String> {
+    let d = args.get("description")?.as_str()?.trim();
+    if d.is_empty() {
+        return None;
+    }
+    let one: String = d.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(one.chars().take(120).collect())
+}
+
+/// One line naming a call for the allow/deny question: the path, the
+/// command, or the arguments, cut short.
+pub(crate) fn summarise_call(_name: &str, args: &serde_json::Value) -> String {
+    let key = ["command", "path", "patch", "url", "text", "brief"]
+        .iter()
+        .find_map(|k| args.get(*k).and_then(serde_json::Value::as_str));
+    let body = match key {
+        Some(v) => v.to_string(),
+        None => args.to_string(),
+    };
+    let body = body.replace('\n', " ");
+    let cut: String = body.chars().take(160).collect();
+    if cut.len() < body.len() {
+        format!("{cut}…")
+    } else {
+        cut
+    }
+}
+
+/// Longest tool body kept on a transcript line. The transcript is the
+/// full-body store, but one 100 MB line makes every reader (the kernel's
+/// tail, the desktop, compaction) parse 100 MB per tick. Over the cap the
+/// body goes to a side file the model can `read` in pieces.
+pub const BODY_CAP: usize = 1024 * 1024;
+const BODY_HEAD: usize = 64 * 1024;
+
+/// A body larger than the model's view of it (the eviction limits) is
+/// written whole to `<agent dir>/results/<call_id>.txt`, so the model can
+/// `read` it in slices by the path the evicted view cites; the transcript
+/// keeps it whole too, up to `BODY_CAP`. Past that the transcript line
+/// holds a head plus the path instead.
+pub fn cap_body(cx: &RunCx, tool: &str, call_id: &str, body: String) -> String {
+    // A `read` result already has a file behind it — the one it read; the
+    // evicted view cites that path, so no copy is kept.
+    if tool == "read" && body.len() <= BODY_CAP {
+        return body;
+    }
+    if !crate::evict::spills(&body) {
+        return body;
+    }
+    let dir = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str())
+        .dir
+        .join("results");
+    let path = dir.join(crate::evict::spill_name(call_id));
+    let spilled = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(&path, &body))
+        .is_ok();
+    if body.len() <= BODY_CAP {
+        return body;
+    }
+    let cut = body
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= BODY_HEAD)
+        .last()
+        .unwrap_or(0);
+    let mut head = body[..cut].to_string();
+    head.push_str(&format!(
+        "\n[… {} MB more{}]",
+        body.len() / (1024 * 1024),
+        if spilled {
+            format!(" in {}; read it in pieces", path.display())
+        } else {
+            String::new()
+        }
+    ));
+    head
 }
 
 enum State {
@@ -186,7 +281,11 @@ pub async fn run(
         }
 
         let stopped = control.is_stopped() || aborted;
-        let steered = control.steer_pending();
+        // A steer waits for the tool boundary; the calls the model already
+        // decided on run (Cursor's rule, and the multitasking audit: a
+        // steer before a batch skipped the user's own spawn by 30 s). Only
+        // a steer that says stop cancels what has not started.
+        let steered = arbos_core::inbox::has_stop_steer(&cx.place, cx.agent.id.as_str());
         let running = slots
             .iter()
             .filter(|s| matches!(s.state, State::Running))
@@ -204,10 +303,11 @@ pub async fn run(
                 }
             }
         } else if steered && running == 0 {
-            // pi's rule: the user's new instruction lands within one tool.
+            // The user said stop: nothing more starts; the words land at
+            // the boundary and the turn takes it from there.
             for s in &mut slots {
                 if !s.is_done() {
-                    s.state = State::Done(Outcome::Skipped("skipped: user steered".into()));
+                    s.state = State::Done(Outcome::Skipped("skipped: user said stop".into()));
                 }
             }
         } else if !steered {
@@ -239,9 +339,10 @@ pub async fn run(
                     ..cx.clone()
                 };
                 let started = arbos_core::now_ms();
-                cx.hooks.emit(&Event::new(EventKind::Tool(ToolRec {
+                let rec = ToolRec {
                     name: call.name.clone(),
                     call_id: call.id.clone(),
+                    step: cx.step,
                     paths: vec![],
                     started: Some(started),
                     ended: None,
@@ -252,9 +353,18 @@ pub async fn run(
                     child: None,
                     images: vec![],
                     diff: None,
-                })));
+                    label: call_label(&call.arguments),
+                    output: None,
+                };
+                // On disk before it runs: a kernel that dies mid-call
+                // leaves this for the next one to write up (qal-j02).
+                crate::inflight::start(&cx.place, &cx.agent.id, &rec);
+                cx.hooks.emit(&Event::new(EventKind::Tool(rec)));
+                for note in &prepared.notices {
+                    hook_notice(&cx, note);
+                }
                 let handle = set.spawn(async move {
-                    let out = prepared.tool.run(call_cx, prepared.args).await;
+                    let out = run_with_hooks(prepared, &call_cx, &call).await;
                     (
                         i,
                         Outcome::Ran {
@@ -284,7 +394,10 @@ pub async fn run(
             },
             joined = set.join_next(), if !set.is_empty() => {
                 match joined {
-                    Some(Ok((i, outcome))) => slots[i].state = State::Done(outcome),
+                    Some(Ok((i, outcome))) => {
+                        crate::inflight::end(&cx.place, &cx.agent.id, &slots[i].call.id);
+                        slots[i].state = State::Done(outcome);
+                    }
                     Some(Err(e)) => {
                         // A panicking or aborted tool task.
                         if let Some(&i) = task_slot.get(&e.id()) {
@@ -305,6 +418,10 @@ pub async fn run(
         }
     }
 
+    // Nothing is in flight once the batch is over, whatever ended it.
+    for s in &slots {
+        crate::inflight::end(&cx.place, &cx.agent.id, &s.call.id);
+    }
     let outcomes: Vec<(ToolCall, Outcome)> = slots
         .into_iter()
         .map(|s| {
@@ -343,5 +460,106 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
         } else {
             1.0
         }
+    );
+}
+
+/// The call itself, between its hooks: a before-tool `ask` goes to the user
+/// first (deny = tool error), then the tool runs, then after-tool hooks see
+/// the result and may add context for the model.
+async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
+    let name = call.name.clone();
+    if let Some(question) = &prepared.ask {
+        // On disk as "waiting for the user" while the card is up: a
+        // kernel that dies here must not write the call up as one that
+        // may have run.
+        crate::inflight::waiting_for_approval(&cx.place, &cx.agent.id, &call.id);
+        let allowed = tokio::select! {
+            r = cx.hooks.approve(&cx.agent.id, &name, question) => r.unwrap_or(false),
+            _ = cx.cancel.cancelled() => false,
+        };
+        crate::inflight::approval_settled(&cx.place, &cx.agent.id, &call.id);
+        if !allowed {
+            anyhow::bail!(
+                "the user did not allow {name} ({question}). Do not retry it unchanged; say what you wanted to do and why, and go on with what is allowed."
+            );
+        }
+    }
+    let args = prepared.args.clone();
+    // The first edit of a task states its mechanism or does not run.
+    let recorded = crate::mechanism::gate(&cx.place, &cx.agent.id, &name, &args)?;
+    let taken = crate::repro::gate(&cx.place, &cx.agent.id, &name)?;
+    let result = prepared
+        .tool
+        .run(cx.clone(), prepared.args)
+        .await
+        .map(|mut out| {
+            out.body = cap_body(cx, &name, &call.id, std::mem::take(&mut out.body));
+            if let Some(line) = &recorded {
+                out.body.push_str("\n\nMechanism recorded for this task: ");
+                out.body.push_str(line);
+            }
+            if let Some(note) = &taken {
+                out.body.push_str("\n\n");
+                out.body.push_str(note);
+            }
+            out
+        });
+    let (body, error, paths) = match &result {
+        Ok(out) => (out.body.clone(), None, out.paths.clone()),
+        Err(e) => (String::new(), Some(e.to_string()), Vec::new()),
+    };
+    let after = {
+        let place = cx.place.clone();
+        let agent = cx.agent.clone();
+        let name = name.clone();
+        let cwd = cx.cwd.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut after = tools::file_hooks::after_tool(
+                &place,
+                &agent,
+                &name,
+                &args,
+                &body,
+                error.as_deref(),
+                &paths,
+            );
+            // A source edit reports which existing tests name what it
+            // changed; "none" is the wrong-layer signal (see git::coverage_note).
+            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch") {
+                if let Some(note) = tools::git::coverage_note(&cwd, &paths) {
+                    after.context.push(note);
+                }
+            }
+            after
+        })
+        .await
+        .unwrap_or_default()
+    };
+    for note in &after.notices {
+        hook_notice(cx, note);
+    }
+    let context: Vec<String> = prepared.context.into_iter().chain(after.context).collect();
+    match result {
+        Ok(mut out) => {
+            for c in context {
+                out.body.push_str("\n\n[hook] ");
+                out.body.push_str(&c);
+            }
+            Ok(out)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Hook trouble goes on the transcript: the user should see that a hook
+/// failed or that `hooks.toml` is wrong, and it should survive the turn.
+fn hook_notice(cx: &RunCx, text: &str) {
+    let path = arbos_core::Layout::new(&cx.place, cx.agent.id.as_str()).transcript();
+    let _ = arbos_core::append_event(
+        &path,
+        &Event::new(EventKind::Notice {
+            text: text.to_string(),
+            failed: false,
+        }),
     );
 }

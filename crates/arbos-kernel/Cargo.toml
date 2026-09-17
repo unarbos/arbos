@@ -1,6 +1,6 @@
 [package]
 name = "arbos-kernel"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,19 +12,38 @@ path = "src/main.rs"
 
 [dependencies]
 arbos-core.workspace = true
+# `arbos-kernel update`: the channel feed, the signature over a payload, and
+# the install that cannot leave a half-replaced binary — the same code the
+# desktop updates itself with, so there is one answer to what a published
+# build is rather than two that can drift.
+arbos-update = { path = "../arbos-update" }
 arbos-engine.workspace = true
 anyhow.workspace = true
 base64 = "0.22"
+libc = "0.2"
 portable-pty = "0.8"
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tokio-util = "0.7"
 tgrep-core = { path = "../../vendor/tgrep/tgrep-core" }
 regex = "1"
 glob = "0.3"
+# `arbos-kernel setup` reads the API key with echo off.
+rpassword = "7"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 uuid = { version = "1", features = ["v4"] }
 which = "7"
+toml = "0.8"
 # Chrome DevTools Protocol for the browser tool: plain ws:// to a local
 # headless Chrome, so no TLS feature is needed.
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+# The attach socket also speaks WebSocket (a phone behind a Cloudflare
+# tunnel); TLS ends at the tunnel on the server side. The client side
+# (`serve --hub`, `worker`, `spawn host=` through the hub) dials wss://
+# with the bundled roots.
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["handshake", "connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,48 @@
+name: Website
+
+# Deploys www/ to the Cloudflare Pages project "arbos-life" (https://arbos.life).
+# Needs two repository secrets: CLOUDFLARE_API_TOKEN (Pages: Edit) and
+# CLOUDFLARE_ACCOUNT_ID. Pull requests get a preview URL; main goes live.
+
+on:
+  push:
+    branches: [main]
+    paths: ["www/**", ".github/workflows/pages.yml"]
+  pull_request:
+    paths: ["www/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check HTML
+        run: |
+          set -euo pipefail
+          for f in $(find www -name '*.html'); do
+            grep -q '<html lang="en">' "$f"
+            grep -q '<meta name="viewport"' "$f"
+          done
+          test -f www/_headers
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: >-
+            pages deploy www
+            --project-name=arbos-life
+            --branch=${{ github.head_ref || github.ref_name }}
+            --commit-hash=${{ github.sha }}

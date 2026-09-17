@@ -115,7 +115,9 @@ pub fn render(
     match &surface.bind {
         Bind::Terminal { .. } => quiet(&theme, "This terminal has no session."),
         Bind::Browser { url, shot, .. } => browser_body(&theme, url, shot.clone()),
-        Bind::Process { log, .. } => process_body(&theme, log),
+        Bind::Process {
+            log, live, done, ..
+        } => process_body(&theme, log, live, *done),
         Bind::Url(url) => open_card(&theme, Some(url), url),
         Bind::Empty => quiet(&theme, "Nothing here."),
         Bind::Path(path) => path_body(surface, place, path, window, cx),
@@ -184,16 +186,32 @@ fn browser_body(theme: &Theme, url: &str, shot: Option<Arc<Image>>) -> AnyElemen
         .into_any_element()
 }
 
-/// The tail of a job's journal, and how it ended if it has.
-fn process_body(theme: &Theme, log: &Path) -> AnyElement {
-    let tail = tail_lines(log);
-    let exit = log
-        .parent()
-        .and_then(|dir| std::fs::read_to_string(dir.join("exit")).ok())
-        .map(|code| code.trim().to_owned())
-        .filter(|code| !code.is_empty());
+/// The tail of a job's journal, and how it ended if it has. The kernel's
+/// streamed output wins when any has arrived (it is the only source on a
+/// remote place); the file is read for kernels that do not stream.
+fn process_body(theme: &Theme, log: &Path, live: &str, done: Option<Option<i32>>) -> AnyElement {
+    let streamed = !live.is_empty() || done.is_some();
+    let tail = if streamed {
+        let lines: Vec<&str> = live.lines().collect();
+        let skip = lines.len().saturating_sub(TAIL_LINES);
+        lines[skip..].join("\n")
+    } else {
+        tail_lines(log)
+    };
+    let exit = if streamed {
+        done.map(|code| match code {
+            Some(code) => code.to_string(),
+            None => "killed".to_owned(),
+        })
+    } else {
+        log.parent()
+            .and_then(|dir| std::fs::read_to_string(dir.join("exit")).ok())
+            .map(|code| code.trim().to_owned())
+            .filter(|code| !code.is_empty())
+    };
     let status = match exit {
         Some(code) if code == "0" => "exited 0".to_owned(),
+        Some(code) if code == "killed" => "killed".to_owned(),
         Some(code) => format!("exited {code}"),
         None => "running".to_owned(),
     };

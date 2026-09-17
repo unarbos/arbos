@@ -1,12 +1,12 @@
 {
-	"name": "cydonia-www",
+	"name": "arbos-www",
 	"private": true,
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
 		"preview": "vite preview",
-		"deploy": "npm run build && wrangler pages deploy build --project-name=cydonia --branch=main"
+		"deploy": "npm run build && wrangler pages deploy build --project-name=arbos --branch=main"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.8",

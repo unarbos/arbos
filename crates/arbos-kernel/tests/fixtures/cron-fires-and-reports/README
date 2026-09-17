@@ -1,0 +1,4 @@
+A one-shot shell subscription with deliver_to = user, due one second before
+the kernel's clock starts. Expect: one say line "BTC: 42" on root's
+transcript (no model turn), the subscription file gone (once), kernel idle.
+State travels as dot-arbos/ (the repo ignores .arbos/); the runner renames it.

@@ -1,7 +1,7 @@
 //! The `+` menu a project heading opens, and the field that says which menu
 //! is showing.
 
-use crate::view::root::Cydonia;
+use crate::view::root::Arbos;
 use bezel::{
     gpui::{AnyElement, Context, Div, SharedString, Stateful, Window, prelude::*},
     theme::Theme,
@@ -9,33 +9,33 @@ use bezel::{
 };
 
 /// What a row does when it is picked.
-type Act = Box<dyn Fn(&mut Cydonia, &mut Window, &mut Context<Cydonia>)>;
+type Act = Box<dyn Fn(&mut Arbos, &mut Window, &mut Context<Arbos>)>;
 
 /// Which menu is open. One field rather than a flag each, so opening one
 /// closes the rest by construction.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Menu {
-    /// A project heading: what to do to the project.
-    Project(usize),
     /// A chat row: copy, fork, archive, delete.
     Session(u64),
+    /// A project tab: edit its face, close it.
+    Tab(usize),
 }
 
 /// One row of a menu, and what picking it does.
 pub(crate) fn row(
     item: Item,
-    act: impl Fn(&mut Cydonia, &mut Window, &mut Context<Cydonia>) + 'static,
+    act: impl Fn(&mut Arbos, &mut Window, &mut Context<Arbos>) + 'static,
 ) -> (Item, Act) {
     (item, Box::new(act))
 }
 
-impl Cydonia {
+impl Arbos {
     /// Open a menu, or shut the one already open.
     ///
     /// The press that reaches a trigger is the same press the open card
     /// dismisses on, so by click time the menu already reads as shut and a
     /// plain toggle would open it straight back. What the press found is noted
-    /// by [`Cydonia::menu_press`] instead, in the capture phase — ahead of
+    /// by [`Arbos::menu_press`] instead, in the capture phase — ahead of
     /// that handler, whichever element owns it.
     pub(crate) fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         let closed_by_this_press = std::mem::take(&mut self.menu_pressed);
@@ -46,7 +46,7 @@ impl Cydonia {
     }
 
     /// The same menu, opened from the chat header: it anchors under the
-    /// header's `⋯` instead of beside the sidebar row.
+    /// header's `⋯` instead of beside the panel row.
     pub(crate) fn toggle_menu_at_header(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.toggle_menu(menu, cx);
         self.menu_at_header = self.menu.is_some();
@@ -73,7 +73,7 @@ impl Cydonia {
         }))
     }
 
-    /// The card every sidebar menu hangs in, dismissed by a press outside it —
+    /// The card every menu hangs in, dismissed by a press outside it —
     /// which the card reports itself, since with a panel open only the tree
     /// knows which presses landed on none of it.
     pub(crate) fn menu_card(

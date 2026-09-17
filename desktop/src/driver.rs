@@ -27,11 +27,12 @@
 
 use crate::{
     model::{
-        session::{ChatItem, ChatSession, Connection, ToolStatus},
+        project::Project,
+        session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
     },
     view::{
-        root::{Cydonia, Pane},
+        root::{Arbos, Pane},
         settings::SettingsWindow,
     },
 };
@@ -56,7 +57,7 @@ use std::{
 };
 
 /// The window title the screenshot looks for among AppKit's windows.
-const WINDOW_TITLE: &str = "Arbos";
+pub(crate) const WINDOW_TITLE: &str = "Arbos";
 
 /// Where the socket goes, or `None` when the driver is switched off.
 pub fn socket_path() -> Option<PathBuf> {
@@ -75,7 +76,7 @@ struct Job {
 }
 
 /// Start listening. Returns at once; the socket lives until the app quits.
-pub fn start(handle: WindowHandle<Cydonia>, cx: &mut App) -> Result<PathBuf> {
+pub fn start(handle: WindowHandle<Arbos>, cx: &mut App) -> Result<PathBuf> {
     let path = socket_path().context("driver is not enabled")?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)
@@ -128,7 +129,7 @@ pub fn start(handle: WindowHandle<Cydonia>, cx: &mut App) -> Result<PathBuf> {
             // The window is on the update stack inside this closure, so the
             // root comes from the view handed in, not from `handle.entity`.
             let step = cx.update_window(target, |view, window, cx| {
-                let root = view.downcast::<Cydonia>().ok();
+                let root = view.downcast::<Arbos>().ok();
                 let acted = act(root.as_ref(), &method, &params, window, cx)?;
                 Ok::<_, anyhow::Error>((root, acted))
             });
@@ -145,16 +146,17 @@ pub fn start(handle: WindowHandle<Cydonia>, cx: &mut App) -> Result<PathBuf> {
             let reply_on_error = reply.clone();
             let id_on_error = id.clone();
             let quitting = method == "quit";
-            // An action that closed its own window (CloseWindow on Settings)
-            // has nothing left to settle on: the request succeeded, and the
-            // reply says the window is gone rather than failing.
+            // A request that closed its own window (CloseWindow on
+            // Settings, Escape in it) has nothing left to settle on: the
+            // request succeeded, and the reply says the window is gone
+            // rather than failing.
             let still_open = cx.update(|cx| cx.windows().into_iter().any(|w| w == target));
-            if method == "action" && !still_open {
-                let _ = reply.send(json!({
-                    "id": id,
-                    "ok": true,
-                    "result": { "action": acted.get("action").cloned().unwrap_or(Value::Null), "window_closed": true }
-                }));
+            if !still_open {
+                let mut result = acted;
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("window_closed".into(), json!(true));
+                }
+                let _ = reply.send(json!({ "id": id, "ok": true, "result": result }));
                 continue;
             }
             let settled = cx.update_window(target, |_, window, _| {
@@ -190,7 +192,7 @@ fn failure(id: Value, err: &anyhow::Error) -> Value {
 
 /// What kind of window a handle is, by its root view type.
 fn window_kind(window: &AnyWindowHandle) -> &'static str {
-    if window.downcast::<Cydonia>().is_some() {
+    if window.downcast::<Arbos>().is_some() {
         "main"
     } else if window.downcast::<SettingsWindow>().is_some() {
         "settings"
@@ -204,7 +206,7 @@ fn window_id_json(window: &AnyWindowHandle) -> Value {
 }
 
 /// Every open window: kind, id, size, and whether it is the active one.
-fn windows_json(main: WindowHandle<Cydonia>, cx: &mut App) -> Value {
+fn windows_json(main: WindowHandle<Arbos>, cx: &mut App) -> Value {
     let list: Vec<Value> = cx
         .windows()
         .into_iter()
@@ -229,7 +231,7 @@ fn windows_json(main: WindowHandle<Cydonia>, cx: &mut App) -> Value {
 /// `"settings"` is the settings window; anything else is a window id from
 /// `windows`.
 fn resolve_window(
-    main: WindowHandle<Cydonia>,
+    main: WindowHandle<Arbos>,
     wanted: &Value,
     cx: &mut App,
 ) -> Result<AnyWindowHandle> {
@@ -338,7 +340,8 @@ fn finish_screenshot(reply: Value, request: &Value) -> Value {
 /// `screencapture -l` grabs one window by its AppKit number, without its
 /// shadow (`-o`) and without the camera sound (`-x`). It needs the Screen
 /// Recording permission; macOS asks once, for whichever app launched us.
-fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
+#[cfg(target_os = "macos")]
+pub(crate) fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("create screenshot folder {}", dir.display()))?;
@@ -355,6 +358,52 @@ fn capture_window(window_id: i64, path: &std::path::Path) -> Result<()> {
     }
     if std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0) == 0 {
         bail!("screencapture wrote nothing; is Screen Recording allowed?");
+    }
+    Ok(())
+}
+
+/// X11 (a test rig under Xvfb, a Linux desktop): grab the whole display
+/// with ImageMagick's `import`, else `xwd` piped through `convert`. The
+/// window is the only thing on an Xvfb screen, so the root is the window;
+/// on a real desktop the caller crops if it must. `window_id` is unused.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn capture_window(_window_id: i64, path: &std::path::Path) -> Result<()> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create screenshot folder {}", dir.display()))?;
+    }
+    let display =
+        std::env::var("DISPLAY").context("DISPLAY is not set; no X display to capture")?;
+    let via_import = std::process::Command::new("import")
+        .args(["-display", &display, "-window", "root"])
+        .arg(path)
+        .status();
+    let ok = match via_import {
+        Ok(status) if status.success() => true,
+        _ => {
+            let xwd = std::process::Command::new("xwd")
+                .args(["-root", "-silent", "-display", &display])
+                .output()
+                .context("run import or xwd (install imagemagick or x11-apps)")?;
+            if !xwd.status.success() {
+                bail!("xwd exited with {}", xwd.status);
+            }
+            let mut convert = std::process::Command::new("convert")
+                .arg("xwd:-")
+                .arg(path)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .context("run convert (install imagemagick)")?;
+            convert
+                .stdin
+                .take()
+                .context("convert stdin")?
+                .write_all(&xwd.stdout)?;
+            convert.wait()?.success()
+        }
+    };
+    if !ok || std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0) == 0 {
+        bail!("capture of {display} wrote nothing");
     }
     Ok(())
 }
@@ -435,6 +484,12 @@ struct KeyParams {
     keys: String,
 }
 
+/// `fn`: hold or release the Fn key, as the native monitor would report it.
+#[derive(Deserialize)]
+struct FnParams {
+    down: bool,
+}
+
 #[derive(Deserialize)]
 struct TypeParams {
     text: String,
@@ -475,7 +530,7 @@ fn parse<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T> {
 /// Do what the request asks. Whatever it returns is the reply for methods
 /// that only act; `report` replaces it for the ones that read.
 fn act(
-    _root: Option<&Entity<Cydonia>>,
+    root: Option<&Entity<Arbos>>,
     method: &str,
     params: &Value,
     window: &mut Window,
@@ -662,8 +717,8 @@ fn act(
             // update, which cannot run from inside this request's own update
             // of the target. Close the target here instead, with the menu's
             // semantics: the chat window takes Settings with it.
-            if name == "cydonia::CloseWindow" {
-                if _root.is_some() {
+            if name == "arbos::CloseWindow" {
+                if root.is_some() {
                     crate::kernel::shutdown_tunnels();
                     cx.defer(|cx| {
                         for other in cx.windows() {
@@ -696,7 +751,7 @@ fn act(
             window.activate_window();
             let size = window.bounds().size;
             let window_id = ns_window_number(f32::from(size.width), f32::from(size.height))
-                .context("find the AppKit window")?;
+                .context("find the window to capture")?;
             // Activation is a request the OS may refuse while the user is
             // busy in another app; raising the window without activating
             // is always allowed and is enough for the capture.
@@ -707,6 +762,16 @@ fn act(
                 "width": f32::from(window.viewport_size().width),
                 "height": f32::from(window.viewport_size().height),
             }))
+        }
+        // The hold-Fn dictation path, by the same calls the key monitor
+        // makes: down starts a take into the composer, up ends it. Drivable
+        // everywhere, so the UI pass can check the wiring; on a machine with
+        // no dictation the notice it raises is the check.
+        "fn" => {
+            let FnParams { down } = parse(params)?;
+            let root = root.context("no main window")?;
+            root.update(cx, |this, cx| this.fn_key(down, cx));
+            Ok(json!({ "down": down }))
         }
         "quit" => {
             cx.quit();
@@ -719,7 +784,7 @@ fn act(
 
 /// Build the reply, one settled frame after the request.
 fn report(
-    root: Option<&Entity<Cydonia>>,
+    root: Option<&Entity<Arbos>>,
     method: &str,
     acted: Value,
     window: &mut Window,
@@ -929,6 +994,18 @@ fn describe(probe: &ElementProbe, window: &Window) -> Value {
     })
 }
 
+/// The last dictated take's clock, with the gateway's own numbers.
+fn voice_latency(this: &Arbos) -> Value {
+    let voice = crate::voice_ws::status();
+    json!({
+        "first_partial_ms": this.dictation.first_partial_ms,
+        "release_to_send_ms": this.dictation.release_to_send_ms,
+        "gateway_first_partial_ms": voice.first_partial_ms,
+        "partial_age_ms": voice.partial_age_ms,
+        "phase": voice.phase.map(|p| p.as_str()),
+    })
+}
+
 fn point_json(position: Point<Pixels>) -> Value {
     json!({ "x": f32::from(position.x), "y": f32::from(position.y) })
 }
@@ -956,7 +1033,7 @@ fn window_json(window: &Window) -> Value {
 
 /// Every identified element on screen, with where it is and whether a click
 /// would reach it, plus the app's own account of itself.
-fn snapshot(root: Option<&Entity<Cydonia>>, window: &mut Window, cx: &mut App) -> Value {
+fn snapshot(root: Option<&Entity<Arbos>>, window: &mut Window, cx: &mut App) -> Value {
     let elements: Vec<Value> = window
         .element_probes()
         .iter()
@@ -974,7 +1051,7 @@ fn snapshot(root: Option<&Entity<Cydonia>>, window: &mut Window, cx: &mut App) -
 
 /// What the app believes is going on, in words a test can assert on: which
 /// pane shows, what is open, what the composer holds, what was said.
-fn state(root: Option<&Entity<Cydonia>>, window: &Window, cx: &App) -> Value {
+fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
     let Some(root) = root else {
         // Not the chat window (settings, for one): only the frame is known.
         return json!({ "window": "other", "focused": window.is_window_active() });
@@ -995,13 +1072,18 @@ fn state(root: Option<&Entity<Cydonia>>, window: &Window, cx: &App) -> Value {
                 "path": project.path.display().to_string(),
                 "host": project.host,
                 "active": workspace.active == Some(ix),
-                "expanded": project.expanded,
+                // The tab's badge as tabs.rs draws it: a dot while a chat
+                // asks or holds notifications nobody has looked at (#297).
+                "tab_dot": project.sessions.iter().filter(|chat| !chat.closed).any(|chat| {
+                    !chat.unseen.is_empty() || chat.plan_open().any(|n| n.do_kind == "ask")
+                }),
+                "unseen": project.sessions.iter().filter(|chat| !chat.closed).map(|chat| chat.unseen.len()).sum::<usize>(),
                 "archive_open": project.archive_open,
                 "focus": project.focus.map(|focus| json!({
                     "agent": focus.agent,
                     "surface": focus.surface.map(|id| id.0),
                 })),
-                "sessions": project.sessions.iter().map(session_json).collect::<Vec<_>>(),
+                "sessions": project.sessions.iter().map(|chat| session_json(Some(project), chat)).collect::<Vec<_>>(),
                 "surfaces": project.surfaces.iter().map(surface_json).collect::<Vec<_>>(),
             })
         })
@@ -1009,18 +1091,104 @@ fn state(root: Option<&Entity<Cydonia>>, window: &Window, cx: &App) -> Value {
     json!({
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
-        "sidebar_open": this.sidebar_open,
-        "sidebar_width": this.sidebar_width,
+        "panel_open": this.panel_open,
         "text_size": workspace.text_size,
+        "bionic_reading": workspace.bionic_reading,
+        "notifications": {
+            "notifier": crate::notify_os::NOTIFIER,
+            "window_active": this.window_active,
+            "touched": this.touched,
+            "posted": this.notifications_posted.iter().map(|n| json!({
+                "at": n.at,
+                "title": n.title,
+                "body": n.body,
+                "error": n.error,
+            })).collect::<Vec<_>>(),
+        },
         "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
         "opener_open": this.opener.read(cx).open,
+        "search_open": this.chat_search.read(cx).is_open(),
+        "feedback": {
+            "sheet_open": this.feedback_sheet.read(cx).is_open,
+            // The sentence he reads after Send. The one thing this feature
+            // cannot get wrong is promising something it does not do, so the
+            // promise itself is assertable rather than only photographable.
+            "message": this.feedback_sheet.read(cx).message().map(|(ok, text)| json!({
+                "ok": ok,
+                "text": text,
+            })),
+            // What the sheet says about the trajectory when there is none. The
+            // fault Jacob hit was invisible to the rig because this was not
+            // here: three rows reading "nothing to send" look exactly like a
+            // report that had nothing to attach.
+            "unavailable": this.feedback_sheet.read(cx).unavailable(),
+            "screenshot": {
+                "attached": this.feedback_sheet.read(cx).shot_state().0,
+                "whole_screen": this.feedback_sheet.read(cx).shot_state().1,
+                "error": this.feedback_sheet.read(cx).shot_state().2,
+            },
+            "outbox": {
+                "waiting": this.feedback_outbox.waiting,
+                "sent_this_run": this.feedback_outbox.sent_this_run,
+                "last_error": this.feedback_outbox.last_error,
+                "drained": this.feedback_outbox.at.is_some(),
+            },
+        },
+        "permissions": {
+            "open": this.permissions_sheet.read(cx).is_open(),
+            "seen": workspace.permissions_seen,
+            "wants_attention": this.permission_center.read(cx).wants_attention(),
+            "enabling_all": this.permission_center.read(cx).enabling_all,
+            "rows": this.permission_center.read(cx).rows.iter().map(|row| json!({
+                "permission": row.permission.title(),
+                "status": match &row.status {
+                    crate::permissions::Status::Granted => "granted",
+                    crate::permissions::Status::NotAsked => "not_asked",
+                    crate::permissions::Status::Denied => "denied",
+                    crate::permissions::Status::Unavailable(_) => "unavailable",
+                },
+                "phase": match &row.phase {
+                    crate::model::permission_center::Phase::Idle => "idle",
+                    crate::model::permission_center::Phase::Requesting { .. } => "requesting",
+                    crate::model::permission_center::Phase::Prompted { .. } => "prompted",
+                    crate::model::permission_center::Phase::NeedsSettings => "needs_settings",
+                },
+            })).collect::<Vec<_>>(),
+        },
         "menu_open": this.menu.is_some(),
         "renaming": this.renaming.is_some(),
         "composer": {
             "text": field.read(cx).content().to_string(),
             "focused": composer_focused,
             "recording": composer.is_recording(),
+            // The take's live words (dictation partials), painted after the caret.
+            "preview": composer.voice_preview(),
         },
+        // The last dictated take's clock: Fn press to first partial, release
+        // to send. The gateway's own numbers ride along.
+        "voice_latency": voice_latency(this),
+        // The call to the project in front, when one is live: what the
+        // strip shows, so a test can assert on it without pixels.
+        "call": this.call.as_ref().map(|call| {
+            let voice = crate::voice_ws::status();
+            json!({
+                "active": true,
+                "connecting": call.connecting,
+                "session": call.session,
+                "label": call.label,
+                "phase": voice.phase.map(|p| p.as_str()),
+                "muted": voice.muted,
+                "mic_device": voice.mic_device,
+                "mic_error": voice.mic_error,
+                "speaker_device": voice.speaker_device,
+                "played_bytes": crate::voice_ws::counters().0,
+                "level": voice.level,
+                "partial": voice.text,
+                "reply": voice.reply,
+                "last_said": voice.last_said,
+                "seconds": call.since.elapsed().as_secs(),
+            })
+        }),
         "active_project": workspace.active,
         "active_session": workspace.active_id(),
         "active_surface": workspace.active_surface().map(|surface| surface.id.0),
@@ -1032,21 +1200,31 @@ fn pane_name(pane: Option<Pane>) -> Value {
     match pane {
         Some(Pane::Chat) => json!("chat"),
         Some(Pane::Surface) => json!("surface"),
+        Some(Pane::Project) => json!("project"),
         None => Value::Null,
     }
 }
 
-fn session_json(chat: &ChatSession) -> Value {
+fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
     json!({
         "id": chat.id,
         "title": chat.title,
         "name": chat.name,
         "agent": chat.entry.name,
+        "agent_session": chat.agent_session,
         "model": chat.model,
         "parent": chat.parent,
+        "readonly": chat.readonly,
+        "agent_kind": chat.agent_kind,
+        "unseen": chat.unseen.len(),
+        "unseen_kinds": chat.unseen.iter().map(|n| n.kind.clone()).collect::<Vec<_>>(),
+        "seen_through": chat.seen_through,
         "draft": chat.draft,
         "queued": chat.queue.len(),
-        "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size})),
+        "held": chat.plan_queued(),
+        "asks": chat.plan_open().filter(|n| n.do_kind == "ask").count(),
+        "reconnect_attempt": chat.reconnect_attempt,
+        "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",
             Connection::Connecting => "connecting",
@@ -1055,8 +1233,14 @@ fn session_json(chat: &ChatSession) -> Value {
             Connection::Lost => "lost",
         },
         "streaming": chat.streaming,
+        "waiting": chat.waiting,
+        "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
+        "pills": project.map(|project| {
+            let (working, prs) = crate::view::detail::pill_counts(project, chat);
+            json!({ "working": working.len(), "prs": prs.len(), "pr_urls": prs })
+        }),
         "permission": chat.permission.as_ref().map(|prompt| prompt.title.clone()),
         "questions": chat.questions.as_ref().map(|prompt| prompt.title.clone()),
         "items": chat.items.iter().map(item_json).collect::<Vec<_>>(),
@@ -1080,8 +1264,13 @@ fn item_json(item: &ChatItem) -> Value {
         ChatItem::User(message) => json!({
             "kind": "user",
             "text": cut(&message.text),
+            "channel": message.channel,
             "images": message.images.len(),
             "files": message.files.len(),
+            "sent_at": message.sent_at,
+            "feedback": message.feedback,
+            "seq": message.seq,
+            "reported": message.reported,
         }),
         ChatItem::From { who, text, .. } => json!({
             "kind": "from",
@@ -1113,10 +1302,33 @@ fn item_json(item: &ChatItem) -> Value {
             "output": cut(output),
             "child_session": child_session,
         }),
+        ChatItem::Asked { question, answer } => json!({
+            "kind": "asked",
+            "question": cut(question),
+            "answer": cut(answer),
+        }),
         ChatItem::Notice { text, failed } => json!({
             "kind": "notice",
             "text": cut(text),
             "failed": failed,
+        }),
+        ChatItem::Wake { kind, secs, .. } => json!({ "kind": "wake", "wake": kind, "secs": secs }),
+        ChatItem::Nudge(text) => json!({
+            "kind": "nudge",
+            "text": cut(text),
+        }),
+        ChatItem::Artifacts(files) => json!({
+            "kind": "artifacts",
+            "files": files.iter().map(|file| json!({
+                "kind": match file.kind {
+                    ArtifactKind::Image => "image",
+                    ArtifactKind::Video => "video",
+                },
+                "path": file.path,
+                "name": file.name,
+                "label": file.caption,
+                "thumb": file.thumb.is_some(),
+            })).collect::<Vec<_>>(),
         }),
     }
 }
@@ -1127,8 +1339,18 @@ fn surface_json(surface: &Surface) -> Value {
         Bind::Browser { id, url, shot } => {
             (json!({ "browser": id }), Some(url.clone()), shot.is_some())
         }
-        Bind::Process { id, log } => (
-            json!({ "process": id, "log": log.display().to_string() }),
+        Bind::Process {
+            id,
+            log,
+            live,
+            done,
+        } => (
+            json!({
+                "process": id,
+                "log": log.display().to_string(),
+                "live_bytes": live.len(),
+                "done": done.map(|code| json!(code)),
+            }),
             None,
             false,
         ),
@@ -1156,7 +1378,7 @@ fn surface_json(surface: &Surface) -> Value {
 /// `height` points, for `screencapture -l`. Two windows of one size fall
 /// back to the one titled "Arbos", then to the first visible window.
 #[cfg(target_os = "macos")]
-fn ns_window_number(width: f32, height: f32) -> Option<i64> {
+pub(crate) fn ns_window_number(width: f32, height: f32) -> Option<i64> {
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
 
     #[repr(C)]
@@ -1226,7 +1448,8 @@ fn order_front_regardless(window_id: i64) {
 #[cfg(not(target_os = "macos"))]
 fn order_front_regardless(_window_id: i64) {}
 
+/// No AppKit here: the capture path grabs the X display, so any id will do.
 #[cfg(not(target_os = "macos"))]
-fn ns_window_number(_width: f32, _height: f32) -> Option<i64> {
-    None
+pub(crate) fn ns_window_number(_width: f32, _height: f32) -> Option<i64> {
+    Some(0)
 }

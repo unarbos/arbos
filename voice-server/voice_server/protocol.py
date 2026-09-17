@@ -26,6 +26,7 @@ AGENT_EVENT = "agent.event"
 AGENT_TURN = "agent.turn"
 AGENT_TREE = "agent.tree"
 AGENT_DONE = "agent.done"
+NARRATOR_SAY = "narrator.say"
 
 # server -> client
 SESSION_READY = "session.ready"
@@ -65,6 +66,13 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                 "project_unreachable"|"no_hub","project":"machine/project","message":…} and
                 closes the socket with code 4404. It never answers from another project.
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
+          "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
+          "project": "<machine>/<project>"  which project the call is for. A hub name, when the gateway has --hub:
+                                            the call attaches to that kernel through the hub (session.ready says
+                                            "via":"hub"). Empty, or the gateway's own project: its kernel ("via":"gateway")
+          "channel": "voice"  what the caller's utterances are filed as in the agent's inbox (voice | text)
+          "device": "desktop"  which client this is (phone | desktop); written beside channel on every message
+          "screen": "on your screen"  how the narrator refers to the client's display ("in the chat" on a phone)
     <binary>                       microphone audio
     {"type":"speak","text":"..."}  voice this text; requests queue in order
     {"type":"interrupt"}           drop the current reply and everything queued
@@ -122,6 +130,22 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                                    once the turn ends (replace the streamed line with it)
     {"type":"agent.turn","agent":"root","state":"running"|"idle"}
     {"type":"agent.tree","agents":[{"id","name","parent"}]}
+
+    call mode (session.start {"mode":"call"}; session.ready then has "mode":"call","narrator":true)
+    {"type":"narrator.say","text":"...","kind":"highlight"|"report"|"ask"|"error"|"detail","ref":"transcript:1181"}
+                                   the narrator is about to voice this line (as a normal reply turn:
+                                   response.started, response.transcript, audio, response.done). Write it
+                                   into the chat as a `voice ·` line so the record is complete.
+    Every finished caller utterance is sent to the project's main agent as a user message with
+    channel = "voice" (the kernel files it in the agent's inbox with that key; a running turn takes
+    it as a steer). text.input during a call goes the same way with channel = "text" and is answered
+    with text.done {"text":"","forwarded":true}. The narrator speaks: the main agent's reply at the end
+    of each turn (first sentence plus the one naming a result, at most 240 characters, "The rest is on
+    your screen." when anything was cut), a sub-agent finishing ("<name> is done: <last words>"),
+    questions (ask frames; the caller's next utterance answers them), and failures. It never reads tool
+    output, diffs, lists or code. The speech model's tools in call mode are more_detail(question) —
+    answered from the transcript through the kernel's tail/read frames, no new work — and
+    agent_status; it does not dispatch work itself (the words already went to the main agent).
 
   Engines
     duplex (default when the model is up): NVIDIA NemotronLabs VoiceChat 11B, one full-duplex

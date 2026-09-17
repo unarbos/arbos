@@ -1,0 +1,154 @@
+import Foundation
+
+/// One row of the main chat, as the screen draws it.
+struct ChatItem: Identifiable, Equatable {
+    enum Kind: Equatable {
+        /// `pending`: typed here, not yet echoed by the kernel — shown at
+        /// once so nothing typed ever vanishes; resent if the link drops.
+        case user(String, pending: Bool = false)
+        /// `streaming` while text is still arriving.
+        case agent(String, streaming: Bool)
+        /// A tool call, folded to one dim line.
+        case tool(label: String, failed: Bool, seconds: Int?)
+        /// A sub-agent's status: spawned, what it said, done.
+        case subagent(name: String, status: String)
+        case notice(String, failed: Bool)
+        /// The desktop's turn headline once a live turn ends: "Worked 12s".
+        case worked(seconds: Int)
+        /// A question the kernel is waiting on: options to tap, or a typed
+        /// answer; `answered` once one went. `id` is the kernel's.
+        case ask(question: String, options: [String], id: String?, answered: Bool)
+    }
+
+    let id: UUID
+    var kind: Kind
+    /// The model step this agent text belongs to (#247); 0 when unknown.
+    /// The settled `assistant` line of a step replaces the text streamed
+    /// for the same step, never a neighbour's.
+    var step: Int = 0
+    /// When the item appeared here — a pending card says how long it waits.
+    let createdAt: Date
+    /// A user line that came in by voice (the gateway's kernel-answered
+    /// turn, `channel: voice`): drawn as his words with a small mark, once.
+    var spoken = false
+    /// Stored names (`attachments/<name>`) of images sent with this line;
+    /// drawn as thumbnails when `AttachmentCache` still has the bytes.
+    var images: [String] = []
+
+    init(id: UUID = UUID(), _ kind: Kind, step: Int = 0) {
+        self.id = id
+        self.kind = kind
+        self.step = step
+        self.createdAt = Date()
+    }
+
+    static func == (lhs: ChatItem, rhs: ChatItem) -> Bool {
+        lhs.id == rhs.id && lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.spoken == rhs.spoken && lhs.images == rhs.images
+    }
+
+    /// Typed here, not yet echoed: a steer that rides at the tail while
+    /// the reply it interrupts keeps streaming above it.
+    var isPendingUser: Bool {
+        if case .user(_, pending: true) = kind { return true }
+        return false
+    }
+
+    var isStreamingAgent: Bool {
+        if case .agent(_, streaming: true) = kind { return true }
+        return false
+    }
+
+    var isAgent: Bool {
+        if case .agent = kind { return true }
+        return false
+    }
+}
+
+/// One of the root's workers, as the desktop's worker line shows it:
+/// "1 Working · <step>" while it runs, "Done <name>" after.
+struct WorkerStatus: Identifiable, Hashable {
+    let id: String
+    var name: String
+    var step: String
+    var running: Bool
+}
+
+/// What a chat source tells the store, in order.
+enum ChatUpdate {
+    /// Replace everything shown (mock seed; later, a transcript replay).
+    /// `earlier` is how many transcript lines lie before the first shown;
+    /// `firstSeq` is the first shown line's seq, for paging back.
+    case history([ChatItem], earlier: Int, firstSeq: Int)
+    case item(ChatItem)
+    /// Append to the open agent message of this step, opening one if there is none.
+    case agentDelta(String, step: Int)
+    /// Close the open agent message.
+    case agentDone
+    /// The kernel's settled text for one step. Replaces what the deltas
+    /// built for that step, so the same words never show twice; a step
+    /// nothing was streamed for becomes a new message.
+    case agentReplace(String, step: Int)
+    case turn(running: Bool)
+    case agents([KernelAgent])
+    /// The root's workers and what each is doing now.
+    case workers([WorkerStatus])
+    /// The focused agent's live step ("Reading notes.md"); empty when idle.
+    case step(String)
+    /// `.arbos/project.toml` read off the kernel.
+    case identity(ProjectIdentity)
+    /// The kernel's address on its hub, from `hello.store`.
+    case store(String)
+    /// The link to the kernel went; the store reconnects on its own.
+    case dropped(String)
+    /// The hub or kernel refused this target for good; no retry.
+    case refused(String)
+    /// Something the user should hear about (#293), live or replayed.
+    case notify(KernelNotification)
+    /// Every notification up to `through` was seen, on some client.
+    case seen(through: Int)
+    /// The hub took this phone's push token; `enabled` says whether it
+    /// can actually push yet.
+    case pushed(enabled: Bool, reason: String?)
+    /// The kernel asks (live, or re-offered on attach — #342).
+    case ask(question: String, options: [String], id: String?)
+}
+
+/// Where the main chat comes from: the live kernel, or a scripted stand-in
+/// while no kernel is reachable.
+@MainActor
+protocol ChatSource: AnyObject {
+    var updates: AsyncStream<ChatUpdate> { get }
+    func start() async throws
+    func send(text: String, steer: Bool, attachments: [PendingAttachment]) async throws
+    func stop()
+    /// A worker's transcript, replayed once. Sources without workers
+    /// return nothing.
+    func history(agent: String) async -> [ChatItem]
+    /// The lines before `seq` of the focused transcript, oldest first;
+    /// nil where there is no paging.
+    func earlier(before seq: Int, limit: Int) async -> HistoryPage?
+    /// The user saw the notifications up to `through`.
+    func markSeen(through: Int)
+    /// This phone's APNs token, for the hub.
+    func registerPush(token: String, sandbox: Bool)
+    /// The user's answer to a pending `ask`.
+    func answer(text: String, id: String?)
+    /// Stop the running turn (the kernel's `stop`): what ran so far stands.
+    func interrupt() async throws
+}
+
+extension ChatSource {
+    func interrupt() async throws {}
+    func history(agent: String) async -> [ChatItem] { [] }
+    func earlier(before seq: Int, limit: Int) async -> HistoryPage? { nil }
+    func markSeen(through: Int) {}
+    func registerPush(token: String, sandbox: Bool) {}
+}
+
+/// One page of a transcript: the lines and the seq range they cover.
+struct HistoryPage {
+    var items: [ChatItem]
+    var from: Int
+    var to: Int
+    var total: Int
+}

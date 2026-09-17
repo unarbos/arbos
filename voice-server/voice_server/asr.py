@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Protocol
 
@@ -68,7 +69,41 @@ class FasterWhisperASR:
         return text
 
 
+class NullASR:
+    """No recogniser. For the duplex engine (the speech model transcribes) and the test harness."""
+
+    name = "none"
+
+    def transcribe(self, audio16k: np.ndarray, *, partial: bool, language: str | None) -> str:
+        return ""
+
+
+class MockASR:
+    """Scripted recogniser for the test harness: utterance N is the N-th line of the file named
+    by `VOICE_MOCK_ASR_SCRIPT`; a partial is the first words of the line, as many as the audio
+    so far would carry (2.5 words a second). Deterministic; hears no actual words."""
+
+    name = "mock"
+
+    def __init__(self, script: str):
+        self.lines = [l.strip() for l in open(script, encoding="utf-8") if l.strip()] if script else []
+        self.n = 0
+
+    def transcribe(self, audio16k: np.ndarray, *, partial: bool, language: str | None) -> str:
+        line = self.lines[self.n] if self.n < len(self.lines) else ""
+        if partial:
+            words = line.split()
+            k = min(len(words), max(1, int(audio16k.size / 16000 * 2.5)))
+            return " ".join(words[:k])
+        self.n += 1
+        return line
+
+
 def build_asr(kind: str, *, model: str, device: str, compute_type: str, beam_size: int, threads: int) -> ASR:
     if kind == "faster-whisper":
         return FasterWhisperASR(model, device, compute_type, beam_size, threads)
+    if kind == "none":
+        return NullASR()
+    if kind == "mock":
+        return MockASR(os.environ.get("VOICE_MOCK_ASR_SCRIPT", ""))
     raise ValueError(f"unknown ASR backend {kind!r}")

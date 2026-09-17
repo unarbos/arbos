@@ -90,7 +90,7 @@ def main() -> int:
                     entry.setdefault("notes", []).append("menu did not close on escape")
                     app.click(x=after["sidebar_width"] + 40, y=200)
                 if rest["sidebar_open"] != base["sidebar_open"]:
-                    app.action("cydonia::ToggleSidebar")
+                    app.action("arbos::ToggleSidebar")
                 entry["ok"] = True
             except (DriverError, ConnectionError, OSError, TimeoutError) as err:
                 entry["ok"] = False

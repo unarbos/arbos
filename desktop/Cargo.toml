@@ -1,22 +1,22 @@
 [workspace]
 
 [package]
-name = "cydonia"
-description = "Arbos desktop shell: Cydonia look, Rust arbos-kernel backend"
-version = "0.1.1"
+name = "arbos-desktop"
+description = "Arbos desktop: the window over the Rust arbos-kernel"
+version = "0.2.0"
 edition = "2024"
 # The floor the edition itself sets. Nothing here reaches past it on purpose.
 rust-version = "1.85"
 license = "MIT"
-repository = "https://github.com/crabtalk/cydonia"
-homepage = "https://cydonia.sh"
+repository = "https://github.com/unarbos/arbos"
+homepage = "https://arbos.life"
 keywords = ["acp", "agents", "desktop", "gpui", "workspace"]
 categories = ["gui", "development-tools"]
 # What a `cargo install` needs and nothing else. The default is every tracked
 # file, which would ship the website and the bundling plumbing to anyone who
 # installs the binary. `assets/` is absent by design — the logo is downloaded,
 # never committed, and `mark()` already holds the case where it is missing.
-include = ["/src", "/bin", "/build.rs", "/README.md", "/LICENSE"]
+include = ["/src", "/bin", "/fonts", "/build.rs", "/README.md", "/LICENSE"]
 
 [[bin]]
 name = "arbos-desktop"
@@ -41,6 +41,8 @@ cacp-agents = "0.1.0"
 base64 = "0.22"
 anyhow = "1"
 dirs = "6"
+# Local clock for the transcript's date dividers (`localtime_r`).
+libc = "0.2"
 # `Shared`, which is the task an in-flight cover is held as. gpui builds its own
 # image cache on it and compiles the crate either way, so this names what is
 # already in the graph rather than adding to it.
@@ -61,13 +63,18 @@ notify = "8"
 # hand to the user, so it cannot depend on whichever sqlite3 a machine ships.
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+schemars = "1.0"
 # An archived transcript is an array of tagged enum variants, which is the one
 # shape `toml` cannot round-trip.
 serde_json = "1"
 # cacp spawns its read and write loops with `tokio::spawn`, so the connection
 # needs a runtime of its own — gpui's executor is smol's.
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
-tokio-tungstenite = { version = "0.26", features = ["connect"] }
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+# Two TLS-using crates pull rustls with different crypto backends (ring and
+# aws-lc-rs), so rustls cannot pick a process default by itself; the voice
+# client installs ring before its first wss:// connection.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 toml = "0.8"
 # Installing an agent edits settings.toml in place. `toml` would round-trip
 # it through a value tree and drop every comment the file was written with.
@@ -76,16 +83,29 @@ toml_edit = "0.22"
 # the catalog with, so this adds no second HTTP stack.
 ureq = "3"
 arbos-core = { path = "../crates/arbos-core" }
+# The update feed, the version order, and the signature over a payload —
+# shared with the CI step that publishes them, so the two cannot disagree
+# about what a published build is.
+arbos-update = { path = "../crates/arbos-update" }
 # Lockfile pin: getrandom's js-sys ^0.3.77 otherwise picks 0.3.81
 # (wasm-bindgen =0.2.104) and clashes with bezel's wasm-bindgen ^0.2.120.
 js-sys = "0.3.104"
+# The microphone and call playback, in-process: on macOS over CoreAudio, so
+# the capture (and the Privacy › Microphone prompt) is attributed to this app,
+# not to a child program; ALSA on Linux.
+cpal = "0.15"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# bezel's `platform` feature turns on `font-kit` and nothing else, and
+# gpui_platform on Linux panics at startup unless a window backend is enabled.
+# Naming the crate here unifies these features into bezel's own copy of it.
+gpui_platform = { version = "0.3.9", package = "bezel-gpui-platform", features = ["x11", "wayland"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Collection behavior and the transparent titlebar — AppKit, not gpui.
 objc = "0.2"
 # Fn-key monitor: `NSEvent.addLocalMonitor` takes a block.
 block = "0.1"
-
 # A dev build's frame time is spent in dependencies — gpui's layout, the text
 # shaper, the markdown parser — and unoptimized they make a long transcript
 # scroll at a crawl. Optimize them once; this crate stays at opt-level 0 so

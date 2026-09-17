@@ -64,6 +64,33 @@ impl PlanCx<'_> {
         crate::tools::fs::confine(self.root, self.cwd, path)
     }
 
+    /// `resolve` for a tool that will write there. `notes.md`,
+    /// `docs/project-context.md`, and `archived.md` belong to the main
+    /// chat: a child's write is refused here, before it runs. A
+    /// coordinator writes the project store and nothing else — code is a
+    /// worker's job.
+    pub fn resolve_write(&self, path: &str) -> Result<PathBuf> {
+        let resolved = self.resolve(path)?;
+        // The store's rules are the place's, whichever root confines this
+        // agent: a worktree child reaches `.arbos/` too (qa-035), and
+        // the page stays root's.
+        let store = crate::tools::fs::store_dir(self.root);
+        let place_root = store.parent().unwrap_or(self.root);
+        if arbos_core::store::is_root_owned(place_root, &resolved)
+            && !arbos_core::store::may_write(self.agent)
+        {
+            anyhow::bail!("{}", arbos_core::store::REFUSAL);
+        }
+        if self.agent.role.as_deref() == Some(arbos_core::project::COORDINATOR)
+            && !arbos_core::store::is_store_path(place_root, &resolved)
+        {
+            anyhow::bail!("{}", arbos_core::store::COORDINATOR_REFUSAL);
+        }
+        // The project page (.arbos/notes.md) guard lives in the store
+        // module's root-owned check (#103); nothing more here.
+        Ok(resolved)
+    }
+
     /// Lexical resolution with no confinement: for `bash`, whose command can
     /// `cd` anywhere regardless, so gating its `cwd` argument would only
     /// mislead.
@@ -79,6 +106,10 @@ pub struct RunCx {
     pub agent: Agent,
     pub cwd: PathBuf,
     pub call_id: String,
+    /// The model step within the turn this call belongs to (1-based);
+    /// the turn sets it before each model call. On every event the step
+    /// writes.
+    pub step: u64,
     pub cancel: CancellationToken,
     pub grep: Arc<dyn Grep>,
     pub hooks: Arc<dyn Hooks>,
@@ -86,6 +117,40 @@ pub struct RunCx {
     pub bash_wait_ms: u64,
     /// Reply budget this turn was started with. `say` spends it.
     pub hops: u8,
+    /// What `search` and `fetch` may use: the custom endpoint from
+    /// config, and the model provider (OpenRouter's web plugin).
+    pub web: Arc<WebCfg>,
+}
+
+impl RunCx {
+    /// Where the file tools may reach. The place, or — for a child that
+    /// works in its own worktree under `.arbos/worktrees/` — that worktree,
+    /// so an isolated child cannot edit its parent's checkout by path.
+    pub fn root(&self) -> &Path {
+        confinement_root(&self.place, &self.cwd)
+    }
+}
+
+/// See [`RunCx::root`].
+pub fn confinement_root<'a>(place: &'a Place, cwd: &'a Path) -> &'a Path {
+    if cwd.starts_with(place.worktrees_dir()) {
+        cwd
+    } else {
+        place.path()
+    }
+}
+
+/// Web access settings, from `config.toml` and the environment.
+#[derive(Debug, Default, Clone)]
+pub struct WebCfg {
+    pub search_url: Option<String>,
+    pub search_key: Option<String>,
+    /// The model provider's base URL and key; OpenRouter's web plugin
+    /// answers searches when no search backend is configured.
+    pub api_base: String,
+    pub api_key: Option<String>,
+    /// `search_model` from config; empty = the tool's default.
+    pub model: String,
 }
 
 #[derive(Debug)]
@@ -99,9 +164,22 @@ pub struct ToolOut {
     pub images: Vec<String>,
     /// Display diff for the transcript card. The model never sees this.
     pub diff: Option<String>,
+    /// The turn ends after this call, with this notice: the tool parked
+    /// the agent (an `ask` waits for the user as a file; the answer starts
+    /// the next turn).
+    pub park: Option<String>,
 }
 
 impl ToolOut {
+    /// End the turn after this call. `body` is what the model would see if
+    /// it ran on — it does not; `why` is the notice on the transcript.
+    pub fn parked(body: impl Into<String>, why: impl Into<String>) -> Self {
+        Self {
+            park: Some(why.into()),
+            ..Self::text(body)
+        }
+    }
+
     pub fn text(body: impl Into<String>) -> Self {
         Self {
             body: body.into(),
@@ -109,6 +187,7 @@ impl ToolOut {
             child: None,
             images: Vec::new(),
             diff: None,
+            park: None,
         }
     }
 
@@ -119,6 +198,7 @@ impl ToolOut {
             child: None,
             images: Vec::new(),
             diff: None,
+            park: None,
         }
     }
 
@@ -162,28 +242,20 @@ pub fn typed_schema(name: &str, desc: &str, params: &[Param]) -> Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for (key, d, req, kind) in params {
-        let prop = if *kind == "array" {
-            json!({"type": "array", "items": {"type": "string"}, "description": d})
+        let mut prop = if *kind == "array" {
+            json!({"type": "array", "items": {"type": "string"}})
         } else {
-            json!({"type": kind, "description": d})
+            json!({"type": kind})
         };
+        if !d.is_empty() {
+            prop["description"] = json!(d);
+        }
         properties.insert((*key).into(), prop);
         if *req {
             required.push(*key);
         }
     }
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
-        }
-    })
+    function_schema(name, desc, properties, required)
 }
 
 /// A boolean argument, accepting the strings a lax model may still send.
@@ -227,22 +299,33 @@ pub fn simple_schema(name: &str, desc: &str, params: &[(&str, &str, bool)]) -> V
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for (key, d, req) in params {
-        properties.insert((*key).into(), json!({"type": "string", "description": d}));
+        let mut prop = json!({"type": "string"});
+        if !d.is_empty() {
+            prop["description"] = json!(d);
+        }
+        properties.insert((*key).into(), prop);
         if *req {
             required.push(*key);
         }
     }
+    function_schema(name, desc, properties, required)
+}
+
+/// The provider's function shape. An empty `required` is left out: every
+/// key of every schema rides in every model call, so nothing empty rides.
+fn function_schema(
+    name: &str,
+    desc: &str,
+    properties: serde_json::Map<String, Value>,
+    required: Vec<&str>,
+) -> Value {
+    let mut parameters = json!({"type": "object", "properties": properties});
+    if !required.is_empty() {
+        parameters["required"] = json!(required);
+    }
     json!({
         "type": "function",
-        "function": {
-            "name": name,
-            "description": desc,
-            "parameters": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            }
-        }
+        "function": {"name": name, "description": desc, "parameters": parameters}
     })
 }
 
@@ -317,11 +400,100 @@ impl Registry {
             .filter(|t| agent.may(t.name()))
             .cloned()
             .collect();
-        let schemas = tools.iter().map(|t| t.schema()).collect();
+        let coordinator = agent.role.as_deref() == Some(arbos_core::project::COORDINATOR);
+        let schemas = tools
+            .iter()
+            .map(|t| {
+                let schema = t.schema();
+                if coordinator {
+                    coordinator_schema(t.name(), schema)
+                } else {
+                    schema
+                }
+            })
+            .collect();
         View {
             tools: Arc::new(tools),
             schemas: Arc::new(schemas),
         }
+    }
+}
+
+/// What a coordinator reads on the editing tools and on `spawn`, ahead
+/// of the tool's own description. The contract says a code change is a
+/// spawn; the model still reached for `edit` on `main.py` first and met
+/// the refusal (F-46). The line at the point of choice — the tool list —
+/// is the one it reads when choosing.
+pub const COORDINATOR_EDIT_NOTE: &str = "COORDINATOR: project store only (.arbos/notes.md, docs/, internal/, media/). Code and every other file are a worker's — on a request that changes code, call spawn first, never this; the kernel refuses it here.";
+pub const COORDINATOR_SPAWN_NOTE: &str = "COORDINATOR: your first call on any request that changes code, fixes a bug, adds a feature, or runs a build or tests — before any read, grep, or edit. wait=true for a one-off, then relay its result.";
+
+fn coordinator_schema(name: &str, mut schema: Value) -> Value {
+    let note = match name {
+        "write" | "edit" | "apply_patch" | "delete" => COORDINATOR_EDIT_NOTE,
+        "spawn" => COORDINATOR_SPAWN_NOTE,
+        _ => return schema,
+    };
+    if let Some(desc) = schema
+        .get_mut("function")
+        .and_then(|f| f.get_mut("description"))
+    {
+        let own = desc.as_str().unwrap_or("").to_string();
+        *desc = Value::String(if own.is_empty() {
+            note.to_string()
+        } else {
+            format!("{note} {own}")
+        });
+    }
+    schema
+}
+
+#[cfg(test)]
+mod coordinator_view_tests {
+    use super::*;
+
+    /// F-46: the coordinator edited `main.py` itself and was refused
+    /// instead of spawning. The tool list it chooses from now says so on
+    /// the editing tools and on spawn; a worker's list is unchanged.
+    #[test]
+    fn a_coordinator_reads_the_role_note_on_editing_tools_and_spawn() {
+        let reg = Registry::builtin();
+        let mut coord = Agent::root("root");
+        coord.role = Some(arbos_core::project::COORDINATOR.to_string());
+        let worker = Agent::root("w");
+        let desc = |view: &View, name: &str| -> String {
+            view.schemas()
+                .iter()
+                .find(|s| s["function"]["name"] == name)
+                .map(|s| {
+                    s["function"]["description"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string()
+                })
+                .unwrap_or_default()
+        };
+        let cv = reg.view(&coord);
+        let wv = reg.view(&worker);
+        for name in ["write", "edit", "apply_patch"] {
+            assert!(
+                desc(&cv, name).starts_with(COORDINATOR_EDIT_NOTE),
+                "{name}: {}",
+                desc(&cv, name)
+            );
+            assert!(!desc(&wv, name).contains("COORDINATOR"), "{name}");
+        }
+        // `spawn` is a kernel tool (see coordinator_spawn_first_e2e); the
+        // note is applied by name here.
+        let spawn = coordinator_schema(
+            "spawn",
+            serde_json::json!({"function": {"name": "spawn", "description": "Start a worker."}}),
+        );
+        assert_eq!(
+            spawn["function"]["description"],
+            format!("{COORDINATOR_SPAWN_NOTE} Start a worker.")
+        );
+        // Other tools keep their own words.
+        assert_eq!(desc(&cv, "read"), desc(&wv, "read"));
     }
 }
 
@@ -342,5 +514,81 @@ impl View {
 
     pub fn is_empty(&self) -> bool {
         self.tools.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod store_guard_tests {
+    use super::*;
+
+    #[test]
+    fn a_child_may_not_write_the_status_page_but_root_may() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        arbos_core::store::ensure(&arbos_core::Place::new(dir.clone())).unwrap();
+        let root = arbos_core::Agent::root("root");
+        let mut child = arbos_core::Agent::root("kid");
+        child.parent = Some(arbos_core::AgentId::new("root"));
+        let for_root = PlanCx {
+            root: &dir,
+            cwd: &dir,
+            agent: &root,
+        };
+        assert!(for_root.resolve_write(".arbos/notes.md").is_ok());
+        assert!(for_root.resolve_write(".arbos/GOALS.md").is_ok());
+        assert!(for_root.resolve_write("main.py").is_ok());
+        let for_child = PlanCx {
+            root: &dir,
+            cwd: &dir,
+            agent: &child,
+        };
+        for owned in [
+            ".arbos/notes.md",
+            ".arbos/GOALS.md",
+            ".arbos/docs/project-context.md",
+            ".arbos/archived.md",
+        ] {
+            let err = for_child.resolve_write(owned).unwrap_err();
+            assert!(
+                err.to_string().contains("owned by the main chat"),
+                "{owned}: {err}"
+            );
+        }
+        assert!(for_child.resolve_write(".arbos/docs/design.md").is_ok());
+        assert!(for_child.resolve_write("main.py").is_ok());
+    }
+
+    #[test]
+    fn a_coordinator_writes_only_the_store() {
+        let dir = std::env::temp_dir().join(format!("arbos-coord-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        arbos_core::store::ensure(&arbos_core::Place::new(dir.clone())).unwrap();
+        let mut root = arbos_core::Agent::root("root");
+        root.role = Some(arbos_core::project::COORDINATOR.into());
+        let cx = PlanCx {
+            root: &dir,
+            cwd: &dir,
+            agent: &root,
+        };
+        for ok in [
+            ".arbos/notes.md",
+            ".arbos/docs/project-context.md",
+            ".arbos/docs/design.md",
+            ".arbos/internal/qa/2026-09-13.md",
+            ".arbos/media/layout/a.png",
+            ".arbos/archived.md",
+        ] {
+            assert!(cx.resolve_write(ok).is_ok(), "{ok}");
+        }
+        for no in [
+            "main.py",
+            ".arbos/agents/root/plan.md",
+            ".arbos/project.toml",
+        ] {
+            let err = cx.resolve_write(no).unwrap_err();
+            assert!(err.to_string().contains("as coordinator"), "{no}: {err}");
+        }
     }
 }

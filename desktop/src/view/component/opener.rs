@@ -7,13 +7,13 @@ use crate::{
 use bezel::{
     gpui::{
         self, App, Context, DragMoveEvent, Empty, Entity, EventEmitter, FocusHandle, Focusable,
-        Hsla, KeyBinding, MouseButton, Pixels, Point, Render, SharedString, Task, Window, actions,
-        div, prelude::*, px,
+        Hsla, KeyBinding, MouseButton, Pixels, Point, Render, ScrollHandle, SharedString, Task,
+        TextAlign, Window, actions, div, prelude::*, px,
     },
     theme::{Glass, SurfaceStyle, TextStyle, Theme, Typeset},
     ui::{
         icons,
-        input::{FieldEvent, TextField},
+        input::{self, FieldEvent, TextField},
         surface::Surfaced as _,
     },
 };
@@ -21,9 +21,21 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-actions!(cydonia_opener, [Submit, Next, Previous, Dismiss, Complete]);
+/// The local machine's row in the picker: named for what it is (ui-007).
+const LOCAL_MACHINE: &str = if cfg!(target_os = "macos") {
+    "This Mac"
+} else {
+    "This machine"
+};
 
-const KEY_CONTEXT: &str = "CydoniaOpener";
+actions!(
+    arbos_opener,
+    [
+        Submit, PickHere, Descend, Ascend, Back, Next, Previous, Dismiss, Complete
+    ]
+);
+
+const KEY_CONTEXT: &str = "ArbosOpener";
 
 /// The panel on its way somewhere else in the window.
 #[derive(Clone)]
@@ -49,10 +61,21 @@ impl DirListing {
 pub fn init(cx: &mut App) {
     crate::view::bind_field_editing(cx, KEY_CONTEXT, false);
     let ctx = Some(KEY_CONTEXT);
+    // Finder's quick-open, on the field: the arrows walk the list and the
+    // tree; Enter does what the lit row says — "Open <folder>" opens, a
+    // folder row steps in; ⌘↩ opens the folder you are in. Bound after
+    // the field's own editing chords on this context, so these win the
+    // shared keys.
     cx.bind_keys([
         KeyBinding::new("enter", Submit, ctx),
+        KeyBinding::new("cmd-enter", PickHere, ctx),
         KeyBinding::new("down", Next, ctx),
         KeyBinding::new("up", Previous, ctx),
+        KeyBinding::new("ctrl-n", Next, ctx),
+        KeyBinding::new("ctrl-p", Previous, ctx),
+        KeyBinding::new("right", Descend, ctx),
+        KeyBinding::new("left", Ascend, ctx),
+        KeyBinding::new("backspace", Back, ctx),
         KeyBinding::new("escape", Dismiss, ctx),
         KeyBinding::new("tab", Complete, ctx),
     ]);
@@ -78,6 +101,8 @@ enum Offer {
     },
     Here(String),
     Dir(String),
+    /// A folder that does not exist yet, at the path typed: Enter makes it.
+    Create(String),
     /// The native folder picker, for whoever would rather click than type.
     Browse,
 }
@@ -95,6 +120,9 @@ pub struct Opener {
     listings: HashMap<(Option<String>, String), DirListing>,
     inflight: HashSet<(Option<String>, String)>,
     debounce: Option<Task<()>>,
+    /// The list's scroll, so a step from the keyboard brings its landing
+    /// into view.
+    scroll: ScrollHandle,
     pub open: bool,
     /// Where the user has dragged the panel to, as an offset from its
     /// centered resting place. Reset each time the opener shows.
@@ -131,6 +159,7 @@ impl Opener {
             listings: HashMap::new(),
             inflight: HashSet::new(),
             debounce: None,
+            scroll: ScrollHandle::new(),
             open: false,
             shift: Point::default(),
             grip: None,
@@ -199,7 +228,7 @@ impl Opener {
         }
         self.stage = Stage::Folder { host: None };
         self.field.update(cx, |field, cx| {
-            field.set_placeholder("This Mac", cx);
+            field.set_placeholder(LOCAL_MACHINE, cx);
         });
         self.prefetch(cx);
         self.ensure_listing(cx);
@@ -231,10 +260,10 @@ impl Opener {
 
     fn machines(&self) -> Vec<Offer> {
         let mut out = vec![Offer::Machine {
-            name: "This Mac".into(),
+            name: LOCAL_MACHINE.into(),
             host: None,
         }];
-        let mut seen = std::collections::HashSet::from(["This Mac".to_string()]);
+        let mut seen = std::collections::HashSet::from([LOCAL_MACHINE.to_string()]);
         let push =
             |out: &mut Vec<Offer>, seen: &mut std::collections::HashSet<String>, host: &str| {
                 if seen.insert(host.to_string()) {
@@ -270,7 +299,7 @@ impl Opener {
                                 .is_some_and(|h| h.to_lowercase().contains(&needle))
                     }
                     Offer::Browse => q.is_empty() || "browse".contains(&needle),
-                    Offer::Here(_) | Offer::Dir(_) => false,
+                    Offer::Here(_) | Offer::Dir(_) | Offer::Create(_) => false,
                 })
                 .collect(),
             Stage::Folder { host } => {
@@ -282,20 +311,46 @@ impl Opener {
                     .map(|listing| listing.names.as_slice())
                     .unwrap_or(&[]);
                 let prefix_l = prefix.to_lowercase();
+                // The folder the text names, when there is one: `~/Code`
+                // typed whole is `Code`, with or without its slash, even
+                // when `Code2` sits beside it. Locally the file system
+                // says; on a remote host the parent's listing does.
+                let exact = if prefix.is_empty() {
+                    Some(dir.clone())
+                } else if names.iter().any(|name| *name == prefix)
+                    || (host.is_none() && local_path(&join_dir(&dir, &prefix)).is_dir())
+                {
+                    Some(join_dir(&dir, &prefix))
+                } else {
+                    None
+                };
+                let matches: Vec<String> = names
+                    .iter()
+                    .filter(|name| {
+                        !name.starts_with('.')
+                            && (prefix.is_empty() || name.to_lowercase().starts_with(&prefix_l))
+                            && Some(name.as_str())
+                                != exact.as_deref().and_then(|e| e.rsplit('/').next())
+                    })
+                    .cloned()
+                    .collect();
                 let mut out = Vec::new();
-                if prefix.is_empty() {
-                    out.push(Offer::Here(dir.clone()));
+                // The first row always says what Enter does. The folder
+                // named outright; else the one folder the text narrows to.
+                if let Some(path) = &exact {
+                    out.push(Offer::Here(path.clone()));
+                } else if matches.len() == 1 {
+                    out.push(Offer::Here(join_dir(&dir, &matches[0])));
                 }
-                out.extend(
-                    names
-                        .iter()
-                        .filter(|name| {
-                            !name.starts_with('.')
-                                && (prefix.is_empty() || name.to_lowercase().starts_with(&prefix_l))
-                        })
-                        .cloned()
-                        .map(Offer::Dir),
-                );
+                out.extend(matches.into_iter().map(Offer::Dir));
+                // Nothing there by that name on this machine: offer to make
+                // the folder typed.
+                if host.is_none() && exact.is_none() && out.is_empty() {
+                    let typed = q.trim().trim_end_matches('/');
+                    if !typed.is_empty() && !local_path(typed).is_dir() {
+                        out.push(Offer::Create(typed.to_string()));
+                    }
+                }
                 out
             }
         }
@@ -335,7 +390,7 @@ impl Opener {
     fn enter_machine(&mut self, host: Option<String>, cx: &mut Context<Self>) {
         self.stage = Stage::Folder { host: host.clone() };
         self.cursor = 0;
-        let name = host.as_deref().unwrap_or("This Mac");
+        let name = host.as_deref().unwrap_or(LOCAL_MACHINE);
         self.field.update(cx, |field, cx| {
             field.set_placeholder(name, cx);
             field.set_content("/", cx);
@@ -359,6 +414,11 @@ impl Opener {
                     Stage::Machine => None,
                 };
                 self.start(host, path, cx);
+            }
+            Offer::Create(path) => {
+                if std::fs::create_dir_all(local_path(&path)).is_ok() {
+                    self.start(None, path, cx);
+                }
             }
             Offer::Dir(name) => {
                 let q = self.query(cx);
@@ -385,24 +445,103 @@ impl Opener {
             Stage::Folder { host } => {
                 let host = host.clone();
                 let offers = self.offers(cx);
-                let path = match offers.get(self.cursor) {
-                    Some(Offer::Here(path)) => path.clone(),
-                    Some(Offer::Dir(name)) => {
-                        let (dir, _) = split_path(&self.query(cx));
-                        join_dir(&dir, name)
-                    }
-                    _ => {
+                match offers.get(self.cursor).cloned() {
+                    // "Open <folder>", lit at the top of the list.
+                    Some(Offer::Here(path)) => self.start(host, path, cx),
+                    Some(Offer::Create(path)) => self.take(Offer::Create(path), cx),
+                    // A folder row is a step in, like → and a click; the
+                    // Open row above it is how it opens. Enter never means
+                    // two things depending on how many siblings matched.
+                    Some(Offer::Dir(name)) => self.take(Offer::Dir(name), cx),
+                    Some(Offer::Machine { .. } | Offer::Browse) | None => {
                         let typed = self.query(cx);
-                        if typed.is_empty() {
+                        let path = if typed.is_empty() {
                             "/".into()
                         } else {
                             typed.trim_end_matches('/').to_string()
-                        }
+                        };
+                        self.start(host, path, cx);
                     }
-                };
-                self.start(host, path, cx);
+                }
             }
         }
+    }
+
+    /// ⌘↩: open the folder you are in, whatever is lit.
+    fn pick_here(&mut self, _: &PickHere, _: &mut Window, cx: &mut Context<Self>) {
+        match &self.stage {
+            Stage::Machine => {
+                let offers = self.offers(cx);
+                if let Some(offer) = offers.get(self.cursor).cloned() {
+                    self.take(offer, cx);
+                }
+            }
+            Stage::Folder { host } => {
+                let host = host.clone();
+                let (dir, _) = split_path(&self.query(cx));
+                self.start(host, dir, cx);
+            }
+        }
+    }
+
+    /// →: step into the lit folder, or the lit machine.
+    fn descend(&mut self, _: &Descend, _: &mut Window, cx: &mut Context<Self>) {
+        let offers = self.offers(cx);
+        match offers.get(self.cursor).cloned() {
+            Some(offer @ (Offer::Dir(_) | Offer::Machine { .. })) => self.take(offer, cx),
+            Some(Offer::Here(_) | Offer::Create(_) | Offer::Browse) | None => {}
+        }
+    }
+
+    /// ←: up one folder; at the top of the tree, back to the machines.
+    fn ascend(&mut self, _: &Ascend, _: &mut Window, cx: &mut Context<Self>) {
+        self.go_up(cx);
+    }
+
+    /// ⌫ with nothing typed is ←; with text it deletes, as in any field.
+    fn back(&mut self, _: &Back, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query(cx).is_empty() {
+            self.go_up(cx);
+        } else {
+            window.dispatch_action(Box::new(input::Backspace), cx);
+        }
+    }
+
+    fn go_up(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.stage, Stage::Folder { .. }) {
+            return;
+        }
+        let (dir, _) = split_path(&self.query(cx));
+        let parent = match dir.trim_end_matches('/') {
+            "" | "~" => None,
+            rest => match rest.rfind('/') {
+                Some(0) => Some("/".to_string()),
+                Some(i) => Some(format!("{}/", &rest[..i])),
+                None => None,
+            },
+        };
+        match parent {
+            Some(parent) => {
+                self.field
+                    .update(cx, |field, cx| field.set_content(parent, cx));
+                self.cursor = 0;
+                self.ensure_listing(cx);
+                cx.notify();
+            }
+            // The tree's top: back to picking a machine.
+            None => self.to_machines(cx),
+        }
+    }
+
+    /// Back to the first step, the field cleared for a machine.
+    fn to_machines(&mut self, cx: &mut Context<Self>) {
+        self.stage = Stage::Machine;
+        self.cursor = 0;
+        self.field.update(cx, |field, cx| {
+            field.set_placeholder("machine", cx);
+            field.clear(cx);
+        });
+        cx.notify();
     }
 
     fn complete(&mut self, _: &Complete, _: &mut Window, cx: &mut Context<Self>) {
@@ -419,7 +558,10 @@ impl Opener {
                     .into_iter()
                     .filter_map(|offer| match offer {
                         Offer::Dir(name) => Some(name),
-                        Offer::Machine { .. } | Offer::Here(_) | Offer::Browse => None,
+                        Offer::Machine { .. }
+                        | Offer::Here(_)
+                        | Offer::Create(_)
+                        | Offer::Browse => None,
                     })
                     .collect();
                 if names.is_empty() {
@@ -452,6 +594,7 @@ impl Opener {
             return;
         }
         self.cursor = (self.cursor + 1) % len;
+        self.scroll.scroll_to_item(self.cursor);
         cx.notify();
     }
 
@@ -461,20 +604,13 @@ impl Opener {
             return;
         }
         self.cursor = self.cursor.checked_sub(1).unwrap_or(len - 1);
+        self.scroll.scroll_to_item(self.cursor);
         cx.notify();
     }
 
+    /// Escape closes, from either step. Going back up to the machines is
+    /// what ← and ⌫ at the top of the tree do.
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.stage, Stage::Folder { .. }) {
-            self.stage = Stage::Machine;
-            self.cursor = 0;
-            self.field.update(cx, |field, cx| {
-                field.set_placeholder("machine", cx);
-                field.clear(cx);
-            });
-            cx.notify();
-            return;
-        }
         self.open = false;
         cx.emit(OpenerEvent::Dismiss);
         cx.notify();
@@ -587,7 +723,8 @@ impl Opener {
         let path = if path.is_empty() { "/".into() } else { path };
         let place = match host {
             Some(host) => Place::remote(host, path),
-            None => Place::local(path),
+            // `~/Code` typed is the user's home, not a folder called `~`.
+            None => Place::local(local_path(&path)),
         };
         cx.emit(OpenerEvent::Open(place));
         cx.notify();
@@ -596,15 +733,65 @@ impl Opener {
     fn row_label(offer: &Offer) -> String {
         match offer {
             Offer::Machine { name, .. } => name.clone(),
-            Offer::Here(path) => path.clone(),
+            Offer::Here(path) => format!("Open {}", folder_name(path)),
             Offer::Dir(name) => format!("{name}/"),
+            Offer::Create(path) => format!("Create {path}"),
             Offer::Browse => "Browse folders…".to_string(),
+        }
+    }
+
+    /// The dim readout beside a row: the whole path behind "Open <name>",
+    /// the step-in mark behind a folder.
+    fn row_detail(offer: &Offer) -> Option<String> {
+        match offer {
+            Offer::Here(path) => Some(path.clone()),
+            Offer::Dir(_) => Some("›".to_string()),
+            Offer::Machine { .. } | Offer::Create(_) | Offer::Browse => None,
         }
     }
 }
 
+/// The last name in a path, for "Open <name>": `/` for the root, the home
+/// folder's own name for `~`.
+fn folder_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    if trimmed == "~" {
+        return dirs::home_dir()
+            .and_then(|home| home.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "~".to_string());
+    }
+    trimmed.rsplit('/').next().unwrap_or(trimmed).to_string()
+}
+
+/// `/~/Code` — a `~` typed after the field's own prefilled `/` — is `~/Code`.
+fn untilde_slash(typed: &str) -> &str {
+    match typed.strip_prefix('/') {
+        Some(rest) if rest.starts_with('~') => rest,
+        _ => typed,
+    }
+}
+
+/// A typed local path as the file system knows it: `~` and `~/…` are the
+/// user's home (this process's, the one the window runs as).
+fn local_path(typed: &str) -> PathBuf {
+    let typed = untilde_slash(typed);
+    let typed = if typed.is_empty() { "/" } else { typed };
+    if typed == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    }
+    if let Some(rest) = typed.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(typed)
+}
+
 fn list_local(dir: &str) -> Vec<String> {
-    let path = PathBuf::from(if dir.is_empty() { "/" } else { dir });
+    let path = local_path(dir);
     let Ok(entries) = std::fs::read_dir(&path) else {
         return Vec::new();
     };
@@ -624,11 +811,14 @@ fn list_local(dir: &str) -> Vec<String> {
             if name.starts_with('.') {
                 return None;
             }
-            if entry.path().is_dir() {
-                Some(name)
-            } else {
-                None
+            if !entry.path().is_dir() {
+                return None;
             }
+            // A service or a worktree is not a project of his to open.
+            if place::hidden_kind(place::declared_kind(&entry.path()).as_deref()) {
+                return None;
+            }
+            Some(name)
         })
         .collect();
     names.sort_unstable();
@@ -637,9 +827,13 @@ fn list_local(dir: &str) -> Vec<String> {
 }
 
 fn split_path(typed: &str) -> (String, String) {
-    let typed = typed.trim();
+    let typed = untilde_slash(typed.trim());
     if typed.is_empty() || typed == "/" {
         return ("/".into(), String::new());
+    }
+    // `~` alone is the home folder, not a name to look for under `/`.
+    if typed == "~" {
+        return ("~".into(), String::new());
     }
     if typed.ends_with('/') {
         let dir = typed.trim_end_matches('/');
@@ -702,7 +896,7 @@ impl Render for Opener {
         let lit = self.cursor;
         let machine = match &self.stage {
             Stage::Machine => None,
-            Stage::Folder { host } => Some(host.as_deref().unwrap_or("This Mac").to_string()),
+            Stage::Folder { host } => Some(host.as_deref().unwrap_or(LOCAL_MACHINE).to_string()),
         };
         let empty = if offers.is_empty() {
             if self.is_listing(cx) {
@@ -724,9 +918,12 @@ impl Render for Opener {
                 .pt(px(4.))
                 .pb(px(6.))
                 .max_h(px(LIST_MAX))
-                .overflow_y_scroll(),
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll),
             |list, (ix, offer)| {
                 let label = Self::row_label(offer);
+                let detail = Self::row_detail(offer);
+                let opens = matches!(offer, Offer::Here(_));
                 let offer = offer.clone();
                 list.child(
                     div()
@@ -738,18 +935,51 @@ impl Render for Opener {
                         .flex()
                         .flex_row()
                         .items_center()
+                        .gap(px(10.))
                         .cursor_pointer()
                         .when(ix == lit, |el| el.bg(theme.surface_raised))
                         .hover(|el| el.bg(theme.surface_raised))
                         .child(
+                            icons::icon(if opens {
+                                icons::files::FOLDER_WITH_FILES
+                            } else {
+                                icons::files::FOLDER
+                            })
+                            .size(px(14.))
+                            .text_color(if opens {
+                                theme.accent
+                            } else {
+                                theme.text_faint
+                            }),
+                        )
+                        .child(
                             div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
+                                .flex_none()
                                 .text_style(TextStyle::Callout)
                                 .text_color(theme.text)
                                 .child(SharedString::from(label)),
                         )
+                        .when_some(detail, |el, detail| {
+                            el.child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_align(TextAlign::Right)
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(detail)),
+                            )
+                        })
+                        .when(ix == lit && opens, |el| {
+                            el.child(
+                                div()
+                                    .flex_none()
+                                    .text_style(TextStyle::Caption)
+                                    .text_color(theme.text_faint)
+                                    .child("↵"),
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, _, cx| this.take(offer.clone(), cx))),
                 )
             },
@@ -791,12 +1021,14 @@ impl Render for Opener {
                     cx.notify();
                 }),
             )
-            .on_drag_move(cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
-                if let Some((from, shift)) = this.grip {
-                    this.shift = shift + (event.event.position - from);
-                    cx.notify();
-                }
-            }))
+            .on_drag_move(
+                cx.listener(|this, event: &DragMoveEvent<PanelDrag>, _, cx| {
+                    if let Some((from, shift)) = this.grip {
+                        this.shift = shift + (event.event.position - from);
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 div()
                     .w(px(WIDTH))
@@ -865,6 +1097,10 @@ impl Render for Opener {
                     .surface(&theme, SURFACE),
             )
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::pick_here))
+            .on_action(cx.listener(Self::descend))
+            .on_action(cx.listener(Self::ascend))
+            .on_action(cx.listener(Self::back))
             .on_action(cx.listener(Self::next))
             .on_action(cx.listener(Self::previous))
             .on_action(cx.listener(Self::dismiss))

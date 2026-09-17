@@ -8,6 +8,7 @@
 
 use crate::model::{place::Place, session, settings};
 use anyhow::{Context, Result, anyhow};
+use arbos_core::host::{Host, HostConfig, KeySource, ProviderKind, attribution_headers};
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
@@ -33,7 +34,56 @@ pub struct WebInfo {
 
 const READY_WAIT: Duration = Duration::from_secs(60);
 const POLL: Duration = Duration::from_millis(200);
-const REMOTE_BIN: &str = "$HOME/.cargo/bin/arbos-kernel";
+/// Where `arbos-kernel` lives on a host that `machines.toml` does not
+/// describe. A described machine says itself (`kernel`, default
+/// `<dir>/bin/arbos-kernel`).
+/// Where a host that is not in `machines.toml` gets its kernel. A directory
+/// of the app's own, never `~/.cargo/bin`: that path is the box's shared
+/// default on a person's `PATH`, and replacing the file there restarts only
+/// the process that came for it — Jacob's own project on ArbosLife was left
+/// running a deleted binary three times in forty hours by kernels installed
+/// into it (mesh sweep, `internal/mesh-stale-binary-sweep-2026-09-17.md`).
+const REMOTE_BIN: &str = "$HOME/.arbos-remote/bin/arbos-kernel";
+
+/// The attach protocol this window speaks; a kernel that says less is
+/// refused (`arbos_kernel::serve::PROTOCOL` on the other side).
+pub const PROTOCOL: u32 = 1;
+
+/// One ssh host as this window reaches it: the ssh target, the kernel
+/// binary's path there, the config home its kernels read, and whether a
+/// source build is allowed when no binary can be copied. From
+/// `~/.config/arbos/machines.toml` when the host is a machine there (by
+/// name or by `ssh` target) — the same fields `spawn host=` uses — else the
+/// old defaults.
+#[derive(Debug, Clone)]
+pub struct RemoteTarget {
+    pub ssh: String,
+    pub bin: String,
+    pub config_home: Option<String>,
+    pub build: bool,
+    pub name: String,
+}
+
+pub fn remote_target(host: &str) -> RemoteTarget {
+    if let Ok(machines) = arbos_core::Machines::load()
+        && let Some(m) = machines.get(host)
+    {
+        return RemoteTarget {
+            ssh: m.target().to_string(),
+            bin: m.kernel_path(),
+            config_home: Some(m.config_home()),
+            build: m.build,
+            name: m.name.clone(),
+        };
+    }
+    RemoteTarget {
+        ssh: host.to_string(),
+        bin: REMOTE_BIN.to_string(),
+        config_home: None,
+        build: false,
+        name: host.to_string(),
+    }
+}
 const REMOTE_PORTS: (u16, u16) = (20000, 32000);
 
 #[cfg(test)]
@@ -156,6 +206,267 @@ fn http() -> ureq::Agent {
 }
 
 /// Find a live kernel for `place`, or start one.
+/// What a running kernel's own gate says about being restarted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gate {
+    /// Nothing is running in it. Replacing it loses nothing.
+    Idle,
+    /// Something is, and this is what: a turn, a parked approval, a detached
+    /// job, a remote child. The kernel's words, not ours.
+    Busy(String),
+    /// It did not say — too old to carry `update_gate`, or it would not
+    /// answer. Treated as busy: not knowing is not permission.
+    Unknown,
+}
+
+impl Gate {
+    pub fn idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub fn say(&self) -> String {
+        match self {
+            Self::Idle => "nothing is running in it".into(),
+            Self::Busy(why) => why.clone(),
+            Self::Unknown => "it is too old to say whether it is busy".into(),
+        }
+    }
+}
+
+/// Why a running kernel is not one this app should be talking to.
+///
+/// Three of them, because they are three different problems and saying the
+/// wrong one is its own harm: a person told "another build" who is actually
+/// looking at a deleted file will go looking for the wrong thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The file it is executing has been replaced or removed underneath it.
+    /// **On its own, whatever the commits say** — a kernel still serving a
+    /// deleted image of the *same* build is exactly as stale as one from
+    /// another build, and it is what happened on 2026-09-17: the app updated
+    /// in place, the commits matched, the bar stayed quiet, five workers hung.
+    BinaryGone { built_at: Option<String> },
+    /// Its commit is not the one this app ships.
+    DifferentBuild { running: String, bundled: String },
+    /// It could not say what it was built from. Older kernels did not record
+    /// a commit, and a build that cannot account for itself is not one to
+    /// assume is current.
+    UnknownBuild { bundled: String },
+}
+
+impl Reason {
+    /// The three or four words on the plate. What is wrong, not that
+    /// something is.
+    pub fn headline(&self) -> &'static str {
+        match self {
+            Self::BinaryGone { .. } => "Kernel running a deleted build",
+            Self::DifferentBuild { .. } | Self::UnknownBuild { .. } => "Kernel from another build",
+        }
+    }
+
+    /// The sentence, for a log line or the first line of a tooltip.
+    pub fn say(&self, place: &str) -> String {
+        match self {
+            Self::BinaryGone { built_at } => format!(
+                "the kernel serving {place} was replaced on disk{} and is still running the \
+                 old image",
+                match built_at {
+                    Some(at) => format!(" (it was built {at})"),
+                    None => String::new(),
+                }
+            ),
+            Self::DifferentBuild { running, bundled } => format!(
+                "the kernel serving {place} was built from {running}, and this app ships {bundled}"
+            ),
+            // Not "was built from unknown", which reads as a commit called
+            // unknown. It is a kernel that did not record one.
+            Self::UnknownBuild { bundled } => format!(
+                "the kernel serving {place} is from a build that did not record its commit, \
+                 and this app ships {bundled}"
+            ),
+        }
+    }
+}
+
+/// A kernel this app should not be quietly talking to.
+#[derive(Debug, Clone)]
+pub struct Skew {
+    pub place: Place,
+    pub reason: Reason,
+    pub gate: Gate,
+}
+
+/// The commit of the kernel this app ships, asked once.
+///
+/// The bundled kernel is the one every place on this machine should be served
+/// by; anything else is a survivor of an older bundle.
+fn bundled_kernel_sha() -> Option<&'static str> {
+    static SHA: OnceLock<Option<String>> = OnceLock::new();
+    SHA.get_or_init(|| {
+        let bin = arbos_bin().ok()?;
+        arbos_update::kernel::Running::read(&bin).ok().map(|k| k.sha)
+    })
+    .as_deref()
+}
+
+/// Whether the kernel described by `info` is one to warn about, and why.
+fn skew(workspace: &Path, info: &WebInfo) -> Option<Skew> {
+    let bundled = bundled_kernel_sha()?;
+    let health = health_of(info);
+    let running = read_info_sha(workspace);
+
+    // Order matters. A deleted image is the most specific thing wrong and the
+    // most urgent, and it is true whatever the commits say.
+    let reason = if health.binary_gone {
+        Reason::BinaryGone {
+            built_at: health.built_at.clone(),
+        }
+    } else {
+        match running {
+            // A kernel from before commits were recorded. It used to fall out
+            // of this function as "nothing to say", which left the one machine
+            // most likely to be stale showing nothing at all.
+            None => Reason::UnknownBuild {
+                bundled: bundled.to_owned(),
+            },
+            Some(running) if !arbos_update::kernel::same_commit(&running, bundled) => {
+                Reason::DifferentBuild {
+                    running,
+                    bundled: bundled.to_owned(),
+                }
+            }
+            Some(_) => return None,
+        }
+    };
+    Some(Skew {
+        place: Place::local(workspace),
+        reason,
+        gate: health.gate,
+    })
+}
+
+/// The `git_sha` a kernel wrote about itself when it started, where it said
+/// one. `unknown` is not a commit; it is a kernel saying it does not know.
+fn read_info_sha(workspace: &Path) -> Option<String> {
+    let place = arbos_core::Place::new(workspace.to_path_buf());
+    let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("git_sha")
+        .and_then(|v| v.as_str())
+        .filter(|sha| !sha.is_empty() && *sha != "unknown")
+        .map(str::to_owned)
+}
+
+/// What a kernel says about itself on `/healthz`.
+struct Health {
+    /// Whether it may be restarted, in its own words.
+    gate: Gate,
+    /// Whether the file it is executing is gone. Absent from kernels older
+    /// than the flag, where it reads false — they are covered by the commit
+    /// comparison instead.
+    binary_gone: bool,
+    built_at: Option<String>,
+}
+
+/// One request, because two reads of the same document should not be two trips
+/// to the same socket.
+///
+/// `update_gate` is the same verdict the self-updater uses, so the app and the
+/// kernel agree about what "safe to restart" means rather than the app
+/// guessing.
+fn health_of(info: &WebInfo) -> Health {
+    let quiet = Health {
+        gate: Gate::Unknown,
+        binary_gone: false,
+        built_at: None,
+    };
+    let Some(addr) = tcp_addr(&info.url) else {
+        return quiet;
+    };
+    let Ok(response) = http()
+        .get(&format!("http://{addr}/healthz"))
+        .call()
+        .and_then(|mut r| r.body_mut().read_to_string().map_err(Into::into))
+    else {
+        return quiet;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) else {
+        return quiet;
+    };
+    Health {
+        gate: match json.get("update_gate") {
+            None => Gate::Unknown,
+            Some(gate) => match gate.get("verdict").and_then(|v| v.as_str()) {
+                Some("idle") => Gate::Idle,
+                Some("busy") => Gate::Busy(
+                    gate.get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("something is running in it")
+                        .to_owned(),
+                ),
+                _ => Gate::Unknown,
+            },
+        },
+        binary_gone: json
+            .get("binary_gone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        built_at: json
+            .get("built_at")
+            .and_then(|v| v.as_str())
+            .filter(|at| !at.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+/// Stop one kernel by the pid it recorded, and wait for its port to go quiet.
+fn stop_kernel(info: &WebInfo) {
+    #[cfg(unix)]
+    if info.pid > 0 {
+        // SAFETY: a signal to a pid. SIGTERM is the kernel's graceful stop —
+        // every running turn ends the way the stop button ends it.
+        unsafe {
+            libc::kill(info.pid, libc::SIGTERM);
+        }
+    }
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < until {
+        if !alive(info) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Whether the kernel serving `place` is a stranger to this app, for the
+/// window to show.
+///
+/// Read rather than acted on: the automatic case — a stranger with nothing
+/// running in it — is already handled at attach. What is left here is the one
+/// that needs a person, so this reports and the bar offers the choice.
+pub fn kernel_skew(place: &Place) -> Option<Skew> {
+    if place.is_remote() {
+        return None;
+    }
+    let workspace = place.path.canonicalize().ok()?;
+    let info = read_info(&workspace).filter(alive)?;
+    skew(&workspace, &info)
+}
+
+/// Stop the kernel serving `place`, whatever it is running. The choice the
+/// window offers when a stranger is busy.
+pub fn restart_kernel(place: &Place) -> Result<()> {
+    let workspace = place
+        .path
+        .canonicalize()
+        .with_context(|| format!("not a directory: {}", place.path.display()))?;
+    let info = read_info(&workspace)
+        .filter(alive)
+        .context("no kernel is running there")?;
+    stop_kernel(&info);
+    attach_or_spawn(&workspace).map(|_| ())
+}
+
 pub fn attach_or_spawn_place(place: &Place) -> Result<WebInfo> {
     match &place.host {
         None => attach_or_spawn(&place.path),
@@ -174,10 +485,71 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
     // recreate the folder here.
     let _ = arbos_core::bootstrap(&arbos_core::Place::new(&workspace));
     if let Some(info) = read_info(&workspace).filter(alive) {
+        // Is this kernel the one this app ships? After an update it may not
+        // be: the app's own stop cannot reach every kernel on the machine, and
+        // one that outlived a swap goes on serving from a binary that is not
+        // there any more. On 2026-09-17 that kernel was 223 commits behind and
+        // the app attached to it without a word, then sent frames it had never
+        // heard of.
+        match skew(&workspace, &info) {
+            // Nobody is using it, so nothing is lost by replacing it with the
+            // build this app came with. No question worth asking.
+            Some(found) if found.gate.idle() => {
+                eprintln!(
+                    "arbos: {} — restarting it",
+                    found.reason.say(&workspace.display().to_string())
+                );
+                stop_kernel(&info);
+            }
+            // Something is running in it. Attaching is still right — it is the
+            // user's work and they must be able to watch it — but the window
+            // has to say so, and offer the choice rather than take it. The bar
+            // reads this back through `kernel_skew`.
+            Some(found) => {
+                eprintln!(
+                    "arbos: {} — {}",
+                    found.reason.say(&workspace.display().to_string()),
+                    found.gate.say()
+                );
+                return Ok(info);
+            }
+            None => return Ok(info),
+        }
+    }
+    // One spawn per place at a time. The chat, the board and the terminal
+    // all attach when a place opens; without this, each of them started a
+    // kernel, the losers of the `.arbos/runtime/lock` race exited 1, and
+    // that exit landed in the transcript as a failed notice.
+    let spawning = spawn_lock(&workspace);
+    let _spawning = spawning
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(info) = read_info(&workspace).filter(alive) {
         return Ok(info);
     }
     let child = spawn(&workspace)?;
     wait_ready(&workspace, child)
+}
+
+fn spawn_lock(workspace: &Path) -> Arc<Mutex<()>> {
+    static SPAWN_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    SPAWN_LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(workspace.to_path_buf())
+        .or_default()
+        .clone()
+}
+
+/// The kernel's own words when a second `serve` finds the place taken
+/// (`arbos_core::PlaceLock::acquire`).
+const LOCK_HELD: &str = "place already served";
+
+/// A spawned kernel exited because another kernel holds the place: not an
+/// error of ours, the other kernel is the one to attach to.
+fn lost_lock_race(status: &std::process::ExitStatus, log_tail: &str) -> bool {
+    !status.success() && log_tail.contains(LOCK_HELD)
 }
 
 pub fn websocket_url(info: &WebInfo) -> String {
@@ -210,11 +582,17 @@ pub fn http_base_place(place: &Place) -> Option<String> {
 /// Loopback HTTP origin for the gateway (`GET /api/models`, sessions).
 /// Attach is `tcp://` in `kernel.json`. HTTP is `web.json`.
 pub fn http_base(workspace: &Path) -> Option<String> {
-    let gateway = read_json_info(&gateway_json(workspace)).filter(alive);
+    // Only an HTTP address is worth a probe. `kernel.json` is `tcp://` on
+    // every kernel of this generation, and probing it opened and closed an
+    // attach socket — logged by the kernel as a client — on every poll.
+    let gateway = read_json_info(&gateway_json(workspace))
+        .filter(|info| http_url(info).is_some())
+        .filter(alive);
     if let Some(url) = gateway.as_ref().and_then(http_url) {
         return Some(url);
     }
     read_info(workspace)
+        .filter(|info| http_url(info).is_some())
         .filter(alive)
         .and_then(|info| http_url(&info))
 }
@@ -288,7 +666,7 @@ pub fn list_commands(place: &Place) -> Vec<session::Command> {
             }
         }
         // The kernel's own verbs, last so a skill or prompt of the same
-        // name wins. The window answers these itself (see `Cydonia::submit`).
+        // name wins. The window answers these itself (see `Arbos::submit`).
         for (name, description) in BUILTIN_COMMANDS {
             add(
                 &mut out,
@@ -311,6 +689,7 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ),
     ("stop", "Stop the current turn"),
     ("model", "Switch model: /model <id>"),
+    ("mode", "Permission mode: /mode auto | ask | plan"),
     ("pause", "Pause this agent: prompts wait until /resume"),
     ("resume", "Resume a paused agent"),
     ("fork", "Copy this chat into a new one"),
@@ -322,6 +701,23 @@ pub const BUILTIN_COMMANDS: &[(&str, &str)] = &[
 pub struct ModelOption {
     pub id: String,
     pub name: String,
+    /// Whether the host lists image input for it (OpenRouter
+    /// `architecture.input_modalities`). None: the host did not say; the
+    /// name is the guess (`arbos_core::models::looks_vision`).
+    pub vision: Option<bool>,
+    /// A free endpoint (`:free`, or a zero price): OpenRouter's free
+    /// providers are the ones whose terms commonly allow training on
+    /// prompts, and the account's "free models" privacy toggle governs
+    /// them separately. The picker says so.
+    pub free: bool,
+}
+
+impl ModelOption {
+    /// Takes image input, by the host's word or, failing that, by name.
+    pub fn sees_images(&self) -> bool {
+        self.vision
+            .unwrap_or_else(|| arbos_core::models::looks_vision(&self.id))
+    }
 }
 
 /// The composer's model list, plus the kernel's current selection.
@@ -383,7 +779,9 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
         .filter(|row| !row.id.is_empty())
         .map(|row| ModelOption {
             name: model_display_name(&row.id),
+            free: row.id.ends_with(":free"),
             id: row.id,
+            vision: None,
         })
         .collect();
     models.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
@@ -405,7 +803,7 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
 /// A `:variant` tail (OpenRouter's `:batch`, `:free`) stays on the label as
 /// a parenthesised tag, so `claude-fable-5.1` and `claude-fable-5.1:batch`
 /// read as two rows instead of two "Fable 5.1".
-fn model_display_name(id: &str) -> String {
+pub fn model_display_name(id: &str) -> String {
     let id = id.trim();
     if id.is_empty() {
         return String::new();
@@ -497,7 +895,8 @@ fn align_current(current: String, models: &[ModelOption]) -> String {
     current
 }
 
-/// Catalog the rust kernel's `api_base` will accept (`~/.config/arbos/config.toml`).
+/// Catalog the rust kernel's provider will accept, read the way the kernel
+/// reads it (`arbos_core::Host`: provider, base, key, model).
 fn fetch_host_models() -> Option<ModelsCatalog> {
     let (base, key, current) = turn_host_auth()?;
     let url = format!("{}/models", base.trim_end_matches('/'));
@@ -508,6 +907,9 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
     let mut req = client.get(&url);
     if !key.is_empty() {
         req = req.header("Authorization", &format!("Bearer {key}"));
+    }
+    for (name, value) in attribution_headers(ProviderKind::infer(&base)) {
+        req = req.header(*name, *value);
     }
     let Ok(mut resp) = req.call() else {
         return None;
@@ -524,6 +926,12 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
         .filter(UpstreamModel::usable)
         .map(|row| ModelOption {
             name: model_display_name(&row.id),
+            vision: row
+                .architecture
+                .as_ref()
+                .filter(|a| !a.input_modalities.is_empty())
+                .map(|a| a.input_modalities.iter().any(|m| m == "image")),
+            free: row.is_free(),
             id: row.id,
         })
         .collect();
@@ -539,57 +947,132 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
     })
 }
 
+/// `(base, key, model)` for the turn host, or None when there is no key —
+/// then there is no catalog to fetch and the gateway list is the fallback.
 fn turn_host_auth() -> Option<(String, String, String)> {
-    let path = host_config_path();
-    let text = std::fs::read_to_string(path).ok()?;
-    let mut base = String::new();
-    let mut key = String::new();
-    let mut model = String::new();
-    let mut key_env = String::from("OPENROUTER_API_KEY");
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let v = v.trim().trim_matches('"').trim_matches('\'');
-        match k.trim() {
-            "api_base" => base = v.to_string(),
-            "api_key" => key = v.to_string(),
-            "api_key_env" => key_env = v.to_string(),
-            "model" => model = v.to_string(),
-            _ => {}
-        }
-    }
-    if base.is_empty() {
-        base = "https://openrouter.ai/api/v1".into();
-    }
-    if key.is_empty() {
-        key = std::env::var(&key_env)
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("OPENROUTER_API_KEY")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })?;
-    }
-    Some((base, key, model))
+    let host = Host::peek().ok()?;
+    let key = host.api_key()?;
+    let base = host.config.api_base().ok()?;
+    Some((base, key, host.config.model()))
 }
 
-fn host_config_path() -> PathBuf {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(base).join("arbos").join("config.toml");
+/// What the Model settings section shows: the provider, where the key is,
+/// and the model turns use when a chat says `inherit`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostSummary {
+    pub provider: ProviderKind,
+    pub base: String,
+    pub model: String,
+    pub key: KeySource,
+    pub config_path: PathBuf,
+    /// A malformed config.toml, verbatim, so the user can fix it.
+    pub error: Option<String>,
+}
+
+pub fn host_summary() -> HostSummary {
+    match Host::peek() {
+        Ok(host) => HostSummary {
+            provider: host.config.provider(),
+            base: host
+                .config
+                .api_base()
+                .unwrap_or_else(|e| format!("({e:#})")),
+            model: host.config.model(),
+            key: host.key_source(),
+            config_path: host.config_path(),
+            error: None,
+        },
+        Err(e) => {
+            let dir = arbos_core::host::dirs_config();
+            let cfg = HostConfig::default();
+            HostSummary {
+                provider: cfg.provider(),
+                base: cfg.api_base().unwrap_or_default(),
+                model: cfg.model(),
+                key: KeySource::Missing(cfg.key_env()),
+                config_path: dir.join("config.toml"),
+                error: Some(format!("{e:#}")),
+            }
+        }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("arbos")
-            .join("config.toml");
+}
+
+/// Save the provider choice into config.toml. A change resets the base,
+/// key variable, and model to that provider's defaults, as setup does.
+pub fn save_host_provider(provider: ProviderKind) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    if host.config.provider() != provider {
+        host.config.set_provider(provider);
     }
-    PathBuf::from(".arbos-host").join("config.toml")
+    host.config.provider = Some(provider);
+    host.save()?;
+    Ok(host_summary())
+}
+
+/// Is `key` accepted by the configured provider? Blocking; run it off the
+/// main thread. The same check `arbos-kernel setup` makes: OpenRouter's
+/// `/key` (its `/models` is public), `/models` elsewhere.
+pub fn check_host_key(key: &str) -> Result<()> {
+    let host = Host::peek()?;
+    let base = host.config.api_base()?;
+    let path = match ProviderKind::infer(&base) {
+        ProviderKind::OpenRouter => "/key",
+        ProviderKind::OpenAi | ProviderKind::Custom => "/models",
+    };
+    let client: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(20)))
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let mut req = client
+        .get(&format!("{base}{path}"))
+        .header("Authorization", &format!("Bearer {}", key.trim()));
+    for (name, value) in attribution_headers(ProviderKind::infer(&base)) {
+        req = req.header(*name, *value);
+    }
+    let resp = req.call().with_context(|| format!("reach {base}"))?;
+    let status = resp.status().as_u16();
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    Err(anyhow!(match status {
+        401 => "the key was rejected".to_string(),
+        402 => "the account has no credit".to_string(),
+        403 => "the key is not allowed here".to_string(),
+        other => format!("{base} answered {other}"),
+    }))
+}
+
+/// Save a pasted key into config.toml the way `arbos-kernel setup` does:
+/// owner-readable file, key never echoed. An empty key clears the saved
+/// one so the environment variable is read again.
+pub fn save_host_key(key: &str) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    let key = key.trim();
+    host.config.api_key = (!key.is_empty()).then(|| key.to_string());
+    host.save()?;
+    Ok(host_summary())
+}
+
+/// Set the base URL requests go to. Empty = the provider's default (a
+/// custom provider needs one). The trailing slash is dropped.
+pub fn save_host_base(base: &str) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    let base = base.trim().trim_end_matches('/');
+    if !base.is_empty() && !(base.starts_with("http://") || base.starts_with("https://")) {
+        anyhow::bail!("the base URL must start with http:// or https://");
+    }
+    host.config.api_base = base.to_string();
+    host.save()?;
+    Ok(host_summary())
+}
+
+/// Set the model turns use by default. Empty = the provider's default.
+pub fn save_host_model(model: &str) -> Result<HostSummary> {
+    let mut host = Host::peek()?;
+    host.config.model = model.trim().to_string();
+    host.save()?;
+    Ok(host_summary())
 }
 
 fn picker_error(raw: Option<&str>) -> String {
@@ -614,6 +1097,13 @@ pub struct SessionSummary {
     pub updated_ms: i64,
     /// Kernel id of the parent agent. Empty for a root.
     pub parent: Option<String>,
+    /// The worker cannot write (a read-only kind, or `readonly: true` on
+    /// the spawn): drawn as a glyph after its name, so a project whose
+    /// workers can all only read looks wrong at a glance (F-56).
+    pub readonly: bool,
+    /// The definition the worker was spawned from (`explore`, …), when one
+    /// was named.
+    pub agent_kind: Option<String>,
 }
 
 /// What this place still holds, and whether the listing reached a live
@@ -693,6 +1183,8 @@ fn list_http_sessions(base: &str) -> Vec<SessionSummary> {
                 title: if title.is_empty() { name } else { title },
                 updated_ms: row.updated_at.unwrap_or(0),
                 parent: None,
+                readonly: false,
+                agent_kind: None,
             }
         })
         .collect()
@@ -720,8 +1212,10 @@ for p in "$d"/*; do
     n=$(awk -F': *' '/^name:/ {{print $2; exit}}' "$p/agent.md")
     [ -n "$n" ] && name=$n
     parent=$(awk -F': *' '/^parent:/ {{print $2; exit}}' "$p/agent.md")
+    readonly=$(awk -F': *' '/^readonly:/ {{print $2; exit}}' "$p/agent.md")
+    kind=$(awk -F': *' '/^kind:/ {{print $2; exit}}' "$p/agent.md")
   fi
-  printf '%s\t%s\t%s\n' "$id" "$name" "$parent"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$name" "$parent" "$readonly" "$kind"
 done"#,
         dir = dir,
     );
@@ -733,10 +1227,12 @@ done"#,
         out.stdout
             .lines()
             .filter_map(|line| {
-                let mut parts = line.splitn(3, '\t');
+                let mut parts = line.splitn(5, '\t');
                 let id = parts.next()?.trim();
                 let name = parts.next().unwrap_or("").trim();
                 let parent = parts.next().unwrap_or("").trim();
+                let readonly = parts.next().unwrap_or("").trim() == "true";
+                let kind = parts.next().unwrap_or("").trim();
                 if id.is_empty() || !safe_session_id(id) {
                     return None;
                 }
@@ -747,6 +1243,8 @@ done"#,
                     title: String::new(),
                     updated_ms: 0,
                     parent: (!parent.is_empty()).then(|| parent.to_string()),
+                    readonly,
+                    agent_kind: (!kind.is_empty()).then(|| kind.to_string()),
                 })
             })
             .collect(),
@@ -788,6 +1286,8 @@ fn list_local_agents(path: &Path) -> Option<Vec<SessionSummary>> {
             title,
             updated_ms,
             parent,
+            readonly: front.readonly,
+            agent_kind: front.kind,
         });
     }
     Some(out)
@@ -795,6 +1295,16 @@ fn list_local_agents(path: &Path) -> Option<Vec<SessionSummary>> {
 
 /// What the kernel called one agent, read off its `agent.md`. Local
 /// places only; a remote child is named when the listing next runs.
+/// `mode:` from a local agent's `agent.md`, for the composer's Mode switch.
+pub fn agent_mode(place: &Place, id: &str) -> Option<String> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let dir = place.path.join(".arbos").join("agents").join(id);
+    let agent = arbos_core::Agent::load(&dir).ok()?;
+    Some(agent.mode.as_str().to_string())
+}
+
 pub fn agent_name(place: &Place, id: &str) -> Option<String> {
     if place.host.is_some() || !safe_session_id(id) {
         return None;
@@ -820,6 +1330,8 @@ struct AgentFront {
     name: Option<String>,
     title: Option<String>,
     parent: Option<String>,
+    readonly: bool,
+    kind: Option<String>,
 }
 
 fn agent_front(text: &str) -> AgentFront {
@@ -835,6 +1347,10 @@ fn agent_front(text: &str) -> AgentFront {
             front.title = field(value);
         } else if let Some(value) = line.strip_prefix("parent:") {
             front.parent = field(value);
+        } else if let Some(value) = line.strip_prefix("readonly:") {
+            front.readonly = value.trim() == "true";
+        } else if let Some(value) = line.strip_prefix("kind:") {
+            front.kind = field(value);
         }
     }
     front
@@ -908,6 +1424,8 @@ pub fn seed_transcript(place: &Place, id: &str, items: &[crate::model::session::
                 batch.push(arbos_core::Event::new(arbos_core::EventKind::User {
                     text: message.text.clone(),
                     attachments,
+                    channel: String::new(),
+                    device: String::new(),
                 }));
             }
             crate::model::session::ChatItem::From { who, text, .. } => {
@@ -919,6 +1437,7 @@ pub fn seed_transcript(place: &Place, id: &str, items: &[crate::model::session::
             crate::model::session::ChatItem::Agent(text) => {
                 batch.push(arbos_core::Event::new(arbos_core::EventKind::Assistant {
                     text: text.clone(),
+                    step: 0,
                     reasoning_details: None,
                 }));
             }
@@ -1062,50 +1581,288 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     if place.host.is_some() {
         return None;
     }
-    let path = place
-        .path
-        .join(".arbos")
-        .join("agents")
-        .join(id)
-        .join("transcript.jsonl");
-    let text = std::fs::read_to_string(path).ok()?;
+    // A finished worker is moved to the archive with its transcript; read
+    // back from there, or a worker's chat opened after a relaunch showed
+    // its brief alone (F-133, cycle 32).
+    let store = place.path.join(".arbos");
+    let text = [
+        store.join("agents").join(id).join("transcript.jsonl"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(id)
+            .join("transcript.jsonl"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())?;
     let mut items = Vec::new();
+    // Timestamps give the replay what the live view measures: the turn's
+    // wall time on its prompt, and a thought's seconds as the gap to the
+    // event after it.
+    let mut turn_began: Option<i64> = None;
+    let mut thinking_since: Option<i64> = None;
+    // A `user` line while a turn is open (after its wake, before its
+    // turn_complete) was a steer: its card stays inside that turn.
+    let mut turn_open = false;
     for line in text.lines() {
         if let Ok(ev) = serde_json::from_str::<arbos_core::Event>(line) {
-            if let Some(item) = event_to_item(&ev) {
-                match (&item, items.last_mut()) {
+            let thinking = matches!(ev.kind, arbos_core::EventKind::Thinking { .. });
+            let steer = turn_open && matches!(ev.kind, arbos_core::EventKind::User { .. });
+            match &ev.kind {
+                arbos_core::EventKind::Wake { .. } => turn_open = true,
+                arbos_core::EventKind::TurnComplete { .. }
+                | arbos_core::EventKind::Interrupted { .. } => turn_open = false,
+                _ => {}
+            }
+            if !thinking {
+                if let Some(since) = thinking_since.take() {
+                    // The record's own `secs` (settled thoughts since #221)
+                    // beats the gap to the next event.
+                    if let Some(crate::model::session::ChatItem::Thinking { secs, .. }) =
+                        items.last_mut()
+                        && secs.is_none()
+                    {
+                        *secs = secs_between(since, ev.ts);
+                    }
+                }
+            }
+            match &ev.kind {
+                arbos_core::EventKind::User { .. } if !steer => turn_began = Some(ev.ts),
+                // A wake of the kernel's own (a worker's report, a
+                // subscription) opens a segment whose clock starts here. So
+                // does a worker's `plan` wake: it is the brief's card below,
+                // and the worker's first turn has no `user` line to start
+                // the clock — read back, its headline lost its "Worked for
+                // 20s" and showed the summary phrase instead (F-131).
+                arbos_core::EventKind::Wake { wake, .. }
+                    if !matches!(wake.as_str(), "user" | "kickoff" | "compact") =>
+                {
+                    turn_began = Some(ev.ts)
+                }
+                arbos_core::EventKind::Thinking { .. } => {
+                    thinking_since.get_or_insert(ev.ts);
+                }
+                arbos_core::EventKind::TurnComplete { .. } => {
+                    if let Some(began) = turn_began.take() {
+                        match items.iter_mut().rev().find(|item| {
+                            matches!(
+                                item,
+                                crate::model::session::ChatItem::User(_)
+                                    | crate::model::session::ChatItem::Wake { .. }
+                            )
+                        }) {
+                            Some(crate::model::session::ChatItem::User(message)) => {
+                                message.worked_secs = secs_between(began, ev.ts);
+                            }
+                            Some(crate::model::session::ChatItem::Wake { secs, .. }) => {
+                                *secs = secs_between(began, ev.ts);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            if let Some(mut item) = event_to_item(&ev) {
+                if steer && let crate::model::session::ChatItem::User(message) = &mut item {
+                    message.steer = true;
+                }
+                // A wake written after the worker's `say` that caused it
+                // opens the segment; the report reads under its header.
+                if matches!(item, crate::model::session::ChatItem::Wake { .. })
+                    && matches!(
+                        items.last(),
+                        Some(crate::model::session::ChatItem::From { .. })
+                    )
+                {
+                    let report = items.pop();
+                    items.push(item);
+                    if let Some(report) = report {
+                        items.push(report);
+                    }
+                    continue;
+                }
+                // A `status` call between two reasoning steps draws no row;
+                // the thoughts on either side of it are one thought.
+                let last_shown = items
+                    .iter()
+                    .rposition(|held| {
+                        !matches!(held, crate::model::session::ChatItem::Tool { label, .. }
+                            if crate::view::component::transcript::is_status_call(label))
+                    })
+                    .filter(|_| matches!(item, crate::model::session::ChatItem::Thinking { .. }));
+                match (&item, last_shown.and_then(|at| items.get_mut(at))) {
                     (
-                        crate::model::session::ChatItem::Thinking { text, .. },
+                        crate::model::session::ChatItem::Thinking { text, secs, .. },
                         Some(crate::model::session::ChatItem::Thinking {
-                            text: held, done, ..
+                            text: held,
+                            done,
+                            secs: held_secs,
                         }),
                     ) => {
                         held.push_str(text);
                         *done = true;
+                        // Two settled steps in a row read as one thought, their
+                        // seconds added.
+                        if let Some(more) = secs {
+                            *held_secs = Some(held_secs.unwrap_or(0).saturating_add(*more));
+                        }
                     }
                     _ => items.push(item),
                 }
             }
         }
     }
+    // The kernel's "Waiting for your answer" was true while the ask was
+    // parked; in a replay only the last one can still be. A `status: …`
+    // assistant line is the step the worker line showed, not prose.
+    let n = items.len();
+    let mut ix = 0;
+    items.retain(|item| {
+        ix += 1;
+        match item {
+            crate::model::session::ChatItem::Notice {
+                text,
+                failed: false,
+            } if text.trim() == "Waiting for your answer" && ix < n => false,
+            crate::model::session::ChatItem::Agent(text) => {
+                crate::model::session::status_line(text).is_none()
+            }
+            _ => true,
+        }
+    });
+    dedupe_replay(&mut items, id);
     Some(crate::model::history::Replay {
         items,
-        ..crate::model::history::Replay::default()
+        model: agent_model(&arbos_core::Place::new(&place.path), id),
     })
+}
+
+/// A paragraph once, as the live session shows it (`dedupe_settled`): a
+/// step that repeats the turn's previous prose word for word goes, and so
+/// does a `say` to the user the agent then wrote out as its reply.
+fn dedupe_replay(items: &mut Vec<crate::model::session::ChatItem>, own: &str) {
+    use crate::model::session::ChatItem;
+    let mut drop = vec![false; items.len()];
+    for ix in 0..items.len() {
+        let ChatItem::Agent(text) = &items[ix] else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        for at in (0..ix).rev() {
+            if drop[at] {
+                continue;
+            }
+            match &items[at] {
+                ChatItem::User(_) => break,
+                ChatItem::Agent(earlier) if earlier.trim() == text => {
+                    drop[ix] = true;
+                    break;
+                }
+                ChatItem::From {
+                    who, text: said, ..
+                } if said.trim() == text && (who == own || who.is_empty()) => {
+                    drop[at] = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    // A retry line replaces the retry before it, as the live session does.
+    for ix in 1..items.len() {
+        if let (ChatItem::Notice { text: prev, .. }, ChatItem::Notice { text: next, .. }) =
+            (&items[ix - 1], &items[ix])
+            && crate::model::session::is_retry_line(prev)
+            && crate::model::session::is_retry_line(next)
+        {
+            drop[ix - 1] = true;
+        }
+    }
+    let mut ix = 0;
+    items.retain(|_| {
+        let keep = !drop[ix];
+        ix += 1;
+        keep
+    });
+}
+
+/// Whole seconds from `from` to `to` (unix millis); `None` when either is
+/// missing (older transcripts wrote no timestamps) or the order is wrong.
+fn secs_between(from: i64, to: i64) -> Option<u32> {
+    if from <= 0 || to <= 0 || to < from {
+        return None;
+    }
+    Some(((to - from) / 1000).min(u32::MAX as i64) as u32)
+}
+
+/// The model the kernel keeps for this agent in `agent.md`, when it is
+/// not `inherit`. The chip shows it, and a reopen does not fall back to
+/// the config default while the kernel keeps using the chosen one.
+/// `skill:` from a local agent's `agent.md`: the mode pinned to the chat.
+pub fn agent_skill(place: &arbos_core::Place, id: &str) -> Option<String> {
+    let agent = arbos_core::Agent::load(&place.agent_dir(id)).ok()?;
+    agent.skill.filter(|s| !s.trim().is_empty())
+}
+
+/// The names of the skills a place offers, for the mode chip's list.
+pub fn skill_names(place: &arbos_core::Place) -> Vec<String> {
+    arbos_core::load_skills(place)
+        .iter()
+        .map(|s| s.name.clone())
+        .collect()
+}
+
+pub fn agent_model(place: &arbos_core::Place, id: &str) -> Option<String> {
+    let agent = arbos_core::Agent::load(&place.agent_dir(id)).ok()?;
+    let model = agent.model.trim();
+    (!model.is_empty() && model != "inherit").then(|| model.to_string())
 }
 
 fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatItem> {
     use crate::model::session::ChatItem;
     match &ev.kind {
-        arbos_core::EventKind::User { text, attachments } => {
+        arbos_core::EventKind::User {
+            text, attachments, ..
+        } => {
             let mut message = crate::model::attachment::UserMessage::from(text.clone());
             for path in attachments {
                 message.add_file_path(path);
             }
+            message.sent_at = (ev.ts > 0).then_some(ev.ts);
+            message.seq = (ev.seq > 0).then_some(ev.seq);
             Some(ChatItem::User(message))
         }
         // An empty line is a step boundary for the kernel's projection, not
         // something the model said.
+        // The brief a worker was spawned with is its prompt: Cursor shows a
+        // subagent's as the first card. A plan wake with no text (a timer,
+        // a chore) is not a message.
+        arbos_core::EventKind::Wake {
+            wake,
+            text: Some(text),
+            brief,
+        } if wake == "plan" && !text.trim().is_empty() => {
+            let mut message =
+                crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
+            message.sent_at = (ev.ts > 0).then_some(ev.ts);
+            Some(ChatItem::User(message))
+        }
+        // A worker's report or a subscription firing: a segment of its own
+        // in the Project chat, as Cursor draws it (F-62).
+        arbos_core::EventKind::Wake { wake, text, .. }
+            if !matches!(wake.as_str(), "user" | "kickoff" | "compact" | "plan") =>
+        {
+            Some(ChatItem::Wake {
+                kind: wake.clone(),
+                text: text.clone(),
+                at: (ev.ts > 0).then_some(ev.ts),
+                secs: None,
+            })
+        }
         arbos_core::EventKind::Assistant { text, .. } if text.trim().is_empty() => None,
         arbos_core::EventKind::Assistant { text, .. } => Some(ChatItem::Agent(text.clone())),
         arbos_core::EventKind::Say { from, text } => Some(ChatItem::From {
@@ -1117,11 +1874,17 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             text: text.clone(),
             failed: *failed,
         }),
-        arbos_core::EventKind::Thinking { text } if text.trim().is_empty() => None,
-        arbos_core::EventKind::Thinking { text } => Some(ChatItem::Thinking {
+        // The turn was cut short: by the Stop button, a stop word, a Force,
+        // or the kernel. A line in the pane, and the turn's fold says so.
+        arbos_core::EventKind::Interrupted { detail } => Some(ChatItem::Notice {
+            text: crate::model::session::interrupt_label(detail),
+            failed: false,
+        }),
+        arbos_core::EventKind::Thinking { text, .. } if text.trim().is_empty() => None,
+        arbos_core::EventKind::Thinking { text, secs, .. } => Some(ChatItem::Thinking {
             text: text.clone(),
             done: true,
-            secs: None,
+            secs: secs.map(|s| s.min(u32::MAX as u64) as u32),
         }),
         arbos_core::EventKind::Tool(rec) => {
             let hint = crate::agent::acp::tool_hint(&rec.name, &rec.paths, rec.args.as_ref());
@@ -1149,6 +1912,11 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
                     .started
                     .zip(rec.ended)
                     .map(|(started, ended)| ((ended - started).max(0) / 1000) as u32),
+                desc: rec
+                    .label
+                    .clone()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty()),
             })
         }
         _ => None,
@@ -1241,27 +2009,12 @@ pub fn clone_session(place: &Place, source_id: &str) -> Result<String> {
 }
 
 fn fork_chat_folder(place: &Place, source_id: &str) -> Result<String> {
+    // The copy rewrites spawn records so the fork claims none of the
+    // original's workers (a fork listed under itself looped the window).
     let core_place = arbos_core::Place::new(&place.path);
-    let source_dir = core_place.agent_dir(source_id);
-    let source = arbos_core::Agent::load(&source_dir)
-        .with_context(|| format!("fork: no chat {source_id} in {}", place.path.display()))?;
-    let mut agent = arbos_core::create_chat(&core_place)?;
-    agent.model = source.model.clone();
-    agent.allowlist = source.allowlist.clone();
-    agent.title = if source.title.is_empty() {
-        String::new()
-    } else {
-        format!("{} (fork)", source.title)
-    };
-    let id = agent.id.to_string();
-    let dir = core_place.agent_dir(&id);
-    agent.save(&dir)?;
-    let from = arbos_core::files::Layout::new(&core_place, source_id).transcript();
-    if from.exists() {
-        let to = arbos_core::files::Layout::new(&core_place, &id).transcript();
-        std::fs::copy(&from, &to).with_context(|| format!("fork: copy {}", from.display()))?;
-    }
-    Ok(id)
+    let agent = arbos_core::files::fork_chat(&core_place, source_id)
+        .with_context(|| format!("fork {source_id} in {}", place.path.display()))?;
+    Ok(agent.id.to_string())
 }
 
 async fn clone_over_ws(url: &str, source_id: &str) -> Result<String> {
@@ -1350,9 +2103,38 @@ struct UpstreamModels {
 struct UpstreamModel {
     #[serde(default)]
     id: String,
+    #[serde(default)]
+    pricing: Option<UpstreamPricing>,
     /// OpenRouter lists what each model accepts. Absent on other hosts.
     #[serde(default)]
     supported_parameters: Vec<String>,
+    #[serde(default)]
+    architecture: Option<UpstreamArchitecture>,
+}
+
+#[derive(Deserialize, Default)]
+struct UpstreamPricing {
+    #[serde(default)]
+    prompt: String,
+    #[serde(default)]
+    completion: String,
+}
+
+impl UpstreamModel {
+    /// `:free` in the id, or a zero price for both prompt and completion.
+    fn is_free(&self) -> bool {
+        self.id.ends_with(":free")
+            || self.pricing.as_ref().is_some_and(|p| {
+                let zero = |s: &str| s.trim().parse::<f64>().is_ok_and(|v| v == 0.0);
+                zero(&p.prompt) && zero(&p.completion)
+            })
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct UpstreamArchitecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
 }
 
 impl UpstreamModel {
@@ -1675,16 +2457,107 @@ struct RunRow {
 }
 
 /// Press the composer's mic. Capture runs on this Mac, not the kernel.
+/// `voice_url` / `voice_token` (or `voice_token_env`) from config.toml:
+/// the self-hosted speech server. `None` when no URL is set, in which case
+/// dictation falls back to this Mac's helper.
+pub fn voice_config() -> Option<crate::voice_ws::VoiceCfg> {
+    let text = std::fs::read_to_string(arbos_core::host_dir().join("config.toml")).ok()?;
+    let mut url = String::new();
+    let mut token = String::new();
+    let mut token_env = String::new();
+    let mut mirror = true;
+    let mut reply = String::new();
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        match k.trim() {
+            "voice_url" => url = v.to_string(),
+            "voice_token" => token = v.to_string(),
+            "voice_token_env" => token_env = v.to_string(),
+            "voice_mirror" => mirror = !matches!(v, "false" | "0" | "no"),
+            "voice_reply" => reply = v.to_ascii_lowercase(),
+            _ => {}
+        }
+    }
+    if url.is_empty() {
+        return None;
+    }
+    if token.is_empty() && !token_env.is_empty() {
+        token = std::env::var(&token_env).unwrap_or_default();
+    }
+    Some(crate::voice_ws::VoiceCfg {
+        url,
+        token: (!token.is_empty()).then_some(token),
+        mirror,
+        reply,
+    })
+}
+
+/// The name a call gives the speech server for a place: `<machine>/<folder>`,
+/// the hub's way of naming a kernel (`docs/arbos-mesh-design.md`). The machine is
+/// this computer's name in `~/.config/arbos/hub.toml` (`machine = "mac"`), or the
+/// ssh alias for a remote place. Without either, the folder's name alone: the
+/// gateway then takes it for its own kernel.
+pub fn hub_project_name(place: &Place) -> String {
+    let folder = place
+        .path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let machine = match &place.host {
+        Some(alias) => Some(alias.clone()),
+        None => hub_machine_name(),
+    };
+    match machine {
+        Some(machine) if !machine.is_empty() && !folder.is_empty() => format!("{machine}/{folder}"),
+        _ => folder,
+    }
+}
+
+/// `machine = "…"` from `~/.config/arbos/hub.toml`, when this computer is on a hub.
+fn hub_machine_name() -> Option<String> {
+    let text = std::fs::read_to_string(arbos_core::host_dir().join("hub.toml")).ok()?;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if k.trim() == "machine" {
+            let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
+            return (!v.is_empty()).then_some(v);
+        }
+    }
+    None
+}
+
 pub fn voice_start_place(_place: &Place) -> Result<()> {
+    if crate::voice_ws::configured() {
+        return crate::voice_ws::start();
+    }
     crate::voice::start()
 }
 
 pub fn voice_stop_place(_place: &Place) -> Result<String> {
+    if crate::voice_ws::configured() {
+        return crate::voice_ws::stop();
+    }
     crate::voice::stop()
 }
 
 /// Latest partial transcript for a take that is still running.
 pub fn voice_peek_place(_place: &Place) -> Result<String> {
+    if crate::voice_ws::configured() {
+        return crate::voice_ws::peek();
+    }
     crate::voice::peek()
 }
 
@@ -1698,7 +2571,13 @@ pub fn voice_stop(_workspace: &Path) -> Result<String> {
     crate::voice::stop()
 }
 
+/// `runtime/kernel.json` since the file-system design's Phase 1; the old
+/// root location while kernels from before it are still around.
 fn kernel_json(workspace: &Path) -> PathBuf {
+    let new = workspace.join(".arbos").join("runtime").join("kernel.json");
+    if new.exists() {
+        return new;
+    }
     workspace.join(".arbos").join("kernel.json")
 }
 
@@ -1743,20 +2622,41 @@ pub fn tcp_addr(url: &str) -> Option<std::net::SocketAddr> {
     raw.parse().ok()
 }
 
+/// Kernels this process has started. Tests read it to prove one place gets
+/// one spawn however many attachers race.
+static SPAWNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+fn spawn_count() -> usize {
+    SPAWNS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn spawn(workspace: &Path) -> Result<Child> {
     let bin = arbos_bin()?;
-    let dir = workspace.join(".arbos");
+    SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // The kernel's stdout/stderr go under runtime/: process facts, never
+    // part of the .arbos/ record.
+    let dir = workspace.join(".arbos").join("runtime");
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let log = std::fs::File::create(dir.join("kernel.log"))
-        .with_context(|| format!("create {}/kernel.log", dir.display()))?;
+    let log = std::fs::File::create(dir.join("kernel.out.log"))
+        .with_context(|| format!("create {}/kernel.out.log", dir.display()))?;
     let err = log.try_clone()?;
     // The kernel picks its own loopback port and writes it to kernel.json
     // as `tcp://127.0.0.1:port`. Do not invent an HTTP URL here — that
     // port is not the attach port, and waiting on it is a 60s miss.
+    // Not the window's whole environment: launched from a shell, that is
+    // every `export` in the user's rc file, and the kernel would hand it
+    // to every job. The allowlist, the configured model key, the vault
+    // token, and what the place's secrets.toml reads — nothing else.
+    let key_env = Host::peek()
+        .map(|h| h.config.key_env())
+        .unwrap_or_else(|_| "OPENROUTER_API_KEY".to_string());
     let mut cmd = Command::new(&bin);
     cmd.arg("serve")
         .arg(workspace)
         .current_dir(workspace)
+        .env_clear()
+        .envs(arbos_core::envsafe::kernel_env(workspace, &key_env))
         .env("NO_COLOR", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
@@ -1772,10 +2672,13 @@ fn wait_ready(workspace: &Path, mut child: Child) -> Result<WebInfo> {
             return Ok(info);
         }
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(anyhow!(
-                "arbos-kernel exited ({status}){}",
-                kernel_log_tail(workspace)
-            ));
+            let tail = kernel_log_tail(workspace);
+            if lost_lock_race(&status, &tail) {
+                // Another process (a CLI `serve`, an older desktop) holds the
+                // place. Wait for its kernel.json instead of reporting ours.
+                return wait_other(workspace, deadline);
+            }
+            return Err(anyhow!("arbos-kernel exited ({status}){tail}"));
         }
         thread::sleep(POLL);
     }
@@ -1787,8 +2690,26 @@ fn wait_ready(workspace: &Path, mut child: Child) -> Result<WebInfo> {
     ))
 }
 
+/// The lock holder is starting up (or already serving): poll for its live
+/// kernel.json until `deadline`.
+fn wait_other(workspace: &Path, deadline: Instant) -> Result<WebInfo> {
+    while Instant::now() < deadline {
+        if let Some(info) = read_info(workspace).filter(alive) {
+            return Ok(info);
+        }
+        thread::sleep(POLL);
+    }
+    Err(anyhow!(
+        "another arbos-kernel holds {} but never wrote a live .arbos/kernel.json",
+        workspace.join(".arbos").display()
+    ))
+}
+
 fn kernel_log_tail(workspace: &Path) -> String {
-    let path = workspace.join(".arbos").join("kernel.log");
+    let path = workspace
+        .join(".arbos")
+        .join("runtime")
+        .join("kernel.out.log");
     let Ok(body) = std::fs::read_to_string(path) else {
         return String::new();
     };
@@ -1808,7 +2729,7 @@ fn kernel_log_tail(workspace: &Path) -> String {
     }
 }
 
-fn arbos_bin() -> Result<PathBuf> {
+pub(crate) fn arbos_bin() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("ARBOS_KERNEL_BIN") {
         let path = PathBuf::from(path);
         if path.is_file() {
@@ -1818,6 +2739,16 @@ fn arbos_bin() -> Result<PathBuf> {
             "ARBOS_KERNEL_BIN is not a file: {}",
             path.display()
         ));
+    }
+    // A shipped app carries its kernel: `Arbos.app/Contents/MacOS/arbos-kernel`,
+    // signed with the bundle (desktop/Makefile). It wins over any development
+    // tree so a copy dragged out of the DMG works on a Mac with no checkout.
+    if let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("arbos-kernel")))
+        .filter(|path| path.is_file())
+    {
+        return Ok(beside);
     }
     if let Ok(path) = std::env::var("CARGO_MANIFEST_DIR") {
         let debug = PathBuf::from(path).join("../target/debug/arbos-kernel");
@@ -1843,6 +2774,8 @@ fn arbos_bin() -> Result<PathBuf> {
 struct Probe {
     arch: String,
     has_bin: bool,
+    /// The remote kernel's `--version` line, when it is one of ours.
+    version: Option<String>,
     running: Option<WebInfo>,
 }
 
@@ -1875,14 +2808,104 @@ fn attach_remote_cached(key: &str, create: impl FnOnce() -> Result<Tunnel>) -> R
     Ok(info)
 }
 
-fn open_remote_tunnel(host: &str, path: &Path) -> Result<Tunnel> {
-    let mut probe = ssh_probe(host, path)?;
-    if !probe.has_bin {
-        ssh_install_kernel(host, path, &probe.arch)?;
-        probe = ssh_probe(host, path)?;
+/// The step a remote place's connect is on, by place key, for the window
+/// to draw ("Installing arbos-kernel 0.2.1…", "Updating 0.2.0 → 0.2.1…").
+/// Set by `open_remote_tunnel` as it goes; `Ready` when the tunnel is up;
+/// `Failed` with the step when it is not. Read with `remote_progress`.
+fn progress_lock() -> &'static Mutex<HashMap<String, arbos_core::remote_kernel::Progress>> {
+    static P: OnceLock<Mutex<HashMap<String, arbos_core::remote_kernel::Progress>>> =
+        OnceLock::new();
+    P.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn set_progress(key: &str, step: arbos_core::remote_kernel::Progress) {
+    eprintln!("remote {key}: {step}");
+    progress_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(key.to_string(), step);
+}
+
+/// Where a remote place's connect stands, if one is or was under way.
+pub fn remote_progress(host: &str, path: &Path) -> Option<arbos_core::remote_kernel::Progress> {
+    progress_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&Place::remote(host, path).encode())
+        .cloned()
+}
+
+fn open_remote_tunnel(host_name: &str, path: &Path) -> Result<Tunnel> {
+    use arbos_core::remote_kernel::Progress;
+    let key = Place::remote(host_name, path).encode();
+    let step = |p: Progress| set_progress(&key, p);
+    match open_remote_tunnel_steps(host_name, path, &step) {
+        Ok(t) => {
+            step(Progress::Ready);
+            Ok(t)
+        }
+        Err(e) => {
+            let at = remote_progress(host_name, path)
+                .map(|p| p.to_string().trim_end_matches('…').to_string())
+                .unwrap_or_else(|| "Connecting".into());
+            step(Progress::Failed {
+                step: at,
+                why: format!("{e:#}"),
+            });
+            Err(e)
+        }
+    }
+}
+
+fn open_remote_tunnel_steps(
+    host_name: &str,
+    path: &Path,
+    step: &dyn Fn(arbos_core::remote_kernel::Progress),
+) -> Result<Tunnel> {
+    use arbos_core::remote_kernel::{KernelVersion, Progress};
+    let target = remote_target(host_name);
+    let host = target.ssh.as_str();
+    step(Progress::Probing);
+    let mut probe = ssh_probe(&target, path)?;
+    // The version rule: the remote's kernel is replaced when it is older
+    // than this window's (semver), or the same version from another
+    // build; a newer remote is left alone. A running older kernel is
+    // stopped first — that process alone; its jobs go with it — so a
+    // place never runs a kernel older than the window that opens it.
+    let mine = KernelVersion::parse(&local_kernel_version());
+    let theirs = probe.version.as_deref().and_then(KernelVersion::parse);
+    let wants_update = match (&theirs, &mine) {
+        (Some(t), Some(m)) => t.needs_update_to(m),
+        // Ours is not a version we can read (a dev build with no line):
+        // an unreadable remote is replaced, a readable one kept.
+        (None, _) => probe.has_bin,
+        (Some(_), None) => false,
+    };
+    if !probe.has_bin || wants_update {
+        match (&theirs, &mine) {
+            (Some(t), Some(m)) => step(Progress::Updating {
+                from: t.short(),
+                to: m.short(),
+            }),
+            _ => step(Progress::Installing {
+                version: mine
+                    .as_ref()
+                    .map(|m| m.short())
+                    .unwrap_or_else(|| "this build".into()),
+            }),
+        }
+        if probe.running.is_some() {
+            step(Progress::Stopping);
+            ssh_stop_kernel(&target, path)?;
+            probe.running = None;
+        }
+        ssh_install_kernel(&target, &probe.arch, probe.has_bin, step)?;
+        probe = ssh_probe(&target, path)?;
         if !probe.has_bin {
             return Err(anyhow!(
-                "could not install arbos-kernel on {host} (~/.cargo/bin/arbos-kernel)"
+                "could not install arbos-kernel on {} ({})",
+                target.name,
+                target.bin
             ));
         }
     }
@@ -1890,11 +2913,13 @@ fn open_remote_tunnel(host: &str, path: &Path) -> Result<Tunnel> {
     let remote_port = if let Some(info) = probe.running {
         port_of(&info.url).ok_or_else(|| anyhow!("arbos on {host} announced no port"))?
     } else {
+        step(Progress::Starting);
         let port = random_port();
-        ssh_launch(host, path)?;
+        ssh_launch(&target, path)?;
         let info = wait_remote_json(host, path)?;
         port_of(&info.url).unwrap_or(port)
     };
+    step(Progress::Connecting);
 
     let local_port = stable_local_port(host, path, "tcp");
     let mut forwards = vec![(local_port, remote_port)];
@@ -1921,12 +2946,30 @@ fn open_remote_tunnel(host: &str, path: &Path) -> Result<Tunnel> {
     Ok(tunnel)
 }
 
+/// The connect step for any place on `host` that is under way, as the
+/// line the window shows where "connecting…" would be. A view over
+/// `remote_progress`, keyed `host:path`; nothing once the tunnel is up or
+/// the attempt has failed (the failure is reported on its own).
+pub fn connect_step(host: &str) -> Option<String> {
+    use arbos_core::remote_kernel::Progress;
+    let prefix = format!("{host}:");
+    progress_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .find_map(|(_, step)| match step {
+            Progress::Ready | Progress::Failed { .. } => None,
+            step => Some(step.to_string()),
+        })
+}
+
 /// Live HTTP gateway on the host (`web.json`), if its pid still answers.
 fn ssh_gateway_info(host: &str, path: &Path) -> Option<WebInfo> {
     let dir = shell_path(&path.to_string_lossy());
     let script = format!(
         r#"f={dir}/.arbos/web.json
-if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
+if [ -f "$f" ]; then pid=$(tr -d '\n' < "$f" | sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
         dir = dir,
     );
     let out = ssh_run(host, &script).ok()?;
@@ -1940,15 +2983,16 @@ if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "
     serde_json::from_str(text).ok()
 }
 
-fn ssh_probe(host: &str, path: &Path) -> Result<Probe> {
+fn ssh_probe(target: &RemoteTarget, path: &Path) -> Result<Probe> {
+    let host = target.ssh.as_str();
     let dir = shell_path(&path.to_string_lossy());
     let script = format!(
         r#"os=$(uname -s | tr A-Z a-z); a=$(uname -m); case "$a" in x86_64|amd64) a=amd64;; aarch64|arm64) a=arm64;; esac; echo "$os-$a"
-if [ -x "{bin}" ]; then sha=$(sha256sum "{bin}" 2>/dev/null | cut -d" " -f1); ver=$("{bin}" --version 2>/dev/null || echo -); else sha=-; ver=-; fi
-echo "$sha"; echo "$ver"
-f={dir}/.arbos/kernel.json
-if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
-        bin = REMOTE_BIN,
+if [ -x "{bin}" ]; then sha=$(sha256sum "{bin}" 2>/dev/null | cut -d" " -f1); ver=$("{bin}" --version 2>/dev/null | head -n1 || echo -); else sha=-; ver=-; fi
+echo "$sha"; echo "${{ver:--}}"
+f={dir}/.arbos/runtime/kernel.json; [ -f "$f" ] || f={dir}/.arbos/kernel.json
+if [ -f "$f" ]; then pid=$(tr -d '\n' < "$f" | sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n1); if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then cat "$f"; fi; fi"#,
+        bin = target.bin,
         dir = dir,
     );
     let out = ssh_run(host, &script)?;
@@ -1961,22 +3005,63 @@ if [ -f "$f" ]; then pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$f"); if [ -n "
     }
     let arch = lines[0].to_string();
     let has_bin = lines[1] != "-";
+    // `arbos-kernel --version` prints `arbos-kernel 0.2.0 <sha> protocol 1`;
+    // an older kernel answers with an unknown-command error, which is as
+    // good as "not ours".
+    let version = has_bin
+        .then(|| lines[2].to_string())
+        .filter(|v| v.starts_with("arbos-kernel "));
     let running = (lines.len() >= 4)
         .then(|| serde_json::from_str::<WebInfo>(&lines[3..].join("\n")).ok())
         .flatten();
     Ok(Probe {
         arch,
         has_bin,
+        version,
         running,
     })
 }
 
-/// Put `arbos-kernel` on the host at `~/.cargo/bin`. Same machine type:
-/// copy ours. Different type: send the source and build there.
-fn ssh_install_kernel(host: &str, _path: &Path, remote_arch: &str) -> Result<()> {
+/// What this window's own kernel says for `--version`, so a remote copy
+/// can be compared to it by the same string.
+fn local_kernel_version() -> String {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            arbos_bin()
+                .ok()
+                .and_then(|bin| Command::new(bin).arg("--version").output().ok())
+                .map(|out| {
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// Put `arbos-kernel` on the host at the target's path. Same machine
+/// type: copy this window's binary (also over a stale one). Different
+/// type: build from source only when the machine allows it in
+/// `machines.toml` (`build = true`); otherwise say where a binary must go.
+fn ssh_install_kernel(
+    target: &RemoteTarget,
+    remote_arch: &str,
+    replacing: bool,
+    step: &dyn Fn(arbos_core::remote_kernel::Progress),
+) -> Result<()> {
+    let host = target.ssh.as_str();
+    let bin_dir = parent_of(&target.bin);
     let mkdir = ssh_run(
         host,
-        r#"umask 077 && mkdir -p "$HOME/.cargo/bin" "$HOME/.cache/arbos""#,
+        &format!(
+            r#"umask 077 && mkdir -p "{bin_dir}" "$HOME/.cache/arbos""#,
+            bin_dir = bin_dir
+        ),
     )?;
     if mkdir.status != 0 {
         return Err(anyhow!("mkdir on {host}: {}", mkdir.problem()));
@@ -1985,17 +3070,98 @@ fn ssh_install_kernel(host: &str, _path: &Path, remote_arch: &str) -> Result<()>
     if local_os_arch() == remote_arch {
         let bin = arbos_bin().context("local arbos-kernel")?;
         if bin.is_file() {
-            ssh_put(host, &bin, ".cargo/bin/arbos-kernel")?;
-            let chmod = ssh_run(host, r#"chmod +x "$HOME/.cargo/bin/arbos-kernel""#)?;
-            if chmod.status == 0 {
+            // Into a temp name first, then moved: a kernel that is being
+            // executed must not be overwritten in place.
+            let tmp = format!("{}.new", target.bin);
+            ssh_put(host, &bin, &tmp)?;
+            let swap = ssh_run(
+                host,
+                &format!(
+                    r#"chmod +x "{tmp}" && mv -f "{tmp}" "{bin}""#,
+                    tmp = tmp,
+                    bin = target.bin
+                ),
+            )?;
+            if swap.status == 0 {
                 return Ok(());
             }
+            return Err(anyhow!(
+                "could not place arbos-kernel at {} on {}: {}",
+                target.bin,
+                target.name,
+                swap.problem()
+            ));
         }
+    }
+    // Another machine type: the release cut for it, from GitHub, checked
+    // against its .sha256 and moved into place as <bin>.new → <bin>; then
+    // the source build when the machine allows it. The script says which.
+    {
+        let mine = arbos_core::remote_kernel::KernelVersion::parse(&local_kernel_version());
+        let version = mine.as_ref().map(|m| m.short()).unwrap_or_default();
+        let sha = mine.as_ref().map(|m| m.sha.clone()).unwrap_or_default();
+        if !version.is_empty() {
+            let script = arbos_core::remote_kernel::install_script(
+                &target.bin,
+                &version,
+                if sha.is_empty() { "main" } else { &sha },
+                remote_arch,
+                target.build,
+            );
+            if target.build
+                && arbos_core::remote_kernel::release_asset(remote_arch, &version).is_none()
+            {
+                step(arbos_core::remote_kernel::Progress::Building);
+            }
+            let out = ssh_run(host, &script)?;
+            let steps = arbos_core::remote_kernel::steps_in(&out.stdout);
+            for line in &steps {
+                eprintln!("remote {}: install: {line}", target.name);
+            }
+            if out.status == 0 {
+                return Ok(());
+            }
+            if !target.build {
+                return Err(anyhow!(
+                    "arbos-kernel {version} for {there} could not be placed on {name} at {bin}: {}",
+                    steps.last().cloned().unwrap_or_else(|| out.problem()),
+                    there = remote_arch,
+                    name = target.name,
+                    bin = target.bin,
+                ));
+            }
+            // Fall through: the machine allows a build; the old tarred
+            // source route below is the last resort.
+            eprintln!(
+                "remote {}: release and cargo install did not land ({}); building from this window's source",
+                target.name,
+                steps.last().cloned().unwrap_or_default()
+            );
+        }
+    }
+    if replacing && !target.build {
+        return Err(anyhow!(
+            "arbos-kernel on {name} ({bin}) is not this window's version and cannot be replaced from here ({here} vs {there}); update it there, or set build = true for {name} in machines.toml",
+            name = target.name,
+            bin = target.bin,
+            here = local_os_arch(),
+            there = remote_arch
+        ));
+    }
+    if !target.build {
+        return Err(anyhow!(
+            "no arbos-kernel on {name} and this window is {here}, the machine {there}: put an arbos-kernel built for it at {bin}, or set build = true for {name} in ~/.config/arbos/machines.toml to build from source there (needs cargo and a C compiler)",
+            name = target.name,
+            bin = target.bin,
+            here = local_os_arch(),
+            there = remote_arch
+        ));
     }
 
     ssh_sync_kernel_src(host)?;
 
-    let script = r#"set -e
+    let script = format!(
+        r#"set -e
 if ! command -v cargo >/dev/null 2>&1; then
   if [ ! -x "$HOME/.cargo/bin/cargo" ]; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
@@ -2003,14 +3169,50 @@ if ! command -v cargo >/dev/null 2>&1; then
   . "$HOME/.cargo/env"
 fi
 cd "$HOME/.cache/arbos/src"
-cargo install --path crates/arbos-kernel --root "$HOME/.cargo" --force
-test -x "$HOME/.cargo/bin/arbos-kernel"
-"#;
+cargo build --release -p arbos-kernel
+mkdir -p "{bin_dir}"
+cp target/release/arbos-kernel "{bin}"
+test -x "{bin}"
+"#,
+        bin_dir = bin_dir,
+        bin = target.bin
+    );
     let out = ssh_run(host, &script)?;
     if out.status != 0 {
-        return Err(anyhow!("install arbos-kernel on {host}: {}", out.problem()));
+        return Err(anyhow!("build arbos-kernel on {host}: {}", out.problem()));
     }
     Ok(())
+}
+
+/// Stop the kernel serving `path` on the host so a newer binary can take
+/// its place: TERM to that one process (its jobs die with it through
+/// their leash), then wait for it to leave. An error names the pid when
+/// it would not.
+fn ssh_stop_kernel(target: &RemoteTarget, path: &Path) -> Result<()> {
+    let host = target.ssh.as_str();
+    let dir = shell_path(&path.to_string_lossy());
+    let script = arbos_core::remote_kernel::stop_script(&dir);
+    let out = ssh_run(host, &script)?;
+    for line in arbos_core::remote_kernel::steps_in(&out.stdout) {
+        eprintln!("remote {}: stop: {line}", target.name);
+    }
+    if out.status != 0 {
+        return Err(anyhow!(
+            "the kernel on {} did not stop for the update: {}",
+            target.name,
+            out.problem()
+        ));
+    }
+    Ok(())
+}
+
+/// The directory part of a remote path, kept as the shell will expand it.
+fn parent_of(path: &str) -> String {
+    match path.rfind('/') {
+        Some(0) => "/".to_string(),
+        Some(ix) => path[..ix].to_string(),
+        None => ".".to_string(),
+    }
 }
 
 fn ssh_sync_kernel_src(host: &str) -> Result<()> {
@@ -2087,19 +3289,49 @@ fn kernel_workspace_toml(root: &Path) -> Result<String> {
 }
 
 fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
-    remember_mux_host(host);
+    // scp over SFTP (OpenSSH 9+) takes the remote path as it is: no shell
+    // there to turn `$HOME` or `~` into a directory. Ask the host once.
+    let remote = if remote.starts_with("$HOME") || remote.starts_with('~') {
+        let home = ssh_run(host, r#"printf %s "$HOME""#)?;
+        if home.status != 0 || home.stdout.trim().is_empty() {
+            return Err(anyhow!(
+                "could not read $HOME on {host}: {}",
+                home.problem()
+            ));
+        }
+        let rest = remote.trim_start_matches("$HOME").trim_start_matches('~');
+        format!("{}{}", home.stdout.trim(), rest)
+    } else {
+        remote.to_string()
+    };
     let dest = format!("{host}:{remote}");
-    let status = Command::new("scp")
-        .args(ssh_shared())
-        .arg("-q")
-        .arg(local)
-        .arg(&dest)
-        .status()
-        .context("scp")?;
-    if !status.success() {
-        return Err(anyhow!("scp {} to {host} failed", local.display()));
+    // Its own connection, not the probe's mux: with ControlPersist=no the
+    // probe's master is closing as scp starts, and scp through that socket
+    // died with "Connection closed" every time on arboslife (cycle 11).
+    let mut last = String::new();
+    for attempt in 0..2 {
+        let out = Command::new("scp")
+            .args(ssh_base())
+            .arg("-q")
+            .arg(local)
+            .arg(&dest)
+            .stdin(Stdio::null())
+            .output()
+            .context("scp")?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        last = if err.is_empty() {
+            out.status.to_string()
+        } else {
+            err
+        };
+        if attempt == 0 {
+            thread::sleep(Duration::from_millis(500));
+        }
     }
-    Ok(())
+    Err(anyhow!("scp {} to {host} failed: {last}", local.display()))
 }
 
 fn local_os_arch() -> String {
@@ -2115,20 +3347,34 @@ fn local_os_arch() -> String {
     format!("{os}-{arch}")
 }
 
-fn ssh_launch(host: &str, path: &Path) -> Result<()> {
+fn ssh_launch(target: &RemoteTarget, path: &Path) -> Result<()> {
+    let host = target.ssh.as_str();
     let dir = shell_path(&path.to_string_lossy());
+    // A machine from machines.toml keeps its kernels' config inside its
+    // own directory (`<dir>/config`), the way `spawn host=` does.
+    let env = match &target.config_home {
+        Some(home) => format!("XDG_CONFIG_HOME={} ", shell_path(home)),
+        None => String::new(),
+    };
     let launch = format!(
-        "cd {dir} && exec {bin} serve {dir}",
+        "cd {dir} && {env}exec {bin} serve {dir}",
         dir = dir,
-        bin = REMOTE_BIN,
+        env = env,
+        bin = target.bin,
     );
     let inner = launch.replace('\'', "'\\''");
+    // The launch log lives under ~/.cache/arbos, which the install makes;
+    // ~/.arbos is the home place and may be anything (on templar a symlink
+    // to a folder that is gone — the redirect failed and the kernel never
+    // started, cycle 11). A log dir that cannot be made is a failure here,
+    // not a 60 s wait for a file that never comes.
     let script = format!(
-        r#"umask 077 && mkdir -p "$HOME/.arbos"
+        r#"umask 077 && mkdir -p "$HOME/.cache/arbos" || {{ echo "cannot make $HOME/.cache/arbos" >&2; exit 1; }}
+log="$HOME/.cache/arbos/web.log"
 if command -v setsid >/dev/null 2>&1; then
-  setsid nohup sh -c '{inner}' >>"$HOME/.arbos/web.log" 2>&1 </dev/null &
+  setsid nohup sh -c '{inner}' >>"$log" 2>&1 </dev/null &
 else
-  nohup sh -c '{inner}' >>"$HOME/.arbos/web.log" 2>&1 </dev/null &
+  nohup sh -c '{inner}' >>"$log" 2>&1 </dev/null &
 fi
 echo started"#
     );
@@ -2143,7 +3389,12 @@ fn wait_remote_json(host: &str, path: &Path) -> Result<WebInfo> {
     let dir = shell_path(&path.to_string_lossy());
     let deadline = Instant::now() + READY_WAIT;
     while Instant::now() < deadline {
-        let out = ssh_run(host, &format!("cat {dir}/.arbos/kernel.json 2>/dev/null"))?;
+        let out = ssh_run(
+            host,
+            &format!(
+                "cat {dir}/.arbos/runtime/kernel.json 2>/dev/null || cat {dir}/.arbos/kernel.json 2>/dev/null"
+            ),
+        )?;
         if out.status == 0
             && let Ok(info) = serde_json::from_str::<WebInfo>(&out.stdout)
         {
@@ -2152,7 +3403,7 @@ fn wait_remote_json(host: &str, path: &Path) -> Result<WebInfo> {
         thread::sleep(Duration::from_millis(500));
     }
     Err(anyhow!(
-        "arbos did not start within 60 s (see ~/.arbos/web.log on {host})"
+        "arbos did not start within 60 s (see ~/.cache/arbos/web.log on {host})"
     ))
 }
 
@@ -2215,11 +3466,18 @@ impl SshOut {
 const REMOTE_DIR_CAP: usize = 200;
 
 pub fn list_remote_dirs(host: &str, path: &str) -> Result<Vec<String>> {
-    // `ls -1p` is one level, no hidden (`-A`/`-a` omitted). `grep '/$'` keeps
-    // directories only, so files never cross SSH. `head` caps the payload.
+    // One level, directories only (`*/` skips hidden names), so files never
+    // cross SSH; beside each name, the `kind` its `.arbos/project.toml`
+    // declares, so a service or a worktree can be kept off the list on the
+    // folder's own word. `head` caps the payload.
     let script = format!(
-        "cd {} && {{ ls -1p 2>/dev/null | grep '/$' || true; }} | head -n {REMOTE_DIR_CAP}",
-        shell_path(path)
+        concat!(
+            "cd {} && for d in */; do d=${{d%/}}; ",
+            "k=$(grep -m1 '^kind' \"$d/.arbos/project.toml\" 2>/dev/null); ",
+            "printf '%s\\t%s\\n' \"$d\" \"$k\"; done 2>/dev/null | head -n {}"
+        ),
+        shell_path(path),
+        REMOTE_DIR_CAP
     );
     let out = ssh_run_with(host, &script, &ssh_listing())?;
     if out.status != 0 {
@@ -2229,8 +3487,12 @@ pub fn list_remote_dirs(host: &str, path: &str) -> Result<Vec<String>> {
         .stdout
         .lines()
         .filter_map(|line| {
-            let name = line.trim().trim_end_matches('/');
-            if name.is_empty() || name == "." || name == ".." || name.starts_with('.') {
+            let (name, kind) = line.split_once('\t').unwrap_or((line, ""));
+            let name = name.trim().trim_end_matches('/');
+            if name.is_empty() || name == "." || name == ".." || name.starts_with('.') || name == "*" {
+                return None;
+            }
+            if crate::model::place::hidden_kind(crate::model::place::kind_in(kind).as_deref()) {
                 return None;
             }
             Some(name.to_string())
@@ -2394,4 +3656,74 @@ fn stable_local_port(host: &str, path: &Path, salt: &str) -> u16 {
 
 fn port_free(port: u16) -> bool {
     TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// The brief inside a spawn wake: the kernel prefixes "You were spawned by
+/// agent root for this mission:" and a blank line; the card shows the
+/// mission as the parent wrote it.
+fn brief_of(text: &str) -> String {
+    let t = text.trim();
+    match t.split_once("for this mission:") {
+        Some((_, rest)) => rest.trim().to_string(),
+        None => t.to_string(),
+    }
+}
+
+/// The prompt a spawned child was given: the wake's `brief` (the mission as
+/// the parent wrote it, on wakes since #221) when present, else the mission
+/// cut out of the kernel's framing in `text` (older transcripts).
+fn wake_brief(text: &str, brief: Option<&str>) -> String {
+    match brief.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(brief) => brief.to_string(),
+        None => brief_of(text),
+    }
+}
+
+/// The brief a worker was spawned with: the text of the first plan wake in
+/// its transcript. `None` for a remote place, an id that is not a folder,
+/// or a transcript that does not start with one.
+/// `readonly:` and `kind:` off a local agent's `agent.md`, live or already
+/// archived — a worker can finish before the listing next runs, and its
+/// line still has to say it could not write.
+pub fn agent_flags(place: &Place, id: &str) -> Option<(bool, Option<String>)> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let store = place.path.join(".arbos");
+    let md = [
+        store.join("agents").join(id).join("agent.md"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(id)
+            .join("agent.md"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())?;
+    let front = agent_front(&md);
+    Some((front.readonly, front.kind))
+}
+
+pub fn agent_brief(place: &Place, id: &str) -> Option<String> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let path = place
+        .path
+        .join(".arbos")
+        .join("agents")
+        .join(id)
+        .join("transcript.jsonl");
+    let file = std::fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(file), &mut first).ok()?;
+    let ev: arbos_core::Event = serde_json::from_str(first.trim()).ok()?;
+    match ev.kind {
+        arbos_core::EventKind::Wake {
+            wake,
+            text: Some(text),
+            brief,
+        } if wake == "plan" && !text.trim().is_empty() => Some(wake_brief(&text, brief.as_deref())),
+        _ => None,
+    }
 }

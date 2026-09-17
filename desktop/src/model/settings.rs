@@ -24,6 +24,13 @@ pub struct Settings {
     /// What the app will show. Every bare key has to go above it.
     #[serde(default)]
     pub features: Features,
+    /// Which builds this machine follows. A table, so it goes below the bare
+    /// keys for the reason above.
+    #[serde(default)]
+    pub update: Update,
+    /// Where an in-app report is delivered. A table, so below the bare keys.
+    #[serde(default)]
+    pub feedback: Feedback,
     /// Leftover from when this shell spawned ACP binaries. Ignored: one
     /// kernel, model switch via `set_model`. Kept so an old file still parses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -52,6 +59,88 @@ impl Default for Features {
             tables: false,
         }
     }
+}
+
+/// Which builds this machine updates itself to.
+///
+/// `stable` is the tagged releases and is what anybody who has not asked
+/// otherwise gets. `dev` is every green commit on `main` — the channel to be
+/// on to test what just merged.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Update {
+    /// `stable` or `dev`. A string rather than an enum so a file naming a
+    /// channel this build has never heard of falls back to the default
+    /// instead of refusing to parse — see [`crate::update::channel_of`].
+    pub channel: String,
+}
+
+/// Where a report goes once he has pressed Send.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Feedback {
+    /// The store address reports are written under; the report's own folder is
+    /// made inside it. A dedicated place on ArbosLife rather than one of
+    /// Jacob's projects, so a report is never mixed into the notes of whatever
+    /// he was building.
+    ///
+    /// Empty switches delivery off, and a report then waits in the outbox on
+    /// his own disk — the same state as being offline, which the sheet already
+    /// says plainly.
+    pub address: String,
+    /// The configuration directory delivery reads its hub credentials from,
+    /// used as `XDG_CONFIG_HOME` for that one command — so the file is
+    /// `<hub_home>/arbos/hub.toml`.
+    ///
+    /// Separate from his own `~/.config/arbos/` on purpose, and this is the
+    /// whole reason the setting exists. That file may hold a machine token
+    /// which is `owner` on every project he has; the token that sends a bug
+    /// report should be able to write reports and nothing else. Delivery reads
+    /// only this directory and **never falls back** to his: with no
+    /// `hub.toml` here, reports wait rather than going out under the wrong
+    /// name.
+    pub hub_home: String,
+}
+
+impl Default for Feedback {
+    fn default() -> Self {
+        Self {
+            address: "arbos://arboslife/feedback/internal/feedback".into(),
+            hub_home: dirs::home_dir()
+                .map(|home| home.join(".config").join("arbos-feedback"))
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Self {
+            channel: arbos_update::Channel::default().as_str().to_owned(),
+        }
+    }
+}
+
+/// Put the channel in the file.
+///
+/// Edited with `toml_edit` for the reason [`set_feature`] is: this file is
+/// meant to be opened by hand, and a round trip would drop every comment in
+/// it.
+pub fn set_update_channel(channel: arbos_update::Channel) -> Result<()> {
+    let path = dir()?.join("settings.toml");
+    let body = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut =
+        body.parse().context("settings.toml is not valid toml")?;
+    let update = doc["update"].or_insert(toml_edit::table());
+    let Some(update) = update.as_table_mut() else {
+        anyhow::bail!("`update` in settings.toml is not a table");
+    };
+    update.set_implicit(false);
+    update["channel"] = toml_edit::value(channel.as_str());
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
 }
 
 /// One switchable surface, named rather than reached as a field so the settings
@@ -159,13 +248,15 @@ impl Default for Settings {
             cover_memory: cover_memory(),
             watch_bounce: watch_bounce(),
             features: Features::default(),
+            update: Update::default(),
+            feedback: Feedback::default(),
             agents: Vec::new(),
         }
     }
 }
 
 /// Where this shell keeps machine-local data — `$XDG_DATA_HOME/arbos-desktop`,
-/// defaulting to `~/.local/share/arbos-desktop`. Separate from a Cydonia install.
+/// defaulting to `~/.local/share/arbos-desktop`. Separate from a Arbos install.
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
         && !xdg.is_empty()

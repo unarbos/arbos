@@ -47,6 +47,7 @@ pub use parse::{is_image, is_url, parse};
 pub use preview::{LinkPreview, Preview, set_link_preview};
 pub use render::{
     Annotation, BlockLayouts, Caption, Editing, markdown, render, render_revealed, render_with,
+    set_code_band,
 };
 pub use reveal::{LineReveal, Pace, Reveal, RevealClock, Rise};
 pub use select::{Cursor, Selection};

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use arbos_core::host::{ProviderKind, attribution_headers};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{sync::OnceLock, time::Duration};
@@ -21,8 +22,12 @@ impl std::error::Error for Interrupted {}
 pub enum FailKind {
     /// Could not connect, or the connection dropped.
     Transport,
-    /// No bytes for `stream_idle`.
+    /// No bytes for `stream_idle` once the answer had started.
     Idle,
+    /// No response at all within `first_byte`: the provider queued the
+    /// request and said nothing. Another model answers now; this one may
+    /// be retried once.
+    Silent,
     /// Non-2xx response.
     Status,
     /// An `{"error": …}` frame inside the SSE stream.
@@ -53,6 +58,7 @@ impl std::fmt::Display for ProviderError {
         match (self.kind, self.status) {
             (FailKind::Status, Some(s)) => write!(f, "{} {}", s, status_label(s))?,
             (FailKind::Idle, _) => f.write_str("no data from provider")?,
+            (FailKind::Silent, _) => f.write_str("no answer from provider")?,
             (FailKind::Transport, _) => f.write_str("connection failed")?,
             (FailKind::Stream, _) => f.write_str("provider error mid-stream")?,
             (FailKind::Status, None) => f.write_str("provider error")?,
@@ -174,6 +180,10 @@ impl ChatMessage {
 pub struct ImagePart {
     pub mime: String,
     pub b64: String,
+    /// The attachment as the transcript names it. Ours, not the wire's:
+    /// it lets a rejected image be described and recorded by name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
 }
 
 impl From<crate::image::ImagePart> for ImagePart {
@@ -181,6 +191,7 @@ impl From<crate::image::ImagePart> for ImagePart {
         Self {
             mime: p.mime.to_string(),
             b64: p.b64,
+            path: String::new(),
         }
     }
 }
@@ -195,6 +206,13 @@ pub struct ToolCall {
 pub enum Delta {
     Text(String),
     Thinking(String),
+    /// Nothing from the model for a while, but the call is alive: how long
+    /// it has run. Every few seconds during a silent stretch, so a window
+    /// can show "Thinking for 40s" instead of a dead turn. A model that
+    /// thinks for a minute before its first byte (Anthropic via OpenRouter
+    /// delivers the reasoning only after the fact) looks exactly like a
+    /// hung call otherwise.
+    Waiting(Duration),
     /// A tool call whose arguments are complete. Fired as soon as we can
     /// tell, so the executor can start it while the model keeps streaming.
     Call(ToolCall),
@@ -206,14 +224,35 @@ pub struct Provider {
     pub key: String,
     pub model: String,
     pub reasoning_effort: Option<String>,
+    /// `cache_control.ttl` for Claude breakpoints: None = the 5-minute
+    /// default, Some("1h") = an hour.
+    pub cache_ttl: Option<String>,
+    /// OpenRouter routing by data policy: "deny" or "zdr" (see
+    /// `HostConfig::data_policy`); empty = the account's default.
+    pub data_policy: String,
     /// Longest silence tolerated mid-stream before the call counts as lost.
     pub stream_idle: Duration,
+    /// The longest wait for the response headers before the call is
+    /// given up as `Silent`. Shorter than `stream_idle`: a provider that
+    /// has not started in half a minute is not about to (Jacob waited
+    /// 98 s on a new project's first turn, 2026-09-16).
+    pub first_byte: Duration,
     /// `max_tokens` to send. None = omit the field.
     pub max_tokens: Option<u64>,
     /// Folder that gets one JSON file per call with the request, the
     /// response headers, every raw chunk with its arrival time, and the
     /// parsed result. None = no tracing.
     pub trace: Option<std::path::PathBuf>,
+    /// What the trace file says about where the call sits: the agent, the
+    /// purpose (`turn`, `compact`), and the transcript line the call's
+    /// result lands on. The turn sets `trace_line` before every step; the
+    /// call ids in the file match the `tool` events' `call_id`.
+    pub trace_agent: String,
+    pub trace_purpose: String,
+    pub trace_line: u64,
+    /// A script instead of the network (`ARBOS_PROVIDER=replay`). Every
+    /// call returns the next line; see [`crate::replay`].
+    pub replay: Option<std::sync::Arc<crate::replay::Replay>>,
 }
 
 /// Everything one provider call did, for the trace file.
@@ -221,6 +260,14 @@ pub struct Provider {
 struct Trace {
     started_ms: i64,
     ended_ms: i64,
+    /// Which agent, why (`turn`, `compact`), and the 1-based transcript
+    /// line the resulting `assistant`/`compaction` event is expected on.
+    agent: String,
+    purpose: String,
+    transcript_line: u64,
+    /// The `call_id`s this call produced; the transcript's `tool` events
+    /// carry the same ids.
+    call_ids: Vec<String>,
     url: String,
     model: String,
     request: Value,
@@ -238,11 +285,23 @@ impl Trace {
     fn write(&mut self, dir: &Option<std::path::PathBuf>) {
         let Some(dir) = dir else { return };
         self.ended_ms = now_ms();
+        // `trace/` lives in the agent folder; a folder deleted mid-call is
+        // not recreated for its trace (qa-017).
+        if !dir.parent().is_some_and(|agent| agent.is_dir()) {
+            return;
+        }
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
         let n = std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
-        let path = dir.join(format!("{:04}-{}.json", n + 1, self.started_ms));
+        // `0007-1789250000000-L42.json`: the 42 is the transcript line, so
+        // `ls trace/` alone maps a call to the transcript.
+        let path = dir.join(format!(
+            "{:04}-{}-L{}.json",
+            n + 1,
+            self.started_ms,
+            self.transcript_line
+        ));
         if let Ok(text) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(path, text);
         }
@@ -271,10 +330,68 @@ fn http() -> &'static reqwest::Client {
     })
 }
 
+/// The key, plus whatever the host behind `base` asks apps to send with it
+/// (OpenRouter: `HTTP-Referer` and `X-Title`, so usage is filed under Arbos).
+fn authed(req: reqwest::RequestBuilder, base: &str, key: &str) -> reqwest::RequestBuilder {
+    let mut req = req.bearer_auth(key);
+    for (name, value) in attribution_headers(ProviderKind::infer(base)) {
+        req = req.header(*name, *value);
+    }
+    req
+}
+
 /// Open the TLS + HTTP/2 session before the first user turn, and remember
 /// the model list so `context_window` can answer without a round trip.
 pub async fn warm(base: &str, key: &str) {
     let _ = models_list(base, key).await;
+}
+
+/// GET `{base}{path}` with the key; a non-2xx is an error naming the status.
+async fn get_json(base: &str, key: &str, path: &str) -> Result<Value> {
+    let url = format!("{}{path}", base.trim_end_matches('/'));
+    let resp = authed(http().get(url), base, key).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        let detail = error_message(&text);
+        anyhow::bail!(
+            "{} {}{}",
+            status.as_u16(),
+            status_label(status.as_u16()),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    Ok(resp.json().await?)
+}
+
+/// Is this key accepted by the host behind `base`? OpenRouter's `/models`
+/// is public and proves nothing, so there the check is `/key`, which
+/// answers 401 to a bad key. Elsewhere `/models` needs the key.
+pub async fn check_key(base: &str, key: &str) -> Result<()> {
+    let path = match ProviderKind::infer(base) {
+        ProviderKind::OpenRouter => "/key",
+        ProviderKind::OpenAi | ProviderKind::Custom => "/models",
+    };
+    get_json(base, key, path).await.map(|_| ())
+}
+
+/// The ids the provider lists at `{base}/models`, or the failure to ask.
+/// Uncached: setup calls this once to offer a pick list.
+pub async fn list_model_ids(base: &str, key: &str) -> Result<Vec<String>> {
+    let v = get_json(base, key, "/models").await?;
+    Ok(v.get("data")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|m| m.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// `{base}/models`, fetched once per process per base.
@@ -286,7 +403,7 @@ async fn models_list(base: &str, key: &str) -> Option<Value> {
         return Some(v);
     }
     let url = format!("{}/models", base.trim_end_matches('/'));
-    let resp = http().get(url).bearer_auth(key).send().await.ok()?;
+    let resp = authed(http().get(url), base, key).send().await.ok()?;
     let v: Value = resp.json().await.ok()?;
     if let Ok(mut c) = cache.lock() {
         c.insert(base.to_string(), v.clone());
@@ -320,6 +437,34 @@ pub async fn max_completion_tokens(base: &str, key: &str, model: &str) -> Option
         .and_then(Value::as_u64)
 }
 
+/// Whether the provider says `model` takes image input. OpenRouter lists
+/// `architecture.input_modalities`; hosts that list nothing answer None
+/// and the turn finds out from the first call.
+pub async fn accepts_images(base: &str, key: &str, model: &str) -> Option<bool> {
+    let m = model_entry(base, key, model).await?;
+    let mods = m.get("architecture")?.get("input_modalities")?.as_array()?;
+    Some(mods.iter().any(|v| v.as_str() == Some("image")))
+}
+
+/// Every model the provider lists as taking image input, in list order.
+pub async fn vision_models(base: &str, key: &str) -> Vec<String> {
+    let Some(list) = models_list(base, key).await else {
+        return Vec::new();
+    };
+    let Some(data) = list.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter(|m| {
+            m.get("architecture")
+                .and_then(|a| a.get("input_modalities"))
+                .and_then(Value::as_array)
+                .is_some_and(|mods| mods.iter().any(|v| v.as_str() == Some("image")))
+        })
+        .filter_map(|m| m.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
 async fn model_entry(base: &str, key: &str, model: &str) -> Option<Value> {
     let list = models_list(base, key).await?;
     let data = list.get("data")?.as_array()?;
@@ -328,6 +473,9 @@ async fn model_entry(base: &str, key: &str, model: &str) -> Option<Value> {
         .cloned()
 }
 
+/// How often a silent model call says it is still there.
+pub const HEARTBEAT: Duration = Duration::from_secs(5);
+
 /// One finished model call.
 #[derive(Debug, Default)]
 pub struct Completion {
@@ -335,6 +483,16 @@ pub struct Completion {
     pub calls: Vec<ToolCall>,
     /// `(prompt_tokens, total_tokens)` when the provider reported usage.
     pub usage: Option<(u64, u64)>,
+    /// This call's price in US dollars, when the provider reported it
+    /// (OpenRouter `usage.cost`, asked for with `usage: {include: true}`).
+    pub cost: Option<f64>,
+    /// Prompt tokens served from the provider's cache on this call
+    /// (`usage.prompt_tokens_details.cached_tokens`), when reported.
+    pub cached: Option<u64>,
+    /// A scripted thought (`thinking` on a replay reply), streamed as
+    /// `Delta::Thinking` before the text so tests can see a thinking
+    /// record settle. Live providers stream theirs and leave this empty.
+    pub thinking: Option<String>,
     /// `reasoning_details` blocks, to be sent back with this assistant
     /// message on later calls. Gemini 3 stops thinking without its thought
     /// signatures; Anthropic rejects a broken thinking chain.
@@ -347,6 +505,50 @@ impl Provider {
             .await
     }
 
+    /// Whether this key can call `self.model` at all: one token, no tools,
+    /// a short wait. Run before a new project's first turn so a blocked
+    /// family is found — and another model picked — before the user is
+    /// shown anything (Code2, 2026-09-16). Ok(()) on an answer; the
+    /// provider's error otherwise.
+    pub async fn probe(&self, cancel: &CancellationToken) -> Result<(), ProviderError> {
+        let mut p = Self {
+            base: self.base.clone(),
+            key: self.key.clone(),
+            model: self.model.clone(),
+            reasoning_effort: None,
+            cache_ttl: None,
+            data_policy: self.data_policy.clone(),
+            stream_idle: Duration::from_secs(15),
+            first_byte: Duration::from_secs(15),
+            max_tokens: Some(1),
+            trace: None,
+            trace_agent: self.trace_agent.clone(),
+            trace_purpose: "probe".into(),
+            trace_line: 0,
+            replay: self.replay.clone(),
+        };
+        p.max_tokens = Some(1);
+        let msgs = [ChatMessage::plain(
+            "user",
+            Some("Reply with one word.".into()),
+        )];
+        match p.complete_stream(&msgs, &[], cancel, |_| {}).await {
+            Ok(_) => Ok(()),
+            Err(e) => match e.downcast::<ProviderError>() {
+                Ok(pe) => Err(pe),
+                Err(other) => Err(ProviderError {
+                    kind: FailKind::Transport,
+                    status: None,
+                    message: format!("{other:#}"),
+                    retry_after: None,
+                    should_retry: None,
+                    visible: false,
+                    partial: String::new(),
+                }),
+            },
+        }
+    }
+
     pub async fn complete_stream(
         &self,
         messages: &[ChatMessage],
@@ -355,8 +557,14 @@ impl Provider {
         mut on_delta: impl FnMut(Delta),
     ) -> Result<Completion> {
         let mut msgs = messages_json(messages);
-        if wants_cache_control(&self.model) {
-            mark_cache_breakpoints(&mut msgs);
+        if wants_cache_control(&self.model, &self.base) {
+            // The hour is Anthropic's; others drop or reject the field.
+            let m = self.model.to_ascii_lowercase();
+            let ttl = self
+                .cache_ttl
+                .as_deref()
+                .filter(|t| *t == "1h" && (m.contains("claude") || m.starts_with("anthropic/")));
+            mark_cache_breakpoints(&mut msgs, ttl);
         }
         let mut body = json!({
             "model": self.model,
@@ -365,6 +573,15 @@ impl Provider {
         });
         if self.base.contains("openai.com") {
             body["stream_options"] = json!({ "include_usage": true });
+        }
+        // OpenRouter streams token counts by default; the price only when
+        // asked. Other endpoints ignore the key or reject it, so it is
+        // sent to OpenRouter alone.
+        if self.base.contains("openrouter.ai") {
+            body["usage"] = json!({ "include": true });
+            if let Some(provider) = data_policy_routing(&self.data_policy) {
+                body["provider"] = provider;
+            }
         }
         if let Some(n) = self.max_tokens {
             body["max_tokens"] = json!(n);
@@ -383,9 +600,15 @@ impl Provider {
         ) {
             body["reasoning_effort"] = json!(effort);
         }
+        if let Some(replay) = &self.replay {
+            return Ok(self.replayed(replay, body, &mut on_delta));
+        }
         let url = format!("{}/chat/completions", self.base.trim_end_matches('/'));
         let mut trace = Trace {
             started_ms: now_ms(),
+            agent: self.trace_agent.clone(),
+            purpose: self.trace_purpose.clone(),
+            transcript_line: self.trace_line,
             url: url.clone(),
             model: self.model.clone(),
             request: if self.trace.is_some() {
@@ -402,12 +625,54 @@ impl Provider {
             Ok(c) => {
                 trace.content = c.content.clone();
                 trace.calls = c.calls.clone();
+                trace.call_ids = c.calls.iter().map(|c| c.id.clone()).collect();
                 trace.usage = c.usage;
             }
             Err(e) => trace.error = Some(format!("{e:#}")),
         }
         trace.write(&self.trace);
         result
+    }
+
+    /// The scripted answer, delivered like a streamed one (one text delta,
+    /// one delta per call) and traced like one, with `replay:<file>` as
+    /// the URL.
+    fn replayed(
+        &self,
+        replay: &crate::replay::Replay,
+        body: Value,
+        on_delta: &mut impl FnMut(Delta),
+    ) -> Completion {
+        let mut trace = Trace {
+            started_ms: now_ms(),
+            agent: self.trace_agent.clone(),
+            purpose: self.trace_purpose.clone(),
+            transcript_line: self.trace_line,
+            url: format!("replay:{}", replay.path.display()),
+            model: self.model.clone(),
+            request: if self.trace.is_some() {
+                body
+            } else {
+                Value::Null
+            },
+            ..Trace::default()
+        };
+        let c = replay.next(&self.trace_agent);
+        if let Some(t) = c.thinking.as_deref().filter(|t| !t.is_empty()) {
+            on_delta(Delta::Thinking(t.to_string()));
+        }
+        if !c.content.is_empty() {
+            on_delta(Delta::Text(c.content.clone()));
+        }
+        for call in &c.calls {
+            on_delta(Delta::Call(call.clone()));
+        }
+        trace.content = c.content.clone();
+        trace.calls = c.calls.clone();
+        trace.call_ids = c.calls.iter().map(|c| c.id.clone()).collect();
+        trace.usage = c.usage;
+        trace.write(&self.trace);
+        c
     }
 
     async fn stream_inner(
@@ -419,40 +684,49 @@ impl Provider {
         trace: &mut Trace,
     ) -> Result<Completion> {
         let t0 = std::time::Instant::now();
-        let request = http().post(url).bearer_auth(&self.key).json(&body).send();
+        let call_start = std::time::Instant::now();
+        let request = authed(http().post(url), &self.base, &self.key)
+            .json(&body)
+            .send();
         // The wait for headers is bounded like the wait for each chunk. A
         // provider that queues the request and says nothing held one call
         // for 195 s before its first byte; the connect timeout does not
-        // cover that, and neither did anything else.
-        let mut resp = tokio::select! {
-            r = tokio::time::timeout(self.stream_idle, request) => match r {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    return Err(ProviderError {
-                        kind: FailKind::Transport,
-                        status: None,
-                        message: e.to_string(),
-                        retry_after: None,
-                        should_retry: None,
-                        visible: false,
-                        partial: String::new(),
-                    }
-                    .into());
+        // cover that, and neither did anything else. Every HEARTBEAT of
+        // silence a `Waiting` delta goes out so the wait is visible.
+        let mut request = std::pin::pin!(request);
+        let mut resp = loop {
+            let left = self.first_byte.saturating_sub(call_start.elapsed());
+            if left.is_zero() {
+                return Err(ProviderError {
+                    kind: FailKind::Silent,
+                    status: None,
+                    message: format!("no response headers for {}s", self.first_byte.as_secs()),
+                    retry_after: None,
+                    should_retry: None,
+                    visible: false,
+                    partial: String::new(),
                 }
-                Err(_) => {
-                    return Err(ProviderError {
-                        kind: FailKind::Idle,
-                        status: None,
-                        message: format!("no response headers for {}s", self.stream_idle.as_secs()),
-                        retry_after: None,
-                        should_retry: None,
-                        visible: false,
-                        partial: String::new(),
+                .into());
+            }
+            tokio::select! {
+                r = tokio::time::timeout(left.min(HEARTBEAT), &mut request) => match r {
+                    Ok(Ok(r)) => break r,
+                    Ok(Err(e)) => {
+                        return Err(ProviderError {
+                            kind: FailKind::Transport,
+                            status: None,
+                            message: e.to_string(),
+                            retry_after: None,
+                            should_retry: None,
+                            visible: false,
+                            partial: String::new(),
+                        }
+                        .into());
                     }
-                    .into());
-                }
-            },
-            _ = cancel.cancelled() => return Err(Interrupted.into()),
+                    Err(_) => on_delta(Delta::Waiting(call_start.elapsed())),
+                },
+                _ = cancel.cancelled() => return Err(Interrupted.into()),
+            }
         };
         let status = resp.status();
         trace.status = Some(status.as_u16());
@@ -489,6 +763,8 @@ impl Provider {
         let mut content = String::new();
         let mut calls: Vec<PartialCall> = Vec::new();
         let mut usage = None;
+        let mut cost = None;
+        let mut cached = None;
         let mut reasoning_details: Vec<Value> = Vec::new();
         // Time since the last delta that carried text, reasoning or tool
         // arguments. Keep-alive comments and empty deltas do not count: a
@@ -517,15 +793,23 @@ impl Provider {
                     &content,
                 ));
             }
+            // A silent stretch shorter than the idle limit is a heartbeat,
+            // not a failure: the model is thinking, and the window hears so.
             let chunk = tokio::select! {
-                c = tokio::time::timeout(left, resp.chunk()) => match c {
+                c = tokio::time::timeout(left.min(HEARTBEAT), resp.chunk()) => match c {
                     Ok(Ok(c)) => c,
                     Ok(Err(e)) => return Err(fail(FailKind::Transport, e.to_string(), &content)),
-                    Err(_) => return Err(fail(
-                        FailKind::Idle,
-                        format!("no model output for {}s", self.stream_idle.as_secs()),
-                        &content,
-                    )),
+                    Err(_) => {
+                        if last_progress.elapsed() >= self.stream_idle {
+                            return Err(fail(
+                                FailKind::Idle,
+                                format!("no model output for {}s", self.stream_idle.as_secs()),
+                                &content,
+                            ));
+                        }
+                        on_delta(Delta::Waiting(call_start.elapsed()));
+                        continue;
+                    }
                 },
                 _ = cancel.cancelled() => return Err(Interrupted.into()),
             };
@@ -550,6 +834,9 @@ impl Provider {
                         content,
                         calls: finish_calls(calls),
                         usage,
+                        cost,
+                        cached,
+                        thinking: None,
                         reasoning_details,
                     });
                 }
@@ -586,6 +873,12 @@ impl Provider {
                 }
                 if let Some(pair) = usage_of(&v) {
                     usage = Some(pair);
+                }
+                if let Some(c) = cost_of(&v) {
+                    cost = Some(c);
+                }
+                if let Some(n) = cached_of(&v) {
+                    cached = Some(n);
                 }
                 let Some(choice) = v.get("choices").and_then(|c| c.get(0)) else {
                     continue;
@@ -628,6 +921,9 @@ impl Provider {
                             content,
                             calls: finish_calls(calls),
                             usage,
+                            cost,
+                            cached,
+                            thinking: None,
                             reasoning_details,
                         });
                     }
@@ -643,6 +939,9 @@ impl Provider {
             content,
             calls: finish_calls(calls),
             usage,
+            cost,
+            cached,
+            thinking: None,
             reasoning_details,
         })
     }
@@ -941,12 +1240,54 @@ fn usage_of(v: &Value) -> Option<(u64, u64)> {
     Some((prompt, total))
 }
 
-/// Anthropic models cache nothing unless the request says where. OpenAI
-/// and most others cache the prefix automatically and reject or ignore the
-/// marker, so it is only sent to Claude.
-fn wants_cache_control(model: &str) -> bool {
+/// Prompt tokens read from the cache, as OpenAI and OpenRouter report them
+/// (`usage.prompt_tokens_details.cached_tokens`); Anthropic's own field
+/// (`cache_read_input_tokens`) when a direct endpoint sends it.
+fn cached_of(v: &Value) -> Option<u64> {
+    let u = v.get("usage")?;
+    u.get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| u.get("cache_read_input_tokens").and_then(Value::as_u64))
+}
+
+/// OpenRouter puts the call's price in `usage.cost` (dollars). Absent
+/// elsewhere.
+fn cost_of(v: &Value) -> Option<f64> {
+    v.get("usage")?.get("cost")?.as_f64()
+}
+
+/// OpenRouter's `provider` routing object for a data policy: "deny"
+/// keeps the request off providers that may store or train on prompts;
+/// "zdr" adds zero-data-retention endpoints only. None for anything else.
+fn data_policy_routing(policy: &str) -> Option<Value> {
+    match policy.trim().to_ascii_lowercase().as_str() {
+        "deny" => Some(json!({ "data_collection": "deny" })),
+        "zdr" => Some(json!({ "data_collection": "deny", "zdr": true })),
+        _ => None,
+    }
+}
+
+/// Who needs the `cache_control` marker. Anthropic models cache nothing
+/// unless the request says where. Through OpenRouter the same marker also
+/// drives Google's explicit caching (Gemini; the 2.5 line caches on its
+/// own too, the marker is harmless) and Alibaba's (Qwen, DeepSeek V3.2 on
+/// Alibaba). OpenAI, Grok, DeepSeek, Moonshot, Groq cache the prefix
+/// automatically; OpenRouter translates the marker for OpenAI but there
+/// is nothing to gain. A custom OpenAI-compatible endpoint may reject an
+/// unknown field, so off OpenRouter only Claude gets it.
+fn wants_cache_control(model: &str, base: &str) -> bool {
     let m = model.to_ascii_lowercase();
-    m.contains("claude") || m.starts_with("anthropic/")
+    if m.contains("claude") || m.starts_with("anthropic/") {
+        return true;
+    }
+    if !base.contains("openrouter.ai") {
+        return false;
+    }
+    m.starts_with("google/")
+        || m.starts_with("qwen/")
+        || m.starts_with("alibaba/")
+        || m.starts_with("deepseek/deepseek-v3.2")
 }
 
 /// Two breakpoints: after the system prompt (contract + tool list, the
@@ -954,15 +1295,19 @@ fn wants_cache_control(model: &str) -> bool {
 /// next step's prefix). Cache reads cost a tenth of fresh tokens and cut
 /// time to first byte; without the markers every step re-reads the whole
 /// conversation at full price.
-fn mark_cache_breakpoints(msgs: &mut [Value]) {
-    fn mark(m: &mut Value) {
+fn mark_cache_breakpoints(msgs: &mut [Value], ttl: Option<&str>) {
+    let marker = match ttl {
+        Some(t) => json!({ "type": "ephemeral", "ttl": t }),
+        None => json!({ "type": "ephemeral" }),
+    };
+    let mark = |m: &mut Value| {
         let Some(content) = m.get_mut("content") else {
             return;
         };
         match content {
             Value::String(s) => {
                 let text = std::mem::take(s);
-                *content = json!([{ "type": "text", "text": text, "cache_control": { "type": "ephemeral" } }]);
+                *content = json!([{ "type": "text", "text": text, "cache_control": marker }]);
             }
             Value::Array(parts) => {
                 if let Some(last) = parts
@@ -970,14 +1315,14 @@ fn mark_cache_breakpoints(msgs: &mut [Value]) {
                     .rev()
                     .find(|p| p.get("type").and_then(Value::as_str) == Some("text"))
                 {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = marker.clone();
                 } else if let Some(last) = parts.last_mut() {
-                    last["cache_control"] = json!({ "type": "ephemeral" });
+                    last["cache_control"] = marker.clone();
                 }
             }
             _ => {}
         }
-    }
+    };
     let n = msgs.len();
     if n == 0 {
         return;
@@ -1052,4 +1397,86 @@ pub fn messages_json(messages: &[ChatMessage]) -> Vec<Value> {
             v
         })
         .collect()
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    const OR: &str = "https://openrouter.ai/api/v1";
+    const CUSTOM: &str = "http://localhost:8080/v1";
+
+    #[test]
+    fn the_marker_goes_to_vendors_that_need_it_and_only_through_openrouter_beyond_claude() {
+        for m in ["anthropic/claude-sonnet-4.5", "claude-3-5-haiku"] {
+            assert!(wants_cache_control(m, OR), "{m}");
+            assert!(wants_cache_control(m, CUSTOM), "{m} direct");
+        }
+        for m in [
+            "google/gemini-2.5-pro",
+            "google/gemini-3-flash",
+            "qwen/qwen3-coder-plus",
+            "deepseek/deepseek-v3.2",
+        ] {
+            assert!(wants_cache_control(m, OR), "{m}");
+            assert!(
+                !wants_cache_control(m, CUSTOM),
+                "{m} direct: unknown field risk"
+            );
+        }
+        for m in [
+            "openai/gpt-5.4-mini",
+            "x-ai/grok-4",
+            "deepseek/deepseek-chat",
+            "moonshotai/kimi-k2",
+        ] {
+            assert!(!wants_cache_control(m, OR), "{m} caches on its own");
+        }
+    }
+
+    #[test]
+    fn the_hour_ttl_rides_on_the_marker_only_when_asked() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "rules"}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        mark_cache_breakpoints(&mut msgs, Some("1h"));
+        assert_eq!(
+            msgs[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert_eq!(
+            msgs[1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        let mut plain = vec![json!({"role": "system", "content": "rules"})];
+        mark_cache_breakpoints(&mut plain, None);
+        assert_eq!(
+            plain[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+    }
+
+    #[test]
+    fn the_data_policy_becomes_openrouters_provider_routing() {
+        assert_eq!(data_policy_routing(""), None);
+        assert_eq!(data_policy_routing("allow"), None);
+        assert_eq!(
+            data_policy_routing("deny"),
+            Some(json!({"data_collection": "deny"}))
+        );
+        assert_eq!(
+            data_policy_routing(" ZDR "),
+            Some(json!({"data_collection": "deny", "zdr": true}))
+        );
+    }
+
+    #[test]
+    fn cached_tokens_are_read_from_either_shape() {
+        let openai = json!({"usage": {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 64}}});
+        assert_eq!(cached_of(&openai), Some(64));
+        let anthropic = json!({"usage": {"prompt_tokens": 100, "cache_read_input_tokens": 80}});
+        assert_eq!(cached_of(&anthropic), Some(80));
+        assert_eq!(cached_of(&json!({"usage": {"prompt_tokens": 1}})), None);
+    }
 }

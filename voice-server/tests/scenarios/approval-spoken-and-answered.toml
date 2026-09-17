@@ -1,0 +1,29 @@
+# The agent asks to run a command. Nobody auto-approves: the narrator speaks the approval
+# ("Arbos wants to run bash: … Allow?"), the caller says yes, and the kernel gets allow = true.
+title = "Approval spoken by the narrator and answered by voice"
+
+[[steps]]
+say = "Clean the build directory."
+model = { ack = "On it." }
+[steps.kernel]
+approval = "bash: rm -rf target && cargo build"
+reply = "Cleaned the build directory and rebuilt: 0 warnings."
+reply_denied = "I did not run the command; the build directory is untouched."
+
+[[steps]]
+wait_spoken = "wants to run bash"
+
+[[steps]]
+say = "Yes, allow it."
+model = { quiet = true }
+
+[[steps]]
+wait_spoken = "Cleaned the build directory"
+
+[expect]
+spoken_contains = ["Arbos wants to run bash: rm -rf target && cargo build. Allow?", "Allowed.", "Cleaned the build directory and rebuilt"]
+spoken_not_contains = ["did not run the command", "denied"]
+approvals = [true]
+approval_answered_within_s = 20
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]
+kernel_user_not = ["Yes, allow it"]

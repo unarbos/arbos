@@ -50,7 +50,8 @@ class OpenRouterReply:
         for _round in range(4):  # tool calls loop back into the model at most this many times
             calls: dict[int, dict] = {}
             finish = None
-            async for kind, payload in self._one_call(history, with_tools=tools is not None):
+            async for kind, payload in self._one_call(history, with_tools=tools is not None,
+                                                       schemas=tools.schemas if tools is not None else None):
                 if kind == "text":
                     yield payload
                 elif kind == "tool":
@@ -78,14 +79,15 @@ class OpenRouterReply:
                 result = await tools.run(call["name"], args)
                 history.append({"role": "tool", "tool_call_id": call["id"] or f"call_{i}", "content": result})
 
-    async def _one_call(self, history: list[dict], *, with_tools: bool) -> AsyncIterator[tuple[str, object]]:
+    async def _one_call(self, history: list[dict], *, with_tools: bool,
+                        schemas: list[dict] | None = None) -> AsyncIterator[tuple[str, object]]:
         body: dict = {
             "model": self.model,
             "stream": True,
             "messages": [{"role": "system", "content": self.system_prompt}, *history],
         }
         if with_tools:
-            body["tools"] = openai_tools()
+            body["tools"] = openai_tools(schemas)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "HTTP-Referer": "https://github.com/unarbos/arbos",

@@ -9,8 +9,10 @@ use crate::{
     model::{
         article::Article,
         board::Board,
+        identity::Identity,
         place::Place,
         session::ChatSession,
+        store_view::StoreView,
         surface::{Bind, Child, Focus, Surface, SurfaceId, SurfaceKind},
         watch::Watch,
         workspace::Workspace,
@@ -64,18 +66,20 @@ pub struct Project {
     /// The open table's window of rows, read when it is opened rather than
     /// while it is drawn — a query per frame is a query too many.
     pub page: Option<Page>,
-    /// Whether the sidebar shows what is under this project's heading.
-    pub expanded: bool,
-    /// Whether the sidebar lists archived chats under this heading.
-    /// Off by default: what was put away is not what you came back for.
-    /// The header toggle is the only control; there is no Archived row.
+    /// Whether archived chats are listed. Off by default: what was put
+    /// away is not what you came back for.
     pub archive_open: bool,
+    /// What the right-hand panel shows of `.arbos/`: goals, notes, and
+    /// what the store holds. Read on open and on every watch knock.
+    pub store_view: StoreView,
     /// The watch on this project's `.arbos/`, once it is up. Held here so
     /// closing the project drops it, which is what takes the watch down.
     pub watch: Option<Watch>,
-    /// Sidebar title, when the person named it. Empty means the folder's own
-    /// name — see [`Self::name`].
-    pub nickname: Option<String>,
+    /// The tab's face — name, glyph, colour — from `.arbos/project.toml`.
+    pub identity: Identity,
+    /// Whether that file exists. A tab opened on a folder without one is
+    /// offered the sheet to write it.
+    pub identity_saved: bool,
     /// Kernel session ids the user deleted. The activity poll must not mint
     /// them again — that is why trash on a delegate used to do nothing.
     pub dismissed: HashSet<String>,
@@ -89,6 +93,17 @@ impl Project {
     pub fn open(place: Place) -> Self {
         // Chat only. Boards, articles and tables have no pane; scanning them
         // on open can fail a folder that is otherwise fine to talk in.
+        let store_view = if place.host.is_some() {
+            StoreView::default()
+        } else {
+            StoreView::read(&place.path)
+        };
+        let store = root(&place.store());
+        let saved = Identity::load(&store);
+        let identity_saved = saved.is_some();
+        let home =
+            dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
+        let identity = saved.unwrap_or_else(|| Identity::defaults(&place, home));
         Self {
             boards: Vec::new(),
             articles: Vec::new(),
@@ -104,10 +119,11 @@ impl Project {
             tables: Vec::new(),
             table: None,
             page: None,
-            expanded: true,
             archive_open: false,
+            store_view,
             watch: None,
-            nickname: None,
+            identity,
+            identity_saved,
             dismissed: HashSet::new(),
         }
     }
@@ -121,9 +137,32 @@ impl Project {
     /// being read in. Everything else is drawn off the model each frame and
     /// nobody keeps a handle on it, so a re-read that only changed those has
     /// nothing to announce — and announcing it would drop the edit somebody has
-    /// open over the echo of their own save.
+    /// open over the echo of their own save. The panel's store view is one of
+    /// those: re-read here, drawn from the model on the next frame.
     pub fn reload(&mut self, _cx: &mut Context<Workspace>) -> bool {
+        if !self.is_remote() {
+            self.store_view = StoreView::read(&self.path);
+        }
+        if let Some(identity) = Identity::load(&root(&self.store())) {
+            self.identity = identity;
+            self.identity_saved = true;
+        }
         false
+    }
+
+    /// Put a face on the project and file it with the folder.
+    pub fn set_identity(&mut self, identity: Identity) {
+        self.identity = identity;
+        self.identity_saved = self.identity.save(&root(&self.store())).is_ok();
+    }
+
+    /// The project's main chat: the open root that sits first by rank. One
+    /// per project; what the column shows when no sub-agent is in front.
+    pub fn main_session(&self) -> Option<u64> {
+        self.roots()
+            .filter(|chat| !chat.closed)
+            .min_by_key(|chat| (chat.rank, chat.id))
+            .map(|chat| chat.id)
     }
 
     /// Re-read what tables exist. The store is the list — nothing here keeps a
@@ -180,19 +219,34 @@ impl Project {
         self.place().store()
     }
 
-    /// The tab's label: a name they typed, or the place title (box name at
-    /// remote home/`/`, otherwise the last folder).
+    /// The tab's label: the name in `project.toml`, or the place title (box
+    /// name at remote home/`/`, otherwise the last folder).
     pub fn name(&self) -> String {
-        self.nickname
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
+        self.identity
+            .label()
             .map(str::to_string)
             .unwrap_or_else(|| self.place().title())
     }
 
     pub fn session(&self, id: u64) -> Option<&ChatSession> {
         self.sessions.iter().find(|chat| chat.id == id)
+    }
+
+    /// Every session under `id` — children, their children — that is still
+    /// working. Cursor's composer keeps its stop disc while any of a chat's
+    /// delegated work runs, and Stop there stops the workers too.
+    pub fn running_descendants(&self, id: u64) -> Vec<u64> {
+        let mut out = Vec::new();
+        let mut frontier = vec![id];
+        while let Some(parent) = frontier.pop() {
+            for chat in self.sessions.iter().filter(|chat| chat.parent == Some(parent)) {
+                if chat.busy() {
+                    out.push(chat.id);
+                }
+                frontier.push(chat.id);
+            }
+        }
+        out
     }
 
     pub fn session_mut(&mut self, id: u64) -> Option<&mut ChatSession> {
@@ -255,21 +309,27 @@ impl Project {
 
     /// Whether `older` is `younger` or sits above it in the parent chain.
     pub fn ancestor_of(&self, older: u64, younger: u64) -> bool {
-        let mut at = Some(younger);
-        while let Some(id) = at {
-            if id == older {
-                return true;
-            }
-            at = self.session(id).and_then(|chat| chat.parent);
-        }
-        false
+        self.path_to(younger).contains(&older)
     }
 
-    /// Sessions from the root that holds `id` down to `id`, root first.
+    /// Whether `child` may take `parent` as its parent: not itself, and
+    /// not one of its own descendants — a link that would close the chain
+    /// into a ring, which every walk up the tree would then circle for ever.
+    pub fn can_parent(&self, child: u64, parent: u64) -> bool {
+        child != parent && !self.ancestor_of(child, parent)
+    }
+
+    /// Sessions from the root that holds `id` down to `id`, root first. A
+    /// ring in the parent links (two chats naming each other) ends the walk
+    /// where it would repeat, so a bad link costs a wrong crumb, not the
+    /// window.
     pub fn path_to(&self, id: u64) -> Vec<u64> {
         let mut chain = Vec::new();
         let mut at = Some(id);
         while let Some(id) = at {
+            if chain.contains(&id) || chain.len() > self.sessions.len() {
+                break;
+            }
             chain.push(id);
             at = self.session(id).and_then(|chat| chat.parent);
         }
@@ -301,19 +361,15 @@ impl Project {
         kids
     }
 
-    /// A child agent stays on the tree while there is something to see:
-    /// a turn running, work the kernel still holds for it (a standing job,
-    /// a scheduled node, a question, a failure), a turn that ended a moment
-    /// ago, or you looking at it (or through it). Done and unwatched means
-    /// off the list; its folder stays, and it comes back if it works again.
+    /// A child agent stays on the tree until it is archived: Cursor keeps
+    /// a finished task on the list with a check, and so does the parent's
+    /// transcript here — the record of what was delegated is part of the
+    /// story. An archived child shows only while you look at it.
     fn live_child(&self, chat: &ChatSession, focus: Option<Focus>) -> bool {
         if chat.closed {
             return focus.is_some_and(|focus| focus.agent == chat.id);
         }
-        if chat.busy() || chat.recently_ended() || chat.plan_open().next().is_some() {
-            return true;
-        }
-        focus.is_some_and(|focus| focus.agent == chat.id || self.ancestor_of(chat.id, focus.agent))
+        true
     }
 
     /// A terminal, process, or panel stays until someone closes it, and so

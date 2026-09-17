@@ -1,13 +1,14 @@
 //! Contract tests for what other processes depend on: the wire frames the
-//! desktop and arbench speak, the plan node status graph, and the place
-//! lock that keeps two kernels off one folder.
+//! desktop and arbench speak, the append discipline of the transcript,
+//! and the place lock that keeps two kernels off one folder.
 
 use arbos_core::{
-    Do, Node, NodeStatus, Place, PlaceLock, Usage, When,
-    node::can_transition,
+    Event, EventKind, Place, PlaceLock, TranscriptTail, Usage, agent_exists, append_event,
+    bootstrap, create_chat, list_agents, load_transcript, read_focus, validate_focus,
     wire::{Frame, TreeNode},
+    write_focus,
 };
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
 fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -34,6 +35,24 @@ fn roundtrip(frame: &Frame) -> serde_json::Value {
 fn every_frame_variant_round_trips_with_a_snake_case_tag() {
     let frames: Vec<(Frame, &str)> = vec![
         (
+            Frame::Put {
+                path: "docs/plan.md".into(),
+                text: "# Plan\n".into(),
+                data: None,
+                base_hash: Some(String::new()),
+            },
+            "put",
+        ),
+        (
+            Frame::Written {
+                path: "docs/plan.md".into(),
+                size: 7,
+                hash: "abc".into(),
+                error: None,
+            },
+            "written",
+        ),
+        (
             Frame::Snapshot {
                 tree: vec![TreeNode {
                     id: "root".into(),
@@ -42,9 +61,19 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                     paused: false,
                     model: "inherit".into(),
                     kind: "agent".into(),
+                    mode: String::new(),
+                    prs: 0,
+                    step: None,
+                    agent_kind: String::new(),
+                    readonly: false,
                 }],
                 focus: ".arbos/agents/root".into(),
-                budget: Some(Usage { used: 1, size: 2 }),
+                budget: Some(Usage {
+                    used: 1,
+                    size: 2,
+                    cost: None,
+                    cached: None,
+                }),
             },
             "snapshot",
         ),
@@ -62,6 +91,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 agent: "root".into(),
                 question: "q".into(),
                 options: vec!["a".into(), "b".into()],
+                id: Some("call_1".into()),
             },
             "ask",
         ),
@@ -96,6 +126,9 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 text: "hi".into(),
                 steer: true,
                 attachments: vec!["/tmp/a.png".into()],
+                channel: String::new(),
+                device: String::new(),
+                model: String::new(),
             },
             "user",
         ),
@@ -128,6 +161,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
             Frame::Answer {
                 agent: "root".into(),
                 text: "teal".into(),
+                id: Some("call_1".into()),
             },
             "answer",
         ),
@@ -151,6 +185,13 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 model: "openai/gpt-5-nano".into(),
             },
             "set_model",
+        ),
+        (
+            Frame::Error {
+                agent: Some("root".into()),
+                detail: "no agent nobody".into(),
+            },
+            "error",
         ),
         (Frame::VoiceStart, "voice_start"),
         (Frame::VoiceStop, "voice_stop"),
@@ -203,69 +244,256 @@ fn optional_frame_fields_default_and_stay_hidden() {
 
 #[test]
 fn unknown_frame_type_and_missing_fields_are_rejected() {
-    assert!(serde_json::from_str::<Frame>(r#"{"type":"no_such_frame"}"#).is_err());
+    // A frame from a newer build reads as `unknown` and is skipped, so a
+    // client keeps its connection when the kernel grows a frame type.
+    assert!(matches!(
+        serde_json::from_str::<Frame>(r#"{"type":"no_such_frame","x":1}"#),
+        Ok(Frame::Unknown)
+    ));
     assert!(serde_json::from_str::<Frame>(r#"{"type":"user"}"#).is_err());
     assert!(serde_json::from_str::<Frame>(r#"{"agent":"root","text":"hi"}"#).is_err());
 }
 
+/// qa-012: a write that fails part-way (disk full, `ulimit -f`, quota)
+/// must not leave the head of a line behind, or the next good append is
+/// glued to it and both are lost to every reader.
 #[test]
-fn node_status_graph_matches_the_documented_rules() {
-    use NodeStatus::*;
-    let mut node = Node::new("goal");
-    node.status = Pending;
-    for to in [Active, Blocked, Done, Failed, Cancelled] {
-        assert!(can_transition(&node, to).is_ok(), "pending -> {to:?}");
+fn a_failed_append_leaves_no_partial_line() {
+    unsafe {
+        libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
     }
-    assert!(
-        can_transition(&node, Pending).is_err(),
-        "no self transition"
-    );
-    node.status = Cancelled;
-    for to in [Pending, Active, Blocked, Done, Failed] {
-        assert!(
-            can_transition(&node, to).is_err(),
-            "cancelled is final ({to:?})"
-        );
-    }
-    node.status = Done;
-    assert!(
-        can_transition(&node, Pending).is_ok(),
-        "done reopens to pending"
-    );
-    assert!(can_transition(&node, Active).is_err());
-    // A recurring node has no terminal success or failure.
-    let mut recurring = Node::new("tick");
-    recurring.when = When {
-        every_ms: Some(60_000),
-        ..When::default()
+    let dir = tmp("partial");
+    let transcript = dir.join("transcript.jsonl");
+    append_event(
+        &transcript,
+        &Event::new(EventKind::User {
+            text: "one".into(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        }),
+    )
+    .unwrap();
+    let t_len = std::fs::metadata(&transcript).unwrap().len();
+
+    // Cap files at 4 KB for this process, then try to append 16 KB.
+    let limit = libc::rlimit {
+        rlim_cur: 4096,
+        rlim_max: libc::RLIM_INFINITY,
     };
-    recurring.status = Active;
-    assert!(can_transition(&recurring, Done).is_err());
-    assert!(can_transition(&recurring, Failed).is_err());
-    assert!(can_transition(&recurring, Cancelled).is_ok());
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+    let big = "x".repeat(16 * 1024);
+    let r1 = append_event(
+        &transcript,
+        &Event::new(EventKind::User {
+            text: big.clone(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        }),
+    );
+    let restore = libc::rlimit {
+        rlim_cur: libc::RLIM_INFINITY,
+        rlim_max: libc::RLIM_INFINITY,
+    };
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &restore) }, 0);
+
+    assert!(
+        r1.is_err(),
+        "the oversized append must fail, not kill the process"
+    );
+    assert_eq!(
+        std::fs::metadata(&transcript).unwrap().len(),
+        t_len,
+        "transcript cut back to its last complete line"
+    );
+
+    // The next good append lands on its own line and every reader sees it.
+    append_event(
+        &transcript,
+        &Event::new(EventKind::TurnComplete { usage: None }),
+    )
+    .unwrap();
+    let events = load_transcript(&transcript).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].seq, 2);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn node_serialises_with_snake_case_do_kinds() {
-    for (d, kind) in [
-        (Do::Agent, "agent"),
-        (
-            Do::Shell {
-                cmd: "true".into(),
-                report: None,
-            },
-            "shell",
-        ),
-        (Do::Notify { text: "hi".into() }, "notify"),
-        (Do::Ask, "ask"),
+fn transcript_tail_reads_only_new_lines_and_numbers_them_like_load_transcript() {
+    let dir = tmp("tail");
+    let path = dir.join("transcript.jsonl");
+    let mut tail = TranscriptTail::default();
+    assert!(
+        tail.read_new(&path).unwrap().is_empty(),
+        "missing file is empty"
+    );
+
+    append_event(
+        &path,
+        &Event::new(EventKind::User {
+            text: "one".into(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        }),
+    )
+    .unwrap();
+    // A damaged line and a blank line still occupy their line numbers.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"not json\n\n")
+        .unwrap();
+    append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+
+    let first = tail.read_new(&path).unwrap();
+    let full = load_transcript(&path).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        full.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        "seq must match the physical line, as load_transcript numbers it"
+    );
+    assert_eq!(first[1].seq, 4);
+    assert!(
+        tail.read_new(&path).unwrap().is_empty(),
+        "nothing new, nothing returned"
+    );
+
+    // A writer mid-append: the partial line waits for its newline.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    f.write_all(br#"{"ts":1,"kind":"user","text":"two"}"#)
+        .unwrap();
+    assert!(tail.read_new(&path).unwrap().is_empty());
+    f.write_all(b"\n").unwrap();
+    let next = tail.read_new(&path).unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].seq, 5);
+
+    // The file was replaced by a shorter one: the tail starts over.
+    std::fs::write(&path, "").unwrap();
+    append_event(
+        &path,
+        &Event::new(EventKind::User {
+            text: "fresh".into(),
+            attachments: vec![],
+            channel: String::new(),
+            device: String::new(),
+        }),
+    )
+    .unwrap();
+    let again = tail.read_new(&path).unwrap();
+    assert_eq!(again.len(), 1);
+    assert_eq!(
+        again[0].seq, 1,
+        "a replaced file is numbered from its first line"
+    );
+
+    // qa-002: a different file of the same length (a chat deleted and
+    // recreated, a fork's transcript copied in) is also a replacement.
+    let swap = dir.join("swap.jsonl");
+    std::fs::copy(&path, &swap).unwrap();
+    std::fs::rename(&swap, &path).unwrap();
+    let swapped = tail.read_new(&path).unwrap();
+    assert_eq!(
+        swapped.len(),
+        1,
+        "same length, new inode: read from the start again"
+    );
+    assert_eq!(swapped[0].seq, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn focus_only_ever_names_an_existing_agent_folder() {
+    // qa-004: the focus file is written from the attach socket and read by
+    // every client and every prompt. It must not carry arbitrary paths.
+    let dir = tmp("focus");
+    let place = Place::new(&dir);
+    bootstrap(&place).unwrap();
+    let chat = create_chat(&place).unwrap();
+    let id = chat.id.as_str();
+
+    assert_eq!(
+        validate_focus(&place, id).unwrap(),
+        format!(".arbos/agents/{id}")
+    );
+    assert_eq!(
+        validate_focus(&place, &format!(".arbos/agents/{id}/")).unwrap(),
+        format!(".arbos/agents/{id}")
+    );
+    for bad in [
+        "../../../../etc/passwd",
+        ".arbos/agents/../../etc",
+        "/etc/passwd",
+        ".arbos/agents/does-not-exist",
+        "",
+        ".arbos/agents/a b",
     ] {
-        let value = serde_json::to_value(&d).unwrap();
-        assert_eq!(value["kind"], kind);
-        let back: Do = serde_json::from_value(value).unwrap();
-        assert_eq!(back, d);
+        assert!(
+            validate_focus(&place, bad).is_err(),
+            "{bad:?} must be refused"
+        );
+        assert!(
+            write_focus(&place, bad).is_err(),
+            "{bad:?} must not be written"
+        );
     }
-    assert_eq!(NodeStatus::parse("Canceled"), Some(NodeStatus::Cancelled));
-    assert_eq!(NodeStatus::parse("nope"), None);
+    assert_eq!(
+        std::fs::read_to_string(place.focus_path()).unwrap().trim(),
+        ".arbos/agents/root",
+        "refused writes leave the file as it was"
+    );
+
+    // A dangling focus on disk reads as root and is repaired.
+    std::fs::write(place.focus_path(), ".arbos/agents/gone\n").unwrap();
+    assert_eq!(read_focus(&place), ".arbos/agents/root");
+    assert_eq!(
+        std::fs::read_to_string(place.focus_path()).unwrap().trim(),
+        ".arbos/agents/root"
+    );
+    write_focus(&place, id).unwrap();
+    assert_eq!(read_focus(&place), format!(".arbos/agents/{id}"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn agent_exists_agrees_with_list_agents() {
+    // qa-005/qa-006: one rule for "this id is an agent here".
+    let dir = tmp("exists");
+    let place = Place::new(&dir);
+    bootstrap(&place).unwrap();
+    let chat = create_chat(&place).unwrap();
+    std::fs::create_dir_all(place.agent_dir("garbage")).unwrap();
+    std::fs::write(place.agent_dir("garbage").join("agent.md"), b"\xff\xfe").unwrap();
+    std::fs::create_dir_all(place.agent_dir("nomd")).unwrap();
+    let listed: Vec<String> = list_agents(&place)
+        .unwrap()
+        .into_iter()
+        .map(|a| a.id.to_string())
+        .collect();
+    for id in [
+        "root",
+        chat.id.as_str(),
+        "garbage",
+        "nomd",
+        "nobody",
+        "../etc",
+        "",
+    ] {
+        assert_eq!(
+            agent_exists(&place, id),
+            listed.iter().any(|l| l == id),
+            "{id:?}: agent_exists and list_agents must agree"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -37,10 +37,15 @@ pub enum Bind {
         url: String,
         shot: Option<Arc<Image>>,
     },
-    /// A job folder's journal. `id` is the kernel's `jN`.
+    /// A job folder's journal. `id` is the kernel's `jN`. `live` is the
+    /// output the kernel streamed (`Frame::Job`), capped; empty until the
+    /// first frame, when the file at `log` is read instead. `done` is set
+    /// by the last frame: `Some(None)` means killed.
     Process {
         id: String,
         log: PathBuf,
+        live: String,
+        done: Option<Option<i32>>,
     },
     Url(String),
     Path(PathBuf),

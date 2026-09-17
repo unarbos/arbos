@@ -58,12 +58,31 @@ TOOLS: list[dict] = [
     },
 ]
 
+MORE_DETAIL: dict = {
+    "name": "more_detail",
+    "description": (
+        "The user wants more about something Arbos or an agent just reported: why it failed, what exactly "
+        "changed, what the output said, or to hear the last thing again. Answers from the transcript of the "
+        "work, in a few sentences. Use this before asking the main agent anything."
+    ),
+    "ack_messages": ["Let me look.", "One moment."],
+    "parameters": {
+        "type": "object",
+        "properties": {"question": {"type": "string", "description": "The question as the user asked it"}},
+        "required": ["question"],
+    },
+}
 
-def openai_tools() -> list[dict]:
+# In call mode the caller's words already go to the main agent as user messages, so the speech
+# model must not dispatch work itself: it acknowledges, reports status, and drills into detail.
+CALL_TOOLS: list[dict] = [MORE_DETAIL, TOOLS[1]]
+
+
+def openai_tools(tools: list[dict] | None = None) -> list[dict]:
     """The same tools in OpenAI chat-completions shape (for OpenRouter)."""
     return [
         {"type": "function", "function": {k: v for k, v in t.items() if k in ("name", "description", "parameters")}}
-        for t in TOOLS
+        for t in (tools if tools is not None else TOOLS)
     ]
 
 
@@ -83,10 +102,24 @@ class ToolRunner:
         self.on_report = on_report
         self.on_call: Callable[[str, dict], Awaitable[None]] | None = None
         self.on_result: Callable[[str, str], Awaitable[None]] | None = None
-        self.watching: set[str] = set()  # kept for introspection; reporting lives in the session now
+        # In call mode: answers `more_detail` and speaks child reports itself.
+        self.narrator = None
+        # Which schemas the reply model is offered; None = TOOLS.
+        self.schemas: list[dict] | None = None
+        self.watching: set[str] = set()
+        if kernel:
+            kernel.listeners.append(self._watch_children)
 
     def close(self) -> None:
-        return None
+        if self.kernel and self._watch_children in self.kernel.listeners:
+            self.kernel.listeners.remove(self._watch_children)
+
+    def rebind(self, kernel: KernelClient) -> None:
+        """Run the tools against another kernel (a call's own attach through the hub)."""
+        self.close()
+        self.kernel = kernel
+        self.watching.clear()
+        kernel.listeners.append(self._watch_children)
 
     async def run(self, name: str, args: dict) -> str:
         if self.on_call:
@@ -102,9 +135,20 @@ class ToolRunner:
             if name == "send_agent":
                 result = await self._send_agent(str(args.get("task", "")).strip())
             elif name == "agent_status":
-                result = self._need_kernel() or self.kernel.status_text()
+                if self.narrator is not None:
+                    self.narrator.consume_pending()
+                result = self._need_kernel() or (
+                    self.narrator.status_text() if self.narrator else self.kernel.status_text()
+                )
             elif name == "ask_arbos":
                 result = await self._ask(str(args.get("question", "")).strip())
+            elif name == "more_detail":
+                question = str(args.get("question", "")).strip()
+                if self.narrator is None:
+                    result = await self._ask(question)
+                else:
+                    claimed = self.narrator.consume_pending()
+                    result = await self.narrator.more_detail(question or claimed or "what happened")
             else:
                 result = f"Unknown tool {name}."
         except Exception as exc:
@@ -134,7 +178,10 @@ class ToolRunner:
         await asyncio.sleep(0.2)
         new = [a for a in self.kernel.agents.values() if a.name not in before and a.name != "root"]
         for child in new:
-            self.watching.add(child.name)
+            if child.running:
+                self.watching.add(child.name)
+            else:  # already done before we could watch it
+                asyncio.create_task(self._report(child.name))
         first_sentence = re.split(r"(?<=[.!?])\s", reply.strip(), maxsplit=1)[0]
         if new:
             return first_sentence or f"Dispatched agent {new[0].name}."
@@ -170,5 +217,7 @@ class ToolRunner:
         report = state.says[-1] if state.says else state.assistant.strip()
         text = _clip(report or "finished without a report", 500)
         log.info("agent %s finished: %s", name, text[:120])
-        if self.on_report:
+        if self.narrator is not None:
+            self.narrator.child_finished(name, text)
+        elif self.on_report:
             await self.on_report(name, text)

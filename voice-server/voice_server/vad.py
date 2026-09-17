@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import onnxruntime as ort
 
@@ -23,6 +25,38 @@ class SileroVAD:
 
     def stream(self) -> "VADStream":
         return VADStream(self)
+
+
+class EnergyVAD:
+    """No model: speech probability from the window's loudness. For the test harness and for a
+    machine without `silero_vad.onnx`; the duplex engine never consults it."""
+
+    def __init__(self, threshold: float = 0.01):
+        self.threshold = threshold
+
+    def stream(self) -> "EnergyVADStream":
+        return EnergyVADStream(self)
+
+
+class EnergyVADStream:
+    def __init__(self, vad: EnergyVAD):
+        self.vad = vad
+        self.pending = np.zeros(0, dtype=np.float32)
+
+    def push(self, samples16k: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        self.pending = np.concatenate([self.pending, samples16k])
+        out: list[tuple[np.ndarray, float]] = []
+        while self.pending.size >= WINDOW:
+            window, self.pending = self.pending[:WINDOW], self.pending[WINDOW:]
+            rms = float(np.sqrt(np.mean(window * window)))
+            out.append((window, min(1.0, rms / (self.vad.threshold * 2))))
+        return out
+
+
+def build_vad(model_path: str) -> SileroVAD | EnergyVAD:
+    if os.path.exists(model_path):
+        return SileroVAD(model_path)
+    return EnergyVAD()
 
 
 class VADStream:

@@ -1,0 +1,78 @@
+name: Linux update payload
+description: >-
+  The Linux desktop and the kernel beside it, as one tarball — the same layout
+  the macOS bundle has, so the desktop finds the kernel next to its own
+  executable and one update replaces the pair together. This is the payload the
+  in-app updater installs on the boxes the loops run on.
+
+inputs:
+  version:
+    description: The marketing version, `0.2.0`.
+    required: true
+  build:
+    description: The build number (a commit count).
+    required: true
+
+outputs:
+  path:
+    description: The app tarball that was built, relative to the workspace root.
+    value: ${{ steps.build.outputs.path }}
+  kernel-path:
+    description: >-
+      The kernel on its own. A headless box updating its kernel has no use for
+      the desktop binary, which is most of the other tarball.
+    value: ${{ steps.build.outputs.kernel-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: System packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq pkg-config clang cmake libssl-dev libasound2-dev \
+          libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
+          libxcb1-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libgl1-mesa-dev \
+          libegl1-mesa-dev libudev-dev libdbus-1-dev
+
+    - name: Build and pack
+      id: build
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        BUILD: ${{ inputs.build }}
+      run: |
+        set -euo pipefail
+        cargo build --release --locked -p arbos-kernel
+        # ARBOS_BUILD is handed to the compile rather than worked out again
+        # inside the crate. The tarball's name and the feed entry both use
+        # $BUILD, and the update feed is *ordered* on that number — a binary
+        # that disagreed with the release it was published as would either
+        # never update or offer the same update forever.
+        ARBOS_BUILD="$BUILD" cargo build --release --locked --manifest-path desktop/Cargo.toml
+        stamped="$(desktop/target/release/arbos-desktop --version | cut -d' ' -f2)"
+        test "$stamped" = "$BUILD" || {
+          echo "::error title=Build number drift::The binary was stamped $stamped but is being published as $BUILD."
+          exit 1
+        }
+        out="arbos-$VERSION-$BUILD-linux-x86_64"
+        mkdir -p "dist/$out"
+        cp desktop/target/release/arbos-desktop "dist/$out/"
+        cp target/release/arbos-kernel "dist/$out/"
+        cp LICENSE "dist/$out/"
+        tar -C dist -czf "dist/$out.tar.gz" "$out"
+        rm -rf "dist/${out:?}"
+        echo "path=dist/$out.tar.gz" >> "$GITHUB_OUTPUT"
+
+        # And the kernel on its own, for a kernel keeping itself current. Same
+        # binary, same commit, same release — a second archive rather than a
+        # second build, so the two can never be from different code.
+        kout="arbos-kernel-$VERSION-$BUILD-linux-x86_64"
+        mkdir -p "dist/$kout"
+        cp target/release/arbos-kernel "dist/$kout/"
+        cp LICENSE "dist/$kout/"
+        tar -C dist -czf "dist/$kout.tar.gz" "$kout"
+        rm -rf "dist/${kout:?}"
+        echo "kernel-path=dist/$kout.tar.gz" >> "$GITHUB_OUTPUT"
+        ls -la dist

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
@@ -52,25 +53,36 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     kernel.add_argument("--kernel-token", default=os.environ.get("VOICE_KERNEL_TOKEN"),
                         help="access.toml client token for a remote kernel (env VOICE_KERNEL_TOKEN); never logged")
     kernel.add_argument("--kernel-place", default=os.environ.get("VOICE_KERNEL_PLACE"), help="place dir; reads .arbos/kernel.json")
-    kernel.add_argument("--no-auto-approve", action="store_true", help="do not auto-approve the kernel's 'allow ...' asks")
+    kernel.add_argument("--auto-approve", action="store_true",
+                        help="answer the gateway's OWN kernel's 'allow ...' asks with allow, unasked. Off by default: "
+                             "approvals are spoken to the caller and answered by voice or a question card; an "
+                             "unanswered one is denied after --approval-timeout. Never applies to a hub attach")
+    kernel.add_argument("--no-auto-approve", action="store_true", help=argparse.SUPPRESS)  # old spelling of the default
+    kernel.add_argument("--approval-timeout", type=float, default=float(os.environ.get("VOICE_APPROVAL_TIMEOUT", "45")),
+                        help="seconds an approval waits for the caller before it is denied with a spoken note")
     kernel.add_argument("--hub", default=os.environ.get("VOICE_HUB_URL"),
-                        help="arbos-hub base URL (ws://host:port or wss://host). Lets session.start scope a call to a "
-                             "project: the gateway attaches to <hub>/attach/<machine>/<project> for that call")
-    kernel.add_argument("--hub-token", default=os.environ.get("VOICE_HUB_CLIENT_TOKEN") or os.environ.get("VOICE_HUB_TOKEN"),
-                        help="hub [[client]] token used for scoped calls (env VOICE_HUB_CLIENT_TOKEN, else VOICE_HUB_TOKEN); never logged")
+                        help="arbos-hub URL (ws[s]://host). A call whose session.start.project names <machine>/<project> "
+                             "attaches to that kernel through the hub instead of the gateway's own kernel")
+    kernel.add_argument("--hub-token", default=os.environ.get("VOICE_HUB_CLIENT_TOKEN") or os.environ.get("VOICE_HUB_TOKEN", ""),
+                        help="the hub [[client]] token (env VOICE_HUB_CLIENT_TOKEN, else VOICE_HUB_TOKEN); never logged")
+    kernel.add_argument("--hub-machine", default=os.environ.get("VOICE_HUB_MACHINE", ""),
+                        help="this gateway's own machine name on the hub, so <machine>/<its place> means its own kernel")
 
     models = parser.add_argument_group("models")
     models.add_argument("--model-dir", default=os.environ.get("VOICE_MODEL_DIR", "models"),
                         help="holds silero_vad.onnx, kokoro-v1.0.onnx, voices-v1.0.bin (see deploy/run.sh)")
     models.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper"])
+    models.add_argument("--asr", default="faster-whisper", choices=["faster-whisper", "none", "mock"],
+                        help="none: no recogniser (duplex engine only; the speech model transcribes). "
+                             "mock: scripted lines from $VOICE_MOCK_ASR_SCRIPT (test harness)")
     models.add_argument("--asr-model", default=None,
                         help="faster-whisper model name or CTranslate2 dir (default: large-v3-turbo on cuda, small.en on cpu)")
     models.add_argument("--compute-type", default=None, help="CTranslate2 compute type (default: float16 on cuda, int8 on cpu)")
     models.add_argument("--beam-size", type=int, default=3, help="beam for the final transcript; partials use 1")
     models.add_argument("--threads", type=int, default=max(2, min(8, (os.cpu_count() or 4) // 2)), help="CPU threads for ASR")
     models.add_argument("--language", default="en", help="ASR language hint; 'auto' to detect per utterance")
-    models.add_argument("--tts", default="kokoro", choices=["kokoro"])
+    models.add_argument("--tts", default="kokoro", choices=["kokoro", "tone"],
+                        help="tone: a placeholder tone per sentence, no weights (test harness)")
     models.add_argument("--voice", default="af_heart", help="default Kokoro voice (session.start may override)")
     models.add_argument("--speed", type=float, default=1.0)
 
@@ -79,6 +91,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                        help="none: speech only, the client sends replies with 'speak'. openrouter: OpenRouter model with the Arbos tools "
                             "(env OPENROUTER_API_KEY). kernel: the kernel's main agent answers")
     reply.add_argument("--reply-model", default=os.environ.get("VOICE_REPLY_MODEL", "google/gemini-2.5-flash"), help="OpenRouter model id (env VOICE_REPLY_MODEL)")
+    reply.add_argument("--call-model-voice", default=os.environ.get("VOICE_CALL_MODEL_VOICE", "auto"),
+                       choices=["auto", "off", "ack", "full"],
+                       help="call mode, duplex engine: how much of the speech model's own voice the caller hears. "
+                            "auto (default): its answers to small talk and general questions, in its own voice, like "
+                            "the phone; work requests go to the main agent and the narrator speaks 'On it.' and the "
+                            "results. off: narrator only. ack: short acknowledgements only. full: everything")
+    reply.add_argument("--escalations-log",
+                       default=os.environ.get("VOICE_ESCALATIONS_LOG")
+                       or (os.path.join(os.environ["VOICE_HOME"], "logs", "call-mode-escalations.jsonl") if os.environ.get("VOICE_HOME") else ""),
+                       help="call mode: append question-shaped utterances that went to the main agent right after the "
+                            "narrator spoke (drill-downs the phrase list may have missed) to this JSONL file. Default: "
+                            "$VOICE_HOME/logs/call-mode-escalations.jsonl, or off")
+    reply.add_argument("--highlights", default=os.environ.get("VOICE_HIGHLIGHTS", "policy"), choices=["policy", "model"],
+                       help="call mode: how the narrator forms a highlight of the agent's reply. policy (default): first "
+                            "sentence plus the result sentence, deterministic. model: --narrator-model rewrites the reply "
+                            "for the ear, checked against the policy's guardrails (length, no code/links/lists, no numbers "
+                            "the reply lacks) and replaced by the policy line on any doubt or after 4 s")
+    reply.add_argument("--narrator-model", default=os.environ.get("VOICE_NARRATOR_MODEL") or None,
+                       help="call mode: OpenRouter model that turns transcript excerpts into `more_detail` answers "
+                            "(needs OPENROUTER_API_KEY). Default: none, the narrator answers from the record verbatim")
 
     turn = parser.add_argument_group("turn taking (ms)")
     turn.add_argument("--end-silence-ms", type=int, default=600, help="silence that ends an utterance")
@@ -89,8 +121,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     turn.add_argument("--max-lead-ms", type=int, default=1500,
                       help="reply audio is sent at most this far ahead of real-time playback (small = fast interrupt)")
     turn.add_argument("--no-echo-gate", action="store_true", help="do not silence uplink frames that match our own reply audio")
-    turn.add_argument("--echo-margin", type=float, default=1.6,
-                      help="uplink must be this many times louder than the predicted echo to pass while we talk (lower = easier barge-in, more echo leaks)")
+    turn.add_argument("--echo-margin", type=float, default=float(os.environ.get("VOICE_ECHO_MARGIN", "1.6")),
+                      help="uplink must be this many times louder than the predicted echo to pass while we talk (lower = easier barge-in, more echo leaks; a speakerphone with no echo cancellation wants it higher)")
     turn.add_argument("--out-target-dbfs", type=float, default=-3.0,
                       help="reply audio is peak-normalised toward this level (soft limiter above it), both engines")
     turn.add_argument("--no-normalize", action="store_true", help="send reply audio at the engine's own level")
@@ -146,7 +178,9 @@ async def serve_forever(args: argparse.Namespace) -> None:
         raise SystemExit(f"unknown voice {args.voice!r}; have: {', '.join(engines.tts.voices)}")
     await engines.warm_up(args.voice)
     defaults = SessionDefaults(language=args.language, voice=args.voice, speed=args.speed, reply=args.reply,
-                               instructions=args.instructions, answerer=args.answerer)
+                               instructions=args.instructions, answerer=args.answerer, narrator_model=args.narrator_model,
+                               model_voice=args.call_model_voice, model_highlights=args.highlights == "model",
+                               approval_timeout=args.approval_timeout, escalations_log=args.escalations_log or "")
     tuning = Tuning(
         start_threshold=args.vad_threshold,
         end_threshold=max(0.1, args.vad_threshold - 0.15),
@@ -164,7 +198,19 @@ async def serve_forever(args: argparse.Namespace) -> None:
     session_class = DuplexSession if engines.engine == "duplex" else PipelineSession
 
     async def handler(ws: ServerConnection) -> None:
-        await session_class(ws, engines, defaults, tuning).run()
+        # Dictation (`session.start {mode: "dictation"}`) is the ASR pipeline whatever the engine:
+        # partials as the words come, a final on release, no reply, no speech model. The first
+        # frame decides; it is handed to the session so nothing is lost.
+        first = await ws.recv()
+        klass = session_class
+        if isinstance(first, str) and '"dictation"' in first:
+            try:
+                msg = json.loads(first)
+            except json.JSONDecodeError:
+                msg = {}
+            if msg.get("type") == P.SESSION_START and msg.get("mode") == "dictation":
+                klass = PipelineSession
+        await klass(ws, engines, defaults, tuning).run(first=first)
 
     stop = asyncio.get_running_loop().create_future()
     for sig in (signal.SIGINT, signal.SIGTERM):

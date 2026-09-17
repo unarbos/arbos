@@ -15,12 +15,13 @@
 //! Which items are live is not written here either. macOS validates each one
 //! against [`bezel::gpui::App::is_action_available`] on every open and before
 //! every key equivalent, so an item greys itself exactly when nothing in the
-//! focused path handles its action — which is what [`Cydonia::commands`] is
+//! focused path handles its action — which is what [`Arbos::commands`] is
 //! for, and why a greyed item's shortcut still reaches the keymap underneath.
 
 use crate::view::root::{
-    CloseProject, Cydonia, NewSession, NextEntry, OpenProject, OpenSettings, PrevEntry,
-    ToggleSidebar, ZoomIn, ZoomOut, ZoomReset,
+    Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
+    OpenSettings, PrevEntry, PrevTab, ReportProblem, SearchChats, ShowPermissions, ShowProject,
+    StartCall, ToggleMute, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{
     gpui::{
@@ -30,7 +31,7 @@ use bezel::{
 };
 
 actions!(
-    cydonia,
+    arbos,
     [
         CloseWindow,
         Hide,
@@ -50,7 +51,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-h", Hide, None),
         KeyBinding::new("alt-cmd-h", HideOthers, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
+        // ⌘W is the tab's — see `root::init`; the window closes on the
+        // browser's chord for it.
+        KeyBinding::new("cmd-shift-w", CloseWindow, None),
         KeyBinding::new("cmd-m", Minimize, None),
         KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
     ]);
@@ -85,7 +88,7 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &CloseWindow, cx: &mut App| {
         let closing_main = cx
             .active_window()
-            .and_then(|window| window.downcast::<Cydonia>())
+            .and_then(|window| window.downcast::<Arbos>())
             .is_some();
         if closing_main {
             crate::kernel::shutdown_tunnels();
@@ -137,6 +140,7 @@ fn menus() -> Vec<Menu> {
         // menu's name from `CFBundleName`, which is this same lowercase word.
         Menu::new("Arbos").items([
             MenuItem::action("Settings…", OpenSettings),
+            MenuItem::action("Permissions…", ShowPermissions),
             MenuItem::separator(),
             MenuItem::action("Hide Arbos", Hide),
             MenuItem::action("Hide Others", HideOthers),
@@ -145,10 +149,11 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Quit Arbos", Quit),
         ]),
         Menu::new("File").items([
-            MenuItem::action("New Session", NewSession),
+            MenuItem::action("New Tab", NewTab),
+            MenuItem::action("New Sub-chat", NewSession),
             MenuItem::separator(),
             MenuItem::action("Open Project…", OpenProject),
-            MenuItem::action("Close Project", CloseProject),
+            MenuItem::action("Close Tab", CloseProject),
             MenuItem::separator(),
             MenuItem::action("Close Window", CloseWindow),
         ]),
@@ -171,13 +176,23 @@ fn menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
-            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::action("Toggle Panel", TogglePanel),
+            MenuItem::action("Show Project", ShowProject),
+            MenuItem::action("Search Chats…", SearchChats),
             MenuItem::separator(),
-            // Drawn ⌥⌘→ and ⌥⌘←, which is why those are bound first: the
+            // A call to the project in front, through the speech server.
+            MenuItem::action("Call Project", StartCall),
+            MenuItem::action("End Call", EndCall),
+            MenuItem::action("Mute", ToggleMute),
+            MenuItem::separator(),
+            // Drawn ⇧⌘] and ⇧⌘[, which is why those are bound first: the
             // `ctrl-tab` pair these also answer to is a chord gpui cannot
             // hand macOS, and an item that named it would teach ⌃T.
-            MenuItem::action("Next Entry", NextEntry),
-            MenuItem::action("Previous Entry", PrevEntry),
+            MenuItem::action("Next Tab", NextTab),
+            MenuItem::action("Previous Tab", PrevTab),
+            MenuItem::separator(),
+            MenuItem::action("Next Agent", NextEntry),
+            MenuItem::action("Previous Agent", PrevEntry),
             MenuItem::separator(),
             MenuItem::action("Actual Size", ZoomReset),
             MenuItem::action("Zoom In", ZoomIn),
@@ -191,6 +206,11 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
         ]),
+        // Where macOS keeps it and where Cursor keeps its own: the last menu.
+        // The turn footer's thumbs-down is the fast way to complain about an
+        // answer; this is the way to complain about the window, which is half
+        // of what actually gets reported.
+        Menu::new("Help").items([MenuItem::action("Report a Problem…", ReportProblem)]),
     ]
 }
 
@@ -205,11 +225,11 @@ fn front(cx: &mut App, f: impl FnOnce(&mut Window)) {
 /// Run `f` on the workspace window, brought forward first. Looked up rather
 /// than held: ⌘W closes that window and the Dock opens another, so a handle
 /// taken at launch outlives the window it names.
-fn workspace(cx: &mut App, f: impl FnOnce(&mut Cydonia, &mut Window, &mut Context<Cydonia>)) {
+fn workspace(cx: &mut App, f: impl FnOnce(&mut Arbos, &mut Window, &mut Context<Arbos>)) {
     let Some(handle) = cx
         .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<Cydonia>())
+        .find_map(|window| window.downcast::<Arbos>())
     else {
         return;
     };
@@ -221,18 +241,18 @@ fn workspace(cx: &mut App, f: impl FnOnce(&mut Cydonia, &mut Window, &mut Contex
 
 /// Run `f` on the workspace window without bringing it forward. For a
 /// setting that shows everywhere at once, the window in front stays there.
-fn workspace_quiet(cx: &mut App, f: impl FnOnce(&mut Cydonia, &mut Context<Cydonia>)) {
+fn workspace_quiet(cx: &mut App, f: impl FnOnce(&mut Arbos, &mut Context<Arbos>)) {
     let Some(handle) = cx
         .windows()
         .into_iter()
-        .find_map(|window| window.downcast::<Cydonia>())
+        .find_map(|window| window.downcast::<Arbos>())
     else {
         return;
     };
     let _ = handle.update(cx, |this, _, cx| f(this, cx));
 }
 
-impl Cydonia {
+impl Arbos {
     /// Hang the menu's commands on the root, each under the condition that
     /// makes it mean something — a board cannot be started in a window with no
     /// project open, so with none there is nothing here to handle `NewBoard`
@@ -246,16 +266,30 @@ impl Cydonia {
         let project = workspace.active.is_some();
         let entries = self.showing(cx).is_some();
 
-        root.on_action(cx.listener(Self::toggle_sidebar_action))
+        root.on_action(cx.listener(Self::toggle_panel_action))
+            .on_action(cx.listener(Self::start_call_action))
+            .on_action(cx.listener(Self::end_call_action))
+            .on_action(cx.listener(Self::toggle_mute_action))
             .on_action(cx.listener(Self::open_project_action))
+            .on_action(cx.listener(Self::new_tab_action))
             .on_action(cx.listener(Self::open_settings_action))
+            .on_action(cx.listener(Self::show_permissions_action))
+            // Always answerable, project or not: half of what he reports
+            // is the window itself rather than an answer in it.
+            .on_action(cx.listener(Self::report_problem))
+            .on_action(cx.listener(Self::report_problem_at))
+            .on_action(cx.listener(Self::attach_paths_action))
             .on_action(cx.listener(Self::show_chat))
+            .on_action(cx.listener(Self::show_project))
+            .on_action(cx.listener(Self::search_chats))
             .on_action(cx.listener(Self::zoom_in_action))
             .on_action(cx.listener(Self::zoom_out_action))
             .on_action(cx.listener(Self::zoom_reset_action))
             .when(project, |root| {
                 root.on_action(cx.listener(Self::close_project_action))
                     .on_action(cx.listener(Self::new_session_action))
+                    .on_action(cx.listener(Self::next_tab))
+                    .on_action(cx.listener(Self::prev_tab))
             })
             .when(entries, |root| {
                 root.on_action(cx.listener(Self::next_entry))

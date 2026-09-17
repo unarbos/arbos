@@ -2,8 +2,9 @@ use crate::agent::AgentId;
 
 /// Why a turn should run. Idle agents have none.
 ///
-/// Derived from a plan node whose moment came, or made by the kernel for
-/// housekeeping (`Serve`, `Compact`).
+/// Made from an inbox file whose moment came (a prompt, a peer's words, a
+/// subscription firing), or by the kernel for housekeeping (`Serve`,
+/// `Compact`).
 #[derive(Debug, Clone)]
 pub struct Wake {
     pub agent: AgentId,
@@ -12,11 +13,22 @@ pub struct Wake {
     pub attachments: Vec<String>,
     /// Inject into a live job at the next tool boundary.
     pub steer: bool,
-    /// The plan node this turn discharges.
-    pub node: Option<crate::NodeId>,
     /// Reply budget: how many agent-to-agent requests may chain from this
     /// turn before they fall back to notes.
     pub hops: u8,
+    /// For a person's words: how they arrived (`voice` | `text`) and from
+    /// which client (`phone` | `desktop` | `cli`). Written onto the
+    /// transcript's `user` line. Empty otherwise.
+    pub channel: String,
+    pub device: String,
+    /// A model for this turn only (the composer's "switch to <vision
+    /// model> for this turn"). Empty: the agent's own.
+    pub model: String,
+    /// The sender's label for this turn (`say title=`), or empty.
+    pub title: String,
+    /// A spawned child's mission as the parent wrote it — the brief alone,
+    /// without the kernel's framing around it in `text`. Empty otherwise.
+    pub brief: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,8 +39,16 @@ pub enum WakeKind {
     Serve,
     /// A detached bash job finished.
     Job,
+    /// One or more of this agent's workers ended; their reports are on the
+    /// transcript as `say` lines. Its text names who reported and who is
+    /// still working. An empty reply ends it without a nudge: when nothing
+    /// is owed to the user yet, silence is the right answer (cold-p5).
+    Done,
     /// Compact the transcript, then stop. No model step.
     Compact,
+    /// Root's first turn in a fresh place: read the folder, seed the
+    /// context file and the page, greet. No spawns, no questions.
+    Kickoff,
 }
 
 impl WakeKind {
@@ -39,7 +59,9 @@ impl WakeKind {
             Self::Plan => "plan",
             Self::Serve => "serve",
             Self::Job => "job",
+            Self::Done => "done",
             Self::Compact => "compact",
+            Self::Kickoff => "kickoff",
         }
     }
 }
@@ -52,8 +74,12 @@ impl Wake {
             text,
             attachments: Vec::new(),
             steer: false,
-            node: None,
             hops: 0,
+            channel: String::new(),
+            device: String::new(),
+            model: String::new(),
+            title: String::new(),
+            brief: String::new(),
         }
     }
 

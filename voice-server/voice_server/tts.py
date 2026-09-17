@@ -12,7 +12,8 @@ import numpy as np
 log = logging.getLogger("voice.tts")
 
 _MD_FENCE = re.compile(r"```.*?```", re.S)
-_MD_INLINE = re.compile(r"[*_`#>]+")
+# Emphasis marks, not the underscores inside identifiers (test_skeptic stays test_skeptic).
+_MD_INLINE = re.compile(r"[*`#>]+|(?<!\w)_+|_+(?!\w)")
 _URL = re.compile(r"https?://\S+")
 _WS = re.compile(r"[ \t]+")
 
@@ -105,7 +106,37 @@ class KokoroTTS:
             yield samples
 
 
+class ToneTTS:
+    """No model: each piece of text becomes a short tone whose length follows the text (about 60 ms
+    per word). For the test harness and for machines without the Kokoro weights: the wire, the
+    pacing, the interrupt path and the narrator all run for real; only the sound is a placeholder.
+    Voices are named so `session.start {voice}` still validates."""
+
+    def __init__(self, rate: int = 24_000):
+        self.rate = rate
+        self.voices = ["af_heart", "tone"]
+        self.name = "tone"
+        self.spoken: list[str] = []  # every text voiced, oldest first (tests read this)
+
+    def _synth(self, piece: str, speed: float) -> np.ndarray:
+        words = max(1, len(piece.split()))
+        seconds = max(0.25, 0.06 * words / max(0.5, speed))
+        n = int(self.rate * seconds)
+        t = np.arange(n, dtype=np.float32) / self.rate
+        # 220 Hz with a soft envelope: clearly audible, clearly not speech.
+        env = np.minimum(1.0, np.minimum(t / 0.02, (seconds - t) / 0.05)).clip(0.0, 1.0)
+        return (0.2 * np.sin(2 * np.pi * 220.0 * t) * env).astype(np.float32)
+
+    async def stream(self, text: str, voice: str, speed: float) -> AsyncIterator[np.ndarray]:
+        for piece in split_for_speech(speakable(text)):
+            self.spoken.append(piece)
+            yield self._synth(piece, speed)
+            await asyncio.sleep(0)
+
+
 def build_tts(kind: str, *, model_dir: str) -> TTS:
     if kind == "kokoro":
         return KokoroTTS(f"{model_dir}/kokoro-v1.0.onnx", f"{model_dir}/voices-v1.0.bin")
+    if kind == "tone":
+        return ToneTTS()
     raise ValueError(f"unknown TTS backend {kind!r}")

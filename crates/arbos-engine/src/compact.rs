@@ -393,6 +393,9 @@ pub struct Managed {
     pub raw: u64,
     /// Calibrated estimate of what `messages` will cost.
     pub estimated: u64,
+    /// Calibrated estimate of the system prompt alone (the messages before
+    /// the conversation): what every call pays before any history.
+    pub system: u64,
 }
 
 /// The working set as projected right now.
@@ -435,6 +438,16 @@ enum Move {
     Done(Option<String>),
 }
 
+/// Whether this exact notice is already on the transcript since the turn
+/// began (the last wake).
+fn said_this_turn(events: &[Event], text: &str) -> bool {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| !e.is_wake())
+        .any(|e| matches!(&e.kind, EventKind::Notice { text: t, .. } if t == text))
+}
+
 /// One decision, no side effects.
 fn next_move(w: &Working, policy: &Policy, stage: Stage, manual: bool) -> Move {
     if stage <= Stage::Fold && (manual || w.used >= policy.fold_at) {
@@ -475,8 +488,9 @@ fn next_move(w: &Working, policy: &Policy, stage: Stage, manual: bool) -> Move {
         }
         if w.used >= policy.compact_at {
             return Move::Done(Some(format!(
-                "over budget (~{}k tokens) with nothing old enough to compact; the next call may be rejected",
-                w.used / 1000
+                "over budget (~{}k tokens against a {}k window) with nothing old enough to compact: the standing context alone needs more room. If config.toml pins window_tokens, remove or raise it; otherwise use a larger-window model. Said once per turn.",
+                w.used / 1000,
+                policy.window / 1000
             )));
         }
     }
@@ -504,9 +518,14 @@ pub async fn manage(
         let w = Working::load(cx, events, calib);
         match next_move(&w, cx.policy, stage, manual) {
             Move::Done(note) => {
-                if let Some(text) = note {
-                    // On the transcript as well as the wire: a client that
-                    // attaches later should still see why nothing changed.
+                // On the transcript as well as the wire: a client that
+                // attaches later should still see why nothing changed.
+                // Once per turn: the same words at every step (thirteen
+                // in one turn on a pinned 32k window) read as a broken
+                // agent, and tell nobody anything new.
+                if let Some(text) = note
+                    && !said_this_turn(events, &text)
+                {
                     let notice = Event::new(EventKind::Notice {
                         text,
                         failed: false,
@@ -515,6 +534,7 @@ pub async fn manage(
                     cx.hooks.emit(&notice);
                 }
                 return Ok(Managed {
+                    system: scaled(w.proj.base_tokens, calib),
                     messages: w.proj.messages,
                     raw: w.raw,
                     estimated: w.used,
@@ -552,6 +572,7 @@ pub async fn manage(
                             failed: false,
                         }));
                         return Ok(Managed {
+                            system: scaled(w.proj.base_tokens, calib),
                             messages: w.proj.messages,
                             raw: w.raw,
                             estimated: w.used,

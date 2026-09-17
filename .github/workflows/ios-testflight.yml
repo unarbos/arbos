@@ -1,0 +1,146 @@
+# Every green commit on main that touches the iPhone app goes to TestFlight.
+#
+# The build number is the commit count, as the desktop's dev channel does
+# (0.2.0+<count>), so two uploads of one version still sort. The archive is
+# built unsigned; the export signs it with a cloud-managed Apple
+# Distribution certificate through the App Store Connect key and uploads
+# it in the same step — no certificate ever lives on the runner.
+#
+# Secrets: the iOS key (App Store Connect "Arbos IOS", Admin, with access to
+# cloud-managed distribution certificates — the notarisation key lacks that):
+#   IOS_ASC_KEY_P8, IOS_ASC_KEY_ID, IOS_ASC_ISSUER_ID
+# Written by .github/setup-publishing.sh (update-channel worker); the
+# notarisation key's NOTARY_* secrets stay as they are for the desktop.
+#
+# IOS_SECRETS_PLIST: ios/Arbos/Secrets.plist, base64 — the endpoints and
+# tokens the phone needs on first launch (the pod hub and the phone's own
+# hub token). Written from the loop's Mac with `gh secret set` after
+# ios/scripts/gen-secrets.sh. ios/scripts/check-secrets.sh runs before the
+# archive: a plist that points at a local hub, or whose token the hub
+# refuses, fails the job — nothing wrong ever reaches Jacob's phone.
+name: iOS to TestFlight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios/**"
+      - ".github/workflows/ios-testflight.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    name: archive, sign, upload
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select the newest Xcode on the runner
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
+      - name: App Store Connect key
+        env:
+          IOS_ASC_KEY_P8: ${{ secrets.IOS_ASC_KEY_P8 }}
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+        run: |
+          test -n "$IOS_ASC_KEY_P8" || { echo "::notice::IOS_ASC_KEY_P8 is not set — run .github/setup-publishing.sh; nothing uploaded."; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0; }
+          mkdir -p ~/.appstoreconnect/private_keys
+          printf '%s' "$IOS_ASC_KEY_P8" > ~/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8
+
+      - name: Baked endpoints and tokens (guarded)
+        if: env.SKIP != '1'
+        working-directory: ios
+        env:
+          IOS_SECRETS_PLIST: ${{ secrets.IOS_SECRETS_PLIST }}
+        run: |
+          test -n "$IOS_SECRETS_PLIST" || { echo "::error::IOS_SECRETS_PLIST is not set — the phone would start with no hub. Run ios/scripts/gen-secrets.sh on a Mac with the vault and set the secret."; exit 1; }
+          printf '%s' "$IOS_SECRETS_PLIST" | base64 --decode > Arbos/Secrets.plist
+          scripts/check-secrets.sh Arbos/Secrets.plist
+
+      - name: Push capability on the App ID?
+        if: env.SKIP != '1'
+        env:
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+        run: |
+          # The day Jacob ticks Push Notifications on com.unarbos.arbos.ios,
+          # the next build signs with aps-environment and pushes start —
+          # no release change. Until then the entitlement stays out, or the
+          # export would fail on a profile without it.
+          # This lookup must never stop an upload: a failed install or call
+          # leaves ENT empty and the build ships without the entitlement,
+          # as every build before it did.
+          pip3 install --quiet --disable-pip-version-check --user --break-system-packages pyjwt cryptography requests \
+            || echo "::warning::push: could not install pyjwt/requests; skipping the capability check"
+          ENT=$(python3 - <<'PY' || true
+          import jwt, time, requests, os, sys
+          kid = os.environ["IOS_ASC_KEY_ID"]; iss = os.environ["IOS_ASC_ISSUER_ID"]
+          key = open(os.path.expanduser(f"~/.appstoreconnect/private_keys/AuthKey_{kid}.p8")).read()
+          tok = jwt.encode({"iss": iss, "iat": int(time.time()), "exp": int(time.time()) + 600, "aud": "appstoreconnect-v1"}, key, algorithm="ES256", headers={"kid": kid})
+          h = {"Authorization": f"Bearer {tok}"}
+          try:
+              r = requests.get("https://api.appstoreconnect.apple.com/v1/bundleIds", params={"filter[identifier]": "com.unarbos.arbos.ios", "include": "bundleIdCapabilities"}, headers=h, timeout=20)
+              caps = [c["attributes"]["capabilityType"] for c in r.json().get("included", []) if c["type"] == "bundleIdCapabilities"]
+              print("Arbos/Arbos.entitlements" if "PUSH_NOTIFICATIONS" in caps else "", end="")
+              print(f"\ncapabilities: {caps}", file=sys.stderr)
+          except Exception as e:
+              print("", end=""); print(f"capability check failed: {e}", file=sys.stderr)
+          PY
+          )
+          echo "ENTITLEMENTS=$ENT" >> "$GITHUB_ENV"
+          if [ -n "$ENT" ]; then echo "push: the App ID has Push Notifications — signing with aps-environment"; else echo "::notice::push: the App ID has no Push Notifications capability yet — this build gets banners only while open"; fi
+
+      - name: Archive (unsigned)
+        if: env.SKIP != '1'
+        working-directory: ios
+        run: |
+          BUILD=$(git rev-list --count HEAD)
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          xcodebuild archive -project Arbos.xcodeproj -scheme Arbos -configuration Release \
+            -destination "generic/platform=iOS" -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
+            CURRENT_PROJECT_VERSION="$BUILD" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_ENTITLEMENTS="${ENTITLEMENTS}" \
+            | tail -30
+
+      - name: Sign for App Store Connect and upload to TestFlight
+        if: env.SKIP != '1'
+        working-directory: ios
+        env:
+          IOS_ASC_KEY_ID: ${{ secrets.IOS_ASC_KEY_ID }}
+          IOS_ASC_ISSUER_ID: ${{ secrets.IOS_ASC_ISSUER_ID }}
+        run: |
+          set +e
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/Arbos.xcarchive" \
+            -exportOptionsPlist ExportOptions.plist -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_$IOS_ASC_KEY_ID.p8 \
+            -authenticationKeyID "$IOS_ASC_KEY_ID" -authenticationKeyIssuerID "$IOS_ASC_ISSUER_ID" \
+            > "$RUNNER_TEMP/export.log" 2>&1
+          status=$?
+          set -e
+          tail -30 "$RUNNER_TEMP/export.log"
+          if grep -q "App record with bundle identifier" "$RUNNER_TEMP/export.log"; then
+            echo "::notice::No App Store Connect app record for com.unarbos.arbos.ios yet — nothing uploaded. Create the app once in App Store Connect (My Apps → + → New App)."
+            exit 0
+          fi
+          [ $status -eq 0 ] || exit $status
+          echo "uploaded 0.2.0 ($BUILD) $(git rev-parse --short HEAD)"
+
+      - name: Tell the dev feed where the iOS build lives
+        if: env.SKIP != '1'
+        run: |
+          # The feed's iOS entry is a link, not a payload (#253):
+          #   {"platform":"ios","kind":"testflight","url":"https://beta.itunes.apple.com/v1/app/6812503407"}
+          # Written by updatectl once its --link flag lands (coordinated with the update-channel worker).
+          echo "feed link: pending updatectl --link"

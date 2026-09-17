@@ -11,8 +11,9 @@ use crate::{
 };
 use bezel::{
     gpui::{
-        App, Bounds, Context, Entity, Render, TitlebarOptions, Window, WindowBackgroundAppearance,
-        WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*, px, size,
+        self, App, Bounds, Context, Entity, FocusHandle, Focusable, KeyBinding, Render,
+        TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowHandle,
+        WindowOptions, actions, div, point, prelude::*, px, size,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset, appearance},
@@ -22,8 +23,25 @@ use bezel::{
     },
 };
 
+actions!(arbos_settings, [CloseSettings]);
+
+/// The key context the window claims, so Escape and ⌘W close it the way
+/// a sheet closes — a settings window with no way out but the title bar's
+/// button sat over the tabs on a first launch.
+const KEY_CONTEXT: &str = "ArbosSettings";
+
+pub fn init(cx: &mut App) {
+    let ctx = Some(KEY_CONTEXT);
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseSettings, ctx),
+        KeyBinding::new("cmd-w", CloseSettings, ctx),
+    ]);
+}
+
 mod general;
+mod model;
 mod performance;
+mod permissions;
 mod theme;
 mod typography;
 
@@ -45,16 +63,26 @@ const CONTENT_MAX_WIDTH: f32 = 860.;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     General,
+    Model,
+    Permissions,
     Appearance,
     Performance,
 }
 
 impl Section {
-    const ALL: [Self; 3] = [Self::General, Self::Appearance, Self::Performance];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Model,
+        Self::Permissions,
+        Self::Appearance,
+        Self::Performance,
+    ];
 
     fn title(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Model => "Model",
+            Self::Permissions => "Permissions",
             Self::Appearance => "Appearance",
             Self::Performance => "Performance",
         }
@@ -65,6 +93,10 @@ impl Section {
     /// and the gap under the whole block is the same either way.
     fn subtitle(self) -> Option<&'static str> {
         match self {
+            Self::Model => Some("Who answers the chat, and with which key."),
+            Self::Permissions => {
+                Some("What the system lets Arbos do here. Each row asks for itself.")
+            }
             Self::General | Self::Appearance | Self::Performance => None,
         }
     }
@@ -72,6 +104,8 @@ impl Section {
     fn glyph(self) -> &'static str {
         match self {
             Self::General => icons::system::SETTINGS_MINIMALISTIC,
+            Self::Model => icons::system::KEY_MINIMALISTIC,
+            Self::Permissions => icons::media::MICROPHONE,
             Self::Appearance => icons::system::SUN,
             Self::Performance => icons::devices::CPU,
         }
@@ -81,6 +115,17 @@ impl Section {
 pub struct SettingsWindow {
     workspace: Entity<Workspace>,
     section: Section,
+    host: model::HostPanel,
+    /// The permissions rows' re-check loop is running.
+    rechecking: bool,
+    /// Holds the keyboard for Escape / ⌘W.
+    focus: FocusHandle,
+}
+
+impl Focusable for SettingsWindow {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
 }
 
 /// Open the window, or bring the open one forward — a second settings window
@@ -118,7 +163,24 @@ pub fn open(
         },
         |window, cx| {
             appearance::observe_window(window, cx).detach();
-            cx.new(|_cx| SettingsWindow { workspace, section })
+            let view = cx.new(|cx| {
+                // The permission rows are the centre's; follow it.
+                let center = cx
+                    .global::<crate::model::permission_center::Permissions>()
+                    .0
+                    .clone();
+                cx.observe(&center, |_, _, cx| cx.notify()).detach();
+                SettingsWindow {
+                    workspace,
+                    section,
+                    host: model::HostPanel::new(cx),
+                    rechecking: false,
+                    focus: cx.focus_handle(),
+                }
+            });
+            let focus = view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            view
         },
     )
     .ok()
@@ -130,6 +192,11 @@ impl SettingsWindow {
     /// re-read on the way in rather than trusted from whenever it was opened.
     fn show(&mut self, section: Section, cx: &mut Context<Self>) {
         self.section = section;
+        if section == Section::Model {
+            // config.toml may have been edited by hand or by `arbos-kernel
+            // setup` since the window opened.
+            self.host.refresh();
+        }
         cx.notify();
     }
 
@@ -169,6 +236,9 @@ impl Render for SettingsWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         div()
+            .key_context(KEY_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(|_: &CloseSettings, window, _| window.remove_window())
             .size_full()
             .relative()
             .flex()
@@ -214,6 +284,8 @@ impl Render for SettingsWindow {
                             )
                             .child(match self.section {
                                 Section::General => self.general_body(cx),
+                                Section::Model => self.model_body(cx),
+                                Section::Permissions => self.permissions_body(cx),
                                 Section::Appearance => self.appearance_body(cx),
                                 Section::Performance => self.performance_body(cx),
                             }),

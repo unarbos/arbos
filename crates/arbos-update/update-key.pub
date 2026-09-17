@@ -1,0 +1,25 @@
+# The public half of the Arbos update signing key.
+#
+# Every published payload — the macOS app zip, the Linux tarball — is signed
+# with the private half, which lives only in the repository secret
+# ARBOS_UPDATE_SIGNING_KEY and is never written to a file that can be
+# committed. This half is compiled into the app: an update installs only if
+# its bytes verify against the line below.
+#
+# Nothing here is Apple's. Notarization is a separate promise made to
+# Gatekeeper about the first launch of a downloaded app; this is the promise
+# made to the running app about the payload it is replacing itself with. When
+# the Developer ID certificate arrives, the payload gains a notarized
+# signature and keeps this one.
+#
+# To set it up once, from a checkout:
+#
+#   cargo run -q -p arbos-update --bin arbos-updatectl -- keygen \
+#       --public crates/arbos-update/update-key.pub | gh secret set ARBOS_UPDATE_SIGNING_KEY
+#
+# That writes this file (commit it) and pipes the secret straight into the
+# repository secret without it ever reaching a terminal or a shell history.
+#
+# Until the line exists, a build refuses every update rather than trusting an
+# unsigned one, and the publish workflow skips itself with a note.
+ed25519 tRMVEMFE8nHJfhoFBIt3pIjEUEFiqvXB9HiB8Rnn3YQ=

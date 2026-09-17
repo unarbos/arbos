@@ -22,6 +22,10 @@ fn build(appearance: Appearance) -> Theme {
     if appearance == Appearance::Dark {
         cursor_dark(&mut theme);
     }
+    // The app's own face on every platform (`crate::fonts`): the same
+    // glyphs, metrics and weights on a Mac, on Linux, and on the rig that
+    // measures them — Cursor ships its font for the same reason.
+    theme.font_sans = crate::fonts::FAMILY.into();
     theme
 }
 

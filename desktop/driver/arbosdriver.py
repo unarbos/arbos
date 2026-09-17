@@ -320,6 +320,13 @@ class Arbos:
         project "+") need the app to render the hover before the press.
         """
         if target is not None:
+            # A click on something the person cannot see is not a click: the
+            # rig once "clicked" a fold scrolled far out of view and read the
+            # nothing that followed as the app's fault (F-123, cycle 27).
+            # Refuse loudly so the row fails with the reason.
+            found = self.find(target)
+            if not found.get("visible", True):
+                raise DriverError(f"click: `{target}` is not on screen (at {found.get('x')},{found.get('y')}, clipped away)")
             self.call("move", target=target, modifiers=_mods(mods))
         return self.call("click", target=target, x=x, y=y, button=button, count=count, modifiers=_mods(mods))
 
@@ -363,7 +370,7 @@ class Arbos:
     # -- app ---------------------------------------------------------------
 
     def action(self, name: str, data: Any = None) -> dict:
-        """Dispatch a gpui action by name, e.g. ``"cydonia::NewSession"``."""
+        """Dispatch a gpui action by name, e.g. ``"arbos::NewSession"``."""
         return self.call("action", name=name, data=data)
 
     def resize(self, width: float, height: float) -> dict:
