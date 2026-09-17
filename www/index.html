@@ -3,10 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Arbos — your projects, run as agents</title>
-  <meta name="description" content="Arbos runs each of your projects as a long-lived agent that delegates work, talks with you in full duplex, and keeps all its state in files you can read, commit, and rewind.">
+  <title>Arbos</title>
+  <meta name="description" content="Arbos runs each of your projects as a long-lived agent. It delegates the work, talks with you in full duplex, and keeps its state in files you can read, commit, and rewind.">
   <meta name="theme-color" content="#161616">
-  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="canonical" href="https://arbos.life/">
   <meta property="og:title" content="Arbos">
   <meta property="og:description" content="Your projects, run as agents. Open source, for Mac.">
@@ -19,17 +22,12 @@
   <header class="top">
     <div class="wrap">
       <a class="brand" href="/" aria-label="Arbos home">
-        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M10.3 3h3.4v11.2c0 1.6.8 2.8 2.4 3.6V19H7.9v-1.2c1.6-.8 2.4-2 2.4-3.6V3z"/><path d="M14.15 9.9 17.55 6.5l2.2 2.2-3.4 3.4-2.2-2.2z"/><path d="M9.85 11.95 6.05 8.15l-2.2 2.2 3.8 3.8 2.2-2.2z"/></svg>
+        <img src="/favicon-32.png" width="18" height="18" alt="">
         Arbos
       </a>
       <nav class="nav" aria-label="Main">
-        <a href="/what/">What it is</a>
         <a href="/install/">Install</a>
-        <a href="/docs/">Docs</a>
-        <a class="gh" href="https://github.com/unarbos/arbos" rel="noopener" aria-label="Arbos on GitHub">
-          <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
-          <span>GitHub</span>
-        </a>
+        <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
       </nav>
     </div>
   </header>
@@ -38,70 +36,32 @@
     <section class="hero">
       <div class="wrap">
         <h1>Your projects, run as agents.</h1>
-        <p class="lede">Arbos gives every project one long-lived agent that delegates the work, talks with you in full duplex, and keeps its state in files you can read, commit, and rewind.</p>
-        <div class="btn-row">
-          <a class="btn btn-primary" href="https://github.com/unarbos/arbos/releases/latest" data-dmg rel="noopener">
-            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c0-2.2 1.8-3.25 1.88-3.3-1.03-1.5-2.62-1.7-3.18-1.73-1.35-.14-2.64.8-3.33.8-.69 0-1.75-.78-2.88-.76-1.48.02-2.85.86-3.61 2.19-1.54 2.67-.39 6.63 1.11 8.8.73 1.06 1.6 2.25 2.75 2.2 1.1-.04 1.52-.71 2.85-.71 1.33 0 1.7.71 2.87.69 1.19-.02 1.94-1.08 2.66-2.14.84-1.23 1.19-2.42 1.21-2.48-.03-.01-2.32-.89-2.33-3.56zM14.2 6.13c.61-.74 1.02-1.76.9-2.78-.88.04-1.94.58-2.57 1.32-.56.65-1.06 1.7-.93 2.7.98.08 1.98-.5 2.6-1.24z"/></svg>
-            Download for Mac
-          </a>
-          <a class="btn" href="https://github.com/unarbos/arbos" rel="noopener">View on GitHub</a>
-        </div>
-        <p class="btn-note">Apple silicon and Intel · macOS 11 or newer · <a href="/install/">install steps</a><span data-release-note hidden></span></p>
+        <p class="lede">One long-lived agent per project. It delegates the work, talks with you in full duplex, and keeps its state in files you can read, commit, and rewind.</p>
+        <p class="cta">
+          <a class="btn btn-primary" href="/download/mac" data-mac-download>Download for Mac</a>
+        </p>
+        <p class="btn-note"><span data-release-note>Newest dev build</span> · Apple silicon · macOS 13 or newer · <a href="/install/">install</a></p>
         <figure class="shot">
-          <img src="/assets/arbos-desktop.png" width="1600" height="972" alt="The Arbos desktop app: a project tab, the main chat asking two workers to write files, both workers running in the right-hand project panel." fetchpriority="high">
+          <img src="/assets/arbos-desktop.png" width="1600" height="1000" alt="The Arbos desktop app: a project's chat on the left, the side drawer open on the right with a job running." fetchpriority="high">
         </figure>
       </div>
     </section>
 
-    <section class="section" aria-labelledby="how">
+    <section class="three">
       <div class="wrap">
-        <div class="section-head">
-          <span class="kicker">How it works</span>
-          <h2 id="how">One agent per project. It runs for as long as the project does.</h2>
-        </div>
-        <div class="grid3">
-          <article class="card">
-            <span class="num">01</span>
-            <h3>It delegates</h3>
-            <p>The main chat never blocks. You keep talking; it hands each piece of work to a smaller agent with the notes and pointers it needs, then folds the results back in.</p>
-          </article>
-          <article class="card">
-            <span class="num">02</span>
-            <h3>You talk to it</h3>
-            <p>Call your project from the desktop or your phone. Both sides speak and listen at the same time. Interrupt it mid-sentence, and it still hears you while it speaks.</p>
-          </article>
-          <article class="card">
-            <span class="num">03</span>
-            <h3>State lives in files</h3>
-            <p>Agents, plans, notes, and subscriptions are plain files in <code>.arbos/</code>. Read them, commit them with git, and rewind to any saved point.</p>
-          </article>
-        </div>
-      </div>
-    </section>
-
-    <section class="section" aria-labelledby="start">
-      <div class="wrap">
-        <div class="section-head">
-          <span class="kicker">Get started</span>
-          <h2 id="start">Download, paste a model key, open a folder.</h2>
-          <p>Arbos talks to any model through <a href="https://openrouter.ai" rel="noopener">OpenRouter</a> by default; OpenAI-compatible endpoints work too. Everything else is on the <a href="/install/">Install</a> page.</p>
-        </div>
-        <div class="btn-row">
-          <a class="btn btn-primary" href="https://github.com/unarbos/arbos/releases/latest" data-dmg rel="noopener">Download for Mac</a>
-          <a class="btn" href="/install/#source">Build from source</a>
-        </div>
+        <p><strong>It delegates.</strong> The main chat hands each piece of work to a smaller agent and never blocks.</p>
+        <p><strong>You talk to it.</strong> Call a project from your Mac or your phone. Both sides speak and listen at once.</p>
+        <p><strong>It lives in files.</strong> Agents, notes, and plans are plain files in <code>.arbos/</code>, so git saves and rewinds them.</p>
       </div>
     </section>
   </main>
 
   <footer class="foot">
     <div class="wrap">
-      <span>© 2026 Arbos · <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT license</a></span>
       <nav aria-label="Footer">
         <a href="https://github.com/unarbos/arbos" rel="noopener">GitHub</a>
-        <a href="https://github.com/unarbos/arbos/releases" rel="noopener">Releases</a>
-        <a href="https://github.com/unarbos/arbos/issues" rel="noopener">Issues</a>
-        <a href="https://github.com/unarbos/arbos/issues/new" rel="noopener">Contact</a>
+        <a href="https://github.com/unarbos/arbos#readme" rel="noopener">Docs</a>
+        <a href="https://github.com/unarbos/arbos/blob/main/LICENSE" rel="noopener">MIT</a>
       </nav>
     </div>
   </footer>
