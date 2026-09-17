@@ -620,6 +620,7 @@ def register(scenario, registry, transcript, now_ms, branch):
     def pn01(cx):
         """A panic on the turn's own task (ARBOS_TEST_PANIC_TURN=root fires once): the agent goes idle within seconds instead of staying `running` for good; the transcript ends with a failed notice naming the internal error and a `turn_complete`; kernel.log says `turn_panicked`; the next message runs a normal turn (#374). Before the guard a user saw only a working line, forever, with no error anywhere."""
         cx.env["ARBOS_TEST_PANIC_TURN"] = "root"
+        cx.rec.notes["expected_panic"] = "the turn task panicked on purpose"  # the harness's panic detector lets this one through
         lines = [{"agent": "root", "content": "Fine now."}]
         k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
         cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")

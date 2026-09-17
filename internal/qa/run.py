@@ -1826,6 +1826,11 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     rec.snapshot(cx.place, "state-after")
     for k in cx.kernels:
         err = k.stderr_text()
+        # A scenario that provokes a panic on purpose (ARBOS_TEST_PANIC_TURN, #374) names the text it expects;
+        # that panic is the test, not a break.
+        expected = cx.rec.notes.get("expected_panic")
+        if expected and expected in err:
+            err = err.replace("panicked at", "expected panic at")
         if "panicked at" in err:
             rec.broke("kernel-panic", err[err.find("panicked at"):][:400], f"{k.tag}.stderr.log")
     result = {
