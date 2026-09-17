@@ -55,6 +55,13 @@ fn write(level: &str, event: &str, agent: Option<&str>, detail: &str) {
         }
     }
     let Some(path) = path() else { return };
+    // The log lives in the store; a store moved out from under the kernel
+    // is not written to at its old path (that made the ghost folder).
+    if let Some(arbos) = path.parent().and_then(|p| p.parent())
+        && !arbos_core::store_intact(arbos)
+    {
+        return;
+    }
     let line = Line {
         ts: arbos_core::now_ms(),
         level,

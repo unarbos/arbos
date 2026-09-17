@@ -1,5 +1,30 @@
 use std::path::{Path, PathBuf};
 
+/// Which folder a `.arbos/` store *is*, as the file system knows it —
+/// device and inode — apart from the path it is at. A kernel records this
+/// at start and compares before it writes: a store moved out from under
+/// it (the person renamed the project folder) keeps its identity at the
+/// new path, and whatever sits at the old path is not the store the
+/// kernel opened. Writing there would recreate the project as a ghost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreId {
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// What a look at `place.arbos()` finds, against the id recorded at start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreState {
+    /// The same folder.
+    Intact,
+    /// Nothing at the path.
+    Gone,
+    /// A folder at the path that is not the one the kernel opened: the
+    /// store moved away and something (often the kernel's own late
+    /// writes) made a new one where it was.
+    Moved,
+}
+
 /// A directory the kernel serves. Remote places are the same folder on a host;
 /// the window tunnels. The kernel only ever sees a local path.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +43,20 @@ impl Place {
 
     pub fn arbos(&self) -> PathBuf {
         self.path.join(".arbos")
+    }
+
+    /// The store's identity now, or None when nothing is at the path.
+    pub fn store_id(&self) -> Option<StoreId> {
+        store_id_of(&self.arbos())
+    }
+
+    /// The store at the path, against the identity recorded at start.
+    pub fn store_state(&self, opened: StoreId) -> StoreState {
+        match self.store_id() {
+            None => StoreState::Gone,
+            Some(now) if now == opened => StoreState::Intact,
+            Some(_) => StoreState::Moved,
+        }
     }
 
     pub fn agents_dir(&self) -> PathBuf {
@@ -229,5 +268,124 @@ mod kernel_json_tests {
         let (_dir, place) = place_with(None, Some(alive()));
         std::fs::write(place.kernel_json(), "not json at all").unwrap();
         assert_eq!(place.kernel_json_read(), place.legacy_kernel_json());
+    }
+}
+
+/// Device and inode of a directory, when it exists.
+pub fn store_id_of(dir: &Path) -> Option<StoreId> {
+    let meta = std::fs::metadata(dir).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(StoreId {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        // No stable identity to compare: every look reads as the same
+        // folder, which is the pre-guard behaviour.
+        Some(StoreId { dev: 0, ino: 0 })
+    }
+}
+
+/// Where a store with `id` is now, when the process can tell: its own
+/// current directory, if that is a place whose `.arbos/` has the id (the
+/// desktop starts a kernel with the project as its cwd, and a cwd follows
+/// the folder when it is renamed).
+pub fn store_now_at(id: StoreId) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    (store_id_of(&cwd.join(".arbos")) == Some(id)).then_some(cwd)
+}
+
+/// The store this process opened, remembered once so that any writer —
+/// a tool, a notification, the plan, the log — can ask whether the folder
+/// at the place's path is still that store before it writes. A process
+/// that never remembers one (a CLI, a test helper) reads every store as
+/// intact.
+static OPENED: std::sync::OnceLock<StoreId> = std::sync::OnceLock::new();
+
+/// Record the store a kernel opened. Once per process; a second call is
+/// ignored.
+pub fn remember_opened(id: StoreId) {
+    let _ = OPENED.set(id);
+}
+
+/// The store this process opened, when it remembered one.
+pub fn opened() -> Option<StoreId> {
+    OPENED.get().copied()
+}
+
+/// Whether `arbos_dir` is the store this process opened — or no store was
+/// remembered. False means: the folder was moved or replaced, and a write
+/// here would land somewhere the project is not (a ghost at the old path).
+pub fn store_intact(arbos_dir: &Path) -> bool {
+    store_intact_against(arbos_dir, opened())
+}
+
+fn store_intact_against(arbos_dir: &Path, opened: Option<StoreId>) -> bool {
+    match opened {
+        None => true,
+        Some(id) => store_id_of(arbos_dir) == Some(id),
+    }
+}
+
+/// `store_intact`, as the error a writer returns instead of writing.
+pub fn check_store(arbos_dir: &Path) -> std::io::Result<()> {
+    check_store_against(arbos_dir, opened())
+}
+
+fn check_store_against(arbos_dir: &Path, opened: Option<StoreId>) -> std::io::Result<()> {
+    if store_intact_against(arbos_dir, opened) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "the project folder was moved or replaced: {} is not the store this kernel opened, and nothing is written there",
+            arbos_dir.display()
+        )))
+    }
+}
+
+#[cfg(test)]
+mod store_id_tests {
+    use super::*;
+
+    /// The rename under a running kernel: the store keeps its identity at
+    /// the new path; the old path is Gone, then — once something makes a
+    /// folder there — Moved; a writer asked first refuses.
+    #[test]
+    fn a_renamed_store_is_intact_where_it_went_and_foreign_where_it_was() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-id-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let old = Place::new(dir.join("w1"));
+        std::fs::create_dir_all(old.arbos()).unwrap();
+        let id = old.store_id().expect("an id");
+        assert_eq!(old.store_state(id), StoreState::Intact);
+        assert!(check_store_against(&old.arbos(), Some(id)).is_ok());
+        // No store remembered: every folder reads as intact (a CLI).
+        assert!(check_store_against(&old.arbos(), None).is_ok());
+
+        std::fs::rename(old.path(), dir.join("w1-moved")).unwrap();
+        let moved = Place::new(dir.join("w1-moved"));
+        assert_eq!(
+            moved.store_state(id),
+            StoreState::Intact,
+            "followed the folder"
+        );
+        assert_eq!(old.store_state(id), StoreState::Gone);
+        assert!(check_store_against(&old.arbos(), Some(id)).is_err());
+
+        // A late write's `create_dir_all` at the old path: a new folder, a
+        // new inode — Moved, and still refused.
+        std::fs::create_dir_all(old.arbos()).unwrap();
+        assert_eq!(old.store_state(id), StoreState::Moved);
+        let err = check_store_against(&old.arbos(), Some(id)).unwrap_err();
+        assert!(err.to_string().contains("moved or replaced"), "{err}");
+        assert!(check_store_against(&moved.arbos(), Some(id)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
