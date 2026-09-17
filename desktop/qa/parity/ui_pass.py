@@ -409,9 +409,14 @@ class Pass:
         if not self.app.exists(target):
             return False
         try:
-            return bool(self.app.find(target).get("visible"))
+            found = self.app.find(target)
         except Exception:
             return False
+        # `visible` is bounds ∩ content mask; the PRs pill read False while
+        # plainly on screen (cycle 31, `128-pill-prs.png`). `reachable` is
+        # the hit test at the element's centre — the stronger word for an
+        # interactive element. Either counts; neither is assumed (R15).
+        return bool(found.get("visible")) or bool(found.get("reachable"))
 
     def first(self, pattern: str) -> str | None:
         found = self.ids(pattern)
