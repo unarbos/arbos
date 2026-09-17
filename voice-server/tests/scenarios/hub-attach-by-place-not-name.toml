@@ -1,0 +1,26 @@
+# Two folders with the same leaf name on one machine (`qa-mac/arbos` and `qa-mac/arbos-2`, a mock
+# hub in this process; never Jacob's real Mac). The client names its folder as the desktop does —
+# the tab's name `arbos` plus the folder's path — and the path is the folder the roster lists as
+# `arbos-2`. The call must attach to the kernel at that folder, matched by the roster's `place`,
+# and not to the one that merely shares the name.
+title = "Hub attach matches the roster's place to the client's path before the name"
+hub = { machine = "qa-mac", project = "arbos-2", decoy = "arbos" }
+# `host` names the machine the folder is on, as the desktop sends for a remote place; without it a
+# folder that happens to exist on the gateway's host takes the local route (path-attaches-local-kernel).
+client_project = { machine = "qa-mac", project = "arbos", path = "$PLACE", host = "qa-mac", name = "arbos" }
+
+[[steps]]
+say = "Which folder is this?"
+model = { ack = "One sec." }
+[steps.kernel]
+reply = "This is the second arbos folder."
+
+[[steps]]
+wait_spoken = "second arbos folder"
+
+[[steps]]
+wait_quiet = 1.0
+
+[expect]
+spoken_contains = ["second arbos folder"]
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]
