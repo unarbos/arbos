@@ -97,3 +97,12 @@ Rates after 3 runs: J1–J6, J8, J11, J13 **3/3**; J9 **2/2** product (one harne
 Harness notes: run 1's call did not start because the call screen waits for a tap on the disc; the runner taps it now. The photo check now reads the reply after the photo line's sequence number and fails on "didn't arrive / nothing at that path".
 
 **PUSH step** (added cycle 19, #333): `~/push-check.sh` reads `GET /push` and calls `GET /push/test`; scored PASS on a 200 (Apple took a test alert to this phone), U on 503 with the hub's reason (expected until Jacob's key exists), FAIL on 502. Today the ArbosLife hub answers 404 — it predates #333 — so the step is U with that note.
+
+## Run 31 — 2026-09-17 12:09 UTC, `arboslife/demo`
+
+- **App** `main@1410`. **Kernel, asked on the attach socket at both ends:** `arbos-kernel 0.2.0 0f2a8bc68cc6 protocol 1`, built 04:39, `binary_gone: false`. First run to carry the kernel's own commit, which is what QA asked for.
+- **Scored: J1 pass** (seeded in 170 s, the kernel's own record shows the test written and a commit), **J7v pass** (the verify line landed), everything else **unexercised**.
+- **Why unexercised rather than failed** (M-162): six of the run's eight typed lines never reached the kernel. Only the setup (seq 1493) and the verify (1512) landed. The challenge, both follow-ups, the steer, the read-only ask and the phone-only photo and call lines did not.
+- **The "spawn refused" in the raw score is not this run's** (M-160). No spawn happened here at all; the refusals quoted belong to runs 29 and 30, matched because an empty anchor let the scorer read the whole transcript. Fixed in #447.
+- **JB-6 neither fired nor was disproved, and its premise is in doubt** (M-161): the roster's per-process `builds` for `arboslife` list six kernels and a worker daemon with none reporting `binary_gone`.
+- Evidence: `media/mobile/journey/0917-120912/` (23 files including `record.json`, `kernel-version.txt`, `score.txt` and the challenge recording).
