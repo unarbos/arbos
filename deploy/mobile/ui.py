@@ -22,6 +22,7 @@ points. Nothing here measures an image.
   tap    tap that centre
   value  print the element's AXValue (the composer's placeholder or text)
   field  print what the text field holds, found by being a text field
+         `field plain` undoes iOS's typographic substitutions first
   focus  tap that same text field
   dump   print every label and frame, for writing a new scenario
 
@@ -93,7 +94,18 @@ def main():
             print(f"ui: {len(fields)} text fields on screen, want one", file=sys.stderr)
             sys.exit(1)
         if verb == "field":
-            print(fields[0].get("AXValue") or "", end="")
+            held = fields[0].get("AXValue") or ""
+            # iOS rewrites punctuation as it types: 'seeded' comes back as
+            # ‘seeded’, and -- as an em dash. The sentence is the same and
+            # the length can even match, so a scenario comparing what it
+            # typed against what the box holds reads a false mismatch,
+            # clears a perfectly good line and retries for ever.
+            if len(sys.argv) > 3 and sys.argv[3] == "plain":
+                for fancy, plain in (("\u2018", "'"), ("\u2019", "'"),
+                                     ("\u201c", '"'), ("\u201d", '"'),
+                                     ("\u2014", "--"), ("\u2013", "-")):
+                    held = held.replace(fancy, plain)
+            print(held, end="")
             return
         # The caret lands where the tap lands. The composer grows into a
         # multi-line box, so its centre is in the middle of what is already

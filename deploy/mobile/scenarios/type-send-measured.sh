@@ -47,8 +47,8 @@ new_send() {
     ui focus >/dev/null 2>&1 || { sleep 1; continue; }
     sleep 0.7
     idb ui text "$want" --udid "$UDID" >/dev/null 2>&1
-    for _ in $(seq 1 40); do [ "$(ui field 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
-    got=$(ui field 2>/dev/null)
+    for _ in $(seq 1 40); do [ "$(ui field plain 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
+    got=$(ui field plain 2>/dev/null)
     if [ "$got" = "$want" ]; then
       ui tap "Up" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID" >/dev/null 2>&1
       return 0
