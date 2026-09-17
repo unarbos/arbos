@@ -249,9 +249,11 @@ fn rewound_arrives_before_the_file_restore() {
         after < before,
         "the transcript is already cut: {before} -> {after}"
     );
-    // The restore reports on its own, as a second rewound or an error.
-    let follow = a.wait(Duration::from_secs(20), |f| {
-        (f["type"] == "rewound" && !f["restored"].is_null()) || f["type"] == "error"
+    // The restore reports on its own: a second `rewound` that closes the
+    // pending state (with what was restored, or without, when the turn's
+    // tree could not be), or an error. `pending` is omitted when false.
+    let follow = a.wait(Duration::from_secs(40), |f| {
+        (f["type"] == "rewound" && f["pending"] != true) || f["type"] == "error"
     });
     assert!(follow.is_some(), "the file restore must report");
 
@@ -261,11 +263,20 @@ fn rewound_arrives_before_the_file_restore() {
     // read right after the frame caught the file mid-rewrite on the CI
     // runner (#158/#162: "not a dangling wake: []"); the cut itself is
     // now written whole, the poll is the belt to that brace.
+    // A kernel notice after the turn (what the restore did or did not
+    // do) is not part of the turn: the last *turn* event is what must be
+    // `turn_complete`.
+    let last_turn_event = |t: &[serde_json::Value]| -> Option<serde_json::Value> {
+        t.iter()
+            .rev()
+            .find(|e| e["kind"] != "notice" && e["kind"] != "nudge")
+            .cloned()
+    };
     let cut = wait_transcript(&k.place, "root", Duration::from_secs(5), |t| {
-        t.last().is_some_and(|e| e["kind"] == "turn_complete")
+        last_turn_event(t).is_some_and(|e| e["kind"] == "turn_complete")
     });
     assert!(
-        cut.last().is_some_and(|e| e["kind"] == "turn_complete"),
+        last_turn_event(&cut).is_some_and(|e| e["kind"] == "turn_complete"),
         "the transcript must end on a finished turn, not a dangling wake: {cut:?}"
     );
     assert_eq!(

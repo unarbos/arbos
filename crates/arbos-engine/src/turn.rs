@@ -557,10 +557,47 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();
         let agent_id = agent.id.to_string();
-        let line = events.len() as u64;
-        tokio::task::spawn_blocking(move || {
-            let _ = crate::tools::git::snapshot_turn(&snap, &agent_dir, &agent_id, line);
-        });
+        let turn_line = events.len() as u64;
+        // The checkpoint's record — HEAD and this turn's line — lands
+        // before the turn goes on, so a rewind arriving at any point
+        // after resolves to this turn and not the one before it. The
+        // working tree (the slow part on a large repository) follows on
+        // the blocking pool and fills the record in.
+        let record = {
+            let (snap, agent_dir, agent_id) = (snap.clone(), agent_dir.clone(), agent_id.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::tools::git::snapshot_turn_record(&snap, &agent_dir, &agent_id, turn_line)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("checkpoint task: {e}"))
+            .and_then(|r| r)
+        };
+        match record {
+            Ok(Some(cp)) => {
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) =
+                        crate::tools::git::snapshot_turn_tree(&snap, &agent_dir, &agent_id, &cp)
+                    {
+                        eprintln!("checkpoint {agent_id}:{turn_line}: tree not saved: {e:#}");
+                    }
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // A checkpoint that could not be written is said, once, on
+                // the transcript: `undo` and `rewind --files` will refuse
+                // this turn, and the person should know why before they
+                // reach for them (the qal-j08 family).
+                let ev = Event::new(EventKind::Notice {
+                    text: format!(
+                        "Checkpoint not written for this turn: {e:#}. Until it is, undo and a rewind of files to this turn are refused rather than guessed."
+                    ),
+                    failed: true,
+                });
+                let _ = append_event(&transcript, &ev);
+                hooks.emit(&ev);
+            }
+        }
     }
 
     // No key or no usable base: the turn cannot start. Say so on the
