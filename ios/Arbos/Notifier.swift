@@ -52,6 +52,17 @@ final class Notifier: NSObject, ObservableObject, UNUserNotificationCenterDelega
     func requestIfNeeded() {
         guard !asked else { return }
         asked = true
+        #if DEBUG
+        // `-noAskNotifications`: a scripted run does not want iOS's own
+        // permission sheet, which sits over the whole app and swallows every
+        // tap sent to it. Two cycle-43 runs were scored against a screen
+        // that alert was covering before anyone noticed. The push coverage
+        // row drives this deliberately and leaves the flag off.
+        if UserDefaults.standard.bool(forKey: "noAskNotifications") {
+            print("notifications: not asking, -noAskNotifications is set")
+            return
+        }
+        #endif
         UNUserNotificationCenter.current().getNotificationSettings { [weak self] settings in
             switch settings.authorizationStatus {
             case .notDetermined:
