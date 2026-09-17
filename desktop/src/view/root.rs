@@ -2259,14 +2259,11 @@ impl Arbos {
             return;
         }
         let label = Workspace::tab_label(project);
-        // What the gateway is told the call is for: this tab's folder path
-        // with the machine and folder name the hub knows it by. The path is
-        // what binds the call — never another folder's agent, whatever the
-        // gateway was started with.
-        let mut target = kernel::call_target(&project.place(), &label);
-        if let Some(chat) = workspace.session(session) {
-            target.context = call_context(chat);
-        }
+        // What the gateway is told the call is for: the tab's hub name
+        // (`mac/arbos`), so a gateway on another machine can attach to this
+        // kernel through the hub; a gateway serving this very kernel takes
+        // the folder's name as its own.
+        let hub_name = kernel::hub_project_name(&project.place());
         // Dictation, if a take is open, ends: the call owns the mic.
         if self.composer.read(cx).is_recording() {
             self.stop_voice(cx);
@@ -2281,7 +2278,7 @@ impl Arbos {
         cx.spawn(async move |this, cx| {
             let started = cx
                 .background_executor()
-                .spawn(async move { crate::voice_ws::call_start(&target) })
+                .spawn(async move { crate::voice_ws::call_start(&hub_name) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match started {
@@ -2354,9 +2351,7 @@ impl Arbos {
                         this.workspace.update(cx, |workspace, cx| {
                             workspace.with_session(call.session, cx, |chat| {
                                 for m in &lines {
-                                    if m.kind == "caller.said" {
-                                        chat.voice_prompt(&m.text);
-                                    } else if let Some(line) = call_line(m) {
+                                    if let Some(line) = call_line(m) {
                                         chat.notice(false, &line);
                                     }
                                 }
@@ -3183,77 +3178,8 @@ fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
         "narrator.say/error" => Some(format!("voice · {text}")),
         "narrator.say/detail" => Some(format!("voice · detail: {text}")),
         k if k.starts_with("narrator.say") => Some(format!("voice · {text}")),
-        // The speech model's own answer to the caller (small talk, or GPT
-        // Live talking for itself): in the record like a narrator line. Its
-        // "On it." is heard, not read, like the narrator's.
-        "model.reply" if is_spoken_ack(&text) => None,
-        "model.reply" => Some(format!("voice · {text}")),
         _ => None,
     }
-}
-
-/// A bare acknowledgement ("On it.", "One moment.", "Noted."): three words
-/// or fewer, no digits, nothing the record needs.
-fn is_spoken_ack(text: &str) -> bool {
-    let words = text.split_whitespace().count();
-    words <= 3 && !text.chars().any(|c| c.is_ascii_digit()) && !text.contains('?')
-}
-
-/// What the call starts knowing: the last lines of this chat, clipped, and
-/// the sub-agents, so the narrator and the speech model can answer "what
-/// were we doing" before the first new turn.
-fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::CallContext {
-    use crate::model::session::{ChatItem, ChildState, ToolStatus};
-    use crate::voice_ws::{CallContext, ContextAgent, ContextLine};
-    const LINES: usize = 12;
-    const CLIP: usize = 400;
-    let clip = |text: &str| -> String {
-        let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        if flat.chars().count() > CLIP {
-            flat.chars().take(CLIP).collect::<String>() + "…"
-        } else {
-            flat
-        }
-    };
-    let mut recent: Vec<ContextLine> = chat
-        .items
-        .iter()
-        .rev()
-        .filter_map(|item| match item {
-            ChatItem::User(m) if !m.text.trim().is_empty() => Some(ContextLine { role: "user".into(), text: clip(&m.text) }),
-            ChatItem::Agent(text) if !text.trim().is_empty() => Some(ContextLine { role: "assistant".into(), text: clip(text) }),
-            ChatItem::From { who, text, .. } if !text.trim().is_empty() => {
-                Some(ContextLine { role: "worker".into(), text: clip(&format!("{who}: {text}")) })
-            }
-            ChatItem::Tool { label, status, .. } => {
-                let state = match status {
-                    ToolStatus::Running => "running",
-                    ToolStatus::Success => "done",
-                    ToolStatus::Failure => "failed",
-                };
-                Some(ContextLine { role: "tool".into(), text: clip(&format!("{label} ({state})")) })
-            }
-            _ => None,
-        })
-        .take(LINES)
-        .collect();
-    recent.reverse();
-    let agents = chat
-        .children
-        .iter()
-        .map(|c| ContextAgent {
-            name: c.kernel_id.clone().unwrap_or_else(|| c.title.clone()),
-            state: match c.state {
-                ChildState::Working => "working",
-                ChildState::Asking => "asking",
-                ChildState::Waiting => "waiting",
-                ChildState::Done => "done",
-            }
-            .into(),
-            step: c.step.clone(),
-        })
-        .collect();
-    CallContext { recent, agents, running: chat.busy() }
 }
 
 /// One notice line for a mirrored speech-server event: who, what, words.
