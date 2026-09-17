@@ -591,6 +591,36 @@ say "the new build is inode $new; nothing has been stopped yet"
 # still on the old file. It is caught here, while it can still be read.
 scan | while read -r p i link; do record "$p" "$i" "$link"; done
 
+# The pid now serving $place on the new build, if any. Only the new inode
+# counts: a supervisor racing a stop produces a replacement on the old
+# build within a second, and nothing but its image tells the two apart.
+serving_new() {
+  for d in /proc/[0-9]*; do
+    q=${d#/proc/}
+    [ "$q" = "${1:-}" ] && continue
+    [ "$(stat -c %u "$d" 2>/dev/null)" = "$uid" ] || continue
+    [ "$(ino "$d/exe")" = "$new" ] || continue
+    tr '\0' '\n' < "$d/cmdline" 2>/dev/null | awk -v want="$place" 'prev=="serve" && $0==want {found=1; exit} {prev=$0} END{exit !found}' || continue
+    echo "$q"
+    return 0
+  done
+  return 1
+}
+
+# Wait for one to appear, bounded by the clock rather than by a count of
+# turns round the loop. Each turn walks /proc, which costs tens of
+# milliseconds here and more on a busier machine, so counting turns made
+# a "10 second" horizon run for about 15 and would stretch further the
+# more the machine had to do.
+wait_for_new() {
+  waited_until=$(( $(now_ms) + window * 1000 ))
+  while :; do
+    got=$(serving_new "${1:-}") && { echo "$got"; return 0; }
+    [ "$(now_ms)" -lt "$waited_until" ] || return 1
+    sleep 0.1
+  done
+}
+
 # --- stop, wait, and relaunch only what did not come back ---
 for p in $(cat "$work/pids"); do
   place=$(cat "$work/$p.place" 2>/dev/null)
@@ -600,8 +630,8 @@ for p in $(cat "$work/pids"); do
     continue
   fi
   kill -TERM "$p" 2>/dev/null
-  i=0
-  while kill -0 "$p" 2>/dev/null && [ "$i" -lt $((grace * 10)) ]; do sleep 0.1; i=$((i + 1)); done
+  stop_by=$(( $(now_ms) + grace * 1000 ))
+  while kill -0 "$p" 2>/dev/null && [ "$(now_ms)" -lt "$stop_by" ]; do sleep 0.1; done
   if kill -0 "$p" 2>/dev/null; then
     say "pid $p did not stop in ${grace}s; leaving ${place:-its place} alone"
     echo "arbos-boot-done: $p ${place:--} refused-still-running - $(( $(now_ms) - started ))"
@@ -611,24 +641,8 @@ for p in $(cat "$work/pids"); do
     echo "arbos-boot-done: $p - ended - $(( $(now_ms) - started ))"
     continue
   fi
-  # Wait to see what happens rather than deciding what it was. Only a
-  # replacement whose image is the new inode counts: the supervised race
-  # produces one on the old build within a second.
-  took=""
-  i=0
-  while [ "$i" -lt $((window * 10)) ]; do
-    for d in /proc/[0-9]*; do
-      q=${d#/proc/}
-      [ "$q" = "$p" ] && continue
-      [ "$(stat -c %u "$d" 2>/dev/null)" = "$uid" ] || continue
-      [ "$(ino "$d/exe")" = "$new" ] || continue
-      tr '\0' '\n' < "$d/cmdline" 2>/dev/null | awk -v want="$place" 'prev=="serve" && $0==want {found=1; exit} {prev=$0} END{exit !found}' || continue
-      took=$q
-      break
-    done
-    [ -n "$took" ] && break
-    sleep 0.1; i=$((i + 1))
-  done
+  # Wait to see what happens rather than deciding what it was.
+  took=$(wait_for_new "$p") || took=""
   if [ -n "$took" ]; then
     say "$place came back as pid $took on the new build; nothing to relaunch"
     echo "arbos-boot-done: $p $place supervised $took $(( $(now_ms) - started ))"
@@ -644,21 +658,7 @@ for p in $(cat "$work/pids"); do
   cwd=$(cat "$work/$p.cwd" 2>/dev/null); [ -d "$cwd" ] || cwd=$place
   if command -v setsid >/dev/null 2>&1; then launch="setsid"; else launch="nohup"; fi
   ( cd "$cwd" 2>/dev/null || cd / ; exec </dev/null >>"$log" 2>&1; xargs -0 -a "$work/$p.rest" $launch "$target" ) &
-  sleep 1
-  back=""
-  i=0
-  while [ "$i" -lt $((window * 10)) ]; do
-    for d in /proc/[0-9]*; do
-      q=${d#/proc/}
-      [ "$(stat -c %u "$d" 2>/dev/null)" = "$uid" ] || continue
-      [ "$(ino "$d/exe")" = "$new" ] || continue
-      tr '\0' '\n' < "$d/cmdline" 2>/dev/null | awk -v want="$place" 'prev=="serve" && $0==want {found=1; exit} {prev=$0} END{exit !found}' || continue
-      back=$q
-      break
-    done
-    [ -n "$back" ] && break
-    sleep 0.1; i=$((i + 1))
-  done
+  back=$(wait_for_new) || back=""
   if [ -n "$back" ]; then
     say "$place had no supervisor; started again as pid $back"
     echo "arbos-boot-done: $p $place relaunched $back $(( $(now_ms) - started ))"
@@ -872,6 +872,24 @@ mod tests {
         );
     }
 
+    /// Measured on the target: one walk of `/proc` costs 55 ms among 58
+    /// processes, so a loop that counted turns ran a "10 second" horizon
+    /// for 14.5 s — and would stretch further the busier the machine.
+    /// The bound is a time, so it is kept against the clock.
+    #[test]
+    fn the_horizon_is_measured_against_the_clock_not_a_count_of_turns() {
+        let s = bootstrap_script("/home/u/.local/bin/arbos-kernel", "/tmp/incoming", 20, 10);
+        assert!(
+            s.contains("waited_until=$(( $(now_ms) + window * 1000 ))")
+                && s.contains("stop_by=$(( $(now_ms) + grace * 1000 ))"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("window * 10)") && !s.contains("grace * 10)"),
+            "counting turns makes the horizon mean different things on different machines: {s}"
+        );
+    }
+
     #[test]
     fn a_process_that_will_not_stop_is_refused_rather_than_forced() {
         let s = bootstrap_script("/home/u/.local/bin/arbos-kernel", "/tmp/incoming", 20, 10);
@@ -956,6 +974,58 @@ arbos-boot: done";
         // A refusal is not an error line: the pass did what it meant to.
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert_eq!(r.steps.len(), 1);
+    }
+
+    /// The bytes a real machine produced, rather than bytes written to
+    /// match the parser. Captured from the disposable target on
+    /// 2026-09-17, where one kernel had been suspended so that it could
+    /// not answer TERM and the other two had no supervisor.
+    #[test]
+    fn the_report_reads_what_a_real_machine_printed() {
+        let out = "\
+arbos-boot: replacing inode 27292243 at /home/arbostest/.local/bin/arbos-kernel
+arbos-boot-found: 1348327 27292243 current /home/arbostest/places/alpha
+arbos-boot-found: 1348330 27292243 current /home/arbostest/places/beta
+arbos-boot-found: 1348349 27292243 current /home/arbostest/places/gamma
+arbos-boot: 3 process(es) of this user are running it
+arbos-boot: installing the new binary before stopping anything
+arbos-boot-swap: 27292243 27292497
+arbos-boot: the new build is inode 27292497; nothing has been stopped yet
+arbos-boot: pid 1348327 did not stop in 20s; leaving /home/arbostest/places/alpha alone
+arbos-boot-done: 1348327 /home/arbostest/places/alpha refused-still-running - 20008
+arbos-boot: /home/arbostest/places/beta had no supervisor; started again as pid 1355354
+arbos-boot-done: 1348330 /home/arbostest/places/beta relaunched 1355354 10229
+arbos-boot: /home/arbostest/places/gamma had no supervisor; started again as pid 1361455
+arbos-boot-done: 1348349 /home/arbostest/places/gamma relaunched 1361455 10249
+arbos-boot: done";
+        let r = bootstrap_report(out);
+        assert_eq!(r.swapped, Some((27292243, 27292497)));
+        assert_eq!(r.found.len(), 3);
+        assert_eq!(r.ended.len(), 3);
+        // One refusal, and it is not an error: the pass decided.
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let unhappy = r.unhappy();
+        assert_eq!(unhappy.len(), 1);
+        assert_eq!(unhappy[0].outcome, Outcome::RefusedStillRunning);
+        assert_eq!(
+            unhappy[0].place.as_deref(),
+            Some("/home/arbostest/places/alpha")
+        );
+        // Nothing took the refused place: a second kernel on a held lock
+        // is the state this refuses into existence rather than out of.
+        assert_eq!(unhappy[0].replaced_by, None);
+        // The grace window is a bound and it was reached exactly; the
+        // watch window is a bound and the two relaunches sat on it.
+        assert_eq!(r.slowest_ms(), Some(20008));
+        for e in &r.ended {
+            if e.outcome == Outcome::Relaunched {
+                let ms = e.waited_ms.expect("a measured wait");
+                assert!(
+                    (10_000..11_000).contains(&ms),
+                    "a 10 s horizon should cost about 10 s, not {ms} ms"
+                );
+            }
+        }
     }
 
     #[test]
