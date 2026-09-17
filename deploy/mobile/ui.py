@@ -24,6 +24,7 @@ points. Nothing here measures an image.
   field  print what the text field holds, found by being a text field
          `field plain` undoes iOS's typographic substitutions first
   focus  tap that same text field
+  menu   tap the overflow button in the top bar, which carries no label
   dump   print every label and frame, for writing a new scenario
 
 `field` and `focus` take no label because the composer has none once there
@@ -102,6 +103,20 @@ def main():
         sys.exit(__doc__)
     udid, verb = sys.argv[1], sys.argv[2]
     els = elements(udid)
+
+    if verb == "menu":
+        # The "…" in the top bar has no label of its own, and its items are
+        # only in the tree once it is open. It is the one pop-up button up
+        # there, which is a surer way to find it than a remembered point.
+        bar = [e for e in els if (e.get("type") or "") == "PopUpButton"
+               and (e.get("frame") or {}).get("y", 999) < 150]
+        if len(bar) != 1:
+            print(f"ui: want one pop-up button in the top bar, found {len(bar)}", file=sys.stderr)
+            sys.exit(1)
+        x, y = centre(bar[0])
+        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        print(f"opened the top-bar menu at {x},{y}")
+        return
 
     if verb in ("field", "focus"):
         fields = [e for e in els if (e.get("type") or "") == "TextField"]

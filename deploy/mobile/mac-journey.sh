@@ -8,6 +8,7 @@
 #   mac-journey.sh <target>    target: pod | <machine>/<project>
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
+. "$(cd "$(dirname "$0")" && pwd)/sim-lib.sh"   # tap_shot: screenshot pixels -> device points
 U=B1185668-7488-420F-B12D-4412BAAC7673; B=com.unarbos.arbos.ios
 TARGET=${1:-pod}; ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
 RUN=$(date -u +%m%d-%H%M%S); O=$HOME/mobile-out/journey/$RUN; mkdir -p $O
@@ -202,17 +203,54 @@ fi
 wait_hist P1 "user +please summarize what the workers did" 30
 # P2/P3 recorded when RECORD_P=1 (the every-third-cycle recording)
 if [ "${RECORD_P:-0}" = "1" ]; then xcrun simctl io "$U" recordVideo --codec h264 --force "$O/p-raw.mp4" >/dev/null 2>&1 & PREC=$!; fi
-# P2 — attach a photo
-idb ui tap 41 788 --udid $U; sleep 1.5; idb ui tap 160 767 --udid $U; sleep 4; idb ui tap 70 230 --udid $U; sleep 1; idb ui tap 355 131 --udid $U; sleep 3; shot P2-chip
+# P2 — attach a photo.
+# The picker itself is another process, so `describe-all` cannot see inside
+# it and the taps within it have to be points. What must not be left to luck
+# is getting *out*: a picker still open swallows everything after it, and in
+# run 32 it swallowed the photo line and the whole call step — P3's stills
+# are of the photo grid. So the way in is by name, the way out is checked.
+ui tap "Add" || score P2 FAIL "no attachment button on the composer"
+sleep 1.5
+ui tap "Photo Library" || score P2 FAIL "no Photo Library in the attachment menu"
+sleep 4
+# Measured off `P2-chip.png` in pixels and converted, because that is the
+# only way to find anything in here and a coordinate read off a still is
+# 1.2x the point size on this device. The old tap for the photo was at
+# y=230 points, which is the "Private Access to Photos" banner, not the
+# grid — so nothing was ever selected and the tick stayed disabled.
+tap_shot 78 470 "$U"; sleep 1      # a photo in the grid, below the privacy banner
+tap_shot 426 157 "$U"; sleep 3     # the picker's tick, which is what closes it
+SWIPED=0
+for _ in 1 2 3; do
+  ui field >/dev/null 2>&1 && break
+  SWIPED=1
+  echo "P2: the picker is still up; swiping it away" | tee -a $O/run.txt
+  idb ui swipe 196 300 196 850 --duration 0.4 --udid $U; sleep 2
+done
+if ! ui field >/dev/null 2>&1; then
+  score P2 FAIL "the photo picker would not close; nothing after this was exercised"
+elif [ "$SWIPED" = 1 ]; then
+  # The tick is what closes the picker. Having to swipe means it was never
+  # pressed, so nothing was attached and the question below is about no
+  # photo at all — which the model will answer anyway, plausibly.
+  score P2 FAIL "no photo attached: the picker had to be dismissed by hand, so the tick was missed"
+fi
+shot P2-chip
 type_send "$ID photo: what is in this photo? One line."
 wait_hist P2e "user +$ID photo" 30 >/dev/null; PA=$(seq_of "user +$ID photo")
 t=0; R=""; while [ $t -lt 90 ]; do R=$(hist | awk -v a="${PA:-0}" '$1+0 > a+0' | grep -E "^ *[0-9]+ assistant" | tail -1); [ -n "$R" ] && break; sleep 5; t=$((t+5)); done
 shot P2-photo-reply
 if [ -z "$R" ]; then score P2 FAIL "no reply within 90s"; elif echo "$R" | grep -qiE "didn.t (arrive|reach|come)|did not (arrive|reach|come)|no .?attachments|can.t see|cannot see|nothing at that path"; then score P2 FAIL "photo did not reach the model: $(echo "$R" | cut -c1-100)"; else score P2 PASS "$(echo "$R" | cut -c1-120)"; fi
 # P3 — call, ask the project a question (must land in THIS project's transcript)
-idb ui tap 351 85 --udid $U; sleep 1.5; idb ui tap 225 94 --udid $U; sleep 3; idb ui tap 196 420 --udid $U; sleep 6; shot P3-call; sleep 16; shot P3-call-answered
+ui menu || score P3 FAIL "no overflow menu in the chat header"
+sleep 1.5
+ui tap "Call $ROW" || score P3 FAIL "no 'Call $ROW' in the chat menu"
+sleep 3
+idb ui tap 196 420 --udid $U          # the orb: the call waits for a tap on it
+sleep 6; shot P3-call; sleep 16; shot P3-call-answered
 wait_hist P3 "user +.*(working on|Arbus|Arbos)" 40
-idb ui tap 42 85 --udid $U; sleep 2; grep -E "^metric" $O/console.log | tail -4 | tee $O/call-metrics.txt
+ui tap "Close" >/dev/null 2>&1 || idb ui tap 42 85 --udid $U
+sleep 2; grep -E "^metric" $O/console.log | tail -4 | tee $O/call-metrics.txt
 if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v error -y -i "$O/p-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-photo-and-call.mp4" && rm -f "$O/p-raw.mp4"; fi
 # PUSH — the hub's own report (#333): enabled or why not; a test alert when the key exists
 ~/push-check.sh 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null
