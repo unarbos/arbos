@@ -2051,6 +2051,18 @@ impl ChatSession {
             self.flush();
             return;
         }
+        // The kernel records the steer as a `user` line a moment later;
+        // that record is this card's echo. Matched only against the newest
+        // card, a second steer typed before the first was recorded made
+        // the first land twice (F-149, cycle 34: three lines typed fast
+        // while the first ran, two of them doubled).
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
+        }
         let mut message = content.message();
         message.steer = true;
         self.items.push(ChatItem::User(message));
