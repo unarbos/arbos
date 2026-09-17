@@ -200,6 +200,164 @@ fn http() -> ureq::Agent {
 }
 
 /// Find a live kernel for `place`, or start one.
+/// What a running kernel's own gate says about being restarted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gate {
+    /// Nothing is running in it. Replacing it loses nothing.
+    Idle,
+    /// Something is, and this is what: a turn, a parked approval, a detached
+    /// job, a remote child. The kernel's words, not ours.
+    Busy(String),
+    /// It did not say — too old to carry `update_gate`, or it would not
+    /// answer. Treated as busy: not knowing is not permission.
+    Unknown,
+}
+
+impl Gate {
+    pub fn idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    pub fn say(&self) -> String {
+        match self {
+            Self::Idle => "nothing is running in it".into(),
+            Self::Busy(why) => why.clone(),
+            Self::Unknown => "it is too old to say whether it is busy".into(),
+        }
+    }
+}
+
+/// A kernel that is not the build this app ships.
+#[derive(Debug, Clone)]
+pub struct Skew {
+    pub place: Place,
+    /// The commit the running process was built from, as it recorded itself.
+    pub running_sha: String,
+    /// The commit of the kernel beside this app.
+    pub bundled_sha: String,
+    pub gate: Gate,
+}
+
+/// The commit of the kernel this app ships, asked once.
+///
+/// The bundled kernel is the one every place on this machine should be served
+/// by; anything else is a survivor of an older bundle.
+fn bundled_kernel_sha() -> Option<&'static str> {
+    static SHA: OnceLock<Option<String>> = OnceLock::new();
+    SHA.get_or_init(|| {
+        let bin = arbos_bin().ok()?;
+        arbos_update::kernel::Running::read(&bin).ok().map(|k| k.sha)
+    })
+    .as_deref()
+}
+
+/// Whether the kernel described by `info` is a stranger, and what its gate
+/// says if so.
+fn skew(workspace: &Path, info: &WebInfo) -> Option<Skew> {
+    let bundled = bundled_kernel_sha()?;
+    let running = read_info_sha(workspace)?;
+    if arbos_update::kernel::same_commit(&running, bundled) {
+        return None;
+    }
+    Some(Skew {
+        place: Place::local(workspace),
+        running_sha: running,
+        bundled_sha: bundled.to_owned(),
+        gate: gate_of(info),
+    })
+}
+
+/// The `git_sha` a kernel wrote about itself when it started.
+fn read_info_sha(workspace: &Path) -> Option<String> {
+    let place = arbos_core::Place::new(workspace.to_path_buf());
+    let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    json.get("git_sha")
+        .and_then(|v| v.as_str())
+        .filter(|sha| !sha.is_empty() && *sha != "unknown")
+        .map(str::to_owned)
+}
+
+/// Ask the kernel whether it may be restarted. `/healthz` on the attach port
+/// carries `update_gate` — the same verdict the self-updater uses, so the app
+/// and the kernel agree about what "safe to restart" means.
+fn gate_of(info: &WebInfo) -> Gate {
+    let Some(addr) = tcp_addr(&info.url) else {
+        return Gate::Unknown;
+    };
+    let Ok(response) = http()
+        .get(&format!("http://{addr}/healthz"))
+        .call()
+        .and_then(|mut r| r.body_mut().read_to_string().map_err(Into::into))
+    else {
+        return Gate::Unknown;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) else {
+        return Gate::Unknown;
+    };
+    match json.get("update_gate") {
+        None => Gate::Unknown,
+        Some(gate) => match gate.get("verdict").and_then(|v| v.as_str()) {
+            Some("idle") => Gate::Idle,
+            Some("busy") => Gate::Busy(
+                gate.get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("something is running in it")
+                    .to_owned(),
+            ),
+            _ => Gate::Unknown,
+        },
+    }
+}
+
+/// Stop one kernel by the pid it recorded, and wait for its port to go quiet.
+fn stop_kernel(info: &WebInfo) {
+    #[cfg(unix)]
+    if info.pid > 0 {
+        // SAFETY: a signal to a pid. SIGTERM is the kernel's graceful stop —
+        // every running turn ends the way the stop button ends it.
+        unsafe {
+            libc::kill(info.pid, libc::SIGTERM);
+        }
+    }
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < until {
+        if !alive(info) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Whether the kernel serving `place` is a stranger to this app, for the
+/// window to show.
+///
+/// Read rather than acted on: the automatic case — a stranger with nothing
+/// running in it — is already handled at attach. What is left here is the one
+/// that needs a person, so this reports and the bar offers the choice.
+pub fn kernel_skew(place: &Place) -> Option<Skew> {
+    if place.is_remote() {
+        return None;
+    }
+    let workspace = place.path.canonicalize().ok()?;
+    let info = read_info(&workspace).filter(alive)?;
+    skew(&workspace, &info)
+}
+
+/// Stop the kernel serving `place`, whatever it is running. The choice the
+/// window offers when a stranger is busy.
+pub fn restart_kernel(place: &Place) -> Result<()> {
+    let workspace = place
+        .path
+        .canonicalize()
+        .with_context(|| format!("not a directory: {}", place.path.display()))?;
+    let info = read_info(&workspace)
+        .filter(alive)
+        .context("no kernel is running there")?;
+    stop_kernel(&info);
+    attach_or_spawn(&workspace).map(|_| ())
+}
+
 pub fn attach_or_spawn_place(place: &Place) -> Result<WebInfo> {
     match &place.host {
         None => attach_or_spawn(&place.path),
@@ -218,7 +376,40 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
     // recreate the folder here.
     let _ = arbos_core::bootstrap(&arbos_core::Place::new(&workspace));
     if let Some(info) = read_info(&workspace).filter(alive) {
-        return Ok(info);
+        // Is this kernel the one this app ships? After an update it may not
+        // be: the app's own stop cannot reach every kernel on the machine, and
+        // one that outlived a swap goes on serving from a binary that is not
+        // there any more. On 2026-09-17 that kernel was 223 commits behind and
+        // the app attached to it without a word, then sent frames it had never
+        // heard of.
+        match skew(&workspace, &info) {
+            // Nobody is using it, so nothing is lost by replacing it with the
+            // build this app came with. No question worth asking.
+            Some(found) if found.gate.idle() => {
+                eprintln!(
+                    "arbos: the kernel serving {} is {} and this app ships {} — restarting it",
+                    workspace.display(),
+                    found.running_sha,
+                    found.bundled_sha
+                );
+                stop_kernel(&info);
+            }
+            // Something is running in it. Attaching is still right — it is the
+            // user's work and they must be able to watch it — but the window
+            // has to say so, and offer the choice rather than take it. The bar
+            // reads this back through `kernel_skew`.
+            Some(found) => {
+                eprintln!(
+                    "arbos: the kernel serving {} is {} and this app ships {} — {}",
+                    workspace.display(),
+                    found.running_sha,
+                    found.bundled_sha,
+                    found.gate.say()
+                );
+                return Ok(info);
+            }
+            None => return Ok(info),
+        }
     }
     // One spawn per place at a time. The chat, the board and the terminal
     // all attach when a place opens; without this, each of them started a
