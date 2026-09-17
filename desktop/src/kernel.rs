@@ -37,7 +37,13 @@ const POLL: Duration = Duration::from_millis(200);
 /// Where `arbos-kernel` lives on a host that `machines.toml` does not
 /// describe. A described machine says itself (`kernel`, default
 /// `<dir>/bin/arbos-kernel`).
-const REMOTE_BIN: &str = "$HOME/.cargo/bin/arbos-kernel";
+/// Where a host that is not in `machines.toml` gets its kernel. A directory
+/// of the app's own, never `~/.cargo/bin`: that path is the box's shared
+/// default on a person's `PATH`, and replacing the file there restarts only
+/// the process that came for it — Jacob's own project on ArbosLife was left
+/// running a deleted binary three times in forty hours by kernels installed
+/// into it (mesh sweep, `internal/mesh-stale-binary-sweep-2026-09-17.md`).
+const REMOTE_BIN: &str = "$HOME/.arbos-remote/bin/arbos-kernel";
 
 /// The attach protocol this window speaks; a kernel that says less is
 /// refused (`arbos_kernel::serve::PROTOCOL` on the other side).
