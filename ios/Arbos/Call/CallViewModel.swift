@@ -173,10 +173,29 @@ final class CallViewModel: ObservableObject {
         }
         if defaults.object(forKey: "normalise") != nil { audio.normalise = defaults.bool(forKey: "normalise") }
         #endif
+        // The microphone opens before the socket does, and connecting takes
+        // about two thirds of a second. Until this cycle the captured frames
+        // went nowhere for that whole window, because `onCapture` was only
+        // wired to the sink after `connect()` returned — so a person who
+        // taps call and starts talking loses their first word. Hold the
+        // frames instead and send them the moment there is somewhere to send
+        // them; the newest two seconds are worth keeping, and anyone silent
+        // for longer than that has said nothing to lose.
+        var held: [Data] = []
+        var heldBytes = 0
+        audio.onCapture = { frame in
+            held.append(frame)
+            heldBytes += frame.count
+            while heldBytes > Self.heldCaptureLimit, let oldest = held.first {
+                held.removeFirst()
+                heldBytes -= oldest.count
+            }
+        }
         do {
             try audio.start(captureMic: captureMic)
             try await link.connect()
         } catch {
+            audio.onCapture = nil
             fail(error.localizedDescription)
             return
         }
@@ -185,9 +204,12 @@ final class CallViewModel: ObservableObject {
         let sink = link.audioSink()
         // Muted: the same frames go out as silence, so the duplex model
         // keeps its clock and nothing of the room is heard.
-        audio.onCapture = { [weak self] frame in
+        let send: (Data) -> Void = { [weak self] frame in
             sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
         }
+        for frame in held { send(frame) }
+        held.removeAll()
+        audio.onCapture = send
         route = audio.outputRoute
         startedAt = Date()
         phase = .listening
@@ -476,6 +498,10 @@ final class CallViewModel: ObservableObject {
     private func trimLines() {
         if lines.count > 12 { lines.removeFirst(lines.count - 12) }
     }
+
+    /// Two seconds of captured audio, at the wire format (24 kHz, mono,
+    /// 16-bit): what is held while the socket is still connecting.
+    private static let heldCaptureLimit = Int(AudioEngine.sampleRate) * 2 * MemoryLayout<Int16>.size
 
     // MARK: - Teardown
 
