@@ -1,35 +1,38 @@
-//! The mechanism line: what is wrong and what change fixes it, stated once
-//! before the first edit of a task.
+//! The mechanism line: what is wrong and what change fixes it, stated by
+//! the agent beside its first edit of a task, when it states one.
 //!
+//! History, so nobody re-derives the gate from the notes of cycles 3–7.
 //! SWE-bench loop, cycle 3: asked for in prose, the agent wrote the line
-//! before its first edit in 3 of 50 rollouts and in the final summary in
-//! the rest; six "right file, wrong fix" losses did not move. So the kernel
-//! asks: the first `edit`, `write`, or `apply_patch` after a user message
-//! must carry `mechanism`, or it is refused with the reason. The line is
-//! kept beside the agent (`mechanism.md`), echoed in the tool result, shown
-//! by `changes`, and re-read in the done-criterion pass.
+//! before its first edit in 3 of 50 rollouts; six "right file, wrong fix"
+//! losses did not move. Cycle 4: the kernel *refused* the first `edit`,
+//! `write`, or `apply_patch` without a line at least `MIN_LEN` long —
+//! every rollout then stated one, and no outcome moved. Cycle 13: a
+//! rollout satisfied the gate with the literal text `placeholder`, and
+//! the twelve honest failures of that cycle held no "wrong mechanism" at
+//! all — the class the gate was built for was an artefact of contaminated
+//! rollouts that had fetched the upstream fix. A gate any long-enough
+//! string passes is worse than none, because its passing is recorded as
+//! evidence. So the gate is gone: the line is optional, recorded when
+//! given, echoed in the tool result, shown by `changes`, and re-read in
+//! the done-criterion pass. Nothing refuses an edit for its absence, and
+//! nothing about it is evidence of anything but that the agent said it.
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use arbos_core::{AgentId, Layout, Place};
 use serde_json::Value;
 
 /// The argument name on the write tools.
 pub const ARG: &str = "mechanism";
-/// Tools whose first call in a task needs the line.
+/// Tools that carry the line.
 pub const GATED: &[&str] = &["edit", "write", "apply_patch"];
-/// Fewer characters than this is a label, not a mechanism.
+/// Fewer characters than this is a label, not a statement; it is not
+/// recorded (and, since cycle 13, not refused either).
 const MIN_LEN: usize = 24;
-/// Set to `1` to refuse the first edit without a line. Measured on
-/// SWE-bench (cycle 4): the refusal made every rollout state a mechanism
-/// and moved no outcome, so by default the line is optional and recorded
-/// when given; a harness turns the refusal on.
+/// Read for compatibility only: the refusal it turned on is gone
+/// (cycle 13). A harness that still sets it changes nothing.
 pub const REQUIRED_ENV: &str = "ARBOS_MECHANISM_REQUIRED";
-
-fn required() -> bool {
-    std::env::var(REQUIRED_ENV).is_ok_and(|v| v == "1" || v == "true")
-}
 
 fn path(place: &Place, agent: &AgentId) -> PathBuf {
     Layout::new(place, agent.as_str()).dir.join("mechanism.md")
@@ -56,51 +59,35 @@ pub fn current_in(agent_dir: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Before a gated tool runs. `Ok(Some(line))` = this call recorded the
-/// task's mechanism (echo it); `Ok(None)` = nothing to do; `Err` = the
-/// first edit of the task came without one, and the call must not run.
+/// Before a write tool runs: record the `mechanism` line when the call
+/// carries one worth the name (the newest line wins). `Ok(Some(line))` =
+/// recorded, echo it; `Ok(None)` = nothing to record. Never an error:
+/// the refusal is gone (see the module doc).
 pub fn gate(place: &Place, agent: &AgentId, tool: &str, args: &Value) -> Result<Option<String>> {
     if !GATED.contains(&tool) {
         return Ok(None);
     }
-    let given = args
+    let Some(line) = args
         .get(ARG)
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let file = path(place, agent);
-    if file.exists() {
-        // Later edits may restate or refine it; the newest line wins.
-        if let Some(line) = given.filter(|l| l.len() >= MIN_LEN) {
-            let _ = std::fs::write(&file, format!("{line}\n"));
-            return Ok(Some(line.to_string()));
-        }
+        .filter(|s| s.len() >= MIN_LEN)
+    else {
         return Ok(None);
+    };
+    let file = path(place, agent);
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    match given {
-        None if !required() => Ok(None),
-        Some(short) if !required() && short.len() < MIN_LEN => Ok(None),
-        Some(line) if line.len() >= MIN_LEN => {
-            if let Some(dir) = file.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            std::fs::write(&file, format!("{line}\n"))?;
-            Ok(Some(line.to_string()))
-        }
-        Some(short) => bail!(
-            "{tool} refused: mechanism is too short ({short:?}). One full line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Then check it against every symptom the request names before you edit."
-        ),
-        None => bail!(
-            "{tool} refused: the first edit of a task needs mechanism. Add mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Check that line against every symptom the request names (each example, error message, edge); a mechanism that explains one symptom but not another is the wrong one, even in the right file. Then repeat this call with mechanism set."
-        ),
-    }
+    std::fs::write(&file, format!("{line}\n"))?;
+    Ok(Some(line.to_string()))
 }
 
 /// The JSON-schema property the gated tools add.
 pub fn schema_property() -> Value {
     serde_json::json!({
         "type": "string",
-        "description": "Required on the first edit of a task, optional after: one line — what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Checked against every symptom the request names."
+        "description": "Optional, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked."
     })
 }
 
@@ -115,28 +102,33 @@ mod tests {
         (Place::new(dir), AgentId::new("root"))
     }
 
+    /// No refusal for any shape: an edit without a line, with a label,
+    /// with `placeholder` — none is evidence and none is a gate. A real
+    /// line is recorded and the newest wins.
     #[test]
-    fn first_edit_needs_a_line_then_later_edits_do_not() {
-        // SAFETY: test-local; no other thread reads this variable.
+    fn the_line_is_recorded_when_given_and_nothing_is_refused() {
+        // SAFETY: test-local; the variable is read for compatibility only.
         unsafe { std::env::set_var(REQUIRED_ENV, "1") };
         let (place, agent) = place();
         let none = serde_json::json!({"path": "a.py"});
-        let err = gate(&place, &agent, "edit", &none).unwrap_err().to_string();
-        assert!(
-            err.contains("first edit of a task needs mechanism"),
-            "{err}"
-        );
-        let short = serde_json::json!({"path": "a.py", "mechanism": "fix bug"});
-        assert!(gate(&place, &agent, "edit", &short).is_err());
+        assert!(gate(&place, &agent, "edit", &none).unwrap().is_none());
+        let label = serde_json::json!({"path": "a.py", "mechanism": "placeholder"});
+        assert!(gate(&place, &agent, "edit", &label).unwrap().is_none());
+        assert!(current(&place, &agent).is_none(), "a label is not recorded");
         let ok = serde_json::json!({"path": "a.py", "mechanism": "set_cmap stores cmap.name, not the registered name; use the given name string"});
         let echoed = gate(&place, &agent, "edit", &ok).unwrap().unwrap();
         assert!(echoed.starts_with("set_cmap stores"));
         assert_eq!(current(&place, &agent).unwrap(), echoed);
-        assert!(gate(&place, &agent, "write", &none).unwrap().is_none());
-        assert!(gate(&place, &agent, "read", &none).unwrap().is_none());
+        let later = serde_json::json!({"path": "b.py", "mechanism": "the registry keys on the object, not its name; key on name"});
+        let echoed = gate(&place, &agent, "write", &later).unwrap().unwrap();
+        assert_eq!(
+            current(&place, &agent).unwrap(),
+            echoed,
+            "the newest line wins"
+        );
+        assert!(gate(&place, &agent, "read", &ok).unwrap().is_none());
         reset(&place, &agent);
         assert!(current(&place, &agent).is_none());
-        assert!(gate(&place, &agent, "apply_patch", &none).is_err());
         let _ = std::fs::remove_dir_all(&place.path);
     }
 }

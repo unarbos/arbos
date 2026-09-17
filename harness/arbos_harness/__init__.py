@@ -106,8 +106,11 @@ class ArbosHarnessConfig(HarnessConfig):
     repro_required: int = Field(1, ge=0)
     """Failing reproductions the first edit needs (`ARBOS_REPRO_REQUIRED`): 0 = no gate,
     1 = one, 2 = the reporter's example plus a second input the agent derives."""
-    mechanism_required: bool = True
-    """Refuse the first edit without a `mechanism` line (`ARBOS_MECHANISM_REQUIRED`)."""
+    mechanism_required: bool = False
+    """Kept for old configs; changes nothing. The kernel no longer refuses an edit without a
+    `mechanism` line (SWE-bench loop, cycle 13: the gate accepted `placeholder`, and the
+    "wrong mechanism" class it targeted was an artefact of contaminated rollouts). The line
+    is still recorded and shown by `changes` when the agent gives one."""
     max_turn_cost_usd: float = Field(8.0, ge=0)
     """Dollars one rollout's turn may spend on model calls before the kernel ends it
     (`ARBOS_MAX_TURN_COST`); 0 = no cap. One SWE-bench rollout ran to $14 before this;
@@ -182,7 +185,6 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             "ARBOS_TRACE": "1" if self.config.trace else "0",
             "ARBOS_WINDOW_TOKENS": str(self.config.window_tokens),
             "ARBOS_REPRO_REQUIRED": str(self.config.repro_required),
-            "ARBOS_MECHANISM_REQUIRED": "1" if self.config.mechanism_required else "0",
             "ARBOS_MAX_TURN_COST": str(self.config.max_turn_cost_usd),
             "ARBOS_CHANGES_BEFORE_DONE": "1" if self.config.changes_before_done else "0",
             "ARBOS_OUT": OUT_DIR,
