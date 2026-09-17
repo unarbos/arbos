@@ -671,7 +671,9 @@ impl Tool for Spawn {
                         )),
                         WaitEnd::Steered => body.push_str(&format!("\n{}", steered_line(id.as_str()))),
                         WaitEnd::Stopped => {
-                            anyhow::bail!("interrupted while waiting for {id}; it keeps working on {host}")
+                            anyhow::bail!(
+                                "interrupted while waiting for {id} on {host}: this turn was stopped. A user's Stop ends {id}'s turn too; check its record before counting on a report."
+                            )
                         }
                     }
                 }
@@ -763,7 +765,12 @@ impl Tool for Spawn {
                     )),
                     WaitEnd::Steered => body.push_str(&format!("\n{}", steered_line(id.as_str()))),
                     WaitEnd::Stopped => {
-                        anyhow::bail!("interrupted while waiting for {id}; it keeps working")
+                        // Not "it keeps working": a user's Stop reaches the
+                        // children (serve's rule, Cursor's too); only a
+                        // superseded stop leaves them running.
+                        anyhow::bail!(
+                            "interrupted while waiting for {id}: this turn was stopped. A user's Stop ends {id}'s turn too; check its record before counting on a report."
+                        )
                     }
                 }
             }
