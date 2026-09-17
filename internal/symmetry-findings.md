@@ -138,6 +138,8 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | F-125 | 09-17 | loop (driving #372 for its author) | bar: stranger kernel | the "Kernel from another build" plate appears for a busy and for a too-old stranger, the idle one is swapped silently, the tooltip is right — but the click runs the update path, never `restart_kernel` (`plate()`'s `on_click` ignores its `action`) | filed to the author: `features-inbox/2026-09-17-stranger-kernel-control-driven.md`; not fixed here (their PR) |
 | F-126 | 09-17 | loop (cycle 26, panel beside Cursor's sidebar, `cycle-26/cursor-sidebar-dark.png` vs `arbos-panel-dark.png`) | panel foot | two gears in one window: the bar's bottom-left (Cursor's place) and the panel foot's | cycle-26 PR (#378): the panel foot keeps search and new-chat only |
 | F-127 | 09-17 | loop (cycle 28, d11 settled vs `cycle-23/cursor-13`) | settled fold | the newest turn's Worked fold stayed open once settled (cycle 3's rule); Cursor's settled headline stands shut over its timeline in both chat styles | cycle-28 PR (#384): `auto_work_open` is `running` alone |
+| F-129 | 09-17 | loop (cycle 32, `cycle-32/cursor-create-project-sheet.png` vs `arbos-opener-create-*.png`) | new project | Cursor's "+" opens a **Create Project** sheet: an editable name ("New Project") under a glyph, a Workspace (repo) picker, a Model picker, one blue button. Ours opens the folder picker: a path field, machines, folder rows, a Create row; the name is the folder's and the model is the composer's later | design difference, Jacob's call: our project is a folder, Cursor's a chat scoped to a repo. Noted, not changed |
+| F-130 | 09-17 | loop (cycle 32, same pair) | glass on Linux | the Opener's glass surface, without the blur primitive, painted only its tint — the project header's text stayed legible *through* the card and the typed path sat over "parity-proj". F-107's family. **The rig cannot see the Mac's blur, so this is how Linux users see it, not how Jacob does** | cycle-32 PR: the non-lensed fallback paints an opaque `surface_raised` floor under the tint (`vendor/bezel-ui/src/surface.rs`) |
 
 ## Per-cycle count
 
@@ -154,6 +156,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | 16 | 9 (F-71 … F-75, F-78 … F-81) | 2 (F-76 raw provider error, F-77 kickoff stall) |
 | 17 (opened) | 17 so far (F-83, F-84, F-92, F-93, F-99 from QA; F-85 … F-91, F-94, F-96 from seven journey runs; F-95 from the gate; F-97, F-98 from the probes) | 1 (F-82, the bubble-sort turn) |
 | 18 – 22 | F-100 … F-112 (feedback sheet F-100/F-101, hub kinds, F-103 … F-112 from journeys and gates) | 1 (F-102 Jacob's Mac, the frosted popover) |
+| 32 (running) | F-129 (design, noted), F-130 (fixed) | 0 |
 | 31 | 0 app findings; rig: R13 withdrawn, R14 (eight assertions that could not fail), R15, R16; R10 closed — the fold row passes | 0 |
 | 30 | 0 (F-128 noted, model-side); ArbosLife on `main`'s kernel | 0 |
 | 29 | 0 new; F-122b traced and fixed; R11, R12 | 0 |

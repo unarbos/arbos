@@ -48,6 +48,12 @@
          it stays, and the tool says "restored" — a refusal here would trade deletion for doing nothing.
   sw-05  the census's "misreport-only" markers, second look: the one-time migration renames plan.jsonl aside with a
          best-effort rename; if it fails, the next start migrates again — standing crons and pending tasks doubled.
+  af-01  the folder is renamed under a running kernel (Finder, `mv`, a sync tool): where do the next turn's writes
+         go — into the renamed folder, or into a ghost recreated at the old path — and does anyone say so?
+  af-03  the same rename under the desktop: does the window respawn a kernel at the old path (a ghost .arbos), tell
+         the user, or follow the folder?
+  af-02  two windows on one place: both attach to one kernel, a line typed in either appears once in both, no
+         second kernel is spawned, and a Stop in one is a Stop in the other.
   rw-04  the same rewind in a repo without git identity: checkpoints carry no work tree and files: true deletes the
          kept turns' uncommitted files while reporting success (qal-j08).
   rw-01  rewind with files: true keeps the history: the turns before the rewind point stay on the transcript and are
@@ -1249,6 +1255,166 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.expect(len(crons) == 1 or "plan.jsonl.migrating" in kept, "sw-06-work-lost-and-source-gone", f"the cut migration neither finished (crons={len(crons)}) nor kept its source for a person: {kept}")
         cx.rec.expect(told is not None and ("plan.jsonl" in told or ".migrating" in told), "sw-06-person-not-told", f"the cut is only in kernel.log ({'yes' if '\"migrate_cut\"' in log else 'no'}); the transcript says nothing a person could act on about the old plan", "arbos-kernel migrate.rs Claim::Cut: a notice beside the log line")
         cx.rec.notes["outcome"] = "finished-once-and-told" if (len(crons) == 1 and told) else ("kept-and-told" if told else "silent")
+
+
+    # ── after something went wrong: the states the rigs test least ────────
+    @reg("af-01-folder-renamed-under-a-running-kernel", tags=("after-failure", "filesystem"))
+    def af01(cx):
+        """The kernel serves `place`; the user renames the folder (Finder, `mv`, a sync tool). Then a line arrives. User-visible questions: does the turn run; where does the transcript go — into the renamed folder, or into a ghost `.arbos/` recreated at the old path; does the window (a fresh attach) see the same history; and does the kernel say anything? A ghost at the old path is the destructive outcome: the user's history splits in two."""
+        place = cx.place
+        lines = [{"agent": "root", "content": "one"}, {"agent": "root", "content": "two after the move"}]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "first")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "af-01-turn-one-never-ended", "turn one never ended")
+        before = len(transcript(place, "root")[0])
+        moved = place.parent / (place.name + "-renamed")
+        os.rename(place, moved)
+        time.sleep(1)
+        c.user("root", "second")
+        ended = c.wait_turn("root", "idle", 60)
+        time.sleep(1)
+        ghost = (place / ".arbos").exists()
+        ghost_lines = len(transcript(place, "root")[0]) if ghost else 0
+        moved_lines = len(transcript(moved, "root")[0]) if (moved / ".arbos").exists() else 0
+        evs_new = transcript(moved, "root")[0] if (moved / ".arbos").exists() else []
+        second_in_moved = any(e.get("kind") == "user" and e.get("text") == "second" for e in evs_new)
+        ghost_evs = transcript(place, "root")[0] if ghost else []
+        second_in_ghost = any(e.get("kind") == "user" and e.get("text") == "second" for e in ghost_evs)
+        err = k.stderr_text()
+        said = [l for l in err.splitlines() if "renamed" in l.lower() or "moved" in l.lower() or "no such" in l.lower() or "not found" in l.lower()][-3:]
+        notices = [e.get("text", "")[:160] for e in evs_new + ghost_evs if e.get("kind") == "notice"]
+        cx.rec.notes.update({"turn_after_move_ended": ended is not None, "lines_before": before, "moved_folder_lines": moved_lines, "ghost_at_old_path": ghost, "ghost_lines": ghost_lines, "second_landed_in": ("moved" if second_in_moved else "") + ("ghost" if second_in_ghost else "") or "nowhere", "kernel_stderr_says": said, "notices": notices[-2:]})
+        cx.rec.expect(not ghost, "af-01-ghost-folder-at-old-path", f"after the folder was renamed, the kernel recreated `.arbos/` at the old path ({ghost_lines} transcript lines there; {moved_lines} in the renamed folder): the user's history is now in two places", "arbos-kernel serve/turn: paths held absolute at start; the place moved under it")
+        kernel_exited = not k.alive() or any("store is gone" in l for l in said)
+        cx.rec.notes["kernel_exited_on_purpose"] = kernel_exited
+        # #377: a kernel whose .arbos is gone from under it stops itself and says so on stderr — no ghost. The turn
+        # then cannot end; that is the designed outcome, not a hang. What the user still loses: the line typed after
+        # the rename, and no word of it reaches the transcript they will reopen.
+        cx.rec.expect(ended is not None or kernel_exited, "af-01-turn-hung-after-move", "the turn after the rename neither ended nor did the kernel stop itself")
+        cx.rec.expect(second_in_moved or bool(notices), "af-01-line-lost-in-silence", f"the line typed after the rename went {cx.rec.notes['second_landed_in']}; the kernel {'stopped itself (stderr only)' if kernel_exited else 'kept running'} and nothing a person could read says the folder moved or the line was dropped", "arbos-kernel serve: on a lost store, a last notice into the moved folder's transcript, or the desktop's respawn telling the user")
+        # put it back so teardown finds it
+        try:
+            k.kill()
+            if moved.exists() and not place.exists():
+                os.rename(moved, place)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @reg("af-02-two-windows-on-one-place", needs_model=True, tags=("after-failure", "desktop"))
+    def af02(cx):
+        """Two desktop windows (two app processes) open on the same place. Expected: one kernel serves both (the second attaches, no second spawn); a line typed in either appears exactly once in both; a Stop pressed in one ends the turn in the other. The destructive outcome is a second kernel on the same folder, or a line delivered twice."""
+        if not desktop_available():
+            cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
+            return
+        from journey_scenarios import Rig, kernel_pid, read_transcript
+
+        folder = cx.scratch / "shared-project"
+        folder.mkdir(parents=True, exist_ok=True)
+        a = Rig(cx, [folder], tag="app-a")
+        b = None
+        try:
+            time.sleep(3)
+            a.focus(folder)
+            a.wait_idle(folder, 60)
+            pid_a = kernel_pid(folder)
+            # A second app process on the same place, its own xdg so it is a second window, not the same state.
+            saved = cx.scratch / "xdg"
+            second = cx.scratch / "xdg-b"
+            shutil.copytree(saved, second, dirs_exist_ok=True)
+            b = Rig(cx, [folder], tag="app-b")
+            time.sleep(3)
+            b.focus(folder)
+            pid_b = kernel_pid(folder)
+            kernels = [l for l in subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True).stdout.splitlines() if str(folder) in l and " serve " in l]
+            tag = f"TWO-{now_ms() % 100000}"
+            a.send(f"Reply with the single word {tag}.")
+            a.wait_busy(folder, 20)
+            a.wait_idle(folder, 90)
+            time.sleep(2)
+            evs = read_transcript(folder)
+            user_lines = [e for e in evs if e.get("kind") == "user" and tag in e.get("text", "")]
+            items_a = [i for i in (a.root_chat(folder) or {}).get("items", []) if tag in str(i.get("text", ""))]
+            items_b = [i for i in (b.root_chat(folder) or {}).get("items", []) if tag in str(i.get("text", ""))]
+            # Stop from B while A runs a slow turn.
+            a.send("Run `sleep 40; echo slow` with bash, then say done.")
+            a.wait_busy(folder, 20)
+            time.sleep(3)
+            try:
+                b.app.click("composer-stop")
+                b.pulse("Stop from the second window")
+                stopped_from_b = True
+            except Exception as e:  # noqa: BLE001
+                stopped_from_b = False
+                cx.rec.notes["stop_error"] = str(e)[:120]
+            ended = a.wait_idle(folder, 20)
+            evs2 = read_transcript(folder)
+            interrupted = any(e.get("kind") == "interrupted" for e in evs2[len(evs):])
+            cx.rec.notes.update({"kernel_pid_a": pid_a, "kernel_pid_b": pid_b, "kernels_serving_folder": len(kernels), "line_on_transcript": len(user_lines), "shown_in_a": len(items_a), "shown_in_b": len(items_b), "stop_from_b": stopped_from_b, "a_ended_after_b_stop": ended, "interrupted": interrupted})
+            cx.rec.expect(len(kernels) == 1 and pid_a == pid_b, "af-02-second-kernel", f"{len(kernels)} kernel(s) serving one folder (pids {pid_a} / {pid_b}) — two windows spawned two kernels", "desktop kernel.rs attach_or_spawn / kernel lock")
+            cx.rec.expect(len(user_lines) == 1, "af-02-line-delivered-twice", f"the line typed once is on the transcript {len(user_lines)} time(s)")
+            cx.rec.expect(len(items_a) >= 1 and len(items_b) >= 1, "af-02-other-window-blind", f"the line shows in A {len(items_a)}x and in B {len(items_b)}x — a window on the same place did not see it")
+            if stopped_from_b:
+                cx.rec.expect(ended and interrupted, "af-02-stop-not-shared", "Stop pressed in the second window did not end the turn the first window started")
+        finally:
+            if b:
+                b.close(folders=[])
+            a.close(folders=[folder])
+            cx.rec.snapshot(folder, "shared-after")
+
+
+    @reg("af-03-desktop-folder-renamed-under-the-window", needs_model=True, tags=("after-failure", "desktop", "filesystem"))
+    def af03(cx):
+        """The window is open on a place; the folder is renamed on disk; the user types a line. The kernel stops itself (#377). What does the window do — respawn a kernel at the OLD path and mint a ghost `.arbos/` there (destructive: history split), tell the user the folder moved, or follow it? Recorded as the user sees it: the chat items, a ghost folder, and where the new line landed."""
+        if not desktop_available():
+            cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
+            return
+        from journey_scenarios import Rig, kernel_pid, read_transcript
+
+        folder = cx.scratch / "moving-project"
+        folder.mkdir(parents=True, exist_ok=True)
+        moved = cx.scratch / "moving-project-renamed"
+        rig = Rig(cx, [folder], tag="app-move")
+        try:
+            time.sleep(3)
+            rig.focus(folder)
+            rig.wait_idle(folder, 60)
+            pid0 = kernel_pid(folder)
+            items0 = len((rig.root_chat(folder) or {}).get("items", []))
+            os.rename(folder, moved)
+            time.sleep(4)
+            tag = f"MOVED-{now_ms() % 100000}"
+            rig.send(f"Reply with the single word {tag}.")
+            rig.pulse("typing after the folder was renamed")
+            end = time.time() + 45
+            while time.time() < end:
+                if (folder / ".arbos").exists() or any(e.get("kind") == "user" and tag in e.get("text", "") for e in read_transcript(moved)):
+                    break
+                time.sleep(1)
+            time.sleep(3)
+            ghost = (folder / ".arbos").exists()
+            in_moved = any(e.get("kind") == "user" and tag in e.get("text", "") for e in read_transcript(moved))
+            in_ghost = ghost and any(e.get("kind") == "user" and tag in e.get("text", "") for e in read_transcript(folder))
+            chat = rig.root_chat(folder) or rig.root_chat(moved) or {}
+            items = chat.get("items", [])[items0:]
+            notices = [str(i.get("text", ""))[:160] for i in items if i.get("kind") == "notice"]
+            pid1 = kernel_pid(folder) if ghost else kernel_pid(moved)
+            cx.rec.notes.update({"kernel_pid_before": pid0, "kernel_pid_after": pid1, "ghost_at_old_path": ghost, "line_in_moved": in_moved, "line_in_ghost": in_ghost, "connection": chat.get("connection"), "new_items": [(i.get("kind"), str(i.get("text", ""))[:80]) for i in items][:6]})
+            cx.rec.expect(not ghost, "af-03-ghost-folder-minted", f"after the rename the window respawned a kernel at the old path and minted a fresh `.arbos/` there (line landed in ghost: {in_ghost}); the user's history is now split between {folder.name} and {moved.name}", "desktop kernel.rs attach_or_spawn on a path whose folder is gone")
+            cx.rec.expect(bool(notices) or in_moved, "af-03-silent", f"the folder moved under the window and the chat says nothing ({cx.rec.notes['new_items']}); the line went {'to the moved folder' if in_moved else 'nowhere'}")
+            # What the notice says must be true: the folder moved; nothing was archived.
+            wrong = [n for n in notices if "archived" in n.lower() and not any(w in n.lower() for w in ("moved", "renamed", "folder", "no longer", "not found"))]
+            cx.rec.expect(not wrong, "af-03-wrong-explanation", f"the chat explains a renamed folder as {wrong[0]!r} — nothing was archived; the user's line went {'to the moved folder' if in_moved else 'nowhere'}", "desktop session.rs: a kernel that stopped because its store is gone is drawn as an archived agent")
+        finally:
+            try:
+                rig.close(folders=[folder, moved])
+            except Exception:  # noqa: BLE001
+                pass
+            for pth in (folder, moved):
+                if pth.exists():
+                    cx.rec.snapshot(pth, f"{pth.name}-after")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))
