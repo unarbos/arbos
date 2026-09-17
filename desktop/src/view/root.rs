@@ -2475,13 +2475,18 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let written = crate::feedback::write(&place, draft, &id, arbos_core::now_ms());
-        if let Err(e) = written {
-            sheet.update(cx, |sheet, cx| {
-                sheet.settled(Err(format!("could not write the report: {e:#}")), cx)
-            });
-            return;
-        }
+        let written = match crate::feedback::write(&place, draft, &id, arbos_core::now_ms()) {
+            Ok(written) => written,
+            Err(e) => {
+                // Every outbox refused it. His words are still in the field and
+                // must not die there, so the sheet offers to put them on the
+                // clipboard rather than a button that repeats the failure.
+                sheet.update(cx, |sheet, cx| {
+                    sheet.nowhere_to_save(format!("{e:#}"), cx);
+                });
+                return;
+            }
+        };
         // The thumbs-down he pressed now reads as reported.
         if let Some((chat_id, seq)) = self.report_anchor.take() {
             self.workspace.update(cx, |workspace, cx| {
@@ -2494,14 +2499,23 @@ impl Arbos {
         let address = self.workspace.read(cx).settings.feedback.address.clone();
         sheet.update(cx, |sheet, cx| {
             sheet.settled(
-                Ok(if address.trim().is_empty() {
-                    format!(
-                        "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk. Reference {id}."
-                    )
-                } else {
-                    format!(
-                        "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
-                    )
+                Ok({
+                    // Where it went, when that is not where it usually goes.
+                    // A report saved somewhere unexpected is only honest if it
+                    // says so.
+                    let where_ = match written.elsewhere {
+                        Some(why) => format!(" Saved to {why} — {}.", written.dir.display()),
+                        None => String::new(),
+                    };
+                    if address.trim().is_empty() {
+                        format!(
+                            "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk.{where_} Reference {id}."
+                        )
+                    } else {
+                        format!(
+                            "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix.{where_} Reference {id}."
+                        )
+                    }
                 }),
                 cx,
             )
@@ -2531,17 +2545,18 @@ impl Arbos {
         if address.trim().is_empty() {
             return;
         }
-        // Every place that holds reports, open or not. Walking the open tabs
-        // meant a report from a project he had closed was never retried — and he
-        // closes a project because the thing he reported is over.
-        let mut places = crate::feedback::known_outboxes();
+        // Every outbox that holds reports, whatever is open. Walking the open
+        // tabs meant a report from a project he had closed was never retried,
+        // and a report staged outside a project — because his home went
+        // read-only — belongs to no tab at all.
+        let mut roots = crate::feedback::known_outboxes();
         for project in &self.workspace.read(cx).projects {
-            let place = arbos_core::Place::new(project.path.clone());
-            if !places.iter().any(|p| p.path() == place.path()) {
-                places.push(place);
+            let root = crate::feedback::outbox(&arbos_core::Place::new(project.path.clone()));
+            if !roots.contains(&root) {
+                roots.push(root);
             }
         }
-        if places.is_empty() {
+        if roots.is_empty() {
             return;
         }
         let sheet = self.feedback_sheet.clone();
@@ -2551,10 +2566,10 @@ impl Arbos {
                 .spawn(async move {
                     let home = std::path::Path::new(&hub_home);
                     let now = arbos_core::now_ms();
-                    places
+                    roots
                         .iter()
-                        .flat_map(|place| {
-                            crate::feedback::deliver_pending(place, &address, home, now)
+                        .flat_map(|root| {
+                            crate::feedback::deliver_pending(root, &address, home, now)
                         })
                         .collect::<Vec<_>>()
                 })
