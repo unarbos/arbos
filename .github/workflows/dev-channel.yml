@@ -103,9 +103,9 @@ env:
   # the tag. One number, read by both the step that writes the feed and the
   # step that prunes the tag, so they cannot disagree about it.
   #
-  # Three rather than one. The updater only ever wants the newest, so the
-  # older two are not there for it — they are there for the morning a bad
-  # build goes out and somebody needs the one before it. A rollback is
+  # Three rather than one. The updater only ever wants the newest app, so
+  # the older two are not there for it — they are there for the morning a
+  # bad build goes out and somebody needs the one before it. A rollback is
   # downloading that zip and unpacking it over the app, and that is only
   # possible if the zip still exists.
   #
@@ -113,6 +113,26 @@ env:
   # payloads for two builds' worth of actual use, on a channel that publishes
   # on every merge.
   KEEP_BUILDS: "3"
+  # How many builds keep their *kernel* payload, which is a different
+  # question and has a different answer.
+  #
+  # An app places a kernel on a remote machine by fetching the kernel for
+  # its **own** build — anything else is replaced again at the next attach,
+  # because the version check that opens a tunnel would still disagree. So
+  # the app asking can be any age, and the kernel it needs has to still be
+  # here.
+  #
+  # Three was an hour's window on a channel that publishes every twenty
+  # minutes. Jacob's app was forty-seven builds behind when it could not
+  # place a kernel on ArbosLife, so three would not have reached it. Sixty
+  # is about two days.
+  #
+  # It is affordable because kernels are the cheap half: about 9 MB against
+  # 35 MB for an app. Sixty kernels is roughly 1 GB, where sixty whole
+  # builds would be nearly 5 GB. Releases past KEEP_BUILDS keep their
+  # kernel payloads and nothing else, so they can never be offered as an
+  # app update.
+  KEEP_KERNELS: "60"
   # The iPhone app is not a payload — TestFlight installs it, and this only
   # says where. One URL per app rather than per build, so every release in the
   # feed carries the same link and the newest build behind it is whatever the
@@ -352,6 +372,7 @@ jobs:
             --notes-url "https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}" \
             --minimum-system-version "${{ needs.plan.outputs.minimum }}" \
             --keep "$KEEP_BUILDS" \
+            --keep-kernels "$KEEP_KERNELS" \
             --artifact "macos/arm64=$mac" \
             --artifact "macos/arm64/kernel=$mac_kernel" \
             --artifact "linux/x86_64=$linux" \
@@ -391,10 +412,14 @@ jobs:
           } > dist/release-notes.md
           gh release edit "$TAG" --notes-file dist/release-notes.md
           rm -f dist/release-notes.md
-          # Drop the payloads no release in the feed still points at. The feed
-          # was just truncated to KEEP_BUILDS, so this is what makes the tag
-          # agree with it — otherwise the pre-release grows a payload per
-          # merge and never sheds one.
+          # Drop the payloads no release in the feed still points at, which
+          # is what makes the tag agree with the feed — otherwise the
+          # pre-release grows a payload per merge and never sheds one.
+          #
+          # The list comes from the feed rather than from a number here, so
+          # it follows the two tiers by itself: a release past KEEP_BUILDS
+          # has had its app payload dropped and keeps its kernel, so the app
+          # zip is pruned from the tag and the kernel tarball stays.
           keep="$(jq -r '.releases[].downloads[].url | split("/") | last' dist/arbos-dev.json | sort -u)"
           gh release view "$TAG" --json assets -q '.assets[].name' | while read -r name; do
             case "$name" in

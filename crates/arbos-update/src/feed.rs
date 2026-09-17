@@ -238,6 +238,34 @@ impl Format {
 
 /// The arch a payload was built for, as the feed spells it: `arm64`,
 /// `x86_64`.
+/// The platform and architecture behind the name a machine goes by over
+/// ssh, as `linux-amd64` or `darwin-arm64`.
+///
+/// `uname` says `Linux` and `x86_64`; the probe that asks it normalises
+/// those to `linux` and `amd64`; the feed calls the same two things
+/// `linux` and `x86_64`. Three spellings of one machine, so something has
+/// to translate — and it belongs on the side that chose the names in the
+/// feed, where a new platform is added, rather than in the caller.
+///
+/// `None` for a machine the feed has no name for, which is the honest
+/// answer: no payload can be selected for it.
+pub fn platform_of(os_arch: &str) -> Option<(Platform, &'static str)> {
+    let lower = os_arch.trim().to_ascii_lowercase();
+    let (os, arch) = lower.split_once('-')?;
+    let platform = match os {
+        // `uname -s` says Darwin; the feed says macos.
+        "darwin" | "macos" => Platform::Macos,
+        "linux" => Platform::Linux,
+        _ => return None,
+    };
+    let arch = match arch {
+        "amd64" | "x86_64" | "x64" => "x86_64",
+        "arm64" | "aarch64" => "arm64",
+        _ => return None,
+    };
+    Some((platform, arch))
+}
+
 pub fn current_arch() -> &'static str {
     match std::env::consts::ARCH {
         "aarch64" => "arm64",
@@ -448,11 +476,50 @@ impl Feed {
     /// Put `release` in, replacing any entry for the same version and build,
     /// and keep at most `keep` of them.
     pub fn put(&mut self, release: Release, keep: usize) {
+        self.put_keeping(release, keep, keep);
+    }
+
+    /// The same, keeping kernels for longer than apps.
+    ///
+    /// The newest `keep` releases are kept whole. Older ones, down to
+    /// `keep_kernels` in total, are reduced to their kernel payloads and
+    /// stay in the feed for that alone.
+    ///
+    /// Two payloads with very different jobs are stored here. An app
+    /// payload is wanted by the newest build and by whoever needs to roll
+    /// back one step, so a few is plenty. A **kernel** payload is wanted
+    /// by whichever app is placing a kernel on another machine, and that
+    /// app can be any age at all — it asks for the kernel matching its own
+    /// build ([`Self::for_build`]), because a remote given anything else
+    /// is replaced again at the next attach.
+    ///
+    /// Keeping three of each made that a one-hour window on the dev
+    /// channel, where a build lands every twenty minutes or so. Jacob's
+    /// app was forty-seven builds behind when it could not place a kernel
+    /// on ArbosLife, so three would not have reached it. Kernels are also
+    /// the cheap half — around 9 MB against 35 MB for an app — so they are
+    /// the ones to keep.
+    ///
+    /// A release reduced this way carries no app download, so
+    /// [`Self::available`] steps over it and it can never be offered as an
+    /// app update.
+    pub fn put_keeping(&mut self, release: Release, keep: usize, keep_kernels: usize) {
         self.releases
             .retain(|r| !(r.version == release.version && r.build == release.build));
         self.releases.push(release);
         self.sorted();
-        self.releases.truncate(keep.max(1));
+
+        let keep = keep.max(1);
+        let keep_kernels = keep_kernels.max(keep);
+        self.releases.truncate(keep_kernels);
+        for release in self.releases.iter_mut().skip(keep) {
+            release
+                .downloads
+                .retain(|d| d.component == Component::Kernel);
+        }
+        // One with nothing left is not worth an entry.
+        self.releases
+            .retain(|r| !r.downloads.is_empty() || !r.links.is_empty());
     }
 
     /// The newest release that is strictly newer than `current` and has
@@ -507,6 +574,51 @@ impl Feed {
             published: release.published.clone(),
             commit: release.commit.clone(),
             download: download.clone(),
+        })
+    }
+
+    /// The release that *is* a given build, rather than one newer than it.
+    ///
+    /// What a desktop needs when it puts a kernel on another machine: not
+    /// the newest kernel but the one matching the app doing the placing,
+    /// so that the two ends of a tunnel are the same build. Asking for the
+    /// newest would hand the remote a kernel the app itself is behind, and
+    /// the version check that opens the tunnel would want to replace it
+    /// again on the next attach.
+    ///
+    /// It also fills the hole this was written for. A dev build's kernel
+    /// exists only in its channel's feed — the tagged release it would
+    /// otherwise be fetched from is an unpublished draft, so that URL
+    /// 404s, and every dev build is unable to place a kernel anywhere
+    /// until somebody cuts a release. Jacob's ArbosLife tab was dead for
+    /// three hours on 2026-09-17 for exactly that reason.
+    ///
+    /// Matched on the version pair, semver and build number together,
+    /// which is what identifies one publish. The commit comes back in
+    /// [`Available`] so a caller can say which build it is installing and
+    /// check that what arrived says the same.
+    pub fn for_build(
+        &self,
+        want: &Version,
+        platform: Platform,
+        arch: &str,
+        component: Component,
+    ) -> Option<Available> {
+        self.releases.iter().find_map(|release| {
+            let version = release.version().ok()?;
+            if version != *want {
+                return None;
+            }
+            let download = release.download(platform, arch, component)?;
+            download.check_url().ok()?;
+            Some(Available {
+                version,
+                notes: release.notes.clone(),
+                notes_url: release.notes_url.clone(),
+                published: release.published.clone(),
+                commit: release.commit.clone(),
+                download: download.clone(),
+            })
         })
     }
 
@@ -588,6 +700,14 @@ mod tests {
         vec![download(Platform::Macos, "arm64", url)]
     }
 
+    fn kernel_for(platform: Platform, arch: &str, url: &str) -> Download {
+        Download {
+            component: Component::Kernel,
+            format: Format::TarGz,
+            ..download(platform, arch, url)
+        }
+    }
+
     fn feed(releases: Vec<Release>) -> Feed {
         let mut feed = Feed::new(Channel::Dev, "2026-09-15T18:00:00Z".into());
         feed.releases = releases;
@@ -598,6 +718,261 @@ mod tests {
 
     fn pick(feed: &Feed, current: &str) -> Option<Available> {
         feed.available(&Version::parse(current).unwrap(), Platform::Macos, "arm64")
+    }
+
+    /// The live dev feed's own bytes, trimmed to one release, rather than
+    /// bytes written to match the parser. Taken from
+    /// `releases/download/dev/arbos-dev.json` on 2026-09-17.
+    #[test]
+    fn the_selector_works_on_the_feed_ci_actually_publishes() {
+        let real = r#"{
+          "format": 1,
+          "channel": "dev",
+          "generated": "2026-09-17T13:43:46Z",
+          "releases": [{
+            "version": "0.2.0",
+            "build": 1457,
+            "commit": "4c0a131",
+            "published": "2026-09-17T13:43:46Z",
+            "notes": "Merge #438: cycle 34",
+            "notes_url": "https://github.com/unarbos/arbos/commit/4c0a1315865b2fd0",
+            "minimum_system_version": "13.0",
+            "downloads": [{
+              "platform": "linux",
+              "arch": "x86_64",
+              "component": "kernel",
+              "format": "tar_gz",
+              "url": "https://github.com/unarbos/arbos/releases/download/dev/arbos-kernel-0.2.0-1457-linux-x86_64.tar.gz",
+              "size": 9134907,
+              "sha256": "0617e149891f08288fab14d426362921d0e0c2773b80ca43cb93f6cb30cd5161",
+              "signature": "/OT2aiGDzILyVchKnI3KnEp7r/AFpAbkdWnJ9PAQxZQRasv6Gkq5a5RB5JvnvVSPzomMQNjp98RtB+X7FMZqDQ=="
+            }],
+            "links": [{
+              "platform": "ios",
+              "kind": "testflight",
+              "url": "https://beta.itunes.apple.com/v1/app/6812503407"
+            }]
+          }]
+        }"#;
+        let feed = Feed::parse(real).expect("the real feed parses");
+        let mine = Version::parse("0.2.0").unwrap().with_build(1457);
+        // The machine name comes from the ssh probe, so the whole path
+        // from `uname` to a URL is exercised here.
+        let (platform, arch) = super::platform_of("linux-amd64").unwrap();
+        let got = feed
+            .for_build(&mine, platform, arch, Component::Kernel)
+            .expect("the kernel for this build");
+        assert_eq!(got.commit, "4c0a131");
+        assert_eq!(got.download.size, 9_134_907);
+        assert_eq!(got.download.format, Format::TarGz);
+        assert!(got.download.check_url().is_ok(), "{}", got.download.url);
+        assert!(
+            got.download
+                .url
+                .ends_with("arbos-kernel-0.2.0-1457-linux-x86_64.tar.gz"),
+            "{}",
+            got.download.url
+        );
+    }
+
+    /// Kernels outlive apps, and a release kept only for its kernel can
+    /// never be offered as an app update.
+    #[test]
+    fn kernels_are_kept_after_their_apps_are_dropped() {
+        let both = |build: u64| {
+            vec![
+                download(Platform::Macos, "arm64", &format!("{HOST}/app-{build}.zip")),
+                kernel_for(Platform::Linux, "x86_64", &format!("{HOST}/k-{build}.tar.gz")),
+            ]
+        };
+        let mut feed = feed(vec![]);
+        for build in 1..=6 {
+            feed.put_keeping(release("0.2.0", build, both(build)), 2, 5);
+        }
+
+        assert_eq!(feed.releases.len(), 5, "five kept, the sixth-oldest dropped");
+        let whole: Vec<u64> = feed
+            .releases
+            .iter()
+            .filter(|r| r.download(Platform::Macos, "arm64", Component::App).is_some())
+            .map(|r| r.build)
+            .collect();
+        assert_eq!(whole, [6, 5], "only the newest two keep their app");
+
+        // Every one of the five still has its kernel, which is the point.
+        for r in &feed.releases {
+            assert!(
+                r.download(Platform::Linux, "x86_64", Component::Kernel)
+                    .is_some(),
+                "build {} lost its kernel",
+                r.build
+            );
+        }
+
+        // An app four builds back can still find its own kernel...
+        let old = Version::parse("0.2.0").unwrap().with_build(2);
+        assert!(
+            feed.for_build(&old, Platform::Linux, "x86_64", Component::Kernel)
+                .is_some()
+        );
+        // ...and is still offered the newest app to update itself to,
+        // which must come from a release that kept one.
+        let offer = feed
+            .available(&old, Platform::Macos, "arm64")
+            .expect("an app update");
+        assert_eq!(offer.version.build, 6);
+    }
+
+    /// `put` is `put_keeping` with one number, and must behave exactly as
+    /// it did — a publisher that says nothing about kernels gets what it
+    /// always got.
+    #[test]
+    fn one_number_still_means_what_it_meant() {
+        let mut feed = feed(vec![]);
+        for build in 1..=5 {
+            feed.put(
+                release(
+                    "0.2.0",
+                    build,
+                    vec![
+                        download(Platform::Macos, "arm64", &format!("{HOST}/a-{build}.zip")),
+                        kernel_for(Platform::Linux, "x86_64", &format!("{HOST}/k-{build}.tar.gz")),
+                    ],
+                ),
+                3,
+            );
+        }
+        assert_eq!(feed.releases.len(), 3);
+        for r in &feed.releases {
+            assert_eq!(r.downloads.len(), 2, "nothing was stripped");
+        }
+    }
+
+    /// The incident, as a test. A dev app asks its channel for the Linux
+    /// kernel of its own build; `available_component` cannot answer,
+    /// because nothing in the feed is *newer* than the app — the app is
+    /// the newest thing there. That is the whole hole: the only other
+    /// route was a tagged release that does not exist yet.
+    #[test]
+    fn a_dev_app_finds_the_kernel_for_its_own_build_when_nothing_is_newer() {
+        let feed = feed(vec![release(
+            "0.2.0",
+            1410,
+            vec![
+                download(Platform::Macos, "arm64", &format!("{HOST}/app.zip")),
+                kernel_for(
+                    Platform::Linux,
+                    "x86_64",
+                    &format!("{HOST}/arbos-kernel-0.2.0-1410-linux-x86_64.tar.gz"),
+                ),
+            ],
+        )]);
+        let mine = Version::parse("0.2.0").unwrap().with_build(1410);
+
+        // What the app would have asked before: nothing, because nothing
+        // is newer than it.
+        assert!(
+            feed.available_component(&mine, Platform::Linux, "x86_64", Component::Kernel)
+                .is_none(),
+            "a build is not newer than itself"
+        );
+
+        let got = feed
+            .for_build(&mine, Platform::Linux, "x86_64", Component::Kernel)
+            .expect("the kernel for this very build");
+        assert_eq!(got.version, mine);
+        assert!(
+            got.download.url.ends_with("arbos-kernel-0.2.0-1410-linux-x86_64.tar.gz"),
+            "{}",
+            got.download.url
+        );
+    }
+
+    /// Not the newest, the *matching* one. A remote given a kernel newer
+    /// than the app would be replaced again on the next attach, because
+    /// the version check that opens a tunnel would still disagree.
+    #[test]
+    fn for_build_takes_the_matching_kernel_and_not_the_newest() {
+        let linux = |build: u64| {
+            kernel_for(
+                Platform::Linux,
+                "x86_64",
+                &format!("{HOST}/arbos-kernel-0.2.0-{build}-linux-x86_64.tar.gz"),
+            )
+        };
+        let feed = feed(vec![
+            release("0.2.0", 1500, vec![linux(1500)]),
+            release("0.2.0", 1410, vec![linux(1410)]),
+        ]);
+        let mine = Version::parse("0.2.0").unwrap().with_build(1410);
+        let got = feed
+            .for_build(&mine, Platform::Linux, "x86_64", Component::Kernel)
+            .unwrap();
+        assert_eq!(got.version.build, 1410, "took the newest instead of mine");
+
+        // And the newest is still there for anything that wants it.
+        assert_eq!(
+            feed.newest(Platform::Linux, "x86_64", Component::Kernel)
+                .unwrap()
+                .version
+                .build,
+            1500
+        );
+    }
+
+    #[test]
+    fn for_build_says_nothing_rather_than_guessing() {
+        let feed = feed(vec![release(
+            "0.2.0",
+            1410,
+            vec![kernel_for(Platform::Linux, "x86_64", &format!("{HOST}/k.tar.gz"))],
+        )]);
+        let mine = Version::parse("0.2.0").unwrap().with_build(1410);
+        // A build the feed has never carried.
+        let other = Version::parse("0.2.0").unwrap().with_build(1409);
+        assert!(
+            feed.for_build(&other, Platform::Linux, "x86_64", Component::Kernel)
+                .is_none()
+        );
+        // A machine the feed has nothing for.
+        assert!(
+            feed.for_build(&mine, Platform::Linux, "arm64", Component::Kernel)
+                .is_none()
+        );
+        // The app, where only a kernel was published.
+        assert!(
+            feed.for_build(&mine, Platform::Linux, "x86_64", Component::App)
+                .is_none()
+        );
+    }
+
+    /// Three spellings of one machine: what `uname` says, what the ssh
+    /// probe normalises it to, and what the feed calls it.
+    #[test]
+    fn a_machines_name_over_ssh_maps_onto_the_feeds_names() {
+        use super::platform_of;
+        assert_eq!(
+            platform_of("linux-amd64"),
+            Some((Platform::Linux, "x86_64"))
+        );
+        assert_eq!(
+            platform_of("linux-x86_64"),
+            Some((Platform::Linux, "x86_64"))
+        );
+        assert_eq!(platform_of("linux-arm64"), Some((Platform::Linux, "arm64")));
+        assert_eq!(
+            platform_of("darwin-arm64"),
+            Some((Platform::Macos, "arm64"))
+        );
+        assert_eq!(
+            platform_of("darwin-aarch64"),
+            Some((Platform::Macos, "arm64"))
+        );
+        assert_eq!(platform_of("MACOS-ARM64"), Some((Platform::Macos, "arm64")));
+        // No payload can be chosen for these, and saying so is the point.
+        assert_eq!(platform_of("freebsd-amd64"), None);
+        assert_eq!(platform_of("linux-riscv64"), None);
+        assert_eq!(platform_of("linux"), None);
     }
 
     #[test]
