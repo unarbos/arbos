@@ -7,7 +7,7 @@
 ## What happens
 
 `new_chat` tested for the leaf `new-subchat` and, if absent, did `hover("project-{ix}")` then
-    10|`click("project-add-{ix}")` — the old left sidebar. The 2026-09-13 layout decision removed the sidebar
+`click("project-add-{ix}")` — the old left sidebar. The 2026-09-13 layout decision removed the sidebar
 ("No left sidebar at all"), so that branch cannot succeed on any current build. Its error,
 `DriverError: move: no element matches 'project-0'`, is what the cycle log shows.
 
@@ -20,7 +20,7 @@ fresh window. Measured by watching one window rather than reasoning about it:
 | as launched (0.09 s after `launch()` returned) | 33 | absent |
 | through 30 s of polling | 33–34 | **never appears** |
 | after `click("permissions-skip")` — the first-run permissions sheet | 26 | absent |
-    20|| after `click("toggle-panel")` | **42** | **present, reachable** |
+| after `click("toggle-panel")` | **42** | **present, reachable** |
 
 So it is not a readiness race: the tree is fully populated at 0.09 s and the fallback fired at 1.7 s. The
 control simply is not mounted until the panel is open, and nothing in the rig opened it.
@@ -33,7 +33,7 @@ control simply is not mounted until the panel is open, and nothing in the rig op
    rig rather than 16 unmeasured scenarios. The draft `1f6f6064cd` still says `Suspected location: (fill
    in)` two days on.
 3. **A fallback that cannot succeed is worse than no fallback.** It converts "the control is not where I
-    30|   look" into a confident, wrong statement about a different control. With the branch removed, the
+   look" into a confident, wrong statement about a different control. With the branch removed, the
    helper now raises a message naming `desktop/src/view/panel.rs` and asking whether the control moved.
 
 ## The fix
@@ -46,18 +46,48 @@ Verified on `desktop-rapid-session-switch`, one of the 16, at `80e6994280f8`: th
 gone and the scenario creates **six chats** — where it had previously not created one. It now fails on two
 questions about the product that nobody had reached:
 
-    40|- `driver-gap: no clickable session row` — the six sub-chats have no `tab-<n>` row; `session_element`
-  looks in the tab bar, and after the layout change sub-chats belong to the panel. Harness, almost
-  certainly; needs the same treatment as `new_chat`.
-- `state:chat-folders: 6 chats created but folders are ['root']` — the window holds six sessions while
-  `.arbos/agents/` holds only `root`. Two readings and the evidence does not yet choose: the kernel may
-  create a chat's folder lazily on its first turn (the scenario never sent to them), or the window is
-  showing rows the kernel has no record of — **which is the shape of Jacob's own 2026-09-17 report**, and
-  is why it is written down here rather than guessed at.
+**Second: the scenario open-coded a selector the helper already owned.** `session_element` exists to find
+a session's row; `desktop-rapid-session-switch` ignored it and did its own `startswith("session-")` — the
+old sidebar's naming — so it reported `no clickable session row` for every sub-chat. The rows are
+`panel-agent-<session id>` in the panel (measured: two sub-chats in a fresh window give `panel-agent-1`,
+`panel-agent-2`, `panel-agent-3`). `session_element` now looks there, opens the panel when it is shut,
+and has lost its old second pass — a loose match on any element whose id merely *contained* the session
+number, which could have returned an unrelated element sharing a digit. The scenario calls the helper.
+The project's duplication rule with a two-day receipt: the copy rotted while the function it copied from
+was there to be called.
 
-Those two are the next thing to take apart, and they exist as questions only because the selector was
-fixed. That is the cost of a rig fault that fails early: it is not 16 red scenarios, it is 16 scenarios
-    50|that measured nothing for two days.
+**Third, and it was mine rather than the product's: `state:chat-folders: 6 chats created but folders are
+['root']`.** That looked like the shape of Jacob's own report — a window row the kernel has no record of
+— and it was not. `Desktop.__init__` sets `PATH` to `dirname(cx.binary)`, which assumes a binary named
+literally `arbos-kernel` sits there. I had pinned control builds as `kernels/arbos-kernel-<sha12>`, so
+nothing on `PATH` was called `arbos-kernel`, every sub-chat failed to connect, and no agent was created.
+The app said so, in the chat, where a user would read it:
+
+    Notice(failed): connection failed: no kernel binary at arbos-kernel on this machine
+
+Re-pinned as `kernels/<sha12>/arbos-kernel` — still immutable, now correctly named — and the same run
+reports **six `chat-<ms>` agent folders, one per sub-chat, beside `root`**. So a ⌘N sub-chat gets its
+kernel agent at once; the app's "nested here and nowhere the kernel can see" describes the moment before
+it binds, not a lasting state. Two lessons: **pin a build by directory, not by filename**, because the
+rig depends on the name; and a notice the app writes into the chat is evidence — it named my own fault
+while I was preparing to file it against the product.
+
+## What the 16 were worth
+
+With both helpers fixed, five of the previously-dead scenarios at `80e6994280f8`:
+
+| scenario | before | now |
+|---|---|---|
+| `desktop-rapid-session-switch` | `project-0` | **pass** — 6 rows, 30 switches, 0 failures |
+| `desktop-fresh-place-no-notice` | `project-0` | **pass** |
+| `desktop-kill-kernel-under-ui` | `project-0` | **pass** |
+| `desktop-huge-transcript-scroll` | `project-0` | **pass**, 58.8 s |
+| `desktop-user-message-card` | `project-0` | **break, and a real one**: `card-short-too-wide: the 'hi' card takes 0.84 of the column; it should hug its text` |
+
+That last row is the point. A message card taking 84% of the column instead of hugging two characters is
+a visible defect in the app, and it sat behind a stale selector for two days while the cycle log said
+`driver-exception`. The cost of a rig fault that fails early is not 16 red scenarios; it is 16 scenarios
+that measured nothing, and a real fault nobody could see.
 
 ## Regression check
 
@@ -70,4 +100,4 @@ One thing the probes taught about themselves: the second probe clicked candidate
 let an opened settings sheet change the window under it, which produced `move: no element matches
 'toggle-panel'` — an apparent driver bug that was my own ordering. The third probe did one action at a
 time from one window and the effect vanished. A script that depends on which of two things happens first
-    60|invents faults as readily as it hides them.
+invents faults as readily as it hides them.

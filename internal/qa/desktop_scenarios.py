@@ -125,18 +125,37 @@ class Desktop:
         return (({c["id"] for p in st["projects"] for c in p["sessions"]}) - before).pop()
 
     def session_element(self, session_id):
-        """The clickable element for a session: its tab (`tab-<index>`) in the tab bar, else the
-        old sidebar row that names the id."""
+        """The clickable element for a session. A sub-chat's row is `panel-agent-<session id>` in the
+        right-hand panel, which must be open to exist; a project's own chat is `tab-<index>` in the
+        window's strip. Measured 2026-09-17 on the app built from `b1c8e82a62b1`: two sub-chats made in
+        a fresh window give `panel-agent-1`, `panel-agent-2`, `panel-agent-3` beside `panel-tab-0`,
+        `panel-tabs` and `tab-0`/`tab-1`.
+
+        The old version looked only in the tab bar and then for any element whose id merely *contained*
+        the session number, so it reported `no clickable session row` for every sub-chat (qal-j24) — and
+        the loose second pass could have returned an unrelated element whose id happened to share a
+        digit."""
         sid = str(session_id)
+
+        def paths():
+            return {str(e.get("path", "")): e for e in self.app.elements("*")}
+
+        def find(leaf):
+            for path, el in paths().items():
+                if path.split(".")[-1] == leaf:
+                    return el["id"]
+            return None
+
+        row = find(f"panel-agent-{sid}")
+        if row is None and find("toggle-panel") is not None and find("panel") is None:
+            # The rows do not exist while the panel is shut, so open it before concluding.
+            self.app.click("toggle-panel")
+            row = find(f"panel-agent-{sid}")
+        if row is not None:
+            return row
         ids = [c["id"] for c in self.sessions()]
         if session_id in ids:
-            cand = f"tab-{ids.index(session_id)}"
-            for el in self.app.elements("*"):
-                if str(el.get("path", "")).endswith(cand):
-                    return el["id"]
-        for el in self.app.elements():
-            if sid in str(el.get("id", "")) or sid in str(el.get("path", "")):
-                return el["id"]
+            return find(f"tab-{ids.index(session_id)}")
         return None
 
     def send(self, text):
@@ -192,8 +211,11 @@ def register(scenario, transcript, kinds, now_ms):
                 ids.append(sid)
             d.shot("six-chats")
             cx.rec.notes["sessions"] = ids
-            # Sidebar rows are `session-<index>` in list order.
-            rows = [i for i in d.app.ids() if i.rsplit(".", 1)[-1].startswith("session-") and "dots" not in i]
+            # Ask the helper for each chat's row rather than guessing at a naming: this line used to
+            # look for `session-<index>`, the old sidebar's, and found nothing on any build since the
+            # 2026-09-13 layout change — a copy of `session_element`'s job that rotted on its own while
+            # the helper was there to be called (qal-j24).
+            rows = [r for r in (d.session_element(sid) for sid in ids) if r]
             cx.rec.notes["session_rows"] = len(rows)
             switches = failures = 0
             for r in range(5):
