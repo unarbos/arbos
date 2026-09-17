@@ -1854,35 +1854,56 @@ mod tests {
         );
     }
 
-    /// And a report about a remote place is written, where it used to fail.
+    /// And a report about a remote place is written, through the public path.
     ///
-    /// The root it goes to is settled by the test above; this one settles that a
-    /// report lands in it whole. Written against a named root rather than by
-    /// pointing `XDG_DATA_HOME` somewhere: that is process-global, and tests run
-    /// in parallel.
+    /// Through `write`, not the helper under it: choosing the root for a remote
+    /// place is the code that failed on his Mac, so it is the code that has to be
+    /// covered. That needs the data directory under the test's control, which is
+    /// what `data_dir_for_test` is for — per thread, so it cannot leak into a
+    /// test running beside it.
     #[test]
     fn a_report_about_a_remote_place_is_written() {
         let scratch = Scratch::new("remote");
-        let root = scratch
-            .path()
-            .join("feedback-outbox")
-            .join(place_key(&Place::new("~"), Some("ArbosLife")));
+        let _data = crate::model::settings::data_dir_for_test(scratch.path());
 
         let mut draft = Draft::new(Parts::default());
         draft.note = "chat fully disconnected on this ask".into();
-        let dir = write_into(&root, &draft, "20260917T131552Z-a3c8", 1_789_573_330_000)
-            .expect("a remote tab can file a report");
+        let written = write(
+            &Place::new("~"),
+            Some("ArbosLife"),
+            &draft,
+            "20260917T131552Z-a3c8",
+            1_789_573_330_000,
+        )
+        .expect("a remote tab can file a report");
 
-        assert!(dir.is_absolute());
-        assert!(dir.join(REPORT_NAME).is_file());
-        assert!(dir.join("ready").is_file());
-        let back: Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join(REPORT_NAME)).unwrap()).unwrap();
-        assert_eq!(back["note"], json!("chat fully disconnected on this ask"));
+        assert!(written.dir.is_absolute(), "{}", written.dir.display());
         assert!(
-            root.to_string_lossy().contains("ArbosLife"),
-            "and it is filed under the place it is about: {}",
-            root.display()
+            written.dir.starts_with(scratch.path()),
+            "staged locally, under the app's own folder: {}",
+            written.dir.display()
+        );
+        assert!(
+            written.elsewhere.is_none(),
+            "this is where a remote place's reports belong, not a fallback"
+        );
+        assert!(
+            written.dir.to_string_lossy().contains("ArbosLife"),
+            "filed under the place it is about: {}",
+            written.dir.display()
+        );
+        assert!(written.dir.join(REPORT_NAME).is_file());
+        assert!(written.dir.join("ready").is_file());
+        let back: Value =
+            serde_json::from_str(&std::fs::read_to_string(written.dir.join(REPORT_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(back["note"], json!("chat fully disconnected on this ask"));
+
+        // And the drain finds it without being told which project is open.
+        assert!(
+            known_outboxes().iter().any(|r| written.dir.starts_with(r)),
+            "the root was remembered: {:?}",
+            known_outboxes()
         );
     }
 
