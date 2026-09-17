@@ -640,7 +640,8 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
             );
             // A source edit reports which existing tests name what it
             // changed; "none" is the wrong-layer signal (see git::coverage_note).
-            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch") {
+            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch" | "bash")
+            {
                 if let Some(note) = tools::git::coverage_note(&cwd, &paths) {
                     after.context.push(note);
                 }
