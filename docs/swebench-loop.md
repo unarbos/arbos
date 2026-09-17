@@ -570,8 +570,35 @@ G has now been seen twice — once declining a ticket on its upstream history, o
 
 Spend $13.52. Cycles 17–20 together: $20.90, against $87 for cycle 16 alone.
 
-## Next (cycle 21)
+## Cycle 21 (2026-09-17) — the last 65 unread failures; the account holds, one new shape of twin, and 26208
 
-1. The five rules are in; the reads are done. The loop's standing work is reading new failures for anything outside A/B/E1/E2/F — the completeness claim is the thing to try to break. Material: any new instances the loop runs for other reasons, and the cycle 1–5 pool (65 non-fetching failures not yet read).
-2. If a measured comparison is ever wanted again, the door is: 40 instances at `-r 2` per arm, band ≥ 8 of 40 stated first, kernel proving its label, both arms interleaved.
-3. Old regression 20 per-base check, band ≥ 8 of 40, when the kernel base next moves for a reason other than these rules.
+No new score was cut. The material is the remaining unread failures from the cycle 1–5 slices: 89 non-fetching failures in that pool, 24 read in cycle 19, **65 read here** on 45 instances (`c21-unread.txt` in the cycle folder). Each is read against the gold patch and FAIL_TO_PASS list with the agent's files, mechanism line where the kernel had one, and final summary; **evident** means the trace is in the transcript, **consistent** means the shape fits and the failing detail is not visible.
+
+**The kernels these rollouts ran on**, from each bundle's `meta.json` (`kernel_git`), recorded here because the loop now records the kernel it reads as well as the one it runs: c1a `unknown` (the first Docker build, before the sha was baked), c1b `f610f39d14bf`, c2a `65522984a9b5`, c2b `16dec37e6492`, c3a `2e89c252baaa`, c3b `14dfac7d0bb0`, c4a `4ea32c333e02`, c4b and c5a `6d452f515612`, c5b `0e5d5eed88a0`. All match the files in `kernels-manifest.json`. These are pre-repro-gate, pre-network-cut agents; the network was open but these rollouts did not use it.
+
+| Pattern | Rollouts | Evident | Consistent | Instances |
+|---|---|---|---|---|
+| **A** the twin | 17 | 14 | 3 | astropy-14369 ×2 (the *generated parser table* `cds_parsetab.py` beside the grammar it is built from — a new shape of twin), django-13212 ×2 (the form-field side beside the validators), django-16256 ×2 (`GenericRelatedObjectManager` beside the related managers), matplotlib-26466 ×2 (`_ref_coord` beside `xy`), sphinx-7462 ×2 (the unparser beside the domain), astropy-14182, django-11728, django-13512, django-14376 (the dbshell client beside the backend); consistent: django-12406, sympy-13798, sympy-16597 |
+| **B** producer, not consumer | 13 | 9 | 4 | sympy-20428 ×2 (the callers patched; the `EX` domain's zero test was wrong), sympy-21930 ×2 (the LaTeX printer patched; the secondquant operators' own `_latex` was wrong), django-13794 ×2 (the `add` filter patched; the lazy proxy lacked `__radd__`), matplotlib-25479 ×2 (`pyplot.set_cmap` patched; the registry should rename on register), pylint-7080 (the linter's walk; `expand_modules` should normalise), matplotlib-23476, django-14792, django-12273 ×2 (consistent) |
+| **E2** reproduce the behaviour | 3 | 1 | 2 | pylint-6386; django-10999 ×2 (five and six tool calls: the reporter's example fixed, the PostgreSQL format in the same test never run) |
+| **E1** a test encodes the bug | 1 | 0 | 1 | sympy-15017 (the `__len__` special case, on a kernel with no thinking to read) |
+| **F** the checkout decides the stage | 1 | 1 | 0 | astropy-13236 |
+| C, the issue does not determine the fix | 27 | 8 | 19 | matplotlib-26208 ×2 (below), django-14140 ×2, sympy-18199 ×2, django-15252 (evident); the rest right file, right mechanism, failing detail not visible |
+| edit path invisible | 3 | — | — | django-14011, pytest-5840 ×2: no `edit`/`write` call recorded — edits made through `sed` in bash — so the read cannot see what was changed; the QA note of cycle 19 already flagged this |
+| **G** argues with the request | 0 | | | |
+
+**Everything fits.** 62 of 65 land in A, B, E1, E2, F or C; 3 cannot be read because the edit path bypassed the tools. No sixth agent pattern, no third case of G. With cycle 18's 79 and cycle 19's 24, the account has now been checked on 168 honest failures across 13 kernels and three generations of the agent; the qualifier stands — 25 of the 168 are consistent-with rather than evident, almost all of them in C.
+
+**One new shape of an old pattern.** astropy-14369: the agent fixed the CDS unit grammar in `cds.py` and left `cds_parsetab.py`, the PLY-generated parser table built from that grammar, as it was; both rollouts. The twin here is not a sibling function but a generated artefact that must be rebuilt when its source changes. The twin rule as written ("the sibling function… the other front end… the reader") does not name this case; worth one more clause: *the generated file beside its source.*
+
+**The nearest thing to "wrong mechanism" in 168 failures**, and why it is still C: matplotlib-26208 (dataLims become inf with `twinx` and a stackplot). Both rollouts found that `relim()` skips `Collection` artists and fixed that — a real defect, plausibly the cause. The maintainers fixed something else entirely: `twinx` now copies the axis units to the twin. The hidden tests are `test_twin_units[x|y]`; the issue never mentions units. The agent's mechanism may well have been right for the symptom as reported; the tests grade a mechanism the issue does not determine. Recorded because it is the case a wrong-mechanism reading would have claimed, and the classification by what the tests require puts it in C.
+
+**The ranking, over all 168 read** (primary class): A twin **41**, B producer **28**, F stage **12**, E2 **7**, E1 **2**, C **70**, other, unreadable or G **8**. Same order as cycle 18's on 79; A and B together are 69 of 168, 41%.
+
+Spend $0.00.
+
+## Next (cycle 22)
+
+1. The read pool is exhausted; every honest failure the loop holds has been read once. New reads need new rollouts. The loop's own prescription says the old regression 20 runs once per kernel base when the base moves for a reason other than these rules — the base has moved *because of* these rules, and a per-base check with the band stated first (≥ 8 of 40) would say whether the honest baseline of 24/40 on `864d6b00` has moved by 20 points on a kernel carrying all five. That is a score, so it waits for Jacob's word.
+2. To the features agent: the twin rule's one missing clause (the generated file beside its source), with astropy-14369 as the case.
+3. For the harness: an edit made through `bash sed` is invisible to the mechanism line, the coverage hook, the twin read and this loop; three of 65 here, one of ten in cycle 19. Either the kernel records file changes from `git status` after each bash call, or reads treat "no edit call" as unreadable rather than as no edit.
