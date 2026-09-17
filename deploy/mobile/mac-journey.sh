@@ -95,14 +95,26 @@ ui tap "$ROW" || score J1 FAIL "no $ROW row on the list"
 sleep 5; shot J1-open
 # seed the failing project (QA's rig seeds a folder; the phone asks the kernel to)
 type_send "$ID setup, do this yourself without workers: create $DIR/ with mathlib.py defining area(w, h) that wrongly returns w + h, tests/test_math.py (unittest) asserting area(3, 4) == 12, and git init with one commit on main containing both. No CHANGELOG. Reply 'seeded' when done."
-wait_hist J1 "user +$ID setup" 30; AFTER=$(seq_of "user +$ID setup"); echo "anchor $AFTER" | tee -a $O/run.txt
+# The anchor is this very line's seq, so this one wait cannot go through
+# `hist`: there is nothing to read it against yet, and it scored a FAIL on
+# every run for want of an anchor it was about to set. Wait on the seq.
+t=0; while [ $t -lt 30 ]; do AFTER=$(seq_of "user +$ID setup"); [ -n "$AFTER" ] && break; sleep 5; t=$((t+5)); done
+if [ -n "${AFTER:-}" ]; then score J1 PASS "the setup line reached the kernel after ${t}s, at seq $AFTER"
+else score J1 FAIL "the setup line never reached the kernel within 30s"; fi
+echo "anchor ${AFTER:-none}" | tee -a $O/run.txt
 wait_hist J1s "assistant .*[Ss]eeded" 180 >/dev/null || score J1 FAIL "seeding never finished"
 # the read frame is confined to .arbos/ (kernel), so the seed is scored on the kernel's own tool records
 if hist | grep -qE "tool +(write|edit) +$DIR/tests/test_math.py|tool +bash .*(test_math|set -e|git init)" && hist | grep -qE "assistant .*[Ss]eeded"; then score J1 PASS "project opened; kernel record shows the test written and a commit"; else score J1 FAIL "no record of the test file / commit after the seed line"; fi
 shot J1-seeded
 
 # J2 — the real challenge (QA's prompt, scoped to the folder); the first 45 s recorded (workers appearing)
-xcrun simctl io "$U" recordVideo --codec h264 --force "$O/j2-raw.mp4" >/dev/null 2>&1 & REC=$!
+# A recorder left behind by an interrupted run holds the device, and every
+# later `recordVideo` fails with "Host recording is already in progress" —
+# silently, because the output went to /dev/null, so cycle 55's first run
+# produced no video and only ffmpeg's missing-file error said so.
+pkill -INT -f "simctl io.*recordVideo" 2>/dev/null; sleep 2
+xcrun simctl io "$U" recordVideo --codec h264 --force "$O/j2-raw.mp4" > "$O/record.log" 2>&1 & REC=$!
+sleep 2; grep -q "already in progress" "$O/record.log" 2>/dev/null && echo "recording refused: the device still has a recorder on it" | tee -a $O/run.txt
 # the spawn tool record lands in the transcript only when the call ends (wait:true); the child's own
 # `turn running` frame is live, so a frame log is what says "a worker is running now"
 (python3 ~/frame-log.py $TARGET 400 > $O/frames.log 2>&1 &)
@@ -117,7 +129,12 @@ sleep 3; SPAWNERR=$(hist | grep -E "tool +spawn.*ERROR:" | head -1 | sed 's/.*ER
 if [ -z "$C" ]; then :; elif [ -n "$SPAWNERR" ]; then score J2 FAIL "spawn refused: $SPAWNERR"; elif grep -qE '"state": "running"' $O/frames.log 2>/dev/null || hist | grep -qE "tool +spawn"; then score J2 PASS "worker running after ${t}s"; else score J2 U "no worker: the root did it itself (allowed)"; fi
 shot J2-workers
 
-kill -INT $REC 2>/dev/null; ffmpeg -v error -y -i "$O/j2-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-challenge-workers.mp4" && rm -f "$O/j2-raw.mp4"
+kill -INT $REC 2>/dev/null; sleep 4
+if [ -s "$O/j2-raw.mp4" ]; then
+  ffmpeg -v error -y -i "$O/j2-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-challenge-workers.mp4" && rm -f "$O/j2-raw.mp4"
+else
+  echo "no recording: $(tail -1 "$O/record.log" 2>/dev/null)" | tee -a $O/run.txt
+fi
 # J4 — follow up mid-flight (as soon as the work is running), then after
 type_send "Also add a line to the CHANGELOG saying who asked for this: QA-$ID."
 wait_hist J4m "user +Also add a line to the CHANGELOG" 30 >/dev/null; F=$(seq_of "user +Also add a line")
