@@ -148,6 +148,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
         (
             Frame::Stop {
                 agent: "root".into(),
+                reason: None,
             },
             "stop",
         ),

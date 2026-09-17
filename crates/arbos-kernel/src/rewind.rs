@@ -168,9 +168,46 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
             events.len()
         );
     }
+    let (dropped, archive) = truncate(&layout, cut_from, &cps, checkpoint.line)?;
+    Ok(Cut {
+        checkpoint,
+        dropped,
+        archive,
+    })
+}
+
+/// The transcript cut at line `line` (0-based; that line and after go),
+/// no checkpoint needed: for a turn the kernel itself is taking back —
+/// one superseded before it did anything. Returns lines dropped and
+/// where they went.
+pub fn cut_from_line(place: &Place, agent: &str, line: u64) -> Result<(u64, PathBuf)> {
+    let layout = Layout::new(place, agent);
+    let events = load_transcript(&layout.transcript()).unwrap_or_default();
+    let at = line as usize;
+    if at >= events.len() {
+        bail!(
+            "line {line} is at or past the end of the transcript ({} lines); nothing to cut",
+            events.len()
+        );
+    }
+    if !events[at].is_wake() {
+        bail!("line {line} is not a turn's wake; refusing to cut mid-turn");
+    }
+    let cps = checkpoints(&layout.dir);
+    truncate(&layout, at, &cps, line)
+}
+
+/// Lines `at..` of the transcript to the rewind archive, the file
+/// replaced whole; checkpoints from `keep_below` on dropped with them.
+fn truncate(
+    layout: &Layout,
+    at: usize,
+    cps: &[Checkpoint],
+    keep_below: u64,
+) -> Result<(u64, PathBuf)> {
     let raw = std::fs::read_to_string(layout.transcript())?;
     let lines: Vec<&str> = raw.lines().collect();
-    let at = cut_from.min(lines.len());
+    let at = at.min(lines.len());
     let keep = lines[..at].join("\n");
     let gone = lines[at..].join("\n");
     let archive = layout
@@ -191,16 +228,14 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
     // Checkpoints of the cut turns go too, the target's own included: the
     // next turn starts on that line and writes a fresh one.
     let mut text = String::new();
-    for cp in cps.iter().filter(|cp| cp.line < checkpoint.line) {
+    for cp in cps.iter().filter(|cp| cp.line < keep_below) {
         text.push_str(&serde_json::to_string(cp)?);
         text.push('\n');
     }
-    replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
-    Ok(Cut {
-        checkpoint,
-        dropped: (lines.len() - at) as u64,
-        archive,
-    })
+    if !cps.is_empty() || layout.dir.join("checkpoints.jsonl").exists() {
+        replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
+    }
+    Ok(((lines.len() - at) as u64, archive))
 }
 
 /// Replace `path` with `text` in one step: a temp file in the same folder,
