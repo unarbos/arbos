@@ -397,6 +397,9 @@ struct ProjectChatView: View {
         case .mock: return "No kernel reachable — a scripted chat is answering."
         case .offline:
             if let refusal = chat.refusal { return refusal }
+            if let standing = chat.standing {
+                return chat.reconnectIn.map { "\(standing) Retrying in \($0)s." } ?? standing
+            }
             if let seconds = chat.reconnectIn { return "Link lost — reconnecting in \(seconds)s" }
             return "Kernel offline."
         case .connecting, .server, .live: return nil
