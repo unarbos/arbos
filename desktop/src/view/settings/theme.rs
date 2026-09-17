@@ -2,7 +2,7 @@
 
 use crate::{
     model::workspace::Workspace,
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, SettingsPane},
 };
 use bezel::{
     gpui::{AnyElement, Context, DragMoveEvent, Empty, div, prelude::*, px},
@@ -29,7 +29,7 @@ const MODES: [AppearanceMode; 3] = [
     AppearanceMode::Dark,
 ];
 
-impl SettingsWindow {
+impl SettingsPane {
     /// The whole page: the mode it paints in, then the colours it mixes, the
     /// size it reads at, and how the caret behaves in what it writes.
     /// Typography is a group here rather than a section of its own — a size is

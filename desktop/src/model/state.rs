@@ -32,7 +32,7 @@ pub struct Entry {
 /// The file's shape as this build writes it. A file without the key was
 /// written by a build from before the key existed; `restore` uses that to
 /// tell a setting the user chose from one an old default wrote for them.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -92,8 +92,11 @@ pub struct State {
 /// What the body size may be set to, in points: the ladder's smallest measured
 /// role to Title3's, so bezel's fixed chrome heights hold at either end. Read
 /// on the way in as well as by the control, because a size out of range paints
-/// an interface nobody can read the settings window to fix.
+/// an interface nobody can read the Settings tab to fix.
 pub const TEXT_SIZE: (f32, f32) = (11., 17.);
+
+/// The body size a fresh install reads at: Cursor's 14.
+pub const DEFAULT_TEXT_SIZE: f32 = 14.;
 
 /// Hand-written because a zeroed `text_size` is a font nobody can read, and a
 /// missing state file resolves every field through here.
@@ -110,7 +113,10 @@ impl Default for State {
             // Opaque, as Cursor's window is; the palette is tuned for it.
             reduce_transparency: true,
             cursor_blink: true,
-            text_size: TextStyle::Body.size(),
+            // Cursor's prose is 14 px on the Mac (cycle 1's measurement);
+            // bezel's 13 pt body read small beside it (Jacob, report
+            // 2026-09-17-13: "needs to be closer to cursor in size").
+            text_size: DEFAULT_TEXT_SIZE,
             // Off: Cursor's prose is plain; the weighted words are a reading
             // aid to switch on, not what a new user meets (Mac cycle 11).
             bionic_reading: false,
@@ -178,7 +184,14 @@ pub fn restore() -> State {
         appearance: stored.appearance,
         reduce_transparency: stored.reduce_transparency,
         cursor_blink: stored.cursor_blink,
-        text_size: stored.text_size.clamp(TEXT_SIZE.0, TEXT_SIZE.1),
+        // A file from before version 3 holding the old default (13, the
+        // body's own size) carries the default, not a choice: it moves to
+        // the new one. A size the person stepped to stays.
+        text_size: if stored.version < 3 && stored.text_size == TextStyle::Body.size() {
+            DEFAULT_TEXT_SIZE
+        } else {
+            stored.text_size.clamp(TEXT_SIZE.0, TEXT_SIZE.1)
+        },
         bionic_reading,
         hue: stored.hue,
         chroma: stored.chroma,

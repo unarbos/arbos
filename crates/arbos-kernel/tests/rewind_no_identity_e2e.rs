@@ -201,17 +201,32 @@ fn a_rewind_on_a_checkpoint_without_a_tree_leaves_the_files_and_says_so() {
         .collect();
     std::fs::write(&path, old).unwrap();
     a.send(serde_json::json!({"type":"rewind","agent":"root","turn":2,"files":true}));
-    let report = a
+    // Not an `error` frame (a rewind that half-worked drawn as a crash):
+    // a second `rewound` closes the pending state with nothing restored,
+    // and a notice on the transcript says why, and when it stops.
+    // `pending` is omitted when false.
+    let closed = a
         .wait(Duration::from_secs(20), |f| {
-            (f["type"] == "rewound" && !f["restored"].is_null()) || f["type"] == "error"
+            (f["type"] == "rewound" && f["pending"] != true) || f["type"] == "error"
         })
         .expect("the restore reports");
-    assert_eq!(report["type"], "error", "{report}");
-    let detail = report["detail"].as_str().unwrap_or("");
+    assert_eq!(closed["type"], "rewound", "not an error: {closed}");
+    assert!(closed["restored"].is_null(), "{closed}");
+    let report = a
+        .wait(Duration::from_secs(10), |f| {
+            f["type"] == "event"
+                && f["event"]["kind"] == "notice"
+                && f["event"]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("Files were not restored"))
+        })
+        .expect("the notice on the transcript");
+    assert_eq!(report["event"]["failed"], false, "{report}");
+    let text = report["event"]["text"].as_str().unwrap_or("");
+    assert!(text.contains("no checkpoint of the working tree"), "{text}");
     assert!(
-        detail.contains("files not restored")
-            && detail.contains("no checkpoint of the working tree"),
-        "{detail}"
+        text.contains("turns recorded from now on restore their files"),
+        "says when it stops: {text}"
     );
     assert!(
         k.place.join("f1.txt").exists(),

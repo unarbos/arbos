@@ -88,6 +88,9 @@ pub enum Event {
     AssistantFinal {
         text: String,
         step: u64,
+        /// The record's line number, so a line the pane already holds is
+        /// not appended a second time (F-135).
+        seq: u64,
     },
     /// Streamed text of model step `step` (1-based within the turn), from
     /// a kernel that numbers its steps; the settled line of the same step
@@ -134,6 +137,7 @@ pub enum Event {
         kind: String,
         text: Option<String>,
         at: Option<i64>,
+        seq: u64,
     },
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
@@ -1039,12 +1043,17 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             kind: wake,
             text,
             at: (ts > 0).then_some(ts),
+            seq: event.seq,
         }],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
         EventKind::Assistant { text, step, .. } if recorded => {
-            vec![Event::AssistantFinal { text, step }]
+            vec![Event::AssistantFinal {
+                text,
+                step,
+                seq: event.seq,
+            }]
         }
         EventKind::Assistant { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
@@ -1407,8 +1416,26 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
     {
         return Some(path.to_owned());
     }
+    // A page fetched is named by its host, as Cursor's "Fetched
+    // en.wikipedia.org" — a bare "fetch" / "Fetched fetch" was what Jacob
+    // saw on every web page his agent read (report 2026-09-17-12, F-143).
+    if matches!(name, "fetch" | "web")
+        && let Some(url) = obj.and_then(|obj| obj.get("url").and_then(Value::as_str))
+    {
+        let host = url
+            .split("://")
+            .nth(1)
+            .unwrap_or(url)
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(url)
+            .trim_start_matches("www.");
+        if !host.is_empty() {
+            return Some(host.to_owned());
+        }
+    }
     obj.and_then(|obj| {
-        ["path", "file", "target", "pattern", "query", "command"]
+        ["path", "file", "target", "pattern", "query", "command", "url"]
             .iter()
             .find_map(|key| obj.get(*key).and_then(Value::as_str))
             .map(str::trim)

@@ -1604,12 +1604,25 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     // A `user` line while a turn is open (after its wake, before its
     // turn_complete) was a steer: its card stays inside that turn.
     let mut turn_open = false;
+    // The kernel writes `wake user` and then the `user` line that caused
+    // it: that line is the turn's prompt, not a steer into it. Read as a
+    // steer, every prompt of a forked chat folded into the turn before it
+    // and the answers vanished behind shut folds (Jacob, report
+    // 2026-09-17-17, F-147).
+    let mut prompt_pending = false;
     for line in text.lines() {
         if let Ok(ev) = serde_json::from_str::<arbos_core::Event>(line) {
             let thinking = matches!(ev.kind, arbos_core::EventKind::Thinking { .. });
-            let steer = turn_open && matches!(ev.kind, arbos_core::EventKind::User { .. });
+            let is_user = matches!(ev.kind, arbos_core::EventKind::User { .. });
+            let steer = turn_open && is_user && !prompt_pending;
+            if is_user {
+                prompt_pending = false;
+            }
             match &ev.kind {
-                arbos_core::EventKind::Wake { .. } => turn_open = true,
+                arbos_core::EventKind::Wake { wake, .. } => {
+                    turn_open = true;
+                    prompt_pending = wake == "user";
+                }
                 arbos_core::EventKind::TurnComplete { .. }
                 | arbos_core::EventKind::Interrupted { .. } => turn_open = false,
                 _ => {}
@@ -3838,6 +3851,31 @@ pub fn agent_flags(place: &Place, id: &str) -> Option<(bool, Option<String>)> {
     .find_map(|path| std::fs::read_to_string(path).ok())?;
     let front = agent_front(&md);
     Some((front.readonly, front.kind))
+}
+
+/// The kernel's own word on who an agent belongs to, from its `agent.md`
+/// (live or archived): `None` when the kernel has no record of the agent
+/// at all, `Some(None)` for a parentless chat, `Some(Some(parent))` for a
+/// worker. The window's session file is a cache of this, never the source
+/// (F-137: a parentless `chat-…` the panel had adopted under root drew as
+/// "Delegate 1" for two days). Remote places have no file to read and
+/// answer `None`; their roster is the record there.
+pub fn agent_parent(place: &Place, id: &str) -> Option<Option<String>> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let store = place.path.join(".arbos");
+    let md = [
+        store.join("agents").join(id).join("agent.md"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(id)
+            .join("agent.md"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())?;
+    Some(agent_front(&md).parent)
 }
 
 pub fn agent_brief(place: &Place, id: &str) -> Option<String> {

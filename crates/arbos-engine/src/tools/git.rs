@@ -39,7 +39,7 @@ impl Tool for Undo {
         Ok(Plan::access(Access::exclusive()))
     }
     fn run(&self, cx: RunCx, _args: Value) -> BoxFuture<'static, Result<ToolOut>> {
-        blocking(move || undo(&cx.cwd))
+        blocking(move || undo(&cx.cwd, cx.turn_line))
     }
 }
 
@@ -73,6 +73,21 @@ pub struct Checkpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_error: Option<String>,
 }
+
+/// A restore refused because the checkpoint does not know its tree: not a
+/// failure of git, a fact about the record. The kernel tells it as a
+/// notice, not an error (qal-j05's shape: a rewind that half-worked drawn
+/// as a crash), and says when it stops.
+#[derive(Debug)]
+pub struct NoTree(pub String);
+
+impl std::fmt::Display for NoTree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NoTree {}
 
 impl Checkpoint {
     /// Whether a `files: true` restore may reset and clean the tree: it
@@ -194,22 +209,28 @@ pub fn snapshot_turn_tree(
             .status();
     }
     // The `undo` mark carries the same knowledge: HEAD, then the work
-    // commit, `clean`, or `error:<why>`, so `undo` too never cleans on a
-    // tree it does not know.
+    // commit, `clean`, or `error:<why>`, then `line:<n>` — the turn it
+    // was written for, which `undo` checks before it resets anything. It
+    // is written whole or not at all, and a write that fails leaves *no*
+    // mark rather than an older turn's: a stale mark sent `undo` to an
+    // older HEAD, deleting a kept commit and its file (qal-j10).
     let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
     let second = match (&work, clean, &work_error) {
         (Some(w), _, _) => w.clone(),
         (None, true, _) => "clean".to_string(),
         (None, false, why) => format!("error:{}", why.as_deref().unwrap_or("unknown")),
     };
-    let _ = std::fs::write(
+    // A mark that could not be written is removed rather than left
+    // stale: `undo` on a mark from an earlier turn would reset HEAD to
+    // that turn's commit. No mark → `undo` refuses and says so (#444).
+    // Written atomically, with the line the turn began at (#392).
+    if let Err(e) = arbos_core::record::write_atomic(
         &mark,
-        format!(
-            "{head}
-{second}
-"
-        ),
-    );
+        format!("{head}\n{second}\nline:{line}\n").as_bytes(),
+    ) {
+        let _ = std::fs::remove_file(&mark);
+        return Err(e.context("the undo mark could not be written; undo is refused for this turn"));
+    }
     let filled = Checkpoint {
         line,
         ts: cp.ts,
@@ -491,12 +512,12 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
     // the record — gets no `reset --hard`, no `clean`: the transcript is
     // rewound, the files are left as they are, and the reason is said.
     if !cp.knows_tree() {
-        anyhow::bail!(
+        return Err(anyhow::Error::new(NoTree(format!(
             "no checkpoint of the working tree for this turn ({}); files left as they are — the transcript is rewound",
             cp.work_error
                 .as_deref()
                 .unwrap_or("recorded before the kernel kept the tree, or whether it was clean")
-        );
+        ))));
     }
     // Nothing destructive until everything the restore needs is known to
     // be there (qal-j16: a `reset --hard` ran, then `read-tree` failed on
@@ -674,6 +695,15 @@ pub fn snapshot(cwd: &Path) -> Result<()> {
     }
     // HEAD only. `git add -A` + stash on a large place blocked the first
     // token and staged thousands of files. Undo still uses this sha.
+    // The old mark goes first: a write that then fails must leave no
+    // mark, never a previous turn's (qal-j10). `snapshot_turn` rewrites
+    // it whole, with the tree and the turn line, right after.
+    let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
+    match std::fs::remove_file(&mark) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => anyhow::bail!("could not clear the undo mark {}: {e}", mark.display()),
+    }
     if let Ok(out) = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(cwd)
@@ -681,9 +711,8 @@ pub fn snapshot(cwd: &Path) -> Result<()> {
     {
         let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !sha.is_empty() {
-            let runtime = cwd.join(".arbos").join("runtime");
-            let _ = std::fs::create_dir_all(&runtime);
-            let _ = std::fs::write(runtime.join("checkpoint"), format!("{sha}\n"));
+            arbos_core::record::write_atomic(&mark, format!("{sha}\n").as_bytes())
+                .map_err(|e| e.context("the undo mark"))?;
         }
     }
     Ok(())
@@ -1064,14 +1093,45 @@ fn base_branch(cwd: &Path, git: &dyn Fn(&[&str]) -> Option<String>) -> String {
     "main".into()
 }
 
-pub fn undo(cwd: &Path) -> Result<ToolOut> {
+pub fn undo(cwd: &Path, turn_line: u64) -> Result<ToolOut> {
     let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
-    if let Ok(text) = std::fs::read_to_string(&mark) {
+    // A confirmed read: an unreadable mark is not a mark to reset to.
+    let text = match arbos_core::record::read_text(&mark).confirmed() {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            return Ok(ToolOut::text(
+                "no checkpoint for this turn (its mark was never written, or its write failed and was said on the transcript); nothing reset",
+            ));
+        }
+        Err(e) => anyhow::bail!("undo: {e}"),
+    };
+    {
         let mut lines = text.lines().map(str::trim);
         let sha = lines.next().unwrap_or("");
         // The second line, from `snapshot_turn`: the work commit, `clean`,
         // or `error:<why>`. A mark from before it carries HEAD alone.
         let tree = lines.next().unwrap_or("");
+        // The third: the turn the mark was written for. A mark for another
+        // turn is a stale mark — its writer failed after this one's start —
+        // and resetting to it deletes kept work (qal-j10).
+        let for_line = lines
+            .next()
+            .and_then(|l| l.strip_prefix("line:"))
+            .and_then(|n| n.parse::<u64>().ok());
+        match for_line {
+            Some(l) if l == turn_line => {}
+            Some(l) => {
+                return Ok(ToolOut::text(format!(
+                    "no checkpoint for this turn: the mark on disk is from the turn at line {l}, this turn started at line {turn_line} (its own mark was not written); nothing reset"
+                )));
+            }
+            None if turn_line > 0 => {
+                return Ok(ToolOut::text(
+                    "no checkpoint for this turn: the mark on disk names no turn (written by an older kernel, or by a start that failed part way); nothing reset",
+                ));
+            }
+            None => {}
+        }
         if !sha.is_empty() {
             let knows_tree = tree == "clean" || (!tree.is_empty() && !tree.starts_with("error:"));
             if !knows_tree {
@@ -1637,7 +1697,7 @@ mod tests {
         std::fs::write(dir.join(".arbos/runtime/checkpoint"), format!("{head}\n")).unwrap();
         std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
         std::fs::write(dir.join("mine.txt"), "the user's own untracked file\n").unwrap();
-        let out = undo(&dir).unwrap();
+        let out = undo(&dir, 0).unwrap();
         assert!(
             out.body.contains("untracked files left as they are"),
             "{}",
@@ -1655,7 +1715,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("new.txt"), "this turn's\n").unwrap();
-        let out = undo(&dir).unwrap();
+        let out = undo(&dir, 0).unwrap();
         assert!(out.body.starts_with("restored "), "{}", out.body);
         assert!(!dir.join("new.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -1699,10 +1759,12 @@ mod tests {
         );
         assert_eq!(on_disk[0].line, 9);
         assert!(on_disk[0].work.is_some() && on_disk[0].work_error.is_none());
-        // The undo mark now carries the tree (HEAD, then the work commit).
+        // The undo mark carries the tree (HEAD, the work commit) and the
+        // turn line it belongs to, so a stale mark is refused.
         let mark = std::fs::read_to_string(dir.join(".arbos/runtime/checkpoint")).unwrap();
-        assert_eq!(mark.lines().count(), 2, "{mark}");
+        assert_eq!(mark.lines().count(), 3, "{mark}");
         assert_eq!(mark.lines().nth(1), on_disk[0].work.as_deref(), "{mark}");
+        assert_eq!(mark.lines().nth(2), Some("line:9"), "{mark}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

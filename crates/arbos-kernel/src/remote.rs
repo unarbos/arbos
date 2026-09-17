@@ -2292,8 +2292,6 @@ mod relay_tests {
                 total: 2,
                 archived: false,
                 path: String::new(),
-                id: String::new(),
-                unknown: false,
             })
             .unwrap();
         // Mid-turn: the lines are on the local transcript, no report yet.
@@ -2325,8 +2323,6 @@ mod relay_tests {
                 total: 2,
                 archived: false,
                 path: String::new(),
-                id: String::new(),
-                unknown: false,
             })
             .unwrap();
 
@@ -2366,8 +2362,6 @@ mod relay_tests {
                 total: 3,
                 archived: false,
                 path: String::new(),
-                id: String::new(),
-                unknown: false,
             })
             .unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;

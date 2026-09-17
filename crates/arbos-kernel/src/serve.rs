@@ -149,10 +149,18 @@ impl HeldRecord {
             )),
         ]
     }
+    /// The newest copy wherever it lies. A first-match read took a stale
+    /// copy in `runtime/` over a live one in the temp folder once the
+    /// runtime folder had stopped being writable (qal-j19, the third
+    /// shape: writable at first, then not — a full disk, a permission
+    /// change), and said the escalation on every relaunch. A write that
+    /// landed somewhere other than where the reader looks first is a
+    /// write the reader must still find.
     fn load(place: &Place) -> Option<Self> {
         Self::paths(place)
             .iter()
-            .find_map(|p| serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok())
+            .filter_map(|p| serde_json::from_str::<Self>(&std::fs::read_to_string(p).ok()?).ok())
+            .max_by_key(|r| (r.last_said_ms, r.refusals))
     }
     /// Saved where, or why nowhere. A record that could not be kept is
     /// not a record: the caller says so and speaks as if there were none.
@@ -1468,7 +1476,7 @@ fn handle_frame(
         Frame::Pause { agent, paused } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.paused = paused;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "pause", a.save(&place.agent_dir(&agent)));
             }
             if paused {
                 sched.stop(&agent);
@@ -1657,12 +1665,21 @@ fn handle_frame(
                 .ok()
                 .and_then(|a| a.cwd)
                 .unwrap_or_else(|| place.path.clone());
-            let _ = arbos_engine::git::undo(&cwd);
+            // The mark must be the last turn's: its start line is the
+            // last checkpoint's (qal-j10).
+            let turn_line = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
+                .last()
+                .map(|cp| cp.line)
+                .unwrap_or(0);
+            match arbos_engine::git::undo(&cwd, turn_line) {
+                Ok(out) => klog::info("undo", Some(&agent), arbos_core::text::clip(&out.body, 200)),
+                Err(e) => refuse(hooks, Some(&agent), format!("undo: {e:#}")),
+            }
         }
         Frame::SetModel { agent, model } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.model = model;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "model", a.save(&place.agent_dir(&agent)));
             }
         }
         Frame::SetMode { agent, mode } => {
@@ -1672,7 +1689,7 @@ fn handle_frame(
             };
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.mode = mode;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "mode", a.save(&place.agent_dir(&agent)));
                 // On the record, so the transcript says when the leash changed.
                 let _ = append_event(
                     &Layout::new(place, &agent).transcript(),
@@ -1839,26 +1856,9 @@ enum Page {
 
 fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
     // A finished worker's record lives in the archive; a client asking
-    // for it — by id or by the name its card shows — gets the lines from
-    // there, flagged, not an empty page. No such agent anywhere: an empty
-    // page that says so, not one that reads as an empty record.
-    let resolved = arbos_core::files::resolve_history_agent(place, agent);
-    let unknown = resolved.is_none();
-    let (transcript, archived, id) = match resolved {
-        Some(r) => (r.transcript, r.archived, r.id),
-        None => (
-            Layout::new(place, agent).transcript(),
-            false,
-            agent.to_string(),
-        ),
-    };
-    if unknown {
-        klog::warn(
-            "history_unknown",
-            Some(agent),
-            "no agent live or archived by that id or name",
-        );
-    }
+    // for it gets the lines from there, flagged, not an empty page.
+    let (transcript, archived) = arbos_core::files::transcript_for_history(place, agent)
+        .unwrap_or_else(|| (Layout::new(place, agent).transcript(), false));
     let events = load_transcript(&transcript).unwrap_or_default();
     let total = events.len() as u64;
     let picked: Vec<&Event> = match page {
@@ -1887,7 +1887,7 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     let to = picked.last().map(|e| e.seq).unwrap_or(anchor);
     for ev in picked {
         let mut event = ev.clone();
-        arbos_core::files::scrub_child_claims(place, &id, &mut event);
+        arbos_core::files::scrub_child_claims(place, agent, &mut event);
         // A record from before `output` existed gets its glance here.
         if let EventKind::Tool(rec) = &mut event.kind
             && rec.output.is_none()
@@ -1906,12 +1906,10 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         total,
         archived,
         path: if archived {
-            format!("archive/agents/{id}/transcript.jsonl")
+            format!("archive/agents/{agent}/transcript.jsonl")
         } else {
             String::new()
         },
-        id: if id == agent { String::new() } else { id },
-        unknown,
     });
 }
 
@@ -3035,6 +3033,21 @@ fn configure(
 /// done here (fast: two file writes); the tail is moved to the new end;
 /// files are restored on the blocking pool, and `rewound` goes out to
 /// every client when that is done.
+/// A setting the client asked for that did not reach the agent's file:
+/// the window shows it set, the next start would not — said as an
+/// error frame instead of believed (the unchecked-write pass).
+fn say_if_unsaved(hooks: &KernelHooks, agent: &str, what: &str, saved: anyhow::Result<()>) {
+    if let Err(e) = saved {
+        klog::warn("agent_save_failed", Some(agent), format!("{what}: {e:#}"));
+        hooks.broadcast(Frame::Error {
+            agent: Some(agent.to_string()),
+            detail: format!(
+                "{what} changed for this run only: the agent's file could not be written ({e:#}); it would revert at the next start"
+            ),
+        });
+    }
+}
+
 /// The `reason` on a `stop` that replaces a message rather than ending work.
 pub const SUPERSEDED: &str = "superseded";
 
@@ -3165,6 +3178,34 @@ fn rewind_live(
         let restored = if files {
             match rewind::restore_files(&place, &agent, &done.checkpoint) {
                 Ok(what) => Some(what),
+                Err(e) if e.downcast_ref::<arbos_engine::git::NoTree>().is_some() => {
+                    // Not a failure: the record for this turn has no tree
+                    // (recorded before the kernel kept one, or its save
+                    // failed and was said at the time). The transcript is
+                    // cut; the files stand; and on Jacob's existing places
+                    // most old-turn rewinds land here. A notice, drawn as
+                    // a kernel line, that also says when it stops — not
+                    // an `error` frame that draws the rewind as a crash.
+                    let text = format!(
+                        "Rewound the transcript. Files were not restored: {e}. This turn was recorded before the kernel kept each turn's working tree; turns recorded from now on restore their files."
+                    );
+                    let _ = arbos_core::append_event(
+                        &Layout::new(&place, &agent).transcript(),
+                        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                            text,
+                            failed: false,
+                        }),
+                    );
+                    klog::info("rewind_files_skipped", Some(&agent), format!("{e}"));
+                    hooks.broadcast(Frame::Rewound {
+                        agent: agent.clone(),
+                        line: done.checkpoint.line,
+                        dropped: done.dropped,
+                        restored: None,
+                        pending: false,
+                    });
+                    None
+                }
                 Err(e) => {
                     hooks.broadcast(Frame::Error {
                         agent: Some(agent.clone()),
@@ -3219,7 +3260,15 @@ fn resolve_approve(
         tool,
         allowed: allow,
     });
-    let _ = append_event(&Layout::new(place, &agent).transcript(), &event);
+    // The decision drove the tool whether or not this line lands; a
+    // record without it would show a tool that ran with no one's say-so.
+    if let Err(e) = append_event(&Layout::new(place, &agent).transcript(), &event) {
+        klog::warn(
+            "approval_unrecorded",
+            Some(&agent),
+            format!("allowed={allow}: the decision could not be written to the transcript: {e:#}"),
+        );
+    }
     hooks.broadcast(Frame::Event { agent, event });
 }
 
