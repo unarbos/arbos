@@ -1349,7 +1349,12 @@ class Pass:
                 self.check(name, "settings", "click section", "section body changes (element set differs)",
                            lambda s_=s_: self.app.click(s_), lambda a, b: (len(self.ids()) > 0 and f"{len(self.ids())} interactive ids in section") or "unverified: nothing listed", settle=0.6)
                 self.inv(f"settings-{name}")
-                for el in self.ids():
+                # Only the tab's own controls. Settings shares the window
+                # now, so a bare ids() lists the strip and the bar too — and
+                # the walk clicked `tab-0` then `tab-close-0`, closing the
+                # project tab under itself (cycle 35: "No tab open", every
+                # phase after it without a composer). Rig audit R22.
+                for el in [e for e in self.ids() if ".settings-body." in e]:
                     short = el.rsplit(".", 1)[-1]
                     if short.startswith("section-") or short in ("settings-body", "settings-back-to-chat", "tab-settings", "tab-settings-close"):
                         continue
