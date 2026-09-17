@@ -53,12 +53,253 @@ struct KernelJson {
     log: String,
 }
 
+/// The place lock, or the exit code for a place another kernel holds.
+enum Held {
+    Taken(PlaceLock),
+    /// Another kernel kept the place for the whole wait: exit 3, so a
+    /// supervisor can tell "held" from "crashed".
+    StillHeld(i32),
+}
+
+/// Exit code of a serve that found its place held and gave up waiting.
+pub const EXIT_PLACE_HELD: i32 = 3;
+
+/// The place's lock — or, when another kernel holds it, a refusal that
+/// says who holds it **once**, falls to a heartbeat, and after a few
+/// minutes says plainly that a person needs to look. A supervisor
+/// relaunching `serve` every two seconds against a place a stale kernel
+/// held logged `place already served` 1411 times over 32 minutes (the pod
+/// test, 2026-09-17): the useful facts — who holds it, which build,
+/// whether its file is gone — were nowhere, and nothing said that no one
+/// was coming. Each relaunch is a fresh process, so "once" lives in
+/// `runtime/place-held.json`, keyed on the holder's pid.
+///
+/// By default the refusal exits at once with `EXIT_PLACE_HELD` (a
+/// desktop that lost the spawn race attaches to the winner and must not
+/// be kept waiting, nor left a standby kernel that would serve a place
+/// the user has since closed). `ARBOS_LOCK_WAIT_SECS=N` makes a
+/// supervised kernel wait in-process instead, with the same words.
+fn acquire_or_wait(place: &Place) -> Held {
+    let wait_secs: u64 = std::env::var("ARBOS_LOCK_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let started = std::time::Instant::now();
+    loop {
+        match PlaceLock::acquire(place) {
+            Ok(lock) => {
+                if let Some(h) = HeldRecord::load(place) {
+                    let line = format!(
+                        "the place is free after {}s held by pid {}; serving {}",
+                        (arbos_core::now_ms() - h.first_ms) / 1000,
+                        h.holder_pid,
+                        place.path.display()
+                    );
+                    eprintln!("arbos-kernel: {line}");
+                    log_line_to_place(place, "info", "place_freed", &line);
+                    HeldRecord::clear(place);
+                }
+                return Held::Taken(lock);
+            }
+            Err(e) if e.to_string().contains("place already served") => {
+                say_held(place, wait_secs);
+                if started.elapsed() >= Duration::from_secs(wait_secs) {
+                    return Held::StillHeld(EXIT_PLACE_HELD);
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Err(e) => {
+                eprintln!("arbos-kernel: cannot lock {}: {e:#}", place.path.display());
+                return Held::StillHeld(1);
+            }
+        }
+    }
+}
+
+/// Seconds a held place is reported at: the first refusal in full, then
+/// one heartbeat a minute, then — after this long — the plain word that a
+/// person needs to look, repeated every ten minutes.
+const HELD_ESCALATE_SECS: i64 = 300;
+
+/// What was said so far about a held place, across relaunches.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct HeldRecord {
+    holder_pid: u32,
+    first_ms: i64,
+    last_said_ms: i64,
+    /// Refusals seen (each is one relaunch, or one poll of a waiter).
+    refusals: u64,
+    escalated: bool,
+}
+
+impl HeldRecord {
+    fn path(place: &Place) -> std::path::PathBuf {
+        place.runtime_dir().join("place-held.json")
+    }
+    fn load(place: &Place) -> Option<Self> {
+        serde_json::from_str(&std::fs::read_to_string(Self::path(place)).ok()?).ok()
+    }
+    fn save(&self, place: &Place) {
+        if let Ok(text) = serde_json::to_string(self) {
+            let p = Self::path(place);
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, &p);
+            }
+        }
+    }
+    fn clear(place: &Place) {
+        let _ = std::fs::remove_file(Self::path(place));
+    }
+}
+
+/// One refusal of a held place, said according to the record: in full
+/// the first time for this holder, a heartbeat once a minute, the
+/// escalation after `HELD_ESCALATE_SECS`, and otherwise nothing at all.
+fn say_held(place: &Place, wait_secs: u64) {
+    let now = arbos_core::now_ms();
+    let holder_pid = std::fs::read_to_string(place.lock_path())
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let mut rec = match HeldRecord::load(place) {
+        Some(r) if r.holder_pid == holder_pid => r,
+        _ => HeldRecord {
+            holder_pid,
+            first_ms: now,
+            last_said_ms: 0,
+            refusals: 0,
+            escalated: false,
+        },
+    };
+    rec.refusals += 1;
+    let held_for = (now - rec.first_ms) / 1000;
+    let holder = describe_holder(place);
+    let waiting = if wait_secs > 0 {
+        format!(
+            " This process waits up to {wait_secs}s for the place to be freed (ARBOS_LOCK_WAIT_SECS), then exits {EXIT_PLACE_HELD}."
+        )
+    } else {
+        format!(
+            " This process exits {EXIT_PLACE_HELD}; a supervisor that relaunches it will read this once, not every time."
+        )
+    };
+    let line = if rec.refusals == 1 {
+        Some((
+            "warn",
+            format!(
+                "another kernel already serves {}: {holder}.{waiting}",
+                place.path.display()
+            ),
+        ))
+    } else if held_for >= HELD_ESCALATE_SECS
+        && (!rec.escalated || now - rec.last_said_ms >= 600_000)
+    {
+        rec.escalated = true;
+        Some((
+            "error",
+            format!(
+                "a person needs to look: {} has been held for {held_for}s by {holder}; {} start(s) were refused in that time. Stop that kernel (arbos-kernel stop, or kill -TERM its pid) or point this supervisor at another place.",
+                place.path.display(),
+                rec.refusals
+            ),
+        ))
+    } else if now - rec.last_said_ms >= 60_000 {
+        Some((
+            "warn",
+            format!(
+                "still held after {held_for}s: {holder} ({} start(s) refused so far)",
+                rec.refusals
+            ),
+        ))
+    } else {
+        None
+    };
+    match line {
+        Some((level, text)) => {
+            rec.last_said_ms = now;
+            // The exact phrase stays on stderr every time: the desktop
+            // reads it to tell a lost spawn race from a crash.
+            eprintln!("arbos-kernel: place already served — {text}");
+            log_line_to_place(place, level, "place_held", &text);
+        }
+        None => eprintln!(
+            "arbos-kernel: place already served by pid {holder_pid} ({held_for}s; said in full in kernel.log)"
+        ),
+    }
+    rec.save(place);
+}
+
+/// Who holds the place, from what is on disk: the pid in the lock file,
+/// whether it is alive, which build it runs (kernel.json), whether its
+/// file has been replaced under it (a stale image), and its url.
+fn describe_holder(place: &Place) -> String {
+    let pid = std::fs::read_to_string(place.lock_path())
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok());
+    let Some(pid) = pid else {
+        return "a holder whose pid the lock file does not say".to_string();
+    };
+    let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    let mut parts = vec![format!(
+        "pid {pid}{}",
+        if alive {
+            ""
+        } else {
+            " (not alive — the lock should be free momentarily)"
+        }
+    )];
+    if let Ok(text) = std::fs::read_to_string(place.kernel_json_read())
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        && v["pid"].as_u64() == Some(pid as u64)
+    {
+        if let Some(sha) = v["git_sha"].as_str().filter(|s| !s.is_empty()) {
+            parts.push(format!("build {}", &sha[..sha.len().min(12)]));
+        }
+        if let Some(url) = v["url"].as_str() {
+            parts.push(format!("url {url}"));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+        let s = exe.to_string_lossy();
+        if s.ends_with(" (deleted)") {
+            parts.push("its file replaced under it — a stale image that restarts onto the new one when idle".to_string());
+        }
+    }
+    parts.join(", ")
+}
+
+/// One line into the place's kernel.log before this process has its own
+/// logger: the holder's log is the one a person reads.
+fn log_line_to_place(place: &Place, level: &str, event: &str, detail: &str) {
+    let path = klog::log_path_for(&place.arbos());
+    let line = serde_json::json!({
+        "ts": arbos_core::now_ms(),
+        "level": level,
+        "event": event,
+        "detail": detail,
+        "pid": std::process::id(),
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let place = Place::new(
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
     );
-    let _lock = PlaceLock::acquire(&place)?;
+    let _lock = match acquire_or_wait(&place) {
+        Held::Taken(lock) => lock,
+        Held::StillHeld(code) => return Ok(code),
+    };
     bootstrap(&place)?;
     klog::init(klog::log_path_for(&place.arbos()));
     let host = Host::load()?;
