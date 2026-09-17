@@ -149,6 +149,31 @@ fn env_key(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+/// The one refusal a kernel with no working search gives, leading with the
+/// one thing to do. The first time in this process it carries what each
+/// provider said; after that only the sentence, so a second and third
+/// search do not paint the same two failures in red again (Jacob's
+/// desktop feedback 2026-09-17-12: two red rows, 1m 41s, and the model
+/// reached this sentence itself two calls later).
+static SAID_NO_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn no_search_here(detail: &str) -> anyhow::Error {
+    let first = !SAID_NO_SEARCH.swap(true, std::sync::atomic::Ordering::SeqCst);
+    let lead = "No web search on this kernel: add a search key to its environment (EXA_API_KEY, BRAVE_API_KEY or TAVILY_API_KEY) or a search_url in config.toml. Until then, fetch a URL you know; do not retry search.";
+    if first {
+        anyhow::anyhow!("{lead} ({detail})")
+    } else {
+        anyhow::anyhow!("{lead}")
+    }
+}
+
+/// A provider's failure that means "no search here", as opposed to a bad
+/// query or a network fault: the keyless page's bot check.
+fn is_no_search(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}");
+    s.contains("bot check") || s.contains("CAPTCHA")
+}
+
 pub async fn search(web: &WebCfg, query: &str, n: usize) -> Result<ToolOut> {
     let backend = backend_name(web);
     let hits = match backend {
@@ -169,12 +194,25 @@ pub async fn search(web: &WebCfg, query: &str, n: usize) -> Result<ToolOut> {
                             &more,
                         )));
                     }
+                    Err(e) if is_no_search(&e) => {
+                        return Err(no_search_here(&format!(
+                            "OpenRouter's web plugin returned no sources, and DuckDuckGo's keyless page answered with a bot check"
+                        )));
+                    }
                     Err(e) => bail!("OpenRouter web returned no sources; {e}"),
                 }
             }
             hits
         }
-        _ => duckduckgo(query, n).await?,
+        _ => match duckduckgo(query, n).await {
+            Ok(h) => h,
+            Err(e) if is_no_search(&e) => {
+                return Err(no_search_here(
+                    "DuckDuckGo's keyless page answered with a bot check instead of results",
+                ));
+            }
+            Err(e) => return Err(e),
+        },
     };
     Ok(ToolOut::text(render(backend, query, &hits)))
 }
@@ -442,9 +480,7 @@ pub async fn duckduckgo(query: &str, n: usize) -> Result<Vec<Hit>> {
     let resp = client()?.get(url).send().await.context("DuckDuckGo")?;
     let html = resp.text().await.unwrap_or_default();
     if html.contains("anomaly-modal") || html.contains("bots use DuckDuckGo too") {
-        bail!(
-            "DuckDuckGo answered with a bot check (CAPTCHA) instead of results. Set EXA_API_KEY, BRAVE_API_KEY or TAVILY_API_KEY, or run the model through OpenRouter (its web plugin searches with the same key)."
-        );
+        bail!("DuckDuckGo answered with a bot check (CAPTCHA) instead of results");
     }
     let mut hits = Vec::new();
     for block in html.split("class=\"result__body\"").skip(1) {
@@ -621,4 +657,44 @@ fn html_to_text(html: &str) -> String {
     }
     let collapsed = out.split_whitespace().collect::<Vec<_>>().join(" ");
     html_unescape(&collapsed)
+}
+
+#[cfg(test)]
+mod no_search_tests {
+    use super::*;
+
+    /// Two providers' failures were one red line the person had to read
+    /// twice; now the refusal leads with the one thing to do, carries the
+    /// providers' words once per process, and is one sentence after.
+    #[test]
+    fn the_refusal_leads_with_the_fix_and_carries_detail_once() {
+        SAID_NO_SEARCH.store(false, std::sync::atomic::Ordering::SeqCst);
+        let first =
+            no_search_here("DuckDuckGo's keyless page answered with a bot check").to_string();
+        assert!(
+            first.starts_with("No web search on this kernel: add a search key"),
+            "{first}"
+        );
+        assert!(first.contains("EXA_API_KEY"), "{first}");
+        assert!(first.contains("do not retry search"), "{first}");
+        assert!(
+            first.contains("(DuckDuckGo's keyless page answered with a bot check)"),
+            "{first}"
+        );
+        let second = no_search_here("anything").to_string();
+        assert!(
+            second.starts_with("No web search on this kernel"),
+            "{second}"
+        );
+        assert!(
+            !second.contains("anything"),
+            "the detail is said once: {second}"
+        );
+        assert!(is_no_search(&anyhow::anyhow!(
+            "DuckDuckGo answered with a bot check (CAPTCHA) instead of results"
+        )));
+        assert!(!is_no_search(&anyhow::anyhow!(
+            "DuckDuckGo: connection refused"
+        )));
+    }
 }
