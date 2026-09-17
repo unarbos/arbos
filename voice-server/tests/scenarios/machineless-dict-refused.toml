@@ -1,0 +1,6 @@
+# A dict that names no machine and no path ({"project": "discord_backups"}), the shape a client
+# off the hub might send. It used to parse as "no project" and fall through to the gateway's own
+# kernel. Now it is a bare name: refused with project_not_on_hub, close 4404, no kernel touched.
+title = "A project dict without a machine is refused like a bare name, never read as 'no project'"
+project = { project = "discord_backups", name = "discord_backups" }
+refused = "project_not_on_hub"
