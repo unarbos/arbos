@@ -315,7 +315,20 @@ fn start_kernel(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let _child = cmd.spawn().context("start arbos-kernel serve")?;
+    let mut child = cmd.spawn().context("start arbos-kernel serve")?;
+    // Waited out on a thread of its own: a worktree kernel ends when its
+    // claim does (hours later, or never), and a child nobody waits for is
+    // a zombie under this daemon for the rest of its life — one from a
+    // test spawn sat on arboslife for hours. The same omission the kernel
+    // was cured of tonight: a parent not noticing its child has ended.
+    let reaped = place.display().to_string();
+    std::thread::Builder::new()
+        .name("reap-kernel".into())
+        .spawn(move || match child.wait() {
+            Ok(status) => eprintln!("worker: kernel for {reaped} ended ({status})"),
+            Err(e) => eprintln!("worker: kernel for {reaped}: wait failed: {e}"),
+        })
+        .ok();
     let deadline = std::time::Instant::now() + KERNEL_READY;
     while std::time::Instant::now() < deadline {
         if live_port(&place).is_some() {
