@@ -225,6 +225,9 @@ pub enum Event {
         kind: String,
         cwd: Option<String>,
         url: Option<String>,
+        /// Who asked for it: `user`, `agent`, or empty from a kernel that
+        /// predates the field (unknown — never read as `user`).
+        by: String,
     },
     /// The kernel closed one: the shell exited, the job ended, the page
     /// was dropped.
@@ -906,6 +909,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             cwd,
             title,
             url,
+            by,
         } if owner == agent && matches!(panel.as_str(), "terminal" | "browser" | "process") => {
             let title = title.unwrap_or_default();
             terminal_ids
@@ -923,6 +927,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                             kind: panel.clone(),
                             cwd: cwd.clone(),
                             url: url.clone(),
+                            by: by.clone(),
                         }
                     }
                 })

@@ -555,6 +555,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let cwd = agent.work_dir(&place.path);
     let turn_line = events.len() as u64;
     let mut tree_ready: Option<tokio::sync::watch::Receiver<bool>> = None;
+    let mut turn_ts: Option<i64> = None;
     {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();
@@ -567,14 +568,30 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         let record = {
             let (snap, agent_dir, agent_id) = (snap.clone(), agent_dir.clone(), agent_id.clone());
             tokio::task::spawn_blocking(move || {
-                crate::tools::git::snapshot_turn_record(&snap, &agent_dir, &agent_id, turn_line)
+                crate::tools::git::snapshot_turn_record_with_mark(
+                    &snap, &agent_dir, &agent_id, turn_line,
+                )
             })
             .await
             .map_err(|e| anyhow::anyhow!("checkpoint task: {e}"))
             .and_then(|r| r)
         };
         match record {
-            Ok(Some(cp)) => {
+            Ok(Some((cp, mark_error))) => {
+                turn_ts = Some(cp.ts);
+                if let Some(why) = mark_error {
+                    // The record stands (rewind works from it); the undo
+                    // mark does not. The person hears it before they reach
+                    // for undo (qal-j22: nobody was told).
+                    let ev = Event::new(EventKind::Notice {
+                        text: format!(
+                            "Checkpoint not written for this turn's undo: {why}. undo is refused for this turn; rewind still works from the record."
+                        ),
+                        failed: true,
+                    });
+                    let _ = append_event(&transcript, &ev);
+                    hooks.emit(&ev);
+                }
                 // The first tool that writes waits for this to finish,
                 // so the tree is the one before the turn, never one the
                 // turn has already touched.
@@ -851,6 +868,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
         turn_line,
+        turn_ts,
         tree_ready,
         web: Arc::new(crate::tool::WebCfg {
             search_url: host.config.search_url.clone(),
