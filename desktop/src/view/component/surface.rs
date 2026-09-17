@@ -314,13 +314,28 @@ fn path_body(
         TextFile::Binary => quiet(&theme, "Can't preview this file."),
         TextFile::Text { text, truncated } => {
             let source = match kind {
-                Present::Markdown => fence_if_needed(None, &text, truncated),
+                // The kernel's documents open on TOML or YAML front matter
+                // (`+++ owner = "root" +++`); a page reader shows the page,
+                // not its header (Jacob, report 2026-09-17-14, F-144).
+                Present::Markdown => fence_if_needed(None, without_front_matter(&text), truncated),
                 Present::Sheet => sheet_markdown(&text, truncated),
                 _ => fence_if_needed(Some(language_for(&resolved)), &text, truncated),
             };
             document(&source, window, cx)
         }
     }
+}
+
+/// The body after a `+++`/`---` front-matter block, if the text opens on one.
+fn without_front_matter(text: &str) -> &str {
+    for fence in ["+++", "---"] {
+        if let Some(rest) = text.strip_prefix(fence)
+            && let Some(end) = rest.find(&format!("\n{fence}"))
+        {
+            return rest[end + 1 + fence.len()..].trim_start_matches('\n');
+        }
+    }
+    text
 }
 
 enum Present {
