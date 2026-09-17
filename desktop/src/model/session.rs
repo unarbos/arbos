@@ -3175,8 +3175,15 @@ impl ChatSession {
             Event::Permission(request, reply) => self.open_permission(request, reply),
             Event::Working(secs) => {
                 self.working = Some((secs, Instant::now()));
-                self.turn_open = true;
-                self.turn_ended = None;
+                // A heartbeat straggling in after the turn's own end must
+                // not reopen it: the chat then looked idle everywhere but
+                // refused "Rewind here" with "stop the turn before
+                // rewinding" and drew no footer (F-122, cycle 24 gate).
+                // Same lag rule as `turn_alive`.
+                if !self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
+                    self.turn_open = true;
+                    self.turn_ended = None;
+                }
             }
             Event::Status(text) => {
                 let text = text.trim().to_string();
