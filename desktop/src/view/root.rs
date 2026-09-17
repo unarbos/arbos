@@ -22,7 +22,7 @@ use crate::{
             tab_sheet::{TabSheet, TabSheetEvent},
         },
         naming::Renaming,
-        settings::{self, Section, SettingsWindow},
+        settings::{CloseSettings, Section, SettingsPane},
     },
 };
 use anyhow::Result;
@@ -597,6 +597,30 @@ pub enum Pane {
     Project,
 }
 
+/// Which tab of the strip the window's middle draws. Everywhere else in the
+/// app a tab is a project; Settings is the one tab that is not, so this is the
+/// one place that says which kind is in front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Front {
+    /// The project `Workspace::active` points at, in whichever [`Pane`] it was
+    /// left on.
+    Project,
+    /// The Settings tab, filling the width.
+    Settings,
+}
+
+/// The Settings tab while it is in the strip: the pane that draws it, and
+/// whether it is the tab in front.
+///
+/// One field holds both, so nothing can claim Settings is in front while no
+/// tab holds it: closing the tab is dropping this whole value, and the project
+/// underneath is untouched — which is why leaving Settings needs no memory of
+/// where to go back to.
+pub(crate) struct SettingsTab {
+    pub(crate) pane: Entity<SettingsPane>,
+    front: bool,
+}
+
 /// One step from `at` through `len` entries. Past either end is
 /// nowhere — stay on the first or the last. A list of none, or no
 /// current place in it, has nowhere to land.
@@ -696,7 +720,12 @@ pub struct Arbos {
     pub(crate) permission_center: Entity<PermissionCenter>,
     /// ⌘K: the palette over every open tab's chats.
     pub(crate) chat_search: Entity<ChatSearch>,
-    settings_window: Option<WindowHandle<SettingsWindow>>,
+    /// The Settings tab, or nothing when it is not open. It is not remembered
+    /// across a launch: a tab in this strip is a place with a kernel and a
+    /// chat, `state.toml` restores those, and a relaunch that landed on a
+    /// preferences form instead of the work would be the wrong side of the
+    /// trade — ⌘, is one chord away.
+    pub(crate) settings_tab: Option<SettingsTab>,
     pub(crate) pane: Pane,
     pub(crate) menu: Option<Menu>,
     /// Which of the open menu's rows is live. Held here rather than in the
@@ -1010,7 +1039,7 @@ impl Arbos {
             permissions_sheet,
             permission_center,
             chat_search,
-            settings_window: None,
+            settings_tab: None,
             pane: Pane::Chat,
             menu: None,
             menu_cursor: Cursor::default(),
@@ -1044,8 +1073,10 @@ impl Arbos {
         .detach();
         cx.on_release(|this, cx| {
             this.flush_composer_draft(cx);
-            if let Some(handle) = this.settings_window.take() {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            // The Settings tab goes with the window, and what it had running —
+            // the permission poll, a microphone test — goes with it.
+            if let Some(tab) = this.settings_tab.take() {
+                tab.pane.update(cx, |pane, cx| pane.went_behind(cx));
             }
         })
         .detach();
@@ -1271,26 +1302,36 @@ impl Arbos {
         self.open_project_action(&OpenProject, window, cx);
     }
 
-    pub(crate) fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_tab(1, cx);
+    pub(crate) fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, window, cx);
     }
 
-    pub(crate) fn prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_tab(-1, cx);
+    pub(crate) fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, window, cx);
     }
 
     /// Step to the neighbouring tab, wrapping at either end as a browser
-    /// does.
-    fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
-        let (at, len) = {
-            let workspace = self.workspace.read(cx);
-            (workspace.active, workspace.projects.len())
+    /// does. The ring is the strip: the projects in their order, then Settings
+    /// when it is open, because a tab the cycle cannot reach is not a tab.
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let projects = self.workspace.read(cx).projects.len();
+        // The Settings slot's index, when the strip holds one: past the last
+        // project, which is where the strip draws it.
+        let settings = self.settings_tab.is_some().then_some(projects);
+        let slots = projects + usize::from(settings.is_some());
+        let at = match self.front() {
+            Front::Settings => settings,
+            Front::Project => self.workspace.read(cx).active,
         };
-        let (Some(at), true) = (at, len > 1) else {
+        let (Some(at), true) = (at, slots > 1) else {
             return;
         };
-        let next = (at as isize + step).rem_euclid(len as isize) as usize;
-        self.select_project(next, cx);
+        let next = (at as isize + step).rem_euclid(slots as isize) as usize;
+        if settings == Some(next) {
+            self.show_settings(window, cx);
+        } else {
+            self.select_project(next, cx);
+        }
     }
 
     /// Copy what the transcript has selected. Bound app-wide and reached only
@@ -1403,6 +1444,8 @@ impl Arbos {
     /// before — the way back from the Project page or a document, and the
     /// view a new tab opens on.
     pub(crate) fn select_project(&mut self, ix: usize, cx: &mut Context<Self>) {
+        // A project tab in front means Settings is not, whatever it was.
+        self.leave_settings(cx);
         self.show_pane(Pane::Chat, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_project(ix, cx));
@@ -1431,9 +1474,16 @@ impl Arbos {
             self.dismiss_menu(cx);
             return;
         }
-        // Nothing to close: Escape leaves the Project page (or a document)
-        // for the chat, as ⌘1 does.
-        if self.pane != Pane::Chat {
+        // Nothing to close: Escape leaves the Settings tab, the Project page or
+        // a document for the chat, as ⌘1 does. The pane binds `escape` on its
+        // own key context as well, and both are wanted: this one answers when
+        // the focus has come back to the window (a pane that stopped being
+        // drawn dispatches nothing), that one when the pane itself holds it.
+        let leaving = match self.front() {
+            Front::Settings => true,
+            Front::Project => self.pane != Pane::Chat,
+        };
+        if leaving {
             self.show_chat(&ShowChat, window, cx);
         }
     }
@@ -1462,10 +1512,10 @@ impl Arbos {
     pub(crate) fn open_settings_action(
         &mut self,
         _: &OpenSettings,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings(Section::General, cx);
+        self.open_settings(Section::General, window, cx);
     }
 
     /// Kernel notifications (#293), sorted the way Cursor sorts them: one
@@ -1578,16 +1628,22 @@ impl Arbos {
 
     /// ⌘W and the menu's Close Tab: the tab in front. A tab's own close
     /// mark names its tab; the chord has only the one in front.
+    /// ⌘W closes the tab in front, and Settings is a tab.
     pub(crate) fn close_project_action(
         &mut self,
         _: &CloseProject,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ix) = self.workspace.read(cx).active else {
-            return;
-        };
-        self.close_project(ix, cx);
+        match self.front() {
+            Front::Settings => self.close_settings(window, cx),
+            Front::Project => {
+                let Some(ix) = self.workspace.read(cx).active else {
+                    return;
+                };
+                self.close_project(ix, cx);
+            }
+        }
     }
 
     /// ⌘K and the panel's magnifier: search every open tab's chats by
@@ -1649,7 +1705,13 @@ impl Arbos {
         self.show_pane(Pane::Project, cx);
     }
 
-    pub(crate) fn show_chat(&mut self, _: &ShowChat, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
+        // ⌘1 and Escape are the way back from the Settings tab as much as from
+        // the Project page. The tab stays open; its close mark closes it.
+        if self.front() == Front::Settings {
+            self.leave_settings(cx);
+            self.focus_composer(window, cx);
+        }
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
                 if let Some(focus) = &mut project.focus {
@@ -1660,37 +1722,86 @@ impl Arbos {
         self.show_pane(Pane::Chat, cx);
     }
 
-    pub(crate) fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        let had = self.settings_window.is_some();
-        self.settings_window = settings::open(workspace, self.settings_window, section, cx);
-        // When the window goes — Escape, ⌘W, the title bar — this window
-        // comes back forward and the composer takes the keyboard, so the
-        // settings never sit between the user and the chat.
-        if !had
-            && let Some(view) = self
-                .settings_window
-                .and_then(|handle| handle.entity(cx).ok())
-        {
-            cx.observe_release(&view, |this, _, cx| {
-                this.settings_window = None;
-                if let Some(main) = cx
-                    .windows()
-                    .into_iter()
-                    .find(|w| w.downcast::<Self>().is_some())
-                {
-                    let _ = main.update(cx, |_, window, _| window.activate_window());
-                }
-                let composer = this.composer.read(cx).focus_handle(cx);
-                if let Some(main) = cx
-                    .windows()
-                    .into_iter()
-                    .find(|w| w.downcast::<Self>().is_some())
-                {
-                    let _ = main.update(cx, |_, window, cx| window.focus(&composer, cx));
-                }
-            })
-            .detach();
+    /// ⌘, the gear, and the menu item: open the Settings tab on `section`, or
+    /// bring the open one forward. Never a second one — two Settings tabs
+    /// would be two views of one preference file, and the strip would hold a
+    /// tab whose twin already answers to the same chord.
+    pub(crate) fn open_settings(
+        &mut self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.settings_tab {
+            Some(tab) => {
+                let pane = tab.pane.clone();
+                pane.update(cx, |pane, cx| pane.show(section, cx));
+            }
+            None => {
+                let workspace = self.workspace.clone();
+                let pane = cx.new(|cx| SettingsPane::new(workspace, section, cx));
+                self.settings_tab = Some(SettingsTab { pane, front: false });
+            }
+        }
+        self.dismiss_menu(cx);
+        self.show_settings(window, cx);
+    }
+
+    /// Put the Settings tab in front. The pane takes the keyboard, so Escape
+    /// reaches its own key context.
+    pub(crate) fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = &mut self.settings_tab else {
+            return;
+        };
+        tab.front = true;
+        let focus = tab.pane.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Leave the Settings tab without closing it: Escape, ⌘1, a click on a
+    /// project tab, ⌃Tab, the rail's own row. It keeps its place in the strip,
+    /// where its close mark is.
+    fn leave_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = &mut self.settings_tab else {
+            return;
+        };
+        if !tab.front {
+            return;
+        }
+        tab.front = false;
+        let pane = tab.pane.clone();
+        pane.update(cx, |pane, cx| pane.went_behind(cx));
+        cx.notify();
+    }
+
+    /// Close the tab: its close mark, ⌘W with it in front, and the driver's
+    /// `arbos_settings::CloseSettings`. Whatever is underneath comes back —
+    /// the chat of the project in front, or, when Settings was the only tab
+    /// left, the launch view with its folder button.
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.settings_tab.take() else {
+            return;
+        };
+        tab.pane.update(cx, |pane, cx| pane.went_behind(cx));
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_settings_action(
+        &mut self,
+        _: &CloseSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_settings(window, cx);
+    }
+
+    /// Which tab the window's middle draws.
+    pub(crate) fn front(&self) -> Front {
+        match &self.settings_tab {
+            Some(tab) if tab.front => Front::Settings,
+            _ => Front::Project,
         }
     }
 
@@ -2736,8 +2847,9 @@ impl Render for Arbos {
             // element's ancestors. Sized at nothing, so the pane that does hold
             // a field keeps its focus through a click anywhere else.
             .child(div().key_context(WINDOW_CONTEXT).track_focus(&self.focus))
-            // The strip of tabs across the top, then the chat column with
-            // the panel on its right.
+            // The strip of tabs across the top, then whichever tab is in
+            // front: a project — the chat column with the panel on its right —
+            // or Settings, which is not a project and so fills the width.
             .child(self.tab_bar(cx))
             .child(
                 div()
@@ -2746,8 +2858,15 @@ impl Render for Arbos {
                     .w_full()
                     .flex()
                     .flex_row()
-                    .child(self.detail(window, cx))
-                    .children(self.panel(window, cx)),
+                    .map(|row| match self.front() {
+                        // No panel beside it: the panel is a view of a
+                        // project's `.arbos/`, and Settings has none.
+                        Front::Settings => row
+                            .children(self.settings_tab.as_ref().map(|tab| tab.pane.clone())),
+                        Front::Project => {
+                            row.child(self.detail(window, cx)).children(self.panel(window, cx))
+                        }
+                    }),
             )
             // Under everything, the width of the window: settings and the
             // update control, where Cursor keeps them.

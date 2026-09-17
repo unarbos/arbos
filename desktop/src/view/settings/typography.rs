@@ -7,7 +7,7 @@
 
 use crate::{
     model::state,
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, SettingsPane},
 };
 use bezel::{
     gpui::{AnyElement, Context, ElementId, SharedString, div, prelude::*, px},
@@ -15,7 +15,7 @@ use bezel::{
     ui::widgets::{Buttons, Controls, Scaffolding},
 };
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn typography_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let size = self.workspace.read(cx).text_size;

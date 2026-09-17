@@ -23,7 +23,10 @@
 use crate::{
     build,
     update::{Checked, State, Updater},
-    view::{root::Arbos, settings::Section},
+    view::{
+        root::{Arbos, Front},
+        settings::Section,
+    },
 };
 use arbos_update::Channel;
 use bezel::{
@@ -66,12 +69,16 @@ impl Arbos {
             .into_any_element()
     }
 
-    /// The gear. The same control the panel's foot carries, in the place
-    /// Cursor keeps it, so it is reachable with the panel folded away.
+    /// The gear. Still the way in, in the place Cursor keeps it, so it is
+    /// reachable with the panel folded away — but it opens the Settings tab in
+    /// the strip now rather than a window of its own. With that tab in front it
+    /// lights, so a press that only brings a tab you are already looking at
+    /// forward says as much.
     fn status_bar_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Something the user tried needed a permission that is not granted: a
         // dot on the gear, and nothing louder.
         let wants_permission = self.permission_center.read(cx).wants_attention();
+        let on = self.front() == Front::Settings;
         theme
             .ghost("status-bar-settings")
             .px(px(6.))
@@ -83,7 +90,7 @@ impl Arbos {
                     .child(
                         icons::icon(icons::system::SETTINGS_MINIMALISTIC)
                             .size(px(13.))
-                            .text_color(theme.text_muted),
+                            .text_color(if on { theme.text } else { theme.text_muted }),
                     )
                     .when(wants_permission, |el| {
                         el.child(
@@ -102,7 +109,7 @@ impl Arbos {
                 if wants_permission {
                     this.show_permissions(window, cx);
                 } else {
-                    this.open_settings(Section::General, cx);
+                    this.open_settings(Section::General, window, cx);
                 }
             }))
             .into_any_element()
