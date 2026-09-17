@@ -132,6 +132,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | F-119 | 09-16 | Jacob (his stuck screen, kernel half #362) | steers, stall hint | (a) "run it" typed four times into a silent turn drew four bubbles; (b) the heartbeat's hint read "Nothing has arrived in 2m 26s … check the model key" — its clock was the turn's age, not the quiet, and a running command is not the model | cycle-23 PR: (a) the same words again while the first steer still waits are one bubble; the kernel's "Already queued" notice hangs under it, once. Driven: 3× "run it" into a streaming reply → 1 bubble, 1 notice (`stuck/02-run-it-x3.png`). (b) `progress_at`: the quiet since the last visible progress — tokens, tool rows, `job` output count; `Alive`/probes do not. Over a running command the hint names it: "`python3 slow.py` has printed nothing in 1m 10s. Stop ends it." |
 | F-120 | 09-16 | loop (cycle 23, driving #362's kernel) | process rows | the kernel now opens a process row for any attached command past 20 s (#362); the desktop brought that row to the column — the chat, composer and all, replaced by a `python3 slow.py` board while the person typed (`stuck/01-running-25s.png`) | cycle-23 PR: a process row never takes the column on its own; it lands in the panel's Processes, one click away |
 | F-121 | 09-16 | loop (cycle 23, own regression from F-115, caught the same cycle) | live fold | with the Project chat's live fold shut: the steer bubbles typed into the turn were inside it and vanished; the heartbeat drew under the headline saying the same step twice; a steer typed after the answer began streaming was dropped from the tail, so the "Already queued" notice stood alone | cycle-23 PR: steers draw under a shut headline; the headline silences the heartbeat open or shut; a steer in the answer range draws its bubble |
+| F-122 | 09-17 | loop (cycle 24 gate, twice in a row: `qa-ui/cycle-24/033-rewind-turn.png`) | rewind | "Rewind here" on an idle root over a stopped worker: no state change; the kernel log shows no rewind frame, so the refusal is the desktop's (the footer under the last answer is not in the still either). Passed on cycle 23's final build an hour earlier, same kernel | open — first item of cycle 25; check the footer's presence and `rewind`'s guard with the driver |
 
 ## Per-cycle count
 
@@ -148,7 +149,7 @@ Every gap between Arbos and Cursor, who found it, the cycle, the PR. Target: zer
 | 16 | 9 (F-71 … F-75, F-78 … F-81) | 2 (F-76 raw provider error, F-77 kickoff stall) |
 | 17 (opened) | 17 so far (F-83, F-84, F-92, F-93, F-99 from QA; F-85 … F-91, F-94, F-96 from seven journey runs; F-95 from the gate; F-97, F-98 from the probes) | 1 (F-82, the bubble-sort turn) |
 | 18 – 22 | F-100 … F-112 (feedback sheet F-100/F-101, hub kinds, F-103 … F-112 from journeys and gates) | 1 (F-102 Jacob's Mac, the frosted popover) |
-| 24 | 0 new (F-111, F-114 closed) | 0 |
+| 24 | 1 (F-122 rewind, from the gate; F-111, F-114 closed) | 0 |
 | 23 | 7 (F-113 … F-117, F-120, F-121; five fixed, one kept on purpose, one open) | 2 (F-118 the bars, F-119 the stuck screen — both fixed) |
 
 ## Untested by decision (Linux is the rig — Jacob, 2026-09-16)

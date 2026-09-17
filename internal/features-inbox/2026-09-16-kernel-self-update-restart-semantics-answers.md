@@ -126,6 +126,18 @@ reason="<child>: a turn runs on <machine>"` in the log whenever the gate is
 asked, and `GET /healthz` carries `update_gate: {verdict, reason}` so you
 can read the refusal from outside before the swap.
 
+## Item 6 driven: a subscription run in flight (added 2026-09-17 00:35 UTC, [#364](https://github.com/unarbos/arbos/pull/364))
+
+`subs::busy()` holds: `run_job` awaits the command to its end and the
+in-flight mark clears only after the outcome lands. The gate now names
+the run (`subscription runs in flight: root#2 shell \`…\` (4s)`) on
+`/healthz` and in the log. The ceiling case — you stop waiting and swap
+mid-run — is said rather than lost: the run's job carries a
+`subscription` marker, and the next boot logs `subscription_run_cut`
+and writes it on the row's `last`; `next_due` stands. All six items are
+now readable from the kernel: 1 (#342), 2 (#353), 3 and 6 (`update_gate`
+reason), 4 and 5 are yours.
+
 ## What a restart preserves (all files) and what it cannot
 
 Preserved, no work needed: asks and their answers; inbox files; subscriptions
