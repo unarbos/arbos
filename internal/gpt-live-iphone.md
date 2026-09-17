@@ -111,3 +111,39 @@ the same question. Both are now in the chat: the kernel's because it is
 replayed, the spoken one because it is what Jacob heard. That may be right —
 one is the record, the other is the conversation — or it may read as the same
 answer twice. I have not guessed; say which is wanted and I will make it so.
+
+### Update 21:20Z — shown on screen, and one claim above corrected
+
+**The screenshot the section above owed now exists**: `media/mobile/cycle-53/01-chat-shows-the-call.png`. The chat after a call reads:
+
+```
+day.                                                   [user, Spoken]
+I didn't quite catch that — could you say more about what you mean by "day"?
+Worked 10s
+What is the status on the project?                     [user, Spoken]
+One sec, let me check.
+This project (poems, sorting algorithms, and the nine J-series math-library
+fixes …) is fully done, tested, and committed …        [the kernel's text]
+Worked 10s
+This project is fully done, tested, committed on its own branches …
+                                                       [the spoken answer]
+```
+
+Both halves of the call are there, marked Spoken, and each question appears
+once — the local copy is replaced by the kernel's replay, so the dedup works.
+
+**The correction.** I wrote above that small talk "is answered by GPT-Live and
+never touches the kernel". That is not reliably true. In this run GPT-Live
+delegated `"day."` as well, and the kernel recorded it (`1939 user day.`,
+`1941 assistant I didn't quite catch that …`). Whether a trivial utterance is
+delegated is GPT-Live's decision, not a fixed property of small talk. The
+four-run measurement that founded the claim stands for those runs — "Okay."
+happened to be answered locally — but it does not generalise.
+
+Nothing about the change depends on it: `spoke()` sends nothing either way,
+and the kernel lines are the gateway's delegation, which happens with or
+without this PR.
+
+**The shape question now has a picture.** The kernel's answer and GPT-Live's
+spoken answer sit one after the other, saying the same thing in different
+words. Visible in the still above. Still not guessed at.

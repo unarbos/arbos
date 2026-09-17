@@ -206,3 +206,15 @@ Finishing #480, which cycle 51 left as a draft with half of it working.
 - PR: **#480** (ready). #433 still open; #472 and #485 merged, #484 closed in #485's favour.
 - Media: `media/mobile/cycle-52/01-row-named-awsmac-is-off.png`, `02-final-commit-verified.png`, `evidence.txt`.
 - Next: the journey with `type_send` fixed (M-162) — it invalidates most of a run and is the oldest open rig problem — then a recording, which is due.
+
+## Cycle 53 report (21:25 UTC, 09-17)
+
+The screenshot #502 owed, and a correction to my own claim.
+
+- **The call's words read back in the project chat** (M-177), shown on screen at last: both halves marked Spoken, each question once because the kernel's replay replaces the local copy. Four earlier attempts failed on harness navigation — leaving a call goes through a context menu, "Tap to call" is a label rather than the control, and `-previewCall` returns to the list rather than a chat. The path that works: open the project to set the target, relaunch into the call, then come back and open the project again.
+- **A claim of mine was wrong and is corrected** (M-178). I wrote that small talk "never touches the kernel". In this run GPT-Live delegated "day." too and the kernel recorded it. Whether a trivial utterance is delegated is GPT-Live's decision, not a property of small talk. Four consistent runs established what happened four times, not a rule — and I wrote it as a rule. Corrected on #502 and in `gpt-live-iphone.md`.
+- **The shape question now has a picture** (M-179): the kernel's answer and the spoken answer sit one after the other, the same thing in different words. Not guessed at; deduping on text cannot work, since the two wordings differ by design.
+- Purpose check: the chat reads as a conversation, with the spoken mark distinguishing what was said aloud. The duplicate answer is the one thing that reads as machinery.
+- PR: **#502**. #433 and #480 also open. Feedback poll hourly, nothing new.
+- Media: `media/mobile/cycle-53/01-chat-shows-the-call.png`, `02-call-screen.png`, `evidence.txt`.
+- Next: `type_send` (M-162), still the oldest open rig problem; then a recording, now two cycles overdue.

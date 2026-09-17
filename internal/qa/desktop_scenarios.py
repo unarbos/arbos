@@ -99,16 +99,28 @@ class Desktop:
         return [c for p in self.app.state()["projects"] for c in p["sessions"]]
 
     def new_chat(self, ix=0, timeout=20):
-        """A new chat in the open project: `new-subchat` (symmetry cycles 11+; `new-tab` opens the
-        project opener instead), else the old sidebar's `project-add-<ix>`. Returns the new session id."""
+        """A new chat in the open project. `new-subchat` lives in the right-hand panel
+        (`desktop/src/view/panel.rs`), and the panel is **closed** in a fresh window, so the leaf is
+        absent until `toggle-panel` is clicked. Measured 2026-09-17 on `b1c8e82a62b1`: fresh window 33
+        elements with `new-subchat` absent; after dismissing the first-run permissions sheet, 26 and still
+        absent; after `toggle-panel`, 42 with `new-subchat` present and reachable.
+
+        The old sidebar fallback (`hover project-<ix>` then `project-add-<ix>`) is gone: the sidebar was
+        removed by the 2026-09-13 layout decision, so that branch could only ever fail — and because it
+        was tried second, its `move: no element matches 'project-0'` became the error 16 desktop
+        scenarios a cycle reported from 15 September, naming the fallback instead of the cause. A
+        fallback that cannot succeed is worse than none (qal-j24)."""
         before = {c["id"] for c in self.sessions()}
-        leaves = {str(e.get("path", "")).split(".")[-1] for e in self.app.elements("*")}
-        if "new-subchat" in leaves:
-            self.app.click("new-subchat")
-        else:
-            self.app.hover(f"project-{ix}")
-            self.app.wait_element(f"project-add-{ix}", reachable=True)
-            self.app.click(f"project-add-{ix}")
+
+        def leaves():
+            return {str(e.get("path", "")).split(".")[-1] for e in self.app.elements("*")}
+
+        if "new-subchat" not in leaves():
+            if "toggle-panel" not in leaves():
+                raise RuntimeError("no `new-subchat` and no `toggle-panel` to open the panel with; the app's new-chat control has moved again — check desktop/src/view/panel.rs against this helper")
+            self.app.click("toggle-panel")
+            self.app.wait_element("new-subchat", reachable=True)
+        self.app.click("new-subchat")
         st = self.app.wait_state(lambda s: {c["id"] for p in s["projects"] for c in p["sessions"]} - before, timeout=timeout, what="a new session")
         return (({c["id"] for p in st["projects"] for c in p["sessions"]}) - before).pop()
 
