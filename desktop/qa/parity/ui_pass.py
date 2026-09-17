@@ -337,6 +337,25 @@ class Pass:
 
     # -- app helpers ------------------------------------------------------
 
+    def reveal(self, el: str, body: str, tries: int = 8) -> bool:
+        """Scroll `body` until `el` is on screen. True when it is (or was)."""
+        for _ in range(tries):
+            try:
+                found = self.app.find(el)
+            except self.drv.DriverError:
+                return False
+            if found.get("visible") or found.get("reachable"):
+                return True
+            win_h = (self.state().get("window") or {}).get("height") or 900
+            y = found.get("y", 0)
+            step = 240 if y > win_h / 2 else -240
+            try:
+                self.app.scroll(body, dy=-step)
+            except self.drv.DriverError:
+                return False
+            time.sleep(0.4)
+        return False
+
     def wait(self, pred, timeout: float = 60, every: float = 0.5, what: str = "condition"):
         t0 = time.monotonic()
         last = None
@@ -1382,6 +1401,11 @@ class Pass:
                 # phase after it without a composer). Rig audit R22.
                 for el in [e for e in self.ids() if ".settings-body." in e]:
                     short = el.rsplit(".", 1)[-1]
+                    # Bring a control below the fold onto the screen before
+                    # touching it: the driver refuses a click on what is not
+                    # visible (R13), and two settings controls read
+                    # not-reachable for that alone (R24's next step).
+                    self.reveal(el, "settings-body")
                     if short.startswith("section-") or short in ("settings-body", "settings-back-to-chat", "tab-settings", "tab-settings-close"):
                         continue
                     if short == "bionic-reading":
