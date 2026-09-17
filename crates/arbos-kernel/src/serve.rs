@@ -109,7 +109,26 @@ fn acquire_or_wait(place: &Place) -> Held {
                 std::thread::sleep(Duration::from_secs(2));
             }
             Err(e) => {
-                eprintln!("arbos-kernel: cannot lock {}: {e:#}", place.path.display());
+                // The first thing a kernel writes is its lock, so a folder
+                // the person cannot write fails here — and "cannot lock"
+                // names our mechanism, not their situation (a shared
+                // mount, a folder owned by another account, a read-only
+                // disk). Say the situation and what to do.
+                let denied = e.chain().any(|c| {
+                    c.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                        io.kind() == std::io::ErrorKind::PermissionDenied
+                            || io.raw_os_error() == Some(libc::EROFS)
+                    })
+                });
+                if denied {
+                    eprintln!(
+                        "arbos-kernel: cannot start in {}: the folder is not writable by this user ({e:#}). Arbos keeps its records in {}/.arbos and needs to write there — pick another folder, or make this one writable (a shared mount and a folder owned by another account are the usual causes).",
+                        place.path.display(),
+                        place.path.display()
+                    );
+                } else {
+                    eprintln!("arbos-kernel: cannot lock {}: {e:#}", place.path.display());
+                }
                 return Held::StillHeld(1);
             }
         }
