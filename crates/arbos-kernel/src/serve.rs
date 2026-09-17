@@ -225,6 +225,11 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         );
     }
 
+    // Leash pointers (`runtime/leash/<pid>`) whose leash is gone.
+    let swept = arbos_engine::sweep_leash_pointers(&place.arbos());
+    if swept > 0 {
+        klog::info("leash_pointers_swept", None, swept.to_string());
+    }
     // Jobs left running by an earlier kernel (parent pid 1) end now: the
     // Mac wake-up incident had one appending to .arbos/user.md every 30 s
     // for three days across restarts. A `keep` file in the job folder

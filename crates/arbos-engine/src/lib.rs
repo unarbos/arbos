@@ -36,8 +36,8 @@ pub use access::{Access, Resource};
 pub use control::TurnControl;
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
 pub use jobs::{
-    JOB_TTL, JOURNAL_WINDOW, Job, JobsRoot, Meta as JobMeta, PidIdentity, Reaped,
-    Status as JobStatus, parent_pid,
+    JOB_TTL, JOURNAL_WINDOW, Job, JobsRoot, LEASH_POINTERS, Meta as JobMeta, PidIdentity, Reaped,
+    Status as JobStatus, parent_pid, repoint_leash, sweep_leash_pointers,
 };
 pub use provider::{
     ChatMessage, Interrupted, Provider, ProviderError, check_key, list_model_ids, warm,
