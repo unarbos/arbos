@@ -103,6 +103,10 @@ const WINDOW_CONTEXT: &str = "ArbosWindow";
 /// Claimed on the rename field so `enter` files the name and `escape` drops it.
 const RENAME_CONTEXT: &str = "ArbosSessionName";
 
+/// The side panel's key context. Nothing is bound on it: it exists so the
+/// panel's own focus is a fact the tab chords can read.
+pub(crate) const PANEL_CONTEXT: &str = "ArbosPanel";
+
 fn name_field_entity(heading: bool, cx: &mut Context<Arbos>) -> Entity<TextField> {
     cx.new(|cx| {
         let field = TextField::new(cx)
@@ -670,8 +674,12 @@ pub struct Arbos {
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
     active_terminal: Option<String>,
-    /// Whether the right-hand panel is out. ⌘B folds it away.
-    pub(crate) panel_open: bool,
+    /// The side panel's own focus. Two rows of tabs are on screen and one
+    /// pair of chords drives both — `⌘T`, `⌘⇧{`, `⌘⇧}` act on the panel's
+    /// tabs while this holds the focus and on the window's projects
+    /// otherwise — so which row is lit and which row moves are the same
+    /// fact, read from here.
+    pub(crate) panel_focus: FocusHandle,
     /// The panel's "N archived" row is unfolded: finished workers the
     /// kernel moved to `archive/agents/` are listed, faint.
     pub(crate) archived_open: bool,
@@ -997,7 +1005,7 @@ impl Arbos {
             notifications_posted: Vec::new(),
             touched: false,
             launched_at: std::time::Instant::now(),
-            panel_open: true,
+            panel_focus: cx.focus_handle(),
             archived_open: false,
             agents_card_open: None,
             composer,
@@ -1260,28 +1268,42 @@ impl Arbos {
         self.focus_composer_after_create(window, cx);
     }
 
-    /// ⌘T: a new tab, which is a project — pick the machine, then the
-    /// folder. Same picker as ⌘O.
+    /// ⌘T: a new tab. Which row of tabs it lands in follows the focus — the
+    /// side panel's when the panel has it, the window's projects otherwise.
+    /// The lit tab row is the one that answers, and it is lit off the same
+    /// focus this reads, so what the chord will do is on screen before it is
+    /// pressed.
     pub(crate) fn new_tab_action(
         &mut self,
         _: &NewTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.panel_focused(window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
+            return;
+        }
         self.open_project_action(&OpenProject, window, cx);
     }
 
-    pub(crate) fn next_tab(&mut self, _: &NextTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_tab(1, cx);
+    pub(crate) fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(1, window, cx);
     }
 
-    pub(crate) fn prev_tab(&mut self, _: &PrevTab, _: &mut Window, cx: &mut Context<Self>) {
-        self.cycle_tab(-1, cx);
+    pub(crate) fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_tab(-1, window, cx);
     }
 
     /// Step to the neighbouring tab, wrapping at either end as a browser
-    /// does.
-    fn cycle_tab(&mut self, step: isize, cx: &mut Context<Self>) {
+    /// does — in the panel's row when the panel has the focus, in the
+    /// window's own otherwise.
+    fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel_focused(window, cx) {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.step_panel_tab(step, cx));
+            return;
+        }
         let (at, len) = {
             let workspace = self.workspace.read(cx);
             (workspace.active, workspace.projects.len())
@@ -1431,6 +1453,22 @@ impl Arbos {
             self.dismiss_menu(cx);
             return;
         }
+        // The side panel is the next thing Escape closes: it is the one of
+        // the three ways back that needs no keystroke to be learned first
+        // (the Project page shipped without one, and he told us he could not
+        // close it).
+        if self.panel_focused(window, cx)
+            && self
+                .workspace
+                .read(cx)
+                .panel()
+                .is_some_and(|panel| panel.open)
+        {
+            self.workspace
+                .update(cx, |workspace, cx| workspace.set_panel_open(false, cx));
+            self.focus_composer(window, cx);
+            return;
+        }
         // Nothing to close: Escape leaves the Project page (or a document)
         // for the chat, as ⌘1 does.
         if self.pane != Pane::Chat {
@@ -1529,13 +1567,39 @@ impl Arbos {
         });
     }
 
+    /// ⌘B: open or close the side panel of the project in front. Opening it
+    /// gives it the focus, so the tab chords act on its row at once — he
+    /// asked for the drawer, so the drawer is what he is driving.
     pub(crate) fn toggle_panel_action(
         &mut self,
         _: &TogglePanel,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.panel_open = !self.panel_open;
+        self.workspace
+            .update(cx, |workspace, cx| workspace.toggle_panel(cx));
+        let open = self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_some_and(|panel| panel.open);
+        if open {
+            self.focus_panel(window, cx);
+        } else {
+            self.focus_composer(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Whether the side panel holds the focus — which row of tabs `⌘T` and
+    /// `⌘⇧{ }` act on, and which row is drawn lit.
+    pub(crate) fn panel_focused(&self, window: &Window, cx: &App) -> bool {
+        self.panel_focus.contains_focused(window, cx)
+    }
+
+    /// Give the panel the focus. Only a person's own action calls this.
+    pub(crate) fn focus_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.panel_focus, cx);
         cx.notify();
     }
 
@@ -1635,7 +1699,7 @@ impl Arbos {
     }
 
     /// The composer takes the keyboard back, when there is one to take it.
-    fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let composer = self
             .workspace
             .read(cx)
@@ -1649,7 +1713,10 @@ impl Arbos {
         self.show_pane(Pane::Project, cx);
     }
 
-    pub(crate) fn show_chat(&mut self, _: &ShowChat, _: &mut Window, cx: &mut Context<Self>) {
+    /// ⌘1: the chat, whatever else is open. One of the three ways back, and
+    /// the one that always works — it takes the focus off the side panel too,
+    /// so the next `⌘T` is a project tab again.
+    pub(crate) fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
                 if let Some(focus) = &mut project.focus {
@@ -1658,6 +1725,7 @@ impl Arbos {
             }
         });
         self.show_pane(Pane::Chat, cx);
+        self.focus_composer(window, cx);
     }
 
     pub(crate) fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -2426,8 +2494,9 @@ impl Arbos {
         } else if refused.is_some() {
             // The kernel said it does not know the frame, which means it
             // predates it. Certain, not guessed.
-            self.feedback_sheet
-                .update(cx, |sheet, cx| sheet.no_bundle(Unavailable::KernelTooOld, cx));
+            self.feedback_sheet.update(cx, |sheet, cx| {
+                sheet.no_bundle(Unavailable::KernelTooOld, cx)
+            });
         }
     }
 

@@ -1,0 +1,340 @@
+//! The side panel's own tabs: what is open in the drawer on the right, which
+//! of them is in front, and whether the drawer is open at all.
+//!
+//! One drawer per project, so switching tabs at the top of the window switches
+//! this with it. Closed unless the person opened it: a terminal or a job the
+//! agent starts becomes a tab here and is *listed*, but it never opens the
+//! drawer and never takes the tab in front. Only the person does that.
+//!
+//! A tab holds an address, never content — [`PanelTab::Surface`] names a
+//! [`SurfaceId`], and the surface it names is the one thing that knows what is
+//! behind it. A tab whose surface has gone is dropped by
+//! [`Panel::retain_surfaces`] rather than kept as a row the kernel cannot
+//! account for (F-137).
+
+use crate::model::surface::SurfaceId;
+
+/// The drawer's width when the person has not set one. The `.arbos/` view was
+/// drawn for the narrow measure; anything else wants room for a command's
+/// output.
+pub const PAGE_WIDTH: f32 = 280.;
+pub const SURFACE_WIDTH: f32 = 560.;
+
+/// Which side opened a surface. The window knows its own clicks; it cannot
+/// know whether a terminal the agent started was asked for in prose, so the
+/// two routes are named at the call rather than guessed at from the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenedBy {
+    /// A click in the window, or `⌘T` and a card: the drawer opens and the
+    /// tab comes to the front.
+    User,
+    /// A Board frame from the kernel: listed, and nothing moves.
+    Agent,
+}
+
+/// What one tab holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelTab {
+    /// The project's `.arbos/`: its agents, their processes, the resources
+    /// they hold and the project page. Always the first tab, and never
+    /// closed — it is what "open the project" opens, and the one place the
+    /// panel can always fall back to.
+    Project,
+    /// A terminal, a job's output, a browser page, a document.
+    Surface(SurfaceId),
+    /// A tab with nothing in it yet: the four cards. The number keeps two of
+    /// them apart.
+    New(u64),
+}
+
+/// One project's drawer.
+#[derive(Debug, Clone)]
+pub struct Panel {
+    /// Whether it is open. Default closed, and nothing but the person opens
+    /// it.
+    pub open: bool,
+    /// The width the person dragged it to, if they ever did. `None` takes
+    /// [`PAGE_WIDTH`] or [`SURFACE_WIDTH`] from what is in front, so the
+    /// `.arbos/` view keeps the measure it was drawn for.
+    pub width: Option<f32>,
+    tabs: Vec<PanelTab>,
+    active: usize,
+    next_new: u64,
+}
+
+impl Default for Panel {
+    fn default() -> Self {
+        Self {
+            open: false,
+            width: None,
+            tabs: vec![PanelTab::Project],
+            active: 0,
+            next_new: 1,
+        }
+    }
+}
+
+impl Panel {
+    pub fn tabs(&self) -> &[PanelTab] {
+        &self.tabs
+    }
+
+    /// Which tab is in front. Clamped on the way out: a tab dropped from under
+    /// the index must not leave a row lit that nobody can see.
+    pub fn active(&self) -> usize {
+        self.active.min(self.tabs.len().saturating_sub(1))
+    }
+
+    pub fn active_tab(&self) -> PanelTab {
+        self.tabs
+            .get(self.active())
+            .copied()
+            .unwrap_or(PanelTab::Project)
+    }
+
+    /// How wide to draw, given nothing the person chose.
+    pub fn width(&self) -> f32 {
+        self.width.unwrap_or(match self.active_tab() {
+            PanelTab::Project => PAGE_WIDTH,
+            PanelTab::Surface(_) | PanelTab::New(_) => SURFACE_WIDTH,
+        })
+    }
+
+    pub fn select(&mut self, ix: usize) {
+        if ix < self.tabs.len() {
+            self.active = ix;
+        }
+    }
+
+    /// The tab holding `id`, if one does.
+    pub fn position_of(&self, id: SurfaceId) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| *tab == PanelTab::Surface(id))
+    }
+
+    /// A surface the agent opened, or the person did. It becomes a tab if it
+    /// is not one already, and the two flags are what tell the routes apart:
+    ///
+    /// - the agent opens something: neither — it is listed and nothing moves;
+    /// - the agent's `focus` says look at this: `select`, so it is what the
+    ///   drawer shows when the person opens it, but it does not open it;
+    /// - the person clicks a row or a card: both.
+    ///
+    /// Only the person's route sets `open`. The window cannot tell a terminal
+    /// the agent started for itself from one he asked for in prose, so it
+    /// never guesses (`docs/side-panels-design.md`, "The panel never opens
+    /// itself").
+    ///
+    /// The person's open fills an empty tab in front rather than making a
+    /// second one, which is what `⌘T` and then a card on it reads as.
+    pub fn add_surface(&mut self, id: SurfaceId, select: bool, open: bool) -> usize {
+        let at = match self.position_of(id) {
+            Some(at) => at,
+            None => {
+                let empty_in_front = select
+                    && matches!(self.active_tab(), PanelTab::New(_))
+                    && self.active() < self.tabs.len();
+                if empty_in_front {
+                    let at = self.active();
+                    self.tabs[at] = PanelTab::Surface(id);
+                    at
+                } else {
+                    self.tabs.push(PanelTab::Surface(id));
+                    self.tabs.len() - 1
+                }
+            }
+        };
+        if select {
+            self.active = at;
+        }
+        self.open |= open;
+        at
+    }
+
+    /// A new empty tab, in front. What `⌘T` does with the drawer focused.
+    pub fn new_tab(&mut self) -> usize {
+        let id = self.next_new;
+        self.next_new += 1;
+        self.tabs.push(PanelTab::New(id));
+        self.active = self.tabs.len() - 1;
+        self.open = true;
+        self.active
+    }
+
+    /// Close the tab at `ix`. The project tab does not close: it is the
+    /// drawer's floor. Closing what was in front lands on the tab to its
+    /// right, or the one to its left when it was last.
+    pub fn close(&mut self, ix: usize) {
+        if ix == 0 || ix >= self.tabs.len() {
+            return;
+        }
+        let was = self.active();
+        self.tabs.remove(ix);
+        // The project tab is never removed, so there is always one left.
+        let last = self.tabs.len() - 1;
+        self.active = match was.cmp(&ix) {
+            std::cmp::Ordering::Less => was,
+            // The tab that slid into its place, or its left neighbour when
+            // the one closed was the last.
+            std::cmp::Ordering::Equal => ix.min(last),
+            std::cmp::Ordering::Greater => was - 1,
+        };
+    }
+
+    /// Close every tab holding a surface. What "close the panel's tabs"
+    /// means when a project is being put away.
+    pub fn close_surfaces(&mut self) {
+        self.tabs.retain(|tab| !matches!(tab, PanelTab::Surface(_)));
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+    }
+
+    /// Drop tabs whose surface is no longer there. Called after any change to
+    /// the project's surfaces, so a row can never outlive what it points at.
+    pub fn retain_surfaces(&mut self, alive: impl Fn(SurfaceId) -> bool) {
+        let front = self.tabs.get(self.active()).copied();
+        self.tabs.retain(|tab| match tab {
+            PanelTab::Project | PanelTab::New(_) => true,
+            PanelTab::Surface(id) => alive(*id),
+        });
+        self.active = front
+            .and_then(|tab| self.tabs.iter().position(|held| *held == tab))
+            .unwrap_or_else(|| self.active.min(self.tabs.len().saturating_sub(1)));
+    }
+
+    /// One step along the row, `1` or `-1`, wrapping at either end — what
+    /// the same chord already does to the window's project tabs. One chord,
+    /// one behaviour, whichever row has the focus.
+    pub fn step(&mut self, by: isize) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let len = self.tabs.len() as isize;
+        self.active = (self.active() as isize + by).rem_euclid(len) as usize;
+    }
+
+    /// Restore the drawer's shape from what was filed for this place. The
+    /// tabs are handed in already resolved — a persisted tab whose record we
+    /// could not find on disk is not passed here, so nothing is drawn from
+    /// memory alone.
+    pub fn restore(
+        &mut self,
+        open: bool,
+        width: Option<f32>,
+        surfaces: Vec<SurfaceId>,
+        active: usize,
+    ) {
+        self.open = open;
+        self.width = width;
+        self.tabs = vec![PanelTab::Project];
+        self.tabs
+            .extend(surfaces.into_iter().map(PanelTab::Surface));
+        self.active = active.min(self.tabs.len().saturating_sub(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u64) -> SurfaceId {
+        SurfaceId(n)
+    }
+
+    #[test]
+    fn starts_closed_on_the_project_tab() {
+        let panel = Panel::default();
+        assert!(!panel.open);
+        assert_eq!(panel.tabs(), &[PanelTab::Project]);
+        assert_eq!(panel.width(), PAGE_WIDTH);
+    }
+
+    #[test]
+    fn an_agents_surface_is_listed_but_does_not_open_the_drawer() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), false, false);
+        assert_eq!(panel.tabs().len(), 2);
+        assert!(!panel.open, "the agent's own open must not open the drawer");
+        assert_eq!(panel.active_tab(), PanelTab::Project);
+    }
+
+    #[test]
+    fn the_persons_open_comes_to_the_front() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), false, false);
+        panel.add_surface(id(2), true, true);
+        assert!(panel.open);
+        assert_eq!(panel.active_tab(), PanelTab::Surface(id(2)));
+        assert_eq!(panel.width(), SURFACE_WIDTH);
+    }
+
+    #[test]
+    fn an_empty_tab_in_front_is_filled_rather_than_doubled() {
+        let mut panel = Panel::default();
+        panel.new_tab();
+        assert_eq!(panel.tabs().len(), 2);
+        panel.add_surface(id(7), true, true);
+        assert_eq!(panel.tabs(), &[PanelTab::Project, PanelTab::Surface(id(7))]);
+    }
+
+    #[test]
+    fn stepping_wraps_as_the_project_tabs_do() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), true, true);
+        assert_eq!(panel.active(), 1);
+        panel.step(1);
+        assert_eq!(panel.active(), 0, "past the last comes round to the first");
+        panel.step(-1);
+        assert_eq!(panel.active(), 1, "and back the other way");
+    }
+
+    #[test]
+    fn one_tab_has_nowhere_to_step() {
+        let mut panel = Panel::default();
+        panel.step(1);
+        assert_eq!(panel.active(), 0);
+    }
+
+    #[test]
+    fn the_project_tab_does_not_close() {
+        let mut panel = Panel::default();
+        panel.close(0);
+        assert_eq!(panel.tabs(), &[PanelTab::Project]);
+    }
+
+    #[test]
+    fn closing_the_front_tab_lands_beside_it() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), true, true);
+        panel.add_surface(id(2), true, true);
+        panel.select(1);
+        panel.close(1);
+        assert_eq!(panel.tabs(), &[PanelTab::Project, PanelTab::Surface(id(2))]);
+        assert_eq!(panel.active(), 1, "the tab that slid into its place");
+    }
+
+    #[test]
+    fn a_surface_that_goes_takes_its_tab_with_it() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), true, true);
+        panel.add_surface(id(2), true, true);
+        panel.retain_surfaces(|held| held == id(1));
+        assert_eq!(panel.tabs(), &[PanelTab::Project, PanelTab::Surface(id(1))]);
+        assert_eq!(panel.active(), 1);
+    }
+
+    #[test]
+    fn the_tab_in_front_keeps_its_place_when_one_before_it_goes() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), true, true);
+        panel.add_surface(id(2), true, true);
+        panel.add_surface(id(3), true, true);
+        assert_eq!(panel.active_tab(), PanelTab::Surface(id(3)));
+        panel.retain_surfaces(|held| held != id(1));
+        assert_eq!(
+            panel.active_tab(),
+            PanelTab::Surface(id(3)),
+            "the front tab is followed by identity, not by index"
+        );
+    }
+}

@@ -17,6 +17,7 @@ use crate::{
         attachment::Prompt,
         board::{self, Board},
         identity::Identity,
+        panel::{OpenedBy, Panel, PanelTab},
         place::Place,
         project::Project,
         record,
@@ -142,6 +143,12 @@ pub struct Workspace {
     pub pending_composer: Option<String>,
     /// Whether the permissions sheet has been shown once.
     pub permissions_seen: bool,
+    /// Side panels of places that are *not* open, so closing a tab and
+    /// opening the folder again brings the drawer back as it was. An open
+    /// project's own [`Project::panel`] is the only copy of its state; a key
+    /// is moved into this map when its tab closes and taken out when it
+    /// opens, so the two can never disagree.
+    panels: BTreeMap<String, state::PanelState>,
 }
 
 /// Under a fork's trailing prompt when the original was still answering it.
@@ -182,6 +189,7 @@ impl Workspace {
                 .unwrap_or(0)
         });
         let restore: Vec<usize> = (0..projects.len()).collect();
+        let panels = state.panels;
         let mut this = Self {
             settings,
             projects,
@@ -209,11 +217,20 @@ impl Workspace {
             dismissed: state.dismissed,
             pending_composer: None,
             permissions_seen: state.permissions_seen,
+            panels,
         };
         for ix in restore {
             this.restore_sessions(ix);
             this.watch_project(ix, cx);
             this.watch_board(ix, cx);
+        }
+        // The side panels, after the projects exist: open or closed, how
+        // wide, and the tabs whose record is still on disk.
+        for ix in 0..this.projects.len() {
+            let key = this.projects[ix].place().encode();
+            if let Some(saved) = this.panels.remove(&key) {
+                this.restore_panel(ix, &saved);
+            }
         }
         for ix in 0..this.projects.len() {
             this.apply_dismissed(ix);
@@ -285,7 +302,113 @@ impl Workspace {
             dismissed: self.dismissed.clone(),
             permissions_seen: self.permissions_seen,
             frame: self.frame,
+            panels: self.panel_states(),
         });
+    }
+
+    /// Each project's side panel as it is filed: open, width, and its tabs as
+    /// addresses. Only a finished job is written — its journal and the `exit`
+    /// file beside it are a record on disk that the next launch can read for
+    /// itself. A live job, a terminal page and a browser page are the
+    /// kernel's own state and it does not yet replay them to a client that
+    /// reattaches, so filing them would be filing a row we could not prove
+    /// (see `docs/side-panels-design.md`, kernel handover 1).
+    fn panel_states(&self) -> BTreeMap<String, state::PanelState> {
+        // The places that are not open keep what was filed for them.
+        let mut filed = self.panels.clone();
+        for ix in 0..self.projects.len() {
+            filed.insert(self.projects[ix].place().encode(), self.panel_state_of(ix));
+        }
+        filed
+    }
+
+    /// One project's drawer as it is filed.
+    fn panel_state_of(&self, ix: usize) -> state::PanelState {
+        let project = &self.projects[ix];
+        let tabs: Vec<state::PanelEntry> = project
+            .panel
+            .tabs()
+            .iter()
+            .filter_map(|tab| match tab {
+                PanelTab::Project | PanelTab::New(_) => None,
+                PanelTab::Surface(id) => project.surface(*id),
+            })
+            .filter_map(|surface| match &surface.bind {
+                Bind::Process {
+                    log, done: Some(_), ..
+                } => Some(state::PanelEntry {
+                    kind: "process".into(),
+                    id: log.display().to_string(),
+                    title: surface.title.clone(),
+                }),
+                Bind::Process { .. }
+                | Bind::Terminal { .. }
+                | Bind::Browser { .. }
+                | Bind::Url(_)
+                | Bind::Path(_)
+                | Bind::Empty => None,
+            })
+            .collect();
+        state::PanelState {
+            open: project.panel.open,
+            width: project.panel.width,
+            active: project.panel.active(),
+            tabs,
+        }
+    }
+
+    /// Put back what a project's side panel held. A tab is restored only when
+    /// its record is on disk now: the journal is there and the job's `exit`
+    /// file says how it ended. Anything else is left out rather than drawn
+    /// from the window's own memory, which is the F-137 shape.
+    fn restore_panel(&mut self, ix: usize, saved: &state::PanelState) {
+        let mut ids = Vec::new();
+        for entry in &saved.tabs {
+            if entry.kind != "process" {
+                continue;
+            }
+            let log = PathBuf::from(&entry.id);
+            let Some(exit) = log
+                .parent()
+                .map(|dir| dir.join("exit"))
+                .and_then(|path| std::fs::read_to_string(path).ok())
+            else {
+                continue;
+            };
+            if !log.is_file() {
+                continue;
+            }
+            let job = log
+                .parent()
+                .and_then(|dir| dir.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let title = if entry.title.is_empty() {
+                job.clone()
+            } else {
+                entry.title.clone()
+            };
+            let id = self.upsert_surface(
+                ix,
+                None,
+                SurfaceKind::Process,
+                title,
+                Bind::Process {
+                    id: job,
+                    log,
+                    live: String::new(),
+                    done: Some(exit.trim().parse::<i32>().ok()),
+                },
+                "process",
+                |surface, bind| {
+                    surface.kernel_id().is_some() && surface.kernel_id() == bind.kernel_id()
+                },
+            );
+            ids.push(id);
+        }
+        self.projects[ix]
+            .panel
+            .restore(saved.open, saved.width, ids, saved.active);
     }
 
     /// The first-launch sheet has been shown; it will not open on its own again.
@@ -628,11 +751,21 @@ impl Workspace {
     /// window did to that place's kernel (the stranger plate's restart).
     /// Nothing if the place is not open: a closed tab has no pane to say
     /// it on, and the bar has already said what the click does.
-    pub fn notice_on_root(&mut self, place: &Place, failed: bool, text: &str, cx: &mut Context<Self>) {
+    pub fn notice_on_root(
+        &mut self,
+        place: &Place,
+        failed: bool,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.projects.iter_mut().find(|p| p.place() == *place) else {
             return;
         };
-        let Some(chat) = project.sessions.iter_mut().find(|chat| chat.parent.is_none() && !chat.closed) else {
+        let Some(chat) = project
+            .sessions
+            .iter_mut()
+            .find(|chat| chat.parent.is_none() && !chat.closed)
+        else {
             return;
         };
         chat.notice(failed, text);
@@ -720,6 +853,10 @@ impl Workspace {
         }
         let key = self.projects[ix].place().encode();
         self.board_out.remove(&key);
+        // The drawer's shape goes back into the filed map, so opening this
+        // folder again brings the panel back as it was left.
+        let filed = self.panel_state_of(ix);
+        self.panels.insert(key.clone(), filed);
         self.projects.remove(ix);
         self.active = self.active.and_then(|active| {
             let next = if active > ix { active - 1 } else { active };
@@ -1694,7 +1831,8 @@ impl Workspace {
                 .join(&sid)
                 .is_dir();
             let text = if archived {
-                "this agent is archived: its history stays, but it takes no more messages".to_owned()
+                "this agent is archived: its history stays, but it takes no more messages"
+                    .to_owned()
             } else {
                 format!(
                     "this agent's folder is gone: expected {}. Your line was not sent.",
@@ -2461,8 +2599,91 @@ impl Workspace {
         project.surface(id)
     }
 
-    /// Put a surface in the column. The parent agent stays the focused
-    /// agent, so its children stay listed.
+    // ── the side panel ───────────────────────────────────────────────
+
+    /// The drawer of the project in front, for the chrome to read.
+    pub fn panel(&self) -> Option<&Panel> {
+        self.active_project().map(|project| &project.panel)
+    }
+
+    /// Change the drawer of the project in front. Every change is filed at
+    /// once: which tabs are open and whether the drawer is open are part of what a
+    /// relaunch puts back.
+    fn with_panel(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Panel)) {
+        let Some(ix) = self.active else {
+            return;
+        };
+        let Some(project) = self.projects.get_mut(ix) else {
+            return;
+        };
+        change(&mut project.panel);
+        self.save();
+        cx.notify();
+    }
+
+    pub fn set_panel_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.open = open);
+    }
+
+    pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.open = !panel.open);
+    }
+
+    /// A click on a tab. It opens the drawer too, so the row a person
+    /// clicked in the chat's card is never a click that does nothing.
+    pub fn select_panel_tab(&mut self, at: usize, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| {
+            panel.select(at);
+            panel.open = true;
+        });
+    }
+
+    /// `⌘⇧{` and `⌘⇧}` with the drawer focused.
+    pub fn step_panel_tab(&mut self, by: isize, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.step(by));
+    }
+
+    /// `⌘T` with the drawer focused: an empty tab, in front.
+    pub fn new_panel_tab(&mut self, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| {
+            panel.new_tab();
+        });
+    }
+
+    /// Close one tab. The view it holds goes; a job it was following keeps
+    /// running, and the project tab does not close at all.
+    pub fn close_panel_tab(&mut self, at: usize, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.close(at));
+    }
+
+    /// Bring a surface to the front of the side panel. `open` is whether the
+    /// drawer opens with it: true for the person's own click, false for the
+    /// agent's `focus`, which may say what to look at but may not put it on
+    /// screen.
+    pub fn show_surface(&mut self, id: SurfaceId, open: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self
+            .projects
+            .iter()
+            .position(|project| project.surface(id).is_some())
+        else {
+            return;
+        };
+        let owner = self.projects[ix]
+            .surface(id)
+            .and_then(|surface| surface.owner);
+        self.projects[ix].panel.add_surface(id, true, open);
+        self.active = Some(ix);
+        self.push_snapshot(ix);
+        if let Some(owner) = owner {
+            self.wake_session(owner, cx);
+        }
+        cx.notify();
+    }
+
+    /// Put a surface in the column — the panel's zoom, and the only thing
+    /// that still fills the middle of the window with something that is not
+    /// a chat. The parent agent stays the focused agent, so its children
+    /// stay listed.
     pub fn select_surface(&mut self, id: SurfaceId, cx: &mut Context<Self>) {
         let Some(ix) = self
             .projects
@@ -2500,6 +2721,7 @@ impl Workspace {
             }
         }
         project.surfaces.retain(|surface| surface.id != id);
+        project.sync_panel();
         self.push_snapshot(ix);
         cx.notify();
     }
@@ -2535,6 +2757,7 @@ impl Workspace {
             "code".to_string(),
             None,
             None,
+            OpenedBy::User,
             cx,
         );
     }
@@ -2551,6 +2774,7 @@ impl Workspace {
         kind: String,
         cwd: Option<String>,
         url: Option<String>,
+        by: OpenedBy,
         cx: &mut Context<Self>,
     ) {
         let Some(ix) = self.project_of(owner) else {
@@ -2629,25 +2853,15 @@ impl Workspace {
                 _ => false,
             },
         );
-        // The surface comes to the column for the chat that is in front. A
-        // worker's terminal or job opening under its parent's turn goes to
-        // the panel's Processes and stays there: the view does not jump
-        // from the conversation to a sub-agent's shell.
-        let in_front = self.projects[ix]
-            .focused_agent()
-            .is_none_or(|focused| focused == owner);
-        // A process row never takes the column on its own: the kernel opens
-        // one for any command past twenty seconds (#362), and a board over
-        // the chat, composer gone, is not what a person mid-sentence wants
-        // — Jacob's screen would have swapped to `python3 bubble_sort.py`
-        // while he typed. It lands in the panel's Processes, one click away.
-        let takes_column = in_front && surface_kind != SurfaceKind::Process;
-        if takes_column {
-            self.projects[ix].focus_surface(owner, id);
-            if self.active == Some(ix) {
-                cx.emit(PaneRequest::Surface(id));
-            }
-        }
+        // Everything the agent opens becomes a tab of the side panel and
+        // nothing more: the drawer stays as it was, the tab in front does not
+        // change, and the chat keeps the column. The person's own routes —
+        // a click on the chat's card, a row in the panel, `⌘T` — are the only
+        // ones that open it. Nothing about a Board frame says whether he
+        // asked for this in prose or the agent needed it for itself, so the
+        // window does not guess.
+        let by_user = by == OpenedBy::User;
+        self.projects[ix].panel.add_surface(id, by_user, by_user);
         self.push_snapshot(ix);
         cx.notify();
     }
@@ -3368,7 +3582,9 @@ impl Workspace {
 
     fn board_focus(&mut self, ix: usize, target: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.card_surface(ix, target) {
-            self.select_surface(id, cx);
+            // The agent saying "look at this" fronts the tab; it does not
+            // open the drawer over whatever he is doing.
+            self.show_surface(id, false, cx);
             return;
         }
         if let Some(id) = self.card_session(ix, target) {

@@ -34,6 +34,33 @@ pub struct Entry {
 /// tell a setting the user chose from one an old default wrote for them.
 pub const STATE_VERSION: u32 = 2;
 
+/// One tab of a project's side panel, as an address rather than as content.
+/// `kind` is `process`; the others are not filed yet, because nothing can
+/// prove on the next launch that a terminal page or a browser page is still
+/// there (see `docs/side-panels-design.md`, the kernel handover list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PanelEntry {
+    pub kind: String,
+    /// Where it points: a job's journal path. Read on the way back in, and
+    /// a tab whose address is not on disk is not restored.
+    pub id: String,
+    /// What the row was called. A name, not a record: the address above is
+    /// what proves the thing exists.
+    #[serde(default)]
+    pub title: String,
+}
+
+/// A project's side panel between launches: whether it was open, the width
+/// the person dragged it to, its tabs and which was in front.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelState {
+    pub open: bool,
+    pub width: Option<f32>,
+    pub active: usize,
+    pub tabs: Vec<PanelEntry>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct State {
@@ -87,6 +114,11 @@ pub struct State {
     /// lies on a screen that is there; otherwise the window is centred.
     #[serde(default)]
     pub frame: Option<[f32; 4]>,
+    /// Each project's side panel, by place string: whether it was open, how
+    /// wide, and its tabs. After `frame` and the other maps for the reason
+    /// `last` gives — a bare key written after a table belongs to it.
+    #[serde(default)]
+    pub panels: BTreeMap<String, PanelState>,
 }
 
 /// What the body size may be set to, in points: the ladder's smallest measured
@@ -121,6 +153,7 @@ impl Default for State {
             dismissed: BTreeMap::new(),
             permissions_seen: false,
             frame: None,
+            panels: BTreeMap::new(),
         }
     }
 }
@@ -165,6 +198,15 @@ pub fn restore() -> State {
             .unwrap_or(raw);
         last.entry(key).or_insert(entry);
     }
+    // Panels are keyed the same way, and for the same reason: a key in the
+    // old absolute-path form would leave the drawer looking unremembered.
+    let mut panels = BTreeMap::new();
+    for (raw, panel) in stored.panels {
+        let key = Place::parse(&raw)
+            .map(|place| place.encode())
+            .unwrap_or(raw);
+        panels.entry(key).or_insert(panel);
+    }
     // A `true` from a file older than version 2 is the old default, not a
     // choice: the setting shipped on and every save wrote it back, so it
     // survived the default's flip (Jacob's Mac, twice). Only a versioned
@@ -187,6 +229,7 @@ pub fn restore() -> State {
         dismissed: stored.dismissed,
         permissions_seen: stored.permissions_seen,
         frame: stored.frame,
+        panels,
     }
 }
 

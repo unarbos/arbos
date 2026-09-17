@@ -8,6 +8,7 @@ use crate::{
         project::Project,
         session::{ChatItem, ChatSession, Choice, Connection, PlanNode},
         settings,
+        surface::Surface,
     },
     view::{
         component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
@@ -1740,6 +1741,20 @@ impl Arbos {
             .into_any_element()
     }
 
+    /// A process journal grows on its own. Come back and read it again while
+    /// it is the one on screen — one timer at a time, so a busy window does
+    /// not stack them, and the same clock serves the column and the drawer.
+    pub(crate) fn tail_again(&self, shown: &Surface, cx: &mut Context<Self>) {
+        if board::live(shown) && !TAIL_PENDING.swap(true, Ordering::SeqCst) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(board::TAIL_EVERY).await;
+                TAIL_PENDING.store(false, Ordering::SeqCst);
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
+    }
+
     fn surface_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
@@ -1750,17 +1765,7 @@ impl Arbos {
         let glyph = board::glyph(&shown.board_kind);
         let heading = board::title(&shown);
         let id = shown.id;
-        // A process journal grows on its own. Come back and read it again
-        // while it is the one in front — one timer at a time, so a busy
-        // window does not stack them.
-        if board::live(&shown) && !TAIL_PENDING.swap(true, Ordering::SeqCst) {
-            cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(board::TAIL_EVERY).await;
-                TAIL_PENDING.store(false, Ordering::SeqCst);
-                let _ = this.update(cx, |_, cx| cx.notify());
-            })
-            .detach();
-        }
+        self.tail_again(&shown, cx);
         let content =
             if let Some(terminal) = shown.terminal_id().and_then(|id| self.terminals.get(id)) {
                 div()

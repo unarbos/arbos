@@ -13,6 +13,7 @@ use crate::{
     agent::acp::{self, Event, Launch, Reply, Session},
     model::{
         attachment::{DescribedImage, MessageImage, Prompt, UserMessage},
+        panel::OpenedBy,
         place::Place,
         record::{self, Record},
         settings,
@@ -4380,7 +4381,7 @@ fn pump(
                     }
                 });
                 for (path, title, kind) in shown {
-                    workspace.open_shown(id, path, title, kind, None, None, cx);
+                    workspace.open_shown(id, path, title, kind, None, None, OpenedBy::Agent, cx);
                 }
                 for event in surfaces {
                     match event {
@@ -4390,7 +4391,8 @@ fn pump(
                             kind,
                             cwd,
                             url,
-                        } => workspace.open_shown(id, path, title, kind, cwd, url, cx),
+                        } => workspace
+                            .open_shown(id, path, title, kind, cwd, url, OpenedBy::Agent, cx),
                         Event::Hide { path, kind } => {
                             if kind == "process" {
                                 workspace.finish_shown_process(id, &path, cx)

@@ -9,6 +9,7 @@ pub mod changes;
 pub mod cover;
 pub mod history;
 pub mod identity;
+pub mod panel;
 pub mod permission_center;
 pub mod place;
 pub mod project;

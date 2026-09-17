@@ -69,6 +69,25 @@ pub fn live(surface: &Surface) -> bool {
     matches!(surface.bind, Bind::Process { .. })
 }
 
+/// What state a row is in, in one word, or none where the surface has no
+/// state to be in. A tab wears this on its face, so a finished job and a
+/// running one are told apart by a word rather than by a colour — and a
+/// journal that has gone while its process may still be writing says so
+/// (the 164 GB job, #377).
+pub fn state_word(surface: &Surface) -> Option<&'static str> {
+    match &surface.bind {
+        Bind::Process { done, log, .. } => match done {
+            None if log.is_file() => Some("running"),
+            None => Some("no journal"),
+            Some(Some(0)) => Some("done"),
+            Some(Some(_)) => Some("failed"),
+            Some(None) => Some("stopped"),
+        },
+        Bind::Terminal { .. } => Some("yours"),
+        Bind::Browser { .. } | Bind::Url(_) | Bind::Path(_) | Bind::Empty => None,
+    }
+}
+
 /// Filename, page title, or host — never a full path.
 pub fn title(surface: &Surface) -> String {
     if !surface.title.is_empty() && !generic_title(&surface.title, &surface.board_kind) {

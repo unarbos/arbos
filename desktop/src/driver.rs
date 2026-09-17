@@ -27,11 +27,13 @@
 
 use crate::{
     model::{
+        panel::PanelTab,
         project::Project,
         session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
     },
     view::{
+        component::surface as board,
         root::{Arbos, Pane},
         settings::SettingsWindow,
     },
@@ -1091,7 +1093,31 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
     json!({
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
-        "panel_open": this.panel_open,
+        // The side panel: whether it is out, how wide, its own tabs and which
+        // of them is in front, plus whether its row is the one the tab chords
+        // will move. `panel_open` stays under its old name — the parity loop
+        // and the journeys assert on it.
+        "panel_open": workspace.panel().is_some_and(|panel| panel.open),
+        "panel": workspace.panel().map(|panel| json!({
+            "open": panel.open,
+            "width": panel.width(),
+            "active": panel.active(),
+            "focused": this.panel_focused(window, cx),
+            "tabs": panel.tabs().iter().map(|tab| match tab {
+                PanelTab::Project => json!({ "kind": "project" }),
+                PanelTab::New(n) => json!({ "kind": "new", "id": n }),
+                PanelTab::Surface(id) => {
+                    let surface = workspace.active_project().and_then(|p| p.surface(*id));
+                    json!({
+                        "kind": "surface",
+                        "id": id.0,
+                        "title": surface.map(board::title),
+                        "board_kind": surface.map(|s| s.board_kind.clone()),
+                        "state": surface.and_then(board::state_word),
+                    })
+                }
+            }).collect::<Vec<_>>(),
+        })),
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
         // The rest of the Settings window's values, so a click on a control
