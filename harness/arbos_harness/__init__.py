@@ -171,7 +171,15 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             )
         if self.config.instructions:
             env["ARBOS_INSTRUCTIONS"] = self.config.instructions
-        return await runtime.run_program([PROGRAM_BIN, prompt], env)
+        result = await runtime.run_program([PROGRAM_BIN, prompt], env)
+        if runtime.network_restricted:
+            # The agent has exited. verifiers grades in this same container, and
+            # SWE-bench's verifier (`uv run parser.py`, swebench from PyPI) needs
+            # the network the agent was denied: under the cut every rollout graded
+            # 0 with a patch in place (cycle 12). Egress reopens here, after the
+            # agent's last step and before the grader runs.
+            await runtime.prepare_execution(None)
+        return result
 
     async def result(self, runtime: Runtime) -> dict:
         try:
