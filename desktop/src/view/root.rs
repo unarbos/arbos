@@ -342,6 +342,11 @@ pub fn init(cx: &mut App) {
 /// smaller than `window_min_size`; clamp those so the pane is usable.
 const WINDOW_WIDTH: f32 = 1100.;
 const WINDOW_HEIGHT: f32 = 761.;
+/// The title the macOS window-restore check matches; only that check
+/// reads it, so Linux would otherwise warn it is unused (#486 deleted it
+/// on that warning and broke the macOS build).
+#[cfg(target_os = "macos")]
+const WINDOW_TITLE: &str = "Arbos";
 
 fn restore_usable_bounds(window: &mut Window) {
     let now = window.bounds().size;
