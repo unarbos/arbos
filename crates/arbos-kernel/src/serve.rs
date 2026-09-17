@@ -149,10 +149,18 @@ impl HeldRecord {
             )),
         ]
     }
+    /// The newest copy wherever it lies. A first-match read took a stale
+    /// copy in `runtime/` over a live one in the temp folder once the
+    /// runtime folder had stopped being writable (qal-j19, the third
+    /// shape: writable at first, then not — a full disk, a permission
+    /// change), and said the escalation on every relaunch. A write that
+    /// landed somewhere other than where the reader looks first is a
+    /// write the reader must still find.
     fn load(place: &Place) -> Option<Self> {
         Self::paths(place)
             .iter()
-            .find_map(|p| serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok())
+            .filter_map(|p| serde_json::from_str::<Self>(&std::fs::read_to_string(p).ok()?).ok())
+            .max_by_key(|r| (r.last_said_ms, r.refusals))
     }
     /// Saved where, or why nowhere. A record that could not be kept is
     /// not a record: the caller says so and speaks as if there were none.
