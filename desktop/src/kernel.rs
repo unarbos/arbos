@@ -3241,12 +3241,11 @@ fn ssh_bootstrap_kernel(
     ssh_install_kernel(target, remote_arch, REMOTE_INCOMING, true, step)?;
 
     step(arbos_core::remote_kernel::Progress::Stopping);
-    let script = bootstrap_script(
-        &target.bin,
-        REMOTE_INCOMING,
-        REMOTE_STOP_SECS,
-        REMOTE_WATCH_SECS,
-    );
+    // Real paths, not `$HOME/…`: the pass matches against
+    // `/proc/<pid>/exe`, which is always absolute.
+    let bin = remote_home_path(host, &target.bin)?;
+    let incoming = remote_home_path(host, REMOTE_INCOMING)?;
+    let script = bootstrap_script(&bin, &incoming, REMOTE_STOP_SECS, REMOTE_WATCH_SECS);
     // The pass writes its report to a file and we read it back, rather
     // than letting it stream through this session. Anything it relaunches
     // that inherited our stdout would hold this connection open for as
@@ -3415,22 +3414,32 @@ fn kernel_workspace_toml(root: &Path) -> Result<String> {
     Ok(format!("{}\n", text[..cut].trim_end()))
 }
 
+/// A remote path with a leading `$HOME` or `~` turned into the directory
+/// it names, by asking the host.
+///
+/// Two callers need this for different reasons. `scp` over SFTP takes the
+/// path as it is, with no shell there to expand it. And the bootstrap
+/// pass compares paths against `/proc/<pid>/exe`, which is always a real
+/// absolute path — a literal `$HOME/…` would match nothing, silently, and
+/// the pass would report that it found no processes rather than that it
+/// could not look.
+fn remote_home_path(host: &str, remote: &str) -> Result<String> {
+    if !remote.starts_with("$HOME") && !remote.starts_with('~') {
+        return Ok(remote.to_string());
+    }
+    let home = ssh_run(host, r#"printf %s "$HOME""#)?;
+    if home.status != 0 || home.stdout.trim().is_empty() {
+        return Err(anyhow!(
+            "could not read $HOME on {host}: {}",
+            home.problem()
+        ));
+    }
+    let rest = remote.trim_start_matches("$HOME").trim_start_matches('~');
+    Ok(format!("{}{}", home.stdout.trim(), rest))
+}
+
 fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
-    // scp over SFTP (OpenSSH 9+) takes the remote path as it is: no shell
-    // there to turn `$HOME` or `~` into a directory. Ask the host once.
-    let remote = if remote.starts_with("$HOME") || remote.starts_with('~') {
-        let home = ssh_run(host, r#"printf %s "$HOME""#)?;
-        if home.status != 0 || home.stdout.trim().is_empty() {
-            return Err(anyhow!(
-                "could not read $HOME on {host}: {}",
-                home.problem()
-            ));
-        }
-        let rest = remote.trim_start_matches("$HOME").trim_start_matches('~');
-        format!("{}{}", home.stdout.trim(), rest)
-    } else {
-        remote.to_string()
-    };
+    let remote = remote_home_path(host, remote)?;
     let dest = format!("{host}:{remote}");
     // Its own connection, not the probe's mux: with ControlPersist=no the
     // probe's master is closing as scp starts, and scp through that socket
