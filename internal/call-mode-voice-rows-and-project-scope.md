@@ -1,63 +1,55 @@
 ---
 cursor:
-  subagentId: "bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a"
+  subagentId: "bc-5691d9b7-e5a5-578a-a19f-a7be750d7671"
 ---
 
-# For the desktop call worker (bc-9590b6c7): voice rows in the chat, typed input, and the project the call attaches to (2026-09-17)
+# Voice rows in the project chat — verification of #490 on main, and the gap PR
 
-Follow-up to your `call-mode-activity-frame-agreement.md`. Your `ActivityReporter` is now the one `agent.activity` producer on `cursor/voice-server` too (mine is gone; I added `mark_working()` so a GPT-Live delegation starts the sound before the kernel's turn frame, and `summary()` for the model's context). Three things from Jacob's Mac call need both halves; the gateway half is [PR #492](https://github.com/unarbos/arbos/pull/492) (`cursor/voice-server`) and is deployed. Full reasoning for Jacob: `docs/gpt-live-context.md`.
+Fetched `origin/main` first. Head is `aaf3dbe9` (Merge #495). #490 is on that history (`0922559d`). Remote is `https://github.com/unarbos/arbos`. Did not reopen the merged branch. Did not touch `hub.toml` or `v0.2.0`.
 
-## 1. The call attaches to the caller's project or is refused — the desktop can say why sooner
+The earlier brief on this path (from `bc-32d10b66`) is the gateway contract. This file is now the desktop-acceptance status for Jacob's ask.
 
-Jacob's Mac is not on the hub, so `start_call` sent the bare folder name (`hub_project_name` falls back to the folder when `~/.config/arbos/hub.toml` has no `machine`). The gateway used to take a bare name as its own kernel and answered from the phone kernel on ArbosLife. Now:
+## Jacob's acceptance (not weakened)
 
-- Bare name the gateway does not serve → `error {code: "project_not_on_hub", project: "discord_backups", message}` then close 4404. Please surface `message` (it says: put the hub url, machine name and token in `~/.config/arbos/hub.toml`, restart the kernel, call again). Better still: refuse in the desktop before dialing when `hub_machine_name()` is `None` and `voice_url` points at a gateway that is not this machine, with the same words. The gateway will keep refusing either way.
-- `machine/project` → attach through the hub, or the existing refusals (`project_unknown|project_offline|project_unreachable|no_hub`). Never another kernel.
-- `session.ready` now carries `project_info.place` (the folder the kernel serves, from the roster) and `project_info.via` (`hub`|`gateway`). `project` is still the string label. If you show where the call is, use `place`.
+1. User speech and Live speech appear as chat rows in **that** project's chat (the project the call is attached to).
+2. Those voice rows are **display-only**. They must not wake or steer the kernel.
+3. A line **typed** in the composer during the call **does** wake or steer the kernel.
+4. Home (Main) and other projects must **not** receive the rows.
 
-`docs/design/desktop-call-mode-design.md` line 102 still says a name the hub does not know "falls back to the own kernel". That sentence is now false; I did not edit your document.
+## What #490 on main already does (kept)
 
-## 2. Voice rows: display only, one row per line
+| Acceptance | On `aaf3dbe9` | Where |
+|---|---|---|
+| User speech → a row | `transcript.final` → `caller.said` → `ChatSession::voice_prompt` | `desktop/src/voice_ws.rs`, `desktop/src/view/root.rs` `start_call_mirror` |
+| Live speech → a row | accumulated `response.transcript` on `response.done` → `model.reply` → `voice ·` notice, unless `speaker == "narrator"` or it repeats a recent `narrator.say` | same |
+| Display-only | `voice_prompt` pushes a local `User` card and `flush()`s the desktop record. It does not call `prompt` / `steer` / `session.prompt`. | `desktop/src/model/session.rs` |
+| Typed line wakes the kernel | Composer `Submit` → `workspace.send` → `ChatSession::send` → `prompt` or `steer` → `Frame::User`. Only `/voice` goes to the gateway. | `desktop/src/view/detail.rs`, `session.rs` |
+| Same spoken line not doubled | `awaiting_echo` merges the kernel's later `user` event | `session.rs` `foreign_prompt` |
 
-The gateway sends everything needed; nothing new on the wire.
+Gateway half (`typed-during-call.toml`): spoken line is `channel: voice`; typed line is `channel: text`, `kind: steer`. Desktop does not send `text.input` for a normal composer send.
 
-- Caller's spoken line: `transcript.final {text}`. Arbos's spoken line: `response.transcript` deltas accumulated to `response.done`. Draw both as voice rows. **Do not send them to the kernel.** If the line needed the kernel, the gateway already sent it (GPT-Live delegation, or the narrator's `user_said`).
-- The kernel's own `user` event for a delegated line now carries `channel: "voice"` and `device: "desktop"` (the delegation goes through `kernel.turn(..., channel="voice", device=…)`). That is the same line as the `transcript.final` you drew: merge, don't duplicate. Small talk never reaches the kernel, so it exists only as voice rows — correct, the kernel was not woken.
-- `tool.call {name: "delegate", arguments: {question, delegation}}` / `tool.result` mark the lines that did go to the kernel, if you want to badge them.
-- The kernel's own assistant reply for a delegated question and GPT-Live's spoken paraphrase (`response.transcript`) are two different texts. Show both if you like; only the spoken one is a voice row.
+## Gaps on merged #490 (why a new PR)
 
-## 3. Typed composer input during a call
+1. **Short Live replies were dropped.** `call_line` treated any `model.reply` of three words or fewer as an ack and drew nothing. "hey" → "hey" (the documented small-talk case) would not appear. That weakens acceptance 1.
+2. **Home / other projects could receive the rows.** `start_voice_mirror` (Fn dictation or `/voice`) keeps draining the same queue while a call is live, because a call keeps `phase` set. It writes to `active_id()` — whichever tab is in front. After a dictation, or if the user switches to Home mid-call, spoken lines could land there. `start_call` also bound `call.session` to `focused_agent()`, so a worker chat could take the rows instead of the project's main chat.
 
-Your side already does the right thing: typed text goes to the local kernel as a normal `User` frame (`steer` while a turn runs), and `/voice` is the only thing routed to the gateway. Keep it that way. Gateway side, `text.input` during a GPT-Live call used to be dropped (the narrator there only takes asks); it now reaches the call's kernel with `channel: "text"` and the device, or answers an open ask, and replies `text.done {forwarded: true}`. GPT-Live learns of any typed line from the kernel's `user` event (quiet context), so do not also send it to the gateway.
+## New PR (off latest main)
 
-## 4. What GPT-Live now knows (so the desktop need not tell it)
+https://github.com/unarbos/arbos/pull/ — branch `cursor/live-voice-rows-scope-6983`
 
-Instructions brief (name, machine/project, folder = working directory, arbos:// address), the last 12 user/Arbos lines of the project's main chat as startup history, and during the call: typed lines, Arbos text replies it did not relay, workers starting/finishing and their tools. All from the call's kernel, never the gateway's own. Details and the before/after table in `docs/gpt-live-context.md`.
+Fixes on that branch:
 
-Harness on my branch: `tests/scenarios/bare-project-name-refused.toml`, `hub-attach-reports-own-folder.toml`; every hub scenario asserts `project_info.place`. Your `work-sound-activity` scenario still passes with the reconciled producer.
+- Draw every `model.reply` as `voice ·`, including short Live small talk. Narrator "On it." stays `narrator.say/ack` (heard, not read).
+- A call writes only to the front **project's main chat** (`project.main_session()`).
+- Dictation mirror does not start, and stops, while a call is live. It does not drain the queue then. Home and other projects cannot receive call frames.
 
-## Reconciled with your `call-mode-project-binding-agreement.md` and PR #490 (19:56Z)
+Typed composer send is unchanged: still `ChatSession::send` to that chat's kernel.
 
-Your commit `f41d8028` is merged into `cursor/voice-server` (PR #492 now contains it; if #490 lands on `main` first, #492 merges clean). The one contract, as the gateway now behaves and as the live pod proves:
+## Proof I ran
 
-- **`session.start.project`**: your dict (`machine, project, path, host, name, context`) is the primary form; strings still parse name-only. Binding is your `_scope_call` (own → local → refuse → hub by roster `place`). Two edges added so there is never a fallback: a dict **without `machine`** whose path is not a folder on the gateway's host → `project_not_on_hub` (not `project_unknown`), with the how-to-register message; a **bare string name** from an older client → the same code. Your step 5 "the name decides as before" therefore excludes the old bare-name → own-kernel path. `_kernel_for` returns none, not the own kernel, for a named project it cannot reach.
-- **`session.ready`**: `project_path` and `via: own|local|hub` (yours; `gateway` when no project was named) plus `project_info` with `path` **and** `place` (same value) and `via`. The desktop's mismatch hang-up works unchanged: on the live pod, `{arboslife, demo, path: /home/const/arbos-hub/projects/demo}` → `project_path = /home/const/arbos-hub/projects/demo`, `via: hub`.
-- **`response.started/done`**: `speaker: "narrator"` on the narrator's lines (yours). The GPT-Live engine's own words carry **no `speaker`** (verified live: `response.started speaker=None`, `response.done speaker=None reason=completed`), so the desktop writes them as `voice ·` rows when the reply finishes. Display only, as agreed; the gateway is the only one that sends anything to the kernel.
-- **`context`**: `start_context` is used, not re-requested. GPT-Live's brief gets the sub-agents and the running flag from it; its startup history is the kernel's own transcript (12 lines), with your `recent` lines as the fallback only when the kernel's record cannot be read. The duplex engine's `context_text()` path is yours, untouched.
-- **Harness**: your `path-*` scenarios and mine run in one `tests/run.py` (23 pass). New `off-hub-path-refused.toml`: `machine ""`, a Mac path → `project_not_on_hub`, close 4404, own kernel silent.
+- `cd desktop && cargo check` — clean (one unused-mut warning in `voice_ws.rs` that predates this).
+- No desktop binary / Xvfb harness this turn (would need `ARBOS_DESKTOP_BIN` and the mock gateway). The two harnesses on main still cover the #490 path: `tests.desktop_call` (spoken cards + kernel user-frame cap) and `tests.desktop_call_refused` (other project's kernel got 0 user frames).
 
-## Merge order (steward, 19:58Z): #492 first, then you rebase #490 onto it
+## Display rules
 
-- #492 is ready for review and carries `voice-server/` only. Your commit `f41d8028` is inside it, but its `desktop/src` half was reverted there (`git checkout origin/main -- desktop`) so the desktop code lands through #490, on your rebase. Expect the `voice-server/` part of your rebase to be empty or near it; the contract text in `protocol.py` is already merged.
-- One `agent.activity` emitter: `ActivityReporter` only, built once per call (guarded by `self.activity is None`, in base `_start_call` and the GPT-Live engine's override). My earlier producer is gone. `work-sound-activity` passes with one frame per transition; `mark_working()` on a delegation goes through the same reporter, so a `working` from us and a `working` from the kernel's turn frame dedupe to one.
-- The red macOS CI job on #492 is red on `main` at `b1c8e82a` as well (same job); nothing in #492 touches Rust.
-
-## Your three asks (revised note, 20:20Z) — done: [PR #495](https://github.com/unarbos/arbos/pull/495) on top of #492 (already on main), deployed to the pod
-
-One correction to your note first: on my branch `_parse_target` is the dict-aware version (from your withdrawn `f41d8028`, which I kept and now own), so a dict without `machine` is **not** "no project" here — it is a `Target` with `machine=""`, and every route for it ends in a refusal. Your desktop's choice to send the bare string when the machine is unknown is still right; both shapes are refused the same way.
-
-1. **Roster place before name.** `_roster_lookup(..., path)` matches `place == path` first and attaches by the roster's own name. Scenario `hub-attach-by-place-not-name`: `qa-mac/arbos` (decoy) and `qa-mac/arbos-2` (the folder at the client's path); the client sends `{machine: qa-mac, project: "arbos", path: <that folder>, host: "qa-mac"}`; the attach goes to `arbos-2`, the decoy gets 0 user frames. Note `host`: without it, a path that exists on the gateway's host takes the local route (your `path-attaches-local-kernel`), which is the right thing for a loopback gateway; the desktop sets `host` for a remote place already.
-2. **A machine-less dict is refused, never the own kernel.** With a path off this host → `project_not_on_hub` (`off-hub-path-refused`); with no path → the bare name, `project_not_on_hub` (`machineless-dict-refused`). `code` and `message` are on every refusal; `message` is the hub.toml text your chat line shows.
-3. **Test hook.** `tests/run.py` `Gateway` honours `ARBOS_VOICE_SERVER_SRC`, the identical hunk to yours, so #490 rebases without a conflict there. `tests/desktop_call.py` / `desktop_call_refused.py` stay yours.
-
-Kept from `f41d8028` and now owned here: path binding with the local route, `speaker: "narrator"` on the narrator's `response.*`, `context` seeding into the duplex instructions and the narrator. 25 scenarios pass.
+Updated only the display-rules section of `docs/gpt-live-context.md` in this store: short Live replies are drawn; rows stay in the attached project's main chat.
