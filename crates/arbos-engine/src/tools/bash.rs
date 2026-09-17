@@ -289,7 +289,11 @@ impl Tool for Bash {
 
             let job = root.load(&job.id)?;
             if !finished && job.running() {
-                root.mark_detached(&job);
+                let unarmed = root
+                    .mark_detached(&job)
+                    .err()
+                    .map(|e| format!(" (The kernel could not arm the finished notice — {e:#} — so its end will not be announced; follow it with await or jobs.)"))
+                    .unwrap_or_default();
                 let (text, skipped) = root.read_new(&job);
                 let body = format_tail(&text, "(no output yet)", &journal, skipped);
                 let verb = if background {
@@ -304,7 +308,7 @@ impl Tool for Bash {
                 };
                 return Ok(ToolOut::with_paths(
                     format!(
-                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
+                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}{unarmed}",
                         id = job.id,
                         pid = job.meta.pid,
                     ),

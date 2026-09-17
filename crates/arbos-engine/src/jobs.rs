@@ -370,19 +370,29 @@ impl JobsRoot {
     }
 
     /// The tool call returned while the job was still running. Arms the
-    /// completion notice.
-    pub fn mark_detached(&self, job: &Job) {
-        let _ = fs::write(job.dir.join("detached"), b"");
+    /// completion notice — the one thing that tells anyone this job
+    /// ended. A marker that could not be written is a job that would
+    /// finish unnoticed (the class of 2026-09-17), so the failure is
+    /// returned for the tool result to say.
+    pub fn mark_detached(&self, job: &Job) -> Result<()> {
+        fs::write(job.dir.join("detached"), b"")
+            .with_context(|| format!("arm the completion notice for {}", job.id))
     }
 
     /// Detached jobs that have finished and have not yet been announced.
-    /// Marks them announced; the caller delivers the notice.
+    /// Marks them announced; the caller delivers the notice. A marker
+    /// that could not be written would have the same end announced on
+    /// every sweep for ever; the caller keeps its own memory of what it
+    /// said this run (`serve.rs`), so the failure costs one repeat after
+    /// a restart, and is logged here.
     pub fn sweep(&self) -> Vec<Job> {
         self.list()
             .into_iter()
             .filter(|j| !j.running() && j.detached() && !j.dir.join("notified").exists())
             .inspect(|j| {
-                let _ = fs::write(j.dir.join("notified"), b"");
+                if let Err(e) = fs::write(j.dir.join("notified"), b"") {
+                    eprintln!("job {}: could not mark its end as announced: {e}", j.id);
+                }
             })
             .collect()
     }
