@@ -130,10 +130,33 @@ impl Arbos {
             .collect();
         self.updater
             .update(cx, |updater, cx| updater.look_for_strangers(places, cx));
-        let found = self.updater.read(cx).strangers().first()?.clone();
+        // The project in front first: with two strangers (the Home place's
+        // and this tab's, after one replacement took both) the plate named
+        // and the click ended the other place's kernel while the person
+        // looked at this one (F-136, cycle 33).
+        let front = self
+            .workspace
+            .read(cx)
+            .active
+            .and_then(|ix| self.workspace.read(cx).projects.get(ix))
+            .map(|project| project.place());
+        let strangers = self.updater.read(cx).strangers();
+        let found = front
+            .as_ref()
+            .and_then(|place| strangers.iter().find(|found| found.place == *place))
+            .or_else(|| strangers.first())?
+            .clone();
+        let several = strangers.len() > 1;
         let place = found.place.clone();
         // Capitalised: `say` gives the sentence, this is the start of one.
         let what = found.reason.say(&place.title());
+        // More than one: the label says which place this plate is about,
+        // since the click ends that one's work and no other's.
+        let label = if several {
+            format!("{} · {}", found.reason.headline(), place.title())
+        } else {
+            found.reason.headline().to_string()
+        };
         let tooltip = format!(
             "{}{}.\n\n\
              It will not understand everything this window sends it: work can finish and \n\
@@ -149,7 +172,7 @@ impl Arbos {
                 cx,
                 Plate {
                     id: "status-bar-stranger-kernel",
-                    label: found.reason.headline().into(),
+                    label,
                     icon: None,
                     fill: theme.warning,
                     progress: None,
@@ -169,6 +192,7 @@ impl Arbos {
     /// next look finds no stranger.
     fn restart_stranger(&mut self, place: crate::model::place::Place, cx: &mut Context<Self>) {
         let title = place.title();
+        eprintln!("arbos: stranger plate clicked — restarting the kernel for {}", place.path.display());
         self.workspace.update(cx, |workspace, cx| {
             workspace.notice_on_root(
                 &place,
@@ -186,6 +210,7 @@ impl Arbos {
             let _ = this.update(cx, |this, cx| {
                 this.updater
                     .update(cx, |updater, cx| updater.forget_strangers(cx));
+                eprintln!("arbos: stranger restart for {}: {:?}", place.path.display(), outcome.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
                 let (failed, text) = match outcome {
                     Ok(()) => (
                         false,
