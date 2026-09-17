@@ -39,8 +39,17 @@ struct ProjectsView: View {
                     if !working.isEmpty {
                         section("Working", open: $workingOpen, rows: working)
                     }
-                    section("Read", open: $readOpen, rows: read)
-                    if projects.entries.isEmpty { emptyState }
+                    // An empty "Read" header over nothing reads as a section
+                    // somebody collapsed, not as "nothing matched", so it
+                    // stands down when a filter empties the list.
+                    if !read.isEmpty || projects.entries.isEmpty {
+                        section("Read", open: $readOpen, rows: read)
+                    }
+                    if projects.entries.isEmpty {
+                        emptyState
+                    } else if visible.isEmpty {
+                        nothingMatches
+                    }
                     Color.clear.frame(height: 90)
                 }
             }
@@ -191,14 +200,33 @@ struct ProjectsView: View {
         .padding(.top, 8)
     }
 
+    /// A search or a filter that matches nothing. Without this the screen
+    /// went blank under the search box and said nothing at all, which reads
+    /// as a list still loading rather than an answer.
+    private var nothingMatches: some View {
+        Text(query.isEmpty
+             ? "No project is live. Turn the filter off to see the rest."
+             : "No project matches “\(query)”.")
+            .font(ArbosTheme.callout)
+            .foregroundStyle(ArbosTheme.textFaint)
+            .padding(.horizontal, ArbosTheme.gutter)
+            .padding(.top, 8)
+    }
+
     /// The reference's bottom composer: words typed here go to the
     /// project last open and its chat opens; the mic is the call.
-    /// Where a line typed on the list goes: the last project, unless the
-    /// roster no longer has it — then the first listed one.
+    /// Where a line typed on the list goes: the last project, unless it is
+    /// not among the rows on screen — then the first that is.
+    ///
+    /// The rows on screen, not the whole roster. Search for one project and
+    /// the composer went on naming the last one opened, which is not in
+    /// front of you and is not what "Message …" beside a filtered list
+    /// means. Typing into a list showing one project and having the line go
+    /// to another is the same complaint Jacob opened with on build 956.
     private var composerTarget: KernelTarget? {
-        let listed = projects.entries.map(\.target)
-        if listed.contains(settings.kernelTarget) { return settings.kernelTarget }
-        return listed.first
+        let onScreen = visible.map(\.target)
+        if onScreen.contains(settings.kernelTarget) { return settings.kernelTarget }
+        return onScreen.first
     }
 
     private var composer: some View {

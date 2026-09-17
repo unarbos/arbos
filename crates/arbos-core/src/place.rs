@@ -50,13 +50,14 @@ impl Place {
         store_id_of(&self.arbos())
     }
 
-    /// The store at the path, against the identity recorded at start.
+    /// The store at the path, against the identity recorded at start —
+    /// and, when the inode disagrees, against the token the kernel stamped
+    /// into `runtime/store.id`: a filesystem that re-numbers inodes (sshfs
+    /// and some FUSE mounts do, between lookups) must not read as a moved
+    /// folder and stop the kernel on a project that never moved. A folder
+    /// with our token is ours; one without it, or with another's, is not.
     pub fn store_state(&self, opened: StoreId) -> StoreState {
-        match self.store_id() {
-            None => StoreState::Gone,
-            Some(now) if now == opened => StoreState::Intact,
-            Some(_) => StoreState::Moved,
-        }
+        store_state_against(&self.arbos(), opened, opened_token())
     }
 
     pub fn agents_dir(&self) -> PathBuf {
@@ -299,7 +300,10 @@ pub fn store_id_of(dir: &Path) -> Option<StoreId> {
 /// the folder when it is renamed).
 pub fn store_now_at(id: StoreId) -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    (store_id_of(&cwd.join(".arbos")) == Some(id)).then_some(cwd)
+    let arbos = cwd.join(".arbos");
+    let ours = store_id_of(&arbos) == Some(id)
+        || (opened_token().is_some() && token_at(&arbos) == opened_token());
+    ours.then_some(cwd)
 }
 
 /// The store this process opened, remembered once so that any writer —
@@ -308,6 +312,54 @@ pub fn store_now_at(id: StoreId) -> Option<PathBuf> {
 /// that never remembers one (a CLI, a test helper) reads every store as
 /// intact.
 static OPENED: std::sync::OnceLock<StoreId> = std::sync::OnceLock::new();
+static TOKEN: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// The file under `runtime/` that carries the kernel's token for this
+/// store: a second proof of identity beside the inode, for filesystems
+/// whose inodes are not stable.
+pub const STORE_TOKEN_FILE: &str = "store.id";
+
+/// Stamp the store with a fresh token and remember it. Once per process.
+/// A store that cannot take the stamp (a read-only `runtime/`) is judged
+/// by inode alone, as before.
+pub fn stamp_store(place: &Place) -> std::io::Result<u64> {
+    let token =
+        crate::now_ms() as u64 ^ ((std::process::id() as u64) << 40) ^ 0x9e37_79b9_7f4a_7c15;
+    std::fs::create_dir_all(place.runtime_dir())?;
+    std::fs::write(
+        place.runtime_dir().join(STORE_TOKEN_FILE),
+        format!("{token}\n"),
+    )?;
+    let _ = TOKEN.set(token);
+    Ok(token)
+}
+
+/// The token this process stamped, when it did.
+pub fn opened_token() -> Option<u64> {
+    TOKEN.get().copied()
+}
+
+fn token_at(arbos_dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(arbos_dir.join("runtime").join(STORE_TOKEN_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn store_state_against(arbos_dir: &Path, opened: StoreId, token: Option<u64>) -> StoreState {
+    match store_id_of(arbos_dir) {
+        None => StoreState::Gone,
+        Some(now) if now == opened => StoreState::Intact,
+        Some(_) => {
+            if token.is_some() && token_at(arbos_dir) == token {
+                StoreState::Intact
+            } else {
+                StoreState::Moved
+            }
+        }
+    }
+}
 
 /// Record the store a kernel opened. Once per process; a second call is
 /// ignored.
@@ -330,7 +382,7 @@ pub fn store_intact(arbos_dir: &Path) -> bool {
 fn store_intact_against(arbos_dir: &Path, opened: Option<StoreId>) -> bool {
     match opened {
         None => true,
-        Some(id) => store_id_of(arbos_dir) == Some(id),
+        Some(id) => store_state_against(arbos_dir, id, opened_token()) == StoreState::Intact,
     }
 }
 
@@ -353,6 +405,50 @@ fn check_store_against(arbos_dir: &Path, opened: Option<StoreId>) -> std::io::Re
 #[cfg(test)]
 mod store_id_tests {
     use super::*;
+
+    /// A filesystem that re-numbers inodes (sshfs, some FUSE mounts):
+    /// the same folder reads with a different id. Our token in
+    /// `runtime/store.id` says it is still ours; a folder without it, or
+    /// with another kernel's, is a different folder.
+    #[test]
+    fn a_folder_with_our_token_is_ours_whatever_its_inode_says() {
+        let dir = std::env::temp_dir().join(format!("arbos-store-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ours = Place::new(dir.join("ours"));
+        std::fs::create_dir_all(ours.runtime_dir()).unwrap();
+        let id = ours.store_id().unwrap();
+        std::fs::write(ours.runtime_dir().join(STORE_TOKEN_FILE), "12345\n").unwrap();
+        // Another folder standing where ours is read (a re-numbered
+        // inode): our token → Intact.
+        let other = Place::new(dir.join("other"));
+        std::fs::create_dir_all(other.runtime_dir()).unwrap();
+        std::fs::write(other.runtime_dir().join(STORE_TOKEN_FILE), "12345\n").unwrap();
+        assert_eq!(
+            store_state_against(&other.arbos(), id, Some(12345)),
+            StoreState::Intact
+        );
+        // Another kernel's token, or none: Moved.
+        std::fs::write(other.runtime_dir().join(STORE_TOKEN_FILE), "999\n").unwrap();
+        assert_eq!(
+            store_state_against(&other.arbos(), id, Some(12345)),
+            StoreState::Moved
+        );
+        std::fs::remove_file(other.runtime_dir().join(STORE_TOKEN_FILE)).unwrap();
+        assert_eq!(
+            store_state_against(&other.arbos(), id, Some(12345)),
+            StoreState::Moved
+        );
+        // No token stamped (a read-only runtime/ at start): inode alone.
+        assert_eq!(
+            store_state_against(&other.arbos(), id, None),
+            StoreState::Moved
+        );
+        assert_eq!(
+            store_state_against(&ours.arbos(), id, None),
+            StoreState::Intact
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The rename under a running kernel: the store keeps its identity at
     /// the new path; the old path is Gone, then — once something makes a

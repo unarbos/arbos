@@ -59,6 +59,15 @@ fn a_place_renamed_mid_turn_is_not_recreated_at_its_old_path_and_the_kernel_stop
         transcript.contains("folder was moved from") && transcript.contains("kernel stopped"),
         "the moved store carries the notice: {transcript}"
     );
+    // No lock left behind where the store went (QA's `state:lock-leftover`
+    // on every run): the stopping kernel takes its own files with it.
+    for p in arbos_core::Place::new(moved.clone()).lock_paths() {
+        assert!(
+            !p.exists(),
+            "lock file left in the moved store: {}",
+            p.display()
+        );
+    }
     let _ = k.child.kill();
 }
 
@@ -98,6 +107,61 @@ fn a_place_renamed_while_idle_stops_the_kernel_on_the_next_look() {
     assert!(
         ghost.is_empty(),
         "the kernel wrote into the stand-in: {ghost:?}"
+    );
+    let _ = k.child.kill();
+}
+
+/// The bash whose tool event went out before the rename and whose job
+/// spawned after it: the job folder is the first thing made at the old
+/// path — `.arbos/agents/root/jobs/j1`, a ghost with nothing in it. The
+/// spawn now checks the store first and the call fails with the reason.
+#[test]
+fn a_bash_spawned_after_the_rename_fails_with_the_reason_and_makes_no_job_folder_at_the_old_path() {
+    let replies = concat!(
+        "{\"agent\":\"root\",\"content\":\"working\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"echo hi\",\"description\":\"A quick step\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"done\"}\n",
+    );
+    // The job's folder is made two seconds after the tool's record goes
+    // out; the rename lands in between.
+    let scratch = common::scratch_dir("store-moved-spawn");
+    let file = scratch.join("replies.jsonl");
+    std::fs::write(&file, replies).unwrap();
+    let mut k = common::spawn_with_opts(
+        scratch,
+        &[
+            "--provider",
+            "replay",
+            "--replies",
+            &file.display().to_string(),
+        ],
+        &[("ARBOS_TEST_SPAWN_DELAY_MS", "2000")],
+        true,
+    );
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "run it"}));
+    assert!(
+        a.wait(Duration::from_secs(20), |f| {
+            f["type"] == "event"
+                && f["agent"] == "root"
+                && f["event"]["kind"] == "tool"
+                && f["event"]["name"] == "bash"
+        })
+        .is_some(),
+        "the tool's record went out"
+    );
+    let old = k.place.clone();
+    let moved = k.scratch.join("place-moved");
+    std::fs::rename(&old, &moved).unwrap();
+    let code = wait_exit(&mut k.child, Duration::from_secs(30));
+    assert_eq!(code, Some(4), "the kernel stopped on the moved store");
+    assert!(
+        !old.exists(),
+        "no job folder at the old path: {:?}",
+        std::fs::read_dir(&old).map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
     );
     let _ = k.child.kill();
 }

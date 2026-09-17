@@ -220,6 +220,21 @@ impl JobsRoot {
         sandbox: Option<&crate::sandbox::Sandbox>,
         granted: Vec<(String, String)>,
     ) -> Result<(Job, Child)> {
+        // A job folder made after the project folder was renamed under
+        // the kernel recreates the place at its old path — `.arbos/agents/
+        // <id>/jobs/j1`, the ghost the desktop gate saw (a bash call
+        // whose tool event went out before the rename and whose spawn
+        // landed after it). The store is checked first; a bash on a moved
+        // store fails with the reason instead.
+        // Test knob: the window between a tool's record going out and
+        // its job's folder being made, held open.
+        if let Some(ms) = std::env::var("ARBOS_TEST_SPAWN_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        arbos_core::check_store(&store_of(&self.0))?;
         fs::create_dir_all(&self.0).with_context(|| format!("jobs dir {}", self.0.display()))?;
         self.prune();
         let (id, dir) = self.alloc()?;

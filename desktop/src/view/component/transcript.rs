@@ -1124,7 +1124,15 @@ fn user_prompt(
     // `cycle-22/cursor-worker-chat-collapsed.png`); a brief is the length
     // of a page, and whole it pushed the work off the screen. The project
     // chat's own prompts stay bubbles.
-    let brief = chat.parent.is_some() && ix == 0;
+    // Only the parent's own words are a brief. A New Chat is filed under
+    // the root too, so `parent.is_some()` alone made its first line — "hi"
+    // — a column-wide card (QA `desktop-user-message-card`, qal-j24).
+    // The kernel's record of parentage (`parent_kernel`) is what a spawned
+    // worker has and a New Chat has not; the channel marks a brief read
+    // from the transcript. Either says "the parent's words".
+    let brief = ix == 0
+        && (message.channel == crate::model::attachment::BRIEF_CHANNEL
+            || chat.parent_kernel.is_some());
     let brief_open = chat.transcript.output.contains(&ix);
     // The card's colour as painted, for the fade to end in.
     let card_bg = theme

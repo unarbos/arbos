@@ -2678,6 +2678,42 @@ impl Arbos {
         .detach();
     }
 
+    /// Read the far side's own account over ssh, off the UI thread.
+    ///
+    /// `exit 2` is a real answer and is shown as one: there is no Arbos place in
+    /// that folder, so there is nothing to attach — a different fact from "the
+    /// kernel would not answer", pointing at a different thing to do. Jacob's
+    /// `ArbosLife:~` tab had no store there until this afternoon.
+    fn collect_over_ssh(
+        &mut self,
+        host: String,
+        path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let sheet = self.feedback_sheet.clone();
+        cx.spawn(async move |_, cx| {
+            let got = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::kernel::feedback_over_ssh(&host, &path, crate::feedback::TAIL_LINES)
+                })
+                .await;
+            let _ = sheet.update(cx, |sheet, cx| match got {
+                Ok(crate::kernel::FarSide::Bundle(line)) => {
+                    match crate::agent::acp::feedback_bundle_from_json(&line) {
+                        Some(bundle) => sheet.take_bundle_over_ssh(bundle, cx),
+                        None => sheet.no_bundle(Unavailable::NoAnswer, cx),
+                    }
+                }
+                Ok(crate::kernel::FarSide::NoPlace(why)) => {
+                    sheet.no_bundle(Unavailable::NoPlaceThere(why), cx)
+                }
+                Err(_) => sheet.no_bundle(Unavailable::NoAnswer, cx),
+            });
+        })
+        .detach();
+    }
+
     /// The kernel answered a `feedback` ask: hand it to the sheet.
     fn collect_feedback(&mut self, cx: &mut Context<Self>) {
         if !self.feedback_sheet.read(cx).is_open {

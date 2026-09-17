@@ -74,18 +74,29 @@ pub enum Unavailable {
     /// that is not carrying. Distinguished from the above because the fix is
     /// different — waiting or reopening, rather than updating.
     NoAnswer,
+    /// There is no Arbos place on the far machine at all.
+    ///
+    /// A real answer, not a failure, and it belongs in front of him as one:
+    /// Jacob's `ArbosLife:~` tab had no store there until this afternoon. The
+    /// kernel's parts are absent because nothing has ever run in that folder,
+    /// which is a different fact from "the kernel would not answer" and points
+    /// at a different thing to do.
+    NoPlaceThere(String),
 }
 
 impl Unavailable {
     /// One sentence, naming the fix. Not "unavailable": he can act on this.
-    fn words(&self) -> &'static str {
+    fn words(&self) -> String {
         match self {
             Self::KernelTooOld => {
-                "This project's kernel is older than the app and cannot attach the transcript or the log. Update it from the bar, then report again to include them."
+                "This project's kernel is older than the app and cannot attach the transcript or the log. Update it from the bar, then report again to include them.".into()
             }
             Self::NoAnswer => {
-                "This project's kernel did not answer, so the transcript and the log are not attached. Your words and the screenshot will still be sent."
+                "This project's kernel did not answer, so the transcript and the log are not attached. Your words and the screenshot will still be sent.".into()
             }
+            Self::NoPlaceThere(why) => format!(
+                "There is no Arbos place in that folder on the far machine, so there is no transcript or log to attach — nothing has run there yet. Your words and the screenshot will still be sent. ({why})"
+            ),
         }
     }
 
@@ -94,6 +105,7 @@ impl Unavailable {
         match self {
             Self::KernelTooOld => "not attached — the kernel is too old",
             Self::NoAnswer => "not attached — the kernel did not answer",
+            Self::NoPlaceThere(_) => "nothing has run in that folder yet",
         }
     }
 }
@@ -113,6 +125,13 @@ pub struct FeedbackSheet {
     /// Waiting for the kernel's answer. His words are typed meanwhile, so the
     /// wait is never in his way.
     awaiting: bool,
+    /// Set when the bundle was collected over ssh rather than through the tab's
+    /// own attach.
+    ///
+    /// Shown, not hidden: presenting it as though the tab had answered would
+    /// misrepresent what happened, and *that the tab never answered* is often the
+    /// bug being reported.
+    other_door: bool,
     /// Why no bundle is coming, once that is known: the kernel's own refusal,
     /// or nothing said in time.
     ///
@@ -149,6 +168,7 @@ impl FeedbackSheet {
             draft: Draft::new(Parts::default()),
             anchor: None,
             awaiting: false,
+            other_door: false,
             unavailable: None,
             stranded: false,
             open: Open::None,
@@ -202,6 +222,7 @@ impl FeedbackSheet {
         self.awaiting = false;
         self.unavailable = None;
         self.draft.trajectory_unavailable = None;
+        self.draft.collected_over_ssh = self.other_door;
         cx.notify();
     }
 
@@ -210,6 +231,12 @@ impl FeedbackSheet {
     /// A bundle that arrives after this is still taken: the sheet says what it
     /// knows at the time and corrects itself if the kernel turns out to be
     /// merely slow.
+    /// A bundle collected over ssh, because the tab never attached.
+    pub fn take_bundle_over_ssh(&mut self, bundle: feedback::Bundle, cx: &mut Context<Self>) {
+        self.other_door = true;
+        self.take_bundle(bundle, cx);
+    }
+
     pub fn no_bundle(&mut self, why: Unavailable, cx: &mut Context<Self>) {
         if !self.is_open || self.draft.bundle.is_some() {
             return;
@@ -230,8 +257,14 @@ impl FeedbackSheet {
     }
 
     /// For the driver: what the sheet says about the trajectory, if anything.
-    pub fn unavailable(&self) -> Option<&'static str> {
+    pub fn unavailable(&self) -> Option<String> {
         self.unavailable.as_ref().map(Unavailable::words)
+    }
+
+    /// Whether the bundle came through the ssh door. On the driver's surface so
+    /// the rig can assert it rather than read the sentence.
+    pub fn other_door(&self) -> bool {
+        self.other_door
     }
 
     /// The picture arrived, or did not.
@@ -894,7 +927,13 @@ impl FeedbackSheet {
             lines.push("still reading the exchange from the kernel…".into());
         }
         if let Some(why) = &self.unavailable {
-            lines.push(why.words().into());
+            lines.push(why.words());
+        }
+        if self.other_door {
+            lines.push(
+                "this tab has never connected, so the transcript and log were read over ssh from the far machine, not from the tab"
+                    .into(),
+            );
         }
         div()
             .flex()

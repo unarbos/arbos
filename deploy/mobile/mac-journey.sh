@@ -8,6 +8,7 @@
 #   mac-journey.sh <target>    target: pod | <machine>/<project>
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
+. "$(cd "$(dirname "$0")" && pwd)/sim-lib.sh"   # tap_shot: screenshot pixels -> device points
 U=B1185668-7488-420F-B12D-4412BAAC7673; B=com.unarbos.arbos.ios
 TARGET=${1:-pod}; ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
 RUN=$(date -u +%m%d-%H%M%S); O=$HOME/mobile-out/journey/$RUN; mkdir -p $O
@@ -95,14 +96,26 @@ ui tap "$ROW" || score J1 FAIL "no $ROW row on the list"
 sleep 5; shot J1-open
 # seed the failing project (QA's rig seeds a folder; the phone asks the kernel to)
 type_send "$ID setup, do this yourself without workers: create $DIR/ with mathlib.py defining area(w, h) that wrongly returns w + h, tests/test_math.py (unittest) asserting area(3, 4) == 12, and git init with one commit on main containing both. No CHANGELOG. Reply 'seeded' when done."
-wait_hist J1 "user +$ID setup" 30; AFTER=$(seq_of "user +$ID setup"); echo "anchor $AFTER" | tee -a $O/run.txt
+# The anchor is this very line's seq, so this one wait cannot go through
+# `hist`: there is nothing to read it against yet, and it scored a FAIL on
+# every run for want of an anchor it was about to set. Wait on the seq.
+t=0; while [ $t -lt 30 ]; do AFTER=$(seq_of "user +$ID setup"); [ -n "$AFTER" ] && break; sleep 5; t=$((t+5)); done
+if [ -n "${AFTER:-}" ]; then score J1 PASS "the setup line reached the kernel after ${t}s, at seq $AFTER"
+else score J1 FAIL "the setup line never reached the kernel within 30s"; fi
+echo "anchor ${AFTER:-none}" | tee -a $O/run.txt
 wait_hist J1s "assistant .*[Ss]eeded" 180 >/dev/null || score J1 FAIL "seeding never finished"
 # the read frame is confined to .arbos/ (kernel), so the seed is scored on the kernel's own tool records
 if hist | grep -qE "tool +(write|edit) +$DIR/tests/test_math.py|tool +bash .*(test_math|set -e|git init)" && hist | grep -qE "assistant .*[Ss]eeded"; then score J1 PASS "project opened; kernel record shows the test written and a commit"; else score J1 FAIL "no record of the test file / commit after the seed line"; fi
 shot J1-seeded
 
 # J2 — the real challenge (QA's prompt, scoped to the folder); the first 45 s recorded (workers appearing)
-xcrun simctl io "$U" recordVideo --codec h264 --force "$O/j2-raw.mp4" >/dev/null 2>&1 & REC=$!
+# A recorder left behind by an interrupted run holds the device, and every
+# later `recordVideo` fails with "Host recording is already in progress" —
+# silently, because the output went to /dev/null, so cycle 55's first run
+# produced no video and only ffmpeg's missing-file error said so.
+pkill -INT -f "simctl io.*recordVideo" 2>/dev/null; sleep 2
+xcrun simctl io "$U" recordVideo --codec h264 --force "$O/j2-raw.mp4" > "$O/record.log" 2>&1 & REC=$!
+sleep 2; grep -q "already in progress" "$O/record.log" 2>/dev/null && echo "recording refused: the device still has a recorder on it" | tee -a $O/run.txt
 # the spawn tool record lands in the transcript only when the call ends (wait:true); the child's own
 # `turn running` frame is live, so a frame log is what says "a worker is running now"
 (python3 ~/frame-log.py $TARGET 400 > $O/frames.log 2>&1 &)
@@ -117,7 +130,12 @@ sleep 3; SPAWNERR=$(hist | grep -E "tool +spawn.*ERROR:" | head -1 | sed 's/.*ER
 if [ -z "$C" ]; then :; elif [ -n "$SPAWNERR" ]; then score J2 FAIL "spawn refused: $SPAWNERR"; elif grep -qE '"state": "running"' $O/frames.log 2>/dev/null || hist | grep -qE "tool +spawn"; then score J2 PASS "worker running after ${t}s"; else score J2 U "no worker: the root did it itself (allowed)"; fi
 shot J2-workers
 
-kill -INT $REC 2>/dev/null; ffmpeg -v error -y -i "$O/j2-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-challenge-workers.mp4" && rm -f "$O/j2-raw.mp4"
+kill -INT $REC 2>/dev/null; sleep 4
+if [ -s "$O/j2-raw.mp4" ]; then
+  ffmpeg -v error -y -i "$O/j2-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-challenge-workers.mp4" && rm -f "$O/j2-raw.mp4"
+else
+  echo "no recording: $(tail -1 "$O/record.log" 2>/dev/null)" | tee -a $O/run.txt
+fi
 # J4 — follow up mid-flight (as soon as the work is running), then after
 type_send "Also add a line to the CHANGELOG saying who asked for this: QA-$ID."
 wait_hist J4m "user +Also add a line to the CHANGELOG" 30 >/dev/null; F=$(seq_of "user +Also add a line")
@@ -165,23 +183,74 @@ shot J7-verified
 score J6 EYE "chat intact and an away card on return = pass (J6-back.png); no card = unverified"
 score J8 U "a: kernel restart mid-turn — not possible on a hosted kernel from the phone; b: second project — see P-runs; c: link cut 25 s mid-turn — turn finished after the link returned (J8c-link-down.png, J3)"
 
-# P1 — dictate a follow-up; his tap sends
-idb ui tap 355 788 --udid $U; sleep 3; shot P1-listening; sleep 8; idb ui tap 355 788 --udid $U; sleep 3; shot P1-dictated
-idb ui tap 200 788 --udid $U; sleep 0.5; idb ui key 40 --udid $U
+# P1 — dictate a follow-up; his tap sends.
+# By label, for the reason type_send is: the composer row is not at y=788,
+# and the button on its right changes from Microphone to Up the moment there
+# are words to send, so a fixed point hits whichever happens to be there.
+# The one button on the right of the composer is three buttons in turn:
+# Microphone, then Stop while it listens, then Up once there are words to
+# send. A second tap on "Microphone" does not stop it, because by then there
+# is no Microphone there — which is why this step sent nothing for months.
+ui tap "Microphone" || score P1 FAIL "no microphone button on the composer"
+sleep 3; shot P1-listening; sleep 8
+ui tap "Stop" >/dev/null 2>&1 || echo "P1: no Stop button; dictation may not have started" | tee -a $O/run.txt
+sleep 3; shot P1-dictated
+heard=$(ui field plain 2>/dev/null)
+if [ -z "$heard" ]; then score P1 FAIL "dictation put nothing in the composer"; else
+  echo "P1 heard: $heard" | tee -a $O/run.txt
+  ui tap "Up" || score P1 FAIL "dictated words in the box but no send button: $(ui dump | awk '$2 > 740 && $2 < 830')"
+fi
 wait_hist P1 "user +please summarize what the workers did" 30
 # P2/P3 recorded when RECORD_P=1 (the every-third-cycle recording)
 if [ "${RECORD_P:-0}" = "1" ]; then xcrun simctl io "$U" recordVideo --codec h264 --force "$O/p-raw.mp4" >/dev/null 2>&1 & PREC=$!; fi
-# P2 — attach a photo
-idb ui tap 41 788 --udid $U; sleep 1.5; idb ui tap 160 767 --udid $U; sleep 4; idb ui tap 70 230 --udid $U; sleep 1; idb ui tap 355 131 --udid $U; sleep 3; shot P2-chip
+# P2 — attach a photo.
+# The picker itself is another process, so `describe-all` cannot see inside
+# it and the taps within it have to be points. What must not be left to luck
+# is getting *out*: a picker still open swallows everything after it, and in
+# run 32 it swallowed the photo line and the whole call step — P3's stills
+# are of the photo grid. So the way in is by name, the way out is checked.
+ui tap "Add" || score P2 FAIL "no attachment button on the composer"
+sleep 1.5
+ui tap "Photo Library" || score P2 FAIL "no Photo Library in the attachment menu"
+sleep 4
+# Measured off `P2-chip.png` in pixels and converted, because that is the
+# only way to find anything in here and a coordinate read off a still is
+# 1.2x the point size on this device. The old tap for the photo was at
+# y=230 points, which is the "Private Access to Photos" banner, not the
+# grid — so nothing was ever selected and the tick stayed disabled.
+tap_shot 78 470 "$U"; sleep 1      # a photo in the grid, below the privacy banner
+tap_shot 426 157 "$U"; sleep 3     # the picker's tick, which is what closes it
+SWIPED=0
+for _ in 1 2 3; do
+  ui field >/dev/null 2>&1 && break
+  SWIPED=1
+  echo "P2: the picker is still up; swiping it away" | tee -a $O/run.txt
+  idb ui swipe 196 300 196 850 --duration 0.4 --udid $U; sleep 2
+done
+if ! ui field >/dev/null 2>&1; then
+  score P2 FAIL "the photo picker would not close; nothing after this was exercised"
+elif [ "$SWIPED" = 1 ]; then
+  # The tick is what closes the picker. Having to swipe means it was never
+  # pressed, so nothing was attached and the question below is about no
+  # photo at all — which the model will answer anyway, plausibly.
+  score P2 FAIL "no photo attached: the picker had to be dismissed by hand, so the tick was missed"
+fi
+shot P2-chip
 type_send "$ID photo: what is in this photo? One line."
 wait_hist P2e "user +$ID photo" 30 >/dev/null; PA=$(seq_of "user +$ID photo")
 t=0; R=""; while [ $t -lt 90 ]; do R=$(hist | awk -v a="${PA:-0}" '$1+0 > a+0' | grep -E "^ *[0-9]+ assistant" | tail -1); [ -n "$R" ] && break; sleep 5; t=$((t+5)); done
 shot P2-photo-reply
 if [ -z "$R" ]; then score P2 FAIL "no reply within 90s"; elif echo "$R" | grep -qiE "didn.t (arrive|reach|come)|did not (arrive|reach|come)|no .?attachments|can.t see|cannot see|nothing at that path"; then score P2 FAIL "photo did not reach the model: $(echo "$R" | cut -c1-100)"; else score P2 PASS "$(echo "$R" | cut -c1-120)"; fi
 # P3 — call, ask the project a question (must land in THIS project's transcript)
-idb ui tap 351 85 --udid $U; sleep 1.5; idb ui tap 225 94 --udid $U; sleep 3; idb ui tap 196 420 --udid $U; sleep 6; shot P3-call; sleep 16; shot P3-call-answered
+ui menu || score P3 FAIL "no overflow menu in the chat header"
+sleep 1.5
+ui tap "Call $ROW" || score P3 FAIL "no 'Call $ROW' in the chat menu"
+sleep 3
+idb ui tap 196 420 --udid $U          # the orb: the call waits for a tap on it
+sleep 6; shot P3-call; sleep 16; shot P3-call-answered
 wait_hist P3 "user +.*(working on|Arbus|Arbos)" 40
-idb ui tap 42 85 --udid $U; sleep 2; grep -E "^metric" $O/console.log | tail -4 | tee $O/call-metrics.txt
+ui tap "Close" >/dev/null 2>&1 || idb ui tap 42 85 --udid $U
+sleep 2; grep -E "^metric" $O/console.log | tail -4 | tee $O/call-metrics.txt
 if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v error -y -i "$O/p-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-photo-and-call.mp4" && rm -f "$O/p-raw.mp4"; fi
 # PUSH — the hub's own report (#333): enabled or why not; a test alert when the key exists
 ~/push-check.sh 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null

@@ -551,11 +551,19 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace is not a directory: {}", workspace.display()))?;
-    // The live kernel bootstraps only at start. A later delete (or a
-    // missing tree) can leave `.arbos/agents/root` gone while the
-    // socket is still up — every new chat attaches as `root`, so
-    // recreate the folder here.
-    let _ = arbos_core::bootstrap(&arbos_core::Place::new(&workspace));
+    // The live kernel bootstraps only at start. A later delete can leave
+    // `.arbos/agents/root` gone while the socket is still up — every new
+    // chat attaches as `root`, so the folder is put back here. Only where
+    // a store already is, though: a path with no `.arbos/project.toml` and
+    // no `agents/` is a place that moved or was deleted, not one to make.
+    // Bootstrapping it built a whole ghost project at the old path after a
+    // rename — PROTOCOL.md, .git/, docs/ — and the window then read the
+    // place as present and the agent as gone (F-165; the features agent's
+    // note 2026-09-17-recreated-place-the-maker-is-attach-or-spawns-bootstrap).
+    let store = workspace.join(".arbos");
+    if store.join("project.toml").is_file() || store.join("agents").is_dir() {
+        let _ = arbos_core::bootstrap(&arbos_core::Place::new(&workspace));
+    }
     if let Some(info) = read_info(&workspace).filter(alive) {
         // Is this kernel the one this app ships? After an update it may not
         // be: the app's own stop cannot reach every kernel on the machine, and
@@ -1937,6 +1945,11 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             let mut message =
                 crate::model::attachment::UserMessage::from(wake_brief(text, brief.as_deref()));
             message.sent_at = (ev.ts > 0).then_some(ev.ts);
+            // The parent's words, not the person's: the card is drawn as a
+            // brief (column-wide, folded) only for these. A New Chat's own
+            // first line is filed under the root too, and was drawn as a
+            // brief — "hi" took the column (QA `desktop-user-message-card`).
+            message.channel = crate::model::attachment::BRIEF_CHANNEL.to_string();
             Some(ChatItem::User(message))
         }
         // A worker's report or a subscription firing: a segment of its own
@@ -3102,6 +3115,58 @@ pub fn connect_step(host: &str) -> Option<String> {
 }
 
 /// Live HTTP gateway on the host (`web.json`), if its pid still answers.
+/// What the far side said when asked for a report's material over ssh.
+pub(crate) enum FarSide {
+    /// A `feedback_bundle` frame, as JSON. The desktop drops it in where the
+    /// attach's own frame would have gone — same shape, other door.
+    Bundle(String),
+    /// There is no Arbos place there. A real answer, not a failure: nothing has
+    /// ever run in that folder, so there is no transcript or log to attach.
+    NoPlace(String),
+}
+
+/// Ask the kernel binary on `host` for a report's material, without an attach.
+///
+/// The attach can be down while ssh is fine — a wedged kernel, a crashed serve,
+/// a hub refusal — and when a remote tab has never connected the disconnection is
+/// itself the bug being reported. The desktop already holds the ssh path it
+/// tunnels over, so it uses that door instead
+/// ([#466](https://github.com/unarbos/arbos/pull/466)).
+///
+/// Exit codes are the far side's own: `0` a bundle (a place with nothing to say
+/// still answers `0`, with no lines), `2` the place cannot be read, anything
+/// else a failure worth showing.
+pub(crate) fn feedback_over_ssh(host: &str, path: &Path, tail: u32) -> Result<FarSide> {
+    let target = remote_target(host);
+    let script = format!(
+        "{bin} feedback {dir} --agent root --tail {tail}",
+        bin = shell_quote(&target.bin),
+        dir = shell_path(&path.to_string_lossy()),
+    );
+    let out = ssh_run(&target.ssh, &script)?;
+    match out.status {
+        0 => {
+            let line = out
+                .stdout
+                .lines()
+                .find(|l| l.trim_start().starts_with('{'))
+                .map(str::to_string)
+                .context("the far side printed no bundle")?;
+            Ok(FarSide::Bundle(line))
+        }
+        2 => Ok(FarSide::NoPlace(first_line(&out.stderr))),
+        _ => Err(anyhow!("{}", out.problem())),
+    }
+}
+
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no reason given")
+        .to_string()
+}
+
 fn ssh_gateway_info(host: &str, path: &Path) -> Option<WebInfo> {
     let dir = shell_path(&path.to_string_lossy());
     let script = format!(

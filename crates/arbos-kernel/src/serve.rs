@@ -382,7 +382,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
     );
-    let _lock = match acquire_or_wait(&place) {
+    let lock = match acquire_or_wait(&place) {
         Held::Taken(lock) => lock,
         Held::StillHeld(code) => return Ok(code),
     };
@@ -395,6 +395,15 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         .store_id()
         .context("the place's .arbos folder could not be identified")?;
     arbos_core::remember_opened(store_id);
+    // A second proof beside the inode, for filesystems that re-number
+    // theirs; a store that cannot take it is judged by inode alone.
+    if let Err(e) = arbos_core::stamp_store(&place) {
+        klog::warn(
+            "store_token_unwritten",
+            None,
+            format!("{e} — the store is told apart from a moved one by inode alone"),
+        );
+    }
     let host = Host::load()?;
     host.remember_place(place.path());
     let git_present = say_if_git_missing(&place);
@@ -896,7 +905,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 // Not one byte of it lands at a path that is not the store
                 // this kernel opened.
                 if place.store_state(store_id) != arbos_core::StoreState::Intact {
-                    say_store_moved(&place, store_id);
+                    say_store_moved(&place, store_id, &lock);
                     crate::remote::stop_all(&hooks).await;
                     exit_code = 4;
                     break;
@@ -928,6 +937,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             Some(&id),
                             format!("{} lines → {}", rolled.lines, rolled.archive.display()),
                         );
+                        // The rolled checkpoints are out of a rewind's
+                        // reach: their tree commits need no refs now.
+                        drop_rolled_checkpoint_refs(&place, &id, &rolled.archive);
                         hooks.broadcast(Frame::Rewound {
                             agent: id.clone(),
                             line: 1,
@@ -1009,7 +1021,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     // usual maker. One look decides: an inode does not
                     // change and change back. Stop before more lands there.
                     arbos_core::StoreState::Moved => {
-                        say_store_moved(&place, store_id);
+                        say_store_moved(&place, store_id, &lock);
                         crate::remote::stop_all(&hooks).await;
                         exit_code = 4;
                         break;
@@ -2060,6 +2072,33 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     });
 }
 
+/// After a roll, the archived checkpoints' refs go: `NNNN.checkpoints.jsonl`
+/// beside the rolled transcript names the lines, and no rewind reaches
+/// them (a rewind into rolled history is refused). Best effort.
+fn drop_rolled_checkpoint_refs(place: &Place, agent: &str, archive: &std::path::Path) {
+    let cps_path = archive.with_extension("checkpoints.jsonl");
+    let lines: Vec<u64> = std::fs::read_to_string(&cps_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<arbos_engine::git::Checkpoint>(l).ok())
+        .filter(|cp| cp.work.is_some())
+        .map(|cp| cp.line)
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    let cwd = arbos_core::load_agent(place, &arbos_core::AgentId::new(agent))
+        .map(|a| a.work_dir(&place.path))
+        .unwrap_or_else(|_| place.path.clone());
+    let n = lines.len();
+    arbos_engine::git::drop_checkpoint_refs(&cwd, agent, lines);
+    klog::info(
+        "checkpoint_refs_dropped",
+        Some(agent),
+        format!("{n} rolled checkpoint ref(s) released for git to reclaim"),
+    );
+}
+
 /// The marker that the missing-git notice was said for this place; in
 /// `runtime/`, so a reinstall of the machine starts the question afresh.
 const GIT_MISSING_SAID: &str = "git-missing.said";
@@ -2119,8 +2158,14 @@ fn say_if_git_missing(place: &Place) -> bool {
 /// kernel can tell (its cwd followed the folder), so the person opening
 /// the moved project reads why its kernel stopped. Nothing is written at
 /// the old path: that would be the ghost.
-fn say_store_moved(place: &Place, opened: arbos_core::StoreId) {
+fn say_store_moved(place: &Place, opened: arbos_core::StoreId, lock: &arbos_core::PlaceLock) {
     let now_at = arbos_core::store_now_at(opened);
+    // The lock files went with the folder; `Drop` would look for them at
+    // the old path. Take ours away where they are, so the moved store is
+    // not left with a lock that names a kernel that is gone.
+    if let Some(p) = &now_at {
+        lock.release_at(&Place::new(p.clone()));
+    }
     let where_ = match &now_at {
         Some(p) => format!("it is now at {}", p.display()),
         None => "where it went, this kernel cannot tell".to_string(),

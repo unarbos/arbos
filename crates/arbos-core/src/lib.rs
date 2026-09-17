@@ -57,8 +57,8 @@ pub use machines::{Machine, Machines};
 pub type NodeId = u64;
 pub use page::{Page, PageKind};
 pub use place::{
-    Place, StoreId, StoreState, check_store, opened as opened_store, remember_opened, store_id_of,
-    store_intact, store_now_at,
+    Place, STORE_TOKEN_FILE, StoreId, StoreState, check_store, opened as opened_store,
+    opened_token, remember_opened, stamp_store, store_id_of, store_intact, store_now_at,
 };
 pub use project::{ArchivedChild, archived_children};
 pub use prs::{PrRec, load_prs, record_pr};

@@ -24,6 +24,7 @@ points. Nothing here measures an image.
   field  print what the text field holds, found by being a text field
          `field plain` undoes iOS's typographic substitutions first
   focus  tap that same text field
+  menu   tap the overflow button in the top bar, which carries no label
   dump   print every label and frame, for writing a new scenario
 
 `field` and `focus` take no label because the composer has none once there
@@ -42,6 +43,7 @@ A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.
 """
 import json
+import re
 import subprocess
 import sys
 
@@ -62,19 +64,36 @@ def centre(el):
     return round(f.get("x", 0) + f.get("width", 0) / 2), round(f.get("y", 0) + f.get("height", 0) / 2)
 
 
-def match(els, needle):
-    """First element whose label or value contains `needle`, case-insensitively.
+def on_screen(el):
+    """Is this element somewhere a finger could reach?
 
-    Prefers an exact label match so that "demo" does not pick
-    "qa-cycle-11-demo" when both are on screen.
+    `describe-all` returns the whole scroll view, including messages far
+    above the top of the screen. Tapping one of those taps nothing, or
+    something else — cycle 55's dictation step "sent" its line by tapping a
+    message at y=-573.
+    """
+    f = el.get("frame") or {}
+    x, y = f.get("x", 0), f.get("y", 0)
+    return y + f.get("height", 0) > 0 and y < 1000 and x + f.get("width", 0) > 0 and x < 500
+
+
+def match(els, needle):
+    """First on-screen element whose label or value matches `needle`.
+
+    An exact label wins, so "demo" does not pick "qa-cycle-11-demo" when both
+    are on screen. Failing that the needle must appear as a whole word:
+    plain substring matching found "Up" inside "setup" in the body of a
+    message and tapped that instead of the send button.
     """
     needle = needle.lower()
-    exact = [e for e in els if (e.get("AXLabel") or "").lower().split(",")[0].strip() == needle]
+    here = [e for e in els if on_screen(e)]
+    exact = [e for e in here if (e.get("AXLabel") or "").lower().split(",")[0].strip() == needle]
     if exact:
         return exact[0]
-    for e in els:
+    word = re.compile(r"(?<!\w)" + re.escape(needle) + r"(?!\w)")
+    for e in here:
         for field in ("AXLabel", "AXValue", "AXUniqueId"):
-            if needle in (e.get(field) or "").lower():
+            if word.search((e.get(field) or "").lower()):
                 return e
     return None
 
@@ -84,6 +103,20 @@ def main():
         sys.exit(__doc__)
     udid, verb = sys.argv[1], sys.argv[2]
     els = elements(udid)
+
+    if verb == "menu":
+        # The "…" in the top bar has no label of its own, and its items are
+        # only in the tree once it is open. It is the one pop-up button up
+        # there, which is a surer way to find it than a remembered point.
+        bar = [e for e in els if (e.get("type") or "") == "PopUpButton"
+               and (e.get("frame") or {}).get("y", 999) < 150]
+        if len(bar) != 1:
+            print(f"ui: want one pop-up button in the top bar, found {len(bar)}", file=sys.stderr)
+            sys.exit(1)
+        x, y = centre(bar[0])
+        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        print(f"opened the top-bar menu at {x},{y}")
+        return
 
     if verb in ("field", "focus"):
         fields = [e for e in els if (e.get("type") or "") == "TextField"]

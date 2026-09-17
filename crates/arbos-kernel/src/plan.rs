@@ -634,6 +634,12 @@ fn archive_finished_inner(hooks: &KernelHooks, reported: &[String]) {
                 moved = true;
                 crate::klog::info("child_archived", Some(id), dest.display().to_string());
                 retire_page_rows(hooks, id, &dest);
+                // Its checkpoints left the live folder with it, out of any
+                // rewind's reach: the refs holding their trees go too.
+                // The worktree (if any) shares refs with the place's
+                // repository, so the place path reaches them before the
+                // worktree is removed below.
+                arbos_engine::git::drop_agent_checkpoint_refs(hooks.place.path(), id);
                 // A child on another machine: its kernel there stops and
                 // its record goes, or every spawn left one running (qa-038).
                 if remote {

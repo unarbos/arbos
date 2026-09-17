@@ -1828,7 +1828,15 @@ impl ChatSession {
         // tool this window saw start, or the kernel's own activity list —
         // never a flag alone on a chat nothing is attached to (F-137).
         let evidence = self.live() || self.has_running_tool() || !self.live.is_empty();
-        if self.busy() && evidence {
+        // A worker mid-tool when the window relaunches has no tool row yet
+        // (the kernel files a tool record when it ends) and no frame yet,
+        // so busy() is false — but its status.toml, read on attach, holds
+        // the step the kernel is on, and the kernel clears that file when
+        // the turn ends. Live socket plus a kernel step is the kernel's own
+        // word that it is working (F-172, d15: five sleeping workers drew
+        // as idle rows after a relaunch).
+        let stepping = self.status.is_some() && self.live();
+        if (self.busy() || stepping) && evidence {
             ChildState::Working
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking

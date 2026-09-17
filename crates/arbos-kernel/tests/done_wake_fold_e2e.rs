@@ -36,11 +36,17 @@ fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
     ok()
 }
 
+// Both workers pause before reporting, so both reports land after root's
+// dispatch turn has ended and each opens a done wake — the shape this
+// test reads. A worker answering in a millisecond reported while root was
+// still on its first turn; the report folded in and no done turn came
+// (the red on #523).
 const REPLIES: &str = concat!(
     "{\"agent\":\"root\",\"content\":\"two workers\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"first\",\"task\":\"say sentence one\"}},{\"name\":\"spawn\",\"arguments\":{\"name\":\"second\",\"task\":\"say sentence two\"}}]}\n",
     "{\"agent\":\"root\",\"content\":\"Both are under way.\"}\n",
+    "{\"agent\":\"first\",\"content\":\"pausing\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 2\",\"description\":\"Wait a moment\"}}]}\n",
     "{\"agent\":\"first\",\"content\":\"Sentence one.\"}\n",
-    "{\"agent\":\"second\",\"content\":\"pausing\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 4\",\"description\":\"Wait a moment\"}}]}\n",
+    "{\"agent\":\"second\",\"content\":\"pausing\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 5\",\"description\":\"Wait a moment\"}}]}\n",
     "{\"agent\":\"second\",\"content\":\"Sentence two.\"}\n",
     "{\"agent\":\"root\",\"content\":\"\"}\n",
     "{\"agent\":\"root\",\"content\":\"Sentence one. Sentence two.\"}\n",

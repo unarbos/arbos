@@ -168,7 +168,7 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
             events.len()
         );
     }
-    let (dropped, archive) = truncate(&layout, cut_from, &cps, checkpoint.line)?;
+    let (dropped, archive) = truncate(place, agent, &layout, cut_from, &cps, checkpoint.line)?;
     Ok(Cut {
         checkpoint,
         dropped,
@@ -194,12 +194,14 @@ pub fn cut_from_line(place: &Place, agent: &str, line: u64) -> Result<(u64, Path
         bail!("line {line} is not a turn's wake; refusing to cut mid-turn");
     }
     let cps = checkpoints(&layout.dir);
-    truncate(&layout, at, &cps, line)
+    truncate(place, agent, &layout, at, &cps, line)
 }
 
 /// Lines `at..` of the transcript to the rewind archive, the file
 /// replaced whole; checkpoints from `keep_below` on dropped with them.
 fn truncate(
+    place: &Place,
+    agent: &str,
     layout: &Layout,
     at: usize,
     cps: &[Checkpoint],
@@ -237,6 +239,21 @@ fn truncate(
     for cp in cps.iter().filter(|cp| cp.line >= keep_below) {
         let _ = std::fs::remove_file(arbos_engine::git::tree_sidecar(&layout.dir, cp.line));
     }
+    // And the refs that kept the cut turns' trees alive: no rewind can
+    // reach them now, and a project should not carry every cut turn's
+    // working tree in its repository for ever.
+    // The agent's repository is its work dir (a worktree shares refs with
+    // the place's repository, so the place path reaches them too).
+    let cwd = arbos_core::load_agent(place, &arbos_core::AgentId::new(agent))
+        .map(|a| a.work_dir(&place.path))
+        .unwrap_or_else(|_| place.path.clone());
+    arbos_engine::git::drop_checkpoint_refs(
+        &cwd,
+        agent,
+        cps.iter()
+            .filter(|cp| cp.line >= keep_below && cp.work.is_some())
+            .map(|cp| cp.line),
+    );
     if !cps.is_empty() || layout.dir.join("checkpoints.jsonl").exists() {
         replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
     }

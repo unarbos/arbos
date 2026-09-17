@@ -194,6 +194,59 @@ pub fn snapshot_turn_record_with_mark(
     Ok(Some((cp, mark_error)))
 }
 
+/// The ref that keeps a turn's tree commit alive: `refs/arbos/cp/<agent
+/// with unsafe chars replaced>/<line>`.
+pub fn checkpoint_ref(agent: &str, line: u64) -> String {
+    let safe: String = agent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("refs/arbos/cp/{safe}/{line}")
+}
+
+/// Drop the refs of checkpoints no rewind can reach any more: turns a
+/// rewind cut, or lines a roll archived. Their tree commits become
+/// unreachable and git's own gc reclaims them in time. Without this a
+/// long project's repository kept every turn's working tree for ever,
+/// and `git log --all` in a person's own tools showed thousands of
+/// `arbos-checkpoint` commits. Best effort; a ref already gone is fine.
+pub fn drop_checkpoint_refs(cwd: &Path, agent: &str, lines: impl IntoIterator<Item = u64>) {
+    for line in lines {
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", &checkpoint_ref(agent, line)])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+/// Every checkpoint ref of `agent`: for a worker being archived, whose
+/// checkpoints leave the live folder with it.
+pub fn drop_agent_checkpoint_refs(cwd: &Path, agent: &str) {
+    let prefix = checkpoint_ref(agent, 0);
+    let prefix = prefix.trim_end_matches("/0");
+    let Some(list) = git_out(cwd, &["for-each-ref", "--format=%(refname)", prefix]) else {
+        return;
+    };
+    for r in list.lines().map(str::trim).filter(|r| !r.is_empty()) {
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", r])
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 /// The expensive half, on the blocking pool while the turn runs: the
 /// working-tree commit (`git add -A` into a scratch index), the ref, the
 /// undo mark with the tree, and the checkpoint line rewritten with what
@@ -205,6 +258,25 @@ pub fn snapshot_turn_tree(
     agent: &str,
     cp: &Checkpoint,
 ) -> Result<()> {
+    snapshot_turn_tree_unless(cwd, agent_dir, agent, cp, None)
+}
+
+/// What the record says when the tree was abandoned: the turn went on
+/// before the snapshot finished, so a tree taken now might hold the
+/// turn's own changes and is not kept (qal-j17's wrong-checkpoint shape).
+pub const TREE_TOO_SLOW: &str = "tree not saved: the working tree took too long to snapshot and the turn went on without it — a rewind of files to this turn is refused; the transcript rewind still works";
+
+/// `snapshot_turn_tree`, with a flag the turn raises when it stopped
+/// waiting for the tree: a tree finished after that is dropped and the
+/// record says why, rather than filled in from a state the turn may
+/// already have touched.
+pub fn snapshot_turn_tree_unless(
+    cwd: &Path,
+    agent_dir: &Path,
+    agent: &str,
+    cp: &Checkpoint,
+    abandoned: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     let line = cp.line;
     let head = &cp.head;
     // Test knob: a slow `add -A`, as a large repository has.
@@ -215,6 +287,10 @@ pub fn snapshot_turn_tree(
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     let (work, clean, work_error) = match work_commit(cwd, head) {
+        _ if abandoned.is_some_and(|a| a.load(std::sync::atomic::Ordering::SeqCst)) => {
+            eprintln!("checkpoint {agent}:{line}: {TREE_TOO_SLOW}");
+            (None, false, Some(TREE_TOO_SLOW.to_string()))
+        }
         Ok(Some(w)) => (Some(w), false, None),
         Ok(None) => (None, true, None),
         Err(why) => {
@@ -223,18 +299,8 @@ pub fn snapshot_turn_tree(
         }
     };
     if let Some(w) = &work {
-        let safe: String = agent
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
         let _ = Command::new("git")
-            .args(["update-ref", &format!("refs/arbos/cp/{safe}/{line}"), w])
+            .args(["update-ref", &checkpoint_ref(agent, line), w])
             .current_dir(cwd)
             .status();
     }
@@ -1887,6 +1953,53 @@ mod tests {
         );
         assert_eq!(git_out(&dir, &["rev-parse", "HEAD"]).unwrap(), mine);
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A turn's tree commit is kept alive by its ref; a cut, a roll or an
+    /// archive drops the ref, and git may reclaim the tree. Without the
+    /// drop a project carried every turn's working tree for ever.
+    #[test]
+    fn checkpoint_refs_are_dropped_by_line_and_by_agent() {
+        let dir = identityless_repo("cp-refs");
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let refs = || {
+            git_out(
+                &dir,
+                &["for-each-ref", "--format=%(refname)", "refs/arbos/cp/"],
+            )
+            .unwrap_or_default()
+        };
+        for (line, name) in [(3u64, "a.txt"), (7, "b.txt")] {
+            std::fs::write(dir.join(name), format!("{line}\n")).unwrap();
+            let cp = snapshot_turn_record(&dir, &agent_dir, "root", line)
+                .unwrap()
+                .unwrap();
+            snapshot_turn_tree(&dir, &agent_dir, "root", &cp).unwrap();
+        }
+        assert!(refs().contains("refs/arbos/cp/root/3"), "{}", refs());
+        assert!(refs().contains("refs/arbos/cp/root/7"), "{}", refs());
+        drop_checkpoint_refs(&dir, "root", [3]);
+        assert!(!refs().contains("refs/arbos/cp/root/3"), "{}", refs());
+        assert!(
+            refs().contains("refs/arbos/cp/root/7"),
+            "the kept turn's ref stays"
+        );
+        // A ref already gone is fine.
+        drop_checkpoint_refs(&dir, "root", [3, 99]);
+        // A worker's whole set, by agent; another agent's untouched.
+        std::fs::write(dir.join("c.txt"), "c\n").unwrap();
+        let w_dir = dir.join(".arbos/agents/w1");
+        std::fs::create_dir_all(&w_dir).unwrap();
+        let cp = snapshot_turn_record(&dir, &w_dir, "w1", 2)
+            .unwrap()
+            .unwrap();
+        snapshot_turn_tree(&dir, &w_dir, "w1", &cp).unwrap();
+        assert!(refs().contains("refs/arbos/cp/w1/2"), "{}", refs());
+        drop_agent_checkpoint_refs(&dir, "w1");
+        assert!(!refs().contains("refs/arbos/cp/w1/"), "{}", refs());
+        assert!(refs().contains("refs/arbos/cp/root/7"), "{}", refs());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
