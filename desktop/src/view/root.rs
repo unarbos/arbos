@@ -2462,18 +2462,16 @@ impl Arbos {
         draft: &crate::feedback::Draft,
         cx: &mut Context<Self>,
     ) {
-        // The host as well as the path: a remote place's path is not a local
-        // path, and staging a report inside one is what stranded his.
-        let host = self
-            .workspace
-            .read(cx)
-            .active_project()
-            .and_then(|project| project.host.clone());
+        // The *store*, not the path. A remote place's path belongs to the far
+        // machine — `~` is not even absolute here — and `Project::store()` is
+        // already the local folder the desktop keeps that place's own files in,
+        // session records included. Deriving the outbox from the path is what
+        // stranded his report.
         let Some(place) = self
             .workspace
             .read(cx)
             .active_project()
-            .map(|project| arbos_core::Place::new(project.path.clone()))
+            .map(|project| arbos_core::Place::new(project.store()))
         else {
             sheet.update(cx, |sheet, cx| {
                 sheet.settled(Err("no project open to file this against".into()), cx)
@@ -2482,13 +2480,7 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let written = match crate::feedback::write(
-            &place,
-            host.as_deref(),
-            draft,
-            &id,
-            arbos_core::now_ms(),
-        ) {
+        let written = match crate::feedback::write(&place, draft, &id, arbos_core::now_ms()) {
             Ok(written) => written,
             Err(e) => {
                 // Every outbox refused it. His words are still in the field and

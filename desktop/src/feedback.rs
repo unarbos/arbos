@@ -607,71 +607,26 @@ pub fn outbox(place: &Place) -> PathBuf {
     place.arbos().join("desktop").join("feedback-outbox")
 }
 
-/// Where a report about this place is staged.
+/// Where a report about a place is staged: **under the place's store**, which
+/// for a remote place is its local sidecar and not the remote path.
 ///
-/// A remote place's path is not a local path, and treating one as the other is
-/// what stranded Jacob's report. His tab is `ArbosLife:~`, whose path is the
-/// literal string `~` — so the outbox came out **relative**, was resolved
-/// against the app's working directory, and a Finder-launched app has that as
-/// `/`. `mkdir /~` is `Read-only file system (os error 30)` on macOS, which is
-/// the error he saw.
+/// This is what stranded Jacob's report. His tab is `ArbosLife:~`, and a remote
+/// place's *path* is the remote machine's — `~` is not even absolute. Deriving
+/// the outbox from it gave a relative path, resolved against the app's working
+/// directory, and a Finder-launched app has that as `/`. `mkdir /~` is
+/// `Read-only file system (os error 30)` on macOS.
 ///
-/// Failing was the visible half. The quiet half is worse: a remote path that
-/// *happens* to exist on this machine — `/Users/jacob/proj` on his laptop and on
-/// the box — would have staged his report into the local folder of that name and
-/// said nothing. Misfiling beats failing only in that nobody notices.
+/// The quiet half is worse: a remote path that happens to exist here — the same
+/// `/Users/jacob/proj` on his laptop and on the box — would have staged his
+/// report into the local folder of that name and said nothing.
 ///
-/// So anything not plainly local and absolute is staged under the app's own
-/// support directory, keyed by the place rather than inside it.
-pub fn outbox_for(place: &Place, host: Option<&str>) -> PathBuf {
-    if host.is_none() && place.path().is_absolute() {
-        return outbox(place);
-    }
-    let root = crate::model::settings::data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("arbos-desktop"))
-        .join("feedback-outbox");
-    root.join(place_key(place, host))
-}
-
-/// A readable, filesystem-safe name for a place that is not on this disk.
+/// The fix is to use what the app already has. [`Place::store`] returns the path
+/// a place's own files live at: the folder itself when local, and
+/// `<config>/remote/<host>/<hash>` when not — which is where the desktop already
+/// keeps a remote project's session records. So a report goes beside them, one
+/// convention rather than a second of my own invention.
 ///
-/// Readable rather than hashed, because whoever finds one of these folders
-/// should be able to tell whose report it is without a lookup.
-fn place_key(place: &Place, host: Option<&str>) -> String {
-    let raw = match host {
-        Some(host) => format!("{host}:{}", place.path().to_string_lossy()),
-        None => place.path().to_string_lossy().into_owned(),
-    };
-    let mut key: String = raw
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    // Trim the runs a path leaves behind, and keep it short enough for any
-    // filesystem. Two places whose names collide after 96 characters would
-    // share an outbox, so the raw length goes on the end to part them.
-    while key.contains("--") {
-        key = key.replace("--", "-");
-    }
-    let key = key.trim_matches('-').to_string();
-    if key.chars().count() > 96 {
-        format!(
-            "{}-{}",
-            key.chars().take(96).collect::<String>(),
-            raw.len()
-        )
-    } else if key.is_empty() {
-        "unnamed".into()
-    } else {
-        key
-    }
-}
-
+/// Callers pass the store, so nothing here has to know about hosts.
 /// Everywhere a report could be staged, best first.
 ///
 /// A report must never depend on one writable location. Jacob's home directory
@@ -684,8 +639,8 @@ fn place_key(place: &Place, host: Option<&str>) -> String {
 /// `fixed.json` writeback both belong beside it. After that, anywhere: the
 /// app's own data directory, then the system temp folder, which survives a
 /// read-only home.
-fn outbox_candidates(place: &Place, host: Option<&str>) -> Vec<(PathBuf, Option<&'static str>)> {
-    let mut out = vec![(outbox_for(place, host), None)];
+fn outbox_candidates(store: &Place) -> Vec<(PathBuf, Option<&'static str>)> {
+    let mut out = vec![(outbox(store), None)];
     if let Ok(data) = crate::model::settings::data_dir() {
         out.push((
             data.join("feedback-outbox"),
@@ -715,15 +670,9 @@ pub struct Written {
 /// "sent". A report is on disk or it is not; there is no state where he pressed
 /// the button and nothing exists — and now no single unwritable folder can put
 /// him in one.
-pub fn write(
-    place: &Place,
-    host: Option<&str>,
-    draft: &Draft,
-    id: &str,
-    now_ms: i64,
-) -> Result<Written> {
+pub fn write(store: &Place, draft: &Draft, id: &str, now_ms: i64) -> Result<Written> {
     let mut refusals = Vec::new();
-    for (root, elsewhere) in outbox_candidates(place, host) {
+    for (root, elsewhere) in outbox_candidates(store) {
         match write_into(&root, draft, id, now_ms) {
             Ok(dir) => {
                 remember_outbox_root(&root);
@@ -1682,7 +1631,7 @@ mod tests {
         let place = Place::new(dir.path());
         let mut draft = Draft::new(Parts::default());
         draft.note = "it froze".into();
-        write(&place, None, &draft, "20260916T154210Z-aa11", 1_789_573_330_000).unwrap();
+        write(&place, &draft, "20260916T154210Z-aa11", 1_789_573_330_000).unwrap();
         (dir, place)
     }
 
@@ -1749,7 +1698,7 @@ mod tests {
         for (n, place) in [(1, &pa), (2, &pb)] {
             let mut draft = Draft::new(Parts::default());
             draft.note = format!("report {n}");
-            write(place, None, &draft, &format!("20260916T15421{n}Z-aa11"), 1_789_573_330_000).unwrap();
+            write(place, &draft, &format!("20260916T15421{n}Z-aa11"), 1_789_573_330_000).unwrap();
         }
         // As the drain does it: every open place, one pass.
         let now = 1_789_573_400_000;
@@ -1788,7 +1737,7 @@ mod tests {
         let place = Place::new(scratch.path().join("project"));
         let mut draft = Draft::new(Parts::default());
         draft.note = "it drew the sidebar twice".into();
-        let written = write(&place, None, &draft, "20260916T154210Z-cc33", 1_789_573_330_000).unwrap();
+        let written = write(&place, &draft, "20260916T154210Z-cc33", 1_789_573_330_000).unwrap();
         assert!(written.elsewhere.is_none(), "a writable project takes its own");
         assert!(written.dir.starts_with(outbox(&place)));
 
@@ -1807,107 +1756,99 @@ mod tests {
         );
     }
 
-    /// The fault that actually stranded Jacob's report.
+    /// The fault that actually stranded Jacob's report, and the journey that
+    /// proves it is gone.
     ///
-    /// His tab is `ArbosLife:~`. A remote place's path is the remote machine's,
-    /// and `~` is not even absolute — so the outbox came out relative, was
-    /// resolved against the app's working directory (`/` for a Finder launch),
-    /// and `mkdir /~` is `Read-only file system (os error 30)`.
+    /// His tab is `ArbosLife:~`. A remote place's path belongs to the far
+    /// machine and `~` is not even absolute, so deriving the outbox from it gave
+    /// a relative path resolved against the app's working directory — `/` for a
+    /// Finder launch, where `mkdir /~` is `Read-only file system (os error 30)`.
     ///
-    /// The quiet half matters more than the loud one: a remote path that happens
-    /// to exist on this machine would have staged his report into the local
-    /// folder of that name and said nothing at all.
+    /// The app already had the answer: `Place::store()` is a place's own local
+    /// folder, and for a remote place it is `<config>/remote/<host>/<hash>`,
+    /// where the desktop already keeps that place's session records. A report
+    /// goes beside them.
+    ///
+    /// Two shapes are checked, and the second is the insidious one: a remote
+    /// path that *exists locally as something else*, which the old code would
+    /// have written into silently rather than failing.
     #[test]
-    fn a_remote_place_is_staged_locally_and_absolutely() {
-        // His case, exactly.
-        let tilde = Place::new("~");
-        let root = outbox_for(&tilde, Some("ArbosLife"));
-        assert!(root.is_absolute(), "never relative: {}", root.display());
-        assert!(
-            !outbox(&tilde).is_absolute(),
-            "and the old derivation really was relative"
-        );
-        assert!(
-            root.to_string_lossy().contains("ArbosLife"),
-            "keyed by the place, so a person can tell whose it is: {}",
-            root.display()
-        );
-
-        // The silent half: a remote path that also exists locally must not be
-        // written into. Two places of the same path on different machines get
-        // different outboxes, and neither is the local folder.
-        let shared = Place::new("/Users/jacob/proj");
-        let here = outbox_for(&shared, None);
-        let there = outbox_for(&shared, Some("ArbosLife"));
-        assert_eq!(here, outbox(&shared), "a local place keeps its own .arbos");
-        assert_ne!(there, here, "the remote one is somewhere else entirely");
-        assert!(!there.starts_with("/Users/jacob/proj"), "{}", there.display());
-
-        // Two remote places cannot share an outbox.
-        assert_ne!(
-            outbox_for(&Place::new("~"), Some("ArbosLife")),
-            outbox_for(&Place::new("~"), Some("other-box")),
-        );
-        assert_ne!(
-            outbox_for(&Place::new("~/a"), Some("ArbosLife")),
-            outbox_for(&Place::new("~/b"), Some("ArbosLife")),
-        );
-    }
-
-    /// And a report about a remote place is written, through the public path.
-    ///
-    /// Through `write`, not the helper under it: choosing the root for a remote
-    /// place is the code that failed on his Mac, so it is the code that has to be
-    /// covered. That needs the data directory under the test's control, which is
-    /// what `data_dir_for_test` is for — per thread, so it cannot leak into a
-    /// test running beside it.
-    #[test]
-    fn a_report_about_a_remote_place_is_written() {
-        let scratch = Scratch::new("remote");
+    fn a_report_from_a_remote_tab_is_written_locally_and_absolutely() {
+        let scratch = Scratch::new("remote-journey");
         let _data = crate::model::settings::data_dir_for_test(scratch.path());
 
-        let mut draft = Draft::new(Parts::default());
-        draft.note = "chat fully disconnected on this ask".into();
-        let written = write(
-            &Place::new("~"),
-            Some("ArbosLife"),
-            &draft,
-            "20260917T131552Z-a3c8",
-            1_789_573_330_000,
-        )
-        .expect("a remote tab can file a report");
+        // A remote place's store, as `Place::store()` builds it: local,
+        // absolute, under the app's own folder, keyed by host and path.
+        for (label, store) in [
+            ("tilde", scratch.path().join("remote/ArbosLife/9f2a1b")),
+            ("looks-local", scratch.path().join("remote/ArbosLife/0c33de")),
+        ] {
+            let place = Place::new(&store);
+            let mut draft = Draft::new(Parts::default());
+            draft.note = format!("chat fully disconnected on this ask ({label})");
 
-        assert!(written.dir.is_absolute(), "{}", written.dir.display());
-        assert!(
-            written.dir.starts_with(scratch.path()),
-            "staged locally, under the app's own folder: {}",
-            written.dir.display()
-        );
-        assert!(
-            written.elsewhere.is_none(),
-            "this is where a remote place's reports belong, not a fallback"
-        );
-        assert!(
-            written.dir.to_string_lossy().contains("ArbosLife"),
-            "filed under the place it is about: {}",
-            written.dir.display()
-        );
-        assert!(written.dir.join(REPORT_NAME).is_file());
-        assert!(written.dir.join("ready").is_file());
-        let back: Value =
-            serde_json::from_str(&std::fs::read_to_string(written.dir.join(REPORT_NAME)).unwrap())
-                .unwrap();
-        assert_eq!(back["note"], json!("chat fully disconnected on this ask"));
+            let written =
+                write(&place, &draft, &format!("20260917T131552Z-{label}"), 1_789_573_330_000)
+                    .expect("a remote tab can file a report");
 
-        // And the drain finds it without being told which project is open.
+            // 1. It exists, at a local absolute path, before Send returns.
+            assert!(written.dir.is_absolute(), "{}", written.dir.display());
+            assert!(written.dir.join(REPORT_NAME).is_file(), "the report is there");
+            assert!(written.dir.join("ready").is_file(), "and complete");
+
+            // 2. It is keyed by the place rather than inside it.
+            assert!(
+                written.dir.starts_with(&store),
+                "under the place's own store: {}",
+                written.dir.display()
+            );
+            assert!(
+                written.dir.starts_with(scratch.path()),
+                "which is local: {}",
+                written.dir.display()
+            );
+
+            // 3. Not a fallback, because the normal location worked — or a real
+            //    fallback would stop meaning anything.
+            assert!(
+                written.elsewhere.is_none(),
+                "this is where a remote place's reports belong: {:?}",
+                written.elsewhere
+            );
+
+            // 4. And the drain finds it without being told what is open — the
+            //    same family as reports from closed projects never retrying.
+            assert!(
+                known_outboxes().iter().any(|root| written.dir.starts_with(root)),
+                "the root was remembered: {:?}",
+                known_outboxes()
+            );
+            assert_eq!(
+                pending(&outbox(&place)).len(),
+                1,
+                "and it is queued for delivery"
+            );
+
+            let back: Value = serde_json::from_str(
+                &std::fs::read_to_string(written.dir.join(REPORT_NAME)).unwrap(),
+            )
+            .unwrap();
+            assert!(back["note"].as_str().unwrap().contains(label));
+        }
+
+        // The insidious case, stated as a fact rather than a hope: a report
+        // about a remote place never lands in a local folder of the remote
+        // path's name. The store is not derived from the path at all.
         assert!(
-            known_outboxes().iter().any(|r| written.dir.starts_with(r)),
-            "the root was remembered: {:?}",
+            !known_outboxes()
+                .iter()
+                .any(|root| root.starts_with("/Users") || root == Path::new("/")),
+            "no outbox outside the app's own folder: {:?}",
             known_outboxes()
         );
     }
 
-    /// The fallback, which stands whatever the cause: when the chosen outbox
+    /// The fallback, which stands whatever the cause    /// The fallback, which stands whatever the cause: when the chosen outbox
     /// cannot be made, the report still lands somewhere and says where.
     #[test]
     fn an_unwritable_project_does_not_lose_the_report() {
@@ -1925,7 +1866,7 @@ mod tests {
 
         let mut draft = Draft::new(Parts::default());
         draft.note = "chat fully disconnected on this ask".into();
-        let written = write(&place, None, &draft, "20260917T131552Z-a3c8", 1_789_573_330_000)
+        let written = write(&place, &draft, "20260917T131552Z-a3c8", 1_789_573_330_000)
             .expect("a report is never lost to one unwritable folder");
 
         assert!(
@@ -1969,6 +1910,36 @@ mod tests {
     /// Not a test of behaviour: writes one report into a folder named by the
     /// environment so the poller can be run against what the app really
     /// produces. Ignored unless asked for by name.
+    /// Writes a report for a **remote** place, so the poller can be run against
+    /// what a remote tab really produces. Ignored unless asked for by name.
+    ///
+    /// `ARBOS_FEEDBACK_PROBE` is the store to use, standing in for
+    /// `Place::store()` of a remote place — which is what the app passes.
+    #[test]
+    #[ignore]
+    fn write_one_remote_report_for_the_poller() {
+        let at = std::env::var("ARBOS_FEEDBACK_PROBE").expect("ARBOS_FEEDBACK_PROBE");
+        let store = Place::new(&at);
+        let mut draft = Draft::new(Parts::default());
+        draft.fixture = true;
+        draft.note = "FIXTURE from a remote tab (ArbosLife:~) — chat fully disconnected on this ask. \
+             Words and events invented."
+            .into();
+        // What a disconnected remote tab really has: no bundle at all.
+        draft.trajectory_unavailable =
+            Some("This project's kernel did not answer, so the transcript and the log are not attached.".into());
+        draft.session = Some(json!({
+            "place": at,
+            "rows": [{"label": "Main", "agent": "root", "streaming": false, "live_work": 0}],
+            "records": [],
+            "records_note": "every session record is here",
+        }));
+        let id = new_id(1_789_573_330_000);
+        let written = write(&store, &draft, &id, 1_789_573_330_000).unwrap();
+        println!("WROTE {}", written.dir.display());
+        println!("ROOT {}", outbox(&store).display());
+    }
+
     #[test]
     #[ignore]
     fn write_one_report_for_the_poller() {
@@ -2005,7 +1976,7 @@ mod tests {
             ..Default::default()
         });
         let id = new_id(1_789_573_330_000);
-        let written = write(&place, None, &draft, &id, 1_789_573_330_000).unwrap();
+        let written = write(&place, &draft, &id, 1_789_573_330_000).unwrap();
         println!("WROTE {}", written.dir.display());
     }
 
