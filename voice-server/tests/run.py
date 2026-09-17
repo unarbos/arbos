@@ -37,6 +37,7 @@ from tests.client import Caller
 from tests.mock_duplex import MockDuplex, Response, Utterance
 from tests.mock_hub import MockHub
 from tests.mock_kernel import Behaviour, Child, MockKernel
+from tests.mock_openai import MockOpenAILive
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -112,10 +113,11 @@ def kernel_behaviour(k: dict) -> Behaviour:
 class Gateway:
     """The real thing, as a subprocess."""
 
-    def __init__(self, *, duplex_url: str, kernel_url: str, log: Path, extra: list[str]):
+    def __init__(self, *, duplex_url: str, kernel_url: str, log: Path, extra: list[str], env: dict | None = None):
         self.port = free_port()
         self.url = f"ws://127.0.0.1:{self.port}/ws"
         self.log = log
+        self.env = env or {}
         model_dir = OUT / "no-models"
         model_dir.mkdir(parents=True, exist_ok=True)
         self.cmd = [
@@ -132,7 +134,7 @@ class Gateway:
         # ARBOS_VOICE_SERVER_SRC: run another checkout's gateway (a branch under review) against
         # this tree's desktop and mocks.
         src = Path(os.environ.get("ARBOS_VOICE_SERVER_SRC") or ROOT)
-        env = dict(os.environ, PYTHONPATH=str(src))
+        env = dict(os.environ, PYTHONPATH=str(src), **self.env)
         self.proc = subprocess.Popen(self.cmd, cwd=src, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
         deadline = time.monotonic() + timeout
         async with httpx.AsyncClient(timeout=2.0) as client:
@@ -183,6 +185,7 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
 
     gateway: Gateway | None = None
     caller: Caller | None = None
+    live: MockOpenAILive | None = None
     # `hub = { machine, project }`: the scripted kernel sits behind a mock hub under that name;
     # the gateway's own kernel is a second, unscripted one, so routing through the hub is provable.
     hub_cfg = sc.get("hub")
@@ -200,6 +203,18 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
     try:
         duplex_url = await duplex.start()
         kernel_url = opts.kernel or await kernel.start()
+        if sc.get("history"):
+            transcript = place / ".arbos" / "agents" / "root" / "transcript.jsonl"
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            with transcript.open("a", encoding="utf-8") as fh:
+                for event in sc["history"]:
+                    fh.write(json.dumps(event) + "\n")
+        live_env: dict[str, str] = {}
+        if sc.get("engine") == "openai":
+            live = MockOpenAILive()
+            live_url = await live.start()
+            extra += ["--engine", "openai"]
+            live_env = {"OPENAI_API_KEY": "test-key", "VOICE_OPENAI_URL": live_url}
         if path_mode in ("local", "missing"):
             own_place = out / "own-place"
             own_place.mkdir()
@@ -238,7 +253,8 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
         if opts.gateway:
             url, token = opts.gateway, opts.token
         else:
-            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=extra)
+            gateway = Gateway(duplex_url=duplex_url, kernel_url=kernel_url, log=out / "gateway.log", extra=extra,
+                               env=live_env)
             await gateway.start()
             url, token = gateway.url, TOKEN
         # `project = "name"`: a bare folder name, as a desktop off the hub sends it; `refused = "code"`:
@@ -286,7 +302,7 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
         await asyncio.sleep(0.4)  # the speech model's session.update lands
         await run_steps(steps, caller, duplex, kernel, opts)
         await caller.wait_quiet(1.0, timeout=10)
-        check(sc.get("expect") or {}, res, caller, duplex, kernel)
+        check(sc.get("expect") or {}, res, caller, duplex, kernel, live=live)
         if hub_cfg and own is not None and hub is not None:
             res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
             res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
@@ -311,6 +327,8 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             gateway.stop()
         await duplex.stop()
         await kernel.stop()
+        if live:
+            await live.stop()
         if hub:
             await hub.stop()
         if own:
@@ -365,7 +383,8 @@ async def run_steps(steps: list[dict], caller: Caller, duplex: MockDuplex, kerne
 # ---------------------------------------------------------------------- expectations
 
 
-def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: MockKernel) -> None:
+def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: MockKernel,
+          live: MockOpenAILive | None = None) -> None:
     rec = caller.rec
     spoken = rec.spoken()
     joined = "\n".join(spoken).lower()
@@ -485,6 +504,13 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
     if "audio_bytes_min" in exp:
         total = sum(a.size for a in rec.audio if a.speaking)
         add(total >= int(exp["audio_bytes_min"]), f"at least {exp['audio_bytes_min']} bytes of reply audio ({total})")
+    if live is not None and (exp.get("live_sees") or exp.get("live_not_sees") or exp.get("live_started")):
+        blob = (live.instructions + "\n" + live.input_text()).lower()
+        add(live.started >= 1, f"GPT-Live received session.start ({live.started})")
+        for needle in exp.get("live_sees", []):
+            add(needle.lower() in blob, f"GPT-Live session sees {needle!r}")
+        for needle in exp.get("live_not_sees", []):
+            add(needle.lower() not in blob, f"GPT-Live session does not see {needle!r}")
 
 
 # ---------------------------------------------------------------------- main

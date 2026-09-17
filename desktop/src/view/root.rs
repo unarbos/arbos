@@ -3225,11 +3225,12 @@ fn is_spoken_ack(text: &str) -> bool {
 
 /// What the call starts knowing: the last lines of this chat, clipped, and
 /// the sub-agents, so the narrator and the speech model can answer "what
-/// were we doing" before the first new turn.
+/// were we doing" before the first new turn. Tool lines are the label and
+/// state only — never the output or the diff.
 fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::CallContext {
     use crate::model::session::{ChatItem, ChildState, ToolStatus};
     use crate::voice_ws::{CallContext, ContextAgent, ContextLine};
-    const LINES: usize = 12;
+    const LINES: usize = 40;
     const CLIP: usize = 400;
     let clip = |text: &str| -> String {
         let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3256,6 +3257,20 @@ fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::C
                     ToolStatus::Failure => "failed",
                 };
                 Some(ContextLine { role: "tool".into(), text: clip(&format!("{label} ({state})")) })
+            }
+            ChatItem::Notice { text, .. } if !text.trim().is_empty() => {
+                Some(ContextLine { role: "notice".into(), text: clip(text) })
+            }
+            ChatItem::Asked { question, answer } => {
+                let line = if answer.trim().is_empty() {
+                    format!("asked: {question}")
+                } else {
+                    format!("asked: {question} → {answer}")
+                };
+                Some(ContextLine { role: "asked".into(), text: clip(&line) })
+            }
+            ChatItem::Thinking { text, done, .. } if !done && !text.trim().is_empty() => {
+                Some(ContextLine { role: "thinking".into(), text: clip(text) })
             }
             _ => None,
         })
