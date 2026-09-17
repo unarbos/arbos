@@ -803,6 +803,9 @@ pub async fn attach(
                 },
             )
             .await;
+            // The commonest refusal of all — a machine that is offline — and
+            // until now the one that still closed bare through the tunnel.
+            refuse_close(&mut ws).await;
             return;
         }
     };
@@ -1042,6 +1045,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     };
     if !ok {
         let _ = send_json(&mut ws, &answer).await;
+        refuse_close(&mut ws).await;
         return;
     }
     // A worktree place is not a project of the user's: the roster says
