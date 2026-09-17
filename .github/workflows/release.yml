@@ -362,7 +362,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" dist/* --clobber
+          # Payloads first, each on its own, then the feed — the same
+          # ordering the dev channel uses and for the same reason. A batch
+          # upload retries a file whose connection dropped, a retry of one
+          # the first attempt had created fails with "already exists", and
+          # `set -e` takes the files still in flight down with it. When the
+          # feed is in that batch it can go live naming a payload that
+          # never arrived.
+          #
+          # A feed that is late is a channel that has not moved yet. A feed
+          # that is early is a download that 404s.
+          for f in dist/*; do
+            case "${f##*/}" in arbos-stable.json) continue ;; esac
+            for attempt in 1 2 3; do
+              if gh release upload "$TAG" "$f" --clobber; then break; fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error title=Upload failed::${f##*/} would not upload after three tries"
+                exit 1
+              fi
+              echo "retrying ${f##*/} ($attempt)"
+              sleep $((attempt * 15))
+            done
+          done
+          if [ -f dist/arbos-stable.json ]; then
+            gh release upload "$TAG" dist/arbos-stable.json --clobber
+          fi
       - name: Say what went out
         env:
           SIGNING: ${{ needs.stable-macos.outputs.signing }}

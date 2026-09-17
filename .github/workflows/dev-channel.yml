@@ -398,7 +398,72 @@ jobs:
           SIGNING: ${{ needs.macos.outputs.signing }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" dist/* --clobber
+          # The payloads first, then the feed, and never the two in one
+          # batch.
+          #
+          # `gh release upload` takes a batch concurrently and retries a
+          # file whose connection dropped. A retry of a file the first
+          # attempt had in fact created fails with "already exists", and
+          # `set -e` takes the whole batch down with it — including the
+          # uploads still in flight. On 2026-09-17 that left the feed
+          # advertising a Linux app tarball that was never uploaded, and
+          # the largest file is the one most likely to still be going when
+          # it happens.
+          #
+          # A feed that is late is a channel that has not moved yet. A feed
+          # that is early is a download that 404s. So the feed goes last,
+          # and only once everything it names is really on the tag.
+          for f in dist/*; do
+            case "${f##*/}" in arbos-dev.json) continue ;; esac
+            for attempt in 1 2 3; do
+              if gh release upload "$TAG" "$f" --clobber; then break; fi
+              if [ "$attempt" = 3 ]; then
+                echo "::error title=Upload failed::${f##*/} would not upload after three tries"
+                exit 1
+              fi
+              echo "retrying ${f##*/} ($attempt)"
+              sleep $((attempt * 15))
+            done
+          done
+
+          # What this build must have, before anything is allowed to drop.
+          want="$(jq -r --argjson b "$BUILD" \
+            '.releases[] | select(.build == $b) | .downloads[].url | split("/") | last' \
+            dist/arbos-dev.json | sort -u)"
+
+          # Drop from the feed anything the tag does not actually have.
+          #
+          # Older releases are kept for their payloads, and a payload that
+          # went missing — a partial publish, a prune that ran when it
+          # should not have — must stop being advertised rather than
+          # standing as a 404 for ever. Self-healing, so one bad run cannot
+          # block the channel behind it.
+          have="$(gh release view "$TAG" --json assets -q '.assets[].name' \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          jq --argjson have "$have" '
+            .releases |= (
+              map(.downloads |= map(select((.url | split("/") | last) as $n | $have | index($n))))
+              | map(select((.downloads | length) > 0 or (.links | length) > 0))
+            )' dist/arbos-dev.json > dist/arbos-dev.checked.json
+          if ! cmp -s dist/arbos-dev.json dist/arbos-dev.checked.json; then
+            echo "::warning title=Feed pruned::Entries naming payloads that are not on the tag were dropped."
+            diff <(jq -S . dist/arbos-dev.json) <(jq -S . dist/arbos-dev.checked.json) || true
+          fi
+          mv dist/arbos-dev.checked.json dist/arbos-dev.json
+
+          # This build's own payloads are not optional. Losing one of those
+          # is this run failing, not something to quietly publish around.
+          for name in $want; do
+            if ! jq -e --arg n "$name" \
+              '[.releases[].downloads[].url | split("/") | last] | index($n)' \
+              dist/arbos-dev.json > /dev/null; then
+              echo "::error title=Payload missing::$name did not reach the tag, so this build is not being published"
+              exit 1
+            fi
+          done
+
+          # Now the feed, which every download in it is known to be behind.
+          gh release upload "$TAG" dist/arbos-dev.json --clobber
           # The page says what the newest build is, so the releases list reads
           # as a release and not as a bucket.
           commit_url="https://github.com/${{ github.repository }}/commit/${{ needs.plan.outputs.sha }}"
