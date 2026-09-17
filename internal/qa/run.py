@@ -1853,7 +1853,10 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     result = {
         "scenario": name,
         "doc": meta["doc"],
-        "status": "env" if rec.breaks and all(str(b["rule"]).startswith("env:") for b in rec.breaks) else ("break" if rec.breaks else "pass"),
+        # A scenario that set itself aside (no desktop, no hub binary, feature replaced, path not exercised) has
+        # established nothing: it is `skipped`, never `pass`. Twenty-nine sites did this and read as green (audit, 2026-09-17).
+        "status": "env" if rec.breaks and all(str(b["rule"]).startswith("env:") for b in rec.breaks) else ("break" if rec.breaks else ("skipped" if rec.notes.get("skipped") else "pass")),
+        "reason": ("self: " + str(rec.notes.get("skipped"))[:120]) if (not rec.breaks and rec.notes.get("skipped")) else None,
         "breaks": rec.breaks,
         "notes": rec.notes,
         "duration_s": round(time.time() - t0, 1),
@@ -1886,7 +1889,10 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
         with open(ROLLOUTS / "reaped.jsonl", "a") as f:
             f.write(json.dumps({"ts": now_ms(), "scenario": name, "rollout": final.name, "reaped": REAPED}) + "\n")
     shutil.rmtree(scratch, ignore_errors=True)
-    print(f"[{result['status']:5}] {name} ({result['duration_s']}s, {len(rec.breaks)} break(s)) -> {final.name}" + (f"  [reaped {leaked} leaked process(es)]" if leaked else ""))
+    tail = f"  [reaped {leaked} leaked process(es)]" if leaked else ""
+    if result["status"] == "skipped":
+        tail += f"  — {result['reason']}"
+    print(f"[{result['status']:5}] {name} ({result['duration_s']}s, {len(rec.breaks)} break(s)) -> {final.name}{tail}")
     return result
 
 

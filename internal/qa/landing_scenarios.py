@@ -28,6 +28,11 @@
   pn-01  a panic on the turn's own task no longer strands the agent (#374, ARBOS_TEST_PANIC_TURN): the agent goes idle,
          its record says why (a failed notice, `turn_panicked` in kernel.log), and the next message runs — the purest
          form of the invisible class: a fault with no error anywhere that looks exactly like the app thinking.
+  jl-01  the incident shape (2026-09-16, 164 GB): a background flood, `jobs`, then `kill <the pid jobs shows>` — nothing may be
+         left running or writing (#377: a signal at the displayed pid ends the whole group; a literal `kill` goes through
+         the kernel; the wrapper watches its own parent).
+  sb-01  #377's stated cost: a shell subscription whose command backgrounds something must still finish promptly, not
+         hold until its timeout.
   fb-01  the desktop feedback chain (#336, #345, #331): the sheet opens from a thumbs-down and the window keeps
          answering; the report is on disk before anything is sent; with no credentials it waits ("saved, and
          waiting"); with credentials it is delivered through `store put` into a store a kernel serves; the poller
@@ -644,6 +649,97 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.expect(c.wait_turn("root", "running", 10) is not None and c.wait_turn("root", "idle", 20) is not None, "pn-01-next-message-stuck", "the next message did not run a normal turn after the panic")
         evs, _ = transcript(cx.place, "root")
         cx.rec.expect(any(e.get("kind") == "assistant" and e.get("text") == "Fine now." for e in evs), "pn-01-next-message-unanswered", "the message after the panic was not answered")
+
+
+    # ── #377: the incident shape, pinned ───────────────────────────────────
+    def procs_writing_under(place, needle):
+        """Processes that name `needle` in their argv or have a cwd under `place` — the writer and its shells."""
+        found = []
+        try:
+            out = subprocess.run(["ps", "-eo", "pid=,ppid=,stat=,args="], capture_output=True, text=True, timeout=10).stdout
+        except Exception:  # noqa: BLE001
+            return found
+        for line in out.splitlines():
+            parts = line.split(None, 3)
+            if len(parts) < 4:
+                continue
+            pid, ppid, stat, args = parts
+            cwd = ""
+            try:
+                cwd = os.readlink(f"/proc/{pid}/cwd")
+            except OSError:
+                pass
+            if needle in args or cwd.startswith(str(place)):
+                if "run.py" in args or " serve " in args or "arbos-kernel" in args.split()[0]:
+                    continue  # the kernel and the harness are not the job
+                found.append({"pid": int(pid), "ppid": int(ppid), "stat": stat, "args": args[:90], "cwd_under_place": cwd.startswith(str(place))})
+        return found
+
+    @reg("jl-01-kill-the-displayed-pid-ends-the-group", tags=("jobs", "leash"))
+    def jl01(cx):
+        """The 164 GB incident, step for step: a background flood (`while true; do echo …; done`), `jobs`, then `kill <the pid jobs shows>`. Afterwards nothing under the place may be running or writing: the flood's shell and its loop are gone, out.log has stopped growing, and `jobs` says the job ended. Before #377 the displayed pid was the wrapper/leash: killing it orphaned the writer, which outlived the kernel and its folder."""
+        marker = f"flood-{now_ms() % 100000}"
+        flood = f'while true; do echo "{marker} runaway line"; done'
+        lines = [
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"background": True, "command": flood, "description": "a slow flood"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "jobs", "arguments": {}}]},
+            # The pid `jobs` shows is the one in meta.json; the model kills exactly that, through its own shell, as it did.
+            {"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": "kill $(python3 -c 'import json;print(json.load(open(\".arbos/agents/root/jobs/j1/meta.json\"))[\"pid\"])')", "description": "kill the job by its shown pid"}}]},
+            {"agent": "root", "content": "", "calls": [{"name": "jobs", "arguments": {}}]},
+            {"agent": "root", "content": "Killed it."},
+        ]
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, lines))])
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        c.user("root", "Start a runaway flood in the background, list jobs, then kill it by the pid you see.")
+        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "jl-01-turn-never-ended", "the turn never ended")
+        time.sleep(2)
+        out_log = cx.place / ".arbos" / "agents" / "root" / "jobs" / "j1" / "out.log"
+        size1 = out_log.stat().st_size if out_log.exists() else -1
+        time.sleep(3)
+        size2 = out_log.stat().st_size if out_log.exists() else -1
+        left = procs_writing_under(cx.place, marker)
+        evs, _ = transcript(cx.place, "root")
+        jobs_said = [str(e.get("body") or e.get("result") or "")[:200] for e in evs if e.get("kind") == "tool" and e.get("name") == "jobs"]
+        kill_said = [str(e.get("body") or e.get("result") or "")[:200] for e in evs if e.get("kind") == "tool" and e.get("name") == "bash" and "kill" in json.dumps(e.get("args", {}))]
+        cx.rec.notes.update({"out_log_bytes": [size1, size2], "still_running": left, "jobs_said": jobs_said, "kill_said": kill_said})
+        cx.rec.expect(not left, "jl-01-writer-survived", f"after `kill <shown pid>` {len(left)} process(es) of the job are still alive: {left[:3]} — the 164 GB shape", "arbos-engine jobs.rs / bash.rs: a signal at the displayed pid ends the group (#377)")
+        cx.rec.expect(size1 >= 0 and size2 == size1, "jl-01-log-still-growing", f"out.log grew from {size1} to {size2} bytes in 3 s after the kill — something is still writing")
+        cx.rec.expect(bool(jobs_said) and any(("killed" in j.lower() or "exit" in j.lower()) for j in jobs_said[-1:]), "jl-01-jobs-still-says-running", f"`jobs` after the kill does not say the job ended: {jobs_said[-1:] }")
+        # Whatever survived is ended here too, so the rig itself never repeats the incident.
+        for pr in left:
+            try:
+                os.kill(pr["pid"], signal.SIGKILL)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # ── #377's stated cost: a backgrounding subscription command ───────────
+    @reg("sb-01-backgrounding-subscription-command-finishes", tags=("jobs", "subscriptions"))
+    def sb01(cx):
+        """A `kind = shell` subscription whose command backgrounds something (`nohup sleep 300 &`) and exits must be run to completion promptly — its reading delivered within seconds — not held until the command's timeout because the leash waits on the group. #377's author says this needs #364 beside it; here it is measured."""
+        from fileplan_scenarios import write_subscription
+
+        write_subscription(cx.place, "root", "bg", kind="shell", cmd="nohup sleep 300 >/dev/null 2>&1 & echo started-bg", every="30s", deliver_to="user", notify="bg: {output}")
+        k = cx.kernel()
+        cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+        c = k.attach()
+        c.wait(lambda f: f.get("type") == "snapshot", 5)
+        t0 = time.time()
+        # The reading is a delivered line ("bg: started-bg"), never the subscription file echoed in a snapshot or plan
+        # frame — matching the raw frame text would pass on the definition alone.
+        def is_reading(f):
+            if f.get("type") in ("snapshot", "plan", "hello"):
+                return False
+            text = json.dumps(f.get("event", f))
+            return "bg: started-bg" in text
+        told = c.wait(is_reading, int(os.environ.get("ARBOS_QA_SB01_WAIT", "45")), "the subscription's reading")
+        cx.rec.notes["reading_frame"] = {kk: str(v)[:80] for kk, v in (told or {}).items()}
+        took = round(time.time() - t0, 1)
+        cx.rec.notes.update({"reading_delivered": told is not None, "took_s": took})
+        cx.rec.expect(told is not None, "sb-01-held-until-timeout", f"a shell subscription whose command backgrounds a child did not deliver its reading within 45 s (the command itself exits at once) — held on the backgrounded child", "arbos-kernel plan.rs shell run + jobs.rs group wait (#377 vs #364)")
+        # Clean the backgrounded sleep so it does not outlive the scenario.
+        subprocess.run(["pkill", "-f", "^sleep 300$"], capture_output=True)
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))

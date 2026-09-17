@@ -96,4 +96,6 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] Rotate leaked secrets — four leaks today, every one from a worker masking output it had chosen to print, so masking is now banned outright and no agent may fetch a whole vault item: Jacob to change his Apple ID password (exposed twice), revoke the app-specific password, re-export the `.p12`, rotate the GitHub PAT and turn on GitHub two-factor; the AWS keys, wallet seed and API tokens sitting in two Cursor helper processes on his Mac are worth rotating too
 
-- [ ] [Launch Arbos desktop on Macbook](bc-b337f0b1-4e0b-5dcf-ae7f-b040ac2a52cd) — visit done and stopped again: his app runs `181b657` with the bar showing `0.2.0 (879)`, no button because he is on the newest build, so the click is still unproven; th
+- [ ] [Launch Arbos desktop on Macbook](bc-b337f0b1-4e0b-5dcf-ae7f-b040ac2a52cd) — visit done and stopped again: his app runs `181b657` with the bar showing `0.2.0 (879)`, no button because he is on the newest build, so the click is still unproven; the notarised DMG upload and the macOS capture leg wait for his word
+- [ ] [Linux launch fix PR](https://github.com/unarbos/arbos/pull/4) — ready for review; QA and parity builds already use it
+- [x] Run rust branch on cloud VM — built and running, [screenshot](/opt/cursor/artifacts/screenshots/arbos-rust-running.png) confirmed visible

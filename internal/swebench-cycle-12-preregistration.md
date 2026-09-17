@@ -5,15 +5,15 @@ cursor:
 
 # SWE-bench loop, cycle 12: pre-registration (written before the run)
 
-Written 2026-09-17 03:06 UTC, before the run started.
+Written 2026-09-17 03:06 UTC, before the run started. Amended 03:20 UTC, before the run that counts: the first launch (kernel `main` `fa17987e`, 2 rollouts, $0.49) was stopped when Jacob pointed out that #380 changes the reproduction gate and the instructions override; a baseline across that change would not be usable. It is set aside as `c12-reg-aborted-pre380` and not counted.
 
 ## What this cycle is
 
 A re-baseline, not a comparison. One arm, no lever.
 
-- Kernel: `main` `fa17987e`, built static (`arbos-kernel-c12`).
+- Kernel: `864d6b00`, the head of #380 (`main` `fa17987e` + #380: reproduction only from a command that ran code; instructions layer under the headless rules). Built static (`arbos-kernel-c12-380`). #380 is not merged at run time; the baseline is stated on this commit.
 - Harness: one reproduction, mechanism gate on, $8 per-rollout cap, 2400 s timeout, Sonnet 5 via OpenRouter, concurrency 3.
-- Runtime: docker with `--env.agent.runtime.block '["*"]'` — the container reaches only the interception proxy. The harness now refuses to run without this (commit `95ca8f8d`).
+- Runtime: docker with `--env.agent.runtime.block '["*"]'` — the container reaches only the interception proxy. The harness now refuses to run without this (branch `cursor/swebench-loop-c12-7c9c`). The harness code in use for the run is #380's harness plus the refusal; no `instructions` are passed, so #380's instruction change is not exercised.
 - Set: `reg20` at `-r 2` = 40 rollouts. Cap $55, watcher stops at $50 recorded.
 
 ## What is decided in advance
