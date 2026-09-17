@@ -36,21 +36,21 @@ sleep 30; shot 02-call-delegated-answer
 # Out of the call and into the chat it belongs to. Closing the call lands on
 # the project list, not on the chat, so the project is opened by name — the
 # list is alphabetical and its rows move as machines come and go.
-# The call's controls fade while it runs and a touch brings them back, so
-# the close button is waited for rather than assumed to be on screen.
-for _ in 1 2 3 4 5; do
-  ui find "Close" >/dev/null 2>&1 && break
-  idb ui tap 196 400 --udid "$UDID"; sleep 1.5
-done
-ui tap "Close" || { echo "no close control"; exit 1; }
-sleep 2.5; shot 03-project-list
+# A call is wordless by design: the composer and the close button only exist
+# once the screen is pulled down, so the gesture comes first and the tap
+# after it. Tapping for a control that is not on the screen yet was how the
+# first two attempts at this still were lost.
+idb ui swipe 196 300 196 700 --duration 0.4 --udid "$UDID"; sleep 1.5
+shot 03-call-pulled-down
+ui tap "Close" || { echo "no close control — the pull did not take"; exit 1; }
+sleep 2.5; shot 04-project-list
 ui tap "${PROJECT:-phone}, Idle" || { echo "project row not on screen"; exit 1; }
-sleep 3; shot 04-chat-tail
+sleep 3; shot 05-chat-tail
 
 # One screen back reaches the same question as it was answered before the
 # rule landed: the kernel's wording, kept whole.
 idb ui swipe 196 300 196 720 --duration 0.4 --udid "$UDID"; sleep 1.2
-shot 05-chat-before-the-rule
+shot 06-chat-before-the-rule
 
 echo "--- what the call did ---"
 grep -E "^metric|^event response.done|^phase" "$OUT/console.log" | tail -12
