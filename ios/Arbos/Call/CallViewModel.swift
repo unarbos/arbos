@@ -400,21 +400,19 @@ final class CallViewModel: ObservableObject {
         case .assistantTranscript(let delta):
             trace("reply: \(delta)")
             append(delta, to: .arbos)
-        case .responseDone(let interrupted):
+        case .responseDone(let end):
             let levels = audio.replyLevelsAndReset()
-            trace("event response.done interrupted=\(interrupted) playing=\(audio.isPlaying) reply peak=\(Int(levels.peak))dBFS rms=\(Int(levels.rms))dBFS out=\(Int(levels.out))dBFS")
-            if interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
+            trace("event response.done reason=\(end.rawValue) playing=\(audio.isPlaying) reply peak=\(Int(levels.peak))dBFS rms=\(Int(levels.rms))dBFS out=\(Int(levels.out))dBFS")
+            if end == .interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
             responseDone = true
-            // A response that never played is not an answer ending, so it
-            // must not take the screen back to listening. Pause mid-sentence
-            // and the server closes the first, silent response as interrupted
-            // when the rest of the question arrives: the orb fell back to
-            // listening and then jumped to speaking, which reads as "it gave
-            // up" a moment before it answers.
-            if interrupted, !responseHadAudio {
-                trace("response.done with no audio — staying in \(phase.label)")
-            } else {
+            // Only a reply the caller could have heard is an answer ending.
+            // The server says which now; the silence check stays behind it,
+            // because a reply that reached nobody must not take the screen
+            // back to listening whatever the frame calls itself.
+            if end.reachedTheCaller, responseHadAudio {
                 settle()
+            } else {
+                trace("response.done \(end.rawValue), nothing heard — staying in \(phase.label)")
             }
             responseHadAudio = false
         case .toolCall(let name, let summary):

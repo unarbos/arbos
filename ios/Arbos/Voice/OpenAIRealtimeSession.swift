@@ -152,9 +152,9 @@ final class OpenAIRealtimeSession: VoiceSession {
         case "response.output_audio_transcript.delta", "response.audio_transcript.delta":
             sink.emit(.assistantTranscript(delta: object["delta"] as? String ?? ""))
         case "response.done":
-            sink.emit(.responseDone(interrupted: false))
+            sink.emit(.responseDone(.completed))
         case "response.cancelled":
-            sink.emit(.responseDone(interrupted: true))
+            sink.emit(.responseDone(.interrupted))
         case "error":
             let detail = object["error"] as? [String: Any]
             sink.emit(.error(detail?["message"] as? String ?? "Realtime error"))
