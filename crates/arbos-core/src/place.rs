@@ -68,6 +68,21 @@ impl Place {
         self.runtime_dir().join("lock")
     }
 
+    /// Where kernels before the `runtime/` split took the place lock. A
+    /// kernel takes both, so an old build and a new one contend for the
+    /// same place and one of them loses honestly — with only the new
+    /// path, two kernels of two builds served one store at once (the
+    /// update worker's proof, 2026-09-17).
+    pub fn legacy_lock_path(&self) -> PathBuf {
+        self.arbos().join("lock")
+    }
+
+    /// The lock files a holder writes its pid into, legacy first: the one
+    /// an old kernel reads and the one a new kernel reads.
+    pub fn lock_paths(&self) -> [PathBuf; 2] {
+        [self.legacy_lock_path(), self.lock_path()]
+    }
+
     /// The `.arbos/` folder's own git repository, when bootstrap made one.
     pub fn arbos_repo(&self) -> PathBuf {
         self.arbos().join(".git")
