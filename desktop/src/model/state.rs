@@ -92,7 +92,7 @@ pub struct State {
 /// What the body size may be set to, in points: the ladder's smallest measured
 /// role to Title3's, so bezel's fixed chrome heights hold at either end. Read
 /// on the way in as well as by the control, because a size out of range paints
-/// an interface nobody can read the settings window to fix.
+/// an interface nobody can read the Settings tab to fix.
 pub const TEXT_SIZE: (f32, f32) = (11., 17.);
 
 /// The body size a fresh install reads at: Cursor's 14.

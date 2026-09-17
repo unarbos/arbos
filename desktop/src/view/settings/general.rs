@@ -3,7 +3,7 @@
 use crate::{
     assets, build, update,
     update::Updates,
-    view::{settings::SettingsWindow, status_bar},
+    view::{settings::SettingsPane, status_bar},
 };
 use arbos_update::Channel;
 use bezel::{
@@ -26,7 +26,7 @@ const COMMIT: &str = build::COMMIT;
 /// the section is.
 const MARK: f32 = 72.;
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn general_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         div()

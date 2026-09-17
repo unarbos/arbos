@@ -40,7 +40,7 @@ Result values:
 Phases (letters, default all):
     L launch+inventory  C composer  T turn (stop/follow-ups/footer/folds)  Q question card
     P standing work (panel only, no strip)  S sub-agents  A artifacts  B tab bar+opener
-    R right panel/sidebar  W settings window  M menus  K shortcuts
+    R right panel/sidebar  W settings tab  M menus  K shortcuts
     X multitasking audit (steer file, queue held by the kernel and across a relaunch,
       typed words while a question stands, deleted child, first-spawn connect)
     G pull-request flow (a worker runs `gh pr create` against the fake gh on PATH;
@@ -62,7 +62,7 @@ import time
 import traceback
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
@@ -412,12 +412,6 @@ class Pass:
             if self.wait(lambda s: not s["composer"]["text"], 4) is None:
                 log("send: the line did not leave the composer (R17)")
 
-    def close_second_windows(self) -> None:
-        for title in ("Settings",):
-            subprocess.run(["wmctrl", "-c", title], env=ENV)
-        time.sleep(0.8)
-        self.reconnect()
-
     def escape(self) -> None:
         try:
             self.app.key("escape")
@@ -496,14 +490,12 @@ class Pass:
                        lambda: self.app.click("permissions-skip"),
                        lambda a, b: perms(b).get("open") is False and perms(b).get("seen") is True and b["composer"]["focused"] and "closed, seen, composer focused", settle=1.2)
         if self.state().get("settings_open"):
-            def close_settings():
-                self.app.use_window("settings")
-                try:
-                    self.app.key("escape")
-                finally:
-                    self.app.use_window("main")
-            self.check("settings-escape (first launch)", "launch", "Escape in the Settings window", "window closes; settings_open false; the composer has the keyboard",
-                       close_settings, lambda a, b: b.get("settings_open") is False and b["composer"]["focused"] and "closed, composer focused", settle=1.2)
+            self.check("settings-escape (first launch)", "launch", "Escape with the Settings tab in front", "back to the chat; the composer has the keyboard",
+                       lambda: self.app.key("escape"),
+                       lambda a, b: b.get("front") == "project" and b["composer"]["focused"] and "left the tab, composer focused", settle=1.2)
+            self.check("tab-settings-close (first launch)", "launch", "the Settings pill's close mark", "the tab leaves the strip",
+                       lambda: self.app.click("tab-settings-close"),
+                       lambda a, b: b.get("settings_open") is False, settle=1.0)
         if self.tabs:
             ix = self.project_index()
             self.check(f"tab-{ix}", "tab-bar", "click project tab", "active_project becomes the sample project",
@@ -1323,63 +1315,55 @@ class Pass:
                 self.app.click(row); time.sleep(0.5)
                 if any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
                     break
-        # Settings closes from the keyboard and the chat gets the keyboard back.
-        gear = "settings" if self.app.exists("settings") else "status-bar-settings"
-        if not self.state().get("settings_open") and self.app.exists(gear):
-            self.app.click(gear); time.sleep(1.0)
-        if self.state().get("settings_open"):
-            def close_settings():
-                self.app.use_window("settings")
-                try:
-                    self.app.key("cmd-w")
-                finally:
-                    self.app.use_window("main")
-            self.check("settings-cmd-w", "settings", "⌘W in the Settings window", "window closes; composer focused",
-                       close_settings, lambda a, b: b.get("settings_open") is False and b["composer"]["focused"], settle=1.2)
+        """Settings is a tab of this window, not a window of its own: the gear
+        opens it in the strip, it fills the width, and every route back out of
+        it is driven here — Escape, ⌘1, the pill's close mark, ⌘W."""
         sc = "settings"
+        gear = "status-bar-settings"
         SETTINGS_ROWS = ["section-*", "model-pick-*", "appearance-*", "watch-bounce-*", "update-channel-*", "size-up", "size-down", "reduce-transparency", "cursor-blink", "bionic-reading", "weight-visible", "cmd-,"]
         if not self.app.exists(gear):
-            self.stop_phase(sc, "no settings control on screen", SETTINGS_ROWS, fault=True)
+            self.gap("settings", sc, "click gear", "no gear on the bar under the window")
             return
-        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click(gear), lambda a, b: b.get("settings_open") is True, settle=1.5)
+        # A closed tab first, so the gear's own check is the one that opens it.
+        if self.state().get("settings_open"):
+            self.app.key("cmd-w"); time.sleep(0.8)
+        self.check("status-bar-settings", sc, "click the gear", "the Settings tab opens in the strip and comes to front",
+                   lambda: self.app.click(gear),
+                   lambda a, b: b.get("settings_open") is True and b.get("front") == "settings", settle=1.5)
         if not self.state().get("settings_open"):
             self.stop_phase(sc, "the gear did not open settings", SETTINGS_ROWS, fault=True)
             return
-        try:
-            wins = self.app.windows()
-            self.record("windows", sc, "driver windows()", "settings window listed", json.dumps([w.get("kind") for w in wins]), "pass" if any(w.get("kind") == "settings" for w in wins) else "fail")
-            self.app.use_window("settings")
-            found = self.inv("settings-window")
-        except Exception as err:
-            self.stop_phase(sc, f"the driver cannot address the settings surface ({err})", SETTINGS_ROWS, fault=True)
-            self.app.use_window("main"); self.close_second_windows(); return
+        # One window. The whole point of the change is that there is no second
+        # one, so this is asserted rather than assumed.
+        wins = [w.get("kind") for w in self.app.windows()]
+        self.record("windows", sc, "driver windows()", "one window: Settings is a tab, not a window",
+                    json.dumps(wins), "pass" if wins == ["main"] else "fail", self.still("settings-one-window"))
+        found = self.inv("settings")
+        self.record("tab-settings", sc, "the strip with Settings open", "a Settings pill with its own close mark, after the project tabs",
+                    f"pill={'tab-settings' in found} close={'tab-settings-close' in found}",
+                    "pass" if "tab-settings" in found and "tab-settings-close" in found else "fail")
         try:
             secs = self.ids("section-*")
             for s_ in secs:
                 name = s_.rsplit(".", 1)[-1]
-                self.check(name, "settings-window", "click section", "section body changes (element set differs)",
+                self.check(name, "settings", "click section", "section body changes (element set differs)",
                            lambda s_=s_: self.app.click(s_), lambda a, b: (len(self.ids()) > 0 and f"{len(self.ids())} interactive ids in section") or "unverified: nothing listed", settle=0.6)
                 self.inv(f"settings-{name}")
                 for el in self.ids():
                     short = el.rsplit(".", 1)[-1]
-                    if short.startswith("section-") or short in ("settings-body",):
+                    if short.startswith("section-") or short in ("settings-body", "settings-back-to-chat", "tab-settings", "tab-settings-close"):
                         continue
                     if short == "bionic-reading":
-                        # The flag lives in the main window's state; the
-                        # click lands in the settings window.
                         def flag():
-                            self.app.use_window("main")
-                            try:
-                                return self.state().get("bionic_reading")
-                            finally:
-                                self.app.use_window("settings")
+                            return self.state().get("bionic_reading")
                         # F-53: the rig must be able to *see* a weight change,
                         # not just the flag — the bundled Inter carries the
                         # semibold the fixation letters are set in.
                         def prose_pixels():
-                            # The whole main window, with the Settings window's
-                            # rectangle blacked out: every paragraph of prose
-                            # changes weight, so the window as a whole must.
+                            # The chat's prose is behind the Settings tab now,
+                            # so step back to the chat, photograph the window,
+                            # and return to the tab on the section it was on.
+                            # Nothing to mask: there is only one window.
                             def geo(name):
                                 ids = subprocess.run(["xdotool", "search", "--name", name], capture_output=True, text=True, env=ENV).stdout.split()
                                 if not ids:
@@ -1389,82 +1373,71 @@ class Pass:
                             main = geo("^Arbos$")
                             if not main:
                                 return None
-                            self.app.use_window("main")
+                            self.app.key("cmd-1"); time.sleep(0.5)
                             try:
                                 self.app.hover("composer-field"); time.sleep(0.4)
+                                shot = self.outdir / "weight-probe.png"
+                                subprocess.run(["scrot", "-o", str(shot)], env=ENV, check=True)
+                                im = Image.open(shot).convert("L")
+                                x, y, w, h = main
+                                return im.crop((x, y, x + w, y + h))
                             finally:
-                                self.app.use_window("settings")
-                            shot = self.outdir / "weight-probe.png"
-                            subprocess.run(["scrot", "-o", str(shot)], env=ENV, check=True)
-                            im = Image.open(shot).convert("L")
-                            x, y, w, h = main
-                            im = im.crop((x, y, x + w, y + h))
-                            other = geo("Settings")
-                            if other:
-                                ox, oy, ow, oh = other
-                                ImageDraw.Draw(im).rectangle((ox - x, oy - y, ox - x + ow, oy - y + oh), fill=0)
-                            return im
+                                self.app.click("tab-settings"); time.sleep(0.5)
                         plain = prose_pixels()
                         self.app.click(el); time.sleep(0.6); on = flag()
-                        self.record("bionic-reading", "settings-window", "click the toggle on", "bionic_reading true in the driver state", f"bionic_reading={on}", "pass" if on is True else "fail")
+                        self.record("bionic-reading", "settings", "click the toggle on", "bionic_reading true in the driver state", f"bionic_reading={on}", "pass" if on is True else "fail")
                         weighted = prose_pixels()
                         if plain is not None and weighted is not None and plain.size == weighted.size:
                             diff = ImageChops.difference(plain, weighted).tobytes()
                             changed = sum(1 for v in diff if v > 40); total = max(1, plain.size[0] * plain.size[1])
-                            self.record("weight-visible", "settings-window", "compare the main window before/after the toggle (Settings window masked)", "the rig sees the weight change (> 0.2 % of the window's pixels differ)",
+                            self.record("weight-visible", "settings", "compare the chat before/after the toggle (⌘1 out, the pill back in)", "the rig sees the weight change (> 0.2 % of the window's pixels differ)",
                                         f"{changed}/{total} pixels differ ({100.0 * changed / total:.2f} %)", "pass" if changed > 0.002 * total else "fail", self.still("weight-visible"))
                         else:
-                            self.record("weight-visible", "settings-window", "compare prose before/after the toggle", "-", "no prose paragraph on screen to compare", "unverified")
+                            self.record("weight-visible", "settings", "compare prose before/after the toggle", "-", "no prose paragraph on screen to compare", "unverified")
                         self.app.click(el); time.sleep(0.6); off = flag()
-                        self.record("bionic-reading", "settings-window", "click the toggle off again", "bionic_reading false", f"bionic_reading={off}", "pass" if off is False else "fail")
+                        self.record("bionic-reading", "settings", "click the toggle off again", "bionic_reading false", f"bionic_reading={off}", "pass" if off is False else "fail")
                         continue
                     if short in ("key-forget", "config-reveal", "key-paste"):
-                        self.skip(short, "settings-window", "click", "destructive or opens a file manager / pastes clipboard into the key field")
+                        self.skip(short, "settings", "click", "destructive or opens a file manager / pastes clipboard into the key field")
                         continue
                     if short == "commit":
-                        self.skip(short, "settings-window", "click", "opens the commit URL in the system browser (verified once: Chrome opened)")
+                        self.skip(short, "settings", "click", "opens the commit URL in the system browser (verified once: Chrome opened)")
                         continue
                     if short.startswith("provider-"):
-                        self.skip(short, "settings-window", "click", "rewrites config.toml for the rest of the run; selection state is not in the driver dump")
+                        self.skip(short, "settings", "click", "rewrites config.toml for the rest of the run; selection state is not in the driver dump")
                         continue
-                    # The values these controls set live in the main window's
+                    # The values these controls set live in the window's own
                     # state (`appearance`, `reduce_transparency`, `cursor_blink`,
                     # `watch_bounce`, `update_channel`, `text_size`); a model
                     # pick lands in config.toml. Read those, not the click
                     # (rig audit R3, cycle 32: these rows were `unverified`).
-                    def main_state():
-                        self.app.use_window("main")
-                        try:
-                            return self.state()
-                        finally:
-                            self.app.use_window("settings")
                     def settled(el, field, want=None, action="click", changed_ok=False):
-                        a = main_state().get(field)
+                        a = self.state().get(field)
                         self.app.click(el); time.sleep(0.6)
-                        b = main_state().get(field)
+                        b = self.state().get(field)
                         if want is not None:
-                            self.record(short, "settings-window", action, f"{field} == {want!r}", f"{field}: {a!r} → {b!r}", "pass" if b == want else "fail", self.still(short))
+                            self.record(short, "settings", action, f"{field} == {want!r}", f"{field}: {a!r} → {b!r}", "pass" if b == want else "fail", self.still(short))
                         elif changed_ok and b != a:
-                            self.record(short, "settings-window", action, f"{field} changes", f"{field}: {a!r} → {b!r}", "pass", self.still(short))
+                            self.record(short, "settings", action, f"{field} changes", f"{field}: {a!r} → {b!r}", "pass", self.still(short))
                         elif changed_ok:
-                            self.record(short, "settings-window", action, f"{field} changes", f"{field} unchanged at {a!r} (already the selection?)", "unverified", self.still(short))
+                            self.record(short, "settings", action, f"{field} changes", f"{field} unchanged at {a!r} (already the selection?)", "unverified", self.still(short))
                         return a, b
                     def flips(el, field):
-                        a = main_state().get(field)
+                        a = self.state().get(field)
                         self.app.click(el); time.sleep(0.5)
-                        mid = main_state().get(field)
+                        mid = self.state().get(field)
                         self.app.click(el); time.sleep(0.5)
-                        b = main_state().get(field)
+                        b = self.state().get(field)
                         ok = isinstance(a, bool) and mid == (not a) and b == a
-                        self.record(short, "settings-window", "click toggle twice", f"{field} flips and flips back", f"{field}: {a!r} → {mid!r} → {b!r}", "pass" if ok else "fail", self.still(short))
+                        self.record(short, "settings", "click toggle twice", f"{field} flips and flips back", f"{field}: {a!r} → {mid!r} → {b!r}", "pass" if ok else "fail", self.still(short))
                     if short.startswith("model-pick-"):
                         cfg = self.xdg / "arbos" / "config.toml"
                         line = lambda: next((l.strip() for l in cfg.read_text().splitlines() if l.strip().startswith("model")), None) if cfg.exists() else None
                         a = line(); self.app.click(el); time.sleep(0.6); b = line()
                         if b is not None and b != a:
-                            self.record(short, "settings-window", "click", "config.toml's model line changes to the pick", f"{a} → {b}", "pass", self.still(short))
+                            self.record(short, "settings", "click", "config.toml's model line changes to the pick", f"{a} → {b}", "pass", self.still(short))
                         else:
-                            self.record(short, "settings-window", "click", "config.toml's model line changes to the pick", f"model line unchanged: {b} (already the pick?)", "unverified", self.still(short))
+                            self.record(short, "settings", "click", "config.toml's model line changes to the pick", f"model line unchanged: {b} (already the pick?)", "unverified", self.still(short))
                         continue
                     if short.startswith("appearance-"):
                         settled(el, "appearance", changed_ok=True)
@@ -1479,22 +1452,47 @@ class Pass:
                         a, b = settled(el, "text_size", changed_ok=True)
                         if isinstance(a, (int, float)) and isinstance(b, (int, float)) and b != a:
                             grew = b > a
-                            self.record(short, "settings-window", "direction", "+ grows, − shrinks", f"{a} → {b}", "pass" if grew == (short == "size-up") else "fail")
+                            self.record(short, "settings", "direction", "+ grows, − shrinks", f"{a} → {b}", "pass" if grew == (short == "size-up") else "fail")
                         continue
                     if short in ("reduce-transparency", "cursor-blink"):
                         flips(el, short.replace("-", "_"))
                         continue
                     if short in ("commit", "meter"):
-                        self.check(short, "settings-window", "click", "copies / no-op", lambda el=el: self.app.click(el), None)
+                        self.check(short, "settings", "click", "copies / no-op", lambda el=el: self.app.click(el), None)
                         continue
-                    self.check(short, "settings-window", "click", "no error", lambda el=el: self.app.click(el), None)
+                    self.check(short, "settings", "click", "no error", lambda el=el: self.app.click(el), None)
         except Exception as err:
-            self.record("settings-window", sc, "walk controls", "-", f"{type(err).__name__}: {err}", "fail")
-        finally:
-            self.app.use_window("main")
-            self.close_second_windows()
-        self.check("cmd-,", sc, "cmd-, from the main window", "settings_open true", lambda: self.app.key("cmd-,"), lambda a, b: b.get("settings_open") is True, settle=1.5)
-        self.close_second_windows()
+            self.record("settings", sc, "walk controls", "-", f"{type(err).__name__}: {err}", "fail")
+        self.phase_settings_ways_out()
+
+    def phase_settings_ways_out(self) -> None:
+        """Every route out of the Settings tab, driven one at a time. Jacob has
+        been stuck in a full-width surface before — he opened the Project page
+        and could not close it — so each of these is a check, not a comment."""
+        sc = "settings"
+        if not self.state().get("settings_open"):
+            self.app.key("cmd-,"); time.sleep(1.2)
+        if not self.state().get("settings_open"):
+            self.gap("settings-ways-out", sc, "cmd-,", "the Settings tab would not open")
+            return
+        chat = lambda b: b.get("front") == "project" and b.get("settings_open") is True
+        self.check("settings-escape", sc, "Escape with the Settings tab in front", "back to the chat; the tab stays in the strip",
+                   lambda: self.app.key("escape"), lambda a, b: chat(b), settle=1.0)
+        self.check("tab-settings", sc, "click the Settings pill again", "Settings comes forward on the section it was left on",
+                   lambda: self.app.click("tab-settings"), lambda a, b: b.get("front") == "settings", settle=1.0)
+        self.check("cmd-1", sc, "⌘1 with the Settings tab in front", "back to the chat; the tab stays",
+                   lambda: self.app.key("cmd-1"), lambda a, b: chat(b), settle=1.0)
+        self.check("settings-back-to-chat", sc, "the rail's Back to chat row", "back to the chat, without a chord",
+                   lambda: (self.app.click("tab-settings"), time.sleep(0.6), self.app.click("settings-back-to-chat")),
+                   lambda a, b: chat(b), settle=1.0)
+        self.check("tab-settings-close", sc, "the pill's close mark", "the tab leaves the strip; the composer has the keyboard",
+                   lambda: (self.app.click("tab-settings"), time.sleep(0.6), self.app.click("tab-settings-close")),
+                   lambda a, b: b.get("settings_open") is False and b.get("front") == "project" and b["composer"]["focused"], settle=1.2)
+        self.check("cmd-,", sc, "⌘, from the chat", "the Settings tab opens and comes to front",
+                   lambda: self.app.key("cmd-,"), lambda a, b: b.get("settings_open") is True and b.get("front") == "settings", settle=1.5)
+        self.check("settings-cmd-w", sc, "⌘W with the Settings tab in front", "the tab closes and the project tab is untouched",
+                   lambda: self.app.key("cmd-w"),
+                   lambda a, b: b.get("settings_open") is False and len(b["projects"]) == len(a["projects"]), settle=1.2)
 
     def phase_world(self, kernel: str) -> None:
         """After-failure states — what the window says when the world outside

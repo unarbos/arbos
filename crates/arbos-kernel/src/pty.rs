@@ -45,15 +45,23 @@ impl PtyHub {
     }
 
     /// Start a shell the Mac pane can attach to (`PtyIn` agent `root`).
-    /// `owner` is the agent that asked; it gets the close when the shell ends.
-    pub fn spawn_shell(&self, page: &str, cwd: &std::path::Path, owner: &str) -> Result<u32> {
+    /// `owner` is the agent the row docks under; it gets the close when the
+    /// shell ends. `by` is who asked for it — `user` or `agent` — and rides
+    /// on that close, so the window can pair it with the open.
+    pub fn spawn_shell(
+        &self,
+        page: &str,
+        cwd: &std::path::Path,
+        owner: &str,
+        by: &str,
+    ) -> Result<u32> {
         let frames = self
             .out
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| anyhow!("pty hub not bound"))?;
-        self.open("root", page, cwd, frames, Some(owner))
+        self.open("root", page, cwd, frames, Some((owner, by)))
     }
 
     pub fn open(
@@ -62,7 +70,7 @@ impl PtyHub {
         page: &str,
         cwd: &std::path::Path,
         frames: mpsc::UnboundedSender<Frame>,
-        owner: Option<&str>,
+        owner: Option<(&str, &str)>,
     ) -> Result<u32> {
         let pair = NativePtySystem::default().openpty(PtySize {
             rows: 32,
@@ -95,7 +103,7 @@ impl PtyHub {
         );
         let agent = agent.to_string();
         let page = page.to_string();
-        let owner = owner.map(str::to_string);
+        let owner = owner.map(|(o, by)| (o.to_string(), by.to_string()));
         let pages = Arc::clone(&self.inner);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -119,7 +127,7 @@ impl PtyHub {
             // EOF: the shell is gone. Forget the page so a later write
             // starts a fresh one, and tell the desktop to drop the row.
             pages.lock().unwrap().remove(&key);
-            if let Some(owner) = owner {
+            if let Some((owner, by)) = owner {
                 let _ = frames.send(Frame::Board {
                     owner,
                     action: "close".into(),
@@ -128,6 +136,7 @@ impl PtyHub {
                     cwd: None,
                     title: None,
                     url: None,
+                    by,
                 });
             }
         });

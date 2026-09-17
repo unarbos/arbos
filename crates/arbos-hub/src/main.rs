@@ -145,7 +145,11 @@ async fn handle(
                 ),
             )
             .await;
-            let _ = futures_util::SinkExt::close(&mut ws).await;
+            // The same wait every other refusal gets (#344, #417): a close in
+            // the same instant reaches the peer through cloudflared as a bare
+            // close with no reason — observed on 2026-09-17 for exactly this
+            // path while every authenticated refusal arrived with its text.
+            hub::refuse_close(&mut ws).await;
             return Ok(());
         }
         return http::respond(&mut stream, 401, "text/plain", "token required\n").await;

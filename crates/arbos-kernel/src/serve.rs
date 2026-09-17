@@ -189,7 +189,11 @@ impl HeldRecord {
 /// How long the holder has had the place, with no record at all: the
 /// lock file is written by the holder when it takes the lock.
 fn held_since_lock(place: &Place) -> Option<i64> {
-    let modified = std::fs::metadata(place.lock_path()).ok()?.modified().ok()?;
+    let modified = place
+        .lock_paths()
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+        .max()?;
     Some(modified.elapsed().ok()?.as_secs() as i64)
 }
 
@@ -198,10 +202,7 @@ fn held_since_lock(place: &Place) -> Option<i64> {
 /// escalation after `HELD_ESCALATE_SECS`, and otherwise nothing at all.
 fn say_held(place: &Place, wait_secs: u64) {
     let now = arbos_core::now_ms();
-    let holder_pid = std::fs::read_to_string(place.lock_path())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let holder_pid = PlaceLock::holder_pid(place).unwrap_or(0);
     let mut rec = match HeldRecord::load(place) {
         Some(r) if r.holder_pid == holder_pid => r,
         _ => HeldRecord {
@@ -297,9 +298,7 @@ fn say_held(place: &Place, wait_secs: u64) {
 /// whether it is alive, which build it runs (kernel.json), whether its
 /// file has been replaced under it (a stale image), and its url.
 fn describe_holder(place: &Place) -> String {
-    let pid = std::fs::read_to_string(place.lock_path())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok());
+    let pid = PlaceLock::holder_pid(place);
     let Some(pid) = pid else {
         return "a holder whose pid the lock file does not say".to_string();
     };
@@ -745,7 +744,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // appended since the last one.
     let mut tails: std::collections::HashMap<String, TranscriptTail> =
         std::collections::HashMap::new();
-    shutdown_backstop(place.lock_path());
+    shutdown_backstop(place.lock_paths().to_vec());
     // How far each detached job's journal has been streamed (`agent/jN` →
     // bytes, and whether its final frame went out).
     let mut offsets: std::collections::HashMap<String, (u64, bool)> =
@@ -973,8 +972,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                         idle::Verdict::Idle
                     )
                 {
-                    reexec_backoff_until = arbos_core::now_ms() + REEXEC_RETRY_MS;
-                    reexec_onto_new_binary(&place, &hooks);
+                    // A new file still being written (the app's swap is a
+                    // directory rename, then a copy; an installer streams
+                    // the binary) is not a failed restart: look again in
+                    // a moment. Only an exec that returned an error waits
+                    // the full minute. A restart that missed its window
+                    // by a few milliseconds used to wait sixty seconds
+                    // for it (binary_gone_e2e red one run in six).
+                    reexec_backoff_until = arbos_core::now_ms()
+                        + match reexec_onto_new_binary(&place, &hooks) {
+                            Reexec::NotReady => REEXEC_LOOK_AGAIN_MS,
+                            Reexec::Failed => REEXEC_RETRY_MS,
+                        };
                 }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
@@ -1046,6 +1055,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: Some(job.meta.cwd.display().to_string()),
                             title: Some(job.meta.command.replace('\n', " ")),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                     }
                     // Output streams for every job, attached or detached:
@@ -1071,6 +1081,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: None,
                             title: Some(job.status_line()),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                         let text = format!(
                             "job {} {} — `{}` — log: {}",
@@ -1657,11 +1668,12 @@ fn handle_frame(
                 .unwrap_or_else(|| place.path.clone());
             // The mark must be the last turn's: its start line is the
             // last checkpoint's (qal-j10).
-            let turn_line = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
+            let last = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
                 .last()
-                .map(|cp| cp.line)
-                .unwrap_or(0);
-            match arbos_engine::git::undo(&cwd, turn_line) {
+                .cloned();
+            let turn_line = last.as_ref().map(|cp| cp.line).unwrap_or(0);
+            let turn_ts = last.as_ref().map(|cp| cp.ts);
+            match arbos_engine::git::undo(&cwd, turn_line, turn_ts) {
                 Ok(out) => klog::info("undo", Some(&agent), arbos_core::text::clip(&out.body, 200)),
                 Err(e) => refuse(hooks, Some(&agent), format!("undo: {e:#}")),
             }
@@ -1783,6 +1795,60 @@ fn handle_frame(
                 let _ = ptys.write(&agent, &page, &bytes);
             }
         }
+        Frame::Shell { owner, cwd } => {
+            // A person's own shell, asked for from a window: the same
+            // `PtyHub` shell the `terminal` tool mints, announced with
+            // `by: user` so the drawer opens for it.
+            let owner = owner.unwrap_or_else(|| "root".to_string());
+            if !arbos_core::agent_exists(place, &owner) {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: no agent {owner:?} in this place"),
+                );
+                return;
+            }
+            let dir = match cwd.as_deref().filter(|c| !c.trim().is_empty()) {
+                Some(c) => {
+                    let p = std::path::PathBuf::from(c);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        place.path.join(p)
+                    }
+                }
+                None => place.path.clone(),
+            };
+            if !dir.is_dir() {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: {} is not a directory", dir.display()),
+                );
+                return;
+            }
+            let id = ptys.next_id();
+            match ptys.spawn_shell(&id, &dir, &owner, "user") {
+                Ok(_) => {
+                    klog::info(
+                        "shell_opened",
+                        Some(&owner),
+                        format!("{id} in {}", dir.display()),
+                    );
+                    hooks.broadcast(Frame::Board {
+                        owner,
+                        action: "open".into(),
+                        panel: "terminal".into(),
+                        terminal_ids: vec![id],
+                        cwd: Some(dir.display().to_string()),
+                        title: None,
+                        url: None,
+                        by: "user".into(),
+                    });
+                }
+                Err(e) => refuse(hooks, Some(&owner), format!("shell: {e:#}")),
+            }
+        }
         _ => {}
     }
 }
@@ -1792,7 +1858,7 @@ fn handle_frame(
 /// if the loop has not returned a few seconds later, drop the lock file
 /// (the `PlaceLock` guard would have) and exit, rather than leave a kernel
 /// the user cannot stop.
-fn shutdown_backstop(lock_path: std::path::PathBuf) {
+fn shutdown_backstop(lock_paths: Vec<std::path::PathBuf>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
         let (Ok(mut int), Ok(mut term)) = (
@@ -1807,7 +1873,9 @@ fn shutdown_backstop(lock_path: std::path::PathBuf) {
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("arbos-kernel: serve loop did not stop within 5s of the signal; exiting");
-        let _ = std::fs::remove_file(&lock_path);
+        for p in &lock_paths {
+            let _ = std::fs::remove_file(p);
+        }
         std::process::exit(130);
     });
 }
@@ -2728,27 +2796,67 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
 /// about to fire is a reason to wait), and how long between attempts.
 const REEXEC_HORIZON_MS: i64 = 60_000;
 const REEXEC_RETRY_MS: i64 = 60_000;
+/// How soon to look again when the new file was not there or was still
+/// being written.
+const REEXEC_LOOK_AGAIN_MS: i64 = 2_000;
+
+/// Why a re-exec did not happen (a successful one never returns).
+enum Reexec {
+    /// No usable new file yet, or one whose bytes were still changing.
+    NotReady,
+    /// `execv` itself returned an error; the old image serves on.
+    Failed,
+}
 
 /// Replace this process with the arbos-kernel now at its own path, same
 /// arguments, same environment. Returns only when the exec failed — the
 /// old image then serves on. Set `ARBOS_NO_REEXEC=1` to keep a kernel on
 /// its old image (a test of the notice alone, or a person who wants to
 /// choose the moment).
-fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
+fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) -> Reexec {
     if std::env::var_os("ARBOS_NO_REEXEC").is_some() {
-        return;
+        return Reexec::NotReady;
     }
     let chosen = match crate::binary::kernel_binary() {
         Ok(c) => c,
         Err(e) => {
-            klog::warn(
-                "reexec_failed",
+            klog::info(
+                "reexec_wait",
                 None,
-                format!("no binary to restart onto: {e:#}"),
+                format!("no binary to restart onto yet: {e:#}; looking again"),
             );
-            return;
+            return Reexec::NotReady;
         }
     };
+    // The file must be whole and at rest: the same size and mtime across
+    // a short pause, executable, and not this process's own image.
+    let settled = {
+        let first = arbos_core::binary_identity::of(&chosen.path);
+        std::thread::sleep(Duration::from_millis(250));
+        let second = arbos_core::binary_identity::of(&chosen.path);
+        match (first, second) {
+            (Some(a), Some(b))
+                if a == b
+                    && std::fs::metadata(&chosen.path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    };
+    if !settled {
+        klog::info(
+            "reexec_wait",
+            None,
+            format!(
+                "{} is still being written or is not there; looking again",
+                chosen.path.display()
+            ),
+        );
+        return Reexec::NotReady;
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     klog::info(
         "reexec",
@@ -2782,6 +2890,7 @@ fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
             format!("{}: {err}; the old image serves on", chosen.path.display()),
         );
     }
+    Reexec::Failed
 }
 
 /// A running turn that has shown nothing for [`crate::hooks::stall_secs`] gets
