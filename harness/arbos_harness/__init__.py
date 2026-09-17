@@ -12,9 +12,9 @@ custom OpenAI-compatible provider, so the trace verifiers records is the sample.
 
 `--env.agent.runtime.block '["*"]'` leaves the container only the interception
 route. Without it the docker runtime uses the host network, and the agent can
-`pip download` the release that already carries the fix: 6 of 35 rollouts did in
-one SWE-bench regression run (cycle 11 of the loop), all six graded solved. The
-`arbos_egress_open` metric records which rollouts ran open.
+`pip download` the release that already carries the fix: in the SWE-bench loop's
+cycle-10 baseline run 6 of 35 rollouts did, all six graded solved; in cycle 11,
+8 of 29. The `arbos_egress_open` metric records which rollouts ran open.
 """
 
 from __future__ import annotations
