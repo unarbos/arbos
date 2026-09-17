@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -84,18 +84,85 @@ impl Checkpoint {
     }
 }
 
+/// Why a fresh checkpoint has no tree yet: its working-tree commit is
+/// being made on the blocking pool. A `files: true` rewind that lands in
+/// that window is refused with this rather than guessed.
+pub const TREE_PENDING: &str =
+    "the working tree for this turn is still being saved; try again in a moment";
+
 /// Record where a turn starts: the plain HEAD mark `undo` uses, plus a
 /// checkpoint of the working tree for `rewind`. Runs on the blocking pool.
+/// The record and the tree, in one call; the turn itself uses the two
+/// halves below so the record is on disk before the turn goes on.
 pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Result<()> {
+    if let Some(cp) = snapshot_turn_record(cwd, agent_dir, agent, line)? {
+        snapshot_turn_tree(cwd, agent_dir, agent, &cp)?;
+    }
+    Ok(())
+}
+
+/// The cheap half, done **before the turn goes on**: the undo mark
+/// cleared and set to HEAD, and the checkpoint line appended with HEAD
+/// and the turn's line, its tree marked pending. `rewind turn N`
+/// resolves to the checkpoint on or before the Nth user line; when this
+/// record was written on the blocking pool after the turn had started,
+/// a rewind that landed first resolved to the *previous* turn's
+/// checkpoint and cut one turn too many — down to an empty transcript
+/// when the previous turn was the first (`standing_pass_e2e`, red under
+/// load for days; a person pressing Rewind right after a turn on a busy
+/// machine). None when the folder is not a git repository or has no
+/// HEAD: nothing to rewind to.
+pub fn snapshot_turn_record(
+    cwd: &Path,
+    agent_dir: &Path,
+    agent: &str,
+    line: u64,
+) -> Result<Option<Checkpoint>> {
     snapshot(cwd)?;
     if !cwd.join(".git").exists() {
-        return Ok(());
+        return Ok(None);
     }
     let head = git_out(cwd, &["rev-parse", "HEAD"]).unwrap_or_default();
     if head.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
-    let (work, clean, work_error) = match work_commit(cwd, &head) {
+    let cp = Checkpoint {
+        line,
+        ts: arbos_core::now_ms(),
+        head,
+        work: None,
+        clean: false,
+        work_error: Some(TREE_PENDING.to_string()),
+    };
+    let path = agent_dir.join("checkpoints.jsonl");
+    let mut text = serde_json::to_string(&cp)?;
+    text.push('\n');
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?
+        .write_all(text.as_bytes())
+        .with_context(|| format!("append {}", path.display()))?;
+    let _ = agent;
+    Ok(Some(cp))
+}
+
+/// The expensive half, on the blocking pool while the turn runs: the
+/// working-tree commit (`git add -A` into a scratch index), the ref, the
+/// undo mark with the tree, and the checkpoint line rewritten with what
+/// was found. A line the meantime removed (a rewind cut it) is left
+/// removed.
+pub fn snapshot_turn_tree(
+    cwd: &Path,
+    agent_dir: &Path,
+    agent: &str,
+    cp: &Checkpoint,
+) -> Result<()> {
+    let line = cp.line;
+    let head = &cp.head;
+    let (work, clean, work_error) = match work_commit(cwd, head) {
         Ok(Some(w)) => (Some(w), false, None),
         Ok(None) => (None, true, None),
         Err(why) => {
@@ -128,25 +195,98 @@ pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Re
         (None, true, _) => "clean".to_string(),
         (None, false, why) => format!("error:{}", why.as_deref().unwrap_or("unknown")),
     };
-    let _ = std::fs::write(&mark, format!("{head}\n{second}\n"));
-    let cp = Checkpoint {
+    let _ = std::fs::write(
+        &mark,
+        format!(
+            "{head}
+{second}
+"
+        ),
+    );
+    let filled = Checkpoint {
         line,
-        ts: arbos_core::now_ms(),
-        head,
+        ts: cp.ts,
+        head: head.clone(),
         work,
         clean,
         work_error,
     };
+    // The filled record on its own first (`checkpoints.d/<line>.json`),
+    // whole or not at all: a rewind that resolved the pending record and
+    // cut the line meanwhile reads the tree from here once it lands.
+    atomic_write(
+        &tree_sidecar(agent_dir, line),
+        serde_json::to_string(&filled)?.as_bytes(),
+    )?;
+    // Then this turn's line rewritten with the tree; a confirmed read,
+    // whole or not at all.
     let path = agent_dir.join("checkpoints.jsonl");
-    let mut text = serde_json::to_string(&cp)?;
-    text.push('\n');
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?
-        .write_all(text.as_bytes())?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
+    };
+    let mut out = String::new();
+    let mut seen = false;
+    for l in text.lines() {
+        match serde_json::from_str::<Checkpoint>(l) {
+            Ok(existing) if existing.line == line && existing.head == filled.head => {
+                out.push_str(&serde_json::to_string(&filled)?);
+                seen = true;
+            }
+            _ => out.push_str(l),
+        }
+        out.push('\n');
+    }
+    if seen {
+        atomic_write(&path, out.as_bytes())?;
+    }
     Ok(())
+}
+
+/// Write whole or not at all: a sibling temp file renamed over `path`.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().context("file has no parent folder")?;
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(
+        ".{}.tmp-{}",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
+}
+
+/// Where a turn's filled checkpoint waits for a rewind that resolved it
+/// while its tree was still being saved.
+pub fn tree_sidecar(agent_dir: &Path, line: u64) -> std::path::PathBuf {
+    agent_dir.join("checkpoints.d").join(format!("{line}.json"))
+}
+
+/// A checkpoint whose tree was pending when it was read: the filled
+/// record, waited for up to `wait` (the save runs on the blocking pool
+/// and takes what `git add -A` takes on the repository), or the pending
+/// one back when it does not land — the caller refuses with
+/// [`TREE_PENDING`] then. A checkpoint that already knows its tree, or
+/// whose save failed for another reason, comes straight back.
+pub fn settle_tree(agent_dir: &Path, cp: &Checkpoint, wait: std::time::Duration) -> Checkpoint {
+    if cp.work_error.as_deref() != Some(TREE_PENDING) {
+        return cp.clone();
+    }
+    let sidecar = tree_sidecar(agent_dir, cp.line);
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&sidecar)
+            && let Ok(filled) = serde_json::from_str::<Checkpoint>(&text)
+            && filled.head == cp.head
+        {
+            return filled;
+        }
+        if std::time::Instant::now() >= deadline {
+            return cp.clone();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// The identity an internal checkpoint commit is written under. It is
@@ -178,8 +318,36 @@ fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
     if index.exists() {
         std::fs::copy(&index, &scratch).map_err(|e| format!("copy the index: {e}"))?;
     }
+    // `.arbos/` is kept out of the add by an excludes file of our own —
+    // the user's global excludes plus `/.arbos/` — rather than a pathspec:
+    // `:!.arbos` makes `add` fail when `.arbos` is *also* ignored by the
+    // project ("paths are ignored by one of your .gitignore files"), and
+    // no exclusion at all makes it fail when it is *not* ignored, since
+    // the store is a git repository of its own that may have no commit
+    // yet ("does not have a commit checked out; adding files failed").
+    // The second sank every tree save in a fresh place whose project
+    // repository did not ignore the store yet (found by the standing
+    // pass under load).
+    let excludes = cwd
+        .join(".arbos")
+        .join(format!("index-scratch-excludes-{}", std::process::id()));
+    {
+        let mut text = git_out(cwd, &["config", "--get", "core.excludesFile"])
+            .filter(|p| !p.is_empty())
+            .map(|p| std::path::PathBuf::from(shellexpand_home(&p)))
+            .or_else(default_global_excludes)
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str("/.arbos/\n");
+        std::fs::write(&excludes, text).map_err(|e| format!("write the excludes file: {e}"))?;
+    }
     let run = |args: &[&str]| -> Result<String, String> {
         let out = Command::new("git")
+            .arg("-c")
+            .arg(format!("core.excludesFile={}", excludes.display()))
             .args(args)
             .env("GIT_INDEX_FILE", &scratch)
             .envs(CHECKPOINT_IDENTITY.iter().copied())
@@ -197,9 +365,18 @@ fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
         }
     };
     let result = (|| {
+        // `.arbos/` is excluded at the add: it is the agent's own state,
+        // never part of the project's checkpoint — and it is a git
+        // repository of its own (the F design's Phase 1), which `add -A`
+        // refuses outright when it has no commit yet ("does not have a
+        // commit checked out; adding files failed"). A place whose
+        // project repository does not yet ignore the store (a fresh
+        // place, `git init` run by the agent in its first turn) lost
+        // every tree save to that until the next kernel start wrote the
+        // exclude; found by the standing pass under load.
         run(&["add", "-A", "--", "."])?;
-        // `.arbos/` is the agent's own state, never part of the project's
-        // checkpoint; it is dropped from the scratch index when not ignored.
+        // And dropped from the scratch index if an earlier plain `add`
+        // had taken it.
         let _ = run(&[
             "rm",
             "-r",
@@ -218,7 +395,35 @@ fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
         run(&["commit-tree", &tree, "-p", head, "-m", "arbos checkpoint"]).map(Some)
     })();
     let _ = std::fs::remove_file(&scratch);
+    let _ = std::fs::remove_file(&excludes);
     result
+}
+
+/// `~/x` → `$HOME/x`, as git reads `core.excludesFile`.
+fn shellexpand_home(p: &str) -> String {
+    match p.strip_prefix("~/") {
+        Some(rest) => match std::env::var("HOME") {
+            Ok(home) => format!("{home}/{rest}"),
+            Err(_) => p.to_string(),
+        },
+        None => p.to_string(),
+    }
+}
+
+/// Where git looks for global excludes when `core.excludesFile` is unset:
+/// `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`.
+fn default_global_excludes() -> Option<std::path::PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(std::path::PathBuf::from(xdg).join("git").join("ignore"));
+    }
+    std::env::var("HOME").ok().map(|h| {
+        std::path::PathBuf::from(h)
+            .join(".config")
+            .join("git")
+            .join("ignore")
+    })
 }
 
 fn git_out(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -1063,6 +1268,50 @@ mod tests {
         let out = undo(&dir).unwrap();
         assert!(out.body.starts_with("restored "), "{}", out.body);
         assert!(!dir.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The record lands before the tree: a rewind between the two finds
+    /// this turn's checkpoint (pending, refused for files), never the
+    /// previous turn's.
+    #[test]
+    fn the_checkpoint_record_is_on_disk_before_its_tree_and_is_filled_in_after() {
+        let dir = identityless_repo("record-first");
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(dir.join("f1.txt"), "first\n").unwrap();
+        let cp = snapshot_turn_record(&dir, &agent_dir, "root", 9)
+            .unwrap()
+            .expect("a git repository with a HEAD");
+        let on_disk = checkpoints(&agent_dir);
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].line, 9);
+        assert!(!on_disk[0].knows_tree(), "pending, not guessed");
+        assert_eq!(on_disk[0].work_error.as_deref(), Some(TREE_PENDING));
+        let err = restore(&dir, &on_disk[0]).unwrap_err();
+        assert!(
+            err.to_string().contains("no checkpoint of the working tree"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("still being saved"), "{err}");
+        assert!(dir.join("f1.txt").exists());
+        // The undo mark is HEAD alone until the tree lands: `undo` refuses.
+        let mark = std::fs::read_to_string(dir.join(".arbos/runtime/checkpoint")).unwrap();
+        assert_eq!(mark.lines().count(), 1, "{mark}");
+
+        snapshot_turn_tree(&dir, &agent_dir, "root", &cp).unwrap();
+        let on_disk = checkpoints(&agent_dir);
+        assert_eq!(
+            on_disk.len(),
+            1,
+            "filled in place, not appended: {on_disk:?}"
+        );
+        assert_eq!(on_disk[0].line, 9);
+        assert!(on_disk[0].work.is_some() && on_disk[0].work_error.is_none());
+        // The undo mark now carries the tree (HEAD, then the work commit).
+        let mark = std::fs::read_to_string(dir.join(".arbos/runtime/checkpoint")).unwrap();
+        assert_eq!(mark.lines().count(), 2, "{mark}");
+        assert_eq!(mark.lines().nth(1), on_disk[0].work.as_deref(), "{mark}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
