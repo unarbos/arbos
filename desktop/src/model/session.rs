@@ -603,6 +603,15 @@ pub struct ChatSession {
     /// worker is live (#366). Runtime only; the kernel clears it the
     /// moment no worker is live.
     pub waiting: Option<String>,
+    /// The agent set its `status` while a worker of its was live: the step
+    /// is about the workers, and goes when the last of them finishes —
+    /// "Waiting on three sorting workers" stood over three Done lines for
+    /// minutes (Jacob's report 2026-09-17-6; #432's author handed the
+    /// drawing here). Runtime only.
+    status_over_workers: bool,
+    /// The attached command this chat has running as a job, by title —
+    /// set by the workspace before a draw, like `children`. Runtime only.
+    pub running_job: Option<String>,
     /// When each running tool call began, by call id, so its finished
     /// item can say how long it took.
     tool_started: HashMap<String, Instant>,
@@ -741,6 +750,8 @@ impl ChatSession {
             kickoff_wanted: false,
             status: None,
             waiting: None,
+            status_over_workers: false,
+            running_job: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -835,6 +846,8 @@ impl ChatSession {
             kickoff_wanted: false,
             status: None,
             waiting: None,
+            status_over_workers: false,
+            running_job: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -929,6 +942,8 @@ impl ChatSession {
             kickoff_wanted: false,
             status: None,
             waiting: None,
+            status_over_workers: false,
+            running_job: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -1555,6 +1570,17 @@ impl ChatSession {
             && !self.queue.is_empty()
     }
 
+    /// The workers this status was about have all finished: the status
+    /// goes. Called by the workspace with the children's current states
+    /// before a draw; the flag is set when a `status` lands while a child
+    /// is working.
+    pub fn settle_status_over_workers(&mut self, any_working: bool) {
+        if self.status_over_workers && !any_working && !self.children.is_empty() {
+            self.status = None;
+            self.status_over_workers = false;
+        }
+    }
+
     /// Whether the newest notice already says the place is gone — one
     /// line per disappearance, however many lines are typed into it.
     pub fn has_place_gone_notice(&self) -> bool {
@@ -1657,6 +1683,9 @@ impl ChatSession {
     /// coordinator itself sat in `sleep 75`; the line that was true was
     /// "Running sleep 75; echo waited".
     pub fn live_status(&self) -> Option<String> {
+        if let Some(job) = &self.running_job {
+            return Some(step_label(&format!("bash {job}")));
+        }
         for item in self.items.iter().rev() {
             if let ChatItem::Tool { label, status, .. } = item {
                 if label.split_whitespace().next() == Some("status") {
@@ -1748,7 +1777,11 @@ fn step_label(label: &str) -> String {
 impl ChatSession {
     /// The state a parent shows for this chat.
     pub fn child_state(&self) -> ChildState {
-        if self.busy() {
+        // "Working" is drawn from something: frames on a live socket, a
+        // tool this window saw start, or the kernel's own activity list —
+        // never a flag alone on a chat nothing is attached to (F-137).
+        let evidence = self.live() || self.has_running_tool() || !self.live.is_empty();
+        if self.busy() && evidence {
             ChildState::Working
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking
@@ -3366,9 +3399,26 @@ impl ChatSession {
             }
             Event::Status(text) => {
                 let text = text.trim().to_string();
+                self.status_over_workers = self.waiting.is_some()
+                    || self
+                        .children
+                        .iter()
+                        .any(|child| matches!(child.state, ChildState::Working));
                 self.status = (!text.is_empty()).then_some(text);
             }
-            Event::Waiting(line) => self.waiting = line,
+            Event::Waiting(line) => {
+                // The kernel clears its waiting line the moment no worker
+                // is live: a status the agent set over its workers has
+                // lost its subject and goes with it. The kernel's own
+                // derived steps (a checkpoint being saved) arrive as
+                // status too and are told apart by nothing here — they
+                // never outlive what they describe on the kernel's side.
+                if line.is_none() && self.waiting.is_some() && self.status_over_workers {
+                    self.status = None;
+                    self.status_over_workers = false;
+                }
+                self.waiting = line;
+            }
             Event::TurnEndedAt(ended) => {
                 // The turn read back is the newest opener's: a prompt, or a
                 // wake — a worker's whole first turn opens on its `plan`

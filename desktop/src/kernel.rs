@@ -3704,6 +3704,31 @@ pub fn agent_flags(place: &Place, id: &str) -> Option<(bool, Option<String>)> {
     Some((front.readonly, front.kind))
 }
 
+/// The kernel's own word on who an agent belongs to, from its `agent.md`
+/// (live or archived): `None` when the kernel has no record of the agent
+/// at all, `Some(None)` for a parentless chat, `Some(Some(parent))` for a
+/// worker. The window's session file is a cache of this, never the source
+/// (F-137: a parentless `chat-…` the panel had adopted under root drew as
+/// "Delegate 1" for two days). Remote places have no file to read and
+/// answer `None`; their roster is the record there.
+pub fn agent_parent(place: &Place, id: &str) -> Option<Option<String>> {
+    if place.host.is_some() || !safe_session_id(id) {
+        return None;
+    }
+    let store = place.path.join(".arbos");
+    let md = [
+        store.join("agents").join(id).join("agent.md"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(id)
+            .join("agent.md"),
+    ]
+    .into_iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())?;
+    Some(agent_front(&md).parent)
+}
+
 pub fn agent_brief(place: &Place, id: &str) -> Option<String> {
     if place.host.is_some() || !safe_session_id(id) {
         return None;
