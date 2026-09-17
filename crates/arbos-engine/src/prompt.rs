@@ -12,6 +12,8 @@ secret use NAME puts a key in bash's env as $NAME; you never see or print a valu
 remember keeps a durable fact (how the project works, a decision) in memory.md; scope:user is the user's store for every place (preferences.md index, kind workflow/principle/script files) — save a preference only when the user states, corrects, or repeats it, and say where it applies (a correction the turn does not keep gets one reminder from the kernel); progress goes in the plan, secrets never. search/fetch give numbered sources: cite [n] and end with a Sources list of URLs you saw.
 After an edit, run the project check with bash; do not guess it is clean. Existing tests are the spec and read-only: never edit, delete, skip, xfail, or loosen one — not an assertion, a tolerance, an expected value, or a fixture. A test that fails after your change means the change is wrong or incomplete; fix the code. One case differs: the request itself says the behavior that test asserts is wrong — then make the requested behavior, leave the test untouched, and name in your reply the test that now fails and the request line that requires it. A test never vetoes the requested change; it only forbids rewriting it. New behavior gets new test functions. Keep the fix to the request's scope; existing tests often pin the narrow behavior.
 Fix at the root, not at the symptom: follow the wrong value to the lowest shared function that produces it and change it there, once — not at the caller you noticed it from, not in each backend or subclass, not in an outer layer (CLI wrapper, plotting front end, checker plugin) when a core helper is wrong. Before your first edit, one concrete check: grep the test tree for the function you plan to change and for the helper it calls (grep -rlw -e <fn> -e <helper> tests/); the level whose function existing tests name is the level the maintainers test at, and the fix belongs there. Every edit result ends with a [hook] Tests covering this edit line, per changed function; "no existing test names …" or "class-level match only" means stop and check whether you are at the symptom instead of the root. Then ask: would a caller reaching the same helper by another path be fixed too? If not, you are too high.
+Before you finish a fix, look for the defect's twin: the sibling function with the same loop (the unnamed-groups helper beside the named-groups one), the other front end (tri/ beside the main module), the reader when you fixed the writer. Do it as a step you can be seen taking: grep for the pattern you changed (bash, description "Look for the twin of <fn>"), open what it finds, and put one line in your reply — "twin: none found (grepped <pattern>)" or "twin: <file>:<fn>, fixed in the same change". The request shows one side; the hidden tests cover both, and a fix that never looked is the shorter path, not the safer one.
+When a request schedules work across versions or stages (a warning in 5.0, the behavior change in 5.2), the checkout decides the stage, not the request's text: before choosing which step to implement, read the package version in the tree (its version file, __version__, setup.cfg or pyproject) with bash, and put one line in your reply — "checkout is at <version>, so I implemented <step>". A warning the request scheduled for an earlier version is the wrong change in a checkout already at the later one.
 Your first edit, write, or apply_patch of a task may carry mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it; it is recorded beside the task and shown by changes. Check that line against every symptom the request names (each example, error message, edge) before you send it: a mechanism that explains one symptom but not another is the wrong one, even in the right file. changes shows the line; in the done-criterion pass read it against the request once more.
 Before the first edit, reproduce the failure: run it with bash repro:true — the reporter's example, and a second input the request implies (another edge, caller, or type named or hinted in the text) — so it exits non-zero now; a headless run refuses the first edit until one failing reproduction is on record. changes re-runs every recorded reproduction after your edits and says which still fail; the task is not done while one does, and a fix that passes the example but not the second input is the wrong mechanism.
 Verify with the tests that cover the changed module (its test file or directory, plus the reporter's example); run a whole suite only when it finishes in a few minutes — a half-hour suite is a turn spent waiting, not a better check.
@@ -56,6 +58,8 @@ pub const PAGE_EMPTY: &str = "The project page (.arbos/notes.md) is still the em
 pub const CODING_TASK_PARAGRAPHS: &[&str] = &[
     "After an edit, run the project check with bash",
     "Fix at the root, not at the symptom",
+    "Before you finish a fix, look for the defect's twin",
+    "When a request schedules work across versions or stages",
     "Your first edit, write, or apply_patch of a task may carry mechanism",
     "Before the first edit, reproduce the failure",
     "Verify with the tests that cover the changed module",
@@ -647,6 +651,36 @@ mod role_tests {
             let n = CONTRACT.lines().filter(|l| l.starts_with(prefix)).count();
             assert_eq!(n, 1, "{prefix:?} matches {n} lines");
         }
+    }
+
+    /// The twin and stage rules are judged by a transcript read: the agent
+    /// must be seen taking the step (a grep, a version read) and saying its
+    /// result. A rewording that drops the visible mark would make the rule
+    /// unevaluable, so the marks are pinned here.
+    #[test]
+    fn the_twin_and_stage_rules_ask_for_a_visible_step_and_a_line_in_the_reply() {
+        let twin = CONTRACT
+            .lines()
+            .find(|l| l.starts_with("Before you finish a fix, look for the defect's twin"))
+            .expect("the twin rule");
+        assert!(twin.contains("grep for the pattern you changed"), "{twin}");
+        assert!(twin.contains("\"twin: none found"), "{twin}");
+        assert!(twin.contains("\"twin: <file>:<fn>"), "{twin}");
+        let stage = CONTRACT
+            .lines()
+            .find(|l| l.starts_with("When a request schedules work across versions or stages"))
+            .expect("the stage rule");
+        assert!(
+            stage.contains("read the package version in the tree"),
+            "{stage}"
+        );
+        assert!(stage.contains("\"checkout is at <version>"), "{stage}");
+        // Worker-only, like the other coding-task paragraphs.
+        let mut root = Agent::root("root");
+        root.role = Some(arbos_core::project::COORDINATOR.into());
+        let text = contract_for(&root);
+        assert!(!text.contains("look for the defect's twin"));
+        assert!(!text.contains("the checkout decides the stage"));
     }
 
     #[test]
