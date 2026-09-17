@@ -35,7 +35,11 @@ arbos-kernel update [--install] [--channel stable|dev] [--binary PATH] [--pin X.
     What the channel has, and whether this binary is behind it. --install
     replaces it; without that it only reports. Replacing the binary does not
     update a running kernel: it keeps the code it started with until it
-    restarts, and --place says which ones are still serving what.";
+    restarts, and --place says which ones are still serving what.
+    --binary PATH checks and replaces that file instead of this one. That is
+    how a kernel too old to have `update` (it answers `unknown command
+    update`) is brought forward: run this from any newer arbos-kernel against
+    the old file; afterwards it updates itself.";
 
 pub struct Args {
     pub install: bool,

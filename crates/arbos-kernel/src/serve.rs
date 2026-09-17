@@ -225,6 +225,11 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         );
     }
 
+    // Leash pointers (`runtime/leash/<pid>`) whose leash is gone.
+    let swept = arbos_engine::sweep_leash_pointers(&place.arbos());
+    if swept > 0 {
+        klog::info("leash_pointers_swept", None, swept.to_string());
+    }
     // Jobs left running by an earlier kernel (parent pid 1) end now: the
     // Mac wake-up incident had one appending to .arbos/user.md every 30 s
     // for three days across restarts. A `keep` file in the job folder
@@ -405,6 +410,8 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let mut watch = crate::watch::Watch::default();
     let mut watch_tick = interval(Duration::from_secs(1));
     let mut exit_code = 0;
+    // Consecutive five-second looks that found the store missing.
+    let mut store_gone = 0u8;
     if let Some(u) = &until_idle {
         klog::info(
             "until_idle",
@@ -601,6 +608,28 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 }
             }
             _ = tick.tick() => {
+                // The place's store gone from under the kernel — the folder
+                // deleted, a scratch place removed — twice in a row (a
+                // mount's hiccup is one look): nothing here can be read or
+                // written any more, and a kernel that serves on is the
+                // parent every job's leash trusts, so the jobs run on too,
+                // writing into unlinked logs. QA's machine: 164 GB. Exit;
+                // the leashes see the parent go and end the jobs. Said on
+                // stderr, since the log lived in the store.
+                if !place.arbos().is_dir() {
+                    store_gone += 1;
+                    if store_gone >= 2 {
+                        eprintln!(
+                            "arbos-kernel stopping: the place's .arbos store is gone ({}); its jobs end with this kernel",
+                            place.arbos().display()
+                        );
+                        crate::remote::stop_all(&hooks).await;
+                        exit_code = 4;
+                        break;
+                    }
+                } else {
+                    store_gone = 0;
+                }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
                 say_stalls(&hooks);
@@ -1397,7 +1426,11 @@ enum Page {
 }
 
 fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
-    let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
+    // A finished worker's record lives in the archive; a client asking
+    // for it gets the lines from there, flagged, not an empty page.
+    let (transcript, archived) = arbos_core::files::transcript_for_history(place, agent)
+        .unwrap_or_else(|| (Layout::new(place, agent).transcript(), false));
+    let events = load_transcript(&transcript).unwrap_or_default();
     let total = events.len() as u64;
     let picked: Vec<&Event> = match page {
         Page::Tail => {
@@ -1442,6 +1475,12 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         from,
         to,
         total,
+        archived,
+        path: if archived {
+            format!("archive/agents/{agent}/transcript.jsonl")
+        } else {
+            String::new()
+        },
     });
 }
 

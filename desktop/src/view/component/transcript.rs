@@ -2925,11 +2925,13 @@ struct WorkStats {
 /// one line above the answer. A click takes over from there.
 /// Cursor leaves the newest turn's timeline open — "Worked 6s ⌄" with its
 /// Thought / Explored / Edited lines — until the next prompt folds it.
-fn auto_work_open(items: &[ChatItem], first: usize, running: bool) -> bool {
+fn auto_work_open(_items: &[ChatItem], _first: usize, running: bool) -> bool {
+    // Open while it runs; shut once settled — the last turn too. Cursor's
+    // settled headline is "Worked 1m 15s" with the timeline behind it in
+    // both chat styles (`cycle-23/cursor-13-reopened-settled.png`, the
+    // worker tab in `cycle-22/`); ours kept the newest turn open (cycle 3),
+    // which read as a timeline the person had asked for (F-127, cycle 28).
     running
-        || turns(items)
-            .last()
-            .is_some_and(|turn| turn.range.start == first)
 }
 
 /// The files a chat's own edit calls in `body` wrote, one row per path
@@ -5846,13 +5848,13 @@ mod selection_tests {
             12
         );
         assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
-        // Cursor: the timeline shows while the turn runs and stays open on
-        // the newest turn; an older turn folds once it settles, and from
-        // there a click owns the fold.
+        // Cursor: the timeline shows while the turn runs and folds once it
+        // settles — the newest turn too (F-127); from there a click owns
+        // the fold.
         assert!(auto_work_open(&items, 0, true));
         assert!(
-            auto_work_open(&items, 0, false),
-            "the newest turn stays open"
+            !auto_work_open(&items, 0, false),
+            "a settled turn folds, the newest too"
         );
         let mut older = items.clone();
         older.push(ChatItem::User("Next".to_string().into()));

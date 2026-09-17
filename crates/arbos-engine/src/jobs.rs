@@ -235,8 +235,15 @@ impl JobsRoot {
         // After the login shell has read the user's profile, secrets that
         // came back with it go out again unless the secrets door granted
         // them (see `envsafe::scrub_prologue`).
+        // The command runs as a background child of this wrapper, which
+        // polls its own parent (the leash, or the sandbox that dies with
+        // it) the way the leash polls the kernel: parent gone, the whole
+        // group goes. Without this, a leash killed on its own left the
+        // wrapper and the command running with nothing watching the cap,
+        // and the protection depended on which process someone happened
+        // to kill. `ARBOS_LEASH` is the group (the leash's pid).
         let script = format!(
-            "(set -o pipefail) 2>/dev/null && set -o pipefail; {scrub} ( cd {} && {command}\n); echo $? > {}",
+            "(set -o pipefail) 2>/dev/null && set -o pipefail; {scrub} ( cd {} && {command}\n) & J=$!; trap 'kill -TERM \"$J\" 2>/dev/null' INT TERM; while kill -0 \"$J\" 2>/dev/null; do if ! kill -0 \"$PPID\" 2>/dev/null; then kill -9 \"$J\" 2>/dev/null; kill -9 -\"${{ARBOS_LEASH:-$J}}\" 2>/dev/null; exit 137; fi; sleep 0.1; done; wait \"$J\"; echo $? > {}",
             sh_quote(&cwd.display().to_string()),
             sh_quote(&exit_path.display().to_string()),
             scrub = arbos_core::envsafe::scrub_prologue(),
@@ -410,7 +417,39 @@ impl JobsRoot {
             let Ok(job) = load_dir(&dir) else {
                 continue;
             };
-            if !job.running() || dir.join("keep").exists() {
+            if dir.join("keep").exists() {
+                continue;
+            }
+            if !job.running() {
+                // The leash died without a word (no `exit`, no `killed`)
+                // but its group did not: children of the command outlived
+                // every shell of ours — the leash and the wrapper killed
+                // together by a cleanup that matched them and not `yes`.
+                // A group whose leader is gone takes no new members, so
+                // what is in it descends from our leash; on Linux the
+                // start times say so too. The folder read "killed" while
+                // the work ran on: the mirror of a turn that looks alive
+                // after it ended.
+                if job.status == Status::Killed && job.killed_why.is_none() {
+                    let orphans = group_survivors(job.meta.pid, job.meta.started_ms);
+                    if !orphans.is_empty() {
+                        let _ = fs::write(
+                            dir.join("killed"),
+                            format!(
+                                "killed: the job's shells were gone but {} process(es) of its group still ran with nothing watching them (reaped at start)\n",
+                                orphans.len()
+                            ),
+                        );
+                        crate::tools::kill_job(job.meta.pid);
+                        out.reaped.push(format!(
+                            "{} (pid {}): {} [{} orphan(s) of its group]",
+                            job.id,
+                            job.meta.pid,
+                            arbos_core::text::clip(job.meta.command.trim(), 80),
+                            orphans.len()
+                        ));
+                    }
+                }
                 continue;
             }
             let line = format!(
@@ -596,24 +635,79 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 /// The log is cut back when it passes the cap; a job that refills it past
 /// the cap on the very next look is writing faster than anyone reads and
 /// is ended as runaway (a poll cannot hard-cap a writer doing 500 MB/s).
+/// `$2` is the place's `.arbos` store: gone (the project deleted, a
+/// scratch folder removed), the job has no folder to be checked, read,
+/// capped or killed from, and its `out.log` is an unlinked inode growing
+/// on the disk unseen — 164 GB on QA's machine, with the cap blind
+/// because `wc -c` on a deleted path reads as 0. No store, no job; the
+/// kernel's own liveness is not asked, since the kernel may be the thing
+/// that leaked.
+///
+/// The rule the rest of the script holds: no job runs with an
+/// uncheckable cap.
+/// - The job folder gone but the store there (an archived child: the
+///   kernel moved the folder): the leash re-points itself from
+///   `<store>/runtime/leash/<pid>`, which the kernel writes before the
+///   move. Not found within 20 looks (5 s), the group ends
+///   and a `job_folder_lost` line goes on kernel.log. The job is not
+///   ended by the move itself: a server a worker started on purpose
+///   survives being archived.
+/// - A signal at the leash's own pid — the pid `jobs` shows, so the pid
+///   an agent or a user kills — ends the whole group, not the leash
+///   alone. QA's 164 GB: the model ran `kill <pid>` on what `jobs`
+///   displayed, the leash forwarded TERM to the wrapper shell only, the
+///   loop under it lived on with PPID 1 and nothing polling anything,
+///   and the folder later went, taking the cap with it. The pid we show
+///   must be safe to kill. (`kill -9` on it cannot be trapped; the
+///   wrapper's parent poll is the backstop for that.)
+/// - The wrapper gone but children of it still in the group (a command
+///   that backgrounded something, or a wrapper killed on its own): the
+///   leash stays with the survivors — same cap, same kernel and store
+///   checks — until the group is empty, and writes the wrapper's exit
+///   if the wrapper could not (its exit path was the old folder).
 fn leashed(dir: &Path, program: String, args: Vec<String>) -> (String, Vec<String>) {
-    const LEASH: &str = r#"D=$1; shift; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0
+    const LEASH: &str = r#"D=$1; P=$2; shift 2; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0; L=0; X=; T=0.25
+export ARBOS_LEASH=$$
 "$@" & F=$!
-trap 'kill -TERM "$F" 2>/dev/null' INT TERM
-while kill -0 "$F" 2>/dev/null; do
+ended() { trap '' INT TERM; echo "killed: a signal to the job's pid $$ ended it (the whole job, not only its shell)" > "$D/killed" 2>/dev/null; rm -f "$P/runtime/leash/$$" 2>/dev/null; kill -TERM -$$ 2>/dev/null; sleep 1; kill -9 -$$ 2>/dev/null; exit 143; }
+trap ended INT TERM
+die() { kill -9 "$F" 2>/dev/null; rm -f "$P/runtime/leash/$$" 2>/dev/null; kill -9 -$$ 2>/dev/null; exit 137; }
+note() { printf '{"ts":%s000,"level":"warn","event":"%s","detail":"%s"}\n' "$(date +%s)" "$1" "$2" >> "$P/runtime/kernel.log" 2>/dev/null; }
+while :; do
+  if ! kill -0 "$F" 2>/dev/null; then
+    if [ -z "$X" ]; then
+      wait "$F"; X=$?
+      [ -e "$D/exit" ] || echo "$X" > "$D/exit" 2>/dev/null
+      T=1
+    fi
+    A=0; for Q in $(pgrep -g $$ 2>/dev/null); do [ "$Q" != "$$" ] && kill -0 "$Q" 2>/dev/null && A=1; done
+    if [ "$A" -eq 0 ]; then
+      rm -f "$P/runtime/leash/$$" 2>/dev/null
+      exit "$X"
+    fi
+  fi
+  [ -d "$P" ] || die
+  if [ ! -d "$D" ]; then
+    N=$(cat "$P/runtime/leash/$$" 2>/dev/null)
+    if [ -n "$N" ] && [ -d "$N" ]; then
+      D=$N; L=0
+    else
+      L=$((L+1))
+      if [ "$L" -ge 20 ]; then
+        note job_folder_lost "job folder $D gone for 5s with no new path from the kernel; the job's cap could not be checked and its group was ended (leash $$)"
+        die
+      fi
+    fi
+  fi
   if ! kill -0 "$K" 2>/dev/null; then
-    echo "killed: the kernel exited and the job was ended with it" > "$D/killed"
-    kill -9 "$F" 2>/dev/null
-    kill -9 -$$ 2>/dev/null
-    exit 137
+    echo "killed: the kernel exited and the job was ended with it" > "$D/killed" 2>/dev/null
+    die
   fi
   S=$(wc -c < "$D/out.log" 2>/dev/null || echo 0)
   if [ "${S:-0}" -gt "$C" ]; then
     if [ "$R" = 1 ]; then
       echo "killed: runaway output (over $C bytes twice in a row after the log was cut back)" > "$D/killed"
-      kill -9 "$F" 2>/dev/null
-      kill -9 -$$ 2>/dev/null
-      exit 137
+      die
     fi
     R=1
     : > "$D/out.log"
@@ -621,18 +715,85 @@ while kill -0 "$F" 2>/dev/null; do
   else
     R=0
   fi
-  sleep 0.25
-done
-wait "$F""#;
+  sleep $T
+done"#;
     let mut all = vec![
         "-c".to_string(),
         LEASH.to_string(),
         "job-leash".to_string(),
         dir.display().to_string(),
+        store_of(dir).display().to_string(),
         program,
     ];
     all.extend(args);
     ("sh".to_string(), all)
+}
+
+/// Live members of process group `pgid` other than the leader, started no
+/// earlier than the job where the machine can say (Linux). `pgrep -g` is
+/// on Linux and macOS alike.
+fn group_survivors(pgid: u32, job_started_ms: i64) -> Vec<u32> {
+    let Ok(out) = std::process::Command::new("pgrep")
+        .args(["-g", &pgid.to_string()])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .filter(|&pid| pid != pgid && pid_alive(pid))
+        .filter(|&pid| {
+            process_start_ms(pid).is_none_or(|started| started >= job_started_ms - 120_000)
+        })
+        .collect()
+}
+
+/// Where a leash reads its job folder's new path from when the old one is
+/// gone: `<store>/runtime/leash/<leash pid>`, one line, the folder. The
+/// kernel writes it before it moves an agent's folder (archive), so the
+/// cap never goes blind; the leash removes it when it ends.
+pub const LEASH_POINTERS: &str = "runtime/leash";
+
+/// Tell the leash of `pid` that its job folder is now `new_dir`. Written
+/// before the move: a look between the two finds the old path still
+/// there, or the new one already named.
+pub fn repoint_leash(store: &Path, pid: u32, new_dir: &Path) -> std::io::Result<()> {
+    let dir = store.join(LEASH_POINTERS);
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(pid.to_string()), new_dir.display().to_string())
+}
+
+/// Pointers whose leash is gone (a leash killed before it could remove
+/// its own): removed, at kernel start.
+pub fn sweep_leash_pointers(store: &Path) -> usize {
+    let Ok(rd) = fs::read_dir(store.join(LEASH_POINTERS)) else {
+        return 0;
+    };
+    let mut n = 0;
+    for e in rd.flatten() {
+        let dead = e
+            .file_name()
+            .to_string_lossy()
+            .parse::<u32>()
+            .map(|pid| !pid_alive(pid))
+            .unwrap_or(true);
+        if dead && fs::remove_file(e.path()).is_ok() {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The `.arbos` store a job folder lives under: the nearest ancestor so
+/// named, or three levels up (`.arbos/agents/<id>/jobs/<job>`).
+fn store_of(job_dir: &Path) -> PathBuf {
+    job_dir
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == ".arbos"))
+        .map(Path::to_path_buf)
+        .or_else(|| job_dir.ancestors().nth(4).map(Path::to_path_buf))
+        .unwrap_or_else(|| job_dir.to_path_buf())
 }
 
 fn job_num(id: &str) -> i64 {

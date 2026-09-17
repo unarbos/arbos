@@ -28,9 +28,38 @@ fn main() -> Result<()> {
             );
         }
     }
+    // The path this process was started with, kept before anything can
+    // replace the binary under it (see `binary`).
+    arbos_kernel::binary::remember_start();
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
+        // Which file a kernel started by this process would run from, and
+        // why, when it is not this process's own binary. `--wait-for
+        // <file>` answers only once the file exists (a test replaces the
+        // binary meanwhile).
+        "binary" => {
+            let mut wait_for = None;
+            let mut it = args;
+            while let Some(a) = it.next() {
+                if a == "--wait-for" {
+                    wait_for = it.next();
+                }
+            }
+            if let Some(flag) = wait_for {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !std::path::Path::new(&flag).exists() && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            let chosen = arbos_kernel::binary::kernel_binary()?;
+            println!("{}", chosen.path.display());
+            if let Some(note) = chosen.note {
+                println!("note: {note}");
+            }
+            return Ok(());
+        }
         "serve" => {
             // `serve [place] [--provider replay --replies FILE]`: the
             // provider choice goes into the environment before the runtime
@@ -201,7 +230,10 @@ fn main() -> Result<()> {
             println!("{}", arbos_kernel::worker::USAGE);
             Ok(())
         }
-        other => bail!("unknown command {other}"),
+        other => bail!(
+            "unknown command {other}. Commands: serve, run, answer, attach, log, rollout, check, prompt, store, setup, rewind, update, worker, version, help. \
+             A kernel that answers this to `update` is older than the feature and cannot update itself: from any newer arbos-kernel, run `arbos-kernel update --install --binary <path to the old file>`; afterwards it can."
+        ),
     }
 }
 

@@ -65,7 +65,7 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
 
 STORE = Path(os.environ.get("STORE", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983"))
 # This folder: the scripts and fake gh beside this file. The driver module
@@ -90,6 +90,10 @@ P_SUB = ("Use parallel sub-agents: one reviews math_utils.py for edge cases, one
          "one drafts a CHANGELOG.md. Then merge their results.")
 P_ART = "Create a file named report.md containing three bullet points about this project, then show me the file."
 P_EDIT = "Add a mul(a, b) function to math_utils.py and call it from main.py with mul(4, 5)."
+# A turn the root does itself — a command of its own — so the fold under
+# test is the turn under test: a delegating turn's fold is bare by design
+# (F-104) and the row had been clicking whatever fold was on screen (R10).
+P_OWN = "Run `ls` yourself with bash — no workers — and tell me in one line what is here."
 P_PERM = "Delete the file README.md with `rm -f README.md`, then recreate it with one line."
 P_PR = ("Spawn one sub-agent whose only task is to run exactly this shell command and report the URL it prints: "
         "gh pr create --base master --head cursor/parity-pill --title 'Parity PR' --body 'Opened by the parity pass.' "
@@ -224,12 +228,21 @@ class Pass:
         return [e["path"] for e in els if e.get("interactive") and (pattern is None or self.drv._matches(pattern, e["path"]))]
 
     def inv(self, screen: str) -> list[str]:
+        # A new scenario: a recover in the last one no longer taints rows.
+        self.current_screen = screen
+        if getattr(self, "context_lost", None) not in (None, screen):
+            self.context_lost = None
         found = sorted(set(p.rsplit(".", 1)[-1] for p in self.ids()))
         self.inventory[screen] = found
         log(f"inventory {screen}: {len(found)} interactive ids")
         return found
 
     def record(self, element: str, screen: str, action: str, expected: str, observed: str, result: str, still: str = "") -> None:
+        # After a recover moved the run to a fresh chat, later rows in the
+        # same scenario run without the scenario's history: a pass there is
+        # not the pass the row names (rig audit R5).
+        if result == "pass" and getattr(self, "context_lost", None) == screen:
+            result = "pass-after-recover"
         self.rows.append({"element": element, "screen": screen, "action": action, "expected": expected,
                           "observed": observed, "result": result, "branch": self.branch, "still": still})
         log(f"{result:13s} {element:38s} {action[:40]}")
@@ -338,6 +351,7 @@ class Pass:
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop All ended the workers", "pass", self.still("recover-stop-all"))
                 return
         self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "turn still busy after Stop; opening a new chat", "fail", self.still("recover-stuck"))
+        self.context_lost = getattr(self, "current_screen", None)
         self.app.key("cmd-n"); time.sleep(1.5)
         try:
             self.app.wait_element("composer-field", timeout=8, reachable=True)
@@ -382,6 +396,17 @@ class Pass:
         if self.tabs and ix is not None:
             self.app.click(f"tab-{ix}")
             time.sleep(0.8)
+
+    def seen(self, target: str) -> bool:
+        """On screen, not merely laid out: `exists` lists elements scrolled or
+        clipped out of view, and a row that means "the person sees X" must
+        not pass on one of those (rig audit R1)."""
+        if not self.app.exists(target):
+            return False
+        try:
+            return bool(self.app.find(target).get("visible"))
+        except Exception:
+            return False
 
     def first(self, pattern: str) -> str | None:
         found = self.ids(pattern)
@@ -651,22 +676,42 @@ class Pass:
         # Fold lines from an edit turn.
         self.go_main()
         self.send(P_EDIT); self.wait_idle(120); time.sleep(1)
+        self.send(P_OWN); self.wait_idle(90); time.sleep(1)
         sc = "turn-folds"
         self.inv(sc)
         # `work-bare-N` is a headline over nothing foldable (F-104): no chevron,
         # nothing to click. Only a real fold is exercised here.
-        work = next((w for w in self.ids("work-*") if "work-bare-" not in w), None)
+        # The last fold that is actually on screen. The first non-bare fold
+        # in id order was the kickoff's, scrolled far out of view after an
+        # edit turn; the click landed on nothing and the row read "no state
+        # change" (F-123's last case, cycle 27).
+        def on_screen(w):
+            try:
+                f = self.app.find(w); return bool(f.get("visible")) and f.get("y", -1) >= 0
+            except Exception:
+                return False
+        folds = [w for w in self.ids("work-*") if "work-bare-" not in w and on_screen(w)]
+        work = folds[-1] if folds else None
         if work:
-            def below_y():
-                foot = self.ids("copy-turn-*")
-                return self.app.find(foot[-1])["y"] if foot else self.app.find(work)["h"]
-            y0 = below_y()
-            self.check("work", sc, "click 'Worked' fold", "fold toggles: the footer under it moves (summary line shown/hidden)",
-                       lambda: self.app.click(work), lambda a, b: (below_y() != y0) and f"footer y {y0:.0f} -> {below_y():.0f}; tool={len(self.ids('tool-*'))} thought={len(self.ids('thought-*'))} diff={len(self.ids('diff-card-*'))} term={len(self.ids('term-card-*'))}")
-            self.check("work", sc, "click 'Worked' fold again", "fold toggles back", lambda: self.app.click(work), lambda a, b: below_y() == y0)
+            # What a fold shows or hides is the rows under it — `run-*`,
+            # `tool-*`, `thought-*`, a card. The footer's y is not a proxy:
+            # the transcript is bottom-anchored, so a fold opening above the
+            # viewport's bottom shifts content up and leaves the footer where
+            # it was — "no state change" on this row, cycles 23–25 (F-123),
+            # while the fold had in fact opened.
+            def rows():
+                # Everything a Project-chat fold can hold: runs, tools,
+                # thoughts, cards — and the checklist card, which is all a
+                # delegating turn's fold holds.
+                kinds = ("run-*", "tool-*", "thought-*", "diff-card-*", "term-card-*", "todo-card-*", "worker-line-*")
+                return set().union(*(set(self.ids(k)) for k in kinds))
+            r0 = rows()
+            self.check("work", sc, "click 'Worked' fold", "fold toggles: rows under it appear or disappear",
+                       lambda: self.app.click(work), lambda a, b: (rows() != r0) and f"rows {len(r0)} -> {len(rows())}")
+            self.check("work", sc, "click 'Worked' fold again", "fold toggles back", lambda: self.app.click(work), lambda a, b: rows() == r0 and f"rows back to {len(r0)}")
         else:
             bare = self.first("work-bare-*")
-            self.gap("work", sc, "click", "no work-* fold after an edit turn" + (" (a bare 'Worked' headline over a delegating turn — nothing to fold, F-104)" if bare else ""))
+            self.gap("work", sc, "click", "no work-* fold on screen after an edit turn" + (" (a bare 'Worked' headline over a delegating turn — nothing to fold, F-104)" if bare else ""))
         for kind in ("tool", "thought", "diff-card", "term-card", "term-body", "diff-body"):
             el = self.first(f"{kind}-*")
             if not el:
@@ -1124,7 +1169,7 @@ class Pass:
             st = self.state()
             self.record("new-project-kickoff", "new-project", "after the opener opens an empty folder", "pane chat; kickoff view (project head + greeting); composer asks what you are working on",
                         f"pane={st.get('pane')} kickoff={self.app.exists('kickoff')} greeting={self.app.exists('kickoff-greeting')} changes_pill={self.app.exists('pill-changes')} branch={self.app.exists('composer-branch')}",
-                        "pass" if st.get("pane") == "chat" and self.app.exists("kickoff") and not self.app.exists("pill-changes") else "fail", self.still("new-project-kickoff"))
+                        "pass" if st.get("pane") == "chat" and self.seen("kickoff") and not self.app.exists("pill-changes") else "fail", self.still("new-project-kickoff"))
             # Close that tab again.
             ix = next((p["index"] for p in st["projects"] if p["path"].rstrip("/").endswith("newone")), None)
             if ix is not None:
@@ -1207,8 +1252,9 @@ class Pass:
 
     def phase_settings(self) -> None:
         # Settings closes from the keyboard and the chat gets the keyboard back.
-        if not self.state().get("settings_open") and self.app.exists("settings"):
-            self.app.click("settings"); time.sleep(1.0)
+        gear = "settings" if self.app.exists("settings") else "status-bar-settings"
+        if not self.state().get("settings_open") and self.app.exists(gear):
+            self.app.click(gear); time.sleep(1.0)
         if self.state().get("settings_open"):
             def close_settings():
                 self.app.use_window("settings")
@@ -1219,10 +1265,10 @@ class Pass:
             self.check("settings-cmd-w", "settings", "⌘W in the Settings window", "window closes; composer focused",
                        close_settings, lambda a, b: b.get("settings_open") is False and b["composer"]["focused"], settle=1.2)
         sc = "settings"
-        if not self.app.exists("settings"):
+        if not self.app.exists(gear):
             self.gap("settings", sc, "click gear", "no settings element on screen")
             return
-        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click("settings"), lambda a, b: b.get("settings_open") is True, settle=1.5)
+        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click(gear), lambda a, b: b.get("settings_open") is True, settle=1.5)
         if not self.state().get("settings_open"):
             return
         try:
@@ -1387,7 +1433,7 @@ class Pass:
         self.inv(sc)
         self.record("pill-prs", sc, "worker runs `gh pr create` (fake gh on PATH)", "pills.prs counts the subtree's PR; the pill-prs element shows \"PRs 1\"; .arbos/prs.jsonl has the record",
                     f"pills={json.dumps(pills)[:160]} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')}",
-                    "pass" if pills.get("prs", 0) > n0 and self.app.exists("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
+                    "pass" if pills.get("prs", 0) > n0 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
         if self.app.exists("pill-prs"):
             self.check("pill-prs", sc, "hover the pill", "tooltip lists the PR URLs; no state change", lambda: self.app.hover("pill-prs"), None)
 
@@ -1602,10 +1648,14 @@ def main() -> int:
     os.chmod(fake_gh / "gh", 0o755)
     os.environ["PATH"] = f"{fake_gh}:{os.environ.get('PATH', '')}"
     os.environ["FAKE_GH_STATE"] = str(fake_gh / "counter")
+    build = kernel_build(args.kernel)
+    log(f"kernel under test: {build}")
     log(f"launching {args.binary}")
     app = drv.Arbos.launch(binary=args.binary, env={"ARBOS_KERNEL_BIN": args.kernel, "DISPLAY": DISPLAY, "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(xdg / "data")},
                            log=str(outdir / "app.log"), timeout=90)
     p = Pass(drv, app, args.branch, outdir, store_dir)
+    # The first row of every run names the kernel the run measured against.
+    p.record("kernel", "rig", "arbos-kernel --version", "the build under test, from the binary", build, "info")
     phases = {"L": p.phase_launch, "C": p.phase_composer, "T": p.phase_turn, "Q": p.phase_question, "P": p.phase_plan,
               "S": p.phase_subagents, "A": p.phase_artifacts, "B": p.phase_tabs, "R": p.phase_panel, "W": p.phase_settings,
               "M": p.phase_menus, "G": p.phase_prs, "N": p.phase_permissions}

@@ -743,6 +743,25 @@ pub fn agent_exists(place: &Place, id: &str) -> bool {
     crate::validate_id(id).is_ok() && Agent::load(&place.agent_dir(id)).is_ok()
 }
 
+/// The transcript a client's `history` or attach replays for `id`: the
+/// live agent's, or — once the agent has finished and its folder moved
+/// under `archive/agents/` — the archived one, flagged. A Done worker's
+/// chat read "Nothing on record yet" while its whole record sat in the
+/// archive (M-27). None when no folder of that name exists in either.
+pub fn transcript_for_history(place: &Place, id: &str) -> Option<(std::path::PathBuf, bool)> {
+    if crate::validate_id(id).is_err() {
+        return None;
+    }
+    let live = Layout::new(place, id).transcript();
+    if place.agent_dir(id).join("agent.md").exists() {
+        return Some((live, false));
+    }
+    let archived = crate::project::archive_agents_dir(place)
+        .join(id)
+        .join("transcript.jsonl");
+    archived.exists().then_some((archived, true))
+}
+
 /// `id`, its parent, grandparent, … up to the top (or an unreadable or
 /// looping link). What a scoped grant is checked against.
 pub fn lineage(place: &Place, id: &str) -> Vec<String> {

@@ -9,6 +9,11 @@ struct ProjectEntry: Identifiable, Equatable {
     var place: String
     var live: Bool
     var identity: ProjectIdentity
+    /// This project's kernel is running from a file that has been deleted.
+    /// It answers, so it is not Off, but it refuses every worker it is asked
+    /// to start — the state behind JB-6, which looked healthy from outside
+    /// for days. A live fact from the roster, never cached.
+    var needsRestart = false
 
     var id: String { target.stored }
     var title: String { identity.label ?? folder }
@@ -71,6 +76,11 @@ final class ProjectStore: ObservableObject {
                             row.identity = face
                             remember(face, for: target)
                         }
+                        // This project's own kernel, not the machine: a
+                        // machine runs several processes and they can be on
+                        // different builds, which is why the hub stopped
+                        // keeping one row for all of them (#385).
+                        row.needsRestart = machine.build(forProject: project.name)?.binaryGone ?? false
                         list.append(row)
                     }
                 }

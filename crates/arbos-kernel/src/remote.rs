@@ -1564,7 +1564,9 @@ fn prepare_remote(machine: &Machine, local_place: &Path, remote_path: &str) -> R
             std::env::consts::ARCH
         );
         if local_arch == arch {
-            let me = std::env::current_exe().context("locate this kernel binary")?;
+            let me = crate::binary::kernel_binary()
+                .context("locate this kernel binary")?
+                .path;
             let staged = format!("{kernel}.new");
             scp(machine, &me, &staged)?;
             ssh_run(
@@ -2288,6 +2290,8 @@ mod relay_tests {
                 from: 0,
                 to: 2,
                 total: 2,
+                archived: false,
+                path: String::new(),
             })
             .unwrap();
         // Mid-turn: the lines are on the local transcript, no report yet.
@@ -2317,6 +2321,8 @@ mod relay_tests {
                 from: 2,
                 to: 2,
                 total: 2,
+                archived: false,
+                path: String::new(),
             })
             .unwrap();
 
@@ -2354,6 +2360,8 @@ mod relay_tests {
                 from: 2,
                 to: 3,
                 total: 3,
+                archived: false,
+                path: String::new(),
             })
             .unwrap();
         tokio::time::sleep(Duration::from_millis(500)).await;
