@@ -318,11 +318,14 @@ pub fn record(
                 exit,
                 ts: arbos_core::now_ms(),
             };
-            let line = serde_json::to_string(&entry).unwrap_or_default();
-            let mut text = std::fs::read_to_string(&file).unwrap_or_default();
-            text.push_str(&line);
-            text.push('\n');
-            let _ = std::fs::write(&file, text);
+            // Appended, not read-then-rewritten: a failed read must not
+            // shrink the record to this one line (arbos_core::record).
+            let mut line = serde_json::to_string(&entry).unwrap_or_default();
+            line.push('\n');
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+                let _ = f.write_all(line.as_bytes());
+            }
             let n = list(place, agent).len();
             format!(
                 "Reproduction {n} recorded (exit {}). changes re-runs it after your edits; the task is not done while it still fails.",

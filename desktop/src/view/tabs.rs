@@ -1,8 +1,15 @@
-//! The tab bar across the top of the window: one tab per open project, a
-//! `+` that opens the machine-then-folder picker, and the traffic-light
-//! inset on macOS. A tab is a project — a folder on a machine — and closing
-//! it closes the project; its `.arbos/` stays, so opening the folder again
-//! brings it back as it was.
+//! The tab bar across the top of the window: one tab per open project, the
+//! Settings tab after them when it is open, a `+` that opens the
+//! machine-then-folder picker, and the traffic-light inset on macOS. A tab is
+//! a project — a folder on a machine — and closing it closes the project; its
+//! `.arbos/` stays, so opening the folder again brings it back as it was.
+//!
+//! Settings is the one tab that is not a project, and it reads as one: the
+//! gear in the muted tone every other piece of chrome takes, rather than a
+//! project's own glyph in its own colour, and none of the marks a project
+//! carries — no spinner, no asking dot, no unseen badge, because nothing runs
+//! in it. It sits last, after every project, and no tab in this strip can be
+//! dragged, so it cannot be reordered either.
 
 use crate::{
     model::workspace::Workspace,
@@ -11,7 +18,7 @@ use crate::{
             menu::{self, Menu},
             transcript,
         },
-        root::{self, Arbos, NewTab},
+        root::{self, Arbos, Front, NewTab},
     },
 };
 use bezel::{
@@ -113,9 +120,10 @@ impl Arbos {
             .pr(px(root::HEADER_INSET))
             .gap(px(4.))
             .children(tabs.into_iter().map(|tab| {
-                let selected = active == Some(tab.ix);
+                let selected = active == Some(tab.ix) && self.front() == Front::Project;
                 self.tab(tab, selected, &theme, cx)
             }))
+            .children(self.settings_tab_pill(&theme, cx))
             .child(
                 theme
                     .ghost("new-tab")
@@ -253,6 +261,85 @@ impl Arbos {
                 }
             }));
         self.menu_press(pill, Menu::Tab(ix), cx).into_any_element()
+    }
+
+    /// The Settings tab's pill, when it is open: the same shape and size as
+    /// every other tab — Cursor's strip is a row of equal pills, the live one
+    /// shaded — with the gear where a project's glyph goes and a close mark
+    /// beside its name. Clicking it brings Settings forward; the mark closes
+    /// it, as ⌘W does with it in front.
+    fn settings_tab_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.settings_tab.as_ref()?;
+        let active = self.front() == Front::Settings;
+        let group = SharedString::from("tab-settings");
+        let close = theme
+            .ghost("tab-settings-close")
+            .flex_none()
+            .size(px(16.))
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .when(!active, |el| {
+                el.invisible().group_hover(group.clone(), |el| el.visible())
+            })
+            .tooltip(|window, cx| Tooltip::with_keystroke("Close Settings", "⌘W", window, cx))
+            .child(
+                icons::icon(icons::system::CLOSE)
+                    .size(px(11.))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.close_settings(window, cx);
+            }));
+        Some(
+            div()
+                .id("tab-settings")
+                .group(group)
+                .relative()
+                .flex_none()
+                .h(px(TAB_HEIGHT))
+                .min_w(px(TAB_MIN_WIDTH))
+                .max_w(px(TAB_MAX_WIDTH))
+                .pl(px(8.))
+                .pr(px(4.))
+                .rounded(px(TAB_RADIUS))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .text_style(TextStyle::Callout)
+                .when(active, |el| {
+                    el.bg(theme.element_active).text_color(theme.text)
+                })
+                .when(!active, |el| {
+                    el.text_color(theme.text_muted)
+                        .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.))
+                        .h(px(14.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            icons::icon(icons::system::SETTINGS_MINIMALISTIC)
+                                .size(px(13.))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+                .child(div().flex_1().min_w_0().truncate().child("Settings"))
+                .child(close)
+                // Forward on whichever section it was left on, not back to
+                // General: a tab click is not a fresh open.
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.show_settings(window, cx);
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The tab's menu: its face, then closing it.

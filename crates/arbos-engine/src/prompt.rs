@@ -64,15 +64,27 @@ pub const CODING_TASK_PARAGRAPHS: &[&str] = &[
 /// The contract as this agent reads it: the whole of CONTRACT, minus the
 /// coding-task paragraphs for a coordinator.
 pub fn contract_for(agent: &Agent) -> String {
-    if agent.role.as_deref() != Some(arbos_core::project::COORDINATOR) {
-        return CONTRACT.to_string();
+    // The pre-#399 sentence, for the A/B (`ARBOS_MECHANISM_REQUIRED=1`):
+    // the same paragraph with "carries … a headless run refuses the call
+    // without it" in place of "may carry".
+    let contract = if agent.role.as_deref() != Some(arbos_core::project::COORDINATOR) {
+        CONTRACT.to_string()
+    } else {
+        CONTRACT
+            .lines()
+            .filter(|line| !CODING_TASK_PARAGRAPHS.iter().any(|p| line.starts_with(p)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if crate::mechanism::required() {
+        contract.replacen(MECHANISM_MAY, MECHANISM_MUST, 1)
+    } else {
+        contract
     }
-    CONTRACT
-        .lines()
-        .filter(|line| !CODING_TASK_PARAGRAPHS.iter().any(|p| line.starts_with(p)))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
+
+const MECHANISM_MAY: &str = "Your first edit, write, or apply_patch of a task may carry mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it; it is recorded beside the task and shown by changes.";
+const MECHANISM_MUST: &str = "The first edit, write, or apply_patch of a task carries mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it; a headless run refuses the call without it.";
 
 /// Per-agent fields. Kept off the stable CONTRACT prefix so the provider
 /// can cache the contract + tool list; nothing here changes step to step.

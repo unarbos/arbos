@@ -158,7 +158,7 @@ pub fn relocate(place: &Path, how: Relocation) -> Result<PathBuf> {
     // The moved store is a nested repository under a new name: the project
     // must not record it either (steward's note on #134).
     if how == Relocation::Nosync {
-        crate::files::exclude_locally(place, &[".arbos.nosync/"]);
+        let _ = crate::files::exclude_locally(place, &[".arbos.nosync/"]);
     }
     #[cfg(not(unix))]
     bail!("relocating the store needs symlinks (unix only)");
@@ -269,7 +269,7 @@ mod tests {
         let exclude = std::fs::read_to_string(place.join(".git/info/exclude")).unwrap();
         assert!(exclude.lines().any(|l| l == ".arbos.nosync/"), "{exclude}");
         // Idempotent.
-        crate::files::exclude_locally(place, &[".arbos.nosync/", ".arbos/"]);
+        let _ = crate::files::exclude_locally(place, &[".arbos.nosync/", ".arbos/"]);
         let again = std::fs::read_to_string(place.join(".git/info/exclude")).unwrap();
         assert_eq!(again.matches(".arbos.nosync/").count(), 1, "{again}");
         assert!(again.lines().any(|l| l == ".arbos/"), "{again}");

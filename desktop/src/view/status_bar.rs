@@ -23,7 +23,10 @@
 use crate::{
     build,
     update::{Checked, State, Updater},
-    view::{root::Arbos, settings::Section},
+    view::{
+        root::{Arbos, Front},
+        settings::Section,
+    },
 };
 use arbos_update::Channel;
 use bezel::{
@@ -66,12 +69,16 @@ impl Arbos {
             .into_any_element()
     }
 
-    /// The gear. The same control the panel's foot carries, in the place
-    /// Cursor keeps it, so it is reachable with the panel folded away.
+    /// The gear. Still the way in, in the place Cursor keeps it, so it is
+    /// reachable with the panel folded away — but it opens the Settings tab in
+    /// the strip now rather than a window of its own. With that tab in front it
+    /// lights, so a press that only brings a tab you are already looking at
+    /// forward says as much.
     fn status_bar_settings(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // Something the user tried needed a permission that is not granted: a
         // dot on the gear, and nothing louder.
         let wants_permission = self.permission_center.read(cx).wants_attention();
+        let on = self.front() == Front::Settings;
         theme
             .ghost("status-bar-settings")
             .px(px(6.))
@@ -83,7 +90,7 @@ impl Arbos {
                     .child(
                         icons::icon(icons::system::SETTINGS_MINIMALISTIC)
                             .size(px(13.))
-                            .text_color(theme.text_muted),
+                            .text_color(if on { theme.text } else { theme.text_muted }),
                     )
                     .when(wants_permission, |el| {
                         el.child(
@@ -102,7 +109,7 @@ impl Arbos {
                 if wants_permission {
                     this.show_permissions(window, cx);
                 } else {
-                    this.open_settings(Section::General, cx);
+                    this.open_settings(Section::General, window, cx);
                 }
             }))
             .into_any_element()
@@ -130,6 +137,46 @@ impl Arbos {
             .collect();
         self.updater
             .update(cx, |updater, cx| updater.look_for_strangers(places, cx));
+        // A restart in flight, or one that failed, comes before the warning
+        // that prompted it. #423 wired the click and says what happened on
+        // the root transcript; this is the answer in the place the click
+        // happened, which is where somebody who just clicked is looking.
+        if let Some(place) = self.updater.read(cx).restarting().cloned() {
+            return Some(plate(
+                cx,
+                Plate {
+                    id: "status-bar-kernel-restarting",
+                    label: format!("Restarting kernel · {}", place.title()),
+                    icon: None,
+                    fill: theme.warning,
+                    progress: Some(1.),
+                    tooltip: Some(format!(
+                        "Stopping the kernel serving {} and starting one from this build.",
+                        place.title()
+                    )),
+                    action: Action::None,
+                },
+            ));
+        }
+        if let Some((place, why)) = self.updater.read(cx).restart_failed().cloned() {
+            let retry = place.clone();
+            return Some(plate(
+                cx,
+                Plate {
+                    id: "status-bar-kernel-restart-failed",
+                    label: format!("Could not restart kernel · {}", place.title()),
+                    icon: None,
+                    fill: theme.danger,
+                    progress: None,
+                    tooltip: Some(format!(
+                        "Restarting the kernel serving {} failed.\n\n{why}\n\nClick to try again.",
+                        place.title()
+                    )),
+                    action: Action::RestartKernel(retry),
+                },
+            ));
+        }
+
         // The project in front first: with two strangers (the Home place's
         // and this tab's, after one replacement took both) the plate named
         // and the click ended the other place's kernel while the person
@@ -157,15 +204,19 @@ impl Arbos {
         } else {
             found.reason.headline().to_string()
         };
+        // What is wrong, then what to do, then why it matters. The remedy
+        // used to come third, after the consequence had been given twice,
+        // and a sentence began in lower case. This is read at a glance.
+        let gate = found.gate.say();
         let tooltip = format!(
             "{}{}.\n\n\
-             It will not understand everything this window sends it: work can finish and \n\
-             never be reported. {}.\n\n\
              Click to stop and restart it on this build. Anything running in it ends the \n\
-             way the stop button ends it.",
+             way the stop button ends it.\n\n\
+             Until then, work can finish in it and never be reported. {}{}.",
             what[..1].to_uppercase(),
             &what[1..],
-            found.gate.say(),
+            gate[..1].to_uppercase(),
+            &gate[1..],
         );
         Some(
             plate(
@@ -201,6 +252,8 @@ impl Arbos {
                 cx,
             );
         });
+        self.updater
+            .update(cx, |updater, cx| updater.restart_began(place.clone(), cx));
         cx.spawn(async move |this, cx| {
             let target = place.clone();
             let outcome = cx
@@ -208,8 +261,11 @@ impl Arbos {
                 .spawn(async move { crate::kernel::restart_kernel(&target) })
                 .await;
             let _ = this.update(cx, |this, cx| {
-                this.updater
-                    .update(cx, |updater, cx| updater.forget_strangers(cx));
+                let why = outcome.as_ref().err().map(|e| format!("{e:#}"));
+                this.updater.update(cx, |updater, cx| {
+                    updater.restart_ended(place.clone(), why, cx);
+                    updater.forget_strangers(cx);
+                });
                 eprintln!("arbos: stranger restart for {}: {:?}", place.path.display(), outcome.as_ref().map(|_| ()).map_err(|e| format!("{e:#}")));
                 let (failed, text) = match outcome {
                     Ok(()) => (
