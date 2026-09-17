@@ -1725,6 +1725,150 @@ def register(scenario, registry, transcript, now_ms, branch):
         k.stop()
         cx.check()
 
+    # ── #441: a held place is said once, then escalates ─────────────────────────
+    def relaunch(cx, place, env=None, timeout=20):
+        """One supervisor relaunch: the kernel binary against a held place, as the supervisor would run it. Returns
+        (exit code, stderr)."""
+        wrap = ["bash", os.environ["ARBOS_QA_NS_WRAP"]] if os.environ.get("ARBOS_QA_NS_WRAP") and os.environ.get("ARBOS_QA_STORE_VISIBLE") != "1" else []
+        p_ = subprocess.run([*wrap, cx.binary, "serve", str(place)], cwd=str(place), env=env or cx.env, capture_output=True, text=True, timeout=timeout)
+        return p_.returncode, p_.stderr
+
+    def held_lines(place):
+        log = place / ".arbos" / "runtime" / "kernel.log"
+        if not log.exists():
+            return []
+        out = []
+        for l in log.read_text(errors="replace").splitlines():
+            if "place_held" in l or "place_freed" in l:
+                out.append(l)
+        return out
+
+    def classify(lines):
+        return {
+            "full": sum(1 for l in lines if "another kernel already serves" in l),
+            "heartbeat": sum(1 for l in lines if "still held after" in l),
+            "escalation": sum(1 for l in lines if "a person needs to look" in l),
+            "freed": sum(1 for l in lines if "place_freed" in l),
+        }
+
+    @reg("lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop", tags=("lock", "slow"))
+    def lk01(cx):
+        """#441, on a real relaunch loop rather than a moved clock: a kernel holds the place; a supervisor relaunches
+        every 2 s for 5.5 minutes (~160 starts). Expected in the place's kernel.log: one full `place_held` line naming
+        the holder's pid, build and url; one heartbeat a minute; one error-level escalation after five minutes, not
+        repeated within ten; every relaunch exits 3 with `place already served` on stderr."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        holder = cx.kernel(tag="holder")
+        cx.rec.expect(holder.start(), "holder-start", "the holding kernel did not come up")
+        holder_pid = holder.proc.pid
+        codes, phrases, t0 = [], 0, time.time()
+        while time.time() - t0 < 330:
+            code, err = relaunch(cx, place)
+            codes.append(code)
+            phrases += "place already served" in err
+            time.sleep(2)
+        lines = held_lines(place)
+        c_ = classify(lines)
+        cx.rec.notes.update({"relaunches": len(codes), "exit_codes": sorted(set(codes)), "stderr_phrase_every_time": phrases == len(codes), "kernel_log_place_held_lines": len(lines), "classes": c_, "first_line": next((l[:300] for l in lines if "another kernel already serves" in l), None), "escalation_line": next((l[:300] for l in lines if "a person needs to look" in l), None)})
+        cx.rec.expect(len(codes) >= 100, "probe-too-few-relaunches", f"only {len(codes)} relaunches in 5.5 min; this run proves little")
+        cx.rec.expect(set(codes) == {3}, "exit-code-not-3", f"relaunches exited {sorted(set(codes))}; a held place must exit 3 (EXIT_PLACE_HELD) every time")
+        cx.rec.expect(phrases == len(codes), "phrase-missing-on-stderr", f"`place already served` was on stderr {phrases} of {len(codes)} times; the desktop parses that phrase", "arbos-kernel serve.rs say_held — the phrase is an interface")
+        cx.rec.expect(c_["full"] == 1, "full-line-not-once", f"the full line appeared {c_['full']} times over {len(codes)} relaunches (kernel.log place_held lines: {len(lines)})", "arbos-kernel serve.rs HeldRecord (#441)")
+        cx.rec.expect(4 <= c_["heartbeat"] <= 7, "heartbeat-cadence", f"{c_['heartbeat']} heartbeats over 5.5 min; expected about one a minute")
+        cx.rec.expect(c_["escalation"] == 1, "escalation-did-not-escalate", f"{c_['escalation']} escalation line(s) after 5.5 min held; expected exactly one after five minutes")
+        first = next((l for l in lines if "another kernel already serves" in l), "")
+        cx.rec.expect(str(holder_pid) in first and "url" in first and "build" in first, "first-line-lacks-the-facts", f"the first line does not name pid {holder_pid}, build and url: {first[:300]}")
+        holder.stop()
+        cx.check()
+
+    @reg("lk-02-held-record-in-a-read-only-runtime-folder", tags=("lock", "destructive-order"))
+    def lk02(cx):
+        """The record that makes 'once' possible lives in runtime/place-held.json and is saved with `let _ =`. If the
+        folder cannot be written (read-only, full, permissions), every relaunch finds no record and says the full line
+        again — the 1411 lines back, plus a write failing silently: qal-j09's shape one layer down. Probe: runtime/ made
+        read-only after the holder starts, eight relaunches."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        holder = cx.kernel(tag="holder")
+        cx.rec.expect(holder.start(), "holder-start", "the holding kernel did not come up")
+        runtime = place / ".arbos" / "runtime"
+        record = runtime / "place-held.json"
+        holder_pid = holder.proc.pid
+        # (a) No record yet and the folder cannot take one: is the full line said on every relaunch?
+        record.unlink(missing_ok=True)
+        runtime.chmod(0o555)
+        errs_a, codes = [], []
+        try:
+            for _ in range(6):
+                code, err = relaunch(cx, place)
+                codes.append(code)
+                errs_a.append(err)
+                time.sleep(0.2)
+        finally:
+            runtime.chmod(0o755)
+        full_a = sum(1 for e in errs_a if "another kernel already serves" in e)
+        # (b) A record that exists but cannot be updated, six minutes old: `escalated` can never be saved, so is the
+        # error-level line said on every relaunch?
+        now = now_ms()
+        record.write_text(json.dumps({"holder_pid": holder_pid, "first_ms": now - 360_000, "last_said_ms": now - 360_000, "refusals": 180, "escalated": False}))
+        runtime.chmod(0o555)
+        errs_b = []
+        try:
+            for _ in range(6):
+                code, err = relaunch(cx, place)
+                codes.append(code)
+                errs_b.append(err)
+                time.sleep(0.2)
+        finally:
+            runtime.chmod(0o755)
+        esc_b = sum(1 for e in errs_b if "a person needs to look" in e)
+        cx.rec.notes.update({"exit_codes": sorted(set(codes)), "a_no_record_readonly_full_line_count_of_6": full_a, "b_stale_record_readonly_escalation_count_of_6": esc_b, "sample_a": (errs_a[-1] if errs_a else "")[:200], "sample_b": (errs_b[-1] if errs_b else "")[:200]})
+        cx.rec.expect(set(codes) <= {3}, "exit-code-not-3", f"relaunches exited {sorted(set(codes))} with the runtime folder read-only")
+        cx.rec.expect(full_a <= 1, "unwritable-record-says-it-every-time", f"with no record and runtime/ read-only, the full line went to stderr {full_a} of 6 relaunches: the record's save fails silently and 'once' becomes 'every time' — the 1411 lines, one layer down", "arbos-kernel serve.rs HeldRecord::save — `let _ =`; when the record cannot be kept, say so once and fall back to the short line")
+        cx.rec.expect(esc_b <= 1, "unwritable-record-escalates-every-time", f"with a six-minute-old record that cannot be updated, the error-level escalation went out {esc_b} of 6 relaunches (it is meant to repeat every ten minutes at most): `escalated` is never saved", "arbos-kernel serve.rs HeldRecord::save — a save that fails must not be treated as done")
+        holder.stop()
+        cx.check()
+
+    @reg("lk-03-holder-gone-clears-the-record-and-a-new-holder-starts-fresh", tags=("lock",))
+    def lk03(cx):
+        """When the holder goes, the first start that serves must clear runtime/place-held.json rather than inherit a
+        permanently-refusing state; and a new holder afterwards gets its own first full line (keyed on its pid), not
+        the old holder's heartbeat cadence."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        record = place / ".arbos" / "runtime" / "place-held.json"
+        holder = cx.kernel(tag="holder")
+        cx.rec.expect(holder.start(), "holder-start", "the holding kernel did not come up")
+        for _ in range(3):
+            relaunch(cx, place)
+            time.sleep(0.3)
+        rec_before = json.loads(record.read_text()) if record.exists() else None
+        holder.kill()
+        time.sleep(1.0)
+        # The supervisor's next start serves. Run it as the harness's own kernel so it can be stopped.
+        served = cx.kernel(tag="served")
+        ok = served.start()
+        time.sleep(1.0)
+        cleared = not record.exists()
+        lines_after_serve = held_lines(place)
+        served.stop()
+        time.sleep(0.5)
+        # A new holder, then a refusal: a fresh record for the new pid, first line in full again.
+        holder2 = cx.kernel(tag="holder2")
+        cx.rec.expect(holder2.start(), "holder2-start", "the second holding kernel did not come up")
+        relaunch(cx, place)
+        rec_after = json.loads(record.read_text()) if record.exists() else None
+        c_ = classify(held_lines(place))
+        cx.rec.notes.update({"record_before_holder_died": rec_before, "served_after_holder_died": ok, "record_cleared_by_serving_start": cleared, "record_for_new_holder": rec_after, "classes": c_, "freed_lines": [l[:200] for l in lines_after_serve if "free" in l.lower()]})
+        cx.rec.expect(ok, "did-not-serve-after-holder-died", "the start after the holder died did not serve the place")
+        cx.rec.expect(cleared, "stale-record-kept", "runtime/place-held.json survived a start that served: the next holder's refusals inherit its clock and count", "arbos-kernel serve.rs — clear the record on the first successful start (#441)")
+        cx.rec.expect(rec_after is not None and rec_before is not None and rec_after.get("holder_pid") == holder2.proc.pid and rec_after.get("refusals") == 1, "new-holder-inherits-old-record", f"after a new holder the record is {rec_after}; expected holder_pid {holder2.proc.pid}, refusals 1")
+        cx.rec.expect(c_["full"] == 2, "second-holder-not-said-in-full", f"the full line appeared {c_['full']} time(s); expected twice, once per holder")
+        cx.rec.expect(c_["freed"] >= 1, "freed-not-said", "no `place_freed` line when the start after the holder died served the place")
+        holder2.stop()
+        cx.check()
+
     @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
     def rw09(cx):
         """#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write

@@ -111,9 +111,18 @@ Three passes tonight proved something other than what they claimed: 29 scenarios
 2. **Ask what else could make it pass.** Content addressing (a blob that comes back by being written elsewhere), a mock echoing the input, a skip scored as a pass, a wait that times out into the expected state, a check on the harness's own copy rather than the kernel's output. `rw-08` now asserts the corrupt object is *still* unreadable after the rewind.
 3. **Ask what else could make it fail.** The harness's own git shim, sharing one capture file between two concurrent gits, produced a checkpoint sha with an email glued on and read as a kernel bug for ten minutes (`rw-08` at `0bceb0df`, first run). A break is reproduced before it is filed, and the rollout holds the evidence (`kernel-git.log`).
 4. **A probe must fail the way the world fails, not a way of its own.** `rw-10b`'s first version stood a FIFO where `.git/index` should be; `open()` on a FIFO with no writer blocks forever, and the kernel's turn hung 200 s on every build. Nothing in a repository ever does that. A directory gives the same `stat` answer and blocks nothing. When a probe's failure looks nothing like the bug it stands for, suspect the probe first.
-5. **A pass in under a second is a question, not a relief.** `ra-01` passes in 1.0 s; the answer was fifteen recorded refusals, each naming its tree.
+5. **When a message changes, ask who reads it.** User-facing wording is an interface: the desktop parses `place already served` to tell a lost spawn race from a crash; this loop's cost detector matched the spend-cap text and went blind for two cycles when it was renamed. A scenario that depends on a phrase says so in its break message, and a PR that changes a phrase names its readers.
+6. **A pass in under a second is a question, not a relief.** `ra-01` passes in 1.0 s; the answer was fifteen recorded refusals, each naming its tree.
 
 `ra-01` (the wipe guard, #410) and `rw-08`/`rw-08b`/`rw-08c` (the rewind property, #419) went through this before their results were recorded in `qal-j15` and `qal-j16`.
+
+## #441, a held place said once — verified 11:58 (`lk-01`…`lk-03`, kernel `b5b24dba`)
+
+- `lk-01`, a real relaunch loop rather than a moved clock: 162 relaunches over 5.5 minutes, every one exit 3 with `place already served` on stderr; the place's `kernel.log` holds **6** `place_held` lines — one full (pid, build, url), four heartbeats, one error-level escalation at 301 s naming 148 refusals and the ways out. Where the pod saw 1411 lines in 32 minutes.
+- `lk-03`: the holder killed → the next start serves, logs `place_freed`, removes the record; a new holder gets its own record (`refusals: 1`) and its own full line. No permanently-refusing state.
+- `lk-02`, the record's own failure (`qal-j19`): `runtime/` read-only → the full line **6 of 6** relaunches; with a six-minute-old record that cannot be updated → the error-level escalation **6 of 6**. `HeldRecord::save` is `let _ =`, and a save that fails is treated as done — qal-j09's shape one layer down, at error level, at the volume #441 exists to stop.
+
+One rule kept from the PR, added to the review list below: **our user-facing wording is an interface for something.** The author kept the exact phrase `place already served` because the desktop parses it; the spend-cap rename silently broke this loop's cost detector for two cycles. When a message changes, ask who reads it — `lk-01` asserts the phrase on every relaunch for that reason.
 
 ## #432, the coordinator that slept on its workers — verified 10:45 (`co-01`…`co-05`, kernel `ec34d0e7`)
 
