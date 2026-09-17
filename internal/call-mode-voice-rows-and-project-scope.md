@@ -35,7 +35,7 @@ Gateway half (`typed-during-call.toml`): spoken line is `channel: voice`; typed 
 
 ## New PR (off latest main)
 
-https://github.com/unarbos/arbos/pull/ — branch `cursor/live-voice-rows-scope-6983`
+[#501](https://github.com/unarbos/arbos/pull/501) — branch `cursor/live-voice-rows-scope-6983`
 
 Fixes on that branch:
 

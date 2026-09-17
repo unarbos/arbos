@@ -19,7 +19,7 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [#495](https://github.com/unarbos/arbos/pull/495) on `main`; voice rows + Live context still going; [mirror](bc-5691d9b7-e5a5-578a-a19f-a7be750d7671) [context](bc-4e8d547d-fa8a-535d-a931-0d11d7b4fdbb); next Update after 1588; [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
+- [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [#501](https://github.com/unarbos/arbos/pull/501) pins call text to the project chat; [#500](https://github.com/unarbos/arbos/pull/500) gives Live the on-screen chat and workers; next Update after both merge; [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1588)**; watching for a newer build that draws the call
 - [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [#495](https://github.com/unarbos/arbos/pull/495) on `main` (`aaf3dbe9`); take remaining greens; `v0.2.0` stays a draft
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — same voice-row rule on iPhone
@@ -31,9 +31,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 ## Voice and phone (end goal)
 
-- [ ] [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — voice rows in the project chat (display-only), typed lines wake the kernel, Live must see that chat and the workers; [#490](https://github.com/unarbos/arbos/pull/490) and [#495](https://github.com/unarbos/arbos/pull/495) on `main` (`aaf3dbe9`); next Update after 1588 draws it; still need `hub.toml`; [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
-  - [ ] [Mirror call text in chat](bc-5691d9b7-e5a5-578a-a19f-a7be750d7671) — proving [#490](https://github.com/unarbos/arbos/pull/490)'s display-only rows against Jacob's ask; [Architect desktop call mode](bc-9590b6c7-3ece-5b78-bb08-21ae0191cf3f) stood down
-  - [ ] [Give Live full chat context](bc-4e8d547d-fa8a-535d-a931-0d11d7b4fdbb) — past the last-12-line cap: on-screen chat plus sub-agents
+- [ ] [Integrate GPT Live backend](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — voice rows in the project chat (display-only), typed lines wake the kernel, Live sees the on-screen chat and workers; waiting on [#501](https://github.com/unarbos/arbos/pull/501) and [#500](https://github.com/unarbos/arbos/pull/500); still need `hub.toml`; [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
+  - [ ] [Mirror call text in chat](bc-5691d9b7-e5a5-578a-a19f-a7be750d7671) — [#501](https://github.com/unarbos/arbos/pull/501) draws every Live reply in that project's chat and blocks the dictation leak
+  - [ ] [Give Live full chat context](bc-4e8d547d-fa8a-535d-a931-0d11d7b4fdbb) — [#500](https://github.com/unarbos/arbos/pull/500) raises the cap to 40 on-screen lines plus workers; no diffs
 - [ ] A call goes silent while the agent works, and Jacob could not tell that from a crash — he asked "what are you working on", heard "let me get that information", and nothing came back, with the strip returning to Listening as though the exchange were over; the cause is being found on the desktop path, with the filler settling the turn as the first suspicion. His ask beside it is the real fix: a sound while commands are running, driven by the actual running state rather than a timer, tolerable for minutes rather than seconds, and ducking out of the way the moment either of them speaks
 
 - [ ] [iOS app scaffold PR](https://github.com/unarbos/arbos/pull/5) — voice call, text mode, and Main chat all live against the real kernel and speech server ([screenshot](/opt/cursor/artifacts/screenshots/ios/live-kernel-chat.png)); installed on Jacob's iPhone
@@ -56,7 +56,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] iPhone on-device pass — build 13 is installed and running on Jacob's iPhone Air (replacing build 12), pointed at the live hub; his 17e is unpaired if that is the phone he meant; three findings with the iOS worker — the reply drawn twice, identical globes instead of each project's icon, and the name repeated three times per row ([stills](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/mobile/device-build-13)); earlier build 12 findings: loudness fixed (duplex model output was 14 dB low, normalised on device; gateway-side normalisation requested), round trip 0.5 s, no self-hearing, hub picker; open: barge-in over speaker (iOS mutes mic in playback), background audio check by Jacob
 - [ ] Reach agents from anywhere — fixed: CI builds had been shipping with no settings file at all, so [#276](https://github.com/unarbos/arbos/pull/276) bakes the phone's own rotated token, replaces a stale keychain copy on launch, and blocks any upload whose hub address or token the hub rejects — build 920 is the first guarded upload and reaches his real projects; the pod hub is redeployed and relays frames raw so it can no longer drop fields silently; Jacob to add CNAMEs for `hub-api` and `kernel-api.arbos.life`, which is why the phone still uses a throwaway tunnel URL
-- [ ] [Build Arbos mesh: workers everywhere](bc-22d20d79-de36-524a-ae31-3e1c44c03b98) — on its own timer; last check MESH-OK (6/6 units, hub and tunnel up, no `binary_gone`); still waiting on his CNAME and whether to narrow the `const` kernel
+- [ ] [Build Arbos mesh: workers everywhere](bc-22d20d79-de36-524a-ae31-3e1c44c03b98) — last check green, nothing outstanding; on its own timer
 
 ## Agent architecture
 

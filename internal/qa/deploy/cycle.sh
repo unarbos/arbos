@@ -174,6 +174,22 @@ rm -rf "$ROOT/loop/__pycache__"
 # the app builds (X11 dev libs, mesa-vulkan-drivers): ARBOS_QA_DESKTOP=1 on the QA VM, unset on
 # ArbosLife.
 if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
+  # The driver is imported by the harness on every desktop scenario, so it must not live on the store's
+  # FUSE mount. 2026-09-17 15:38: with ARBOS_QA_DRIVER_DIR pointed at internal/parity (which is what
+  # vm-loop.sh prefers when the store has a copy), 24 desktop scenarios broke as `driver-exception` —
+  # `OSError: [Errno 5]` for the acceptance journey, `BlockingIOError: [Errno 11]` for sq-02 after it had
+  # held the step for 2.5 hours — and every one of them drafted a bug against a build that was fine.
+  # `available()` cannot see this coming: the file stats perfectly well, it is the read that fails.
+  # So: one copy to local disk per cycle, and the scenarios read that.
+  if [ -n "${ARBOS_QA_DRIVER_DIR:-}" ] && [ -f "$ARBOS_QA_DRIVER_DIR/arbosdriver.py" ]; then
+    mkdir -p "$ROOT/loop/driver"
+    if cp -f "$ARBOS_QA_DRIVER_DIR"/*.py "$ROOT/loop/driver/" 2>/dev/null && [ -s "$ROOT/loop/driver/arbosdriver.py" ]; then
+      echo "-- desktop driver: copied $(ls "$ROOT/loop/driver"/*.py | wc -l) file(s) from $ARBOS_QA_DRIVER_DIR to local disk"
+      ARBOS_QA_DRIVER_DIR="$ROOT/loop/driver"
+    else
+      echo "!! DESKTOP DRIVER NOT COPIED from $ARBOS_QA_DRIVER_DIR; the scenarios would read it from that path on every import"
+    fi
+  fi
   for branch in ${ARBOS_QA_DESKTOP_BRANCH:-main}; do
     slug=$(echo "$branch" | tr '/' '-')
     if ! git -C "$ROOT/repo" fetch -q origin "$branch" 2>/dev/null; then
