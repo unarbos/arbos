@@ -263,7 +263,11 @@ class Pass:
             do()
         except self.drv.DriverError as err:
             msg = str(err)
-            kind = "not-reachable" if ("no element" in msg or "not reachable" in msg or "occluded" in msg) else "fail"
+            # "not on screen … clipped away" is the driver refusing to click
+            # what is not visible (R13) — the row is unreachable in this
+            # scroll position, not failing. Cycle 36 read two settings
+            # controls below the fold as fails (R24).
+            kind = "not-reachable" if ("no element" in msg or "not reachable" in msg or "occluded" in msg or "not on screen" in msg) else "fail"
             self.record(element, screen, action, expected, msg, kind, self.still(element) if still else "")
             return None
         except Exception as err:
