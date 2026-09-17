@@ -1,4 +1,4 @@
-# qal-j16 (fixed at #419 `0bceb0df`, verified 09:41; misreport and index retry verified at `5340c0d2` 10:12): a rewind whose `read-tree` fails still moves HEAD and removes the person's later commits from the tree — `reset --hard` runs before the step that can fail
+# qal-j16: a rewind whose `read-tree` fails still moves HEAD and removes the person's later commits from the tree — `reset --hard` runs before the step that can fail
 
 - Measured at: #419 @ `0f71cca4` (`arbos-kernel 0.2.0 0f71cca408f4`), control `main` @ `7e19f9e9`, each built in its own target directory (see the note at the end). Scenario `rw-08-failed-restore-leaves-the-tree-where-it-was`, rollouts `internal/qa/rollouts/20260917T091840Z-rw-08-…` (#419) and `20260917T092644Z-rw-08-…` (main); every git the kernel ran is in each rollout's `kernel-git.log`.
 - Class: destructive, the eighth in `restore()`'s neighbourhood — the same shape as the seven before it: a step that destroys before the step that can fail. #419 moved `clean` after `read-tree`; `reset --hard` is still before it.
@@ -32,28 +32,6 @@ Nothing destructive until everything the restore needs has been checked:
 ## Regression check
 
 `rw-08-failed-restore-leaves-the-tree-where-it-was` (no model, replay provider): breaks on #419 with `f2.txt: GONE; HEAD: … -> …`. Passes when the working tree, HEAD and index after the failed rewind equal what they were before it. Every `rw-*` scenario now also asserts the general property on any rewind that reports an error (`<name>-failed-restore-changed-the-tree`).
-
-
-## Verified fixed — #419 at `0bceb0df` (2026-09-17 09:41), with controls
-
-Each kernel built in its own target directory (`kernel-pr419b` 0bceb0df, `kernel-pr419` 0f71cca4, `kernel-main` 7e19f9e9). Every git the kernel ran is in each rollout's `kernel-git.log`.
-
-| scenario | what fails | main | #419 `0f71cca4` | #419 `0bceb0df` |
-|---|---|---|---|---|
-| `rw-08` | the work commit's object is gone | f1, f2, f3, notes GONE; HEAD moved | f2 GONE; HEAD moved | **unchanged** — `cat-file -e <work>^{tree}` fails and the restore is refused before `reset --hard`: *"the checkpoint's working tree (41a51906c7ae) is not in the repository (a missing or corrupt object); files left as they are"* |
-| `rw-08b` | `.git/index.lock` exists | unchanged (fails at the first step) | unchanged | unchanged |
-| `rw-08c` | checkpoint has file `f1.txt`; the person made it a folder git cannot empty — `reset --hard` succeeds, `read-tree -u` fails | f2, f3, notes GONE; HEAD moved | f2 GONE; HEAD moved | **unchanged** — the tree was committed first and put back: `reset --hard <safety>`, `read-tree -u --reset <safety>`, `reset -q` |
-
-Content-addressing hazard checked (the trap the author's own first test fell into): `rw-08` removes the work *commit*, whose bytes nothing else in the repository holds, asserts `git cat-file -t <work>` still fails after the rewind (`probe-object-came-back`), and the person's edit differs from every blob. 3 of 3 runs at `0bceb0df` pass with the object still unreadable.
-
-**One misreport left, at `0bceb0df`, `rw-08c`:** the tree *was* put back (diff empty) but the error says *"…and the tree could not be put back — recover by hand: git reset --hard … && git read-tree -u --reset … && git reset -q"*. The put-back's `read-tree -u` returned non-zero on the same unwritable folder after the working tree was already right. A person with a perfectly good tree is told it is broken and handed commands to run. Before saying "could not be put back", compare the tree with the safety commit and say what actually differs, if anything. Misreport class, not destructive; noted here rather than filed apart.
-
-**Seen once, not reproduced (3 later runs clean), for the author:** on the first `0bceb0df` run, turn 3's checkpoint carried `work_error: "copy the index: the source path is neither a regular file nor a symlink to a regular file"` while the harness was running its own `git add`/`git commit` in the same repository. If the new safety copy reads `.git/index` while another git is replacing it, that is the window. The effect is a turn with no work tree (rewind of files refused for it), not a loss.
-
-
-## Verified at `5340c0d2` (10:12)
-
-`rw-08`, `rw-08b`, `rw-08c`, `rw-09`, `rw-10`, `rw-01`, `rw-04` all pass. The `rw-08c` message is now *"git read-tree … failed; the tree was put back as it was (HEAD f719fb95bf23, your files from 32e5a5803229)"* with the tree unchanged — the misreport is gone. The index-copy retry works as described (`rw-10b`: the tree is never lost at `5340c0d2` where `0bceb0df` lost it 5 of 5 and `main` 3 of 5) and opens the question filed as `qal-j17`: what the copy waits for can change meanwhile.
 
 ## A measurement note, so nobody repeats it
 

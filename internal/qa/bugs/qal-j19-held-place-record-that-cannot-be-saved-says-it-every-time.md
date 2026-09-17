@@ -1,4 +1,4 @@
-# qal-j19: when `runtime/place-held.json` cannot be saved, "once" becomes "every relaunch" — and after five minutes, an error-level line on every relaunch
+# qal-j19 (two of three shapes fixed at #441 `46477c88`, verified 12:12; one remains): when `runtime/place-held.json` cannot be saved, "once" becomes "every relaunch" — and after five minutes, an error-level line on every relaunch
 
 - Measured at: #441 @ `b5b24dba` (`arbos-kernel 0.2.0 b5b24dba7b16`), scenario `lk-02-held-record-in-a-read-only-runtime-folder`, rollout `internal/qa/rollouts/20260917T115*-lk-02-…`. `lk-03` (holder gone → record cleared → new holder gets its own first line) and `lk-01` (a real 5.5-minute relaunch loop) pass on the same build; this is the record's own failure mode, not the ordinary path.
 - Class: the qal-j09 shape one layer down — a write that fails silently (`HeldRecord::save`: `let _ = std::fs::write(...)`, `let _ = rename`) and a later step that trusts the record as saved. Misreport at volume: the very flood #441 exists to stop, at error level.
@@ -12,7 +12,22 @@
 
 Ordinary path, for the control: with `runtime/` writable the same six relaunches give one full line then `place already served by pid N (Ns; said in full in kernel.log)` — as designed.
 
-## What we expect
+
+## Verified at `46477c88` (12:12), three shapes, six relaunches each, control `b5b24dba`
+
+| shape | `b5b24dba` | `46477c88` |
+|---|---|---|
+| (a) no record; `runtime/` read-only; temp writable | full line 6 of 6 | **full line 1 of 6**, then the short form — the temp fallback keeps the record |
+| (c) no record; `runtime/` and temp both read-only | full line 6 of 6 | **0 full, 0 escalation, 6 short lines** — *"held by pid …, build …, url … for about 3s; the held record could not be written (…)"*; the age from the lock file's mtime, as described |
+| (b) a stale `runtime/` record six minutes old that cannot be updated; temp writable | escalation 6 of 6 | **escalation 6 of 6, error level** — unchanged |
+
+**What (b) is.** `HeldRecord::load` reads `runtime/place-held.json` first and stops at the first parse. `save` cannot write there, so it writes to temp — and the next start reads the stale `runtime/` copy again, never the one being kept. `escalated: false` and `last_said_ms` from six minutes ago every time; the error-level line on every relaunch. The path to it is real: `runtime/` was writable when the record was first written and stopped being so during the incident — a disk that filled, a permission change, a remount read-only — which is the kind of night this record is for.
+
+**What we expect for (b).** `load` takes the newest of the candidates (highest `last_said_ms`), or `save` records where it wrote and `load` prefers that path; either way the copy that is being kept is the one that is read. Then a stale, unwritable `runtime/` record is shadowed by the live temp one instead of the other way round.
+
+`lk-03` (holder gone → `place_freed`, record cleared from both paths → new holder starts fresh) passes at `46477c88`.
+
+## What we expect (as first filed)
 
 `save` returns whether it saved. When it did not, say so once on stderr in the same breath (*"… (could not keep runtime/place-held.json: <reason>; this line may repeat)"*) and prefer the short form on later relaunches by some means that does not need the record — the simplest: if the record cannot be written, treat a lock file older than a minute as "already said in full" and emit only the short line, and never the error-level line more than once per process lifetime. A write that fails must not be indistinguishable from a write that worked; that is the whole of the qal-j08 family.
 

@@ -1784,10 +1784,11 @@ def register(scenario, registry, transcript, now_ms, branch):
 
     @reg("lk-02-held-record-in-a-read-only-runtime-folder", tags=("lock", "destructive-order"))
     def lk02(cx):
-        """The record that makes 'once' possible lives in runtime/place-held.json and is saved with `let _ =`. If the
-        folder cannot be written (read-only, full, permissions), every relaunch finds no record and says the full line
-        again — the 1411 lines back, plus a write failing silently: qal-j09's shape one layer down. Probe: runtime/ made
-        read-only after the holder starts, eight relaunches."""
+        """The record that makes 'once' possible (runtime/place-held.json, or the machine's temp folder since #441 at
+        46477c88). Three shapes, six relaunches each, folders made read-only before any record exists: runtime/ read-only
+        with temp writable (one long line expected); a stale runtime/ record that cannot be updated beside a writable temp
+        (which copy is read?); both read-only (six short lines that say the record could not be kept, never the long line,
+        never the escalation). qal-j19."""
         place = cx.place
         place.mkdir(parents=True, exist_ok=True)
         holder = cx.kernel(tag="holder")
@@ -1795,38 +1796,70 @@ def register(scenario, registry, transcript, now_ms, branch):
         runtime = place / ".arbos" / "runtime"
         record = runtime / "place-held.json"
         holder_pid = holder.proc.pid
-        # (a) No record yet and the folder cannot take one: is the full line said on every relaunch?
-        record.unlink(missing_ok=True)
-        runtime.chmod(0o555)
-        errs_a, codes = [], []
-        try:
-            for _ in range(6):
-                code, err = relaunch(cx, place)
+        # The record may also live in the machine's temp folder (#441 at 46477c88). Two environments for the
+        # relaunches: temp writable, and temp read-only (TMPDIR pointed at a folder with no write bit).
+        tmp_ro = cx.scratch / "tmp-ro"
+        tmp_ro.mkdir(exist_ok=True)
+        tmp_ro.chmod(0o555)
+        env_tmp_ro = {**cx.env, "TMPDIR": str(tmp_ro)}
+        tmp_rw = cx.scratch / "tmp-rw"
+        tmp_rw.mkdir(exist_ok=True)
+        env_tmp_rw = {**cx.env, "TMPDIR": str(tmp_rw)}
+
+        def burst(env, n=6):
+            errs, codes = [], []
+            for _ in range(n):
+                code, err = relaunch(cx, place, env=env)
                 codes.append(code)
-                errs_a.append(err)
+                errs.append(err)
                 time.sleep(0.2)
+            return codes, errs
+
+        def count(errs):
+            return {"full": sum("another kernel already serves" in e for e in errs), "escalation": sum("a person needs to look" in e for e in errs), "short": sum("said in full" in e or "could not" in e.lower() or "record" in e.lower() for e in errs), "says_record_unkept": sum("could not" in e.lower() and "record" in e.lower() or "place-held" in e for e in errs)}
+
+        results = {}
+        codes_all = []
+        # (a) no record, runtime/ read-only, temp writable: the record goes to temp; one long line in six.
+        record.unlink(missing_ok=True)
+        for f_ in tmp_rw.glob("arbos-place-held-*"):
+            f_.unlink()
+        runtime.chmod(0o555)
+        try:
+            c_, e_ = burst(env_tmp_rw)
         finally:
             runtime.chmod(0o755)
-        full_a = sum(1 for e in errs_a if "another kernel already serves" in e)
-        # (b) A record that exists but cannot be updated, six minutes old: `escalated` can never be saved, so is the
-        # error-level line said on every relaunch?
+        codes_all += c_
+        results["a_runtime_ro_temp_rw"] = {**count(e_), "sample": e_[-1][:220]}
+        # (b) a stale, unwritable runtime record (six minutes old, escalated: false) beside a writable temp: which one
+        # does the next start read? If runtime first, the temp copy never speaks and the escalation repeats.
+        for f_ in tmp_rw.glob("arbos-place-held-*"):
+            f_.unlink()
         now = now_ms()
         record.write_text(json.dumps({"holder_pid": holder_pid, "first_ms": now - 360_000, "last_said_ms": now - 360_000, "refusals": 180, "escalated": False}))
         runtime.chmod(0o555)
-        errs_b = []
         try:
-            for _ in range(6):
-                code, err = relaunch(cx, place)
-                codes.append(code)
-                errs_b.append(err)
-                time.sleep(0.2)
+            c_, e_ = burst(env_tmp_rw)
         finally:
             runtime.chmod(0o755)
-        esc_b = sum(1 for e in errs_b if "a person needs to look" in e)
-        cx.rec.notes.update({"exit_codes": sorted(set(codes)), "a_no_record_readonly_full_line_count_of_6": full_a, "b_stale_record_readonly_escalation_count_of_6": esc_b, "sample_a": (errs_a[-1] if errs_a else "")[:200], "sample_b": (errs_b[-1] if errs_b else "")[:200]})
-        cx.rec.expect(set(codes) <= {3}, "exit-code-not-3", f"relaunches exited {sorted(set(codes))} with the runtime folder read-only")
-        cx.rec.expect(full_a <= 1, "unwritable-record-says-it-every-time", f"with no record and runtime/ read-only, the full line went to stderr {full_a} of 6 relaunches: the record's save fails silently and 'once' becomes 'every time' — the 1411 lines, one layer down", "arbos-kernel serve.rs HeldRecord::save — `let _ =`; when the record cannot be kept, say so once and fall back to the short line")
-        cx.rec.expect(esc_b <= 1, "unwritable-record-escalates-every-time", f"with a six-minute-old record that cannot be updated, the error-level escalation went out {esc_b} of 6 relaunches (it is meant to repeat every ten minutes at most): `escalated` is never saved", "arbos-kernel serve.rs HeldRecord::save — a save that fails must not be treated as done")
+        codes_all += c_
+        results["b_stale_runtime_record_ro_temp_rw"] = {**count(e_), "sample": e_[-1][:220]}
+        # (c) nowhere to keep it: runtime/ and temp both read-only, no record anywhere → six short lines, no long, no escalation.
+        record.unlink(missing_ok=True)
+        runtime.chmod(0o555)
+        try:
+            c_, e_ = burst(env_tmp_ro)
+        finally:
+            runtime.chmod(0o755)
+        codes_all += c_
+        results["c_runtime_ro_temp_ro"] = {**count(e_), "sample": e_[-1][:220]}
+        tmp_ro.chmod(0o755)
+        cx.rec.notes.update({"exit_codes": sorted(set(codes_all)), "results": results})
+        a, b, c3 = results["a_runtime_ro_temp_rw"], results["b_stale_runtime_record_ro_temp_rw"], results["c_runtime_ro_temp_ro"]
+        cx.rec.expect(set(codes_all) <= {3}, "exit-code-not-3", f"relaunches exited {sorted(set(codes_all))} with folders read-only")
+        cx.rec.expect(a["full"] == 1 and a["escalation"] == 0, "runtime-ro-temp-rw-not-once", f"runtime/ read-only with a writable temp: full line {a['full']} of 6, escalation {a['escalation']} — the temp fallback did not give 'once': {a['sample']}", "arbos-kernel serve.rs HeldRecord::save/paths (#441)")
+        cx.rec.expect(b["escalation"] <= 1, "stale-runtime-record-shadows-the-temp-copy", f"a stale runtime/ record that cannot be updated, beside a writable temp: the error-level escalation went out {b['escalation']} of 6 — `load` reads runtime/ first, so the copy that is being kept is never the one read: {b['sample']}", "arbos-kernel serve.rs HeldRecord::load — prefer the newest record, or the one that save() last wrote")
+        cx.rec.expect(c3["full"] == 0 and c3["escalation"] == 0 and c3["says_record_unkept"] >= 5, "nowhere-to-keep-it-not-short", f"runtime/ and temp both read-only: full {c3['full']}, escalation {c3['escalation']}, lines saying the record could not be kept {c3['says_record_unkept']} of 6 — expected six short lines that say so: {c3['sample']}", "arbos-kernel serve.rs say_held — a record kept nowhere means the short form, every time, saying why")
         holder.stop()
         cx.check()
 
