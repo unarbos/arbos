@@ -19,6 +19,8 @@ pub mod session;
 pub mod settings;
 pub mod state;
 pub mod store_view;
+#[cfg(test)]
+pub mod testing;
 pub mod surface;
 pub mod watch;
 pub mod workspace;

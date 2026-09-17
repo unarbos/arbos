@@ -364,40 +364,19 @@ impl Workspace {
     fn restore_panel(&mut self, ix: usize, saved: &state::PanelState) {
         let mut ids = Vec::new();
         for entry in &saved.tabs {
-            if entry.kind != "process" {
+            let Some(restored) = state::restorable_tab(entry) else {
                 continue;
-            }
-            let log = PathBuf::from(&entry.id);
-            let Some(exit) = log
-                .parent()
-                .map(|dir| dir.join("exit"))
-                .and_then(|path| std::fs::read_to_string(path).ok())
-            else {
-                continue;
-            };
-            if !log.is_file() {
-                continue;
-            }
-            let job = log
-                .parent()
-                .and_then(|dir| dir.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let title = if entry.title.is_empty() {
-                job.clone()
-            } else {
-                entry.title.clone()
             };
             let id = self.upsert_surface(
                 ix,
                 None,
                 SurfaceKind::Process,
-                title,
+                restored.title,
                 Bind::Process {
-                    id: job,
-                    log,
+                    id: restored.job,
+                    log: restored.log,
                     live: String::new(),
-                    done: Some(exit.trim().parse::<i32>().ok()),
+                    done: Some(restored.exit),
                 },
                 "process",
                 |surface, bind| {

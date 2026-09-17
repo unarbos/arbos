@@ -50,6 +50,50 @@ pub struct PanelEntry {
     pub title: String,
 }
 
+/// A filed tab that can be put back, and what it takes to draw it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoredTab {
+    /// The kernel's own name for the job — `j3` — read from its folder.
+    pub job: String,
+    pub log: PathBuf,
+    /// How it ended. `None` is a job the wrapper recorded as killed.
+    pub exit: Option<i32>,
+    pub title: String,
+}
+
+/// Whether a filed tab can be put back, and as what.
+///
+/// This is the whole decision, and it is a free function over one entry and
+/// the disk so that a test can make the call the app makes. The rule it holds:
+/// a tab comes back only when its record is there *now* — the journal is a
+/// file and the `exit` file beside it says how the job ended. A live job, a
+/// terminal page and a browser page are the kernel's own state, and it does
+/// not replay them to a client that reattaches, so nothing else is restorable
+/// yet (`docs/side-panels-design.md`, kernel handover 1).
+pub fn restorable_tab(entry: &PanelEntry) -> Option<RestoredTab> {
+    if entry.kind != "process" {
+        return None;
+    }
+    let log = PathBuf::from(&entry.id);
+    if !log.is_file() {
+        return None;
+    }
+    let folder = log.parent()?;
+    let exit = std::fs::read_to_string(folder.join("exit")).ok()?;
+    let job = folder.file_name()?.to_string_lossy().into_owned();
+    let title = if entry.title.is_empty() {
+        job.clone()
+    } else {
+        entry.title.clone()
+    };
+    Some(RestoredTab {
+        job,
+        log,
+        exit: exit.trim().parse::<i32>().ok(),
+        title,
+    })
+}
+
 /// A project's side panel between launches: whether it was open, the width
 /// the person dragged it to, its tabs and which was in front.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -269,5 +313,68 @@ pub fn save(state: &State) {
         if std::fs::rename(&tmp, &path).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::testing::Scratch;
+
+    fn job(dir: &std::path::Path, name: &str, exit: Option<&str>) -> PanelEntry {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        let log = folder.join("out.log");
+        std::fs::write(&log, "tick 1\ntick 2\n").unwrap();
+        if let Some(code) = exit {
+            std::fs::write(folder.join("exit"), code).unwrap();
+        }
+        PanelEntry {
+            kind: "process".into(),
+            id: log.display().to_string(),
+            title: "cargo test".into(),
+        }
+    }
+
+    #[test]
+    fn a_finished_job_comes_back_with_how_it_ended() {
+        let dir = Scratch::new("panel-tab");
+        let restored = restorable_tab(&job(dir.path(), "j3", Some("0\n"))).unwrap();
+        assert_eq!(restored.job, "j3");
+        assert_eq!(restored.exit, Some(0));
+        assert_eq!(restored.title, "cargo test");
+    }
+
+    #[test]
+    fn a_job_that_never_recorded_an_end_is_not_put_back() {
+        let dir = Scratch::new("panel-tab");
+        assert_eq!(
+            restorable_tab(&job(dir.path(), "j4", None)),
+            None,
+            "with no exit file we cannot say what it did, so it is not drawn"
+        );
+    }
+
+    #[test]
+    fn a_journal_that_has_gone_takes_its_tab_with_it() {
+        let dir = Scratch::new("panel-tab");
+        let entry = job(dir.path(), "j5", Some("1"));
+        std::fs::remove_file(&entry.id).unwrap();
+        assert_eq!(restorable_tab(&entry), None);
+    }
+
+    #[test]
+    fn a_killed_job_says_so_rather_than_reading_as_a_clean_exit() {
+        let dir = Scratch::new("panel-tab");
+        let restored = restorable_tab(&job(dir.path(), "j6", Some("killed"))).unwrap();
+        assert_eq!(restored.exit, None, "not parseable as a code, and not 0");
+    }
+
+    #[test]
+    fn a_terminal_or_a_page_is_not_restorable_yet() {
+        let dir = Scratch::new("panel-tab");
+        let mut entry = job(dir.path(), "t1", Some("0"));
+        entry.kind = "terminal".into();
+        assert_eq!(restorable_tab(&entry), None);
     }
 }

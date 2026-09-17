@@ -18,7 +18,7 @@ use crate::{
         surface::{Surface, SurfaceId},
     },
     view::{
-        component::surface::{self as board, Link},
+        component::surface as board,
         panel::{PANEL_MIN_WINDOW, PANEL_WIDTH},
         root::{self, Arbos, Pane, TogglePanel, ZoomPanel},
     },
