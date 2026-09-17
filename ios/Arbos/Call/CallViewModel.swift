@@ -84,6 +84,9 @@ final class CallViewModel: ObservableObject {
     /// without audio never reached the caller's ears and should not be drawn
     /// as one that finished.
     private var responseHadAudio = false
+    /// The reply as it is spoken, gathered so the chat can show the words
+    /// the caller actually heard when the reply ends.
+    private var spokenReply = ""
     /// The kernel is mid-turn on our behalf (pipeline shape only).
     private var kernelBusy = false
     /// The working sound and what drives it: the gateway's `agent.activity`
@@ -384,6 +387,12 @@ final class CallViewModel: ObservableObject {
             appendUserTranscript(text, final: final)
             if final {
                 trace("transcript: \(text)")
+                // The call's words belong in the project's chat so the
+                // conversation can be read there afterwards. Display only —
+                // this never wakes the kernel. A question that is delegated
+                // is recorded by the kernel too, and its replay replaces
+                // this copy rather than doubling it.
+                chat.spoke(text, byUser: true)
                 if text.trimmingCharacters(in: .whitespaces).isEmpty {
                     settle()
                 } else if !server.answersItself {
@@ -417,11 +426,18 @@ final class CallViewModel: ObservableObject {
         case .assistantTranscript(let delta):
             trace("reply: \(delta)")
             append(delta, to: .arbos)
+            spokenReply += delta
         case .responseDone(let end):
             let levels = audio.replyLevelsAndReset()
             trace("event response.done reason=\(end.rawValue) playing=\(audio.isPlaying) reply peak=\(Int(levels.peak))dBFS rms=\(Int(levels.rms))dBFS out=\(Int(levels.out))dBFS")
             if end == .interrupted { metric("barge_in_response_done", since: bargeStartedAt) }
             responseDone = true
+            // What was actually said, once the reply is over: the chat gets
+            // the words Jacob heard, not only the kernel's own text.
+            if end.reachedTheCaller, !spokenReply.isEmpty {
+                chat.spoke(spokenReply, byUser: false)
+            }
+            spokenReply = ""
             // Only a reply the caller could have heard is an answer ending.
             // The server says which now; the silence check stays behind it,
             // because a reply that reached nobody must not take the screen

@@ -98,6 +98,14 @@ final class ChatStore: ObservableObject {
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
     private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
+    /// Spoken lines this app put in the chat itself, so the kernel's replay
+    /// of the same question replaces them instead of doubling them.
+    private var spokenLocally: [(id: UUID, text: String)] = []
+    /// Set once the caller has heard this turn's answer out loud. A delegated
+    /// turn is answered twice — the kernel writes it and the voice says it in
+    /// its own words — and the chat shows the conversation, so the spoken
+    /// wording is the one that stays. Clears at the next question.
+    private var answerWasSpoken = false
     private let pathMonitor = NWPathMonitor()
     private var pathWasSatisfied = true
 
@@ -421,6 +429,46 @@ final class ChatStore: ObservableObject {
         onSeen?(last)
     }
 
+    /// A line said out loud on the call, put in the chat so the
+    /// conversation reads there afterwards. **Display only**: it is never
+    /// sent anywhere and never wakes the kernel. Typed lines still go
+    /// through `send`, which does.
+    ///
+    /// A delegated turn is worded twice: the kernel writes an answer and the
+    /// voice says it in its own words. The chat shows the conversation, so
+    /// the spoken wording is the one that stays and the kernel's goes. The
+    /// question is the other way round — one line either way, never two.
+    func spoke(_ text: String, byUser: Bool) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var item = ChatItem(byUser ? .user(trimmed) : .agent(trimmed, streaming: false))
+        item.spoken = true
+        if byUser {
+            answerWasSpoken = false
+        } else {
+            // The kernel's wording of the same answer, if it got here first.
+            dropKernelWordingOfThisTurn()
+            answerWasSpoken = true
+        }
+        items.append(item)
+        if byUser {
+            spokenLocally.append((item.id, trimmed))
+            if spokenLocally.count > 20 { spokenLocally.removeFirst() }
+        }
+    }
+
+    /// Removes the kernel's own reply text for the turn in progress, leaving
+    /// its record of the work — the tool lines and the time it took — alone.
+    /// Those say what happened; only the prose is said twice.
+    private func dropKernelWordingOfThisTurn() {
+        closeOpenAgentMessage()
+        let turnStart = items.lastIndex(where: { if case .user = $0.kind { return true } else { return false } }).map { $0 + 1 } ?? 0
+        guard turnStart < items.count else { return }
+        let written = Set(items[turnStart...].filter { $0.isAgent && !$0.spoken }.map(\.id))
+        guard !written.isEmpty else { return }
+        items.removeAll { written.contains($0.id) }
+    }
+
     /// A line the app itself has to say (a picker or dictation problem).
     /// `failed` is red, and is for something that went wrong and stayed
     /// wrong. A setback the app has already handled is said in the calm
@@ -493,6 +541,7 @@ final class ChatStore: ObservableObject {
         // makes it real. A turn already running gets the new words as a
         // steer at its next tool boundary; otherwise this starts one.
         let steer = busy
+        answerWasSpoken = false
         if !unseen.isEmpty { markSeen() }
         // Files are named on the card; photos are drawn on it.
         let files = attachments.filter { !$0.isImage }
@@ -558,6 +607,18 @@ final class ChatStore: ObservableObject {
             earlierLines = earlier
             firstSeq = first
         case .item(let item):
+            if case .user = item.kind { answerWasSpoken = false }
+            // This turn's answer was already said out loud, in the voice's
+            // own words. The kernel's wording of it is the second telling.
+            if item.isAgent, answerWasSpoken { return }
+            // The kernel's own record of a question that was spoken here:
+            // one line, not two. The spoken copy goes and the kernel's stays,
+            // because the kernel's carries its seq and its answer.
+            if case .user(let text, _) = item.kind,
+               let spokenIndex = spokenLocally.firstIndex(where: { $0.text == text }) {
+                let local = spokenLocally.remove(at: spokenIndex)
+                items.removeAll { $0.id == local.id }
+            }
             if case .user(let text, _) = item.kind, let index = pendingSends.firstIndex(where: { $0.text == text || ($0.text.isEmpty && text.isEmpty) }) {
                 // The kernel echoed a line typed here: the pending card is real now.
                 let pending = pendingSends.remove(at: index)
@@ -577,6 +638,7 @@ final class ChatStore: ObservableObject {
             closeOpenAgentMessage()
             items.append(item)
         case .agentDelta(let delta, let step):
+            if answerWasSpoken { return }
             if let sentAt {
                 lastFirstToken = Date().timeIntervalSince(sentAt)
                 self.sentAt = nil
@@ -596,6 +658,7 @@ final class ChatStore: ObservableObject {
         case .agentDone:
             closeOpenAgentMessage()
         case .agentReplace(let raw, let step):
+            if answerWasSpoken { return }
             let text = ToolMarkup.strip(raw)
             // The step's own item when the kernel numbers steps; the last
             // agent item when it does not (older kernels). Steps restart
@@ -644,6 +707,9 @@ final class ChatStore: ObservableObject {
             }
         case .turn(let running):
             busy = running
+            // A fresh turn: whatever was last said out loud belongs to the
+            // one before it, and must not swallow this one's text.
+            if running { answerWasSpoken = false }
             if !running { closeOpenAgentMessage() }
         case .notify(let notification):
             // Live, with the chat in front: the user is reading it — seen,
