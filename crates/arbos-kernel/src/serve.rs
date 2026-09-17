@@ -1994,7 +1994,7 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     });
 }
 
-fn snapshot(place: &Place) -> Frame {
+fn snapshot(place: &Place, hooks: &KernelHooks) -> Frame {
     let focus = arbos_core::read_focus(place);
     // The focused agent's last measured context, so a client attaching
     // mid-conversation shows the real meter rather than a placeholder.
@@ -2003,6 +2003,10 @@ fn snapshot(place: &Place) -> Frame {
         tree: tree_nodes(place),
         focus,
         budget: last_usage(place, &agent),
+        // The kernel's record of what it holds, read now: a window that
+        // reattaches after a kernel died draws rows from this, not from
+        // what it remembers (#468's frame, at the moment it matters most).
+        surfaces: crate::surfaces::list(place, hooks, None),
     }
 }
 
@@ -2542,7 +2546,7 @@ pub async fn serve_client(
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });
-            let _ = out_tx.send(snapshot(&accept_place));
+            let _ = out_tx.send(snapshot(&accept_place, &accept_hooks));
             let _ = out_tx.send(provider_frame(&accept_place));
             for agent in list_agents(&accept_place).unwrap_or_default() {
                 let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));

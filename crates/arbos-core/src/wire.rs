@@ -412,6 +412,13 @@ pub enum Frame {
         tree: Vec<TreeNode>,
         focus: String,
         budget: Option<Usage>,
+        /// What this kernel holds at the moment of the attach — its jobs,
+        /// shells and browser pages, as `surface_list` reports them — so a
+        /// window rebuilds its rows from the kernel's record rather than
+        /// its own memory, without having to know to ask. Absent from a
+        /// kernel before this field: ask with `surfaces`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        surfaces: Vec<Surface>,
     },
     Event {
         agent: String,
