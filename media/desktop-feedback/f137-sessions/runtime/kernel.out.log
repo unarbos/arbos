@@ -1,0 +1,16 @@
+Walking /Users/const/.arbos...
+arbos-kernel serve /Users/const/.arbos at 127.0.0.1:64491
+Found 748 text files (27587 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Skipped 139 additional binary files (detected by content)
+Writing index (138243 trigrams, 609 files, 0 spill segment(s))...
+Index built successfully at /Users/const/.cache/arbos/tgrep/f8839487704309a9
+provider: inception/mercury-2.5: provider error mid-stream: Upstream error from Inception: The server had an error while processing your request. — Upstream error from Inception: The server had an error while processing your request.
+tools quicksort-worker: 2 calls, wall 2157ms, sum 365ms, speedup 0.2x
+tools root: 3 calls, wall 8693ms, sum 111ms, speedup 0.0x
+tools mergesort-worker: 2 calls, wall 1959ms, sum 335ms, speedup 0.2x
+tools heapsort-worker: 2 calls, wall 1912ms, sum 323ms, speedup 0.2x
+tools mergesort-worker: 3 calls, wall 6012ms, sum 375ms, speedup 0.1x
+tools quicksort-worker: 3 calls, wall 9025ms, sum 372ms, speedup 0.0x
+tools heapsort-worker: 3 calls, wall 6909ms, sum 375ms, speedup 0.1x
+tools root: 2 calls, wall 365ms, sum 365ms, speedup 1.0x

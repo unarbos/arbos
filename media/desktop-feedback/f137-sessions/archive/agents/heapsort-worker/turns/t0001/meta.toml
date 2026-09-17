@@ -1,0 +1,8 @@
+started = "2026-09-17T09:42:53Z"
+from = "agent:root"
+kind = "brief"
+transcript_lo = 0
+ended = "2026-09-17T09:43:18Z"
+verdict = "success"
+outcome = "Done. Real output from `python3 .arbos/internal/sort_heapsort.py`:…"
+transcript_hi = 10

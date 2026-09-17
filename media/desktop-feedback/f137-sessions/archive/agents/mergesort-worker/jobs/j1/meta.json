@@ -1,0 +1,1 @@
+{"command":"python3 -c \"import json;d=json.load(open('.arbos/internal/sort_dataset.json'));print(type(d),len(d) if hasattr(d,'__len__') else d, str(d)[:200])\"","cwd":"/Users/const/.arbos","pid":51363,"started_ms":1789638174920}

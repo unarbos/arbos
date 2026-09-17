@@ -1,0 +1,9 @@
+{
+  "url": "tcp://127.0.0.1:64491",
+  "auth": "loopback",
+  "pid": 50060,
+  "started": 1789637757090,
+  "version": "0.2.0",
+  "git_sha": "f9b6089c0b80",
+  "log": "/Users/const/.arbos/.arbos/runtime/kernel.log"
+}

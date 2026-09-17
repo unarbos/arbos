@@ -1,0 +1,21 @@
+/Users/const/.arbos/.arbos/agents/hyperliquid-guide:
+total 16
+drwxr-xr-x  8 const  staff   256 Sep 15 11:59:09 2026 .
+drwxr-xr-x@ 5 const  staff   160 Sep 17 06:44:49 2026 ..
+-rw-r--r--  1 const  staff   342 Sep 15 11:59:09 2026 agent.md
+drwxr-xr-x  2 const  staff    64 Sep 15 11:59:09 2026 inbox
+drwxr-xr-x  2 const  staff    64 Sep 15 11:59:09 2026 jobs
+drwxr-xr-x  2 const  staff    64 Sep 15 11:59:09 2026 pages
+-rw-r--r--  1 const  staff  2796 Sep 15 11:59:11 2026 transcript.jsonl
+drwxr-xr-x  3 const  staff    96 Sep 15 11:59:09 2026 turns
+
+/Users/const/.arbos/.arbos/archive/agents/hyperliquid-research:
+total 16
+drwxr-xr-x  8 const  staff   256 Sep 15 11:59:07 2026 .
+drwxr-xr-x  6 const  staff   192 Sep 17 06:44:49 2026 ..
+-rw-r--r--  1 const  staff   345 Sep 15 11:59:03 2026 agent.md
+drwxr-xr-x  2 const  staff    64 Sep 15 11:59:03 2026 inbox
+drwxr-xr-x  2 const  staff    64 Sep 15 11:59:03 2026 jobs
+drwxr-xr-x  2 const  staff    64 Sep 15 11:59:03 2026 pages
+-rw-r--r--  1 const  staff  3160 Sep 15 11:59:07 2026 transcript.jsonl
+drwxr-xr-x  3 const  staff    96 Sep 15 11:59:03 2026 turns
