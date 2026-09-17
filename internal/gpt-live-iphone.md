@@ -37,3 +37,77 @@ This worker has no Xcode, so the PR's first compile was CI's "iPhone (build, sim
 
 - The tick's shape is copied from the desktop's `ticks` mode. If the desktop changes its sound, change `WorkSound` too, or the two surfaces drift.
 - `agent.activity` is the only source of the sound on both surfaces. Do not add a timer.
+
+---
+
+## Status: the call's text in the project chat (iPhone loop, `bc-7c66cfa8-381e-5700-9d78-3129f338a4fa`, 2026-09-17 21:00Z)
+
+Appended by the mobile loop; the sections above are the voice worker's and are untouched.
+
+**Answer: no, #485 does not do this. A change was needed and is on
+[#498](https://github.com/unarbos/arbos/pull/498), branch
+`cursor/mobile-call-text-in-chat-a4fa` off latest `main`.**
+
+### What was there before, measured
+
+A GPT-Live call against `pod`, four consecutive runs. The kernel's transcript
+total before and after each call: 1917 → 1921 → 1925 → 1929 → 1933. **Four
+lines every time**, and those four are always the same three-plus-one:
+
+```
+1919 user          What is the status on the project?
+1920 assistant     This project (poems, sorting algorithms, and the nine
+                   J-series math-library fixes …) is fully done, tested
+1921 turn_complete
+```
+
+What was actually said on that call was six turns:
+
+```
+"Okay."                              -> "Hey! How can I help?"
+"What is the status on the project?" -> "One sec, let me check. Everything's
+                                         done - all those math fixes and the
+                                         little extras … committed on their
+                                         own branches"
+```
+
+So two things were wrong. The small talk was **nowhere** — it is answered by
+GPT-Live and never touches the kernel, so nothing recorded it. And the half
+that did appear was **the kernel's wording, not the words Jacob heard**.
+
+### What the change does
+
+`ChatStore.spoke(_:byUser:)` puts a line in the chat and sends nothing —
+display only, no kernel wake. The call feeds it both halves: each
+`transcript.final`, and the spoken reply gathered from the assistant deltas
+when the reply ends. Lines are marked spoken, so they draw with the existing
+small mark.
+
+A spoken question that gets delegated is recorded by the kernel as well, so
+its replay **replaces** the local copy rather than sitting beside it, matched
+on the text — the same shape already used for a typed line's pending card.
+
+**Typed lines during a call are unchanged**: they still go through `send` and
+still wake the kernel. That path was not touched.
+
+### What is proven and what is not
+
+Proven, by count, four runs: a call's small talk does not wake the kernel,
+and only the delegated turn is recorded. That is the measurement that
+establishes the gap, and it is unchanged by this PR — the new lines are
+display-only, so the totals stay exactly as they were.
+
+**Not yet shown on screen: the spoken lines appearing in the chat.** Three
+attempts to photograph it failed on harness navigation rather than on the
+feature — leaving the call goes through a context menu, and the injected clip
+is consumed when the audio engine starts rather than when the call is entered
+from a chat. The code builds and the path is short, but I am not claiming the
+screenshot until I have it. It is the first item of the next cycle.
+
+### One thing for whoever owns the shape
+
+The kernel's answer and GPT-Live's spoken answer are **different text** for
+the same question. Both are now in the chat: the kernel's because it is
+replayed, the spoken one because it is what Jacob heard. That may be right —
+one is the record, the other is the conversation — or it may read as the same
+answer twice. I have not guessed; say which is wanted and I will make it so.
