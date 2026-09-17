@@ -5,7 +5,9 @@ cursor:
 
 # Finding (conditional): the prompt did the work, not the check
 
-Status: **a hypothesis with a measurement in flight**, not a result. It becomes a finding if the benchmark loop's A/B on [#440](https://github.com/unarbos/arbos/pull/440) shows the mechanism gate's return recovering solves. If it does not, this note stays as the record of what was suspected and why, and the lesson below is withdrawn.
+Status, 12:45 UTC: **withdrawn as a finding; the reasoning stands on its own.** The loop re-ran the cycle-14 binary on the same twelve and got 11/24 against yesterday's 16/24; six runs of the same twelve across three kernels read 16, 9, 10, 11, 13, 15. There was no capability drop — the noise band was set by eye in cycle 9 and never checked against repeated runs; the real standard deviation of a two-arm difference is about 4 on 24 rollouts. The A/B on #440 read gate off 13/24, gate on 15/24: inside that band, so the number decided nothing either way. What was decided, and how, is in #440: the ask stays firm by default on the reasoning below, the check behind the flag, and the effect is to be judged by a transcript read (does the *first* edit carry the line), not a delta. The text below is kept as written, as the argument that was made before the measurement and is untouched by it.
+
+Original status: **a hypothesis with a measurement in flight**, not a result. It becomes a finding if the benchmark loop's A/B on [#440](https://github.com/unarbos/arbos/pull/440) shows the mechanism gate's return recovering solves. If it does not, this note stays as the record of what was suspected and why, and the lesson below is withdrawn.
 
 ## What was measured
 

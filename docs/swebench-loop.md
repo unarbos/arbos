@@ -445,9 +445,36 @@ Soundness on all three: egress 0.0, no fetch, `left` 0 in every sweep; one cappe
 
 Spend $87.21 (confirm $27.08, gate off $32.20, gate on $27.93). Jacob said to spend what it takes; it took $87 to learn that the previous $58 measured noise.
 
-## Next (cycle 17)
+## Cycle 17 (2026-09-17) — the loop changes what it does: reading, not measuring
 
-1. **Set the band from data before anything else**, and put it in the pre-registration template: on a 40-rollout arm, a difference is outside noise at ≥ 8 rollouts (two standard deviations of the difference, from the six-run estimate); on a 24-rollout arm, ≥ 7. Anything below that is reported as "not distinguishable from no effect", never as "+2".
-2. **Decide what the loop is for at this resolution.** Two choices, for Jacob: (a) measure only levers that could plausibly move 20 points — which, from the honest failure reads, means the two evidence rules now with the features agent, tested at `-r 4` on the twelve flippy instances (~$110 per pair of arms); or (b) stop measuring levers and use the budget for reading failures and writing rules, which is where the last three cycles' real findings came from.
-3. The old regression 20 per-base check stands, with the wider band: it is a check for a 20-point collapse, and that is what it is good for.
-4. Still open: `arbos-kernel run` exits with job shells alive; requests-2317's grader hang; the `bash_wait_ms` question.
+**Decision (Jacob, 12:43 UTC): option (b).** The loop stops measuring levers and spends its budget reading failures and writing rules. One door stays open: a change that should plausibly move 20 points is measured, pre-registered, with the band stated from data. Two habits from here: every pre-registration states the band (≥ 7 of 24 or ≥ 8 of 40 rollouts between two arms, from the six-run estimate), and a struck number stays visible.
+
+### On the instrument: forty instances once, or twenty twice?
+
+Jacob's proposal: forty instances at one rollout each, for the same money, gives twice the independent draws and removes the within-instance correlation. Checked against the data before settling: across the six runs of the twelve shared instances there are 72 same-run pairs. Under independence at each instance's pooled rate, 24.2 of them should split (one solved, one not); **24 did**. The within-pair correlation is **0.01**. Two rollouts of the same instance in the same run behave as independent draws from that instance's rate, so for a *fixed set of instances* 20 × 2 and 40 × 1 have the same binomial variance — the count that matters is rollouts, not instances. The excess variance the loop actually saw (observed SD 2.8 against binomial 2.0) is between runs, not within them: something that moves every instance in a run together, most likely the model behind the endpoint drifting across a morning. Forty-once does not remove that; running both arms interleaved in time, as the loop already does, is the only guard the harness has.
+
+So the power claim does not hold on this data, and I disagree with it on that point only. The coverage claim does: forty instances sample the distribution twice as widely, which matters now that ten of twelve are flippy and the set's rate is a property of which instances were drawn. And for *reading*, which is what the loop now does, pairs are the better shape — the 26 same-run split pairs below are the cleanest evidence the loop has ever had, because the two trajectories differ in the agent's choices and nothing else. Recommendation: keep `-r 2` for reading; if the open door is ever used, run the measured arms on forty instances at `-r 2` (80 rollouts, ~$75 an arm), because halving the band needs four times the rollouts, not a different split of the same number.
+
+### The 26 split pairs, read
+
+The paid-for corpus: 171 honest rollouts from cycles 14–16 on the 20b/shared-12 instances, 79 failures, and **26 pairs where the same instance in the same run solved once and failed once**. Read side by side (files edited, mechanism, reproduction, tests run, final summary; `c17-splits.txt` in the cycle folder). Two patterns account for 16 of the 26:
+
+**A. The twin (8 pairs).** The solved rollout fixed the defect and its sibling; the failed one fixed the defect. django-11728 ×4: every solved rollout also fixed `replace_unnamed_groups` ("the identical pattern"); every failed one fixed `replace_named_groups` alone — and the failed one was the shorter trajectory in all four pairs (13–23 calls against 26–44). matplotlib-24870: the solved rollout also changed `tri/_tricontour.py`. astropy-14182 ×3: solved rollouts handled the RST reader as well as the writer; failed ones changed `write()`'s separator index only. The hidden tests cover the twin; the request shows one side.
+
+**B. Producer, not consumer (8 pairs).** The solved rollout gave the thing that was missing to the class or path that should have it; the failed one taught the caller to cope. scikit-learn-14629 ×4 — **four of four**: every solved rollout added `classes_` to `MultiOutputClassifier` ("mirroring `ClassifierChain`", which has it); every failed one added a fallback in `_fit_and_predict`. pylint-6386 ×2: solved routed `-v` through `_preprocess_options` like `--verbose`; failed made the action take no argument (the crash gone, the behaviour absent — cycle 15's evidence failure, seen again from the other side). django-15252 ×2: solved moved up to `executor.py`; failed gated the recorder the issue pointed at. This is the class the dropped lever aimed at, now seen in pairs: the same agent, the same instance, the same run, takes either path. What separates them in the transcripts is whether the agent looked at a *sibling* — `ClassifierChain`, `--verbose`, the executor — before choosing where to put the fix.
+
+**C. Maintainers' incidental detail (5 pairs):** pylint-8898 ×3 (the solved ones split on braces only, one of them by writing the gold's own `_check_regexp_csv` in `utils`; the failed ones were depth-aware and produced a different error string), sympy-18698 (all multiplicities vs all but 1), astropy-13236 (the solved rollout checked the checkout's version — "already at 5.2.dev" — and made the change the issue scheduled for 5.2; the failed one added the warning the issue scheduled for 5.0). **D. Other (3):** django-16454, sphinx-8035, sympy-15017 — where the solved rollout edited the existing test to assert the new behaviour, against the contract, and was graded solved anyway.
+
+**Proposed rules, to the features agent** (`internal/features-inbox/2026-09-17-swebench-twin-and-producer-rules.md`):
+
+> *The twin.* Before you finish, look for the defect's twin: the sibling function with the same loop (`replace_unnamed_groups` beside `replace_named_groups`), the other front end (`tri/` beside the main module), the reader when you fixed the writer. grep for the pattern you changed; if the twin has it, fix it in the same change. The request shows one side; the tests cover both.
+
+> *Producer, not consumer.* When a caller fails because a class lacks an attribute, or a path lacks a case, that its siblings have — `ClassifierChain` has `classes_`, `--verbose` reaches the callback — the fix is in the class or the path, made the way the sibling does it. A fallback in the caller passes your reproduction and fails the tests that check the class.
+
+Both are visible in a transcript read: does the agent grep for the twin; does it open the sibling. The next reading pass checks the remaining 53 failures (no solved partner) against the same two patterns, then the two evidence rules already filed. No model spend this cycle.
+
+## Next (cycle 18)
+
+1. Read the 53 unpaired failures against patterns A–D and the two evidence rules; write what does not fit.
+2. If the features agent lands any of the four rules, read five rollouts each on the instances that carry the pattern (11728, 14629, 14182, 6386) — a read, not a measurement — and say whether the behaviour changed.
+3. Old regression 20 per-base check stays, band ≥ 8 of 40, for a 20-point collapse only.

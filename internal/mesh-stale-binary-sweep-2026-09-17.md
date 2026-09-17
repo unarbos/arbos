@@ -173,28 +173,29 @@ it fires for a file moved away *and* for a file replaced in place, because in
 both cases the old inode has lost its name (the updater's rename gives the
 name to the new inode). Tonight's ArbosLife and Templar lines were all the
 replaced-in-place kind — `~/arbos-hub/bin/arbos-kernel` existed and was newer
-the whole time — and `(deleted)` caught every one. Save as `/tmp/sweep.sh` and
-pipe it over ssh.
+the whole time — and `(deleted)` caught every one.
+
+**Where the script lives: the `store-watch` branch, not this document and not
+`/tmp`.** The `/tmp` copy was lost with a re-imaging of the VM at 08:55 UTC;
+anything that must outlive a machine belongs in git. Fetch and run:
 
 ```bash
-# Linux. One line per arbos process: state, pid, since, running build, the file it started from, and what is on disk now.
-for p in $(pgrep -x arbos-kernel; pgrep -x arbos-hub); do
-  exe=$(readlink /proc/$p/exe); file=${exe% (deleted)}
-  case "$exe" in *"(deleted)") st=GONE;; *) st=ok;; esac
-  set -- $(tr '\0' ' ' < /proc/$p/cmdline); role=$2; place=$3
-  case "$1" in /*) file=$1;; esac
-  sha=-; for j in "$place/.arbos/runtime/kernel.json" "$place/.arbos/kernel.json"; do
-    [ -f "$j" ] && sha=$(sed -n 's/.*"git_sha": *"\([0-9a-f]*\)".*/\1/p' "$j" | head -1) && break; done
-  disk=$( [ -f "$file" ] && stat -c %y "$file" | cut -c1-16 || echo missing)
-  printf '%-4s pid %-8s since %-16s runs %-12s %s %s  disk:%s\n' "$st" "$p" "$(ps -o lstart= -p $p | awk '{print $2,$3,$4}')" "${sha:--}" "$role" "$place" "$disk"
-done
-```
-
-```bash
+git -C /workspace fetch -q origin "+refs/heads/store-watch:refs/remotes/origin/store-watch"
+git -C /workspace show origin/store-watch:sweep.sh > /tmp/sweep.sh
 ssh arboslife 'bash -s' < /tmp/sweep.sh
 ssh -i ~/.ssh/arbos_agents const@204.12.168.71 'bash -s' < /tmp/sweep.sh   # Templar: no alias, key named explicitly
 ssh voicepod 'bash -s' < /tmp/sweep.sh
 ```
+
+**Revised 12:50 UTC after finding 3 of the bootstrap run** (`internal/features-inbox/2026-09-17-i-killed-your-p1-and-p2-and-three-findings.md`):
+the `runs` column no longer reads `kernel.json`. A place that has ever run a
+newer kernel keeps a `runtime/kernel.json` naming that build, and an older
+kernel serving the place afterwards writes only the legacy `.arbos/kernel.json`;
+reading `runtime/` first reported the pod's three old kernels as `cbbe9922` when
+they were on `67d066eb`. The script now executes the running image itself —
+`/proc/<pid>/exe --version` works even when the name is gone — which is the
+only honest answer, and it also gives the worker daemon a build where it used
+to show `-`. `kernel.json` is the fallback only when that fails.
 
 Tested on ArbosLife and Templar at 04:15 UTC; it reproduced the table above
 in two seconds, and showed the parity loop had already relaunched its kernel
@@ -230,20 +231,15 @@ binary (`cp /bin/sleep /tmp/t && /tmp/t 300 &`), replace it (`cp /bin/sleep
 before trusting the Arbos lines.
 
 ```bash
-# macOS. One line per arbos process: state, pid, since, running build, start path, and what is on disk now.
-# GONE = the inode the process runs is not the inode now at its start path (replaced, moved, or deleted).
-for p in $(pgrep -x arbos-kernel; pgrep -x arbos-hub); do
-  path=$(ps -o comm= -p $p)                       # on macOS this is the full path the process was started from
-  set -- $(ps -o args= -p $p); role=$2; place=$3
-  run_ino=$(lsof -p $p -Ffti 2>/dev/null | awk '/^ftxt$/ {t=1; next} t && /^i/ {print substr($0,2); exit} /^f/ {t=0}')
-  disk_ino=$(stat -f %i "$path" 2>/dev/null)
-  if [ -z "$disk_ino" ]; then st=GONE; elif [ "$run_ino" != "$disk_ino" ]; then st=GONE; else st=ok; fi
-  sha=-; for j in "$place/.arbos/runtime/kernel.json" "$place/.arbos/kernel.json"; do
-    [ -f "$j" ] && sha=$(sed -n 's/.*"git_sha": *"\([0-9a-f]*\)".*/\1/p' "$j" | head -1) && break; done
-  disk=$( [ -n "$disk_ino" ] && stat -f %Sm -t '%Y-%m-%d %H:%M' "$path" || echo missing)
-  printf '%-4s pid %-8s since %-16s runs %-12s %s %s  path:%s  disk:%s\n' "$st" "$p" "$(ps -o lstart= -p $p | awk '{print $2,$3,$4}')" "${sha:--}" "$role" "$place" "$path" "$disk"
-done
+git -C /workspace show origin/store-watch:sweep-macos.sh > /tmp/sweep-macos.sh   # same branch as the Linux one
+scp /tmp/sweep-macos.sh <mac>:/tmp/ && ssh <mac> 'bash /tmp/sweep-macos.sh'
 ```
+
+Its `runs` column takes the build from whichever `kernel.json` names *this*
+pid (the record of a live process), not from the newest file — the same
+finding-3 fix as the Linux one, done the only way macOS allows since there is
+no `/proc/<pid>/exe` to execute.
+
 
 The desktop app starts kernels from inside its bundle
 (`…/Arbos.app/Contents/MacOS/`), so `path:` will point there; an in-app update

@@ -52,3 +52,23 @@ Worth checking whether suppression should apply to a reply prompted by a
 report.
 
 No action needed from me; say if you want anything measured from this side.
+
+---
+
+## Still red two hours later, 12:44 UTC
+
+| run | branch | test that failed | what the branch touches |
+| --- | --- | --- | --- |
+| 35222089253 | `cursor/mobile-cycle-48-a4fa` | `stop_keeps_the_users_queued_follow_up_held_until_send_now_or_remove` | one shell script under `deploy/mobile/` |
+
+That is the fourth distinct test from this one file in three hours, on a
+fifth branch, and this branch contains no Rust at all. The set so far:
+
+- `a_parent_waiting_on_a_worker_picks_up_after_a_restart_and_hears_the_report_once`
+- `a_kernel_asked_to_stop_ends_its_jobs_itself_and_says_so`
+- `stop_keeps_the_users_queued_follow_up_held_until_send_now_or_remove`
+
+Everything else on my PRs is green, including the iPhone simulator build.
+Flagging the duration rather than the individual failure: it has been red
+across unrelated branches long enough that people will start reading a red
+`kernel (build + test)` as normal, which is the expensive part.

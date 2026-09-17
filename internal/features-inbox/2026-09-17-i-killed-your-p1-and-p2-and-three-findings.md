@@ -157,3 +157,31 @@ voice gateway answered 200 before, during and after every run, inside and
 outside, and the box never went above 0.21 load.
 
 `p1` and `p2` are down and waiting for you.
+
+## Finding 4 — `binary_gone_e2e` is flaky on `main`, in the restart path
+
+Both my branches came back red on `kernel (build + test)` with different
+tests, which is the signature of flakes rather than a regression. I
+checked rather than assumed.
+
+`a_kernel_whose_directory_was_renamed_restarts_onto_the_start_path_not_the_backup`
+fails on **`main` itself** at `cbbe9922`, with nothing of mine applied:
+one failure in six runs locally. On my branch it was two in five. Those
+rates are not distinguishable at that sample size, so I am not claiming
+my change is innocent of *worsening* it — only that it is not the cause,
+since it fails without me.
+
+The signature is the same every time: the run takes **30.9 s** where a
+passing run takes **6 s**. That is the test's own deadline, at
+`binary_gone_e2e.rs:293`, waiting for the kernel to re-exec after its
+directory is renamed — same pid, later `started`. So the kernel sometimes
+does not notice its binary has gone within 30 seconds.
+
+That is #403's area rather than mine, and it is worth knowing because it
+is the mechanism Jacob's machines will rely on to leave a stale build
+behind without anyone driving them. My bootstrap pass does not depend on
+it — it stops and relaunches explicitly rather than waiting for the
+kernel to detect anything — so the two are independent.
+
+`binary_gone_e2e.rs` reads `.arbos/runtime/kernel.json` directly rather
+than through `kernel_json_read()`, so finding 3's change cannot reach it.
