@@ -788,17 +788,70 @@ pub fn agent_exists(place: &Place, id: &str) -> bool {
 /// chat read "Nothing on record yet" while its whole record sat in the
 /// archive (M-27). None when no folder of that name exists in either.
 pub fn transcript_for_history(place: &Place, id: &str) -> Option<(std::path::PathBuf, bool)> {
-    if crate::validate_id(id).is_err() {
-        return None;
+    resolve_history_agent(place, id).map(|r| (r.transcript, r.archived))
+}
+
+/// What a `history` request resolved to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryTarget {
+    /// The folder id, live or archived.
+    pub id: String,
+    pub transcript: std::path::PathBuf,
+    pub archived: bool,
+}
+
+/// The agent a client means by `q`: its id, live or archived — or its
+/// *name* (the spawn's `name`, what the roster and a worker card show),
+/// live first, then archived. The phone asked `history` for "Run J152618
+/// verification command", the name on its sheet, and got `total: 0` for
+/// eight of eight finished workers whose records were on disk under
+/// their ids; a name is not a valid id, so nothing was even looked up.
+pub fn resolve_history_agent(place: &Place, q: &str) -> Option<HistoryTarget> {
+    let q = q.trim();
+    let by_id = |id: &str| -> Option<HistoryTarget> {
+        if crate::validate_id(id).is_err() {
+            return None;
+        }
+        if place.agent_dir(id).join("agent.md").exists() {
+            return Some(HistoryTarget {
+                id: id.to_string(),
+                transcript: Layout::new(place, id).transcript(),
+                archived: false,
+            });
+        }
+        let dir = crate::project::archive_agents_dir(place).join(id);
+        dir.join("agent.md").exists().then(|| HistoryTarget {
+            id: id.to_string(),
+            transcript: dir.join("transcript.jsonl"),
+            archived: true,
+        })
+    };
+    if let Some(t) = by_id(q) {
+        return Some(t);
     }
-    let live = Layout::new(place, id).transcript();
-    if place.agent_dir(id).join("agent.md").exists() {
-        return Some((live, false));
+    // By name, case-folded: the live roster, then the archive.
+    let want = q.to_lowercase();
+    if let Ok(agents) = list_agents(place)
+        && let Some(a) = agents.iter().find(|a| a.name.trim().to_lowercase() == want)
+    {
+        return by_id(a.id.as_str());
     }
-    let archived = crate::project::archive_agents_dir(place)
-        .join(id)
-        .join("transcript.jsonl");
-    archived.exists().then_some((archived, true))
+    let rd = std::fs::read_dir(crate::project::archive_agents_dir(place)).ok()?;
+    let mut hits: Vec<(std::path::PathBuf, Agent)> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| Agent::load(&p).ok().map(|a| (p, a)))
+        .filter(|(_, a)| a.name.trim().to_lowercase() == want)
+        .collect();
+    // Two archived workers with one name: the newest folder (by mtime).
+    hits.sort_by_key(|(p, _)| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    let (dir, a) = hits.pop()?;
+    Some(HistoryTarget {
+        id: a.id.to_string(),
+        transcript: dir.join("transcript.jsonl"),
+        archived: true,
+    })
 }
 
 /// `id`, its parent, grandparent, … up to the top (or an unreadable or
