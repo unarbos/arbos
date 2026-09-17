@@ -847,7 +847,7 @@ def _local_info(target: Target, place: str) -> dict:
     }
 
 
-def context_text(context: dict, *, lines: int = 12, clip_at: int = 300) -> str:
+def context_text(context: dict, *, lines: int = 40, clip_at: int = 300) -> str:
     """`session.start.project.context` as a few plain lines of text."""
     if not context:
         return ""
@@ -856,7 +856,10 @@ def context_text(context: dict, *, lines: int = 12, clip_at: int = 300) -> str:
     if recent:
         out.append("The chat so far (latest last):")
         for line in recent[-lines:]:
-            role = {"user": "user", "assistant": "arbos", "worker": "worker", "tool": "tool"}.get(str(line.get("role", "")), str(line.get("role", "")))
+            role = {
+                "user": "user", "assistant": "arbos", "worker": "worker", "tool": "tool",
+                "notice": "notice", "asked": "asked", "thinking": "thinking",
+            }.get(str(line.get("role", "")), str(line.get("role", "")))
             text = " ".join(str(line.get("text", "")).split())
             out.append(f"- {role}: {text[:clip_at]}{'...' if len(text) > clip_at else ''}")
     agents = [a for a in context.get("agents", []) if isinstance(a, dict) and a.get("name")]
