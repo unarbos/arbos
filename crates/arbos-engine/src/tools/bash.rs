@@ -199,11 +199,24 @@ impl Tool for Bash {
 
             // Reap in the background so the call can return before the
             // command does. The exit code is the wrapper's job, not ours.
+            // The runtime's wait is signal-driven on macOS: a kernel whose
+            // SIGCHLD never arrives (Jacob's Mac, 2026-09-17: five jobs
+            // exited 0, five zombies, no tool result; `bubble_sort.py`
+            // returned at the 600 s floor as "still running" with `exit`
+            // long written) never hears from it. The wrapper's `exit`
+            // file is the truth about the command, so the wait below also
+            // watches for it, and reaps by pid.
             let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
-            tokio::spawn(async move {
+            let waiter = tokio::spawn(async move {
+                if std::env::var_os("ARBOS_TEST_NO_CHILD_WAIT").is_some() {
+                    // Fault injection for the test of the exit-file path:
+                    // a reaper that never wakes.
+                    std::future::pending::<()>().await;
+                }
                 let _ = child.wait().await;
                 let _ = done_tx.send(());
             });
+            let job_pid = job.meta.pid;
             if let Some(ms) = timeout_ms {
                 let root = root.clone();
                 let id = job.id.clone();
@@ -242,6 +255,14 @@ impl Tool for Bash {
                         if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
                             steered = true;
                             break false;
+                        }
+                        // The command ended and the runtime did not say:
+                        // the wrapper's `exit` file did. Reap the wrapper
+                        // ourselves so no zombie is left under the kernel.
+                        if root.load(&job.id).is_ok_and(|j| !j.running()) {
+                            reap_by_pid(job_pid);
+                            waiter.abort();
+                            break true;
                         }
                     }
                 }
@@ -918,6 +939,19 @@ fn moves_a_delivered_file(cx: &RunCx, cmd: &str) -> Option<String> {
     Some(format!(
         "bash: refused — this moves or deletes {hit}, a file this turn delivered, after a reminder about the brief's Output path. The reminder is bookkeeping, never a reason to relocate a user's file: leave {hit} where the task put it and name that path in your report (the brief's Output line is satisfied by the file existing)."
     ))
+}
+
+/// `waitpid(pid, WNOHANG)`: clear a child that has exited when the
+/// runtime's own reaper did not — a zombie is what the process table
+/// shows otherwise, and it is what Jacob's Mac showed.
+pub fn reap_by_pid(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        let mut status: libc::c_int = 0;
+        let _ = libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 pub fn build_or_test(cmd: &str) -> Option<&'static str> {
