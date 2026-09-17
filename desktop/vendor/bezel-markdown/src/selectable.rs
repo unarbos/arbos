@@ -71,7 +71,7 @@ pub fn render<V: 'static>(
         on_pointer.clone(),
         on_pointer,
     );
-    let (at_down, at_move) = (layouts.clone(), layouts.clone());
+    let (at_down, at_move, at_leave) = (layouts.clone(), layouts.clone(), layouts.clone());
     let hover_marks: Vec<(Selection, crate::render::Annotation)> = hover_link
         .into_iter()
         .map(|sel| (sel, crate::render::Annotation::LinkHover))
@@ -85,8 +85,11 @@ pub fn render<V: 'static>(
         } else {
             CursorStyle::IBeam
         })
-        .on_hover(cx.listener(move |view, hovering: &bool, _, cx| {
-            if !*hovering {
+        // gpui reports "not hovered" for this box while the pointer is
+        // over its own painted text (the canvas child holds the hitbox),
+        // so a leave counts only when the pointer is off the text itself.
+        .on_hover(cx.listener(move |view, hovering: &bool, window, cx| {
+            if !*hovering && at_leave.hit(window.mouse_position()).is_none() {
                 left(view, Pointer::Hover(None), cx);
             }
         }))

@@ -1240,6 +1240,9 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "held": chat.plan_queued(),
         "asks": chat.plan_open().filter(|n| n.do_kind == "ask").count(),
         "reconnect_attempt": chat.reconnect_attempt,
+        // The item whose link the pointer is over, so a rig can assert the
+        // hand and the underline are drawn for a URL (report -31).
+        "hover_link": chat.transcript.hover_link_item(),
         "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",

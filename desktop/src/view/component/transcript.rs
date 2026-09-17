@@ -369,6 +369,11 @@ impl State {
     /// including a click that jittered but stayed on that one link. A later
     /// Up does not: `bezel-markdown` reports release twice (on the text and
     /// off it), and both would otherwise open a tab.
+    /// The transcript item whose link the pointer is over, if any.
+    pub fn hover_link_item(&self) -> Option<usize> {
+        self.hover_link.map(|(ix, _)| ix)
+    }
+
     pub fn point(&mut self, ix: usize, text: &str, pointer: Pointer) -> Option<String> {
         match pointer {
             Pointer::Down(cursor) => {
