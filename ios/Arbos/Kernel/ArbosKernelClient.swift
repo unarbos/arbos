@@ -56,7 +56,12 @@ final class ArbosKernelClient {
                 Task { @MainActor in self?.receive(message) }
             },
             onFailure: { [weak self] error in
-                Task { @MainActor in self?.dropped(error.localizedDescription) }
+                // The hub's own words when it refuses, and the transport's
+                // only when the hub said nothing. "arboslife is not
+                // connected" is something Jacob can act on; "Socket is not
+                // connected" is a sentence about our plumbing.
+                let said = socket.closeReason ?? error.localizedDescription
+                Task { @MainActor in self?.dropped(said) }
             }
         )
         let deadline = Date().addingTimeInterval(8)

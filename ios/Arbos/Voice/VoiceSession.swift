@@ -177,6 +177,19 @@ final class OrderedWebSocket {
         outboxContinuation = held
     }
 
+    /// What the other end said as it closed, when it said anything. A server
+    /// that refuses a connection puts its reason here; without it a client
+    /// has only the transport's own words, which describe the socket and not
+    /// the refusal, and it ends up inventing an explanation for the user.
+    var closeReason: String? {
+        guard let data = socket.closeReason, !data.isEmpty,
+              let text = String(data: data, encoding: .utf8)?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
+        else { return nil }
+        return text
+    }
+
     /// `onMessage` runs for each inbound frame; `onFailure` once, when the
     /// socket dies for any reason other than `close()`.
     func open(
