@@ -591,6 +591,10 @@ pub struct ChatSession {
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
+    /// The kernel's "waiting on <worker> — <step>" for a parent whose
+    /// worker is live (#366). Runtime only; the kernel clears it the
+    /// moment no worker is live.
+    pub waiting: Option<String>,
     /// When each running tool call began, by call id, so its finished
     /// item can say how long it took.
     tool_started: HashMap<String, Instant>,
@@ -726,6 +730,7 @@ impl ChatSession {
             to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
+            waiting: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -817,6 +822,7 @@ impl ChatSession {
             to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
+            waiting: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -908,6 +914,7 @@ impl ChatSession {
             to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
+            waiting: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -3189,6 +3196,7 @@ impl ChatSession {
                 let text = text.trim().to_string();
                 self.status = (!text.is_empty()).then_some(text);
             }
+            Event::Waiting(line) => self.waiting = line,
             Event::TurnEndedAt(ended) => {
                 if let Some(ChatItem::User(message)) = self
                     .items

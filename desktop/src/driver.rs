@@ -1228,6 +1228,7 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
             Connection::Lost => "lost",
         },
         "streaming": chat.streaming,
+        "waiting": chat.waiting,
         "turn_open": chat.turn_open,
         "closed": chat.closed,
         "pills": project.map(|project| {
