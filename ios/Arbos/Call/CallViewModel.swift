@@ -213,9 +213,37 @@ final class CallViewModel: ObservableObject {
             #endif
             sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
         }
-        for frame in held { send(frame) }
-        held.removeAll()
-        audio.onCapture = send
+        #if DEBUG
+        // -flushPace <n>: send the held frames at n times real time instead
+        // of all at once, to ask whether the server dislikes the burst.
+        let pace = UserDefaults.standard.integer(forKey: "flushPace")
+        #else
+        let pace = 0
+        #endif
+        if pace > 0 {
+            // Live frames queue behind the held ones so nothing is sent out
+            // of order, and one drain empties the queue at the asked pace.
+            // Whether the hand-off at the end is tight is checked by the
+            // frame counters, not assumed: a lost frame shows as clip > sent
+            // and the run is void.
+            pendingFrames = held
+            held.removeAll()
+            audio.onCapture = { [weak self] frame in
+                Task { @MainActor in self?.pendingFrames.append(frame) }
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                while !self.pendingFrames.isEmpty {
+                    send(self.pendingFrames.removeFirst())
+                    try? await Task.sleep(for: .milliseconds(DebugInjector.frameMilliseconds / pace))
+                }
+                self.audio.onCapture = send
+            }
+        } else {
+            for frame in held { send(frame) }
+            held.removeAll()
+            audio.onCapture = send
+        }
         route = audio.outputRoute
         startedAt = Date()
         phase = .listening
@@ -566,6 +594,8 @@ final class CallViewModel: ObservableObject {
     /// the same sink and the stream has two producers.
     private var framesFromClip = 0
     var framesSent = 0
+    /// Only used by `-flushPace`: frames waiting for the paced drain.
+    var pendingFrames: [Data] = []
 
     private func stopMicClip() { micClipTask?.cancel(); micClipTask = nil }
     #endif
