@@ -844,9 +844,6 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut nudged = false;
     // The `changes`-before-done nudge fires once per turn.
     let mut changes_nudged = false;
-    // The second-model critique runs once per turn, on the first final
-    // reply after an edit.
-    let mut critiqued = false;
     // The reason of the last nudge, for what the next reply may not say.
     let mut nudge_reason: Option<&'static str> = None;
     // Replies with no words and no calls in a row (a done wake's silence
@@ -1317,35 +1314,6 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 // turn is ending with no image made: once, before the
                 // report goes out with words alone (kickoff item 3).
                 Some((SHOW_NUDGE.to_string(), "image owed"))
-            } else if crate::critique::enabled()
-                && !critiqued
-                && crate::critique::edited_in_task(&events)
-            {
-                critiqued = true;
-                let request = crate::critique::request_text(&events).unwrap_or_default();
-                match crate::critique::run(&provider, &request, &cx.cwd).await {
-                    Ok(Some(c)) => {
-                        if let Some(cost) = c.cost {
-                            turn_cost = Some(turn_cost.unwrap_or(0.0) + cost);
-                        }
-                        eprintln!(
-                            "turn {}: critique {} (cost {:?})",
-                            agent.id,
-                            if c.complete {
-                                "complete"
-                            } else {
-                                "found a gap"
-                            },
-                            c.cost
-                        );
-                        (!c.complete).then(|| (crate::critique::nudge(&c), "critique found a gap"))
-                    }
-                    Ok(None) => None,
-                    Err(e) => {
-                        eprintln!("turn {}: critique call failed: {e:#}", agent.id);
-                        None
-                    }
-                }
             } else if changes_before_done() && !changes_nudged && changes_owed(&events) {
                 changes_nudged = true;
                 Some((
