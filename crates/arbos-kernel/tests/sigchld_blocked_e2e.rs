@@ -120,23 +120,36 @@ fn a_job_that_exits_produces_its_tool_result_even_when_sigchld_is_blocked() {
             .is_some()
     );
     // No zombie left under the kernel.
-    std::thread::sleep(Duration::from_millis(500));
-    let ps = Command::new("ps")
-        .args(["-o", "pid=,ppid=,stat=", "-ax"])
-        .output()
-        .unwrap();
-    let ps = String::from_utf8_lossy(&ps.stdout);
-    let zombies: Vec<&str> = ps
-        .lines()
-        .filter(|l| {
-            let cols: Vec<&str> = l.split_whitespace().collect();
-            cols.len() >= 3 && cols[1] == helper.id().to_string() && cols[2].starts_with('Z')
-        })
-        .collect();
+    let zombies = zombies_under(helper.id(), Duration::from_secs(5));
     assert!(zombies.is_empty(), "children reaped: {zombies:?}");
     let _ = helper.kill();
     let _ = helper.wait();
     let _ = std::fs::remove_dir_all(&scratch);
+}
+
+/// Zombie children of `parent` once the wait settles: empty as soon as a
+/// look finds none, the last look's list otherwise.
+fn zombies_under(parent: u32, within: Duration) -> Vec<String> {
+    let deadline = Instant::now() + within;
+    loop {
+        let ps = Command::new("ps")
+            .args(["-o", "pid=,ppid=,stat=", "-ax"])
+            .output()
+            .unwrap();
+        let ps = String::from_utf8_lossy(&ps.stdout);
+        let zombies: Vec<String> = ps
+            .lines()
+            .filter(|l| {
+                let cols: Vec<&str> = l.split_whitespace().collect();
+                cols.len() >= 3 && cols[1] == parent.to_string() && cols[2].starts_with('Z')
+            })
+            .map(str::to_string)
+            .collect();
+        if zombies.is_empty() || Instant::now() > deadline {
+            return zombies;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// The runtime's reaper never wakes (fault injection, `ARBOS_TEST_NO_CHILD_WAIT`):
@@ -182,19 +195,9 @@ fn a_reaper_that_never_wakes_still_yields_the_result_from_the_exit_file() {
             && f["event"]["text"] == "The number is 26.")
             .is_some()
     );
-    std::thread::sleep(Duration::from_millis(500));
-    let ps = Command::new("ps")
-        .args(["-o", "pid=,ppid=,stat=", "-ax"])
-        .output()
-        .unwrap();
-    let ps = String::from_utf8_lossy(&ps.stdout);
-    let zombies: Vec<&str> = ps
-        .lines()
-        .filter(|l| {
-            let cols: Vec<&str> = l.split_whitespace().collect();
-            cols.len() >= 3 && cols[1] == k.child.id().to_string() && cols[2].starts_with('Z')
-        })
-        .collect();
+    // The leash ends a look after the exit file (250 ms, more under
+    // load) and is reaped the instant it does: poll, do not sleep once.
+    let zombies = zombies_under(k.child.id(), Duration::from_secs(5));
     assert!(zombies.is_empty(), "reaped by pid: {zombies:?}");
     let _ = k.child.kill();
 }

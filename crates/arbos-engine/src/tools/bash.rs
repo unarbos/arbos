@@ -265,21 +265,19 @@ impl Tool for Bash {
                         bail!("bash interrupted; job {} killed", job.id);
                     }
                     _ = tick.tick() => {
-                        // The command's own end is the `exit` file. The
-                        // leash stays behind it while children of the
-                        // command still run in the group (a server the
-                        // command backgrounded), so waiting on the leash
-                        // alone would hold the call for those.
-                        if root.load(&job.id).is_ok_and(|j| !j.running()) {
-                            break true;
-                        }
                         if arbos_core::inbox::has_user_steer(&cx.place, cx.agent.id.as_str()) {
                             steered = true;
                             break false;
                         }
-                        // The command ended and the runtime did not say:
-                        // the wrapper's `exit` file did. Reap the wrapper
-                        // ourselves so no zombie is left under the kernel.
+                        // The command's own end is the `exit` file, and
+                        // the truth about it when the runtime never says
+                        // (a Mac deaf to its children). The leash stays
+                        // behind the file for a moment (its 250 ms look),
+                        // or for as long as children of the command still
+                        // run in its group (a server the command
+                        // backgrounded), so the wait ends here and the
+                        // leash is reaped when it does end, not only if
+                        // it already has.
                         if root.load(&job.id).is_ok_and(|j| !j.running()) {
                             reap_by_pid(job_pid);
                             waiter.abort();
@@ -1091,7 +1089,21 @@ pub fn reap_by_pid(pid: u32) {
     #[cfg(unix)]
     unsafe {
         let mut status: libc::c_int = 0;
-        let _ = libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+        let r = libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG);
+        if r == 0 {
+            // Still running: the leash outlives the command's `exit` file
+            // by one look, or by the life of what the command left in
+            // its group. A plain thread waits it out and reaps it the
+            // instant it ends; the runtime's own reaper, when it is
+            // awake, may get there first (ECHILD here, harmless).
+            std::thread::Builder::new()
+                .name(format!("reap-{pid}"))
+                .spawn(move || {
+                    let mut status: libc::c_int = 0;
+                    let _ = libc::waitpid(pid as libc::pid_t, &mut status, 0);
+                })
+                .ok();
+        }
     }
     #[cfg(not(unix))]
     let _ = pid;
