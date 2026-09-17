@@ -34,6 +34,7 @@ pub mod setup;
 pub mod snapshot;
 pub mod store_cmd;
 pub mod subs;
+pub mod surfaces;
 pub mod tools;
 pub mod update_cmd;
 pub mod watch;

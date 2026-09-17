@@ -234,6 +234,10 @@ pub struct KernelHooks {
     /// the first thing the next turn's model reads after the history).
     pub notes_nudge: Mutex<HashSet<String>>,
     pub browsers: BrowserHub,
+    /// The shells this kernel opened, set once when `serve` builds the
+    /// hub (it binds a frame sender the hooks do not have yet); read by
+    /// `surfaces` to say which shells have a process behind them.
+    pub ptys: std::sync::OnceLock<Arc<crate::pty::PtyHub>>,
     /// Serialises plan file writes. One kernel per place holds the lock, so
     /// this is the whole claim story.
     pub plan_lock: Mutex<()>,
@@ -306,6 +310,7 @@ impl KernelHooks {
             notes_nudge: Mutex::new(HashSet::new()),
             approves: Mutex::new(HashMap::new()),
             browsers: BrowserHub::new(),
+            ptys: std::sync::OnceLock::new(),
             plan_lock: Mutex::new(()),
             running: Mutex::new(HashSet::new()),
             progress: Mutex::new(HashMap::new()),
