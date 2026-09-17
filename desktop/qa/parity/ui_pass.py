@@ -286,8 +286,13 @@ class Pass:
             return after
         if verdict is True:
             self.record(element, screen, action, expected, "as expected", "pass", shot)
-        elif verdict is False:
+        elif verdict is False or verdict is None or verdict == "":
             self.record(element, screen, action, expected, self.diff(before, after), "fail", shot)
+        elif isinstance(verdict, str) and verdict.startswith("unverified:"):
+            # The assert could not decide: it says so instead of passing.
+            # `self.diff(a, b) or "unverified: click accepted, nothing changed"` used to pass on no change at
+            # all — an assertion that cannot fail (rig audit R14, cycle 31).
+            self.record(element, screen, action, expected, verdict[len("unverified:"):].strip(), "unverified", shot)
         else:
             self.record(element, screen, action, expected, str(verdict), "pass", shot)
         return after
@@ -404,9 +409,14 @@ class Pass:
         if not self.app.exists(target):
             return False
         try:
-            return bool(self.app.find(target).get("visible"))
+            found = self.app.find(target)
         except Exception:
             return False
+        # `visible` is bounds ∩ content mask; the PRs pill read False while
+        # plainly on screen (cycle 31, `128-pill-prs.png`). `reachable` is
+        # the hit test at the element's centre — the stronger word for an
+        # interactive element. Either counts; neither is assumed (R15).
+        return bool(found.get("visible")) or bool(found.get("reachable"))
 
     def first(self, pattern: str) -> str | None:
         found = self.ids(pattern)
@@ -468,7 +478,7 @@ class Pass:
             self.app.wait_element("composer-field", timeout=8, reachable=True)
         except Exception:
             self.check("cmd-n", "launch", "cmd-n when no chat is open", "a chat opens with a composer",
-                       lambda: self.app.key("cmd-n"), lambda a, b: self.app.exists("composer-field"))
+                       lambda: self.app.key("cmd-n"), lambda a, b: self.seen("composer-field"))
         self.inv("empty-chat")
 
     def phase_composer(self) -> None:
@@ -480,13 +490,13 @@ class Pass:
                    self.clear_composer, lambda a, b: b["composer"]["text"] == "")
         # Model picker.
         after = self.check("composer-model", sc, "click", "model list opens (composer-model-list present)",
-                           lambda: self.app.click("composer-model"), lambda a, b: self.app.exists("composer-model-list"))
+                           lambda: self.app.click("composer-model"), lambda a, b: self.seen("composer-model-list"))
         if after is not None and self.app.exists("composer-model-list"):
             self.inv("model-picker")
             if self.app.exists("composer-model-toggle"):
                 self.check("composer-model-toggle", "model-picker", "click", "list changes length (all models / favourites)",
                            lambda: self.app.click("composer-model-toggle"),
-                           lambda a, b: f"{len(self.ids('composer-model-*'))} model rows after toggle")
+                           lambda a, b: (len(self.ids('composer-model-*')) > 0 and f"{len(self.ids('composer-model-*'))} model rows after toggle") or "unverified: no model rows to count")
             rows = self.ids("composer-model-[0-9]*")
             if len(rows) > 1:
                 cur = (active(self.state()) or {}).get("model")
@@ -499,7 +509,7 @@ class Pass:
         # Slash commands.
         self.check("composer-field", sc, "type '/'", "slash command list opens (composer-commands-list)",
                    lambda: (self.app.click("composer-field"), self.app.type("/")),
-                   lambda a, b: self.app.exists("composer-commands-list") and f"{len(self.ids('composer-slash-*'))} commands")
+                   lambda a, b: self.seen("composer-commands-list") and f"{len(self.ids('composer-slash-*'))} commands")
         if self.app.exists("composer-commands-list"):
             self.inv("slash-menu")
             cmds = self.ids("composer-slash-*")
@@ -560,7 +570,7 @@ class Pass:
         s = self.wait(lambda s: busy(s), 20, what="turn start")
         self.inv(sc)
         self.check("composer-stop", sc, "present while running", "stop disc replaces mic/send", lambda: None,
-                   lambda a, b: self.app.exists("composer-stop"), still=True)
+                   lambda a, b: self.seen("composer-stop"), still=True)
         pills = (active(self.state()) or {}).get("pills")
         self.record("pill-working", sc, "read session.pills while the main turn runs", "pills present (working counts child agents, so 0 here is fine)", json.dumps(pills)[:120], "pass" if pills is not None else "unverified", self.still("pills"))
         # Enter while busy steers: the words go to the running turn now.
@@ -576,7 +586,7 @@ class Pass:
         self.record("steer-inbox", sc, "read the kernel inbox / transcript after Enter while busy", "a `kind = \"steer\"` inbox file, or the line already taken into the running turn's transcript",
                     f"inbox kinds={inbox_kinds(agent)} in_transcript={transcript_has(agent, steer_text)}", "pass" if "steer" in inbox_kinds(agent) or transcript_has(agent, steer_text) else "fail", "")
         self.check("composer-stop", sc, "present beside Send while running", "Stop is its own disc; no composer-force", lambda: None,
-                   lambda a, b: self.app.exists("composer-stop") and not self.app.exists("composer-force") and "stop disc, no force disc", still=True)
+                   lambda a, b: self.seen("composer-stop") and not self.app.exists("composer-force") and "stop disc, no force disc", still=True)
         # Queue: ⇧⌘↩ holds the words for the next turn; the kernel keeps them.
         if not busy(self.state()):
             self.send(P_LONG); self.wait(lambda s: busy(s), 20, what="turn start")
@@ -586,7 +596,7 @@ class Pass:
                    # carry the long part: `busy` here is F-97's disc over running workers, and a
                    # prompt to an idle root runs at once — Cursor's shape too (its steer while a
                    # worker ran became its own Worked turn). Held, or landed as a user card, both pass.
-                   lambda a, b: b["composer"]["text"] == "" and (self.app.exists("followups-head") or (active(b) or {}).get("held", 0) > 0 or any("Also say thanks." in it.get("text", "") for it in (active(b) or {}).get("items", []) if it.get("kind") == "user")) and f"held={(active(b) or {}).get('held')} followups-head={self.app.exists('followups-head')} landed={any('Also say thanks.' in it.get('text', '') for it in (active(b) or {}).get('items', []) if it.get('kind') == 'user')}", settle=2)
+                   lambda a, b: b["composer"]["text"] == "" and (self.seen("followups-head") or (active(b) or {}).get("held", 0) > 0 or any("Also say thanks." in it.get("text", "") for it in (active(b) or {}).get("items", []) if it.get("kind") == "user")) and f"held={(active(b) or {}).get('held')} followups-head={self.app.exists('followups-head')} landed={any('Also say thanks.' in it.get('text', '') for it in (active(b) or {}).get('items', []) if it.get('kind') == 'user')}", settle=2)
         self.inv("follow-up-row")
         if busy(self.state()):
             agent = (active(self.state()) or {}).get("agent_session") or "root"
@@ -768,7 +778,7 @@ class Pass:
             self.check(opt.rsplit(".", 1)[-1], sc, "click option A", "option selected (card stays)", lambda: self.app.click(opt), None)
         other = self.first("ask-*-other")
         if other:
-            self.check("ask-other", sc, "click Other…", "other row selected; a text field appears", lambda: self.app.click(other), lambda a, b: self.diff(a, b) or "card still up")
+            self.check("ask-other", sc, "click Other…", "other row selected; a text field appears", lambda: self.app.click(other), lambda a, b: self.diff(a, b) or "unverified: card still up, nothing changed")
             if opt:
                 self.app.click(opt)
         for el in ("ask-prev", "ask-next"):
@@ -881,7 +891,7 @@ class Pass:
                 self.record("working-card-closed", sc, "read the pills row while workers run", "no Working card until the pill or the line opens it",
                             f"working-card exists={self.app.exists('working-card')}", "fail" if self.app.exists("working-card") else "pass", "")
                 self.check("child-line", sc, "click the 'N Working' line with several workers", "the Working card opens (a row per worker)",
-                           click_child, lambda a, b: self.app.exists("working-card"), settle=0.8)
+                           click_child, lambda a, b: self.seen("working-card"), settle=0.8)
                 row = self.first("working-row-*")
                 if row:
                     self.check("working-row", sc, "click a Working card row", "active_session becomes the child",
@@ -931,7 +941,7 @@ class Pass:
             for el in ("surface-open", "surface-document", "surface-files", "surface-pane-close-*", "surface-close-*"):
                 f = self.first(el)
                 if f:
-                    self.check(el, "surface", "click", "surface acts / closes", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "clicked")
+                    self.check(el, "surface", "click", "surface acts / closes", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "unverified: click accepted, nothing changed")
         else:
             self.gap("artifact-card", sc, "click", "no artifact-* card after a file-creating turn")
 
@@ -977,7 +987,7 @@ class Pass:
             for el in ("project-mark-*", "pinned-head", "project-archive-*"):
                 f = self.first(el)
                 if f:
-                    self.check(el, sc, "click", "state changes", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "clicked")
+                    self.check(el, sc, "click", "state changes", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "unverified: click accepted, nothing changed")
                     self.escape()
             return
         sc = "tab-bar"
@@ -990,7 +1000,7 @@ class Pass:
         self.check("tab-0", sc, "click Home tab", "active_project 0", lambda: self.app.click("tab-0"), lambda a, b: b["active_project"] == 0)
         self.check(f"tab-{ix}", sc, "click project tab", f"active_project {ix}", lambda: self.app.click(f"tab-{ix}"), lambda a, b: b["active_project"] == ix)
         self.check("tab double-click", sc, "double-click project tab", "tab edit sheet opens (tab-sheet-done present)",
-                   lambda: self.app.double_click(f"tab-{ix}"), lambda a, b: self.app.exists("tab-sheet-done") or self.app.exists("tab-sheet-cancel"))
+                   lambda: self.app.double_click(f"tab-{ix}"), lambda a, b: self.seen("tab-sheet-done") or self.seen("tab-sheet-cancel"))
         self.escape()
         # Kernel notifications (#293/#297): a reply that lands while another
         # tab is in front stays unseen (the tab's dot) until the chat is
@@ -1082,7 +1092,7 @@ class Pass:
                            lambda a, b: b.get("opener_open") and f"{len(self.ids('opener-row-*'))} folder rows", settle=1.5)
                 self.inv("opener-step-2")
                 self.check("opener keyboard", "opener", "type 'par', down, escape", "filter narrows rows, escape closes",
-                           lambda: (self.app.type("par"), self.app.key("down")), lambda a, b: f"{len(self.ids('opener-row-*'))} rows after filter")
+                           lambda: (self.app.type("par"), self.app.key("down")), lambda a, b: (len(self.ids('opener-row-*')) > 0 and f"{len(self.ids('opener-row-*'))} rows after filter") or "unverified: no rows after filter")
                 if self.app.exists("opener-grip"):
                     self.check("opener-grip", "opener", "drag grip 60 px down", "no error", lambda: self.app.drag("opener-grip", (400, 600)), None)
             self.check("opener escape", "opener", "escape", "opener closes", self.escape, lambda a, b: b.get("opener_open") is False)
@@ -1237,7 +1247,7 @@ class Pass:
         for pat in ("panel-surface-*", "panel-standing-*"):
             f = self.first(pat)
             if f:
-                self.check(pat, sc, "click", "surface / node focused", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "clicked")
+                self.check(pat, sc, "click", "surface / node focused", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "unverified: click accepted, nothing changed")
             else:
                 self.gap(pat, sc, "click", "no such row in this run (no processes / standing nodes)")
         self.check("new-subchat", sc, "click +", "a child session of the main chat appears and is active",
@@ -1284,7 +1294,7 @@ class Pass:
             for s_ in secs:
                 name = s_.rsplit(".", 1)[-1]
                 self.check(name, "settings-window", "click section", "section body changes (element set differs)",
-                           lambda s_=s_: self.app.click(s_), lambda a, b: f"{len(self.ids())} interactive ids in section", settle=0.6)
+                           lambda s_=s_: self.app.click(s_), lambda a, b: (len(self.ids()) > 0 and f"{len(self.ids())} interactive ids in section") or "unverified: nothing listed", settle=0.6)
                 self.inv(f"settings-{name}")
                 for el in self.ids():
                     short = el.rsplit(".", 1)[-1]
@@ -1390,7 +1400,7 @@ class Pass:
                        lambda a, b: perms(b).get("enabling_all") is False and all(r["phase"] in ("idle", "needs_settings") for r in perms(b)["rows"]) and "settled", settle=5.0)
         if self.app.exists("mic-test"):
             self.check("mic-test", sc, "click Test in the sheet", "the probe starts (button reads Stop) or an error line says what is missing",
-                       lambda: self.app.click("mic-test"), lambda a, b: self.app.exists("mic-test") and "probe toggled", settle=1.5)
+                       lambda: self.app.click("mic-test"), lambda a, b: self.seen("mic-test") and "probe toggled", settle=1.5)
             if self.app.exists("mic-test"):
                 self.app.click("mic-test"); time.sleep(0.5)
         self.check("permissions-escape", sc, "Escape", "permissions.open false; seen stays true; composer focused",
@@ -1603,6 +1613,21 @@ def place_window() -> None:
             subprocess.run(["xdotool", "windowactivate", "--sync", wid], env=ENV)
             subprocess.run(["xdotool", "windowsize", wid, "1600", "1000"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV)
+            # Read the geometry back rather than trust the move. (Added
+            # after a false alarm: a crop of a still, cut at x=200 while the
+            # window sits at x=100, read as "the window is off-screen"; the
+            # raw still showed it whole. The guard is right anyway — a
+            # coordinate the rig set is not one it verified — rig audit R13.)
+            time.sleep(0.4)
+            geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
+            pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
+            if pos.get("X", 0) < 0 or pos.get("Y", 0) < 0 or pos.get("X", 0) + pos.get("WIDTH", 0) > 1920:
+                subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV); time.sleep(0.4)
+                geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
+                pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
+                if pos.get("X", 0) < 0 or pos.get("Y", 0) < 0:
+                    raise DisplayHung(f"window sits off-screen after placement: {pos}")
+            log(f"window at {pos.get('X')},{pos.get('Y')} {pos.get('WIDTH')}x{pos.get('HEIGHT')}")
             return
         time.sleep(0.5)
 
