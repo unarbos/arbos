@@ -26,6 +26,7 @@ mod place;
 pub mod project;
 pub mod protocol;
 pub mod prs;
+pub mod record;
 pub mod redact;
 pub mod remote_kernel;
 pub mod skills;

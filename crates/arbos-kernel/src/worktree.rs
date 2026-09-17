@@ -346,7 +346,15 @@ fn exclude_arbos(place: &Path) {
         place.join(dir)
     };
     let exclude = git_dir.join("info").join("exclude");
-    let current = std::fs::read_to_string(&exclude).unwrap_or_default();
+    // Confirmed: a hand's exclude lines are added to, never lost to a
+    // failed read (arbos_core::record).
+    let current = match arbos_core::record::read_text(&exclude).confirmed() {
+        Ok(text) => text.unwrap_or_default(),
+        Err(e) => {
+            crate::klog::warn("exclude_unread", None, format!("{e:#}"));
+            return;
+        }
+    };
     if current
         .lines()
         .any(|l| l.trim() == "/.arbos/" || l.trim() == ".arbos/")

@@ -281,7 +281,15 @@ fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> 
         .chars()
         .take(200)
         .collect();
-    let mut text = std::fs::read_to_string(dir.join("meta.toml")).unwrap_or_default();
+    // Confirmed: an unreadable meta.toml is not rewritten as its tail
+    // (arbos_core::record); the close is logged instead.
+    let mut text = match arbos_core::record::read_text(&dir.join("meta.toml")).confirmed() {
+        Ok(t) => t.unwrap_or_default(),
+        Err(e) => {
+            crate::klog::warn("turn_meta_unread", None, format!("{e:#}"));
+            return true;
+        }
+    };
     if !text.ends_with('\n') {
         text.push('\n');
     }

@@ -553,13 +553,30 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut events = load_transcript(&transcript)?;
 
     let cwd = agent.work_dir(&place.path);
+    let turn_line = events.len() as u64;
     {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();
         let agent_id = agent.id.to_string();
-        let line = events.len() as u64;
+        let transcript_for_note = transcript.clone();
+        let hooks_for_note = Arc::clone(&hooks);
         tokio::task::spawn_blocking(move || {
-            let _ = crate::tools::git::snapshot_turn(&snap, &agent_dir, &agent_id, line);
+            // A checkpoint that could not be written is said, once, on the
+            // transcript: `undo` and `rewind --files` will refuse this
+            // turn, and the person should know why before they reach for
+            // them (the qal-j08 family).
+            if let Err(e) =
+                crate::tools::git::snapshot_turn(&snap, &agent_dir, &agent_id, turn_line)
+            {
+                let ev = Event::new(EventKind::Notice {
+                    text: format!(
+                        "Checkpoint not written for this turn: {e:#}. Until it is, undo and a rewind of files to this turn are refused rather than guessed."
+                    ),
+                    failed: true,
+                });
+                let _ = append_event(&transcript_for_note, &ev);
+                hooks_for_note.emit(&ev);
+            }
         });
     }
 
@@ -806,6 +823,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         hooks: Arc::clone(&hooks),
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
+        turn_line,
         web: Arc::new(crate::tool::WebCfg {
             search_url: host.config.search_url.clone(),
             search_key: host.config.search_key.clone(),

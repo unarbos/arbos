@@ -114,7 +114,11 @@ pub fn init_arbos_repo(place: &Place) -> Result<bool> {
     let arbos = place.arbos();
     std::fs::create_dir_all(&arbos)?;
     let ignore = arbos.join(".gitignore");
-    let have = std::fs::read_to_string(&ignore).unwrap_or_default();
+    // Confirmed: a hand's extra lines are merged, not lost to a failed
+    // read (the qal-j08 family; see `crate::record`).
+    let have = crate::record::read_text(&ignore)
+        .confirmed()?
+        .unwrap_or_default();
     if have != ARBOS_GITIGNORE {
         // Keep a hand's extra lines; make sure ours are present.
         let mut merged = String::new();
@@ -176,7 +180,12 @@ pub fn exclude_locally(project: &Path, patterns: &[&str]) {
     }
     let exclude = git_dir.join("info").join("exclude");
     let _ = std::fs::create_dir_all(exclude.parent().unwrap());
-    let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+    // Confirmed: a failed read is not an empty file to write over
+    // (`crate::record`); the patterns wait for the next start.
+    let Ok(text) = crate::record::read_text(&exclude).confirmed() else {
+        return;
+    };
+    let mut text = text.unwrap_or_default();
     let mut changed = false;
     for pattern in patterns {
         let bare = pattern.trim_end_matches('/');
@@ -403,7 +412,14 @@ fn root_focus() -> String {
 /// The focused agent folder. A missing or invalid file reads as root, and
 /// is rewritten so every reader agrees.
 pub fn read_focus(place: &Place) -> String {
-    let raw = std::fs::read_to_string(place.focus_path()).unwrap_or_default();
+    // A focus file that could not be read is not rewritten: the value
+    // shown is root for now, the file keeps what it holds
+    // (`crate::record`). Absent or invalid, it is set so readers agree.
+    let raw = match crate::record::read_text(&place.focus_path()) {
+        crate::record::Read::Present(t) => t,
+        crate::record::Read::Absent => String::new(),
+        crate::record::Read::Unknown(_) => return root_focus(),
+    };
     match validate_focus(place, &raw) {
         Ok(focus) => focus,
         Err(_) => {

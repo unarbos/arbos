@@ -1245,7 +1245,16 @@ fn handle_frame(
                 .ok()
                 .and_then(|a| a.cwd)
                 .unwrap_or_else(|| place.path.clone());
-            let _ = arbos_engine::git::undo(&cwd);
+            // The mark must be the last turn's: its start line is the
+            // last checkpoint's (qal-j10).
+            let turn_line = arbos_engine::git::checkpoints(&place.agent_dir(&agent))
+                .last()
+                .map(|cp| cp.line)
+                .unwrap_or(0);
+            match arbos_engine::git::undo(&cwd, turn_line) {
+                Ok(out) => klog::info("undo", Some(&agent), arbos_core::text::clip(&out.body, 200)),
+                Err(e) => refuse(hooks, Some(&agent), format!("undo: {e:#}")),
+            }
         }
         Frame::SetModel { agent, model } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
@@ -2561,6 +2570,34 @@ fn rewind_live(
         let restored = if files {
             match rewind::restore_files(&place, &agent, &done.checkpoint) {
                 Ok(what) => Some(what),
+                Err(e) if e.downcast_ref::<arbos_engine::git::NoTree>().is_some() => {
+                    // Not a failure: the record for this turn has no tree
+                    // (recorded before the kernel kept one, or its save
+                    // failed and was said at the time). The transcript is
+                    // cut; the files stand; and on Jacob's existing places
+                    // most old-turn rewinds land here. A notice, drawn as
+                    // a kernel line, that also says when it stops — not
+                    // an `error` frame that draws the rewind as a crash.
+                    let text = format!(
+                        "Rewound the transcript. Files were not restored: {e}. This turn was recorded before the kernel kept each turn's working tree; turns recorded from now on restore their files."
+                    );
+                    let _ = arbos_core::append_event(
+                        &Layout::new(&place, &agent).transcript(),
+                        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                            text,
+                            failed: false,
+                        }),
+                    );
+                    klog::info("rewind_files_skipped", Some(&agent), format!("{e}"));
+                    hooks.broadcast(Frame::Rewound {
+                        agent: agent.clone(),
+                        line: done.checkpoint.line,
+                        dropped: done.dropped,
+                        restored: None,
+                        pending: false,
+                    });
+                    None
+                }
                 Err(e) => {
                     hooks.broadcast(Frame::Error {
                         agent: Some(agent.clone()),
