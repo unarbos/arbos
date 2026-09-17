@@ -18,8 +18,7 @@ use arbos_core::wire::Frame;
 use cacp::{
     Error,
     schema::{
-        ContentBlock, Cost, Diff, RequestPermissionRequest, RequestPermissionResponse,
-        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ContentBlock, Cost, Diff, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
         ToolKind, UsageUpdate,
     },
 };
@@ -33,7 +32,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
     runtime::Runtime,
-    sync::{mpsc, oneshot},
+    sync::mpsc,
 };
 
 pub fn runtime() -> &'static Runtime {
@@ -42,12 +41,8 @@ pub fn runtime() -> &'static Runtime {
 }
 
 pub enum Event {
-    History(crate::model::history::Replay),
     Update(SessionUpdate),
-    Permission(RequestPermissionRequest, Reply<RequestPermissionResponse>),
     TurnDone(Result<StopReason, Error>),
-    Reconnecting,
-    Reconnected,
     Closed,
     /// A message that arrived from outside this window: another chat, or
     /// another door on the same chat.
@@ -185,11 +180,6 @@ pub enum Event {
         /// build with nothing in it rather than a build assumed to be ours.
         build: crate::kernel::KernelBuild,
     },
-    /// The kernel paused the turn for a tool the user must allow.
-    NeedApproval {
-        request_id: String,
-        title: String,
-    },
     /// The kernel paused the turn for the ask tool.
     NeedQuestion {
         request_id: String,
@@ -208,12 +198,8 @@ pub enum Event {
     /// serving last week's. Better than any version guess, since it is the
     /// kernel itself saying it does not know the frame.
     FeedbackUnavailable(String),
-    /// Provider-generated pictures for the turn that just finished.
-    Images(Vec<crate::model::attachment::MessageImage>),
     /// Files a tool made for the user: screenshots, screen recordings.
     Artifacts(Vec<crate::model::session::Artifact>),
-    /// Web-search sources the provider grounded the last assistant message on.
-    Citations(Vec<Citation>),
     /// The agent presented a file (`show`).
     Show {
         path: String,
@@ -275,28 +261,7 @@ pub enum Event {
     StoreChanged(String),
 }
 
-/// One source the provider named. Title may be empty; URL is not.
-#[derive(Clone)]
-pub struct Citation {
-    pub url: String,
-    pub title: String,
-}
-
 pub type Events = mpsc::UnboundedReceiver<Event>;
-
-pub struct Reply<T>(oneshot::Sender<Result<T, Error>>);
-
-impl<T> Reply<T> {
-    pub fn send(self, value: T) {
-        let _ = self.0.send(Ok(value));
-    }
-
-    /// A sink nobody is waiting on — kernel approvals answer over the socket.
-    pub fn ignore() -> Self {
-        let (tx, _) = oneshot::channel();
-        Self(tx)
-    }
-}
 
 pub struct Session {
     reader: tokio::task::JoinHandle<()>,
@@ -556,14 +521,6 @@ impl Session {
     pub fn kickoff(&self) -> Result<()> {
         self.send_frame(&Frame::Kickoff {
             agent: self.session_id.clone(),
-        })
-    }
-
-    pub fn approval(&self, request_id: &str, approved: bool) -> Result<()> {
-        self.send_frame(&Frame::Approve {
-            agent: self.session_id.clone(),
-            call_id: request_id.to_string(),
-            allow: approved,
         })
     }
 

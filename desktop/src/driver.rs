@@ -1324,7 +1324,6 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
             Connection::Idle => "idle",
             Connection::Connecting => "connecting",
             Connection::Live(_) => "live",
-            Connection::Reconnecting(_) => "reconnecting",
             Connection::Lost => "lost",
         },
         "streaming": chat.streaming,
@@ -1338,7 +1337,6 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
             let (working, prs) = crate::view::detail::pill_counts(project, chat);
             json!({ "working": working.len(), "prs": prs.len(), "pr_urls": prs })
         }),
-        "permission": chat.permission.as_ref().map(|prompt| prompt.title.clone()),
         "questions": chat.questions.as_ref().map(|prompt| prompt.title.clone()),
         "items": chat.items.iter().map(item_json).collect::<Vec<_>>(),
     })

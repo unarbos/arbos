@@ -10,7 +10,7 @@
 //! with it, so a relaunch opens the same chat again.
 
 use crate::{
-    agent::acp::{self, Event, KernelSurface, Launch, Reply, Session},
+    agent::acp::{self, Event, KernelSurface, Launch, Session},
     model::{
         attachment::{DescribedImage, MessageImage, Prompt, UserMessage},
         panel::OpenedBy,
@@ -24,8 +24,7 @@ use crate::{
 use anyhow::anyhow;
 use bezel::gpui::{Context, Task};
 use cacp::schema::{
-    ContentBlock, MaybeUndefined, PermissionOptionKind, RequestPermissionRequest,
-    RequestPermissionResponse, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    ContentBlock, MaybeUndefined, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
     SessionModeState, SessionUpdate, StopReason, ToolCallContent, ToolCallStatus, ToolKind,
 };
 use serde::{Deserialize, Serialize};
@@ -232,14 +231,6 @@ struct Flight {
     used: u64,
 }
 
-/// One way to answer a permission request. `kind` is what decides how the
-/// button paints — allow and reject must not look alike.
-pub struct Choice {
-    pub id: String,
-    pub name: String,
-    pub kind: PermissionOptionKind,
-}
-
 /// One selectable answer on an ask-tool question.
 #[derive(Clone)]
 pub struct AskOption {
@@ -387,7 +378,6 @@ pub enum Connection {
     Idle,
     Connecting,
     Live(Box<Session>),
-    Reconnecting(Box<Session>),
     /// The connection could not be restored within the retry window.
     Lost,
 }
@@ -399,19 +389,6 @@ pub enum Connection {
 pub struct Command {
     pub name: String,
     pub description: String,
-}
-
-pub struct PermissionPrompt {
-    pub title: String,
-    pub options: Vec<Choice>,
-    /// Whether the answer should stand for every call like this one, rather
-    /// than for this one alone — the checkbox beside the buttons. It picks
-    /// between the `*Once` and `*Always` forms of whichever button is pressed,
-    /// which is what lets two buttons carry four options.
-    pub always: bool,
-    reply: Reply<RequestPermissionResponse>,
-    /// Set when the kernel asked, so the answer goes back as an intent.
-    kernel_approval: Option<String>,
 }
 
 pub struct ChatSession {
@@ -437,7 +414,6 @@ pub struct ChatSession {
     pub plan: Vec<PlanNode>,
     /// A plan question the next composer send answers.
     pub answering: Option<u64>,
-    pub permission: Option<PermissionPrompt>,
     pub questions: Option<AskPrompt>,
     pub commands: Vec<Command>,
     /// The prompt in flight was dictated: voice the answer when it lands.
@@ -708,7 +684,6 @@ impl ChatSession {
             items: Vec::new(),
             plan: Vec::new(),
             answering: None,
-            permission: None,
             questions: None,
             commands: Vec::new(),
             voice_reply: false,
@@ -808,7 +783,6 @@ impl ChatSession {
             items: record.items,
             plan: Vec::new(),
             answering: None,
-            permission: None,
             questions: None,
             commands: Vec::new(),
             voice_reply: false,
@@ -908,7 +882,6 @@ impl ChatSession {
             items,
             plan: Vec::new(),
             answering: None,
-            permission: None,
             questions: None,
             commands: Vec::new(),
             voice_reply: false,
@@ -1178,7 +1151,7 @@ impl ChatSession {
 
     fn socket_dead(&self) -> bool {
         match &self.connection {
-            Connection::Live(session) | Connection::Reconnecting(session) => session.is_closed(),
+            Connection::Live(session) => session.is_closed(),
             _ => false,
         }
     }
@@ -1543,10 +1516,7 @@ impl ChatSession {
     }
 
     pub fn connecting(&self) -> bool {
-        matches!(
-            self.connection,
-            Connection::Connecting | Connection::Reconnecting(_)
-        )
+        matches!(self.connection, Connection::Connecting)
     }
 
     /// Whether sending to it would start an agent: it is not talking to one,
@@ -2456,9 +2426,6 @@ impl ChatSession {
     /// Stop the turn. `announce` is Stop in the transcript — Force
     /// interrupts without saying the turn was stopped, then sends.
     fn interrupt(&mut self, announce: bool) {
-        if let Some(prompt) = self.permission.take() {
-            self.dismiss_permission(prompt, false);
-        }
         if self.questions.is_some() {
             self.skip_ask();
         }
@@ -2668,26 +2635,6 @@ impl ChatSession {
             // update is the answer; nothing is guessed at here.
             _ => {}
         }
-    }
-
-    /// Answer the pending permission prompt with the chosen option id.
-    pub fn respond_permission(&mut self, option_id: String) {
-        let Some(prompt) = self.permission.take() else {
-            return;
-        };
-        if let Some(request_id) = prompt.kernel_approval {
-            let approved = option_id.contains("allow");
-            if let Connection::Live(session) = &self.connection
-                && let Err(e) = session.approval(&request_id, approved)
-            {
-                self.notice(true, &format!("approval failed: {e:#}"));
-                self.flush();
-            }
-            return;
-        }
-        prompt
-            .reply
-            .send(RequestPermissionResponse::selected(option_id));
     }
 
     /// An ask that is really an approval — the kernel in `ask` mode puts
@@ -2933,29 +2880,13 @@ impl ChatSession {
                 | Event::Aside(_)
                 | Event::Refused(_)
                 | Event::Plan(_)
-                | Event::NeedApproval { .. }
                 | Event::NeedQuestion { .. }
-                | Event::Permission(..)
                 | Event::TurnDone(_)
         ) {
             self.progress_at = Instant::now();
         }
         match event {
             Event::Alive => {}
-            Event::History(replay) => {
-                self.adopt_history(replay.items);
-                if let Some(model) = replay.model {
-                    self.model = Some(model);
-                }
-            }
-            Event::Images(images) => {
-                self.items.push(ChatItem::From {
-                    who: String::new(),
-                    text: String::new(),
-                    images,
-                });
-                self.flush();
-            }
             Event::Artifacts(files) => {
                 if !files.is_empty() {
                     self.items.push(ChatItem::Artifacts(files));
@@ -3442,10 +3373,6 @@ impl ChatSession {
                     self.close();
                 }
             }
-            Event::NeedApproval { request_id, title } => {
-                self.turn_alive();
-                self.open_kernel_approval(request_id, title);
-            }
             Event::NeedQuestion {
                 request_id,
                 title,
@@ -3483,8 +3410,6 @@ impl ChatSession {
                     drafts: HashMap::new(),
                 });
             }
-            Event::Citations(sources) => self.bind_sources(sources),
-            Event::Permission(request, reply) => self.open_permission(request, reply),
             Event::Working(secs) => {
                 self.working = Some((secs, Instant::now()));
                 // A heartbeat straggling in after the turn's own end must
@@ -3556,9 +3481,6 @@ impl ChatSession {
                 self.status = None;
                 self.stamp_worked();
                 self.voice_answer();
-                if let Some(prompt) = self.permission.take() {
-                    self.dismiss_permission(prompt, false);
-                }
                 // A question parks the turn: the kernel ends it and waits
                 // for the answer as a file. The card stays; answering
                 // starts the next turn. A stopped or failed turn drops it.
@@ -3614,23 +3536,7 @@ impl ChatSession {
                 self.flush();
                 self.drain();
             }
-            Event::Reconnecting => {
-                self.connection = match std::mem::replace(&mut self.connection, Connection::Lost) {
-                    Connection::Live(session) => Connection::Reconnecting(session),
-                    other => other,
-                };
-            }
-            Event::Reconnected => {
-                self.connection = match std::mem::replace(&mut self.connection, Connection::Lost) {
-                    Connection::Reconnecting(session) => Connection::Live(session),
-                    other => other,
-                };
-                self.drain();
-            }
             Event::Closed => {
-                if let Some(prompt) = self.permission.take() {
-                    prompt.reply.send(RequestPermissionResponse::cancelled());
-                }
                 self.questions = None;
                 let busy = self.streaming || self.has_running_tool();
                 let queued = !self.queue.is_empty();
@@ -4060,92 +3966,6 @@ impl ChatSession {
         }
     }
 
-    fn open_permission(
-        &mut self,
-        request: RequestPermissionRequest,
-        reply: Reply<RequestPermissionResponse>,
-    ) {
-        let options: Vec<Choice> = request
-            .options
-            .into_iter()
-            .map(|opt| Choice {
-                id: opt.option_id.to_string(),
-                name: opt.name,
-                kind: opt.kind,
-            })
-            .collect();
-        if options.is_empty() {
-            reply.send(RequestPermissionResponse::cancelled());
-            return;
-        }
-        // A replaced prompt must still be answered — an unanswered
-        // reply hangs the agent.
-        if let Some(previous) = self.permission.take() {
-            self.dismiss_permission(previous, false);
-        }
-        let title = request
-            .tool_call
-            .fields
-            .title
-            .clone()
-            .unwrap_or_else(|| "Permission required".to_owned());
-        self.permission = Some(PermissionPrompt {
-            title,
-            options,
-            always: false,
-            reply,
-            kernel_approval: None,
-        });
-    }
-
-    fn open_kernel_approval(&mut self, request_id: String, title: String) {
-        if let Some(previous) = self.permission.take() {
-            self.dismiss_permission(previous, false);
-        }
-        self.permission = Some(PermissionPrompt {
-            title,
-            options: vec![
-                Choice {
-                    id: "reject".into(),
-                    name: "Don't allow".into(),
-                    kind: PermissionOptionKind::RejectOnce,
-                },
-                Choice {
-                    id: "allow".into(),
-                    name: "Allow".into(),
-                    kind: PermissionOptionKind::AllowOnce,
-                },
-            ],
-            always: false,
-            reply: Reply::ignore(),
-            kernel_approval: Some(request_id),
-        });
-    }
-
-    fn dismiss_permission(&mut self, prompt: PermissionPrompt, approved: bool) {
-        if let Some(request_id) = prompt.kernel_approval {
-            if let Connection::Live(session) = &self.connection {
-                let _ = session.approval(&request_id, approved);
-            }
-            return;
-        }
-        prompt.reply.send(RequestPermissionResponse::cancelled());
-    }
-
-    fn bind_sources(&mut self, sources: Vec<acp::Citation>) {
-        let Some(ChatItem::Agent(text)) = self
-            .items
-            .iter_mut()
-            .rev()
-            .find(|item| matches!(item, ChatItem::Agent(_)))
-        else {
-            return;
-        };
-        for source in sources {
-            write_source(text, &source.url, &source.title);
-        }
-    }
-
     /// A dictated prompt's turn just ended: read the answer aloud through
     /// the speech server. Once per turn; nothing when voice is not set up.
     fn voice_answer(&mut self) {
@@ -4240,50 +4060,6 @@ impl ChatSession {
     }
 }
 
-fn write_source(text: &mut String, url: &str, title: &str) {
-    if url.is_empty() || text.contains(url) {
-        return;
-    }
-    let label = if title.is_empty() {
-        host_of(url)
-    } else {
-        title.to_string()
-    };
-    let open = format!("[{label}](");
-    if let Some(start) = text.find(&open) {
-        let dest = start + open.len();
-        if let Some(end) = text[dest..].find(')') {
-            let dest_end = dest + end;
-            if !markdown::is_url(&text[dest..dest_end]) {
-                text.replace_range(dest..dest_end, url);
-            }
-            return;
-        }
-    }
-    if let Some(at) = text
-        .rfind("**Sources:**")
-        .or_else(|| text.rfind("Sources:"))
-    {
-        if let Some(nl) = text[at..].find('\n') {
-            text.insert_str(at + nl, &format!(" · [{label}]({url})"));
-        } else {
-            text.push_str(&format!(" · [{label}]({url})"));
-        }
-        return;
-    }
-    text.push_str(&format!("\n\n**Sources:** [{label}]({url})"));
-}
-
-fn host_of(url: &str) -> String {
-    url.trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("www.")
-        .split('/')
-        .next()
-        .filter(|host| !host.is_empty())
-        .unwrap_or(url)
-        .to_string()
-}
 
 fn history_beats(next: &[ChatItem], held: &[ChatItem]) -> bool {
     if next.len() > held.len() {
@@ -4662,10 +4438,7 @@ fn pump(
             let should_resume = if let Some(chat) = workspace.session_mut(id) {
                 if chat.attach_gen != attach_gen {
                     false
-                } else if matches!(
-                    chat.connection,
-                    Connection::Live(_) | Connection::Reconnecting(_)
-                ) {
+                } else if matches!(chat.connection, Connection::Live(_)) {
                     let busy = chat.streaming || chat.has_running_tool();
                     let queued = !chat.queue.is_empty();
                     chat.forget_socket();
