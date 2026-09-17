@@ -117,9 +117,23 @@ pub struct RunCx {
     pub bash_wait_ms: u64,
     /// Reply budget this turn was started with. `say` spends it.
     pub hops: u8,
+    /// The transcript line this turn started at — the checkpoint's key.
+    /// `undo` acts only on a mark written for this very turn (qal-j10: a
+    /// mark whose write failed kept an older HEAD, and `undo` reset to it).
+    pub turn_line: u64,
+    /// The checkpoint record's time for this turn, when one was written:
+    /// with `turn_line`, what a mark must carry to be this turn's.
+    pub turn_ts: Option<i64>,
     /// What `search` and `fetch` may use: the custom endpoint from
     /// config, and the model provider (OpenRouter's web plugin).
     pub web: Arc<WebCfg>,
+    /// `true` once this turn's checkpoint has its working tree saved (or
+    /// gave up). A tool that writes waits on it first: the tree is taken
+    /// beside the turn, and a first tool call that landed before `add -A`
+    /// finished was in the "before" tree — a rewind then restored the
+    /// turn's own file and said restored (qal-j17). `None`: nothing to
+    /// wait for.
+    pub tree_ready: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl RunCx {

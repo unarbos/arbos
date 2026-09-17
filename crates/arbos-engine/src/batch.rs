@@ -240,6 +240,9 @@ pub async fn run(
     let mut task_slot: HashMap<tokio::task::Id, usize> = HashMap::new();
     let mut committed = false;
     let mut aborted = false;
+    let mut waiting_on_tree = false;
+    let mut tree_step_said = false;
+    let mut tree_held_since: Option<std::time::Instant> = None;
     let mut rx_open = true;
 
     loop {
@@ -328,6 +331,23 @@ pub async fn run(
                 if blocked {
                     continue;
                 }
+                // A write waits for the turn's checkpoint tree (qal-j17)
+                // *here*, before its record is stamped `started`, so the
+                // wait is the kernel's own step and not six seconds
+                // billed to `echo` (qal-j18). Reads go on meanwhile.
+                if !slots[i].access.is_readonly()
+                    && let Some(rx) = &cx.tree_ready
+                    && !*rx.borrow()
+                {
+                    if !tree_step_said {
+                        tree_step_said = true;
+                        tree_held_since = Some(std::time::Instant::now());
+                        cx.hooks
+                            .kernel_step("Saving a checkpoint of the working tree");
+                    }
+                    waiting_on_tree = true;
+                    continue;
+                }
                 let State::Ready(prepared) = std::mem::replace(&mut slots[i].state, State::Running)
                 else {
                     unreachable!()
@@ -357,8 +377,20 @@ pub async fn run(
                     output: None,
                 };
                 // On disk before it runs: a kernel that dies mid-call
-                // leaves this for the next one to write up (qal-j02).
-                crate::inflight::start(&cx.place, &cx.agent.id, &rec);
+                // leaves this for the next one to write up (qal-j02). A
+                // record that cannot be written refuses the call: a crash
+                // now would run it twice with nothing to say so.
+                if let Err(e) = crate::inflight::start(&cx.place, &cx.agent.id, &rec) {
+                    running -= 1;
+                    slots[i].state = State::Done(Outcome::Ran {
+                        out: Err(anyhow::anyhow!(
+                            "not run: its in-flight record could not be written ({e:#}) — a kernel death during the call would run it again unrecorded. Fix what blocks writes under .arbos/ (a full disk?) and call again."
+                        )),
+                        started,
+                        ended: arbos_core::now_ms(),
+                    });
+                    continue;
+                }
                 cx.hooks.emit(&Event::new(EventKind::Tool(rec)));
                 for note in &prepared.notices {
                     hook_notice(&cx, note);
@@ -383,9 +415,26 @@ pub async fn run(
             break;
         }
 
+        // The tree's completion is one more thing the loop wakes on when
+        // a write is held for it.
+        let mut tree_rx = cx.tree_ready.clone().filter(|_| waiting_on_tree);
+        waiting_on_tree = false;
         tokio::select! {
             biased;
             _ = control.cancel().cancelled(), if !stopped => {}
+            // The tool's own derived step replaces the checkpoint line
+            // the moment it starts.
+            _ = async { if let Some(rx) = tree_rx.as_mut() { let _ = rx.wait_for(|r| *r).await; } }, if tree_rx.is_some() => {
+                if let Some(since) = tree_held_since.take()
+                    && since.elapsed() > std::time::Duration::from_millis(500)
+                {
+                    eprintln!(
+                        "{}: a writing tool was held {:.1}s for the turn's checkpoint tree",
+                        cx.agent.id,
+                        since.elapsed().as_secs_f64()
+                    );
+                }
+            }
             msg = rx.recv(), if rx_open => match msg {
                 Some(Msg::Call(call)) => slots.push(Slot { call, access: Access::none(), state: State::New }),
                 Some(Msg::Commit) => committed = true,
@@ -468,6 +517,21 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
 /// the result and may add context for the model.
 async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
     let name = call.name.clone();
+    // The scheduler holds a writing tool until the turn's checkpoint has
+    // its tree (qal-j17/j18), so this is normally already true; a caller
+    // that reached here another way still does not write before it.
+    if !prepared.plan.access.is_readonly()
+        && let Some(rx) = cx.tree_ready.clone()
+        && !*rx.borrow()
+    {
+        let mut rx = rx;
+        tokio::select! {
+            _ = rx.wait_for(|ready| *ready) => {}
+            _ = cx.cancel.cancelled() => {
+                anyhow::bail!("{name}: stopped while waiting for the turn's checkpoint tree");
+            }
+        }
+    }
     if let Some(question) = &prepared.ask {
         // On disk as "waiting for the user" while the card is up: a
         // kernel that dies here must not write the call up as one that

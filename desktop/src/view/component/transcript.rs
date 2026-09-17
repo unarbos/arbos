@@ -393,8 +393,14 @@ impl State {
                 if !self.dragging {
                     return None;
                 }
-                self.dragging = false;
+                // Release reaches every prose item, and the ones above the
+                // pressed one hear it first: an Up on an item that does not
+                // hold the press must leave the gesture alone, or the
+                // pressed item's own Up finds `dragging` already false and
+                // no link ever opened — every URL and doc chip in an answer
+                // was dead to a click (Jacob, reports 2026-09-17-15/-16).
                 let (_, selection) = self.selection.filter(|(item, _)| *item == ix)?;
+                self.dragging = false;
                 click_url(&self.doc(ix, text), selection)
             }
         }
@@ -462,10 +468,35 @@ fn openable(url: &str) -> Option<String> {
     if let Some(rest) = url.strip_prefix("//") {
         return Some(format!("https://{rest}"));
     }
-    if url.contains('.') && !url.contains(' ') && !url.starts_with('#') && !url.starts_with('/') {
+    if url.starts_with("file://") {
+        return Some(url.to_string());
+    }
+    // A path in the place — `docs/brief.md`, `./notes.md`, `/abs/file.md`:
+    // the first segment is a folder, not a host. A host has a dot in its
+    // first segment (`en.wikipedia.org/wiki`).
+    let first = url.split('/').next().unwrap_or(url);
+    let is_path = url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+        || (url.contains('/') && !first.contains('.') && !url.contains(' '))
+        || (!url.contains('/') && !url.contains(' ') && file_like(url));
+    if is_path && !url.starts_with('#') {
+        return Some(format!("place:{url}"));
+    }
+    if url.contains('.') && !url.contains(' ') && !url.starts_with('#') {
         return Some(format!("https://{url}"));
     }
     None
+}
+
+/// `brief.md`, `main.py`, `notes.txt` — a file name, not a host name.
+fn file_like(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or("");
+    matches!(
+        ext,
+        "md" | "txt" | "toml" | "json" | "yaml" | "yml" | "py" | "rs" | "js" | "ts" | "html" | "css"
+            | "csv" | "svg" | "png" | "jpg" | "jpeg" | "pdf" | "sh"
+    )
 }
 
 /// The prose of an item, for the two kinds that carry any.
@@ -547,10 +578,13 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// reason only — the instruction half is the agent's to act on, not the
 /// reader's. No strip, no retry.
 fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
-    // "project page not updated last turn: a worker was started or
-    // reported and .arbos/notes.md did not change — update it" is the
-    // kernel's whole sentence; the reader needs the first clause, as a
-    // sentence of its own.
+    // The kernel's nudges are written to the agent ("correction not kept:
+    // last turn the user corrected you … keep it now, in one call…"). The
+    // person sees a system line in their own words, in a class of its
+    // own — a left rule and the faint caption, never the prose's colour —
+    // so a log entry does not read as part of the reply (Jacob, report
+    // 2026-09-17-28: "Correction not kept with a loop glyph … reads like
+    // part of the reply").
     let clause = text
         .split(" — ")
         .next()
@@ -559,15 +593,17 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .next()
         .unwrap_or(text)
         .trim();
-    let mut shown = String::with_capacity(clause.len());
-    let mut chars = clause.chars();
-    if let Some(first) = chars.next() {
-        shown.extend(first.to_uppercase());
-        shown.push_str(chars.as_str());
-    }
-    let shown = if shown.starts_with("Project page not updated") {
+    let shown = if clause.starts_with("project page not updated") {
         "Project page not updated this turn".to_string()
+    } else if clause.starts_with("correction not kept") {
+        "Your correction was not saved last turn; the agent has been asked to keep it now.".to_string()
     } else {
+        let mut shown = String::with_capacity(clause.len());
+        let mut chars = clause.chars();
+        if let Some(first) = chars.next() {
+            shown.extend(first.to_uppercase());
+            shown.push_str(chars.as_str());
+        }
         shown
     };
     div()
@@ -576,15 +612,12 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .max_w(px(root::CHAT_MAX_WIDTH))
         .flex()
         .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            icons::icon(icons::media::REPEAT)
-                .size(px(11.))
-                .text_color(theme.text_faint),
-        )
+        .items_stretch()
+        .gap(px(8.))
+        .child(div().flex_none().w(px(2.)).rounded(px(1.)).bg(theme.hairline(0.9)))
         .child(
             div()
+                .py(px(1.))
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
                 .child(SharedString::from(shown)),
@@ -1585,12 +1618,7 @@ fn children_lines(
         // One worker: its own live step (Jacob's Cursor still reads "1
         // Working  Reading project context…"); several: the coordinator's
         // step over all of them ("Waiting on three writers").
-        let own = chat
-            .status
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        let own = chat.live_status();
         // The coordinator's step only where nothing above says it: under a
         // live "Working <step>" headline the line names the workers instead
         // (cycle 23: "Working Updating the plan" over "2 Working Updating
@@ -1847,10 +1875,22 @@ fn prose(
                 };
                 url = chat.transcript.point(ix, &shown, pointer);
             });
-            // `arbos://` stays in the app; anything else is the browser's.
+            // `arbos://` stays in the app; a file of the place opens in the
+            // column; anything else is the browser's. The doc chip in an
+            // answer ("Full write-up: 📄 Canada-EU partnership brief") is a
+            // relative link to a file the agent wrote — it went to the
+            // browser as `https://docs/…` and did nothing (Jacob, report
+            // 2026-09-17-16, F-145).
             match url {
                 Some(url) if url.starts_with("arbos://") => {
                     workspace.open_chat_link(&url, cx);
+                }
+                Some(url) if url.starts_with("file://") || url.starts_with("place:") => {
+                    let path = url
+                        .trim_start_matches("file://")
+                        .trim_start_matches("place:")
+                        .to_owned();
+                    workspace.open_shown(id, path, String::new(), "doc".into(), None, None, cx);
                 }
                 Some(url) => cx.open_url(&url),
                 None => {}
@@ -3979,9 +4019,7 @@ fn zone(
     let live_headline = running && foldable && !kickoff_turn && rows_under;
     if live_headline {
         let step = chat
-            .status
-            .clone()
-            .filter(|s| !s.trim().is_empty())
+            .live_status()
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
         let id = chat.id;
@@ -4144,9 +4182,20 @@ fn zone(
     // Standing work the turn set up: a small card at the moment it was made.
     zone = zone.children(subscription_cards(chat, body.clone(), &theme));
     // Screenshots and clips the work produced stay in view when the work
-    // folds: they are what the user asked to see.
+    // folds: they are what the user asked to see. Not one the answer
+    // itself shows: the agent drew a cat, screenshotted it twice on the
+    // way, and embedded the last shot in its reply — three cats (Jacob,
+    // report 2026-09-17-11, F-142). A file the answer's prose embeds is
+    // the answer's to show.
+    let answer_text = turn_answer(&chat.items, turn).unwrap_or_default();
     for ix in body.clone() {
         if let ChatItem::Artifacts(files) = &chat.items[ix] {
+            let shown_in_answer = files
+                .iter()
+                .all(|file| !file.path.is_empty() && answer_text.contains(&file.path));
+            if shown_in_answer {
+                continue;
+            }
             zone = zone.child(artifacts_row(chat, ix, files, &theme, cx));
         }
     }
@@ -4160,9 +4209,22 @@ fn zone(
         .flex_col()
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
+    // The worker lines go under the prose that spawned them and *above*
+    // any line the person typed into the turn afterwards: Jacob's "where
+    // is my response" drew with three "Done <worker>" lines under it, as if
+    // they were the answer to it (his report 2026-09-17-8). Taken here at
+    // the first steer card; otherwise after the tail.
+    let mut workers = workers;
     // The tail starts where the body ended: the report line under a wake
     // segment's header is drawn above, not again here.
     for ix in turn.answer_from.max(body_start)..turn.range.end {
+        if inline_user(&chat.items, ix)
+            && matches!(chat.items[ix], ChatItem::User(_))
+            && let Some((lines, _)) = workers.take()
+        {
+            has_tail = true;
+            tail = tail.child(lines);
+        }
         // The interruption is on the fold line already; once is enough.
         if header_drawn
             && let ChatItem::Notice { text, .. } = &chat.items[ix]
@@ -5650,15 +5712,21 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     }
     // The agent named its step (Cursor's UpdateCurrentStep on the
     // timeline: "Copying stills to artifacts"): that is the line.
-    if let Some(step) = chat
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return Some(step.to_string());
+    if let Some(step) = chat.live_status() {
+        return Some(step);
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
+    // The Project chat hides a thought that has no headline over it
+    // (F-117), and this line stood down for the same thought as "live":
+    // between the kernel's "Thinking" heartbeat and the answer's first
+    // words the pane went blank, and Jacob read it as something broken
+    // (report 2026-09-17-27). A streaming thought nobody can see is a
+    // reason to say "Thinking", not to say nothing.
+    if chat.parent.is_none()
+        && matches!(last, ChatItem::Thinking { done: false, .. })
+    {
+        return Some("Thinking".to_string());
+    }
     let tool_running = matches!(
         last,
         ChatItem::Tool {
@@ -5767,11 +5835,7 @@ fn heartbeat(
     // The agent's own step reads as Cursor's "Working  Launching three
     // sort writers": the verb a shade brighter, the step faint and
     // shimmering, no chevron — there is nothing under it to fold.
-    let is_step = chat
-        .status
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|step| step == label);
+    let is_step = chat.live_status().is_some_and(|step| step == label);
     let label = if quiet {
         format!("{label} · {}", since_short(since))
     } else {

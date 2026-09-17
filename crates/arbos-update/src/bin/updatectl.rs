@@ -84,6 +84,7 @@ arbos-updatectl add     --feed <path> --channel <stable|dev> --version <x.y.z>
                         --build <n> --commit <sha> --base-url <url>
                         [--notes <text> | --notes-file <path>] [--notes-url <url>]
                         [--minimum-system-version <x.y>] [--keep <n>]
+                        [--keep-kernels <n>]
                         --artifact <platform>/<arch>[/<component>]=<path> ...
                         [--link <platform>:<kind>=<url> ...]
 arbos-updatectl show    --feed <path> [--current <x.y.z+n>] [--platform <p>] [--arch <a>]
@@ -147,6 +148,14 @@ fn add(args: &Args) -> Result<()> {
         Some(keep) => keep.parse().context("--keep is a number")?,
         None => 10,
     };
+    // Kernels outlive apps in the feed, because an app of any age may need
+    // the kernel matching its own build to put on another machine. See
+    // `Feed::put_keeping`. Defaults to `--keep`, so a publisher that says
+    // nothing gets what it always got.
+    let keep_kernels: usize = match args.one("keep-kernels") {
+        Some(keep) => keep.parse().context("--keep-kernels is a number")?,
+        None => keep,
+    };
     let notes = match (args.one("notes"), args.one("notes-file")) {
         (Some(_), Some(_)) => bail!("--notes and --notes-file are two answers to one question"),
         (Some(notes), None) => notes,
@@ -197,7 +206,7 @@ fn add(args: &Args) -> Result<()> {
         );
     }
     feed.generated = now();
-    feed.put(
+    feed.put_keeping(
         Release {
             version: version.clone(),
             build,
@@ -210,10 +219,16 @@ fn add(args: &Args) -> Result<()> {
             links,
         },
         keep,
+        keep_kernels,
     );
     feed.write(&feed_path)?;
+    let kernels_only = feed
+        .releases
+        .iter()
+        .filter(|r| !r.downloads.iter().any(|d| d.component == Component::App))
+        .count();
     eprintln!(
-        "{}: {} {version}+{build} ({commit}), {} release(s) kept",
+        "{}: {} {version}+{build} ({commit}), {} release(s) kept ({kernels_only} of them kernel-only)",
         feed_path.display(),
         channel.as_str(),
         feed.releases.len()
@@ -354,7 +369,14 @@ fn kernel(args: &Args) -> Result<()> {
     println!("fetching  {} bytes", offered.download.size);
     let bytes = arbos_update::net::bytes(&offered.download.url)?;
     let scratch = std::env::temp_dir().join("arbos-kernel-update");
-    kernel_mod::verify_and_install(&bytes, &offered, &binary, &key, &scratch)?;
+    kernel_mod::verify_and_install(
+        &bytes,
+        &offered,
+        &binary,
+        &key,
+        &scratch,
+        kernel_mod::Probe::Version,
+    )?;
     let now = kernel_mod::Running::read(&binary)?;
     println!("installed {} {}", now.version.human(), now.sha);
     println!(

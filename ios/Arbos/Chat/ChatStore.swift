@@ -54,6 +54,11 @@ final class ChatStore: ObservableObject {
     /// Why this target cannot be reached at all (the hub does not know
     /// it); shown in place of the countdown, no retry.
     @Published private(set) var refusal: String?
+    /// A named reason the link is down that retrying could still cure — a
+    /// project's kernel not running, say. Unlike `refusal` it does not stop
+    /// the countdown; it only replaces "Link lost" with what is actually
+    /// missing.
+    @Published private(set) var standing: String?
 
     /// Fires with each finished agent message. The call speaks it when the
     /// server does not.
@@ -84,6 +89,12 @@ final class ChatStore: ObservableObject {
     private var pump: Task<Void, Never>?
     private var sentAt: Date?
     private var reconnectTask: Task<Void, Never>?
+    /// The last refusal said out loud. Retrying every ten seconds against an
+    /// offline machine must not fill the chat with the same sentence.
+    private var lastRefusal: String?
+    /// The last transport failure said out loud. The retry loop runs every
+    /// few seconds and must not write the same line each time round.
+    private var lastTransport: String?
     private var reconnectAttempt = 0
     /// Typed lines the kernel has not echoed yet, oldest first.
     private var pendingSends: [(id: UUID, text: String, steer: Bool, target: KernelTarget)] = []
@@ -203,17 +214,88 @@ final class ChatStore: ObservableObject {
         do {
             try await live.start()
             mode = .live
+            lastRefusal = nil
+            lastTransport = nil
+            standing = nil
             registerPushIfLive()
             return true
         } catch {
             #if DEBUG
             print("attach \(endpoint.url): \(error)")
             #endif
+            // Two different things wearing the same coat. A refusal is a
+            // verdict — somebody said no and meant it, so say their reason
+            // and stop. A transport failure is the path, which usually
+            // clears by itself, so name it and keep trying. The app had
+            // these the wrong way round.
+            switch failure(from: error) {
+            case .refusal(let why)?:
+                let said = Self.inPlainWords(why)
+                if said != lastRefusal {
+                    lastRefusal = said
+                    items.append(ChatItem(.notice(said, failed: true)))
+                }
+                refusal = said
+            case .transport(let what)?:
+                if what != lastTransport {
+                    lastTransport = what
+                    items.append(ChatItem(.notice(what, failed: false)))
+                }
+            case nil:
+                break
+            }
         }
         live.stop()
         pump?.cancel()
         source = nil
         return false
+    }
+
+    /// The hub's refusals, said the way a person would say them.
+    ///
+    /// The hub is right to log `no machine named "arboslife" is registered
+    /// (known: none)`, and the app was showing that sentence to Jacob. It is
+    /// accurate and it is a record of our internals; what he needs to know is
+    /// that ArbosLife is off and this chat will not open until it is back.
+    ///
+    /// Anything whose shape is not recognised keeps the hub's own words.
+    /// Guessing at a refusal is worse than quoting one.
+    static func inPlainWords(_ why: String) -> String {
+        let text = why.replacingOccurrences(of: "hub: ", with: "")
+        if let machine = quoted(in: text), text.contains("no machine named") {
+            return "\(machine) is not connected — its kernel isn't running, or the machine is off."
+        }
+        if let project = quoted(in: text), text.contains("no project named") {
+            return "\(project) isn't on that machine any more."
+        }
+        // Arrived with #417: the machine is registered and the project is
+        // known, and nothing is serving it. Different from the two above,
+        // and different from what to do about it.
+        if let project = quoted(in: text), text.contains("has no kernel serving") {
+            let machine = text.split(separator: " ").first.map(String.init) ?? "its machine"
+            return "\(project)'s kernel on \(machine) isn't running."
+        }
+        return text
+    }
+
+    /// The first `"…"` in a hub message: the name it is talking about.
+    private static func quoted(in text: String) -> String? {
+        let parts = text.split(separator: "\"", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        let name = String(parts[1])
+        return name.isEmpty ? nil : name
+    }
+
+    /// What kind of failure this was, when the error carries the answer.
+    private func failure(from error: Error) -> KernelFailure? {
+        guard case KernelClientError.failed(let failure) = error else { return nil }
+        let text = failure.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let said = text.prefix(1).uppercased() + text.dropFirst()
+        switch failure {
+        case .refusal: return .refusal(said)
+        case .transport: return .transport(said)
+        }
     }
 
     /// Stop, as the kernel's stall notice offers it: the turn ends, what
@@ -249,6 +331,16 @@ final class ChatStore: ObservableObject {
     /// it holds (the path monitor cuts the wait short when the network
     /// returns). `reconnectIn` counts down for the chat's notice.
     private func scheduleReconnect() {
+        // Somebody said no and gave a reason. Trying the same thing every
+        // few seconds will get the same answer, and the countdown suggests
+        // to the user that waiting will help. `reconnect()` clears the
+        // refusal, so a deliberate retry still works.
+        guard refusal == nil else {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            reconnectIn = nil
+            return
+        }
         reconnectTask?.cancel()
         let delay = min(15, 2 << min(reconnectAttempt, 3))
         reconnectAttempt += 1
@@ -602,16 +694,23 @@ final class ChatStore: ObservableObject {
             identity = face
         case .store(let address):
             store = address
-        case .dropped:
+        case .dropped(let why):
             // One calm line under the transcript (the mode notice), not an
             // error plus a reassurance. A second drop for the same close
             // (the hub's word, then the socket) leaves the countdown alone.
+            //
+            // The line keeps retrying either way, because a kernel that is
+            // not running can start; it just says which thing is not there
+            // when the hub told us. "Link lost" is wrong for a live link and
+            // a stopped kernel, and the two want different things of Jacob.
+            let named = Self.inPlainWords(why)
+            standing = named == why ? nil : named
             guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false
             if settings.chatEndpoint != nil, refusal == nil { scheduleReconnect() }
         case .refused(let why):
-            refusal = why.replacingOccurrences(of: "hub: ", with: "")
+            refusal = Self.inPlainWords(why)
             reconnectTask?.cancel()
             reconnectTask = nil
             reconnectIn = nil

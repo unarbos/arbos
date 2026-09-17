@@ -136,6 +136,11 @@ fn main() -> Result<()> {
             let code = arbos_kernel::check::run(arbos_kernel::check::Args::parse(args)?)?;
             std::process::exit(code);
         }
+        "feedback" => {
+            let code =
+                arbos_kernel::feedback_cmd::run(arbos_kernel::feedback_cmd::Args::parse(args)?)?;
+            std::process::exit(code);
+        }
         "store" => {
             let mut args = args.peekable();
             let code = match args.peek().map(String::as_str) {
@@ -222,6 +227,7 @@ fn main() -> Result<()> {
             );
             println!("{}", arbos_kernel::rollout::USAGE);
             println!("{}", arbos_kernel::check::USAGE);
+            println!("{}", arbos_kernel::feedback_cmd::USAGE);
             println!("{}", arbos_kernel::prompt_size::USAGE);
             println!("{}", arbos_kernel::store_cmd::USAGE);
             println!("{}", arbos_kernel::setup::USAGE);
@@ -232,7 +238,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         other => bail!(
-            "unknown command {other}. Commands: serve, run, answer, attach, log, rollout, check, prompt, store, setup, rewind, update, worker, version, help. \
+            "unknown command {other}. Commands: serve, run, answer, attach, log, rollout, check, feedback, prompt, store, setup, rewind, update, worker, version, help. \
              A kernel that answers this to `update` is older than the feature and cannot update itself: from any newer arbos-kernel, run `arbos-kernel update --install --binary <path to the old file>`; afterwards it can."
         ),
     }

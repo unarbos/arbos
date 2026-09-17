@@ -4,6 +4,7 @@
 
 use anyhow::{Result, bail};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::ToolOut;
@@ -209,6 +210,13 @@ impl Tool for Bash {
             // marked background came back after its first line ("step 1")
             // and the user saw one line of six (F-37, F-43): for anything
             // that is not a server the call stays attached to the floor.
+            // Files an in-place substitution names (`sed -i`, `perl -pi`):
+            // their bytes before, so a pattern that matched no line is
+            // said afterwards. sed exits 0 either way, and an agent that
+            // believed the edit landed carried a wrong model of the file
+            // from then on (the desktop's undispatched restart action,
+            // 2026-09-17: an anchor a merged PR had reworded).
+            let inplace_before = inplace_edit_targets(cmd, &dir);
             let asked_background = opt_bool(&args, "background").unwrap_or(false);
             let background = asked_background && looks_like_server(cmd);
             let background_ignored = asked_background && !background;
@@ -317,7 +325,11 @@ impl Tool for Bash {
 
             let job = root.load(&job.id)?;
             if !finished && job.running() {
-                root.mark_detached(&job);
+                let unarmed = root
+                    .mark_detached(&job)
+                    .err()
+                    .map(|e| format!(" (The kernel could not arm the finished notice — {e:#} — so its end will not be announced; follow it with await or jobs.)"))
+                    .unwrap_or_default();
                 let (text, skipped) = root.read_new(&job);
                 let body = format_tail(&text, "(no output yet)", &journal, skipped);
                 let verb = if background {
@@ -332,7 +344,7 @@ impl Tool for Bash {
                 };
                 return Ok(ToolOut::with_paths(
                     format!(
-                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}",
+                        "{body}\n\n{verb} as job {id} (pid {pid}).{why} Follow with await {id} (optional regex pattern), list with jobs, stop with bash `kill -- -{pid}`. Log: {journal}{unarmed}",
                         id = job.id,
                         pid = job.meta.pid,
                     ),
@@ -350,6 +362,9 @@ impl Tool for Bash {
             }
             match job.status {
                 Status::Exited(0) => {
+                    for line in inplace_unchanged(&inplace_before) {
+                        body.push_str(&format!("\n{line}"));
+                    }
                     if let Some(file) = viewed_file(cmd) {
                         // Reading through the shell gives no LINE:HASH, so
                         // the next edit has nothing to anchor on and the
@@ -811,6 +826,147 @@ mod approval_tests {
         ] {
             assert!(!needs_approval(free), "{free:?} should run");
         }
+    }
+}
+
+/// The files an in-place substitution in `cmd` names, with their bytes
+/// now: `sed -i`, `sed -i.bak`, `sed -i ''`, `perl -pi -e`, `perl -i -pe`.
+/// Only files that exist under `dir` count; the expression word is not a
+/// file. Empty when the command has no such step.
+fn inplace_edit_targets(cmd: &str, dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for segment in cmd.split(['\n', ';', '|', '&']) {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .collect();
+        let Some(first) = words.first() else { continue };
+        let prog = first.rsplit('/').next().unwrap_or(first);
+        let rest = &words[1..];
+        let files: Vec<&str> = match prog {
+            "sed"
+                if rest
+                    .iter()
+                    .any(|w| w.starts_with("-i") || *w == "--in-place") =>
+            {
+                // Flags, then the expression (the first bare word, unless
+                // given by -e/-f), then files. `-i ''` (BSD) leaves an
+                // empty quoted word that is not a file.
+                let mut expr_given = false;
+                let mut skip_next = false;
+                let mut seen_expr = false;
+                let mut files = Vec::new();
+                for w in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if *w == "-e" || *w == "-f" || *w == "--expression" || *w == "--file" {
+                        expr_given = true;
+                        skip_next = true;
+                        continue;
+                    }
+                    if w.starts_with('-') || *w == "''" || *w == "\"\"" {
+                        continue;
+                    }
+                    if !expr_given && !seen_expr {
+                        seen_expr = true;
+                        continue;
+                    }
+                    files.push(*w);
+                }
+                files
+            }
+            "perl"
+                if rest
+                    .iter()
+                    .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('i')) =>
+            {
+                let mut skip_next = false;
+                let mut files = Vec::new();
+                for w in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if *w == "-e" || *w == "-E" {
+                        skip_next = true;
+                        continue;
+                    }
+                    if w.starts_with('-') {
+                        continue;
+                    }
+                    files.push(*w);
+                }
+                files
+            }
+            _ => Vec::new(),
+        };
+        for f in files {
+            let f = f.trim_matches(['"', '\'']);
+            if f.is_empty() || f.contains('$') || f.contains('*') {
+                continue;
+            }
+            let p = dir.join(f);
+            if let Ok(bytes) = std::fs::read(&p)
+                && p.is_file()
+                && !out.iter().any(|(q, _)| *q == p)
+            {
+                out.push((p, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// The note for each in-place target whose bytes did not change.
+fn inplace_unchanged(before: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
+    before
+        .iter()
+        .filter(|(p, bytes)| std::fs::read(p).is_ok_and(|now| now == *bytes))
+        .map(|(p, _)| {
+            format!(
+                "[the in-place substitution on {} changed nothing: its pattern matched no line — the file is as it was; read it and edit with an anchor]",
+                p.display()
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod inplace_tests {
+    use super::{inplace_edit_targets, inplace_unchanged};
+
+    #[test]
+    fn sed_and_perl_in_place_targets_are_named_and_a_no_op_is_said() {
+        let dir = std::env::temp_dir().join(format!("arbos-inplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        let t = inplace_edit_targets("sed -i 's/old/new/' src/a.rs b.txt", &dir);
+        assert_eq!(t.len(), 2, "{t:?}");
+        let t = inplace_edit_targets("sed -i.bak -e 's/x/y/' src/a.rs && cargo build", &dir);
+        assert_eq!(t.len(), 1);
+        let t = inplace_edit_targets("sed -i '' 's/x/y/' src/a.rs", &dir);
+        assert_eq!(t.len(), 1, "{t:?}");
+        let t = inplace_edit_targets("perl -pi -e 's/x/y/' b.txt", &dir);
+        assert_eq!(t.len(), 1);
+        let t = inplace_edit_targets("perl -i -pe 's/x/y/' src/a.rs b.txt", &dir);
+        assert_eq!(t.len(), 2);
+        // Not in place, or no such file: nothing to watch.
+        assert!(inplace_edit_targets("sed 's/x/y/' src/a.rs", &dir).is_empty());
+        assert!(inplace_edit_targets("sed -i 's/x/y/' nothere.rs", &dir).is_empty());
+        assert!(inplace_edit_targets("grep -rn old src/", &dir).is_empty());
+        // A pattern that matched nothing: the note names the file.
+        let before = inplace_edit_targets("sed -i 's/zzz/y/' src/a.rs", &dir);
+        let notes = inplace_unchanged(&before);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("src/a.rs") && notes[0].contains("changed nothing"));
+        // One that did: no note.
+        std::fs::write(dir.join("src/a.rs"), "fn b() {}\n").unwrap();
+        assert!(inplace_unchanged(&before).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

@@ -26,6 +26,7 @@ mod place;
 pub mod project;
 pub mod protocol;
 pub mod prs;
+pub mod record;
 pub mod redact;
 pub mod remote_kernel;
 pub mod skills;
@@ -168,7 +169,9 @@ pub mod binary_identity {
     /// The path this process was started from, as remembered at start.
     pub fn start_path() -> Option<std::path::PathBuf> {
         remember_start();
-        AT_START.get().and_then(|s| s.as_ref().map(|(p, _)| p.clone()))
+        AT_START
+            .get()
+            .and_then(|s| s.as_ref().map(|(p, _)| p.clone()))
     }
 
     /// Whether the file at `path` is not the one recorded as `start`:
@@ -263,9 +266,19 @@ pub mod binary_identity {
             std::fs::create_dir_all(&app).unwrap();
             std::fs::write(&start_path, b"new image!").unwrap();
             let moved_inode_path = dir.join("Arbos.app.backup").join("kernel");
-            assert_eq!(of(&moved_inode_path), Some(start_id), "the inode travelled unchanged");
-            assert!(!replaced(Some(start_id), &moved_inode_path), "by its own current path: fine");
-            assert!(replaced(Some(start_id), &start_path), "by the start path: replaced");
+            assert_eq!(
+                of(&moved_inode_path),
+                Some(start_id),
+                "the inode travelled unchanged"
+            );
+            assert!(
+                !replaced(Some(start_id), &moved_inode_path),
+                "by its own current path: fine"
+            );
+            assert!(
+                replaced(Some(start_id), &start_path),
+                "by the start path: replaced"
+            );
             let _ = std::fs::remove_dir_all(&dir);
         }
     }

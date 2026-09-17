@@ -64,6 +64,16 @@ fn a_waiting_coordinator_takes_the_users_words_before_the_worker_finishes() {
         "answered in {took:?}, not after the worker"
     );
     let _ = answer;
+    // The answer is on the wire before the turn's end is on disk; wait for
+    // the `turn_complete` line to be announced before reading the
+    // transcript, or a loaded runner shows the turn still open.
+    assert!(
+        a.wait(Duration::from_secs(8), |f| {
+            f["type"] == "event" && f["agent"] == "root" && f["event"]["kind"] == "turn_complete"
+        })
+        .is_some(),
+        "root's turn ends after the answer, before the worker's"
+    );
 
     let root = transcript(&k.place, "root");
     let spawn = root

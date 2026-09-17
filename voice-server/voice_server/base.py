@@ -16,6 +16,7 @@ from .audio import Normalizer, float_to_pcm16, pcm16_to_float, resample_whole
 from .echo import EchoGate
 from .engines import Engines
 from .kernel import KernelClient, hub_attach_url
+from .activity import ActivityReporter
 from .narrator import Narrator, is_conversational, openrouter_key
 from .tools import CALL_TOOLS, TOOLS, ToolRunner
 
@@ -101,6 +102,7 @@ class BaseSession:
         self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
+        self.activity: ActivityReporter | None = None  # call mode: agent.activity frames to the client
         self.call_kernel: KernelClient | None = None  # a per-call attach through the hub, when the call names one
         self.project_info: dict | None = None  # machine/project/name/icon/store/kind from the hub roster, when scoped
         self.dictation = False  # ASR only: words to the client, no reply, no agent, no asks
@@ -224,6 +226,11 @@ class BaseSession:
         self.tools.narrator = self.narrator
         self.tools.schemas = CALL_TOOLS
         self.narrator.start()
+        # What the kernel is doing, as frames, so the client can play the sound of work and
+        # show it. From the kernel's own turn and tool frames, never from what was said.
+        if self.activity is None:
+            self.activity = ActivityReporter(kernel, self._emit)
+            self.activity.start()
         log.info("[%s] call mode: narrating %s (channel %s)", self.sid, self.project or "the gateway's kernel", self.channel)
 
     async def _kernel_for(self, project: str) -> KernelClient | None:
@@ -338,6 +345,8 @@ class BaseSession:
         finally:
             if self.engines.kernel and self._mirror in self.engines.kernel.listeners:
                 self.engines.kernel.listeners.remove(self._mirror)
+            if self.activity is not None:
+                self.activity.close()
             if self.narrator is not None:
                 log.info("[%s] narrator: %s %s", self.sid, self.narrator.stats,
                          {k: v for k, v in self.narrator.bench.items() if v})
@@ -419,6 +428,7 @@ class BaseSession:
             voice=self.voice,
             mode="call" if self.call_mode else ("dictation" if self.dictation else "voice"),
             narrator=self.narrator is not None,
+            activity=self.activity is not None,  # agent.activity frames follow
             channel=self.channel,
             device=self.device,
             project=(self.call_kernel.name if self.call_kernel else (self.project or "")),

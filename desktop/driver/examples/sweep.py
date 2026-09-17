@@ -9,8 +9,8 @@ Run from the repo root::
     source .venv/bin/activate
     python desktop/driver/examples/sweep.py [--max N] [--include PATTERN]
 
-Controls that leave the window (file dialogs, the settings window) or that
-destroy things (archive, close, delete) are skipped by default; pass
+Controls that leave the window (file dialogs) or that destroy things
+(archive, close, delete) are skipped by default; pass
 ``--include`` to widen the net once a workspace you can throw away is open.
 """
 
@@ -31,7 +31,7 @@ OUT = Path("/tmp/arbos-driver/sweep")
 # Things a blind click must not do to a real workspace.
 SKIP = [
     "open-project*",  # native folder picker: blocks until a person answers
-    "settings",  # opens a second window the driver does not see
+    "tab-settings-close",  # closes the Settings tab mid-sweep
     "project-archive-*",
     "surface-close-*",
     "surface-pane-close-*",

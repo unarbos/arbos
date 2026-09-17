@@ -620,8 +620,11 @@ impl Tool for Edit {
                 (opt_str(&args, "old_string"), opt_str(&args, "content"))
             {
                 // path + content and nothing to anchor on: the model means
-                // the whole file ("here is the corrected implementation").
-                write(root, &cx.cwd, path, content)
+                // the whole file ("here is the corrected implementation") —
+                // unless the file is far longer than the content, in which
+                // case it more likely meant a change and forgot the anchor,
+                // and a whole-file write would throw most of the file away.
+                whole_file_or_refuse(root, &cx.cwd, path, content)
             } else if args
                 .get("replace_all")
                 .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
@@ -645,6 +648,26 @@ impl Tool for Edit {
             note_inferred_path(out, &args, path)
         })
     }
+}
+
+/// `edit` with content and no anchor: the whole file — refused when the
+/// existing file has more than three times the content's lines (and is
+/// not small), since that shape is an edit that lost its anchor, and the
+/// write would silently drop most of the file. `op: write` says the whole
+/// file is meant.
+fn whole_file_or_refuse(root: &Path, cwd: &Path, path: &str, content: &str) -> Result<ToolOut> {
+    let file = confine(root, cwd, path)?;
+    if let Ok(old) = std::fs::read_to_string(&file) {
+        let have = old.lines().count();
+        let give = content.lines().count();
+        if have > 30 && give * 3 < have {
+            bail!(
+                "edit of {} with content but no anchor: the file has {have} lines and the content {give}; writing it whole would drop the rest. If the whole file is meant, use op: write; to change a part, give old_string (unique) or a LINE:HASH anchor from read.",
+                file.display()
+            );
+        }
+    }
+    write(root, cwd, path, content)
 }
 
 /// Prefix the result when `path` was not in the call but guessed from the
@@ -1717,7 +1740,10 @@ mod store_address_tests {
             hooks: mesh,
             bash_wait_ms: 0,
             hops: 0,
+            turn_line: 0,
+            turn_ts: None,
             web: Arc::new(WebCfg::default()),
+            tree_ready: None,
             step: 0,
         }
     }
@@ -1904,6 +1930,66 @@ mod store_address_tests {
     /// `edit` by address fetches, edits the copy with the local rules
     /// (classic, hashline, whole), and puts it back with the hash it
     /// read; a change in between is a conflict, not a lost update.
+    /// The audit after the desktop's undispatched action (an edit whose
+    /// anchor a merged PR had reworded applied nothing and said nothing —
+    /// in a different tool). Here every anchor form fails loudly, naming
+    /// the file, with the file untouched; a multi-part hashline edit
+    /// applies nothing when one part's anchor is gone; and content with no
+    /// anchor is refused when it would drop most of a long file.
+    #[test]
+    fn a_missing_anchor_fails_loudly_and_applies_nothing_in_every_form() {
+        let dir = scratch("anchors");
+        let long: String = (1..=60).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.join("f.txt"), &long).unwrap();
+        // Classic old_string.
+        let err = edit(&dir, &dir, "f.txt", "reworded comment", "x")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("old_string not found in") && err.contains("f.txt"),
+            "{err}"
+        );
+        let err = edit_all(&dir, &dir, "f.txt", "reworded comment", "x")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("not found in") && err.contains("f.txt"),
+            "{err}"
+        );
+        // Hashline, two parts, the second stale: nothing applied.
+        let good = format!("2:{}", hashline::line_tag("line 2"));
+        let args = serde_json::json!({
+            "path": "f.txt",
+            "edits": [
+                {"anchor": good, "content": "LINE TWO"},
+                {"anchor": "40:zzz", "content": "gone"}
+            ]
+        });
+        let err = hashline::edit(&dir, &dir, "f.txt", &args)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("40:zzz"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+            long,
+            "nothing applied"
+        );
+        // Content with no anchor against a long file: not a silent rewrite.
+        let err = whole_file_or_refuse(&dir, &dir, "f.txt", "fn x() {}\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("60 lines") && err.contains("op: write"),
+            "{err}"
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), long);
+        // A short file, or content of comparable size: the whole file, as before.
+        std::fs::write(dir.join("s.txt"), "a\nb\n").unwrap();
+        whole_file_or_refuse(&dir, &dir, "s.txt", "c\n").unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("s.txt")).unwrap(), "c\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn edit_by_address_is_a_compare_and_swap() {
         let dir = scratch("edit");

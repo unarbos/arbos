@@ -255,9 +255,47 @@ impl Default for Settings {
     }
 }
 
+/// A data directory for this thread only, for a test that needs to control it.
+///
+/// Threads, not the environment. `XDG_DATA_HOME` is process-wide, and tests run
+/// in parallel: four tests in `feedback` set and restored it, so about one run in
+/// twelve a test read a directory another had already moved out from under it.
+/// A test's result belonged to whichever test ran first.
+///
+/// Rust gives each test its own thread, so a thread-local override is genuinely
+/// private to the test that sets it, and [`DataDirGuard`] puts it back even if
+/// the test panics.
+#[cfg(test)]
+thread_local! {
+    static DATA_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Hold this for as long as `data_dir()` should answer with `at`.
+#[cfg(test)]
+pub struct DataDirGuard;
+
+#[cfg(test)]
+impl Drop for DataDirGuard {
+    fn drop(&mut self) {
+        DATA_DIR_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Point `data_dir()` at `at` for this thread until the guard is dropped.
+#[cfg(test)]
+pub fn data_dir_for_test(at: impl Into<PathBuf>) -> DataDirGuard {
+    DATA_DIR_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(at.into()));
+    DataDirGuard
+}
+
 /// Where this shell keeps machine-local data — `$XDG_DATA_HOME/arbos-desktop`,
 /// defaulting to `~/.local/share/arbos-desktop`. Separate from a Arbos install.
 pub fn data_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(at) = DATA_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(at);
+    }
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME")
         && !xdg.is_empty()
     {

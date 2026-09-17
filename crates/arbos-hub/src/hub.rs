@@ -38,7 +38,7 @@ const KERNEL_WAIT: Duration = Duration::from_secs(90);
 /// socket open while nothing else happens.
 const PING_EVERY: Duration = Duration::from_secs(30);
 
-type Ws = WebSocketStream<TcpStream>;
+pub(crate) type Ws = WebSocketStream<TcpStream>;
 
 /// One connected kernel or worker.
 pub struct Registrant {
@@ -122,6 +122,40 @@ struct MachineEntry {
 }
 
 impl MachineEntry {
+    /// A registrant's build said again on its open link (`binary_gone`
+    /// flipped, or a re-exec onto a new build). Empty strings keep the
+    /// old word. True when anything changed.
+    fn revise_build(
+        &mut self,
+        build_key: &str,
+        version: String,
+        git_sha: String,
+        built_at: String,
+        binary_gone: bool,
+    ) -> bool {
+        let Some(b) = self.builds.get_mut(build_key) else {
+            return false;
+        };
+        let changed = b.binary_gone != binary_gone
+            || (!version.is_empty() && b.version != version)
+            || (!git_sha.is_empty() && b.git_sha != git_sha)
+            || (!built_at.is_empty() && b.built_at != built_at);
+        if !changed {
+            return false;
+        }
+        b.binary_gone = binary_gone;
+        if !version.is_empty() {
+            b.version = version;
+        }
+        if !git_sha.is_empty() {
+            b.git_sha = git_sha;
+        }
+        if !built_at.is_empty() {
+            b.built_at = built_at;
+        }
+        true
+    }
+
     fn is_empty(&self) -> bool {
         self.worker.is_none() && self.kernels.is_empty()
     }
@@ -313,6 +347,28 @@ impl Hub {
     /// Every registrant hears the roster after a change, each with its own
     /// access to every store (a machine token is an owner of its user's
     /// stores; a private project of another user reads `none`).
+    /// A registrant's build said again on its open link. True when the
+    /// entry changed.
+    fn revise_build(
+        &self,
+        machine: &str,
+        build_key: &str,
+        version: String,
+        git_sha: String,
+        built_at: String,
+        binary_gone: bool,
+    ) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        let Some(entry) = g.machines.get_mut(machine) else {
+            return false;
+        };
+        if !entry.revise_build(build_key, version, git_sha, built_at, binary_gone) {
+            return false;
+        }
+        g.generation += 1;
+        true
+    }
+
     fn broadcast_roster(&self) {
         let targets: Vec<Arc<Registrant>> = {
             let g = self.inner.lock().unwrap();
@@ -404,8 +460,18 @@ fn list<'a>(it: impl Iterator<Item = &'a String>) -> String {
 /// the same instant after the upgrade — the client saw a bare close and
 /// never the `error`. A short pause before the close handshake lets the
 /// proxy forward the text; refusals are rare, so the wait costs nothing.
-async fn refuse_close(ws: &mut Ws) {
-    tokio::time::sleep(Duration::from_millis(400)).await;
+pub(crate) async fn refuse_close(ws: &mut Ws) {
+    // Wait for the peer to read the reason and hang up itself (its close
+    // or its socket ending) rather than guessing how long the proxy
+    // needs; two seconds is the ceiling for a peer that keeps the socket.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(msg) = ws.next().await {
+            if matches!(msg, Ok(Message::Close(_)) | Err(_)) {
+                break;
+            }
+        }
+    })
+    .await;
     let _ = ws.close(None).await;
 }
 
@@ -534,6 +600,12 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         }
     }
     let (to_socket, mut from_hub) = mpsc::unbounded_channel::<HubFrame>();
+    // This registrant's build, under its own key — kept for the link's
+    // life, so a revision on it finds the same entry.
+    let build_key = match &kind {
+        RegistrantKind::Worker => "worker".to_string(),
+        RegistrantKind::Kernel => format!("kernel:{}", project.clone().unwrap_or_default()),
+    };
     let reg = {
         let mut g = hub.inner.lock().unwrap();
         g.next_id += 1;
@@ -575,13 +647,8 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         if !version.is_empty() {
             entry.version = version.clone();
         }
-        // This registrant's build, under its own key.
-        let build_key = match kind {
-            RegistrantKind::Worker => "worker".to_string(),
-            RegistrantKind::Kernel => format!("kernel:{}", project.clone().unwrap_or_default()),
-        };
         entry.builds.insert(
-            build_key,
+            build_key.clone(),
             RegistrantBuild {
                 role: match kind {
                     RegistrantKind::Worker => "worker".into(),
@@ -719,9 +786,18 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                             });
                         }
                     }
-                    // A registrant sends nothing else; a second register is nothing.
-                    HubFrame::Register { .. }
-                    | HubFrame::Registered { .. }
+                    // A second `Register` on the link revises this
+                    // registrant's build: `binary_gone` is made by a
+                    // replacement while the process runs, so the word
+                    // from connection time goes stale on exactly the
+                    // machines the field was added for.
+                    HubFrame::Register { version, git_sha, built_at, binary_gone, .. } => {
+                        if hub.revise_build(&machine, &build_key, version, git_sha, built_at, binary_gone) {
+                            log!("build revised {machine} {build_key} binary_gone={binary_gone}");
+                            hub.broadcast_roster();
+                        }
+                    }
+                    HubFrame::Registered { .. }
                     | HubFrame::Roster { .. }
                     | HubFrame::Open { .. }
                     | HubFrame::Claim { .. }
@@ -793,6 +869,9 @@ pub async fn attach(
                 },
             )
             .await;
+            // The commonest refusal of all — a machine that is offline — and
+            // until now the one that still closed bare through the tunnel.
+            refuse_close(&mut ws).await;
             return;
         }
     };
@@ -1032,6 +1111,7 @@ pub async fn claim(hub: Arc<Hub>, mut ws: Ws, who: Identity, machine: &str) {
     };
     if !ok {
         let _ = send_json(&mut ws, &answer).await;
+        refuse_close(&mut ws).await;
         return;
     }
     // A worktree place is not a project of the user's: the roster says
@@ -1218,6 +1298,75 @@ mod roster_face_tests {
             json.get("binary_gone").is_none(),
             "absent when false: {json}"
         );
+    }
+
+    /// iPhone loop, cycle 41: the roster learned `binary_gone` only at
+    /// registration, so the seven processes running deleted images for
+    /// days showed healthy until their hub restarted. A registrant's
+    /// second `Register` on its link revises its build; the same word
+    /// twice changes nothing.
+    #[test]
+    fn a_registrants_second_word_revises_its_build_in_the_roster() {
+        let mut entry = MachineEntry::default();
+        entry.builds.insert(
+            "kernel:demo".into(),
+            RegistrantBuild {
+                role: "kernel".into(),
+                project: "demo".into(),
+                version: "0.2.0".into(),
+                git_sha: "01e6b653".into(),
+                built_at: "2026-09-17T06:00Z".into(),
+                binary_gone: false,
+            },
+        );
+        assert!(
+            !entry
+                .info("arboslife", Some(("owner", "owner")), "mesh")
+                .binary_gone
+        );
+        assert!(
+            !entry.revise_build(
+                "kernel:demo",
+                String::new(),
+                String::new(),
+                String::new(),
+                false
+            ),
+            "the same word twice is no change"
+        );
+        assert!(
+            !entry.revise_build(
+                "kernel:other",
+                String::new(),
+                String::new(),
+                String::new(),
+                true
+            ),
+            "a key that never registered is nothing"
+        );
+        assert!(entry.revise_build(
+            "kernel:demo",
+            String::new(),
+            String::new(),
+            String::new(),
+            true
+        ));
+        let info = entry.info("arboslife", Some(("owner", "owner")), "mesh");
+        assert!(info.binary_gone, "{info:?}");
+        let k = info.builds.iter().find(|b| b.role == "kernel").unwrap();
+        assert!(k.binary_gone);
+        assert_eq!(k.git_sha, "01e6b653", "empty fields keep the old word");
+        // A re-exec onto a new build: the sha moves and gone clears.
+        assert!(entry.revise_build(
+            "kernel:demo",
+            "0.2.0".into(),
+            "48513a0d".into(),
+            "2026-09-17T08:00Z".into(),
+            false
+        ));
+        let info = entry.info("arboslife", Some(("owner", "owner")), "mesh");
+        assert!(!info.binary_gone);
+        assert_eq!(info.git_sha, "48513a0d");
     }
 
     /// kernel's project and a worker's checkout alike, as their

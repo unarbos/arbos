@@ -17,7 +17,7 @@ final class ArbosKernelClient {
         case detached
         case attaching
         case attached
-        case failed(String)
+        case failed(KernelFailure)
     }
 
     struct Endpoint: Equatable {
@@ -56,20 +56,33 @@ final class ArbosKernelClient {
                 Task { @MainActor in self?.receive(message) }
             },
             onFailure: { [weak self] error in
-                Task { @MainActor in self?.dropped(error.localizedDescription) }
+                // The hub's own words when it refuses, and the transport's
+                // only when the hub said nothing. "arboslife is not
+                // connected" is something Jacob can act on; "Socket is not
+                // connected" is a sentence about our plumbing.
+                // Only the other end's own words are a verdict. Without
+                // them this is the path failing, which is worth retrying and
+                // worth naming by what happened rather than by URLSession's
+                // sentence about a socket.
+                let failure: KernelFailure = socket.closeReason.map { .refusal($0) }
+                    ?? .transport(Self.transportReason(error, host: endpoint.url.host))
+                Task { @MainActor in self?.dropped(failure) }
             }
         )
         let deadline = Date().addingTimeInterval(8)
         while Date() < deadline {
             switch state {
             case .attached: return
-            case .failed(let reason): throw KernelClientError.failed(reason)
-            case .detached: throw KernelClientError.failed("closed")
+            case .failed(let failure): throw KernelClientError.failed(failure)
+            case .detached: throw KernelClientError.failed(.transport("the socket closed before the kernel said hello"))
             case .attaching: try await Task.sleep(for: .milliseconds(50))
             }
         }
-        dropped("kernel did not answer")
-        throw KernelClientError.failed("kernel did not answer")
+        // Eight seconds and no hello. Nobody refused us, so this is the path.
+        let silence = KernelFailure.transport(
+            "\(endpoint.url.host ?? "the kernel") did not answer in time — retrying")
+        dropped(silence)
+        throw KernelClientError.failed(silence)
     }
 
     func detach() {
@@ -170,21 +183,87 @@ final class ArbosKernelClient {
         frameSink.yield(frame)
     }
 
-    private func dropped(_ reason: String) {
+    /// What went wrong on the way, in words that name the status or the host
+    /// rather than the socket. "The operation couldn't be completed" cannot
+    /// tell a wrong address from a sleeping machine, and those want opposite
+    /// things from the person reading it.
+    static func transportReason(_ error: Error, host: String?) -> String {
+        let where_ = host ?? "the hub"
+        if let status = (error as NSError).userInfo["HTTPStatus"] as? Int ?? httpStatus(in: error) {
+            switch status {
+            case 404: return "\(where_) answered 404 — nothing is listening there, so the address may be wrong"
+            case 401, 403: return "\(where_) refused the token (\(status)) — check it in Settings"
+            case 502, 503, 504: return "\(where_) is not answering (\(status)) — retrying"
+            default: return "\(where_) answered \(status) — retrying"
+            }
+        }
+        switch (error as? URLError)?.code {
+        case .some(.timedOut): return "\(where_) did not answer in time — retrying"
+        case .some(.cannotFindHost), .some(.dnsLookupFailed): return "\(where_) has no address — the tunnel may have gone"
+        case .some(.notConnectedToInternet), .some(.networkConnectionLost): return "no network — retrying when it returns"
+        case .some(.cannotConnectToHost): return "\(where_) is not accepting connections — retrying"
+        default: return "\(where_) could not be reached — retrying"
+        }
+    }
+
+    /// A WebSocket handshake rejected by status puts the code in the error's
+    /// text when it is nowhere else; read it rather than show the sentence.
+    private static func httpStatus(in error: Error) -> Int? {
+        let text = (error as NSError).localizedDescription
+        for code in [400, 401, 403, 404, 500, 502, 503, 504] where text.contains(String(code)) {
+            return code
+        }
+        return nil
+    }
+
+    private func dropped(_ failure: KernelFailure) {
         guard state == .attached || state == .attaching else { return }
-        state = .failed(reason)
+        state = .failed(failure)
         socket = nil
         frameSink.yield(.other(type: "closed"))
     }
 }
 
+/// Why an attach did not hold, and — the part that decides what the app
+/// does next — whether anybody actually said no.
+///
+/// A **refusal** is a verdict: the hub or the kernel sent a reason and meant
+/// it. Retrying is pointless and the reason is worth saying.
+///
+/// A **transport** failure is the path, not a verdict: an HTTP status, a
+/// tunnel that went, a timeout. It is the case that most deserves retrying,
+/// because it usually clears by itself, and the app had these the wrong way
+/// round — it retried refusals for ever and gave up on the path.
+///
+/// The hub guarantees the distinction is readable: every refusal it makes is
+/// an `error` frame with a reason, followed by a close that waits for the
+/// peer. Anything arriving with no reason is the transport.
+enum KernelFailure: Equatable {
+    case refusal(String)
+    case transport(String)
+
+    var reason: String {
+        switch self {
+        case .refusal(let text), .transport(let text): return text
+        }
+    }
+
+    /// Whether trying again could plausibly work.
+    var worthRetrying: Bool {
+        switch self {
+        case .refusal: return false
+        case .transport: return true
+        }
+    }
+}
+
 enum KernelClientError: LocalizedError {
-    case failed(String)
+    case failed(KernelFailure)
     case notAttached
 
     var errorDescription: String? {
         switch self {
-        case .failed(let reason): return reason
+        case .failed(let failure): return failure.reason
         case .notAttached: return "Not attached to a kernel."
         }
     }

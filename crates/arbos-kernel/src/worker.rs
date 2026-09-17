@@ -177,6 +177,7 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
     );
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
+    let mut said_gone = arbos_core::binary_gone();
     loop {
         tokio::select! {
             line = hub_link::next_text(&mut ws) => {
@@ -235,6 +236,19 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
             _ = ping.tick() => {
                 if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
                     return Ok(());
+                }
+                // The daemon's own image replaced under it: the roster's
+                // "Restart needed" comes from here, not from the next
+                // connect (the seven processes running deleted images for
+                // days were mostly daemons).
+                let gone = arbos_core::binary_gone();
+                if gone != said_gone {
+                    said_gone = gone;
+                    let f = hub_link::build_revision(cfg, RegistrantKind::Worker, None);
+                    if hub_link::send_json(&mut ws, &f).await.is_err() {
+                        return Ok(());
+                    }
+                    eprintln!("arbos-kernel worker: build revised on the hub: binary_gone={gone}");
                 }
             }
         }

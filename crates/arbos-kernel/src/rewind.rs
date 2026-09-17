@@ -168,9 +168,46 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
             events.len()
         );
     }
+    let (dropped, archive) = truncate(&layout, cut_from, &cps, checkpoint.line)?;
+    Ok(Cut {
+        checkpoint,
+        dropped,
+        archive,
+    })
+}
+
+/// The transcript cut at line `line` (0-based; that line and after go),
+/// no checkpoint needed: for a turn the kernel itself is taking back —
+/// one superseded before it did anything. Returns lines dropped and
+/// where they went.
+pub fn cut_from_line(place: &Place, agent: &str, line: u64) -> Result<(u64, PathBuf)> {
+    let layout = Layout::new(place, agent);
+    let events = load_transcript(&layout.transcript()).unwrap_or_default();
+    let at = line as usize;
+    if at >= events.len() {
+        bail!(
+            "line {line} is at or past the end of the transcript ({} lines); nothing to cut",
+            events.len()
+        );
+    }
+    if !events[at].is_wake() {
+        bail!("line {line} is not a turn's wake; refusing to cut mid-turn");
+    }
+    let cps = checkpoints(&layout.dir);
+    truncate(&layout, at, &cps, line)
+}
+
+/// Lines `at..` of the transcript to the rewind archive, the file
+/// replaced whole; checkpoints from `keep_below` on dropped with them.
+fn truncate(
+    layout: &Layout,
+    at: usize,
+    cps: &[Checkpoint],
+    keep_below: u64,
+) -> Result<(u64, PathBuf)> {
     let raw = std::fs::read_to_string(layout.transcript())?;
     let lines: Vec<&str> = raw.lines().collect();
-    let at = cut_from.min(lines.len());
+    let at = at.min(lines.len());
     let keep = lines[..at].join("\n");
     let gone = lines[at..].join("\n");
     let archive = layout
@@ -189,18 +226,21 @@ pub fn cut(place: &Place, agent: &str, target: Target) -> Result<Cut> {
         },
     )?;
     // Checkpoints of the cut turns go too, the target's own included: the
-    // next turn starts on that line and writes a fresh one.
+    // next turn starts on that line and writes a fresh one — and their
+    // tree sidecars with them, or a later turn at the same line inherits
+    // a cut turn's tree (qal-j20).
     let mut text = String::new();
-    for cp in cps.iter().filter(|cp| cp.line < checkpoint.line) {
+    for cp in cps.iter().filter(|cp| cp.line < keep_below) {
         text.push_str(&serde_json::to_string(cp)?);
         text.push('\n');
     }
-    replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
-    Ok(Cut {
-        checkpoint,
-        dropped: (lines.len() - at) as u64,
-        archive,
-    })
+    for cp in cps.iter().filter(|cp| cp.line >= keep_below) {
+        let _ = std::fs::remove_file(arbos_engine::git::tree_sidecar(&layout.dir, cp.line));
+    }
+    if !cps.is_empty() || layout.dir.join("checkpoints.jsonl").exists() {
+        replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
+    }
+    Ok(((lines.len() - at) as u64, archive))
 }
 
 /// Replace `path` with `text` in one step: a temp file in the same folder,
@@ -467,4 +507,167 @@ fn stamp(ms: i64) -> String {
         (secs % 3600) / 60,
         secs % 60
     )
+}
+
+#[cfg(test)]
+mod roll_tests {
+    use super::*;
+    use arbos_core::{Event, append_event};
+
+    /// The third instance of "cut too much": after the transcript rolled
+    /// into the archive, the checkpoints still indexed the *old* file.
+    /// `rewind turn 1` on the fresh file found a user line at seq 3 and
+    /// the checkpoint "on or before" it — the project's first, at line 1
+    /// — and with `--files` would have put the working tree back to the
+    /// project's first turn. The checkpoints roll with the lines they
+    /// describe, and a rewind into rolled history is refused.
+    #[test]
+    fn a_rewind_after_a_roll_does_not_reach_the_rolled_checkpoints() {
+        let dir = std::env::temp_dir().join(format!("arbos-roll-rewind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let layout = Layout::new(&place, "root");
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        std::fs::write(layout.agent_md(), "# root\n").unwrap();
+        let path = layout.transcript();
+        // Six turns, a checkpoint at each wake line (as the turn writes it).
+        let mut cps = String::new();
+        for i in 0..6u64 {
+            let at = load_transcript(&path).unwrap().len() as u64;
+            cps.push_str(&format!(
+                "{{\"line\":{at},\"ts\":0,\"head\":\"head{i}\",\"work\":null,\"clean\":true}}\n"
+            ));
+            append_event(
+                &path,
+                &Event::new(EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some(format!("ask {i}")),
+                    brief: None,
+                }),
+            )
+            .unwrap();
+            append_event(
+                &path,
+                &Event::new(EventKind::User {
+                    text: format!("ask {i}"),
+                    attachments: vec![],
+                    channel: String::new(),
+                    device: String::new(),
+                }),
+            )
+            .unwrap();
+            append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        }
+        std::fs::write(layout.dir.join("checkpoints.jsonl"), &cps).unwrap();
+        assert_eq!(checkpoints(&layout.dir).len(), 6);
+        let rolled = arbos_core::files::roll_transcript(&place, "root", 10)
+            .unwrap()
+            .expect("18 lines roll past a cap of 10");
+        assert_eq!(rolled.lines, 18);
+        // One turn after the roll: its checkpoint is the only one.
+        let at = load_transcript(&path).unwrap().len() as u64;
+        std::fs::write(
+            layout.dir.join("checkpoints.jsonl"),
+            format!(
+                "{{\"line\":{at},\"ts\":0,\"head\":\"head-after\",\"work\":null,\"clean\":true}}\n"
+            ),
+        )
+        .unwrap();
+        append_event(
+            &path,
+            &Event::new(EventKind::Wake {
+                wake: "user".into(),
+                text: Some("after".into()),
+                brief: None,
+            }),
+        )
+        .unwrap();
+        append_event(
+            &path,
+            &Event::new(EventKind::User {
+                text: "after".into(),
+                attachments: vec![],
+                channel: String::new(),
+                device: String::new(),
+            }),
+        )
+        .unwrap();
+        append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        let events = load_transcript(&path).unwrap();
+        let cps = checkpoints(&layout.dir);
+        assert_eq!(cps.len(), 1, "only the post-roll checkpoint: {cps:?}");
+        // `turn 1` of the fresh file is the post-roll turn, and resolves
+        // to its own checkpoint — not head0, the project's first.
+        let cp = resolve(&events, &cps, Target::Turn(1)).unwrap();
+        assert_eq!(cp.head, "head-after");
+        // A line of the old file no longer names anything here.
+        assert!(resolve(&events, &cps, Target::Line(0)).is_err());
+        assert!(resolve(&events, &cps, Target::Back(2)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// qal-j20's second fix: a rewind's cut takes the cut turns' tree
+    /// sidecars with their records, so no later turn at the same line
+    /// inherits a cut turn's tree.
+    #[test]
+    fn a_cut_removes_the_cut_turns_sidecars_and_keeps_the_kept_ones() {
+        let dir = std::env::temp_dir().join(format!("arbos-cut-sidecars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let layout = Layout::new(&place, "root");
+        std::fs::create_dir_all(layout.dir.join("checkpoints.d")).unwrap();
+        std::fs::write(layout.agent_md(), "# root\n").unwrap();
+        let path = layout.transcript();
+        let mut cps = String::new();
+        for i in 0..3u64 {
+            let at = load_transcript(&path).unwrap().len() as u64;
+            cps.push_str(&format!(
+                "{{\"line\":{at},\"ts\":{i},\"head\":\"h{i}\",\"work\":null,\"clean\":true}}\n"
+            ));
+            std::fs::write(layout.dir.join(format!("checkpoints.d/{at}.json")), "{}").unwrap();
+            for kind in [
+                EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some(format!("ask {i}")),
+                    brief: None,
+                },
+                EventKind::User {
+                    text: format!("ask {i}"),
+                    attachments: vec![],
+                    channel: String::new(),
+                    device: String::new(),
+                },
+                EventKind::TurnComplete { usage: None },
+            ] {
+                append_event(&path, &Event::new(kind)).unwrap();
+            }
+        }
+        std::fs::write(layout.dir.join("checkpoints.jsonl"), &cps).unwrap();
+        let before: Vec<_> = checkpoints(&layout.dir);
+        assert_eq!(before.len(), 3);
+        // Rewind to turn 2: turns 2 and 3 are cut; turn 1 is kept.
+        cut(&place, "root", Target::Turn(2)).unwrap();
+        assert!(
+            layout
+                .dir
+                .join(format!("checkpoints.d/{}.json", before[0].line))
+                .exists(),
+            "the kept turn's sidecar stays"
+        );
+        assert!(
+            !layout
+                .dir
+                .join(format!("checkpoints.d/{}.json", before[1].line))
+                .exists(),
+            "the target's sidecar goes"
+        );
+        assert!(
+            !layout
+                .dir
+                .join(format!("checkpoints.d/{}.json", before[2].line))
+                .exists(),
+            "the later cut turn's sidecar goes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
