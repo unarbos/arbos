@@ -2213,6 +2213,40 @@ impl ChatSession {
         self.flush();
     }
 
+    /// The caller's spoken words, from the gateway's transcript, into the
+    /// chat now as a `voice` user card. Nothing is sent from here: the
+    /// gateway forwards the utterance to the agent as a voice message when
+    /// it is one for the agent, and the kernel's record of that is this
+    /// card's echo (`foreign_prompt` matches it by its words). An
+    /// utterance the narrator or the speech model answered stays a card
+    /// with no turn under it, which is the truth.
+    pub fn voice_prompt(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let squashed: String = text.split_whitespace().collect();
+        // The kernel's record may already be here (a slow poll).
+        if self.items.iter().rev().take(4).any(|item| matches!(item, ChatItem::User(m) if m.text.split_whitespace().collect::<String>() == squashed)) {
+            return;
+        }
+        self.awaiting_echo.push_back(squashed);
+        while self.awaiting_echo.len() > 8 {
+            self.awaiting_echo.pop_front();
+        }
+        let mut message = crate::model::attachment::UserMessage::from(text.to_string());
+        message.channel = "voice".into();
+        message.sent_at = Some(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        );
+        self.items.push(ChatItem::User(message));
+        self.updated = SystemTime::now();
+        self.flush();
+    }
+
     /// The user is looking at this chat: every notification held for it is
     /// seen, here and on every other client.
     pub fn mark_seen(&mut self) {
