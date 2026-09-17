@@ -263,7 +263,11 @@ class Pass:
             do()
         except self.drv.DriverError as err:
             msg = str(err)
-            kind = "not-reachable" if ("no element" in msg or "not reachable" in msg or "occluded" in msg) else "fail"
+            # "not on screen … clipped away" is the driver refusing to click
+            # what is not visible (R13) — the row is unreachable in this
+            # scroll position, not failing. Cycle 36 read two settings
+            # controls below the fold as fails (R24).
+            kind = "not-reachable" if ("no element" in msg or "not reachable" in msg or "occluded" in msg or "not on screen" in msg) else "fail"
             self.record(element, screen, action, expected, msg, kind, self.still(element) if still else "")
             return None
         except Exception as err:
@@ -333,6 +337,25 @@ class Pass:
 
     # -- app helpers ------------------------------------------------------
 
+    def reveal(self, el: str, body: str, tries: int = 8) -> bool:
+        """Scroll `body` until `el` is on screen. True when it is (or was)."""
+        for _ in range(tries):
+            try:
+                found = self.app.find(el)
+            except self.drv.DriverError:
+                return False
+            if found.get("visible") or found.get("reachable"):
+                return True
+            win_h = (self.state().get("window") or {}).get("height") or 900
+            y = found.get("y", 0)
+            step = 240 if y > win_h / 2 else -240
+            try:
+                self.app.scroll(body, dy=-step)
+            except self.drv.DriverError:
+                return False
+            time.sleep(0.4)
+        return False
+
     def wait(self, pred, timeout: float = 60, every: float = 0.5, what: str = "condition"):
         t0 = time.monotonic()
         last = None
@@ -379,8 +402,20 @@ class Pass:
             if self.wait(lambda s: not busy(s), 15, what="stop all"):
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop All ended the workers", "pass", self.still("recover-stop-all"))
                 return
-        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "turn still busy after Stop; opening a new chat", "fail", self.still("recover-stuck"))
+        # Which agents are still busy, in the kernel's own words, so the
+        # row says who held the turn — a root waiting on a spawn (the
+        # kernel holds Stop until the child returns; filed 2026-09-17) reads
+        # differently from a worker that ignored Stop.
+        who = [(c.get("title") or c.get("name") or c.get("id"), c.get("live_status") or c.get("status")) for c in sessions(self.state()) if c.get("streaming") or c.get("turn_open")]
+        self.stop_failures = getattr(self, "stop_failures", 0) + 1
+        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", f"turn still busy after Stop ({self.stop_failures}x this run); busy={who!r}; opening a new chat", "fail", self.still("recover-stuck"))
         self.context_lost = getattr(self, "current_screen", None)
+        # Twice in one run is the kernel holding Stop, not a row's fault:
+        # every phase after this would fail the same way and bury the
+        # run's real rows (cycle 37: 17 fails from one event). Say so once
+        # and let the main loop mark what follows not-reachable (R27).
+        if self.stop_failures >= 2:
+            self.kernel_holds_stop = True
         self.app.key("cmd-n"); time.sleep(1.5)
         try:
             self.app.wait_element("composer-field", timeout=8, reachable=True)
@@ -1225,6 +1260,39 @@ class Pass:
         the labelled control, Escape, ⌘1, the tab; and Start the page…
         lands in the chat with a prompt in the composer."""
         sc = "project-page"
+        # Since the side-panel rewrite the Project page is the panel's
+        # Project tab, closed by default: open the drawer first, and when
+        # there is still no full-pane page, drive the ways out of the tab
+        # instead (R25 — these rows read not-reachable in cycle 36 and said
+        # nothing; Jacob's -24 asked for a clear way out of the page).
+        panel = lambda: (self.state().get("panel") or {})
+        if not self.app.exists("panel-project-head") and self.app.exists("toggle-panel") and not panel().get("open"):
+            self.app.click("toggle-panel"); time.sleep(1.0)
+        if self.app.exists("panel-tab-0") and not self.app.exists("page-back-to-chat"):
+            tabs = panel().get("tabs") or []
+            active = panel().get("active")
+            self.record("panel-project-tab", sc, "open the drawer", "the Project tab is the drawer's first tab and is active",
+                        f"tabs={[t.get('kind') for t in tabs]} active={active}",
+                        "pass" if tabs and tabs[0].get("kind") == "project" and active == 0 else "fail", self.still("panel-project-tab"))
+            self.check("panel-escape-closes", sc, "Escape with the drawer open", "the drawer closes; the chat stays",
+                       lambda: self.app.key("escape"), lambda a, b: (b.get("panel") or {}).get("open") is False and b.get("pane") == "chat")
+            self.app.key("cmd-b"); time.sleep(0.8)
+            if self.app.exists("panel-close"):
+                self.check("panel-close", sc, "click the drawer's close mark", "the drawer closes",
+                           lambda: self.app.click("panel-close"), lambda a, b: (b.get("panel") or {}).get("open") is False)
+            else:
+                self.gap("panel-close", sc, "click", "no close mark on the drawer")
+            self.app.key("cmd-b"); time.sleep(0.8)
+            if self.app.exists("panel-expand"):
+                # Expand's effect is not in the driver's state yet (the
+                # drawer's width stayed 280 at 1100 wide — bounded by the
+                # chat's minimum, or a no-op; the side-panel owner is asked):
+                # recorded with the widths, not judged.
+                self.check("panel-expand", sc, "click expand", "the drawer widens or takes the pane",
+                           lambda: self.app.click("panel-expand"),
+                           lambda a, b: f"unverified: width {(a.get('panel') or {}).get('width')} -> {(b.get('panel') or {}).get('width')}, no other state change" if self.diff(a, b) == "no state change" else self.diff(a, b))
+                self.app.key("escape"); time.sleep(0.6)
+            return
         if not self.app.exists("panel-project-head"):
             self.gap("project-page-back", sc, "-", "no panel-project-head on this layout")
             return
@@ -1296,7 +1364,7 @@ class Pass:
         self.check("alt-cmd-down", sc, "alt-cmd-down", "steps to the next agent", lambda: self.app.key("alt-cmd-down"), lambda a, b: b["active_session"] != a["active_session"])
         self.check("panel-scroll", sc, "scroll the panel", "no error", lambda: self.app.scroll("panel-scroll", dy=-200), None)
         rows = self.ids("panel-agent-*")
-        if rows:
+        if rows and self.reveal(rows[0], "panel-scroll"):
             self.app.click(rows[0])
 
     def phase_settings(self) -> None:
@@ -1308,6 +1376,12 @@ class Pass:
         self.go_project()
         if not any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
             for row in self.ids("panel-agent-*"):
+                # A row scrolled out of the drawer (a run that opened many
+                # chats) is brought back or skipped, never a crash that
+                # takes the phase with it (cycle 37: phases R and W died on
+                # `panel-agent-27 … clipped away`).
+                if not self.reveal(row, "panel-scroll"):
+                    continue
                 self.app.click(row); time.sleep(0.5)
                 if any(i.get("kind") == "agent" for i in (active(self.state()) or {}).get("items", [])):
                     break
@@ -1352,6 +1426,11 @@ class Pass:
                 # phase after it without a composer). Rig audit R22.
                 for el in [e for e in self.ids() if ".settings-body." in e]:
                     short = el.rsplit(".", 1)[-1]
+                    # Bring a control below the fold onto the screen before
+                    # touching it: the driver refuses a click on what is not
+                    # visible (R13), and two settings controls read
+                    # not-reachable for that alone (R24's next step).
+                    self.reveal(el, "settings-body")
                     if short.startswith("section-") or short in ("settings-body", "settings-back-to-chat", "tab-settings", "tab-settings-close"):
                         continue
                     if short == "bionic-reading":
@@ -1932,6 +2011,9 @@ def main() -> int:
             if not fn:
                 continue
             log(f"== phase {letter} {fn.__name__}")
+            if getattr(p, "kernel_holds_stop", False) and busy(p.state()):
+                p.stop_phase(fn.__name__, "the kernel held Stop over a waiting spawn twice this run (filed 2026-09-17-stop-waits-for-a-blocking-spawn); the phase would only repeat the cascade", [letter], fault=False)
+                continue
             # The rig's own pulse before every phase: a display that has
             # stopped answering fails the run loudly (the ten-minute hang
             # of 2026-09-16 would otherwise have passed as quiet).
