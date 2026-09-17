@@ -267,6 +267,7 @@ impl Arbos {
         let entries = self.showing(cx).is_some();
 
         root.on_action(cx.listener(Self::toggle_panel_action))
+            .on_action(cx.listener(Self::zoom_panel_action))
             .on_action(cx.listener(Self::start_call_action))
             .on_action(cx.listener(Self::end_call_action))
             .on_action(cx.listener(Self::toggle_mute_action))

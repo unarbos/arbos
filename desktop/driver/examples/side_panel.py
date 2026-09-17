@@ -164,6 +164,16 @@ def main() -> int:
                 front["kind"] == "surface" and bool(front["title"]),
                 f"front={front}",
             )
+            # ⌘\ gives the tab in front the whole window, and gives it back.
+            app.key("cmd-\\")
+            state = app.wait_state(
+                lambda s: s["showing"] == "surface", what="the zoom"
+            )
+            check("⌘\\ zooms the tab in front into the column", True)
+            app.key("cmd-\\")
+            state = app.wait_state(lambda s: s["showing"] == "chat", what="the chat back")
+            check("and the same key gives the chat back", True)
+
             at = state["panel"]["active"]
             app.click(f"panel-tab-close-{at}")
             state = app.wait_state(

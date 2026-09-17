@@ -745,7 +745,9 @@ impl Arbos {
                     })
                     .child(SharedString::from(line.title)),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.select_surface(id, cx)))
+            // Into the drawer's tab row, exactly as a click on its tab does:
+            // one thing a row can mean, whichever list it was clicked in.
+            .on_click(cx.listener(move |this, _, window, cx| this.show_surface(id, window, cx)))
             .into_any_element()
     }
 

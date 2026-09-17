@@ -4,6 +4,7 @@
 use crate::{
     kernel,
     model::{
+        panel::{Panel, PanelTab},
         permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
         settings::Settings,
@@ -57,6 +58,7 @@ actions!(
         ShowPermissions,
         ReportProblem,
         TogglePanel,
+        ZoomPanel,
         ShowChat,
         ShowProject,
         SearchChats,
@@ -287,6 +289,7 @@ pub fn init(cx: &mut App) {
         // before the window is offered it, and the editor's own `cmd-b` —
         // bold — is not reached while this one is on the bar.
         KeyBinding::new("cmd-b", TogglePanel, None),
+        KeyBinding::new("cmd-\\", ZoomPanel, None),
         // Call the project in front: a full-duplex conversation with its
         // main agent through the speech server. ⇧⌘C again hangs up.
         KeyBinding::new("cmd-shift-c", StartCall, None),
@@ -1492,11 +1495,37 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.select_session(id, cx));
     }
 
-    pub(crate) fn select_surface(
+    /// A click on a surface, wherever it was clicked: it comes to the front
+    /// of the side panel and the drawer opens with it.
+    pub(crate) fn show_surface(
         &mut self,
         id: crate::model::surface::SurfaceId,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.show_surface(id, true, cx));
+        self.focus_panel(window, cx);
+    }
+
+    /// ⌘\\: the tab in front takes the window, and the same key gives the chat
+    /// back — "let me really work in this one" without a grid to arrange.
+    /// Only a surface can be zoomed; the project tab and an empty tab have
+    /// nothing the column would draw.
+    pub(crate) fn zoom_panel_action(
+        &mut self,
+        _: &ZoomPanel,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane == Pane::Surface {
+            self.show_chat(&ShowChat, window, cx);
+            return;
+        }
+        let Some(PanelTab::Surface(id)) = self.workspace.read(cx).panel().map(Panel::active_tab)
+        else {
+            return;
+        };
         self.show_pane(Pane::Surface, cx);
         self.workspace
             .update(cx, |workspace, cx| workspace.select_surface(id, cx));
