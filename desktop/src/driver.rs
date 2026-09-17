@@ -1094,6 +1094,15 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "panel_open": this.panel_open,
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
+        // The rest of the Settings window's values, so a click on a control
+        // there can be asserted on state and not recorded `unverified`
+        // (rig audit R3, cycle 32).
+        "appearance": format!("{:?}", workspace.appearance).to_ascii_lowercase(),
+        "reduce_transparency": workspace.reduce_transparency,
+        "cursor_blink": workspace.cursor_blink,
+        "tint": { "hue": workspace.tint.hue, "chroma": workspace.tint.chroma },
+        "watch_bounce": workspace.settings.watch_bounce,
+        "update_channel": workspace.settings.update.channel,
         "notifications": {
             "notifier": crate::notify_os::NOTIFIER,
             "window_active": this.window_active,

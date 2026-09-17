@@ -198,6 +198,8 @@ class Pass:
         self.inventory: dict[str, list[str]] = {}
         self.n = 0
         self.tabs = False
+        # The config home the app was launched with; set by main().
+        self.xdg: Path = Path(f"/tmp/qa-ui-xdg-{branch}")
 
     # -- plumbing ---------------------------------------------------------
 
@@ -384,6 +386,15 @@ class Pass:
             self.clear_composer()
         self.app.click("composer-field")
         self.app.type(text + "\n")
+        # The line must leave the composer: once (cycle 32's full gate) the
+        # typed Enter landed on nothing and the prompt sat in the field while
+        # every row after it measured a turn that never ran. Wait for the
+        # field to empty; press Enter once more if it has not; say so.
+        if self.wait(lambda s: not s["composer"]["text"], 4) is None:
+            log(f"send: composer still holds the line after Enter; pressing Enter again ({text[:40]!r})")
+            self.app.click("composer-field"); self.app.key("enter")
+            if self.wait(lambda s: not s["composer"]["text"], 4) is None:
+                log("send: the line did not leave the composer (R17)")
 
     def close_second_windows(self) -> None:
         for title in ("Settings",):
@@ -1377,13 +1388,62 @@ class Pass:
                     if short.startswith("provider-"):
                         self.skip(short, "settings-window", "click", "rewrites config.toml for the rest of the run; selection state is not in the driver dump")
                         continue
-                    if short.startswith("model-pick-") or short.startswith("appearance-"):
-                        self.check(short, "settings-window", "click", "selection changes (visual); main window state unchanged",
-                                   lambda el=el: self.app.click(el), None)
+                    # The values these controls set live in the main window's
+                    # state (`appearance`, `reduce_transparency`, `cursor_blink`,
+                    # `watch_bounce`, `update_channel`, `text_size`); a model
+                    # pick lands in config.toml. Read those, not the click
+                    # (rig audit R3, cycle 32: these rows were `unverified`).
+                    def main_state():
+                        self.app.use_window("main")
+                        try:
+                            return self.state()
+                        finally:
+                            self.app.use_window("settings")
+                    def settled(el, field, want=None, action="click", changed_ok=False):
+                        a = main_state().get(field)
+                        self.app.click(el); time.sleep(0.6)
+                        b = main_state().get(field)
+                        if want is not None:
+                            self.record(short, "settings-window", action, f"{field} == {want!r}", f"{field}: {a!r} → {b!r}", "pass" if b == want else "fail", self.still(short))
+                        elif changed_ok and b != a:
+                            self.record(short, "settings-window", action, f"{field} changes", f"{field}: {a!r} → {b!r}", "pass", self.still(short))
+                        elif changed_ok:
+                            self.record(short, "settings-window", action, f"{field} changes", f"{field} unchanged at {a!r} (already the selection?)", "unverified", self.still(short))
+                        return a, b
+                    def flips(el, field):
+                        a = main_state().get(field)
+                        self.app.click(el); time.sleep(0.5)
+                        mid = main_state().get(field)
+                        self.app.click(el); time.sleep(0.5)
+                        b = main_state().get(field)
+                        ok = isinstance(a, bool) and mid == (not a) and b == a
+                        self.record(short, "settings-window", "click toggle twice", f"{field} flips and flips back", f"{field}: {a!r} → {mid!r} → {b!r}", "pass" if ok else "fail", self.still(short))
+                    if short.startswith("model-pick-"):
+                        cfg = self.xdg / "arbos" / "config.toml"
+                        line = lambda: next((l.strip() for l in cfg.read_text().splitlines() if l.strip().startswith("model")), None) if cfg.exists() else None
+                        a = line(); self.app.click(el); time.sleep(0.6); b = line()
+                        if b is not None and b != a:
+                            self.record(short, "settings-window", "click", "config.toml's model line changes to the pick", f"{a} → {b}", "pass", self.still(short))
+                        else:
+                            self.record(short, "settings-window", "click", "config.toml's model line changes to the pick", f"model line unchanged: {b} (already the pick?)", "unverified", self.still(short))
                         continue
-                    if short in ("reduce-transparency", "cursor-blink", "bionic-reading") or short.startswith("watch-bounce"):
-                        self.check(short, "settings-window", "click toggle twice", "toggle flips and flips back (visual)",
-                                   lambda el=el: (self.app.click(el), time.sleep(0.3), self.app.click(el)), None)
+                    if short.startswith("appearance-"):
+                        settled(el, "appearance", changed_ok=True)
+                        continue
+                    if short.startswith("watch-bounce-"):
+                        settled(el, "watch_bounce", want=int(short.rsplit("-", 1)[-1]))
+                        continue
+                    if short.startswith("update-channel-"):
+                        settled(el, "update_channel", want=short.rsplit("-", 1)[-1])
+                        continue
+                    if short in ("size-up", "size-down"):
+                        a, b = settled(el, "text_size", changed_ok=True)
+                        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and b != a:
+                            grew = b > a
+                            self.record(short, "settings-window", "direction", "+ grows, − shrinks", f"{a} → {b}", "pass" if grew == (short == "size-up") else "fail")
+                        continue
+                    if short in ("reduce-transparency", "cursor-blink"):
+                        flips(el, short.replace("-", "_"))
                         continue
                     if short in ("commit", "meter"):
                         self.check(short, "settings-window", "click", "copies / no-op", lambda el=el: self.app.click(el), None)
