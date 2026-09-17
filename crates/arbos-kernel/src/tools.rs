@@ -20,7 +20,8 @@ use crate::pty::PtyHub;
 /// The one browser page an agent has. The desktop keys its row on this.
 const BROWSER_PAGE: &str = "b1";
 
-/// A panel open/close for the desktop tree. `ids` names the rows.
+/// A panel open/close for the desktop tree, for the agent's own work.
+/// `ids` names the rows.
 fn board(owner: &str, action: &str, panel: &str, ids: Vec<String>) -> Frame {
     Frame::Board {
         owner: owner.to_string(),
@@ -30,6 +31,7 @@ fn board(owner: &str, action: &str, panel: &str, ids: Vec<String>) -> Frame {
         cwd: None,
         title: None,
         url: None,
+        by: "agent".into(),
     }
 }
 
@@ -1365,7 +1367,15 @@ impl Tool for Terminal {
         simple_schema(
             "terminal",
             "Open a shell the user sees as a sub-terminal of this chat (never Terminal.app or an editor's terminal).",
-            &[("action", "open", true), ("cwd", "Start directory.", false)],
+            &[
+                ("action", "open", true),
+                ("cwd", "Start directory.", false),
+                (
+                    "by",
+                    "user when the user asked for a terminal in their message (the window then opens it for them); leave out when you open one for your own work.",
+                    false,
+                ),
+            ],
         )
     }
     fn plan(&self, _cx: &PlanCx, _args: &Value) -> Result<Plan> {
@@ -1393,8 +1403,16 @@ impl Tool for Terminal {
             if !dir.is_dir() {
                 anyhow::bail!("terminal: open: {} is not a directory", dir.display());
             }
+            // The model says whether the person asked; anything but the
+            // word `user` is the agent's own (the safe reading: a drawer
+            // that opens uninvited is the thing the window refuses to do).
+            let by = if opt_str(&args, "by").is_some_and(|b| b.eq_ignore_ascii_case("user")) {
+                "user"
+            } else {
+                "agent"
+            };
             let id = ptys.next_id();
-            ptys.spawn_shell(&id, &dir, cx.agent.id.as_str())?;
+            ptys.spawn_shell(&id, &dir, cx.agent.id.as_str(), by)?;
             hooks.broadcast(Frame::Board {
                 owner: cx.agent.id.to_string(),
                 action: "open".into(),
@@ -1403,6 +1421,7 @@ impl Tool for Terminal {
                 cwd: Some(dir.display().to_string()),
                 title: None,
                 url: None,
+                by: by.into(),
             });
             Ok(ToolOut::text(format!(
                 "Opened terminal {id} in {} as a sub-terminal on the left of this chat.",
@@ -1464,6 +1483,7 @@ impl Tool for Browser {
                     cwd: None,
                     title: None,
                     url: opt_str(&args, "url").map(str::to_string),
+                    by: "agent".into(),
                 });
             }
             let agent = cx.agent.id.clone();

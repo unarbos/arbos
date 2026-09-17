@@ -1055,6 +1055,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: Some(job.meta.cwd.display().to_string()),
                             title: Some(job.meta.command.replace('\n', " ")),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                     }
                     // Output streams for every job, attached or detached:
@@ -1080,6 +1081,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                             cwd: None,
                             title: Some(job.status_line()),
                             url: Some(job.journal().display().to_string()),
+                            by: "agent".into(),
                         });
                         let text = format!(
                             "job {} {} — `{}` — log: {}",
@@ -1791,6 +1793,60 @@ fn handle_frame(
         Frame::PtyIn { agent, page, data } => {
             if let Ok(bytes) = Engine::decode(&base64::engine::general_purpose::STANDARD, data) {
                 let _ = ptys.write(&agent, &page, &bytes);
+            }
+        }
+        Frame::Shell { owner, cwd } => {
+            // A person's own shell, asked for from a window: the same
+            // `PtyHub` shell the `terminal` tool mints, announced with
+            // `by: user` so the drawer opens for it.
+            let owner = owner.unwrap_or_else(|| "root".to_string());
+            if !arbos_core::agent_exists(place, &owner) {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: no agent {owner:?} in this place"),
+                );
+                return;
+            }
+            let dir = match cwd.as_deref().filter(|c| !c.trim().is_empty()) {
+                Some(c) => {
+                    let p = std::path::PathBuf::from(c);
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        place.path.join(p)
+                    }
+                }
+                None => place.path.clone(),
+            };
+            if !dir.is_dir() {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("shell: {} is not a directory", dir.display()),
+                );
+                return;
+            }
+            let id = ptys.next_id();
+            match ptys.spawn_shell(&id, &dir, &owner, "user") {
+                Ok(_) => {
+                    klog::info(
+                        "shell_opened",
+                        Some(&owner),
+                        format!("{id} in {}", dir.display()),
+                    );
+                    hooks.broadcast(Frame::Board {
+                        owner,
+                        action: "open".into(),
+                        panel: "terminal".into(),
+                        terminal_ids: vec![id],
+                        cwd: Some(dir.display().to_string()),
+                        title: None,
+                        url: None,
+                        by: "user".into(),
+                    });
+                }
+                Err(e) => refuse(hooks, Some(&owner), format!("shell: {e:#}")),
             }
         }
         _ => {}

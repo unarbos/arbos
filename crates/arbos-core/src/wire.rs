@@ -601,6 +601,26 @@ pub enum Frame {
         /// Where the panel points: a browser's URL, a process's log path.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        /// Who asked for this panel: `user` (a `shell` frame from a client,
+        /// or a `terminal` tool call the agent marked as the user's request)
+        /// or `agent` (the agent's own work: its jobs, its browser page, a
+        /// terminal it opened for itself). A window opens its drawer for
+        /// `user` and stays quiet for `agent`. Empty on frames from a kernel
+        /// before this field: read as unknown, not as `user`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        by: String,
+    },
+    /// A client asks for a shell of its own — the person's `$SHELL`,
+    /// interactive, in `cwd` (absolute, or relative to the place; the place
+    /// itself when absent). The kernel answers with a `board` frame for
+    /// panel `terminal` with `by: user`, then `pty` output on the new page;
+    /// a directory that does not exist is an `error` frame. `owner` is the
+    /// agent the row docks under (`root` when absent).
+    Shell {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// A frame type this build does not know. A kernel newer than the
     /// client (or the reverse) adds frames; an old reader must skip them,
