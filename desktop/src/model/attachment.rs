@@ -266,6 +266,10 @@ fn attached_file_line(s: &str) -> Option<MessageFile> {
     })
 }
 
+/// `UserMessage::channel` for the brief a worker was spawned with — the
+/// parent's words, drawn as a column-wide folded card, never a bubble.
+pub const BRIEF_CHANNEL: &str = "brief";
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(from = "StoredMessage")]
 pub struct UserMessage {
@@ -365,6 +369,20 @@ enum StoredMessage {
         images: Vec<MessageImage>,
         #[serde(default)]
         files: Vec<MessageFile>,
+        // The card's own record, written by `Serialize` above and read back
+        // here — a reload dropped every one of these until the brief
+        // marker joined them (the file is the cache; the kernel's record
+        // stamps most of them again, the channel it cannot).
+        #[serde(default)]
+        channel: String,
+        #[serde(default)]
+        worked_secs: Option<u32>,
+        #[serde(default)]
+        sent_at: Option<i64>,
+        #[serde(default)]
+        feedback: Option<i8>,
+        #[serde(default)]
+        seq: Option<u64>,
     },
 }
 
@@ -388,16 +406,21 @@ impl From<StoredMessage> for UserMessage {
                 text,
                 images,
                 files,
+                channel,
+                worked_secs,
+                sent_at,
+                feedback,
+                seq,
             } => Self {
                 text,
                 images,
                 files,
-                worked_secs: None,
-                channel: String::new(),
-                sent_at: None,
-                feedback: None,
+                worked_secs,
+                channel,
+                sent_at,
+                feedback,
                 described: Vec::new(),
-                seq: None,
+                seq,
                 reported: None,
                 steer: false,
             },
