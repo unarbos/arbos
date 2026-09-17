@@ -85,6 +85,7 @@ class DuplexSession(BaseSession):
         self.kernel_launched_at = 0.0
         self.kernel_question = ""
         self.kernel_first_audio: float | None = None
+        self.kernel_announced = False  # response.started sent for the current kernel answer
         self.pending_task: asyncio.Task | None = None
         self.our_speech_started_at = 0.0
         self.transcript_stash: list[tuple[float, str]] = []
@@ -256,7 +257,7 @@ class DuplexSession(BaseSession):
         if not self.response_open:
             return
         self.response_open = False
-        self._emit_for_gen(self.gen, P.RESPONSE_DONE)
+        self._emit_for_gen(self.gen, P.RESPONSE_DONE, reason="completed")
 
     async def _quiet_watch(self) -> None:
         """Closes a response when the model stops sending audio altogether (upstream pause)."""
@@ -282,12 +283,12 @@ class DuplexSession(BaseSession):
             if talking and self.vad_run_ms >= max(320, t.barge_in_min_ms):
                 self.vad_run_ms = 0
                 if self.kernel_task is not None and not self.kernel_task.done():
-                    if self.kernel_first_audio is not None:
+                    if self.kernel_announced:
                         self._cancel_kernel_answer("barge-in (vad)")
                 else:
                     self.gen += 1
                     self.gateway_speaking = False
-                    self._emit(P.RESPONSE_DONE, interrupted=True)
+                    self._emit(P.RESPONSE_DONE, interrupted=True, reason="interrupted")
                     log.info("[%s] speak cut (barge-in, vad)", self.sid)
                 talking = False
             # utterance capture
@@ -334,7 +335,7 @@ class DuplexSession(BaseSession):
         self.user_turns += 1
         route = "kernel" if self._kernel_answers(text) else "model"
         answering = self.kernel_task is not None and not self.kernel_task.done()
-        if route == "kernel" and answering and self.kernel_first_audio is None \
+        if route == "kernel" and answering and not self.kernel_announced \
                 and time.monotonic() - self.kernel_launched_at < 3.0:
             # The user paused and went on before the kernel said anything: one question, not two.
             text = f"{self.kernel_question} {text}".strip()
@@ -376,7 +377,7 @@ class DuplexSession(BaseSession):
         turn until the VAD has heard ~0.5 s of quiet (at most 4 s) and merge any fragment that
         arrives meanwhile, so the kernel gets one whole question."""
         if self.kernel_task is not None and not self.kernel_task.done():
-            self._cancel_kernel_answer("new question")
+            self._cancel_kernel_answer("new question", reason="superseded")
         self.kernel_turn = True  # from now on the model's own reply is dropped
         self.transcript_stash.clear()
         self._close_response()
@@ -396,19 +397,32 @@ class DuplexSession(BaseSession):
         self.kernel_launched_at = time.monotonic()
         self.kernel_question = text
         self.kernel_first_audio = None
+        self.kernel_announced = False
         log.info("[%s] asking the kernel: %r", self.sid, text)
         self.kernel_turn = True
         self.transcript_stash.clear()
         self._close_response()
         self.kernel_task = asyncio.create_task(self._kernel_answer(text), name=f"kernel-answer-{self.sid}")
 
-    def _cancel_kernel_answer(self, cause: str) -> None:
+    def _cancel_kernel_answer(self, cause: str, reason: str = "interrupted") -> None:
+        """Stop a kernel answer. `reason` is what the client is told: "interrupted" (the user
+        talked over it) or "superseded" (more of the question arrived; the answer never played).
+        A superseded answer that has not produced audio yet was never announced, so no
+        response.done goes out for it: nothing the client could see has ended."""
         self.kernel_cut_at = time.monotonic()
         self.gen += 1  # drops queued Kokoro frames
         if self.kernel_task is not None and not self.kernel_task.done():
             self.kernel_task.cancel()
-        self._emit(P.RESPONSE_DONE, interrupted=True)
-        log.info("[%s] kernel answer cut (%s)", self.sid, cause)
+        if self.kernel is not None and self.kernel.connected:
+            # Tell the kernel too, or it keeps generating the old answer and the next question
+            # queues behind it (and its deltas would leak into the next turn's text).
+            try:
+                self.kernel.send({"type": "stop", "agent": "root"})
+            except Exception:
+                pass
+        if self.kernel_announced:
+            self._emit(P.RESPONSE_DONE, interrupted=True, reason=reason)
+        log.info("[%s] kernel answer cut (%s, %s)", self.sid, cause, reason)
 
     async def _kernel_answer(self, text: str) -> None:
         """Ask the kernel's main agent and voice its reply with the gateway TTS, sentence by sentence."""
@@ -427,6 +441,7 @@ class DuplexSession(BaseSession):
                 # Only now is there something a client could interrupt; announcing earlier made
                 # clients cut a still-silent answer when the user merely paused and went on.
                 self._emit_for_gen(gen, P.RESPONSE_STARTED)
+                self.kernel_announced = True
             spoken.append(segment)
             self._emit_for_gen(gen, P.RESPONSE_TRANSCRIPT, text=(" " if len(spoken) > 1 else "") + segment)
             at = await self._speak(segment, gen)
@@ -443,7 +458,7 @@ class DuplexSession(BaseSession):
             await flush(buffer)
             if not spoken:
                 self._emit_for_gen(gen, P.RESPONSE_STARTED)
-            self._emit_for_gen(gen, P.RESPONSE_DONE)
+            self._emit_for_gen(gen, P.RESPONSE_DONE, reason="completed")
             log.info("[%s] kernel answer: first audio %s, %d chars",
                      self.sid, f"{(first_audio - started) * 1000:.0f}ms" if first_audio else "none", sum(map(len, spoken)))
         except asyncio.CancelledError:
@@ -451,7 +466,7 @@ class DuplexSession(BaseSession):
         except Exception as exc:
             log.exception("[%s] kernel answer failed", self.sid)
             self._emit(P.ERROR, message=f"kernel answer failed: {exc}")
-            self._emit_for_gen(gen, P.RESPONSE_DONE)
+            self._emit_for_gen(gen, P.RESPONSE_DONE, reason="failed")
         finally:
             self.kernel_turn = False
             self.muted = True  # the model may still be voicing its own (unheard) reply; drop it until it goes quiet
@@ -513,11 +528,11 @@ class DuplexSession(BaseSession):
             await self._speak(text, gen)
         finally:
             self.gateway_speaking = False
-        self._emit_for_gen(gen, P.RESPONSE_DONE)
+        self._emit_for_gen(gen, P.RESPONSE_DONE, reason="completed")
 
     async def on_interrupt(self, cause: str) -> None:
         if self.kernel_task is not None and not self.kernel_task.done():
-            if self.kernel_first_audio is not None:
+            if self.kernel_announced:
                 self._cancel_kernel_answer(cause)
             return  # nothing is playing yet; the user is still finishing the question
         if time.monotonic() - self.kernel_cut_at < 1.0:
@@ -526,7 +541,7 @@ class DuplexSession(BaseSession):
         self.muted = True  # the model trails off for a moment after yielding; the client should not hear that
         self.response_open = False
         self.transcript_stash.clear()
-        self._emit(P.RESPONSE_DONE, interrupted=True)
+        self._emit(P.RESPONSE_DONE, interrupted=True, reason="interrupted")
         if self.up is not None:
             try:  # OpenAI-Realtime shape; the container may ignore it (its own VAD already yields on speech)
                 await self.up.send(json.dumps({"type": "response.cancel", "event_id": str(uuid.uuid4())}))

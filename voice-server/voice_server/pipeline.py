@@ -79,7 +79,7 @@ class PipelineSession(BaseSession):
             self.response_task.cancel()
         if active:
             log.info("[%s] interrupted (%s)", self.sid, cause)
-            self._emit(P.RESPONSE_DONE, interrupted=True)
+            self._emit(P.RESPONSE_DONE, interrupted=True, reason="interrupted")
 
     @property
     def responding(self) -> bool:
@@ -228,7 +228,7 @@ class PipelineSession(BaseSession):
             except Exception as exc:
                 log.exception("[%s] response failed", self.sid)
                 self._emit(P.ERROR, message=f"response failed: {exc}")
-                self._emit_for_gen(item.gen, P.RESPONSE_DONE)
+                self._emit_for_gen(item.gen, P.RESPONSE_DONE, reason="failed")
             finally:
                 self.response_task = None
 
@@ -240,7 +240,7 @@ class PipelineSession(BaseSession):
                 "[%s] speak %d chars: first audio %s", self.sid, len(item.text),
                 f"{(first - started) * 1000:.0f}ms" if first else "none",
             )
-            self._emit_for_gen(item.gen, P.RESPONSE_DONE)
+            self._emit_for_gen(item.gen, P.RESPONSE_DONE, reason="completed")
         elif isinstance(item, ReplyItem):
             await self._reply(item)
         else:
@@ -281,7 +281,7 @@ class PipelineSession(BaseSession):
             if spoken:
                 self.voice_history.append({"role": "assistant", "content": " ".join(spoken)})
             self.voice_history[:] = self.voice_history[-30:]
-        self._emit_for_gen(item.gen, P.RESPONSE_DONE)
+        self._emit_for_gen(item.gen, P.RESPONSE_DONE, reason="completed")
         log.info(
             "[%s] reply: first token %s, first audio %s (from transcript.final)",
             self.sid,

@@ -99,8 +99,12 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     {"type":"response.transcript","text":"..."}
                                    what the audio says; only for server-originated
                                    replies (for "speak" the client already has the text)
-    {"type":"response.done"}       end of one reply. Adds "interrupted":true when it
-                                   ended because of interrupt or barge-in.
+    {"type":"response.done","reason":"completed"|"interrupted"|"superseded"|"failed"}
+                                   end of one reply. "interrupted" (also "interrupted":true, kept
+                                   for old clients): the user talked over it. "superseded": more
+                                   of the question arrived before the answer played; treat it as
+                                   nothing having happened. A superseded answer that never produced
+                                   audio sends no response.done at all (it was never announced).
     {"type":"error","message":"..."}
 
     text channel

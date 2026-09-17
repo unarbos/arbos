@@ -99,7 +99,7 @@ class BaseSession:
     async def on_report_speech(self, text: str) -> None:
         """Voice an agent's report. Default: the gateway's own TTS."""
         await self._speak(text, self.gen)
-        self._emit_for_gen(self.gen, P.RESPONSE_DONE)
+        self._emit_for_gen(self.gen, P.RESPONSE_DONE, reason="completed")
 
     async def on_close(self) -> None: ...
 

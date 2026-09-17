@@ -278,9 +278,10 @@ class KernelClient:
                     started = True
                 elif started:
                     queue.put_nowait(None)
-            elif kind == "assistant_delta" and frame.get("text"):
-                queue.put_nowait(frame["text"])
-            elif kind == "event":
+            elif kind == "assistant_delta" and frame.get("text") and started:
+                queue.put_nowait(frame["text"])  # only once *our* turn is running: an earlier
+                # turn that is still finishing (or being stopped) must not leak into this answer
+            elif kind == "event" and started:
                 event = frame.get("event") or {}
                 if event.get("kind") == "assistant" and event.get("text"):
                     queue.put_nowait(event["text"])
