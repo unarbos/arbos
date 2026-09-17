@@ -243,7 +243,7 @@ pub enum Probe<'a> {
 impl Probe<'_> {
     /// Run it. `staged` is the candidate; `current` is what it would replace.
     fn run(self, staged: &Path, current: &Path, expected: &Version) -> Result<()> {
-        let new = Running::read(staged).context("the downloaded kernel would not run")?;
+        let new = Running::read(staged).context("the new kernel would not run")?;
         if new.version.cmp_release(expected) != std::cmp::Ordering::Equal {
             bail!(
                 "the download says it is {} but the feed said {}",
@@ -257,7 +257,7 @@ impl Probe<'_> {
         let theirs = read_place(current, place);
         let ours = read_place(staged, place).with_context(|| {
             format!(
-                "the downloaded kernel could not read {} at all",
+                "the new kernel could not read {} at all",
                 place.display()
             )
         })?;
@@ -265,7 +265,7 @@ impl Probe<'_> {
             && ours > theirs
         {
             bail!(
-                "the downloaded kernel finds {ours} problems in {} where the one it would \
+                "the new kernel finds {ours} problems in {} where the one it would \
                  replace finds {theirs} — refusing it rather than serving with it",
                 place.display()
             );
@@ -381,6 +381,62 @@ pub fn previous_path(target: &Path) -> PathBuf {
     let mut name = target.as_os_str().to_owned();
     name.push(".previous");
     PathBuf::from(name)
+}
+
+/// Put a kernel binary that is already on this machine in place of another
+/// one, with the same care a downloaded payload gets.
+///
+/// For the case the feed cannot serve: bootstrapping an installation too old
+/// to update itself (a kernel that answers `unknown command update`), and a
+/// machine with no route to the internet. What makes it worth a function
+/// rather than `mv` is everything around the move — the candidate is run
+/// before anything is touched, run again once it is in place, rolled back by
+/// `Swap` if either fails, and the replaced build is kept beside it.
+///
+/// No signature is checked, because there is nothing to check one against. A
+/// file already on the machine was put there by whoever had access to the
+/// machine; the feed's signature protects bytes that crossed a network, and
+/// this protects a swap.
+pub fn install_file(source: &Path, target: &Path, probe: Probe<'_>) -> Result<()> {
+    if source == target {
+        bail!("{} is already the file being replaced", source.display());
+    }
+    let coming =
+        Running::read(source).with_context(|| format!("{} does not run", source.display()))?;
+    probe.run(source, target, &coming.version)?;
+
+    // Staged beside the target: the rename that follows has to be a rename,
+    // and the source may be on another filesystem entirely.
+    let staging = install::staging_for(target)?;
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).with_context(|| format!("making {}", staging.display()))?;
+    let staged = staging.join(
+        target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("arbos-kernel"),
+    );
+    let done = (|| -> Result<()> {
+        std::fs::copy(source, &staged)
+            .with_context(|| format!("copying {} beside {}", source.display(), target.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+        }
+        let previous = previous_path(target);
+        let _ = std::fs::remove_file(&previous);
+        std::fs::copy(target, &previous)
+            .with_context(|| format!("keeping the current binary as {}", previous.display()))?;
+        let swap = install::Swap::begin(target, &staged)?;
+        if let Err(e) = Running::read(target) {
+            let _ = std::fs::remove_file(&previous);
+            return Err(e).context("the new kernel did not survive being moved into place");
+        }
+        swap.commit()
+    })();
+    let _ = std::fs::remove_dir_all(&staging);
+    done
 }
 
 /// Check a payload's bytes and put it in place. The whole of the install, for
