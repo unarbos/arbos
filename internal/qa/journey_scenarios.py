@@ -18,6 +18,21 @@ from pathlib import Path
 
 DESKTOP_BIN = os.environ.get("ARBOS_DESKTOP_BIN", "")
 DRIVER_DIR = os.environ.get("ARBOS_DESKTOP_DRIVER", "")
+
+
+def hidden_store_binary(scratch):
+    """The app binary behind deploy/ns-wrap.sh: the desktop and every kernel it spawns cannot
+    see /cursor/stores (2026-09-17: an agent's `cd / && rm -rf *` deleted the Project Agent
+    Store seven times, qal-j15). run.py exports ARBOS_QA_NS_WRAP; without it we refuse to launch."""
+    if os.environ.get("ARBOS_QA_STORE_VISIBLE") == "1":
+        return DESKTOP_BIN
+    wrap = os.environ.get("ARBOS_QA_NS_WRAP", "")
+    if not wrap:
+        raise RuntimeError("ARBOS_QA_NS_WRAP unset: refusing to launch a desktop that can reach the Project Agent Store")
+    script = Path(scratch) / "desktop-hidden-store.sh"
+    script.write_text(f'#!/bin/sh\nexec bash "{wrap}" "{DESKTOP_BIN}" "$@"\n')
+    script.chmod(0o755)
+    return str(script)
 STEPS = ["J1", "J2", "J3", "J4", "J5", "J6", "J7", "J8"]
 # The prompt's own `status "<-ing verb> <what>"` form, written as a reply line instead of called as a tool.
 STATUS_PROSE = re.compile(r'^\s*status\s*[:"“]', re.I)
@@ -118,12 +133,12 @@ class Rig:
         self.log = cx.rec.dir / f"{tag}.log"
         xdg = cx.scratch / "xdg"
         if reseed:
-            self.app = arbosdriver.Arbos.launch(binary=DESKTOP_BIN, env=env, log=self.log, xdg=xdg, projects=[str(f) for f in folders], timeout=120)
+            self.app = arbosdriver.Arbos.launch(binary=hidden_store_binary(cx.scratch), env=env, log=self.log, xdg=xdg, projects=[str(f) for f in folders], timeout=120)
         else:
             # The app's own state.toml decides what comes back — that is the point of "leave and come back".
             env["XDG_CONFIG_HOME"] = str(xdg)
             env["XDG_DATA_HOME"] = str(xdg / "data")
-            self.app = arbosdriver.Arbos.launch(binary=DESKTOP_BIN, env=env, log=self.log, xdg=None, timeout=120)
+            self.app = arbosdriver.Arbos.launch(binary=hidden_store_binary(cx.scratch), env=env, log=self.log, xdg=None, timeout=120)
         self.pulses = []
         self.pulse("launch")
 

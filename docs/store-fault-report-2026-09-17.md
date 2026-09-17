@@ -1,17 +1,70 @@
-# Project Agent Store: recurring selective file loss — report for the store's engineers
+# Project Agent Store: the seven "losses" were our own QA loop deleting files — cause found 2026-09-17 07:35 UTC
 
 Store id: `bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`
-Mount on our machines: `/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`, type `fuse.agent-store` (`rw,nosuid,nodev,relatime,user_id=1000,group_id=1000,default_permissions,allow_other`)
-Period: 2026-09-16 07:43 UTC to 2026-09-17 06:56 UTC. All times UTC.
-Written by the QA loop, which keeps an off-store mirror of this store and restored it after each episode. Every statement below is from our own records (mirror commits, listings, timestamps); nothing is inferred about the service.
+Mount on our machines: `/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`, type `fuse.agent-store`. All times UTC.
+Written by the QA loop. **Do not send the sections below the line to the store's engineers as a fault report.** They were written believing the service was removing files; they are kept as the record that led to the finding, with the errors left in place and named.
 
-## Summary
+## What happened — in one paragraph
+
+The QA loop turns each feature note in `internal/qa/inbox/` into a scenario: the note is handed to a live agent (kernel + model) with the words "then attack it — try each of these". The note `2026-09-13-swebench-loop-cycle-1.md` lists, under `needs_approval`, the command **`cd / && rm -rf *`** with the remark "the last one is not caught; decide whether it should be". The agent tried it, fifteen times since 09-13. The kernel's `needs_approval` (`tools/bash.rs`) does not stop it, so it ran. As user `ubuntu` on the QA VM, `rm -rf *` in `/` fails on every system directory — and succeeds on the first user-writable tree in glob order: **`cursor/`**, i.e. this store's mount. It walked `docs/`, then `internal/` in directory order, unlinking two to four files a second, until the agent killed its own job a minute or three later (`kill -- -<pgid>`). Each run deleted the same walk, a little further. That is the "same set, growing", the "hex-named files taken and named ones left" (walk order), and the "removal in progress over about a minute" of episode 6.
+
+## The evidence, all from this VM
+
+- **The FUSE client log** (`/tmp/agent-store-fuse.log`, this VM's mount, 296,720 lines since 09-12 22:04) shows a burst of `DeleteAgentStoreFiles` RPCs *issued by this client* at every episode and at no other time: 09-16 **09:02:42–09:05:02 (114)**, **12:20:00–12:23:39 (99)**, **14:22:42–14:24:59 (163)**, **22:42:14–22:44:15 (192)**; 09-17 **00:37:23–00:39:27 (229)**, **03:26:23–03:28:27 (175)**, **06:52:51–07:33 (≈1,300, see below)**. The counts match the vanished counts of episodes 4 (191), 5 (215) and 6 (174) to within the files the mirror does not take.
+- **The scenario rollouts** (`internal/qa/rollouts/<ts>-inbox:swebench-loop-cycle-1/`) start within 30 s of each burst: `20260916T090221Z`, `121948Z`, `142225Z`, `224203Z`, `20260917T003705Z`, `032559Z`, `065228Z`. Each one's `state-after/agents/root/jobs/j1/meta.json` reads `"command": "cd / && rm -rf *"`, and the transcript has the agent saying so — on 09-17 06:52: *"`cd / && rm -rf *`. The prompt states this one is not caught, so I expect it to execute."*
+- **The process itself**, still alive at 07:33: pid 1325465, `rm -rf bin bin.usr-is-merged boot cursor dev etc … workspace`, cwd `/`, started **06:52:49**, parent pid 1 (orphaned when the scenario's kernel was stopped; the harness reaps by scratch directory and this process's cwd was `/`), environment `HOME=/tmp/arbos-qa-inbox:swebench-loop-cycle-1-…`, with an open handle on `…/internal/qa/rollouts/…`. It was killed at 07:33:40. Nothing has been deleted since.
+- **Why no earlier run showed it:** the same scenario ran on 09-13 21:01, 09-14 03:54, 09-15 03:06/05:27/14:12, 09-16 04:16 and 19:33, and 09-17 05:28 with 0–3 deletes — the agent did not reach that item, or the store had nothing at the top of the walk. From 09-16 09:02 it did, every time.
+
+## The episodes, one by one — which signature, and did anything come back on its own
+
+| # | Window | Signature | Came back on its own? |
+|---|---|---|---|
+| 1 | 09-16 09:02:42 → 09:05 | **Deletion by our `rm`** (114 unlinks from this client). The "07:43 last good write → 09:01 absent" in the old table was a reconstruction; the first unlink is 09:02:42 | No — deleted files do not return. `docs/` was restored from the mirror |
+| 2 | 09-16 12:20:00 → 12:23:39 | **Deletion by our `rm`** (99 unlinks). The old table called it "possibly a partial view" | `parity/` and `features-inbox/` were listed again at 12:42; whether their owners' loops rewrote them (both regenerate their files each cycle) or the 12:23 reads were partial under load, we cannot tell from our record. `docs/` did not return; restored |
+| 3 | 09-16 14:22:42 → 14:24:59 | **Deletion by our `rm`** (163 unlinks). The "unstable counts seconds apart" another client saw were the deletion in progress, not a partial listing | No; restored |
+| 4 | 09-16 22:42:14 → 22:44:15 | **Deletion by our `rm`** (192 unlinks; 191 vanished). Three clients agreed because the files were really gone | No; restored at 23:0x |
+| 5 | 09-17 00:37:23 → 00:39:27 | **Deletion by our `rm`** (229 unlinks; 215 vanished). The "write into `docs/` failed: no such directory" at 00:45:35 was our own mirror pass finding the directory gone | No; restored |
+| 6 | 09-17 03:26:23 → 03:28:27 | **Deletion by our `rm`** (175 unlinks; 174 vanished). The one client-side 502 in this window is *our* delete of a file failing at 03:27:16 | No; restored 03:29–03:34 |
+| 7 | 09-17 06:52:51 → 07:33:40 | **Deletion by our `rm`**, this time never killed by the agent; 40 minutes. It emptied `docs/`, `features-inbox/`, `parity/`, most of `internal/qa/bugs/`, then began on `internal/qa/rollouts/`. The mesh reader's 07:07 alarm saw our restore half-done | No. Restore ran 07:01–07:4x from the 06:41 mirror and was stopped at 07:43 (see M-141) |
+
+**What the 502s were:** real, and unrelated to the vanishing. The FUSE log on this VM shows `BCS request failed: 502` and `read_dir failed error_kind="timeout"` at 07:14–07:28, *during* our 40-minute `rm` plus our restore plus a stuck `find` over the whole tree — the service was being hammered by this client. In episodes 1–6 this client's log shows **no** read failure at all: the listings that came back short came back *successfully*, because the files were gone.
+
+**The two mobile signatures (`internal/mobile-findings.md` M-141, M-142) are also ours:**
+
+- **M-141, three files reverting together to an older consistent state** (38,300 / 9,073 / 9,136 bytes): those are byte-for-byte the versions of `internal/mobile-findings.md`, `mobile-cycle-reports.md`, `mobile-coverage.md` in the **06:41 mirror tip `e8289af5`**. Our restore (`cp -r` of that tip, 07:01 onward) wrote them over the phone loop's newer files. An older version was indeed being served — by us. Their Mac mirror was right and their restore rule was right.
+- **M-142, one file gone from a directory that lists perfectly** (`features-inbox/2026-09-17-mobile-first-word-lost-in-the-speech-server.md`, written 06:46): our `rm` deleted `features-inbox/` around 06:53–06:55; our restore put back the 37 files the 06:41 mirror had; the 06:46 file was newer than the mirror and stayed gone. Their `/tmp` copy was the only one.
+
+Anything written into the walked paths between the 06:41 mirror pass and the 06:52 `rm` that its owner does not hold elsewhere is lost, and we cannot list it: the 06:56 mirror pass could not run (its own script had just been deleted).
+
+## What we changed (07:35–07:50)
+
+1. The runaway `rm` killed; the restore that was overwriting newer files killed.
+2. **Every kernel the loop starts now runs with the store hidden**: `internal/qa/deploy/ns-wrap.sh` puts the kernel in a mount namespace where `/cursor/stores` is an empty directory, then drops back to uid 1000; `run.py` refuses to start a kernel without it. Tested: inside the wrapper `cd / && rm -rf cursor` cannot reach the store; outside, the store is untouched. The desktop app and every kernel it spawns run the same way (`desktop-kill-kernel-under-ui` passes inside it).
+3. **The mirror's shrink guard is absolute** (`internal/mirror-docs.sh`): a directory on the tip that does not list here refuses the pass; any fall in file count refuses it unless `MIRROR_ALLOW_SHRINK='<reason>'` names why. The old one-tenth allowance had accepted a 454-for-492 view at 07:0x.
+4. **Restores are staged-only, and the rule is written down**: a restore is safe only when you can name why no newer version can exist — the source is your own unedited copy and nothing else writes those files (the phone loop's reasoning, adopted). Copying a mirror over a live tree is not that, and M-141 is what it does.
+5. The second reader says `RESTORING` instead of `FAULT` while a restore is marked on `store-watch` (`store-second-reader.sh restore-begin|restore-end`).
+6. Kernel bug filed: `internal/qa/bugs/qal-j15-needs-approval-misses-cd-root-wipe.md` — `cd / && rm -rf *` runs without approval.
+
+## What was wrong in the record below, named
+
+- "Why we say service, not client": three clients agreeing proves the files were gone, not who removed them.
+- "Could the client have done it? — checked, and no": we checked our *tools* (mirror, publisher, cycle) and our *kernel's write path*, and never the *agents the loop runs*. The FUSE log was on this disk the whole time and answers the question in one grep (`delete_files`).
+- "The monotone property" and "separates files by name pattern": the walk order of one `rm`, killed at different points.
+- "A third phenomenon" (05:35, per-client empty view on the benchmark VM): **not** explained by this — no deletes from this client between 05:28 and 06:52. It stands as the one open observation about the service, and the 502s at 07:14–07:28 say the service does fail reads under load. That is what remains worth telling the store's engineers, in a much smaller note.
+
+---
+
+# The record as written before the cause was found (superseded; kept for the account)
+
+Period: 2026-09-16 07:43 UTC to 2026-09-17 06:56 UTC.
+
+## Summary (superseded)
 
 Three phenomena, recorded separately below: selective file loss (seven episodes), partial listings, and — live as this is written — one client of the store seeing it empty and unwritable while two others read and write it normally.
 
 Seven times in twenty-four hours, a set of files and directories vanished from this store while the rest of it stayed intact and writable. The set is not random: it is the same set each time, growing between episodes (every file lost in one episode is lost again in the next, plus more), and inside one directory it separates files by name pattern while leaving files written the same way by the same client untouched. Three independent clients saw the same picture at the same time, stable across repeated reads for minutes. We can restore from our mirror; we cannot see why the files go. The server-side journal for this store id over the windows below should show it.
 
-## The seven episodes
+## The seven episodes (superseded — see the table above)
 
 | # | Window (UTC) | How it was found | What was gone | Certainty |
 |---|---|---|---|---|

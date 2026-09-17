@@ -25,6 +25,21 @@ DESKTOP_BIN = os.environ.get("ARBOS_DESKTOP_BIN", "")
 DRIVER_DIR = os.environ.get("ARBOS_DESKTOP_DRIVER", "")
 
 
+def hidden_store_binary(scratch):
+    """The app binary behind deploy/ns-wrap.sh: the desktop and every kernel it spawns cannot
+    see /cursor/stores (2026-09-17: an agent's `cd / && rm -rf *` deleted the Project Agent
+    Store seven times, qal-j15). run.py exports ARBOS_QA_NS_WRAP; without it we refuse to launch."""
+    if os.environ.get("ARBOS_QA_STORE_VISIBLE") == "1":
+        return DESKTOP_BIN
+    wrap = os.environ.get("ARBOS_QA_NS_WRAP", "")
+    if not wrap:
+        raise RuntimeError("ARBOS_QA_NS_WRAP unset: refusing to launch a desktop that can reach the Project Agent Store")
+    script = Path(scratch) / "desktop-hidden-store.sh"
+    script.write_text(f'#!/bin/sh\nexec bash "{wrap}" "{DESKTOP_BIN}" "$@"\n')
+    script.chmod(0o755)
+    return str(script)
+
+
 def available():
     return bool(DESKTOP_BIN and Path(DESKTOP_BIN).exists() and DRIVER_DIR and (Path(DRIVER_DIR) / "arbosdriver.py").exists() and shutil.which("Xvfb"))
 
@@ -47,7 +62,7 @@ class Desktop:
         env["PATH"] = f"{Path(cx.binary).parent}:{env.get('PATH', '')}"
         env["ARBOS_DRIVER"] = "1"
         self.log = self.rec.dir / f"{tag}.app.log"
-        self.app = arbosdriver.Arbos.launch(binary=DESKTOP_BIN, env=env, log=self.log, xdg=cx.scratch / "xdg", projects=[str(cx.place)], timeout=90)
+        self.app = arbosdriver.Arbos.launch(binary=hidden_store_binary(cx.scratch), env=env, log=self.log, xdg=cx.scratch / "xdg", projects=[str(cx.place)], timeout=90)
         self.rec.log(f"{tag}: app pid {self.app.hello().get('pid')} on {self.display}")
         self.shots = 0
 

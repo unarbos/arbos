@@ -43,6 +43,24 @@ FILEPLAN = "auto"  # auto | on | off: the fp-* gate (cycle.sh sets it from the k
 KERNEL_BRANCH = None
 ONLY = set()
 
+# Every kernel under test runs with the Project Agent Store hidden (2026-09-17:
+# an agent given an attack list ran `cd / && rm -rf *`, needs_approval let it
+# through, and the store was the first user-writable tree under /; seven "store
+# fault" episodes were this). deploy/ns-wrap.sh sits beside this file in the
+# store (internal/qa/deploy/) and one level up on the VM (arbos-qa/deploy/).
+NS_WRAP = os.environ.get("ARBOS_QA_NS_WRAP") or next((str(p) for p in (QA_DIR / "deploy" / "ns-wrap.sh", QA_DIR.parent / "deploy" / "ns-wrap.sh") if p.exists()), "")
+if NS_WRAP:
+    os.environ["ARBOS_QA_NS_WRAP"] = NS_WRAP  # the desktop modules read it for the app launch
+
+
+def store_hidden():
+    """argv prefix that hides the store from the child; refuses to run a kernel bare unless told to."""
+    if os.environ.get("ARBOS_QA_STORE_VISIBLE") == "1":
+        return []
+    if not NS_WRAP:
+        raise RuntimeError("deploy/ns-wrap.sh not found: refusing to start a kernel that can reach the Project Agent Store (set ARBOS_QA_STORE_VISIBLE=1 to override)")
+    return ["bash", NS_WRAP]  # via bash: the store does not keep the executable bit
+
 
 def args_only_explicit(name):
     """A scenario named on the command line runs even while its feature is pending."""
@@ -257,7 +275,7 @@ class Kernel:
     def start(self, wait=True, timeout=15):
         stale = self.place / ".arbos" / "kernel.json"
         before = stale.read_text() if stale.exists() else None
-        self.proc = subprocess.Popen([self.binary, "serve", str(self.place), *self.extra_args], stdout=self.out, stderr=self.err, env=self.env, cwd=str(self.place), preexec_fn=self.preexec)
+        self.proc = subprocess.Popen([*store_hidden(), self.binary, "serve", str(self.place), *self.extra_args], stdout=self.out, stderr=self.err, env=self.env, cwd=str(self.place), preexec_fn=self.preexec)
         self.rec.log(f"{self.tag} started pid {self.proc.pid}")
         if not wait:
             return True
@@ -1596,6 +1614,24 @@ EXTRA_INBOX_SCENARIOS = {
 }
 
 
+# A command in a note that would destroy files outside the place. The agent is a live
+# model on the loop's own VM: on 2026-09-16/17 it ran `cd / && rm -rf *` from a note's
+# needs_approval list fifteen times and deleted the Project Agent Store (qal-j15).
+DESTRUCTIVE = re.compile(
+    r"""(rm\s+(?:-\w*r\w*|--recursive)(?:\s+-\S+)*\s+(?:--\s+)?["']?(?:/\*?|~\S*|\$home\S*|\$pwd\S*|\*|\./\*|\.\.?|/[a-z]+/?\*?)["']?(?=[\s`'")]|$)"""
+    r"|find\s+/\S*\s[^\n`]*-delete|mkfs\S*|dd\s+if=[^\n`]*of=/dev/\S+|:\(\)\s*\{|chmod\s+-R\s+0*\s+/|>\s*/dev/[sn]d\w+)",
+    re.IGNORECASE,
+)
+DEFUSED_NOTE = "(do NOT run this — only check whether the kernel asks for approval before it would run, and report that; if it would run without asking, that is the bug)"
+
+
+def defuse_attacks(text):
+    """Rewrite destructive commands in an attack list as approval checks, never instructions."""
+    def fix(m):
+        return f"{m.group(0)} {DEFUSED_NOTE}" if DEFUSED_NOTE not in text[m.end():m.end() + len(DEFUSED_NOTE) + 2] else m.group(0)
+    return DESTRUCTIVE.sub(fix, text)
+
+
 def inbox_scenarios():
     """Each `inbox/<date>-<feature>.md` note becomes scenario `inbox:<feature>`.
 
@@ -1614,7 +1650,9 @@ def inbox_scenarios():
         # The note's own "what could break" list is the attack plan.
         a = re.search(r"(?is)#+\s*what could break.*?\n(.*?)(\n#+\s|\Z)", text)
         if a:
-            exercise += "\n\nThen attack it. Try each of these and report exactly what happened for each:\n" + a.group(1).strip()
+            exercise += "\n\nThen attack it. Try each of these and report exactly what happened for each:\n" + defuse_attacks(a.group(1).strip())
+        # The note body itself can carry destructive commands (the swebench note's needs_approval list did).
+        exercise = defuse_attacks(exercise)
         # The feature usually lives on an unmerged branch; testing it on a
         # kernel built from `rust` would test its absence.
         b = re.search(r"(?i)branch\s+`([^`]+)`", text)
@@ -1789,6 +1827,16 @@ def reap_scratch(scratch):
                 continue
             if cwd.startswith(str(scratch)):
                 describe(int(proc.name), "cwd")
+                continue
+            # Jobs that left the scratch entirely: on 2026-09-17 an agent's `cd / && rm -rf *`
+            # had cwd `/`, no scratch path in argv, and outlived its kernel by 40 minutes,
+            # deleting the Project Agent Store. Its environment still named the scratch HOME.
+            try:
+                env = (proc / "environ").read_bytes()
+            except OSError:
+                continue
+            if str(scratch).encode() in env:
+                describe(int(proc.name), "environ")
     except Exception:  # noqa: BLE001
         pass
     for pid in victims:

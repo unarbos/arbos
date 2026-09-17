@@ -71,8 +71,8 @@ done
 # Never let the mirror shrink by accident. A deliberate deletion needs the flag.
 if [ -n "$parent" ]; then
     n_last="$(git ls-tree --name-only "$parent" docs/ | grep -c '\.md$' || true)"
-    if [ "$n_now" -lt "$n_last" ] && [ "${MIRROR_ALLOW_SHRINK:-0}" != "1" ]; then
-        die "docs/ has $n_now files but the mirror holds $n_last. Refusing to shrink the mirror. If the removal is intended: MIRROR_ALLOW_SHRINK=1 bash mirror-docs.sh"
+    if [ "$n_now" -lt "$n_last" ] && [ -z "${MIRROR_ALLOW_SHRINK:-}" ]; then
+        die "docs/ has $n_now files but the mirror holds $n_last. Refusing to shrink the mirror. If the removal is intended, say why: MIRROR_ALLOW_SHRINK='<reason>' bash mirror-docs.sh"
     fi
 fi
 
@@ -156,11 +156,26 @@ if [ -d "$fb" ]; then
     rm -f "$list"
 fi
 
-# Never let the internal/ mirror shrink by accident either.
+# Never let the internal/ mirror shrink by accident either. Two absolute rules
+# (2026-09-17, after a pass recorded 454 files where the tip held 492 and the
+# old one-tenth allowance let it through):
+#   1. every directory the tip holds under internal/ must still list here;
+#   2. any fall in the file count needs a stated reason. A partial listing from
+#      the mount, or a deletion nobody has owned, must never become the mirror.
 if [ -n "$parent" ]; then
     n_internal_last="$(git ls-tree -r --name-only "$parent" internal/ 2>/dev/null | wc -l || true)"
-    if [ "$n_internal_last" -gt 0 ] && [ "$n_internal" -lt $(( n_internal_last * 9 / 10 )) ] && [ "${MIRROR_ALLOW_SHRINK:-0}" != "1" ]; then
-        die "internal/ has $n_internal mirrorable files but the mirror holds $n_internal_last. Refusing to shrink the mirror by more than a tenth. If the removal is intended: MIRROR_ALLOW_SHRINK=1 bash mirror-docs.sh"
+    if [ "$n_internal_last" -gt 0 ]; then
+        gone_dirs=""
+        while IFS= read -r d; do
+            [ -n "$d" ] && [ ! -d "$STORE/$d" ] && gone_dirs="$gone_dirs $d"
+        done < <(git ls-tree -r --name-only "$parent" internal/ 2>/dev/null | sed -E 's#/[^/]+$##' | sort -u)
+        if [ -n "$gone_dirs" ] && [ -z "${MIRROR_ALLOW_SHRINK:-}" ]; then
+            die "directories the mirror holds are not listed here:$gone_dirs. Either the view is partial or they were removed. Not touching the mirror; if the removal is intended, say why: MIRROR_ALLOW_SHRINK='<reason>' bash mirror-docs.sh"
+        fi
+        if [ "$n_internal" -lt "$n_internal_last" ] && [ -z "${MIRROR_ALLOW_SHRINK:-}" ]; then
+            gone_files="$(comm -23 <(git ls-tree -r --name-only "$parent" internal/ 2>/dev/null | sort) <(GIT_INDEX_FILE="$GIT_INDEX_FILE" git ls-files internal/ | sort) | head -8 | tr '\n' ' ')"
+            die "internal/ has $n_internal mirrorable files but the mirror holds $n_internal_last (first missing: $gone_files). Refusing to shrink the mirror by any amount without a reason. If the removal is intended, say why: MIRROR_ALLOW_SHRINK='<reason>' bash mirror-docs.sh"
+        fi
     fi
 fi
 

@@ -63,7 +63,7 @@ while true; do
   cp -f "$STORE"/scenarios/*.json "$ROOT/loop/scenarios/" 2>/dev/null
   cp -f "$STORE"/bugs/qa-*.md "$STORE"/bugs/qal-*.md "$ROOT/loop/bugs/" 2>/dev/null
   cp -f "$STORE"/inbox/*.md "$ROOT/loop/inbox/" 2>/dev/null
-  cp -f "$STORE"/deploy/cycle.sh "$STORE"/deploy/publish.sh "$STORE"/deploy/kill-shim.sh "$ROOT/deploy/" 2>/dev/null
+  cp -f "$STORE"/deploy/cycle.sh "$STORE"/deploy/publish.sh "$STORE"/deploy/kill-shim.sh "$STORE"/deploy/ns-wrap.sh "$ROOT/deploy/" 2>/dev/null
   chmod +x "$ROOT"/deploy/*.sh
   cp -f "$STORE"/deploy/mirror-timer.sh "$STORE"/deploy/swebench-nightly.sh "$STORE"/deploy/swebench-collect.py "$STORE"/deploy/call-mode-collect.py "$STORE"/deploy/pod-health.py "$STORE"/deploy/mirror-alarm.py "$ROOT/deploy/" 2>/dev/null; chmod +x "$ROOT"/deploy/*.sh
   fi
