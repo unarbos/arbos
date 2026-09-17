@@ -405,6 +405,11 @@ impl arbos_engine::Hooks for TurnHooks {
         let _ = self.inner.set_status(self.agent.as_str(), step, "agent");
     }
 
+    fn kernel_step(&self, step: &str) {
+        self.inner.note_progress(self.agent.as_str());
+        let _ = self.inner.set_status(self.agent.as_str(), step, "derived");
+    }
+
     fn working(&self, secs: u64) {
         self.inner.broadcast(arbos_core::wire::Frame::Working {
             agent: self.agent.to_string(),

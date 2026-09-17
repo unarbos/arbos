@@ -268,20 +268,26 @@ impl Push {
         }
         row.user = user.to_string();
         row.projects.insert(project.to_string());
-        self.save(&reg);
-        Ok(())
+        // Registered means on disk: a phone told "pushed" whose row was
+        // only in memory lost its notifications at the hub's next start,
+        // and nothing said so. The save's failure is the answer.
+        self.save(&reg).with_context(|| {
+            format!(
+                "push: the device could not be recorded in {}",
+                self.path.display()
+            )
+        })
     }
 
-    fn save(&self, reg: &Registry) {
+    fn save(&self, reg: &Registry) -> Result<()> {
         if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
-        if let Ok(text) = serde_json::to_string_pretty(reg) {
-            let tmp = self.path.with_extension("json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.path);
-            }
-        }
+        let text = serde_json::to_string_pretty(reg)?;
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &self.path)?;
+        Ok(())
     }
 
     fn devices_for(&self, project: &str, user: &str) -> Vec<Device> {
@@ -302,8 +308,13 @@ impl Push {
         let mut reg = self.devices.lock().unwrap();
         let before = reg.devices.len();
         reg.devices.retain(|d| d.token != token);
-        if reg.devices.len() != before {
-            self.save(&reg);
+        if reg.devices.len() != before
+            && let Err(e) = self.save(&reg)
+        {
+            eprintln!(
+                "push: forgetting {}…: the registry could not be saved: {e:#}",
+                &token[..token.len().min(8)]
+            );
         }
     }
 
