@@ -188,6 +188,29 @@ def main() -> int:
                 "no store file row to click in this place",
             )
 
+        # The drawer belongs to the project, so the window's tabs switch it.
+        # The focus is on the chat here, which is what makes the same chord
+        # move the project strip.
+        app.key("cmd-1")
+        app.wait_state(lambda s: s["panel"]["focused"] is False, what="the chat's focus")
+        active = [p["name"] for p in app.state()["projects"] if p["active"]]
+        app.key("cmd-shift-[")
+        state = app.wait_state(
+            lambda s: [p["name"] for p in s["projects"] if p["active"]] != active,
+            what="the other project in front",
+        )
+        check(
+            "the other project's drawer is its own, and was never opened",
+            state["panel"]["open"] is False,
+            f"panel={state['panel']}",
+        )
+        app.key("cmd-shift-]")
+        state = app.wait_state(
+            lambda s: [p["name"] for p in s["projects"] if p["active"]] == active,
+            what="the first project back in front",
+        )
+        check("and coming back brings this one's back open", state["panel"]["open"] is True)
+
         app.key("cmd-b")
         app.wait_state(lambda s: s["panel"]["open"] is False, what="⌘B closing it")
         app.key("cmd-b")
