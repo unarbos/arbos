@@ -205,6 +205,25 @@ pub fn snapshot_turn_tree(
     agent: &str,
     cp: &Checkpoint,
 ) -> Result<()> {
+    snapshot_turn_tree_unless(cwd, agent_dir, agent, cp, None)
+}
+
+/// What the record says when the tree was abandoned: the turn went on
+/// before the snapshot finished, so a tree taken now might hold the
+/// turn's own changes and is not kept (qal-j17's wrong-checkpoint shape).
+pub const TREE_TOO_SLOW: &str = "tree not saved: the working tree took too long to snapshot and the turn went on without it — a rewind of files to this turn is refused; the transcript rewind still works";
+
+/// `snapshot_turn_tree`, with a flag the turn raises when it stopped
+/// waiting for the tree: a tree finished after that is dropped and the
+/// record says why, rather than filled in from a state the turn may
+/// already have touched.
+pub fn snapshot_turn_tree_unless(
+    cwd: &Path,
+    agent_dir: &Path,
+    agent: &str,
+    cp: &Checkpoint,
+    abandoned: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
     let line = cp.line;
     let head = &cp.head;
     // Test knob: a slow `add -A`, as a large repository has.
@@ -215,6 +234,10 @@ pub fn snapshot_turn_tree(
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
     let (work, clean, work_error) = match work_commit(cwd, head) {
+        _ if abandoned.is_some_and(|a| a.load(std::sync::atomic::Ordering::SeqCst)) => {
+            eprintln!("checkpoint {agent}:{line}: {TREE_TOO_SLOW}");
+            (None, false, Some(TREE_TOO_SLOW.to_string()))
+        }
         Ok(Some(w)) => (Some(w), false, None),
         Ok(None) => (None, true, None),
         Err(why) => {

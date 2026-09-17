@@ -35,6 +35,19 @@ const MIN_OUTPUT_TOKENS: u64 = 256;
 /// Mid-stream cuts a turn rides through before giving up.
 const MAX_CUTS: u32 = 2;
 
+/// How long a turn's first writing tool waits for the checkpoint of the
+/// working tree before going on without one. `add -A` on a large
+/// repository takes seconds; minutes means the folder is not one a
+/// checkpoint can keep up with, and a person's command should not wait
+/// on it. `ARBOS_TREE_WAIT_MS` overrides it (tests).
+fn tree_wait() -> std::time::Duration {
+    std::env::var("ARBOS_TREE_WAIT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(std::time::Duration::from_secs(20))
+}
+
 /// A reply that is one JSON object naming a tool, or a tool's arguments
 /// (`{"path": "src/lib.rs"}`), instead of a function call.
 /// The model a turn runs: the wake's, when the user switched one turn
@@ -594,17 +607,64 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 }
                 // The first tool that writes waits for this to finish,
                 // so the tree is the one before the turn, never one the
-                // turn has already touched.
+                // turn has already touched — for as long as `tree_wait`.
+                // Past that (a huge repository, a home folder with a
+                // dotfiles repo: `add -A` runs for minutes) the turn goes
+                // on without a file checkpoint, said once per place, and
+                // the tree that finishes later is dropped, not kept: a
+                // tree taken beside the turn's own writes is the wrong
+                // checkpoint, worse than none (qal-j17).
                 let (tx, rx) = tokio::sync::watch::channel(false);
+                let tx = std::sync::Arc::new(tx);
                 tree_ready = Some(rx);
-                tokio::task::spawn_blocking(move || {
-                    if let Err(e) =
-                        crate::tools::git::snapshot_turn_tree(&snap, &agent_dir, &agent_id, &cp)
-                    {
-                        eprintln!("checkpoint {agent_id}:{turn_line}: tree not saved: {e:#}");
-                    }
-                    let _ = tx.send(true);
-                });
+                let abandoned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                {
+                    let (tx, abandoned, agent_id) =
+                        (tx.clone(), abandoned.clone(), agent_id.clone());
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = crate::tools::git::snapshot_turn_tree_unless(
+                            &snap,
+                            &agent_dir,
+                            &agent_id,
+                            &cp,
+                            Some(&abandoned),
+                        ) {
+                            eprintln!("checkpoint {agent_id}:{turn_line}: tree not saved: {e:#}");
+                        }
+                        let _ = tx.send(true);
+                    });
+                }
+                {
+                    let (hooks, transcript, place) =
+                        (Arc::clone(&hooks), transcript.clone(), place.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tree_wait()).await;
+                        if *tx.borrow() {
+                            return;
+                        }
+                        abandoned.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let _ = tx.send(true);
+                        eprintln!(
+                            "checkpoint {agent_id}:{turn_line}: the tree took longer than {}s; the turn goes on without a file checkpoint",
+                            tree_wait().as_secs()
+                        );
+                        // Once per place: the cause is the repository, not
+                        // the turn, and the advice is the same each time.
+                        let said = place.runtime_dir().join("tree-slow.said");
+                        if !said.exists() {
+                            let _ = std::fs::write(&said, "said\n");
+                            let ev = Event::new(EventKind::Notice {
+                                text: format!(
+                                    "Saving a checkpoint of the working tree took longer than {}s here, so this turn went on without one: a rewind of files to this turn is refused (the transcript rewind still works). A large repository, or big untracked folders (build output, node_modules) not in .gitignore, is the usual cause; ignoring them makes the checkpoint fast again. Said once for this project.",
+                                    tree_wait().as_secs()
+                                ),
+                                failed: true,
+                            });
+                            let _ = append_event(&transcript, &ev);
+                            hooks.emit(&ev);
+                        }
+                    });
+                }
             }
             Ok(None) => {}
             Err(e) => {
