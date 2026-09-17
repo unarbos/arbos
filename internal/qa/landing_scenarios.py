@@ -1224,6 +1224,186 @@ def register(scenario, registry, transcript, now_ms, branch):
     rw08_late_failure("rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "`.git/index.lock` exists (a crashed git, another git running): `reset --hard` fails after the objects were verified and before anything moved. Same tree afterwards, told plainly.", sab_index_lock)
     rw08_late_failure("rw-08c-restore-that-fails-half-way-puts-the-tree-back", "The checkpoint has the file f1.txt; the person replaced it with a folder git cannot empty (no write bit, a file inside). Objects verify, `reset --hard` succeeds, `read-tree -u` then fails: the person must be told and must have exactly what they had — on #419 at 0bceb0df by the tree being put back.", sab_dir_in_the_way)
 
+    @reg("rw-10-rewind-while-another-git-commits-in-the-same-repository", tags=("rewind", "concurrency"))
+    def rw10(cx):
+        """Jacob's normal state: a terminal open in the project, git committing there while the kernel works. A second
+        git renames index.lock over index, so for an instant .git/index is not a regular file; the checkpoint's index
+        copy must survive that (retry, #419 at 5340c0d2), every turn must still get a work tree, and a rewind with files
+        landing in the middle of that churn must either restore fully or fail with the tree where it was."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["config", "gc.auto", "0"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        replies = []
+        for i, word in enumerate(("first", "second", "third", "fourth", "fifth", "sixth"), 1):
+            replies.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {word} > f{i}.txt", "description": f"write f{i}"}}]})
+            replies.append({"agent": "root", "content": word})
+        # The other git: a tight loop of `git add`/`git commit` on its own file, each one an index.lock → index rename.
+        churn_log = cx.rec.dir / "other-git.log"
+        # Several terminals, not one: the window (index.lock renamed over index) is a few microseconds wide and the
+        # kernel copies the index six times; one loop at ~100 commits/s rarely meets it. Three loops on one repo
+        # also contend with each other on index.lock, which is what a busy repository looks like.
+        n_churn = int(os.environ.get("ARBOS_QA_RW10_CHURNERS", "3"))
+        churners = [subprocess.Popen(["sh", "-c", f'cd "{place}" && n=0; while :; do n=$((n+1)); echo $n-{i} > terminal-{i}.txt; git -c user.name=t -c user.email=t@t add terminal-{i}.txt >/dev/null 2>&1; git -c user.name=t -c user.email=t@t commit -q -m "terminal {i} $n" >/dev/null 2>&1; done'], stdout=open(churn_log, "ab"), stderr=subprocess.STDOUT, env={**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null"}) for i in range(n_churn)]
+        class _Churn:
+            def kill(self):
+                for p_ in churners:
+                    p_.kill()
+            def wait(self, timeout=None):
+                for p_ in churners:
+                    p_.wait(timeout=timeout)
+            def poll(self):
+                return None if any(p_.poll() is None for p_ in churners) else 0
+        churn = _Churn()
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        try:
+            cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            for t in ("one", "two", "three", "four", "five", "six"):
+                c.user("root", t)
+                cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", f"turn {t!r} never ended")
+            cps = place / ".arbos" / "agents" / "root" / "checkpoints.jsonl"
+            recs, deadline = [], time.time() + 20
+            while time.time() < deadline:
+                recs = [json.loads(l) for l in cps.read_text().splitlines() if l.strip()] if cps.exists() else []
+                pending = [r for r in recs if not (r.get("work") or r.get("clean")) and ("pending" in str(r.get("work_error", "")).lower() or "being saved" in str(r.get("work_error", "")).lower())]
+                if len(recs) >= 6 and not pending:
+                    break
+                time.sleep(0.2)
+            errors = [r.get("work_error") for r in recs if r.get("work_error") and not (r.get("work") or r.get("clean"))]
+            cx.rec.notes["checkpoints"] = [{"line": r.get("line"), "work": (r.get("work") or "")[:10], "clean": r.get("clean"), "work_error": (r.get("work_error") or "")[:120]} for r in recs]
+            cx.rec.notes["other_git_commits_during_turns"] = int(g("rev-list", "--count", "HEAD").stdout.strip() or 0)
+            cx.rec.expect(len(recs) >= 6, "checkpoints-missing", f"six turns, {len(recs)} checkpoint record(s)")
+            cx.rec.expect(not errors, "checkpoint-tree-lost-to-the-other-git", f"{len(errors)} of {len(recs)} checkpoints have no work tree while another git was committing: {errors[:3]}", "arbos-engine tools::git snapshot_turn_tree — copy the index while another git renames it (#419 at 5340c0d2 retries)")
+            # Now the rewind, with the other git still going.
+            before = tree_state(place)
+            c.send({"type": "rewind", "agent": "root", "turn": 4, "files": True})
+            first = c.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+            follow = c.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 45, "the restore's report")
+            churn.kill()
+            churn.wait(timeout=5)
+            time.sleep(0.5)
+            after = tree_state(place)
+            cx.rec.notes["restore_report"] = follow
+            failed = bool(follow) and follow.get("type") == "error"
+            files = sorted(p_.name for p_ in place.glob("f*.txt"))
+            cx.rec.notes["files_after"] = files
+            cx.rec.expect(follow is not None, "restore-never-reported", "no second rewound frame and no error within 45 s")
+            if failed:
+                # terminal.txt keeps changing under the other git until it is killed; judge everything else.
+                diff = [d for d in tree_diff(before, after) if not d.startswith("terminal-") and not d.startswith("HEAD") and not d.startswith("index")]
+                cx.rec.notes["tree_diff_after_failed_restore"] = diff
+                cx.rec.expect(not diff, "failed-restore-changed-the-tree", "the restore failed under another git and the tree is not where it was: " + "; ".join(diff))
+            else:
+                cx.rec.expect(files == ["f1.txt", "f2.txt", "f3.txt"], "files-not-restored", f"after rewinding to turn 4 the files are {files}, expected f1..f3 (kernel's own), whatever the terminals' gits did to terminal-*.txt")
+        finally:
+            if churn.poll() is None:
+                churn.kill()
+        evs, bad = transcript(cx.place, "root")
+        cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
+        k.stop()
+        cx.check()
+
+    @reg("rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it", tags=("rewind", "concurrency"))
+    def rw10b(cx):
+        """The instant rw-10's churn rarely lands on, made certain: as each turn's checkpoint record appears, .git/index
+        is swapped for a directory for 120 ms and put back — to a copy, the same "not a regular file" that another git's
+        index.lock → index rename shows for a moment, held long enough to be sure. (Not a FIFO: the first version used
+        one, and an open() on a FIFO with no writer blocks forever — the kernel's turn hung for good on every build, a
+        failure the harness had invented.) The checkpoint's index copy must ride it out (#419 at 5340c0d2 retries for a
+        quarter second) and every turn must end with a work tree."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        g = lambda *a: subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", *a], cwd=place, capture_output=True, text=True)
+        for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            g(*args)
+        (place / ".gitignore").write_text(".arbos/\n")
+        g("add", ".gitignore")
+        g("commit", "-q", "-m", "ignore .arbos")
+        replies = []
+        for i, word in enumerate(("first", "second", "third"), 1):
+            replies.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {word} > f{i}.txt", "description": f"write f{i}"}}]})
+            replies.append({"agent": "root", "content": word})
+        cps = place / ".arbos" / "agents" / "root" / "checkpoints.jsonl"
+        index = place / ".git" / "index"
+        swaps = []
+        stop = threading.Event()
+
+        def swapper():
+            seen = 0
+            while not stop.is_set():
+                try:
+                    n = sum(1 for l in cps.read_text().splitlines() if l.strip()) if cps.exists() else 0
+                except OSError:
+                    n = seen
+                if n > seen:
+                    seen = n
+                    if os.environ.get("ARBOS_QA_RW10B_NO_SWAP") == "1":
+                        swaps.append(0)  # control: measure the base race with nothing in the way
+                    elif index.exists():
+                        real = index.with_name("index.real-for-a-moment")
+                        try:
+                            index.rename(real)
+                            index.mkdir()
+                            t0 = time.time()
+                            time.sleep(0.12)
+                            index.rmdir()
+                            real.rename(index)
+                            swaps.append(round((time.time() - t0) * 1000))
+                        except OSError as e:
+                            swaps.append(f"swap failed: {e}")
+                            if real.exists() and not index.exists():
+                                real.rename(index)
+                time.sleep(0.002)
+
+        th = threading.Thread(target=swapper, daemon=True)
+        th.start()
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+        try:
+            cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            for t in ("one", "two", "three"):
+                c.user("root", t)
+                cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, "turn-never-ended", f"turn {t!r} never ended")
+            recs, deadline = [], time.time() + 20
+            while time.time() < deadline:
+                recs = [json.loads(l) for l in cps.read_text().splitlines() if l.strip()] if cps.exists() else []
+                pending = [r for r in recs if not (r.get("work") or r.get("clean")) and ("pending" in str(r.get("work_error", "")).lower() or "being saved" in str(r.get("work_error", "")).lower())]
+                if len(recs) >= 3 and not pending:
+                    break
+                time.sleep(0.2)
+        finally:
+            stop.set()
+            th.join(timeout=2)
+            if not index.exists() and index.with_name("index.real-for-a-moment").exists():
+                index.with_name("index.real-for-a-moment").rename(index)
+        errors = [r.get("work_error") for r in recs if r.get("work_error") and not (r.get("work") or r.get("clean"))]
+        # A checkpoint is the tree *before* its turn. Turn N writes fN.txt; checkpoint N's tree must not hold it.
+        # The tree is taken on the blocking pool while the turn runs, so a delay (a retrying index copy, a slow
+        # disk) can let the turn's first write into "before".
+        late = []
+        for i, r in enumerate(recs[:3], 1):
+            if r.get("work"):
+                names = g("ls-tree", "-r", "--name-only", r["work"]).stdout.split()
+                if f"f{i}.txt" in names:
+                    late.append(f"checkpoint {i} ({r['work'][:10]}) already holds f{i}.txt, which turn {i} wrote")
+        cx.rec.notes["checkpoint_after_turn_wrote"] = late
+        cx.rec.expect(not late, "checkpoint-taken-after-the-turn-wrote", "; ".join(late), "arbos-engine turn.rs — the tree snapshot runs beside the turn; the turn's first tool call can land first")
+        cx.rec.notes["swaps_ms"] = swaps
+        cx.rec.notes["checkpoints"] = [{"line": r.get("line"), "work": (r.get("work") or "")[:10], "clean": r.get("clean"), "work_error": (r.get("work_error") or "")[:120]} for r in recs]
+        cx.rec.expect(len(swaps) >= 3 and all(isinstance(x, int) for x in swaps), "probe-did-not-swap", f"the index was not swapped for every checkpoint: {swaps} — this run proves nothing")
+        cx.rec.expect(not errors, "checkpoint-tree-lost-to-a-momentary-index", f"{len(errors)} of {len(recs)} checkpoints have no work tree after a 120 ms instant in which .git/index was not a regular file: {errors[:3]}", "arbos-engine tools::git snapshot_turn_tree — copy the index (#419 at 5340c0d2 retries 10 × 25 ms)")
+        evs, bad = transcript(cx.place, "root")
+        cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
+        k.stop()
+        cx.check()
+
     @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
     def rw09(cx):
         """#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write

@@ -109,7 +109,8 @@ Three passes tonight proved something other than what they claimed: 29 scenarios
 1. **Run it against a control that must fail**, and read *why* it failed — the break must name the mechanism, not a side effect (`ra-01` on `b133af2c`: the sentinel gone, the card shown; `rw-08c` on `main`: f2 gone, HEAD moved).
 2. **Ask what else could make it pass.** Content addressing (a blob that comes back by being written elsewhere), a mock echoing the input, a skip scored as a pass, a wait that times out into the expected state, a check on the harness's own copy rather than the kernel's output. `rw-08` now asserts the corrupt object is *still* unreadable after the rewind.
 3. **Ask what else could make it fail.** The harness's own git shim, sharing one capture file between two concurrent gits, produced a checkpoint sha with an email glued on and read as a kernel bug for ten minutes (`rw-08` at `0bceb0df`, first run). A break is reproduced before it is filed, and the rollout holds the evidence (`kernel-git.log`).
-4. **A pass in under a second is a question, not a relief.** `ra-01` passes in 1.0 s; the answer was fifteen recorded refusals, each naming its tree.
+4. **A probe must fail the way the world fails, not a way of its own.** `rw-10b`'s first version stood a FIFO where `.git/index` should be; `open()` on a FIFO with no writer blocks forever, and the kernel's turn hung 200 s on every build. Nothing in a repository ever does that. A directory gives the same `stat` answer and blocks nothing. When a probe's failure looks nothing like the bug it stands for, suspect the probe first.
+5. **A pass in under a second is a question, not a relief.** `ra-01` passes in 1.0 s; the answer was fifteen recorded refusals, each naming its tree.
 
 `ra-01` (the wipe guard, #410) and `rw-08`/`rw-08b`/`rw-08c` (the rewind property, #419) went through this before their results were recorded in `qal-j15` and `qal-j16`.
 

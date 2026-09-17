@@ -1,4 +1,4 @@
-# qal-j16 (fixed at #419 `0bceb0df`, verified 09:41): a rewind whose `read-tree` fails still moves HEAD and removes the person's later commits from the tree — `reset --hard` runs before the step that can fail
+# qal-j16 (fixed at #419 `0bceb0df`, verified 09:41; misreport and index retry verified at `5340c0d2` 10:12): a rewind whose `read-tree` fails still moves HEAD and removes the person's later commits from the tree — `reset --hard` runs before the step that can fail
 
 - Measured at: #419 @ `0f71cca4` (`arbos-kernel 0.2.0 0f71cca408f4`), control `main` @ `7e19f9e9`, each built in its own target directory (see the note at the end). Scenario `rw-08-failed-restore-leaves-the-tree-where-it-was`, rollouts `internal/qa/rollouts/20260917T091840Z-rw-08-…` (#419) and `20260917T092644Z-rw-08-…` (main); every git the kernel ran is in each rollout's `kernel-git.log`.
 - Class: destructive, the eighth in `restore()`'s neighbourhood — the same shape as the seven before it: a step that destroys before the step that can fail. #419 moved `clean` after `read-tree`; `reset --hard` is still before it.
@@ -49,6 +49,11 @@ Content-addressing hazard checked (the trap the author's own first test fell int
 **One misreport left, at `0bceb0df`, `rw-08c`:** the tree *was* put back (diff empty) but the error says *"…and the tree could not be put back — recover by hand: git reset --hard … && git read-tree -u --reset … && git reset -q"*. The put-back's `read-tree -u` returned non-zero on the same unwritable folder after the working tree was already right. A person with a perfectly good tree is told it is broken and handed commands to run. Before saying "could not be put back", compare the tree with the safety commit and say what actually differs, if anything. Misreport class, not destructive; noted here rather than filed apart.
 
 **Seen once, not reproduced (3 later runs clean), for the author:** on the first `0bceb0df` run, turn 3's checkpoint carried `work_error: "copy the index: the source path is neither a regular file nor a symlink to a regular file"` while the harness was running its own `git add`/`git commit` in the same repository. If the new safety copy reads `.git/index` while another git is replacing it, that is the window. The effect is a turn with no work tree (rewind of files refused for it), not a loss.
+
+
+## Verified at `5340c0d2` (10:12)
+
+`rw-08`, `rw-08b`, `rw-08c`, `rw-09`, `rw-10`, `rw-01`, `rw-04` all pass. The `rw-08c` message is now *"git read-tree … failed; the tree was put back as it was (HEAD f719fb95bf23, your files from 32e5a5803229)"* with the tree unchanged — the misreport is gone. The index-copy retry works as described (`rw-10b`: the tree is never lost at `5340c0d2` where `0bceb0df` lost it 5 of 5 and `main` 3 of 5) and opens the question filed as `qal-j17`: what the copy waits for can change meanwhile.
 
 ## A measurement note, so nobody repeats it
 
