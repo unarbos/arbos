@@ -1,0 +1,22 @@
+{
+  "scenario": "desktop-huge-transcript-scroll",
+  "doc": "A chat with 3,000 transcript lines is opened and scrolled hard. Each driver call must answer within seconds; the app must not die.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-desktop-huge-transcript-scroll-s9mpw54p/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153747Z-desktop-huge-transcript-scroll",
+  "branch": "main",
+  "usd": 0.0
+}

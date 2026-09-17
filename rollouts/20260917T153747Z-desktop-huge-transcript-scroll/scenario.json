@@ -1,0 +1,8 @@
+{
+  "name": "desktop-huge-transcript-scroll",
+  "doc": "A chat with 3,000 transcript lines is opened and scrolled hard. Each driver call must answer within seconds; the app must not die.",
+  "tags": [
+    "desktop",
+    "adversarial"
+  ]
+}

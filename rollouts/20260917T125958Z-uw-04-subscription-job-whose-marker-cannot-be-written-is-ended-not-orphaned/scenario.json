@@ -1,0 +1,11 @@
+{
+  "name": "uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned",
+  "doc": "The marker naming whose run a job is, written just after the process starts. Unwritten, a kernel that\n        finds the job at boot cannot place it and the run's result reaches nobody. The window is a few\n        milliseconds wide, so a watcher takes the write bit off the job folder the instant it appears and the\n        run is repeated up to eight times; the rate is reported. Expected on a build that checks the write: the\n        command is ended and the run said to have failed to start. Never catching the window is a skip.",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "subscriptions",
+    "jobs",
+    "destructive-order"
+  ]
+}

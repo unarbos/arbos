@@ -1,0 +1,10 @@
+1789649653234 panicking started pid 35799
+1789649654640 panicking stopped with code 0
+1789649654641 after-restart started pid 35876
+1789649658996 after-restart stopped with code 0
+1789649659009 BREAK kernel-panic: panicked at crates/arbos-kernel/src/sched.rs:162:21:
+ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+turn_panicked root: ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose after 0.0s
+turn_panicked_unrecorded root: the transcript would not take the notice: open /tmp/arbos-qa-uw-03-a-panicked-turn-that-canno
+1789649659010 bugs: seen e8198c5801.md

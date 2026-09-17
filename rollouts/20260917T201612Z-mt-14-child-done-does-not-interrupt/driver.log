@@ -1,0 +1,3 @@
+1789676173727 desktop: app pid 198156 on :9631
+1789676174074 BREAK driver-exception: DriverError: move: no element matches `project-0`
+1789676174085 bugs: seen fbc45fa1ea.md

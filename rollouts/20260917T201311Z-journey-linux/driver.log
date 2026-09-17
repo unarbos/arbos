@@ -1,0 +1,11 @@
+1789676004029 J1: pass — tab present, greeting shown ('Hey — this Python project with its `shapes` and `tests` dire'), .arbos/ created
+1789676009693 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789676069150 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789676075343 J4: fail — the mid-flight follow-up was not taken into the running work (no same-turn line, no relay to the live worker, or a second worker): {'index': 17, 'reached_root_s': 0.0, 'task_turn_complete': 14, 'same_turn': False, 'relayed_to_worker': False, 'turn_tools': ['plan'], 'workers': ['fix-failing-test'], 'taken': False}
+1789676085456 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789676118048 J6: fail — workers existed but no worker/archived row is shown after relaunch
+1789676135665 J7: pass — tests pass, CHANGELOG written, commit on ['fix/geometry-area']
+1789676165688 J8: pass — restart once (side effect once), second project isolated; dropped connection: pass on the phone loop's run 2026-09-16T22:46:18Z (kernel commit: not recorded by the phone loop)
+1789676168863 BREAK journey-J4: the mid-flight follow-up was not taken into the running work (no same-turn line, no relay to the live worker, or a second worker): {'index': 17, 'reached_root_s': 0.0, 'task_turn_complete': 14, 'same_turn': False, 'relayed_to_worker': False, 'turn_tools': ['plan'], 'workers': ['fix-failing-test'], 'taken': False}
+1789676168864 BREAK journey-J6: workers existed but no worker/archived row is shown after relaunch
+1789676168881 bugs: new 711f60690b.md, new 9c8bf3b8ac.md

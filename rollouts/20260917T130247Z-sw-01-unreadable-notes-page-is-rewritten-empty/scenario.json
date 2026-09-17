@@ -1,0 +1,9 @@
+{
+  "name": "sw-01-unreadable-notes-page-is-rewritten-empty",
+  "doc": "`notes::load` reads the project page with `unwrap_or_default()`: any read failure (EACCES here; EIO, a lock, a partial view on a network mount in life) parses as an empty page, and the next `plan` call writes that empty page over the real one by tmp+rename \u2014 the goal, the checklist, the prose gone, the tool reporting success. Expected: a page that could not be read is not rewritten; the call fails with the reason.",
+  "tags": [
+    "landing",
+    "silent-write",
+    "destructive"
+  ]
+}

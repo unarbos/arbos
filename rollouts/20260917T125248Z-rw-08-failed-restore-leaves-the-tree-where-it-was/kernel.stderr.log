@@ -1,0 +1,22 @@
+mktemp: failed to create file via template ‘/home/ubuntu/arbos-qa/staging/20260917T125248Z-rw-08-failed-restore-leaves-the-tree-where-it-was/kernel-git.log.XXXXXX’: Read-only file system
+/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/git-shim/git: 3: cannot create : Directory nonexistent
+cat: '': No such file or directory
+cat: .err: No such file or directory
+/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/git-shim/git: 5: cannot create /home/ubuntu/arbos-qa/staging/20260917T125248Z-rw-08-failed-restore-leaves-the-tree-where-it-was/kernel-git.log: Read-only file system
+mktemp: failed to create file via template ‘/home/ubuntu/arbos-qa/staging/20260917T125248Z-rw-08-failed-restore-leaves-the-tree-where-it-was/kernel-git.log.XXXXXX’: Read-only file system
+/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/git-shim/git: 3: cannot create : Directory nonexistent
+cat: '': No such file or directory
+cat: .err: No such file or directory
+/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/git-shim/git: 5: cannot create /home/ubuntu/arbos-qa/staging/20260917T125248Z-rw-08-failed-restore-leaves-the-tree-where-it-was/kernel-git.log: Read-only file system
+mktemp: failed to create file via template ‘/home/ubuntu/arbos-qa/staging/20260917T125248Z-rw-08-failed-restore-leaves-the-tree-where-it-was/kernel-git.log.XXXXXX’: Read-only file system
+/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/git-shim/git: 3: cannot create : Directory nonexistent
+cat: '': No such file or directory
+cat: .err: No such file or directory
+/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/git-shim/git: 5: cannot create /home/ubuntu/arbos-qa/staging/20260917T125248Z-rw-08-failed-restore-leaves-the-tree-where-it-was/kernel-git.log: Read-only file system
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/place...
+Found 29 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Skipped 5 additional binary files (detected by content)
+Writing index (5242 trigrams, 24 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-ss6zr38z/home/.cache/arbos/tgrep/6b193a4975d5e1f5

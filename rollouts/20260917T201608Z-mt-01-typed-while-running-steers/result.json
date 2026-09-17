@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-01-typed-while-running-steers",
+  "doc": "Item 1. Typed in the desktop while root runs: a kind = steer inbox file within 1 s; the line is on the transcript before turn_complete.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "DriverError: move: no element matches `project-0`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 1.7,
+  "place": "/tmp/arbos-qa-mt-01-typed-while-running-steers-6qepxik8/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 b1c8e82a62b1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T201608Z-mt-01-typed-while-running-steers",
+  "branch": "main",
+  "usd": 0.0
+}

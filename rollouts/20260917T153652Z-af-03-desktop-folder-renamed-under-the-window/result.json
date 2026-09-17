@@ -1,0 +1,22 @@
+{
+  "scenario": "af-03-desktop-folder-renamed-under-the-window",
+  "doc": "The window is open on a place; the folder is renamed on disk; the user types a line. The kernel stops itself (#377). What does the window do \u2014 respawn a kernel at the OLD path and mint a ghost `.arbos/` there (destructive: history split), tell the user the folder moved, or follow it? Recorded as the user sees it: the chat items, a ghost folder, and where the new line landed.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-af-03-desktop-folder-renamed-under-the-window-8x_03feh/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153652Z-af-03-desktop-folder-renamed-under-the-window",
+  "branch": "main",
+  "usd": 0.0
+}

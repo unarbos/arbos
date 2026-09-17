@@ -33,3 +33,7 @@
 {"ts": 1789632603086, "rollout": "20260917T080815Z-kickoff-session", "branch": "rust", "passed": 9, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 9, 10, 11]}
 {"ts": 1789639866590, "rollout": "20260917T100410Z-kickoff-session", "branch": "rust", "passed": 9, "total": 12, "pass_ids": [1, 2, 5, 6, 7, 8, 9, 10, 11]}
 {"ts": 1789641257933, "rollout": "20260917T103054Z-kickoff-session", "branch": "main", "passed": 10, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 9, 10, 11, 12]}
+{"ts": 1789655631882, "rollout": "20260917T135522Z-kickoff-session", "branch": "rust", "passed": 9, "total": 12, "pass_ids": [2, 5, 6, 7, 8, 9, 10, 11, 12]}
+{"ts": 1789656455728, "rollout": "20260917T144333Z-kickoff-session", "branch": "main", "passed": 12, "total": 12, "pass_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}
+{"ts": 1789669935929, "rollout": "20260917T182910Z-kickoff-session", "branch": "rust", "passed": 11, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12]}
+{"ts": 1789671695858, "rollout": "20260917T185543Z-kickoff-session", "branch": "main", "passed": 8, "total": 12, "pass_ids": [2, 5, 6, 7, 8, 9, 10, 11]}

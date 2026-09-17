@@ -1,0 +1,57 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-spawn-storm-i54ovryj/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-spawn-storm-i54ovryj/home/.cache/arbos/tgrep/d0c43d3da6afcdf2
+tools root: 10 calls, wall 75ms, sum 322ms, speedup 4.3x
+turn_stalled root: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-1: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-10: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-2: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-3: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-4: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-5: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-6: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-7: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-8: waiting on the model, which has returned nothing since 18:38
+turn_stalled worker-9: waiting on the model, which has returned nothing since 18:38
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-2.5-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: google/gemini-3.8-flash: no answer from provider: no response headers for 30s — no response headers for 30s
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+provider: anthropic/claude-opus-5: connection failed: error sending request for url (https://openrouter.ai/api/v1/chat/completions) — error sending request for url (https://openrouter.ai/api/v1/chat/completions)
+tools worker-8: 2 calls, wall 1289ms, sum 1ms, speedup 0.0x
+tools worker-6: 2 calls, wall 1123ms, sum 1ms, speedup 0.0x
+tools worker-10: 2 calls, wall 24ms, sum 0ms, speedup 0.0x
+tools worker-1: 2 calls, wall 183ms, sum 1ms, speedup 0.0x
+tools root: 2 calls, wall 2ms, sum 2ms, speedup 1.0x
+tools root: 6 calls, wall 4ms, sum 4ms, speedup 1.0x

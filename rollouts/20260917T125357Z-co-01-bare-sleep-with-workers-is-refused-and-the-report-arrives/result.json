@@ -1,0 +1,44 @@
+{
+  "scenario": "co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives",
+  "doc": "Jacob's report: three workers spawned, then `sleep 75`, reports queued behind the sleeping turn. #432: a bare\n        sleep of 5 s or more while the agent has workers is refused, naming how many and the move; the worker's report\n        then starts the next turn.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "root's first turn never ended",
+      "where": ""
+    },
+    {
+      "rule": "sleep-not-recorded",
+      "detail": "no bash record for the sleep",
+      "where": ""
+    },
+    {
+      "rule": "sleep-ran-with-workers",
+      "detail": "`sleep 75` with a worker running was not refused: error='' output='None'",
+      "where": "arbos-engine tools/bash.rs bare_sleep_secs / children_count (#432)"
+    },
+    {
+      "rule": "turn-slept-anyway",
+      "detail": "root's turn took 60.0s; a refused sleep must not cost the wait",
+      "where": ""
+    },
+    {
+      "rule": "refusal-names-no-alternative",
+      "detail": "the refusal does not say what to do instead: ",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "sleep_record": {},
+    "first_turn_s": 60.0
+  },
+  "duration_s": 75.9,
+  "place": "/tmp/arbos-qa-co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives-ann2bmcy/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T125357Z-co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives",
+  "branch": "main",
+  "usd": 0.0
+}

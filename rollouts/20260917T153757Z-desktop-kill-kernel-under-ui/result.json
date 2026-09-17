@@ -1,0 +1,22 @@
+{
+  "scenario": "desktop-kill-kernel-under-ui",
+  "doc": "SIGKILL the kernel while the window is attached, then send a prompt. The app must notice, respawn the kernel, and run the prompt.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-desktop-kill-kernel-under-ui-n7830hnn/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153757Z-desktop-kill-kernel-under-ui",
+  "branch": "main",
+  "usd": 0.0
+}

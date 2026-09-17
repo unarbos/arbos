@@ -1,0 +1,10 @@
+{
+  "name": "sw-05-failed-migration-rename-doubles-crons-and-tasks",
+  "doc": "The one-time migration turns a legacy plan.jsonl into subscriptions, inbox files and notes lines, then renames plan.jsonl aside with `let _ = rename(...)`. If that rename fails (here: the agent folder is not writable for the rename while its subfolders are; in life a partial view or a permissions slip), the next kernel start finds plan.jsonl again and migrates again \u2014 the standing cron now exists twice and fires twice, the pending task is queued twice. A marker judged misreport-only reaches a doubled side effect.",
+  "tags": [
+    "landing",
+    "silent-write",
+    "destructive",
+    "migration"
+  ]
+}

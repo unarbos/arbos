@@ -1,0 +1,25 @@
+{
+  "scenario": "inbox:voice-server",
+  "doc": "From inbox note 2026-09-13-voice-server.md: exercise feature 'voice-server' and run every detector. Needs a kernel built from branch cursor/voice-server.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature voice-server: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "voice-server",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-voice-server.md"
+  },
+  "duration_s": 611.2,
+  "place": "/tmp/arbos-qa-inbox:voice-server-6f2mzlnj/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-inbox/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 a94f481efcff protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T195548Z-inbox:voice-server",
+  "branch": "cursor/voice-server",
+  "usd": 0.0
+}

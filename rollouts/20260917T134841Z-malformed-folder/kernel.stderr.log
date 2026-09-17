@@ -1,0 +1,9 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-malformed-folder-cgy2221l/place...
+agent_unlisted: agents/garbage: agent.md: read /tmp/arbos-qa-malformed-folder-cgy2221l/place/.arbos/agents/garbage/agent.md: stream did not contain valid UTF-8 — not an agent, not listed; remove the folder or give it an agent.md
+agent_unlisted: agents/nomd: no agent.md — not an agent, not listed; remove the folder or give it an agent.md
+Found 33 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8191 trigrams, 32 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-malformed-folder-cgy2221l/home/.cache/arbos/tgrep/db461b7e4a5a32dd
+frame_rejected garbage: no agent "garbage" in this place

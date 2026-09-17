@@ -1,0 +1,5 @@
+1789650168233 kernel started pid 48717
+1789650169191 BREAK sw-02-undo-destroyed-committed-work: `undo` in turn two reset to 5278f3b359a6 (turn two started at 73ab6fec01db; the mark said 5278f3b359a6): commit A and a.txt are gone, the tool said ['restored 5278f3b359a635f03abfd96d7ca6ebfbd4ae21c5']
+1789650169191 BREAK sw-02-undo-silent: `undo` neither restored to turn two's start nor said why it refused: HEAD 5278f3b359a6, said ['restored 5278f3b359a635f03abfd96d7ca6ebfbd4ae21c5']
+1789650169195 kernel SIGKILLed
+1789650169218 bugs: new 16e28c3275.md, new e562bc5afd.md

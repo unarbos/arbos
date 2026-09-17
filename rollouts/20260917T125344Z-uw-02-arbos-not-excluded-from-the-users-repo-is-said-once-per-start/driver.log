@@ -1,0 +1,4 @@
+1789649624284 kernel started pid 34730
+1789649625239 BREAK uw-02-silent-about-the-unexcluded-records: `.arbos/` could not be excluded and nothing was said on root's transcript; the person's next `git add -A` stages 1 agent path(s) (['?? .arbos/']) with no warning anywhere
+1789649625242 kernel stopped with code 0
+1789649625257 bugs: new df39cb735d.md

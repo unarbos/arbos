@@ -1,0 +1,22 @@
+{
+  "scenario": "desktop-fresh-place-no-notice",
+  "doc": "Open a fresh place (no .arbos yet). The chat, board and terminal all attach at once; exactly one kernel must be spawned and no failed notice (\"arbos-kernel exited\") may appear in the chat or the transcript (qa-030).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-desktop-fresh-place-no-notice-5purq6ri/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153737Z-desktop-fresh-place-no-notice",
+  "branch": "main",
+  "usd": 0.0
+}

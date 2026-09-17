@@ -1,0 +1,54 @@
+{
+  "scenario": "uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned",
+  "doc": "The marker naming whose run a job is, written just after the process starts. Unwritten, a kernel that\n        finds the job at boot cannot place it and the run's result reaches nobody. The window is a few\n        milliseconds wide, so a watcher takes the write bit off the job folder the instant it appears and the\n        run is repeated up to eight times; the rate is reported. Expected on a build that checks the write: the\n        command is ended and the run said to have failed to start. Never catching the window is a skip.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "uw-04-job-left-running-with-no-record-of-whose-it-is",
+      "detail": "3 job folder(s) could not take their marker; 1 process(es) still run with nothing to place them (pids ['46536']), 0 of them already finished with output nobody can attribute; nothing was said on the transcript. A restart now finds a job it cannot place and the run's result reaches nobody",
+      "where": "arbos-kernel subs.rs run_job \u2014 an unwritten marker ends the run and says so (#444)"
+    }
+  ],
+  "notes": {
+    "job_folders": 4,
+    "folders_caught_before_the_marker": 3,
+    "folders_left_without_a_marker": [
+      {
+        "job": "j2",
+        "exit_file": false,
+        "out": ""
+      },
+      {
+        "job": "j3",
+        "exit_file": false,
+        "out": ""
+      },
+      {
+        "job": "j4",
+        "exit_file": false,
+        "out": ""
+      }
+    ],
+    "processes_still_running_after": [
+      "46536 /bin/bash -O extglob -c snap=$(command cat <&3) && builtin shopt -s extglob && built"
+    ],
+    "notices_naming_the_record": [],
+    "kernel_log_events": [
+      "attach_open",
+      "env_stray_secrets",
+      "kernel_start",
+      "notify_replayed",
+      "prompt_size",
+      "snapshot",
+      "turn_end",
+      "turn_start"
+    ]
+  },
+  "duration_s": 91.4,
+  "place": "/tmp/arbos-qa-uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned-_7sm65bn/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/target-pr444/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130156Z-uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned",
+  "branch": "pr444-f80f0b663bac"
+}

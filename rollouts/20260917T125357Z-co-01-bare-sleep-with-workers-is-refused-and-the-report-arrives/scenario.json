@@ -1,0 +1,9 @@
+{
+  "name": "co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives",
+  "doc": "Jacob's report: three workers spawned, then `sleep 75`, reports queued behind the sleeping turn. #432: a bare\n        sleep of 5 s or more while the agent has workers is refused, naming how many and the move; the worker's report\n        then starts the next turn.",
+  "tags": [
+    "landing",
+    "coordinator",
+    "sleep"
+  ]
+}

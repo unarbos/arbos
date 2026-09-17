@@ -1,0 +1,5 @@
+1789657210391 kernel started pid 132891
+1789658732744 timeout waiting for turn root idle after 300s
+1789658732825 BREAK turn-never-ended: feature composer-plan-alignment: turn never ended
+1789658733004 kernel stopped with code 0
+1789658733170 bugs: new 7df1799155.md

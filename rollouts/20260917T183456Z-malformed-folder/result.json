@@ -1,0 +1,37 @@
+{
+  "scenario": "malformed-folder",
+  "doc": "Pre-write broken state: garbage agent.md, corrupt transcript, dangling parent, stale lock and kernel.json with dead pids, active node with no attempt. Kernel must boot and settle it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "state:agent-md-missing",
+      "detail": "agent folder without agent.md; list_agents skips it silently",
+      "where": "/tmp/arbos-qa-malformed-folder-e6ox3yp_/place/.arbos/agents/nomd/agent.md"
+    },
+    {
+      "rule": "state:agent-parent-dangling",
+      "detail": "parent 'ghost-parent' has no folder",
+      "where": "/tmp/arbos-qa-malformed-folder-e6ox3yp_/place/.arbos/agents/orphan/agent.md"
+    },
+    {
+      "rule": "state:transcript-bad-lines",
+      "detail": "2 unparseable line(s): [2, 4]",
+      "where": "/tmp/arbos-qa-malformed-folder-e6ox3yp_/place/.arbos/agents/orphan/transcript.jsonl"
+    }
+  ],
+  "notes": {
+    "agents_listed": [
+      "orphan",
+      "root"
+    ]
+  },
+  "duration_s": 67.5,
+  "place": "/tmp/arbos-qa-malformed-folder-e6ox3yp_/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1577f4de3035 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T183456Z-malformed-folder",
+  "branch": "main",
+  "usd": 0.02499
+}

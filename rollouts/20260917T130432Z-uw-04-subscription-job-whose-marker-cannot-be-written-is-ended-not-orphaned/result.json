@@ -1,0 +1,71 @@
+{
+  "scenario": "uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned",
+  "doc": "The marker naming whose run a job is, written just after the process starts. Unwritten, a kernel that\n        finds the job at boot cannot place it and the run's result reaches nobody. The window is a few\n        milliseconds wide, so a watcher takes the write bit off the job folder the instant it appears and the\n        run is repeated up to eight times; the rate is reported. Expected on a build that checks the write: the\n        command is ended and the run said to have failed to start. Never catching the window is a skip.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "uw-04-run-finished-with-no-record-of-whose-it-is",
+      "detail": "2 of 3 caught job(s) ran to the end with no marker (['j2', 'j3']): their output is on disk and a restart cannot say whose run it was, so the result reaches nobody",
+      "where": "arbos-kernel subs.rs run_job \u2014 an unwritten marker ends the run before it goes on unrecorded (#444)"
+    },
+    {
+      "rule": "uw-04-nobody-was-told-the-run-did-not-start",
+      "detail": "3 job folder(s) could not take their marker; 3 process(es) still run with nothing to place them (pids ['51727', '51728', '51738']), 2 of them already finished with output nobody can attribute; nothing was said on the transcript. A restart now finds a job it cannot place and the run's result reaches nobody",
+      "where": "arbos-kernel subs.rs run_job \u2014 an unwritten marker ends the run and says so (#444)"
+    }
+  ],
+  "notes": {
+    "job_folders": 4,
+    "folders_caught_before_the_marker": 3,
+    "folders_left_without_a_marker": [
+      {
+        "job": "j2",
+        "exit_file": true,
+        "out": "uw04-ran-to-the-end\n"
+      },
+      {
+        "job": "j3",
+        "exit_file": true,
+        "out": "uw04-ran-to-the-end\n"
+      },
+      {
+        "job": "j4",
+        "exit_file": false,
+        "out": ""
+      }
+    ],
+    "processes_still_running_after": [
+      "51727 sh -c D=$1; P=$2; shift 2; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0; L=0; X=; ",
+      "51728 bash -lc (set -o pipefail) 2>/dev/null && set -o pipefail; for __v in $(env 2>/dev/n",
+      "51738 bash -lc (set -o pipefail) 2>/dev/null && set -o pipefail; for __v in $(env 2>/dev/n"
+    ],
+    "notices_naming_the_record": [],
+    "kernel_log_events": [
+      "attach_open",
+      "env_stray_secrets",
+      "kernel_start",
+      "notify_replayed",
+      "snapshot"
+    ],
+    "finished_without_a_marker": [
+      {
+        "job": "j2",
+        "exit_file": true,
+        "out": "uw04-ran-to-the-end\n"
+      },
+      {
+        "job": "j3",
+        "exit_file": true,
+        "out": "uw04-ran-to-the-end\n"
+      }
+    ],
+    "heard_by_the_person": []
+  },
+  "duration_s": 91.4,
+  "place": "/tmp/arbos-qa-uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned-wlj_i0wv/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130432Z-uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned",
+  "branch": "main-cbbe9922d6a2-control"
+}

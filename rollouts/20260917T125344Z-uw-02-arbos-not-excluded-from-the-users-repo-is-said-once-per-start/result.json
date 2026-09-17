@@ -1,0 +1,30 @@
+{
+  "scenario": "uw-02-arbos-not-excluded-from-the-users-repo-is-said-once-per-start",
+  "doc": "The write that keeps the agent's records out of the person's repository, made to fail before any line\n        exists: `.git/info` read-only, so `.arbos/` is never excluded and their next `git add -A` stages every\n        transcript and checkpoint. Expected of the kernel: it still serves, and root's transcript carries one\n        failed notice naming `.gitignore` as the thing to do before committing \u2014 once per start, not once a\n        turn. The staging itself is recorded on both builds, because the fix is the telling, not the stopping.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "uw-02-silent-about-the-unexcluded-records",
+      "detail": "`.arbos/` could not be excluded and nothing was said on root's transcript; the person's next `git add -A` stages 1 agent path(s) (['?? .arbos/']) with no warning anywhere",
+      "where": "arbos-core files.rs init_arbos_repo/exclude_locally \u2014 say it on root's transcript (#444)"
+    }
+  ],
+  "notes": {
+    "exclude_file_holds_arbos": false,
+    "notices_naming_the_exclude": [],
+    "notice_count": 0,
+    "notice_failed_flag": [],
+    "would_be_staged_by_git_add_all": [
+      "?? .arbos/"
+    ],
+    "event_frames_naming_it": 0,
+    "kernel_still_answering": true
+  },
+  "duration_s": 1.0,
+  "place": "/tmp/arbos-qa-uw-02-arbos-not-excluded-from-the-users-repo-is-said-once-per-start-f7zplszm/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T125344Z-uw-02-arbos-not-excluded-from-the-users-repo-is-said-once-per-start",
+  "branch": "main-cbbe9922d6a2-control"
+}

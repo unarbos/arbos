@@ -1,0 +1,29 @@
+{
+  "scenario": "sw-06-migration-cut-leaves-something-a-person-can-finish",
+  "doc": "An earlier start moved plan.jsonl aside as plan.jsonl.migrating and died before writing any record (the cut case). The next start must not migrate again (no doubled crons) \u2014 and it must leave a person something they can act on: a transcript notice that names the kept file and what it is, not only a kernel.log line and a `.migrating` file nobody would recognise.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "sw-06-person-not-told",
+      "detail": "the cut is only in kernel.log (no); the transcript says nothing a person could act on about the old plan",
+      "where": "arbos-kernel migrate.rs Claim::Cut: a notice beside the log line"
+    }
+  ],
+  "notes": {
+    "cron_copies": 0,
+    "kept_files": [
+      "plan.jsonl.migrating"
+    ],
+    "transcript_notice": "",
+    "kernel_log_says": false,
+    "outcome": "silent"
+  },
+  "duration_s": 2.9,
+  "place": "/tmp/arbos-qa-sw-06-migration-cut-leaves-something-a-person-can-finish-9uuea6do/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130256Z-sw-06-migration-cut-leaves-something-a-person-can-finish",
+  "branch": "main",
+  "usd": 0.0
+}

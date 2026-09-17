@@ -1,0 +1,9 @@
+{
+  "name": "fb-01-feedback-report-written-delivered-picked-up",
+  "doc": "A user reports a problem from the app: the sheet opens on a thumbs-down (and the window keeps answering), the report is written to the outbox before anything is sent, with no credentials it waits and says so, with credentials it lands in the feedback store through `store put`, and the poller picks it up. Linux cannot prove the macOS window capture; that part is recorded, not passed.",
+  "tags": [
+    "landing",
+    "feedback",
+    "desktop"
+  ]
+}

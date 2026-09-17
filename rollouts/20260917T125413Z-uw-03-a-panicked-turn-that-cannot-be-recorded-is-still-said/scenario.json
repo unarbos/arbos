@@ -1,0 +1,10 @@
+{
+  "name": "uw-03-a-panicked-turn-that-cannot-be-recorded-is-still-said",
+  "doc": "`pn-01` drives the panic path with a transcript that works. This drives the half nobody had: the turn\n        panics (ARBOS_TEST_PANIC_TURN=root) while root's transcript cannot be appended to, so the words the\n        kernel meant to write have nowhere to go. Expected: the fault is still visible \u2014 `turn_panicked_unrecorded`\n        in the kernel log and the notice delivered to the attached client as a frame \u2014 and the turn does not\n        read as still running. On the control the fault is invisible in every place a person or a next boot looks.",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "panic",
+    "destructive-order"
+  ]
+}

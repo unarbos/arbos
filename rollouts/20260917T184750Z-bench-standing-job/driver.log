@@ -1,0 +1,4 @@
+1789670870041 kernel started pid 161285
+1789670875756 BREAK wrong-output: no recurring plan node or timer/shell subscription after a standing request
+1789670875760 kernel stopped with code 0
+1789670875775 bugs: seen qa-009-plan-accepts-one-shot-for-recurring-goal.md

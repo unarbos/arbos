@@ -1,0 +1,4 @@
+1789649760652 kernel started pid 39987
+1789649773185 BREAK no-yield-to-the-report: the attached command did not yield to the worker's report (turn took 12.2s; record: {"ts": 1789649773169, "kind": "tool", "name": "bash", "call_id": "replay_2", "step": 2, "paths": ["/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-lpwl7o2w)
+1789649774189 kernel stopped with code 0
+1789649774210 bugs: new 2eae626fbf.md

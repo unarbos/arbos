@@ -1,0 +1,6 @@
+1789653110237 kernel started pid 107312
+1789653157173 BREAK wrong-output: research.md was not written
+1789653157173 BREAK wrong-output: only 0 fetch/search calls: not researched from sources
+1789653157173 BREAK wrong-output: research.md has 0 markdown links to sources
+1789653157205 kernel stopped with code 0
+1789653157227 bugs: seen qa-010-search-tool-blocked-without-provider.md, seen qa-010-search-tool-blocked-without-provider.md, seen qa-010-search-tool-blocked-without-provider.md

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:fallback-on-provider-errors",
+  "doc": "From inbox note 2026-09-13-fallback-on-provider-errors.md: exercise feature 'fallback-on-provider-errors' and run every detector. Needs a kernel built from branch cursor/fallback-models-default-b027.",
+  "tags": [
+    "inbox",
+    "fallback-on-provider-errors"
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "scenario": "sw-05-failed-migration-rename-doubles-crons-and-tasks",
+  "doc": "The one-time migration turns a legacy plan.jsonl into subscriptions, inbox files and notes lines, then renames plan.jsonl aside with `let _ = rename(...)`. If that rename fails (here: the agent folder is not writable for the rename while its subfolders are; in life a partial view or a permissions slip), the next kernel start finds plan.jsonl again and migrates again \u2014 the standing cron now exists twice and fires twice, the pending task is queued twice. A marker judged misreport-only reaches a doubled side effect.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "sw-05-cron-doubled",
+      "detail": "the legacy standing cron was migrated 2 times into subscriptions/ (plan.jsonl left in place: True) \u2014 it will fire that many times",
+      "where": "arbos-kernel migrate.rs: `let _ = rename(plan.jsonl \u2192 .migrated)` then migrate again on the next start"
+    },
+    {
+      "rule": "sw-05-task-doubled",
+      "detail": "the pending task was queued more than once: ['20260917T130251.000Z-user-000.md', '20260917T130251.000Z-user-001.md']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "plan_jsonl_left": true,
+    "subscriptions": [
+      "0001-tick-every-30s.toml",
+      "0002-weekly-git-gc-of-the-arbos-repository.toml",
+      "0003-tick-every-30s.toml"
+    ],
+    "cron_copies": 2,
+    "inbox_files": [
+      "20260917T130251.000Z-user-000.md",
+      "20260917T130251.000Z-user-001.md"
+    ],
+    "migration_notice": ""
+  },
+  "duration_s": 5.1,
+  "place": "/tmp/arbos-qa-sw-05-failed-migration-rename-doubles-crons-and-tasks-3kmklyxj/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130251Z-sw-05-failed-migration-rename-doubles-crons-and-tasks",
+  "branch": "main",
+  "usd": 0.0
+}

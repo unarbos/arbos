@@ -1,0 +1,7 @@
+1789649197677 kernel started pid 21676
+1789649197730 kernel stopped with code 0
+1789649197731 kernel-sub started pid 21718
+1789649238083 BREAK subscription-cadence: a 30s shell subscription ran 3 time(s) in 40 s (expected 1, at most 2)
+1789649238083 BREAK shell-sub-spent-a-turn: 2 model turn(s) for a deliver_to = user shell subscription; the reading must reach the user with no model turn
+1789649238091 kernel-sub stopped with code 0
+1789649238112 bugs: seen a2028034e2.md, seen ab8f18b856.md

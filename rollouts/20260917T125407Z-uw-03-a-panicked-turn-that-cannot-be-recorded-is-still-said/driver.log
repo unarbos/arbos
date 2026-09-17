@@ -1,0 +1,11 @@
+1789649647345 panicking started pid 35572
+1789649648753 panicking stopped with code 0
+1789649648754 after-restart started pid 35649
+1789649653109 after-restart stopped with code 0
+1789649653109 BREAK uw-03-nothing-reached-a-window-or-the-log-by-name: nothing named the unrecordable end: `turn_panicked_unrecorded` rows 0, notice frames 0. The window is the only reader left when the file refuses
+1789649653122 BREAK kernel-panic: panicked at crates/arbos-kernel/src/sched.rs:162:21:
+ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+turn_panicked root: ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose after 0.0s
+
+1789649653131 bugs: new e217160f73.md, new e8198c5801.md

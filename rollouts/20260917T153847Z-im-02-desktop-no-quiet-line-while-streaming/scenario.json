@@ -1,0 +1,9 @@
+{
+  "name": "im-02-desktop-no-quiet-line-while-streaming",
+  "doc": "In the desktop: a command that prints every second for 80 s holds the turn; the stall hint (\"Nothing has arrived in \u2026, check the model key\") must not appear while output streams (it did twice on Jacob's screen). Control: a command that prints nothing for 80 s \u2014 the hint appears after a minute and names the command, never the model key.",
+  "tags": [
+    "landing",
+    "impatient",
+    "desktop"
+  ]
+}

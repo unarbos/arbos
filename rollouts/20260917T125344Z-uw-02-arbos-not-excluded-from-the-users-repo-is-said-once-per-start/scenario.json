@@ -1,0 +1,10 @@
+{
+  "name": "uw-02-arbos-not-excluded-from-the-users-repo-is-said-once-per-start",
+  "doc": "The write that keeps the agent's records out of the person's repository, made to fail before any line\n        exists: `.git/info` read-only, so `.arbos/` is never excluded and their next `git add -A` stages every\n        transcript and checkpoint. Expected of the kernel: it still serves, and root's transcript carries one\n        failed notice naming `.gitignore` as the thing to do before committing \u2014 once per start, not once a\n        turn. The staging itself is recorded on both builds, because the fix is the telling, not the stopping.",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "git",
+    "destructive-order"
+  ]
+}

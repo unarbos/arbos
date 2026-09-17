@@ -1,0 +1,7 @@
+{
+  "name": "prompt-no-key",
+  "doc": "Send one prompt with no API key configured. The turn must end honestly: transcript ended, node not marked done.",
+  "tags": [
+    "adversarial"
+  ]
+}

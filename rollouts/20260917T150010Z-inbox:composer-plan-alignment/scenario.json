@@ -1,0 +1,8 @@
+{
+  "name": "inbox:composer-plan-alignment",
+  "doc": "From inbox note 2026-09-13-composer-plan-alignment.md: exercise feature 'composer-plan-alignment' and run every detector. Needs a kernel built from branch cursor/composer-plan-alignment-b027.",
+  "tags": [
+    "inbox",
+    "composer-plan-alignment"
+  ]
+}

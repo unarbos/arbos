@@ -1,0 +1,5 @@
+1789650272337 kernel started pid 49901
+1789650363714 BREAK uw-04-run-finished-with-no-record-of-whose-it-is: 2 of 3 caught job(s) ran to the end with no marker (['j2', 'j3']): their output is on disk and a restart cannot say whose run it was, so the result reaches nobody
+1789650363714 BREAK uw-04-nobody-was-told-the-run-did-not-start: 3 job folder(s) could not take their marker; 3 process(es) still run with nothing to place them (pids ['51727', '51728', '51738']), 2 of them already finished with output nobody can attribute; nothing was said on the transcript. A restart now finds a job it cannot place and the run's result reaches nobody
+1789650363717 kernel stopped with code 0
+1789650363741 bugs: new f60e35fcd6.md, new 6c88cda0d1.md

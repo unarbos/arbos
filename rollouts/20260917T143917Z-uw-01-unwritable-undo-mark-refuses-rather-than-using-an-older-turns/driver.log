@@ -1,0 +1,11 @@
+1789655957628 a-no-mark started pid 120997
+1789655958488 a-no-mark stopped with code 0
+1789655958492 b-stale-file-ro started pid 121087
+1789655959754 b-stale-file-ro stopped with code 0
+1789655959758 c-stale-folder-ro started pid 121217
+1789655961021 c-stale-folder-ro stopped with code 0
+1789655961022 BREAK uw-01b-undo-destroyed-committed-work: arm (b, mark folder writable): the mark could not be rewritten at turn two's start, and `undo` reset to 01e550f243a9 — turn one's commit 3b2a54dd556d is unreachable and a.txt is gone. The mark said 01e550f243a9; `undo` reported ['restored 01e550f243a98579d3c3dd7571069faf89aa56ab']
+1789655961022 BREAK uw-01b-undo-silent: arm (b): `undo` neither restored to turn two's start nor said why it refused — HEAD 01e550f243a9, said ['restored 01e550f243a98579d3c3dd7571069faf89aa56ab']
+1789655961022 BREAK uw-01c-undo-destroyed-committed-work: arm (c, mark folder read-only): the mark could not be rewritten at turn two's start, and `undo` reset to 01e550f243a9 — turn one's commit 4a8bf9935563 is unreachable and a.txt is gone. The mark said 01e550f243a9; `undo` reported ['restored 01e550f243a98579d3c3dd7571069faf89aa56ab']
+1789655961022 BREAK uw-01c-undo-silent: arm (c): `undo` neither restored to turn two's start nor said why it refused — HEAD 01e550f243a9, said ['restored 01e550f243a98579d3c3dd7571069faf89aa56ab']
+1789655961045 bugs: seen c69605bf46.md, seen dee4b7c08d.md, seen df1c61d7b0.md, seen fd89bbb4d4.md

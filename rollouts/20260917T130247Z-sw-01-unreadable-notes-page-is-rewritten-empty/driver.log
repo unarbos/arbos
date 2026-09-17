@@ -1,0 +1,5 @@
+1789650167257 kernel started pid 48655
+1789650168160 BREAK sw-01-page-rewritten-from-nothing: the project page was replaced after one unreadable read: 293 → 36 bytes; goal/checklist/notes gone; the plan tool said ['Set 1 item(s).\n\n[ ] 1 Add perimeter() tests — ready']
+1789650168160 BREAK sw-01-success-reported-over-a-lost-page: the plan tool reported success while the page it could not read was being replaced
+1789650168163 kernel SIGKILLed
+1789650168194 bugs: new e8153abb79.md, new ff04e5514d.md

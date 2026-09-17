@@ -1,0 +1,5 @@
+1789674948601 kernel started pid 188488
+1789675559359 timeout waiting for turn root idle after 300s
+1789675559447 BREAK turn-never-ended: feature voice-server: turn never ended
+1789675559606 kernel stopped with code 0
+1789675559830 bugs: new b124c7f68b.md

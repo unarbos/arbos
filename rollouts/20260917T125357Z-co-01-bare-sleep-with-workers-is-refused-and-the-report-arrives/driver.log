@@ -1,0 +1,9 @@
+1789649637750 kernel started pid 35081
+1789649698117 timeout waiting for turn root idle after 60s
+1789649698117 BREAK turn-never-ended: root's first turn never ended
+1789649698117 BREAK sleep-not-recorded: no bash record for the sleep
+1789649698117 BREAK sleep-ran-with-workers: `sleep 75` with a worker running was not refused: error='' output='None'
+1789649698117 BREAK turn-slept-anyway: root's turn took 60.0s; a refused sleep must not cost the wait
+1789649698117 BREAK refusal-names-no-alternative: the refusal does not say what to do instead: 
+1789649713633 kernel stopped with code 0
+1789649713668 bugs: new 29708f16c2.md, new 07c6729499.md, new ea194aedc5.md, new e1e2954b37.md, new 0aecaef536.md

@@ -1,0 +1,22 @@
+{
+  "scenario": "fb-01-feedback-report-written-delivered-picked-up",
+  "doc": "A user reports a problem from the app: the sheet opens on a thumbs-down (and the window keeps answering), the report is written to the outbox before anything is sent, with no credentials it waits and says so, with credentials it lands in the feedback store through `store put`, and the poller picks it up. Linux cannot prove the macOS window capture; that part is recorded, not passed.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-fb-01-feedback-report-written-delivered-picked-up-nnl5mhnm/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153837Z-fb-01-feedback-report-written-delivered-picked-up",
+  "branch": "main",
+  "usd": 0.0
+}

@@ -1,0 +1,7 @@
+1789658804565 kernel started pid 133156
+1789659105051 timeout waiting for turn root idle after 300s
+1789659106746 BREAK turn-never-ended: feature fallback-on-provider-errors: turn never ended
+1789659119241 kernel stopped with code 130
+1789659119245 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789659119245 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789659119594 bugs: new 9d45f81f58.md, new de5917fa0e.md, seen de5917fa0e.md

@@ -1,0 +1,9 @@
+{
+  "name": "af-02-two-windows-on-one-place",
+  "doc": "Two desktop windows (two app processes) open on the same place. Expected: one kernel serves both (the second attaches, no second spawn); a line typed in either appears exactly once in both; a Stop pressed in one ends the turn in the other. The destructive outcome is a second kernel on the same folder, or a line delivered twice.",
+  "tags": [
+    "landing",
+    "after-failure",
+    "desktop"
+  ]
+}

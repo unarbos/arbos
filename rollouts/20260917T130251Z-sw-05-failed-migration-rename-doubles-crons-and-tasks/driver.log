@@ -1,0 +1,7 @@
+1789650171018 kernel-1 started pid 49095
+1789650173571 kernel-1 stopped with code 0
+1789650173572 kernel-2 started pid 49137
+1789650176126 kernel-2 stopped with code 0
+1789650176127 BREAK sw-05-cron-doubled: the legacy standing cron was migrated 2 times into subscriptions/ (plan.jsonl left in place: True) — it will fire that many times
+1789650176127 BREAK sw-05-task-doubled: the pending task was queued more than once: ['20260917T130251.000Z-user-000.md', '20260917T130251.000Z-user-001.md']
+1789650176154 bugs: new 2d3d09c1dd.md, new c17f3eacff.md

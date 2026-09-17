@@ -1,0 +1,34 @@
+{
+  "scenario": "co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "doc": "The yielding path is the one that can lose work. Root runs an attached twelve-second loop (not a bare sleep, which\n        would be refused outright) while a worker finishes in ~2 s. #432: the command yields when the worker's report lands, goes on as a job, and\n        its result follows. Check both halves: the yield is said, and the command's own output reaches the record.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "no-yield-to-the-report",
+      "detail": "the attached command did not yield to the worker's report (turn took 12.2s; record: {\"ts\": 1789649773169, \"kind\": \"tool\", \"name\": \"bash\", \"call_id\": \"replay_2\", \"step\": 2, \"paths\": [\"/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-lpwl7o2w)",
+      "where": "arbos-engine tools/bash.rs \u2014 yield on a worker's done (#432)"
+    }
+  ],
+  "notes": {
+    "first_turn_s": 12.2,
+    "long_command_record": {
+      "started": "1789649761020",
+      "ended": "1789649773166",
+      "body": "finished-after-yield",
+      "output": "finished-after-yield"
+    },
+    "job_output_file": ".arbos/agents/root/jobs/j1/out.log",
+    "result_reached_root_as": {
+      "kind": "tool",
+      "text": "{\"ts\": 1789649773169, \"kind\": \"tool\", \"name\": \"bash\", \"call_id\": \"replay_2\", \"step\": 2, \"paths\": [\"/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-lpwl7o2w"
+    }
+  },
+  "duration_s": 13.6,
+  "place": "/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-lpwl7o2w/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T125600Z-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "branch": "main",
+  "usd": 0.0
+}

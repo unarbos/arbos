@@ -1,0 +1,4 @@
+1789650116726 kernel started pid 46553
+1789650208105 BREAK uw-04-job-left-running-with-no-record-of-whose-it-is: 3 job folder(s) could not take their marker; 1 process(es) still run with nothing to place them (pids ['46536']), 0 of them already finished with output nobody can attribute; nothing was said on the transcript. A restart now finds a job it cannot place and the run's result reaches nobody
+1789650208109 kernel stopped with code 0
+1789650208132 bugs: seen 4213c0b179.md

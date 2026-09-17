@@ -1,0 +1,9 @@
+{
+  "name": "sw-06-migration-cut-leaves-something-a-person-can-finish",
+  "doc": "An earlier start moved plan.jsonl aside as plan.jsonl.migrating and died before writing any record (the cut case). The next start must not migrate again (no doubled crons) \u2014 and it must leave a person something they can act on: a transcript notice that names the kept file and what it is, not only a kernel.log line and a `.migrating` file nobody would recognise.",
+  "tags": [
+    "landing",
+    "silent-write",
+    "migration"
+  ]
+}

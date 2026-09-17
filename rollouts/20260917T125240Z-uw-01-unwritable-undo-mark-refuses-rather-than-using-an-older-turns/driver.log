@@ -1,0 +1,11 @@
+1789649560198 a-no-mark started pid 26148
+1789649561230 a-no-mark stopped with code 0
+1789649561250 b-stale-file-ro started pid 26246
+1789649562547 b-stale-file-ro stopped with code 0
+1789649562555 c-stale-folder-ro started pid 26383
+1789649563846 c-stale-folder-ro stopped with code 0
+1789649563851 BREAK uw-01b-undo-destroyed-committed-work: arm (b, mark folder writable): the mark could not be rewritten at turn two's start, and `undo` reset to 461de789c7d8 — turn one's commit a43b19af1867 is unreachable and a.txt is gone. The mark said 461de789c7d8; `undo` reported ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']
+1789649563851 BREAK uw-01b-undo-silent: arm (b): `undo` neither restored to turn two's start nor said why it refused — HEAD 461de789c7d8, said ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']
+1789649563851 BREAK uw-01c-undo-destroyed-committed-work: arm (c, mark folder read-only): the mark could not be rewritten at turn two's start, and `undo` reset to 461de789c7d8 — turn one's commit 8b7c7ee908a6 is unreachable and a.txt is gone. The mark said 461de789c7d8; `undo` reported ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']
+1789649563851 BREAK uw-01c-undo-silent: arm (c): `undo` neither restored to turn two's start nor said why it refused — HEAD 461de789c7d8, said ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']
+1789649563987 bugs: new c69605bf46.md, new dee4b7c08d.md, new df1c61d7b0.md, new fd89bbb4d4.md

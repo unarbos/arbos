@@ -1,0 +1,8 @@
+{
+  "name": "inbox:pipefail-chat-model",
+  "doc": "From inbox note 2026-09-13-pipefail-chat-model.md: exercise feature 'pipefail-chat-model' and run every detector. Needs a kernel built from branch cursor/pipefail-chat-model-b027.",
+  "tags": [
+    "inbox",
+    "pipefail-chat-model"
+  ]
+}

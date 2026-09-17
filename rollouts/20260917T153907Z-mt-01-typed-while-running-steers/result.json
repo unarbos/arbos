@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-01-typed-while-running-steers",
+  "doc": "Item 1. Typed in the desktop while root runs: a kind = steer inbox file within 1 s; the line is on the transcript before turn_complete.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-mt-01-typed-while-running-steers-99r91ar4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153907Z-mt-01-typed-while-running-steers",
+  "branch": "main",
+  "usd": 0.0
+}

@@ -1,0 +1,36 @@
+{
+  "scenario": "sw-01-unreadable-notes-page-is-rewritten-empty",
+  "doc": "`notes::load` reads the project page with `unwrap_or_default()`: any read failure (EACCES here; EIO, a lock, a partial view on a network mount in life) parses as an empty page, and the next `plan` call writes that empty page over the real one by tmp+rename \u2014 the goal, the checklist, the prose gone, the tool reporting success. Expected: a page that could not be read is not rewritten; the call fails with the reason.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "sw-01-page-rewritten-from-nothing",
+      "detail": "the project page was replaced after one unreadable read: 293 \u2192 36 bytes; goal/checklist/notes gone; the plan tool said ['Set 1 item(s).\\n\\n[ ] 1 Add perimeter() tests \u2014 ready']",
+      "where": "arbos-core notes.rs load() unwrap_or_default + save_path tmp+rename"
+    },
+    {
+      "rule": "sw-01-success-reported-over-a-lost-page",
+      "detail": "the plan tool reported success while the page it could not read was being replaced",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "page_after": "- [ ] Add perimeter() tests \u2014 ready\n",
+    "page_kept": false,
+    "plan_said": [
+      "Set 1 item(s).\n\n[ ] 1 Add perimeter() tests \u2014 ready"
+    ],
+    "page_bytes_before_after": [
+      293,
+      36
+    ]
+  },
+  "duration_s": 0.9,
+  "place": "/tmp/arbos-qa-sw-01-unreadable-notes-page-is-rewritten-empty-wk1dy_2e/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130247Z-sw-01-unreadable-notes-page-is-rewritten-empty",
+  "branch": "main",
+  "usd": 0.0
+}

@@ -1,0 +1,25 @@
+{
+  "scenario": "bench-standing-job",
+  "doc": "Checklist item 9: a standing task must become a recurring plan node (when.every), not a promise or a shell loop.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no recurring plan node or timer/shell subscription after a standing request",
+      "where": "arbos-kernel subscribe tool"
+    }
+  ],
+  "notes": {
+    "recurring_nodes": [],
+    "subscriptions": []
+  },
+  "duration_s": 5.7,
+  "place": "/tmp/arbos-qa-bench-standing-job-taisdtlg/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1577f4de3035 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T184750Z-bench-standing-job",
+  "branch": "main",
+  "usd": 0.01085
+}

@@ -1,0 +1,81 @@
+{
+  "scenario": "fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line",
+  "doc": "settle_tree reads checkpoints.d/<line>.json when a checkpoint's tree is still pending, and accepts it if its\n        HEAD matches. Line numbers are transcript lines: after a rewind, new turns reuse the cut turns' lines, and the\n        cut turns' sidecars are not removed. Stage it: five turns, rewind to 3 (f3..f5 gone), new turns 3' and 4' with\n        the tree delayed so 4' is still pending, rewind to 4'. The right tree is {f1, f2, g3}; the stale sidecar says\n        {f1, f2, f3} \u2014 and HEAD never moved, so the guard passes it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "stale-sidecar-restored-a-cut-turns-tree",
+      "detail": "rewinding to the new turn 4 brought back f3.txt, a file the earlier rewind removed: the restore took the cut turn's sidecar at the same line (same HEAD) for the new turn's tree \u2014 files now ['f1.txt', 'f2.txt', 'f3.txt'], expected f1, f2, g3",
+      "where": "arbos-engine tools::git settle_tree \u2014 a sidecar is matched by line and HEAD; a cut turn's sidecar at the same line passes both. Remove cut turns' sidecars on rewind, or key the sidecar on the record's ts"
+    },
+    {
+      "rule": "new-turns-file-lost",
+      "detail": "g3.txt, written by the new turn 3', is gone after rewinding to the new turn 4: ['f1.txt', 'f2.txt', 'f3.txt']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "old_checkpoint_lines": [
+      2,
+      8,
+      14,
+      20,
+      26
+    ],
+    "first_rewind": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 14,
+      "dropped": 18,
+      "restored": "7aea67737b54 + working tree 01879e673e46"
+    },
+    "files_after_first_rewind": [
+      "f1.txt",
+      "f2.txt"
+    ],
+    "sidecars_left_after_rewind": [
+      "2.json",
+      "20.json",
+      "26.json",
+      "8.json"
+    ],
+    "new_turn4_record": {
+      "line": "20",
+      "ts": "1789650138388",
+      "head": "7aea67737b54cd984f09611eef68094880bb62b6",
+      "work_error": "the working tree for this turn is still "
+    },
+    "stale_sidecar_for_that_line": {
+      "line": "20",
+      "ts": "1789650128506",
+      "head": "7aea67737b54cd984f09611eef68094880bb62b6",
+      "work": "9231d23ecb65a24f8044375bf742cafae591ea86"
+    },
+    "files_before_second_rewind": [
+      ".gitignore",
+      "f1.txt",
+      "f2.txt",
+      "g3.txt"
+    ],
+    "second_rewind": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 20,
+      "dropped": 4,
+      "restored": "7aea67737b54 + working tree 9231d23ecb65"
+    },
+    "files_after_second_rewind": [
+      "f1.txt",
+      "f2.txt",
+      "f3.txt"
+    ]
+  },
+  "duration_s": 19.2,
+  "place": "/tmp/arbos-qa-fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line-ypn9_1t8/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130207Z-fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line",
+  "branch": "main",
+  "usd": 0.0
+}

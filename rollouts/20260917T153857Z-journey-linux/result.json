@@ -1,0 +1,22 @@
+{
+  "scenario": "journey-linux",
+  "doc": "The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "OSError: [Errno 5] Input/output error: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/parity/arbosdriver.py'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 10.1,
+  "place": "/tmp/arbos-qa-journey-linux-kezwa0oc/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2f9a042707e1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T153857Z-journey-linux",
+  "branch": "main",
+  "usd": 0.0
+}

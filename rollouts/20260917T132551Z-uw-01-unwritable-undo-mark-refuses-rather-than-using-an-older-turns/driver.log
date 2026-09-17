@@ -1,0 +1,11 @@
+1789651551505 a-no-mark started pid 78657
+1789651552163 a-no-mark stopped with code 0
+1789651552166 b-stale-file-ro started pid 78750
+1789651553126 b-stale-file-ro stopped with code 0
+1789651553129 c-stale-folder-ro started pid 78900
+1789651554090 c-stale-folder-ro stopped with code 0
+1789651554091 BREAK uw-01b-undo-destroyed-committed-work: arm (b, mark folder writable): the mark could not be rewritten at turn two's start, and `undo` reset to e5f5145dc04d — turn one's commit e71661777b9f is unreachable and a.txt is gone. The mark said e5f5145dc04d; `undo` reported ['restored e5f5145dc04ddcaf3eb1c586c835c656b264c61e']
+1789651554091 BREAK uw-01b-undo-silent: arm (b): `undo` neither restored to turn two's start nor said why it refused — HEAD e5f5145dc04d, said ['restored e5f5145dc04ddcaf3eb1c586c835c656b264c61e']
+1789651554091 BREAK uw-01c-undo-destroyed-committed-work: arm (c, mark folder read-only): the mark could not be rewritten at turn two's start, and `undo` reset to e5f5145dc04d — turn one's commit dbe63865f39a is unreachable and a.txt is gone. The mark said e5f5145dc04d; `undo` reported ['restored e5f5145dc04ddcaf3eb1c586c835c656b264c61e']
+1789651554091 BREAK uw-01c-undo-silent: arm (c): `undo` neither restored to turn two's start nor said why it refused — HEAD e5f5145dc04d, said ['restored e5f5145dc04ddcaf3eb1c586c835c656b264c61e']
+1789651554114 bugs: seen c69605bf46.md, seen dee4b7c08d.md, seen df1c61d7b0.md, seen fd89bbb4d4.md

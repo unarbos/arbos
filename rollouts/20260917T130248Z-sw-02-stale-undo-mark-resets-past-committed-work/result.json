@@ -1,0 +1,41 @@
+{
+  "scenario": "sw-02-stale-undo-mark-resets-past-committed-work",
+  "doc": "Turn 1 commits A. Before turn 2 the mark file is made unwritable (the injector for a full disk or an unwritable runtime/), so turn 2's start cannot record HEAD=A and the mark still says HEAD0. Turn 2 commits B, then calls `undo` \u2014 meant to drop only turn 2's work. `undo` reads the stale mark, `git reset --hard HEAD0` + `git clean -fd`: commit A is gone from the branch, its files gone from the tree, and the tool says \"restored HEAD0\".",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "sw-02-undo-destroyed-committed-work",
+      "detail": "`undo` in turn two reset to 5278f3b359a6 (turn two started at 73ab6fec01db; the mark said 5278f3b359a6): commit A and a.txt are gone, the tool said ['restored 5278f3b359a635f03abfd96d7ca6ebfbd4ae21c5']",
+      "where": "arbos-engine tools/git.rs snapshot() ignored write + undo() trusting the mark"
+    },
+    {
+      "rule": "sw-02-undo-silent",
+      "detail": "`undo` neither restored to turn two's start nor said why it refused: HEAD 5278f3b359a6, said ['restored 5278f3b359a635f03abfd96d7ca6ebfbd4ae21c5']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "head0": "5278f3b359a6",
+    "head_after_turn_one": "73ab6fec01db",
+    "mark_before_turn_two": "5278f3b359a6",
+    "mark_after": "5278f3b359a6",
+    "head_after_undo": "5278f3b359a6",
+    "log_after": [
+      "5278f3b ignore",
+      "4e4eace start"
+    ],
+    "a_txt_exists": false,
+    "undo_said": [
+      "restored 5278f3b359a635f03abfd96d7ca6ebfbd4ae21c5"
+    ],
+    "outcome": "destroyed"
+  },
+  "duration_s": 1.0,
+  "place": "/tmp/arbos-qa-sw-02-stale-undo-mark-resets-past-committed-work-fvuvsv4h/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T130248Z-sw-02-stale-undo-mark-resets-past-committed-work",
+  "branch": "main",
+  "usd": 0.0
+}

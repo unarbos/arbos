@@ -1,0 +1,9 @@
+1789651554241 a-no-mark started pid 79066
+1789651554900 a-no-mark stopped with code 0
+1789651554903 b-stale-file-ro started pid 79158
+1789651555916 b-stale-file-ro stopped with code 0
+1789651555919 c-stale-folder-ro started pid 79295
+1789651556884 c-stale-folder-ro stopped with code 0
+1789651556885 BREAK uw-01c-undo-destroyed-committed-work: arm (c, mark folder read-only): the mark could not be rewritten at turn two's start, and `undo` reset to 624fbf9cfa9d — turn one's commit fc1d4a24e15c is unreachable and a.txt is gone. The mark said 624fbf9cfa9d; `undo` reported ['restored 624fbf9cfa9db49afa66dd553e66b0f8793a6fc8']
+1789651556885 BREAK uw-01c-undo-silent: arm (c): `undo` neither restored to turn two's start nor said why it refused — HEAD 624fbf9cfa9d, said ['restored 624fbf9cfa9db49afa66dd553e66b0f8793a6fc8']
+1789651556907 bugs: seen df1c61d7b0.md, seen fd89bbb4d4.md

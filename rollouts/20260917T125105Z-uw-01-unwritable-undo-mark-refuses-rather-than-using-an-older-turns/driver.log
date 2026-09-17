@@ -1,0 +1,8 @@
+1789649465468 a-no-mark started pid 23461
+1789649465518 a-no-mark exited early with code 1
+1789649465521 b-stale-file-ro started pid 23485
+1789649466433 b-stale-file-ro stopped with code 0
+1789649466436 c-stale-folder-ro started pid 23618
+1789649467397 c-stale-folder-ro stopped with code 0
+1789649467398 BREAK probe-kernel-did-not-start: an arm could not start its kernel (a=False, b=True, c=True); nothing measured
+1789649467418 bugs: new 5dbb5cc04f.md

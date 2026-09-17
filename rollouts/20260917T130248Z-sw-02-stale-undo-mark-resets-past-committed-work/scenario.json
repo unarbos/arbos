@@ -1,0 +1,9 @@
+{
+  "name": "sw-02-stale-undo-mark-resets-past-committed-work",
+  "doc": "Turn 1 commits A. Before turn 2 the mark file is made unwritable (the injector for a full disk or an unwritable runtime/), so turn 2's start cannot record HEAD=A and the mark still says HEAD0. Turn 2 commits B, then calls `undo` \u2014 meant to drop only turn 2's work. `undo` reads the stale mark, `git reset --hard HEAD0` + `git clean -fd`: commit A is gone from the branch, its files gone from the tree, and the tool says \"restored HEAD0\".",
+  "tags": [
+    "landing",
+    "silent-write",
+    "destructive"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:voice-server",
+  "doc": "From inbox note 2026-09-13-voice-server.md: exercise feature 'voice-server' and run every detector. Needs a kernel built from branch cursor/voice-server.",
+  "tags": [
+    "inbox",
+    "voice-server"
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "sq-02-desktop-stop-holds-follow-up",
+  "doc": "In the desktop: a follow-up typed while a turn runs, then Stop. What the window shows as held must exist in the kernel's inbox too; while the desktop half (#354) is in and the kernel half (#358) is not, the row is drawn but its file is gone, and Send now sends nothing.",
+  "tags": [
+    "landing",
+    "stop",
+    "queue",
+    "desktop"
+  ]
+}

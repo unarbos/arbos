@@ -1,0 +1,24 @@
+{
+  "scenario": "desktop-user-message-card",
+  "doc": "Feature user-message-card: a short prompt's card hugs its text and sits right; a 200-word prompt wraps within the cap; nothing overflows the reading column.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "DriverError: move: no element matches `project-0`",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "user-message-card"
+  },
+  "duration_s": 1.7,
+  "place": "/tmp/arbos-qa-desktop-user-message-card-cg6uhyz4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 b1c8e82a62b1 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T200958Z-desktop-user-message-card",
+  "branch": "main",
+  "usd": 0.0
+}

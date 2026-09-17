@@ -1,0 +1,110 @@
+{
+  "scenario": "uw-01-unwritable-undo-mark-refuses-rather-than-using-an-older-turns",
+  "doc": "A mark that could not be written must not leave `undo` acting on an older turn's mark. Three arms,\n        each a fresh kernel: (a) no mark has ever existed and `runtime/` is read-only; (b) a stale mark from\n        turn one with the mark file unwritable and its folder writable; (c) the same with the folder read-only,\n        where the fix's own `remove_file` cannot land. qal-j10's shape, #444's fix.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "uw-01b-undo-destroyed-committed-work",
+      "detail": "arm (b, mark folder writable): the mark could not be rewritten at turn two's start, and `undo` reset to 461de789c7d8 \u2014 turn one's commit a43b19af1867 is unreachable and a.txt is gone. The mark said 461de789c7d8; `undo` reported ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']",
+      "where": "arbos-engine tools/git.rs snapshot_turn_tree \u2014 a mark that cannot be written is removed, and `undo` with no mark refuses (#444)"
+    },
+    {
+      "rule": "uw-01b-undo-silent",
+      "detail": "arm (b): `undo` neither restored to turn two's start nor said why it refused \u2014 HEAD 461de789c7d8, said ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']",
+      "where": ""
+    },
+    {
+      "rule": "uw-01c-undo-destroyed-committed-work",
+      "detail": "arm (c, mark folder read-only): the mark could not be rewritten at turn two's start, and `undo` reset to 461de789c7d8 \u2014 turn one's commit 8b7c7ee908a6 is unreachable and a.txt is gone. The mark said 461de789c7d8; `undo` reported ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']",
+      "where": "arbos-engine tools/git.rs snapshot_turn_tree \u2014 a mark that cannot be written is removed, and `undo` with no mark refuses (#444)"
+    },
+    {
+      "rule": "uw-01c-undo-silent",
+      "detail": "arm (c): `undo` neither restored to turn two's start nor said why it refused \u2014 HEAD 461de789c7d8, said ['restored 461de789c7d8162a72c104567dcb2e9e7b984b3a']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "head0": "461de789c7d8",
+    "results": {
+      "a_no_mark_runtime_ro": {
+        "turn_ended": true,
+        "head_before": "461de789c7d8",
+        "head_after_undo": "a1260121391c",
+        "b_committed": true,
+        "mark_exists_after": true,
+        "undo_said": [
+          "no checkpoint"
+        ],
+        "turn_notices": [],
+        "turn_kinds": [
+          "tool",
+          "assistant",
+          "tool",
+          "assistant",
+          "turn_complete"
+        ],
+        "log_after": [
+          "a126012 turn two: B",
+          "461de78 ignore",
+          "73b99d5 start"
+        ],
+        "head0_reachable": true
+      },
+      "b_stale_mark_file_ro": {
+        "turn_one_ended": true,
+        "turn_two_ended": true,
+        "head_after_turn_one": "a43b19af1867",
+        "a_committed": true,
+        "mark_before_turn_two": "461de789c7d8",
+        "mark_after_turn_two": "461de789c7d8",
+        "mark_exists_after": true,
+        "head_after_undo": "461de789c7d8",
+        "a_txt_exists": false,
+        "a_reachable_from_head": false,
+        "undo_said": [
+          "restored 461de789c7d8162a72c104567dcb2e9e7b984b3a"
+        ],
+        "log_after": [
+          "461de78 ignore",
+          "73b99d5 start"
+        ],
+        "refused": false,
+        "outcome": "destroyed-committed-work"
+      },
+      "c_stale_mark_folder_ro": {
+        "turn_one_ended": true,
+        "turn_two_ended": true,
+        "head_after_turn_one": "8b7c7ee908a6",
+        "a_committed": true,
+        "mark_before_turn_two": "461de789c7d8",
+        "mark_after_turn_two": "461de789c7d8",
+        "mark_exists_after": true,
+        "head_after_undo": "461de789c7d8",
+        "a_txt_exists": false,
+        "a_reachable_from_head": false,
+        "undo_said": [
+          "restored 461de789c7d8162a72c104567dcb2e9e7b984b3a"
+        ],
+        "log_after": [
+          "461de78 ignore",
+          "73b99d5 start"
+        ],
+        "refused": false,
+        "outcome": "destroyed-committed-work"
+      }
+    },
+    "outcomes": {
+      "a": "said: ['no checkpoint']",
+      "b": "destroyed-committed-work",
+      "c": "destroyed-committed-work"
+    }
+  },
+  "duration_s": 3.8,
+  "place": "/tmp/arbos-qa-uw-01-unwritable-undo-mark-refuses-rather-than-using-an-older-turns-neki4uza/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T125240Z-uw-01-unwritable-undo-mark-refuses-rather-than-using-an-older-turns",
+  "branch": "main-cbbe9922d6a2-control"
+}

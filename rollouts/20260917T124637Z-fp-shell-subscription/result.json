@@ -1,0 +1,30 @@
+{
+  "scenario": "fp-shell-subscription",
+  "doc": "A shell subscription (kind = shell, every = 30s) is the kernel's only cron: it runs the command once per period with no model turn.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "subscription-cadence",
+      "detail": "a 30s shell subscription ran 3 time(s) in 40 s (expected 1, at most 2)",
+      "where": "arbos-kernel subscriptions poller"
+    },
+    {
+      "rule": "shell-sub-spent-a-turn",
+      "detail": "2 model turn(s) for a deliver_to = user shell subscription; the reading must reach the user with no model turn",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "ticks_in_40s": 3,
+    "bare_ticks_in_40s": 3,
+    "user_told": 30
+  },
+  "duration_s": 40.4,
+  "place": "/tmp/arbos-qa-fp-shell-subscription-49fnieoh/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T124637Z-fp-shell-subscription",
+  "branch": "main",
+  "usd": 0.02248
+}

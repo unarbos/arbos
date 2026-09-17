@@ -1,0 +1,40 @@
+{
+  "scenario": "uw-03-a-panicked-turn-that-cannot-be-recorded-is-still-said",
+  "doc": "`pn-01` drives the panic path with a transcript that works. This drives the half nobody had: the turn\n        panics (ARBOS_TEST_PANIC_TURN=root) while root's transcript cannot be appended to, so the words the\n        kernel meant to write have nowhere to go. Expected: the fault is still visible \u2014 `turn_panicked_unrecorded`\n        in the kernel log and the notice delivered to the attached client as a frame \u2014 and the turn does not\n        read as still running. On the control the fault is invisible in every place a person or a next boot looks.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "uw-03-nothing-reached-a-window-or-the-log-by-name",
+      "detail": "nothing named the unrecordable end: `turn_panicked_unrecorded` rows 0, notice frames 0. The window is the only reader left when the file refuses",
+      "where": "arbos-kernel sched.rs \u2014 the words go to the windows live when the transcript refuses them (#408's rule)"
+    },
+    {
+      "rule": "kernel-panic",
+      "detail": "panicked at crates/arbos-kernel/src/sched.rs:162:21:\nARBOS_TEST_PANIC_TURN: the turn task panicked on purpose\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nturn_panicked root: ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose after 0.0s\n",
+      "where": "panicking.stderr.log"
+    }
+  ],
+  "notes": {
+    "turn_reached_idle": true,
+    "kernel_log_panic_rows": [
+      {
+        "event": "turn_panicked",
+        "detail": "ARBOS_TEST_PANIC_TURN: the turn task panicked on purpose after 0.0s"
+      }
+    ],
+    "turn_panicked_unrecorded_rows": 0,
+    "notice_delivered_as_a_frame": 0,
+    "event_frames_seen": 0,
+    "turn_folders": 1,
+    "turn_folders_carrying_an_error": [],
+    "transcript_bytes_after": 0,
+    "kinds_after_restart": []
+  },
+  "duration_s": 5.8,
+  "place": "/tmp/arbos-qa-uw-03-a-panicked-turn-that-cannot-be-recorded-is-still-said-hrln52s6/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T125407Z-uw-03-a-panicked-turn-that-cannot-be-recorded-is-still-said",
+  "branch": "main-cbbe9922d6a2-control"
+}
