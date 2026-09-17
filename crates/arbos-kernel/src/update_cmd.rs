@@ -418,7 +418,19 @@ mod tests {
         }
         let mut child = child.expect("the copied sleep started");
         let pid = child.id() as i32;
-        assert_eq!(super::pid_binary_gone(pid, &bin), Some(false));
+        // CI (ubuntu runner) read Some(true) here on a live copy while
+        // every local run read Some(false): the message carries what
+        // /proc says, so the next red explains itself.
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
+        assert_eq!(
+            super::pid_binary_gone(pid, &bin),
+            Some(false),
+            "bin={} exe={exe:?} exe_exists={:?} running={:?} installed={:?}",
+            bin.display(),
+            exe.as_ref().map(|e| e.exists()),
+            exe.as_ref().ok().and_then(|e| arbos_core::binary_identity::of(e)),
+            arbos_core::binary_identity::of(&bin),
+        );
         // An update: a new file renamed over the same path. /proc names
         // the old inode as deleted although the path exists.
         std::fs::copy("/bin/sleep", dir.join("sleeper.new")).unwrap();
