@@ -315,8 +315,26 @@ fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
         .join(".arbos")
         .join(format!("index-scratch-{}", std::process::id()));
     let _ = std::fs::create_dir_all(cwd.join(".arbos"));
-    if index.exists() {
-        std::fs::copy(&index, &scratch).map_err(|e| format!("copy the index: {e}"))?;
+    // Another git in the same repository (a person's `git commit` in a
+    // terminal) renames `index.lock` over `index` while this runs: for an
+    // instant the index is not a regular file, and the copy failed with
+    // "the source path is neither a regular file nor a symlink" (seen
+    // once by QA, beside their harness's own commit). A few tries over a
+    // quarter of a second; no index at all is an empty one.
+    let mut tries = 0;
+    loop {
+        if !index.exists() {
+            break;
+        }
+        match std::fs::copy(&index, &scratch) {
+            Ok(_) => break,
+            Err(e) if tries < 10 => {
+                tries += 1;
+                let _ = e;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(e) => return Err(format!("copy the index: {e}")),
+        }
     }
     // `.arbos/` is kept out of the add by an excludes file of our own —
     // the user's global excludes plus `/.arbos/` — rather than a pathspec:
@@ -531,7 +549,27 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
                 .current_dir(cwd)
                 .status();
         }
-        if steps.iter().all(|ok| *ok) {
+        // Judged by the tree's state, not the last command's exit code:
+        // `read-tree -u` returned non-zero on an unwritable folder after
+        // the tree was already right, and the person with a good tree
+        // was told it was broken and handed commands to run (QA's
+        // rw-08c). HEAD is compared, and the working tree is committed
+        // the same way once more and its tree id compared.
+        let head_now = git_out(cwd, &["rev-parse", "HEAD"]);
+        let tree_of = |commit: Option<&str>| -> Option<String> {
+            let c = commit.unwrap_or(&before_head);
+            git_out(cwd, &["rev-parse", &format!("{c}^{{tree}}")])
+        };
+        let tree_before = tree_of(before_work.as_deref());
+        let tree_now = match work_commit(cwd, &before_head) {
+            Ok(now) => tree_of(now.as_deref()),
+            Err(_) => None,
+        };
+        let same = head_now.as_deref() == Some(before_head.as_str())
+            && tree_before.is_some()
+            && tree_now == tree_before;
+        let _ = steps;
+        if same {
             anyhow::anyhow!(
                 "{why}; the tree was put back as it was (HEAD {}{})",
                 &before_head[..before_head.len().min(12)],
@@ -541,8 +579,20 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
                     .unwrap_or_default()
             )
         } else {
+            let what = if head_now.as_deref() != Some(before_head.as_str()) {
+                format!(
+                    "HEAD is at {} instead of {}",
+                    head_now
+                        .as_deref()
+                        .map(|h| &h[..h.len().min(12)])
+                        .unwrap_or("?"),
+                    &before_head[..before_head.len().min(12)]
+                )
+            } else {
+                "the working tree differs from what it was".to_string()
+            };
             anyhow::anyhow!(
-                "{why}; and the tree could not be put back — recover by hand: git reset --hard {}{}",
+                "{why}; and the tree could not be put back ({what}) — recover by hand: git reset --hard {}{}",
                 before_head,
                 before_work
                     .as_deref()
@@ -1419,6 +1469,64 @@ mod tests {
             before,
             "a restore that reports an error changed the tree"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// QA's rw-08c: the put-back's own `read-tree` returns non-zero on a
+    /// folder it cannot write, *after* the tree is already right — and the
+    /// message judged by that exit code told a person with a good tree
+    /// that it was broken. The put-back is judged by the tree's state.
+    #[cfg(unix)]
+    #[test]
+    fn a_put_back_that_leaves_the_tree_right_is_reported_right_whatever_git_returned() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = identityless_repo("putback-ro");
+        for f in ["f1", "f2", "f3"] {
+            std::fs::write(dir.join(format!("{f}.txt")), format!("{f}\n")).unwrap();
+        }
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        let work = work_commit(&dir, &head).unwrap().unwrap();
+        let cp = Checkpoint {
+            line: 9,
+            ts: 0,
+            head: head.clone(),
+            work: Some(work.clone()),
+            clean: false,
+            work_error: None,
+        };
+        let mine = later_work(&dir);
+        // A folder git cannot write into, holding a file of the person's.
+        std::fs::create_dir(dir.join("later-dir")).unwrap();
+        std::fs::write(dir.join("later-dir/keep.txt"), "keep\n").unwrap();
+        std::fs::set_permissions(
+            dir.join("later-dir"),
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::fs::write(dir.join("f3.txt"), "f3 changed\n").unwrap();
+        let blob = git_out(&dir, &["rev-parse", &format!("{work}:f3.txt")]).unwrap();
+        drop_object(&dir, &blob);
+        let before = state(&dir);
+        let err = restore(&dir, &cp).unwrap_err().to_string();
+        let after = state(&dir);
+        std::fs::set_permissions(
+            dir.join("later-dir"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert_eq!(
+            after, before,
+            "a restore that reports an error changed the tree"
+        );
+        assert!(
+            err.contains("the tree was put back as it was"),
+            "a good tree is not called broken: {err}"
+        );
+        assert!(!err.contains("recover by hand"), "{err}");
+        tree_as_it_was(&dir, &mine);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
