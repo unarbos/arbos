@@ -277,9 +277,15 @@ fn process_body(
     };
     // The kernel's own words, when it has told us how this ended — it is the
     // side that knows, and after a kernel's death its replacement is the only
-    // thing that can say what became of the job. Only for an end: a live
-    // job's "running for 41s (pid 4812)" would go stale between asks, and a
-    // stale clock is its own small lie.
+    // thing that can say what became of the job.
+    //
+    // Only for an end, and this restraint is load-bearing: `status` is a
+    // snapshot from the last time we asked, and we ask on attach, not on a
+    // timer. A live job's "running for 41s (pid 4812)" would therefore sit
+    // there reading 41s an hour later — a clock that has stopped while
+    // claiming to run, which is the family of lie this whole panel exists to
+    // end. Widening this to live rows means asking on a timer first; without
+    // that, showing them is worse than showing nothing.
     let ended = gone || exit.is_some() || done.is_some_and(|code| code.is_some());
     let status = match (kernel_words, ended) {
         (Some(words), true) if !words.is_empty() => words.to_owned(),
@@ -292,10 +298,19 @@ fn process_body(
             (None, Link::Lost) => "link lost".to_owned(),
         },
     };
-    let text = if tail.is_empty() {
-        SharedString::from("(no output yet)")
-    } else {
-        SharedString::from(tail)
+    // "No output yet" is only true while there is somewhere for output to
+    // appear. A job whose journal is not on disk has nowhere, and saying
+    // nothing yet about a row that can never say anything is how an empty
+    // screen passes for a working one (the 164 GB job's folder was gone while
+    // it wrote). Checked here rather than remembered: the file either opens or
+    // it does not.
+    let readable = streamed || log.is_file();
+    let text = match (tail.is_empty(), readable) {
+        (false, _) => SharedString::from(tail),
+        (true, true) => SharedString::from("(no output yet)"),
+        (true, false) => SharedString::from(
+            "The journal for this job is not on disk, so its output cannot be read here.",
+        ),
     };
     div()
         .flex_1()
@@ -329,7 +344,8 @@ fn process_body(
         .into_any_element()
 }
 
-/// The last `TAIL_LINES` of a file, read from its end only.
+/// The last `TAIL_LINES` of a file, read from its end only — the end of a
+/// journal, as the panel draws it.
 fn tail_lines(path: &Path) -> String {
     let Ok(mut file) = File::open(path) else {
         return String::new();
@@ -347,6 +363,37 @@ fn tail_lines(path: &Path) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let skip = lines.len().saturating_sub(TAIL_LINES);
     lines[skip..].join("\n")
+}
+
+/// What a row seeded from the kernel's list starts with: everything the job
+/// has already written, ready for the kernel's `job` frames to be appended to
+/// it.
+///
+/// The trailing newline is the whole point of this existing beside
+/// [`tail_lines`], which drops it. Without it the first delta lands on the end
+/// of the last line the job wrote and two lines read as one — seen on the first
+/// still of this working, as `tick 24tick 25`. A file that ends mid-line has no
+/// newline to keep, and there the delta *is* the rest of that line, so the
+/// question is asked of the file rather than assumed either way.
+pub fn journal_prime(path: &Path) -> String {
+    let text = tail_lines(path);
+    if text.is_empty() || !ends_with_newline(path) {
+        return text;
+    }
+    text + "\n"
+}
+
+/// Whether a file's last byte is a newline. Read from the end, so the size of
+/// the journal does not matter.
+fn ends_with_newline(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if file.seek(SeekFrom::End(-1)).is_err() {
+        return false;
+    }
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).is_ok() && last[0] == b'\n'
 }
 
 fn path_body(
@@ -787,5 +834,40 @@ fn language_for(path: &Path) -> &'static str {
         other => syntax::lang::resolve(other)
             .map(|lang| lang.name)
             .unwrap_or(""),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::testing::Scratch;
+
+    #[test]
+    fn priming_keeps_the_break_the_next_delta_needs() {
+        let dir = Scratch::new("journal");
+        let log = dir.path().join("out.log");
+        std::fs::write(&log, "tick 23\ntick 24\n").unwrap();
+        // The kernel's next `job` frame is appended to this, so a lost
+        // newline reads as `tick 24tick 25` — which is what the first still of
+        // a seeded row showed.
+        assert_eq!(journal_prime(&log), "tick 23\ntick 24\n");
+    }
+
+    #[test]
+    fn a_journal_cut_mid_line_is_left_for_the_delta_to_finish() {
+        let dir = Scratch::new("journal-partial");
+        let log = dir.path().join("out.log");
+        std::fs::write(&log, "tick 23\nhalf a li").unwrap();
+        assert_eq!(
+            journal_prime(&log),
+            "tick 23\nhalf a li",
+            "no newline to keep: the rest of that line is what comes next"
+        );
+    }
+
+    #[test]
+    fn nothing_to_prime_from_is_nothing() {
+        let dir = Scratch::new("journal-missing");
+        assert_eq!(journal_prime(&dir.path().join("gone.log")), "");
     }
 }

@@ -29,7 +29,10 @@ use crate::{
         watch::{self, Watch},
     },
     reading,
-    view::component::{surface::Link, transcript},
+    view::component::{
+        surface::{Link, journal_prime},
+        transcript,
+    },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bezel::{
@@ -2682,11 +2685,92 @@ impl Workspace {
                 None => {}
             }
         }
+        changed |= self.seed_running_jobs(ix, chat, listed);
         if changed {
             self.projects[ix].sync_panel();
             self.push_snapshot(ix);
             cx.notify();
         }
+    }
+
+    /// Rows for jobs the kernel says are running that this window does not
+    /// hold. Answers whether it added any.
+    ///
+    /// This is the relaunch a person actually meets: he closes the app, or it
+    /// updates itself, while something long is running; he comes back, and the
+    /// row he most wants is the one still going. Filing tabs on disk cannot
+    /// bring that one back — a live job has no exit file, and inventing one
+    /// from a remembered row is the guess this design refuses — so it comes
+    /// from the kernel's own answer instead. A finished job returning while a
+    /// live one vanished was the wrong way round.
+    ///
+    /// Only running jobs, and only jobs:
+    ///
+    /// - a **finished** job the window never held is history rather than work
+    ///   in progress, and seeding it would repopulate tabs nobody opened;
+    /// - a **shell** cannot be seeded honestly. Its scrollback lives in the
+    ///   pty and is not replayed, so a reattached row would draw an empty
+    ///   screen until the shell next printed — a live thing that looks dead.
+    ///   That wants a decision (and probably a kernel-side replay) rather than
+    ///   a row that misleads;
+    /// - a **page** is a picture the kernel pushes on change, and nothing
+    ///   pushes on attach.
+    ///
+    /// A seeded row is listed and nothing more: it does not open the drawer or
+    /// take the tab in front, because the person did not ask for it — the same
+    /// rule as any other surface the agent owns.
+    fn seed_running_jobs(&mut self, ix: usize, chat: u64, listed: &[KernelSurface]) -> bool {
+        let owner = self.projects[ix].session(chat).map(|c| c.id);
+        let mut added = false;
+        for row in listed
+            .iter()
+            .filter(|row| row.panel == "process" && row.running)
+        {
+            let held = self.projects[ix]
+                .surfaces
+                .iter()
+                .any(|surface| surface.kernel_id() == Some(row.id.as_str()));
+            if held {
+                continue;
+            }
+            // The journal's path is the kernel's to give: `url` on the row.
+            // Without one there is nothing to read, and a row with no output
+            // and no way to get any is not worth drawing.
+            let Some(log) = row.url.as_ref().map(PathBuf::from) else {
+                continue;
+            };
+            let title = row.title.clone().unwrap_or_else(|| row.id.clone());
+            let id = self.upsert_surface(
+                ix,
+                owner,
+                SurfaceKind::Process,
+                title,
+                Bind::Process {
+                    id: row.id.clone(),
+                    // What the job has written so far, then the kernel's
+                    // `job` frames append to it from here — measured: those
+                    // frames carry what is appended *after* a client attaches,
+                    // never a replay, so without this the row starts at
+                    // whatever second the window came back and the work before
+                    // it is invisible. Priming and appending is a row that
+                    // reads whole and keeps moving; priming alone would be the
+                    // frozen screen this exists to avoid.
+                    live: journal_prime(&log),
+                    log,
+                    done: None,
+                },
+                "process",
+                |surface, bind| {
+                    surface.kernel_id().is_some() && surface.kernel_id() == bind.kernel_id()
+                },
+            );
+            if let Some(surface) = self.projects[ix].surface_mut(id) {
+                surface.status = Some(row.status.clone());
+            }
+            self.projects[ix].panel.add_surface(id, false, false);
+            added = true;
+        }
+        added
     }
 
     // ── the side panel ───────────────────────────────────────────────
