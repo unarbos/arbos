@@ -229,6 +229,34 @@ final class ChatStore: ObservableObject {
         return false
     }
 
+    /// The hub's refusals, said the way a person would say them.
+    ///
+    /// The hub is right to log `no machine named "arboslife" is registered
+    /// (known: none)`, and the app was showing that sentence to Jacob. It is
+    /// accurate and it is a record of our internals; what he needs to know is
+    /// that ArbosLife is off and this chat will not open until it is back.
+    ///
+    /// Anything whose shape is not recognised keeps the hub's own words.
+    /// Guessing at a refusal is worse than quoting one.
+    static func inPlainWords(_ why: String) -> String {
+        let text = why.replacingOccurrences(of: "hub: ", with: "")
+        if let machine = quoted(in: text), text.contains("no machine named") {
+            return "\(machine) is not connected — its kernel isn't running, or the machine is off."
+        }
+        if let project = quoted(in: text), text.contains("no project named") {
+            return "\(project) isn't on that machine any more."
+        }
+        return text
+    }
+
+    /// The first `"…"` in a hub message: the name it is talking about.
+    private static func quoted(in text: String) -> String? {
+        let parts = text.split(separator: "\"", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+        let name = String(parts[1])
+        return name.isEmpty ? nil : name
+    }
+
     /// The other end's own words, when the failure carries them. Transport
     /// errors are not refusals and are left to the waiting card.
     private func refusal(from error: Error) -> String? {
@@ -635,7 +663,7 @@ final class ChatStore: ObservableObject {
             busy = false
             if settings.chatEndpoint != nil, refusal == nil { scheduleReconnect() }
         case .refused(let why):
-            refusal = why.replacingOccurrences(of: "hub: ", with: "")
+            refusal = Self.inPlainWords(why)
             reconnectTask?.cancel()
             reconnectTask = nil
             reconnectIn = nil
