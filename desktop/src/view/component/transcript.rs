@@ -578,10 +578,13 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// reason only — the instruction half is the agent's to act on, not the
 /// reader's. No strip, no retry.
 fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
-    // "project page not updated last turn: a worker was started or
-    // reported and .arbos/notes.md did not change — update it" is the
-    // kernel's whole sentence; the reader needs the first clause, as a
-    // sentence of its own.
+    // The kernel's nudges are written to the agent ("correction not kept:
+    // last turn the user corrected you … keep it now, in one call…"). The
+    // person sees a system line in their own words, in a class of its
+    // own — a left rule and the faint caption, never the prose's colour —
+    // so a log entry does not read as part of the reply (Jacob, report
+    // 2026-09-17-28: "Correction not kept with a loop glyph … reads like
+    // part of the reply").
     let clause = text
         .split(" — ")
         .next()
@@ -590,15 +593,17 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .next()
         .unwrap_or(text)
         .trim();
-    let mut shown = String::with_capacity(clause.len());
-    let mut chars = clause.chars();
-    if let Some(first) = chars.next() {
-        shown.extend(first.to_uppercase());
-        shown.push_str(chars.as_str());
-    }
-    let shown = if shown.starts_with("Project page not updated") {
+    let shown = if clause.starts_with("project page not updated") {
         "Project page not updated this turn".to_string()
+    } else if clause.starts_with("correction not kept") {
+        "Your correction was not saved last turn; the agent has been asked to keep it now.".to_string()
     } else {
+        let mut shown = String::with_capacity(clause.len());
+        let mut chars = clause.chars();
+        if let Some(first) = chars.next() {
+            shown.extend(first.to_uppercase());
+            shown.push_str(chars.as_str());
+        }
         shown
     };
     div()
@@ -607,15 +612,12 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .max_w(px(root::CHAT_MAX_WIDTH))
         .flex()
         .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            icons::icon(icons::media::REPEAT)
-                .size(px(11.))
-                .text_color(theme.text_faint),
-        )
+        .items_stretch()
+        .gap(px(8.))
+        .child(div().flex_none().w(px(2.)).rounded(px(1.)).bg(theme.hairline(0.9)))
         .child(
             div()
+                .py(px(1.))
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
                 .child(SharedString::from(shown)),
