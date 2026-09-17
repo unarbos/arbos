@@ -838,24 +838,8 @@ fn short_error(text: &str) -> String {
     if lower.contains("cut off") || lower.contains("mid-stream") {
         return "Answer was cut off. Send the message again.".into();
     }
-    // The reason stays on the line a person reads: "Connection failed:
-    // ssh to ArbosLife refused the key". The session already put it in
-    // plain words (`connect_fault_words`); an older text with the raw
-    // chain gets its most specific link. Only the model-provider retry
-    // line, handled in `short_notice`, collapses this phrase.
-    if let Some(at) = lower.find("connection failed") {
-        let after = text[at + "connection failed".len()..]
-            .trim_start_matches([':', ' ', '—', '-'])
-            .trim();
-        if after.is_empty() {
-            return "Connection failed.".into();
-        }
-        let reason = after
-            .split_once(" — retrying")
-            .map(|(r, _)| r)
-            .unwrap_or(after)
-            .trim();
-        return format!("Connection failed: {}", shorten(reason, 160));
+    if lower.contains("connection failed") {
+        return "Connection failed.".into();
     }
     if lower.contains("attach writer closed") {
         return "Stopped.".into();

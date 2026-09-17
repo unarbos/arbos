@@ -1240,6 +1240,10 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "held": chat.plan_queued(),
         "asks": chat.plan_open().filter(|n| n.do_kind == "ask").count(),
         "reconnect_attempt": chat.reconnect_attempt,
+        // The plain-words reason the bar keeps while a connection is down,
+        // so a rig can assert the tab says *why* and not only that it failed.
+        "connect_fault": chat.connect_fault,
+        "reconnect_in_secs": chat.reconnect_at.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_secs()),
         "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",

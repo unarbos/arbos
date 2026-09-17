@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -497,10 +497,6 @@ pub struct ChatSession {
     /// or Stop meanwhile starts a new generation, and its failure must arm
     /// a new timer rather than defer to the stale one.
     pub reconnect_gen: u64,
-    /// Why the last connect failed, in plain words, for the bar to keep
-    /// for as long as the state lasts ("ssh to ArbosLife refused the
-    /// key"). Cleared by a good connection. Runtime only.
-    pub connect_fault: Option<String>,
     /// The agent's own name for the session, from `SessionInfoUpdate`.
     pub title: String,
     /// The name you typed, which the agent never overwrites. Two fields rather
@@ -725,7 +721,6 @@ impl ChatSession {
             reconnect_attempt: 0,
             reconnect_at: None,
             reconnect_gen: 0,
-            connect_fault: None,
             title: String::new(),
             name: None,
             updated: SystemTime::now(),
@@ -824,7 +819,6 @@ impl ChatSession {
             reconnect_attempt: 0,
             reconnect_at: None,
             reconnect_gen: 0,
-            connect_fault: None,
             title: record.title,
             name: record.name,
             updated,
@@ -923,7 +917,6 @@ impl ChatSession {
             reconnect_attempt: 0,
             reconnect_at: None,
             reconnect_gen: 0,
-            connect_fault: None,
             title,
             name,
             updated,
@@ -4426,33 +4419,18 @@ fn pump(
                             return;
                         }
                         chat.connection = Connection::Lost;
-                        // The reason, in the words a person reads, with
-                        // the bootstrap step it died on when there was one
-                        // ("installing arbos-kernel 0.2.1 failed: ArbosLife
-                        // refused permission: …"). Jacob read
-                        // "Connection failed." and a counter for three
-                        // hours while the reason sat behind Details.
-                        let reason = connect_fault_words(chat.host.as_deref(), &chat.cwd, &e);
-                        let news = chat.connect_fault.as_deref() != Some(reason.as_str());
-                        chat.connect_fault = Some(reason.clone());
-                        // A fault is news the first time it is seen; a
-                        // retry in progress is not, and a race the next
-                        // try wins is not worth a line.
-                        if (!again && news)
-                            || chat.reconnect_attempt >= 1 && chat.reconnect_attempt % 5 == 0
+                        // A fault is news; a retry in progress is not, and
+                        // a race the next try wins is not worth a line.
+                        if !again || chat.reconnect_attempt >= 1 && chat.reconnect_attempt % 5 == 0
                         {
-                            chat.notice(true, &format!("connection failed: {reason}"));
+                            chat.notice(true, &format!("connection failed: {e:#}"));
                         }
                     });
                     let retry = workspace
                         .session(id)
                         .is_some_and(|chat| chat.attach_gen == attach_gen && chat.resumable());
-                    if retry {
-                        // A fault no retry mends (no binary, a bad path)
-                        // is still re-checked, slowly: the machine may be
-                        // fixed from the other side, and a tab that never
-                        // looks again is a dead tab.
-                        workspace.schedule_reconnect(id, !again, cx);
+                    if again && retry {
+                        workspace.schedule_reconnect(id, cx);
                     }
                 });
                 return;
@@ -4631,7 +4609,7 @@ fn pump(
                     && matches!(chat.connection, Connection::Lost)
             });
             if lost {
-                workspace.schedule_reconnect(id, false, cx);
+                workspace.schedule_reconnect(id, cx);
             }
             cx.notify();
         });
@@ -4688,112 +4666,6 @@ fn transient_connect_error(e: &anyhow::Error) -> bool {
     ]
     .iter()
     .any(|fault| text.contains(fault))
-}
-
-/// Why a connect failed, in one plain clause with the machine named, for
-/// the notice and the bar: the hub or the transport has usually said
-/// exactly why, and the person should read it rather than "Connection
-/// failed." A remote bootstrap that died mid-step names the step first
-/// ("installing arbos-kernel 0.2.1 on ArbosLife failed: …").
-pub(crate) fn connect_fault_words(host: Option<&str>, cwd: &Path, e: &anyhow::Error) -> String {
-    let text = format!("{e:#}");
-    let machine = host.unwrap_or("this machine");
-    let step = host
-        .and_then(|h| crate::kernel::remote_progress(h, cwd))
-        .and_then(|p| match p {
-            arbos_core::remote_kernel::Progress::Failed { step, .. } => Some(step),
-            _ => None,
-        })
-        .filter(|s| !s.eq_ignore_ascii_case("connecting"))
-        .map(|s| {
-            let mut c = s.chars();
-            let lower = c
-                .next()
-                .map(|f| f.to_lowercase().collect::<String>() + c.as_str())
-                .unwrap_or_default();
-            // The reason names the machine; the step need not again.
-            format!("{lower} failed: ")
-        })
-        .unwrap_or_default();
-    format!("{step}{}", plain_transport_words(machine, &text))
-}
-
-/// The transport's or the kernel's reason in the reader's words. Patterns
-/// first; else the most specific link of the error chain, whole.
-fn plain_transport_words(machine: &str, text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let http = lower
-        .find("http ")
-        .or_else(|| lower.find("status "))
-        .and_then(|at| lower[at..].split_whitespace().nth(1))
-        .and_then(|code| {
-            code.trim_matches(|c: char| !c.is_ascii_digit())
-                .parse::<u16>()
-                .ok()
-        })
-        .filter(|code| (400..600).contains(code));
-    if lower.contains("publickey") {
-        return format!("ssh to {machine} refused the key");
-    }
-    if lower.contains("permission denied") {
-        let what = text.rsplit(": ").next().unwrap_or(text).trim();
-        return format!("{machine} refused permission: {}", shorten_words(what, 80));
-    }
-    if lower.contains("could not resolve hostname")
-        || lower.contains("name or service not known")
-        || lower.contains("nodename nor servname")
-    {
-        return format!("{machine} is not a name this machine can resolve");
-    }
-    if lower.contains("no route to host") || lower.contains("network is unreachable") {
-        return format!("no route to {machine}");
-    }
-    if lower.contains("connection refused") {
-        return format!("{machine} refused the connection (nothing listening)");
-    }
-    if lower.contains("timed out") || lower.contains("did not answer") || lower.contains("timeout")
-    {
-        return format!("{machine} did not answer (timeout)");
-    }
-    if let Some(code) = http {
-        return match code {
-            404 => format!("{machine} answered HTTP 404 — not an Arbos kernel or hub"),
-            502 | 503 | 504 => format!("{machine} is not answering (HTTP {code})"),
-            401 | 403 => format!("{machine} refused this window (HTTP {code})"),
-            _ => format!("{machine} answered HTTP {code}"),
-        };
-    }
-    if lower.contains("failed to start") {
-        let bin = text
-            .split("failed to start ")
-            .nth(1)
-            .and_then(|rest| rest.split([':', ' ']).next())
-            .unwrap_or("arbos-kernel");
-        return format!("no kernel binary at {bin} on {machine}");
-    }
-    if lower.contains("is not a directory") {
-        return "the project folder is gone or was moved".into();
-    }
-    if lower.contains("is not a file") {
-        return format!("ARBOS_KERNEL_BIN does not point at a file on {machine}");
-    }
-    if lower.contains("bad kernel url") {
-        return format!("the kernel on {machine} announced an address this window cannot read");
-    }
-    // The chain's most specific link: after the last ": " when the links
-    // read as context, else the whole text, bounded.
-    let last = text.rsplit(": ").next().unwrap_or(text).trim();
-    let words = if last.len() >= 12 { last } else { text.trim() };
-    shorten_words(words, 140)
-}
-
-fn shorten_words(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_owned();
-    }
-    let mut cut: String = text.chars().take(max.saturating_sub(1)).collect();
-    cut.push('…');
-    cut
 }
 
 /// A child's row name from the brief the kernel named it after: the lead
