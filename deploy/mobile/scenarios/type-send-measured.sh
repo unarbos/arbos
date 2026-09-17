@@ -31,7 +31,7 @@ LINE="probe: fix the failing test, add perimeter(w, h) and diagonal(w, h) with t
 CHARS=${#LINE}
 
 away() { idb ui tap 196 150 --udid "$UDID" >/dev/null 2>&1; sleep 1; }
-focus() { ui tap "Follow up" >/dev/null 2>&1 || ui tap "Message" >/dev/null 2>&1 || ui tap "Type to" >/dev/null 2>&1; }
+focus() { ui focus >/dev/null 2>&1; }
 
 clear_field() {
   local n
@@ -46,11 +46,12 @@ clear_field() {
 }
 
 echo "== 1. where the journey's fixed tap point lands =="
-away
-echo "with the keyboard down, the composer is at: $(ui find 'Follow up' 2>/dev/null || echo 'not found')"
+clear_field
+echo "keyboard down, the composer sits at:"
+ui dump | awk '$3 == "TextField" { print "  " $1 " " $2 }'
 focus; sleep 1
-echo "with the keyboard up, the thing at 200,788 is:"
-ui dump | awk '$2 > 745 && $2 < 800 && $1 > 150 && $1 < 260' || echo "  nothing"
+echo "keyboard up, what covers 200,788:"
+ui dump | awk '$2 > 745 && $2 < 800 && $1 > 150 && $1 < 260 { print "  " $0 }'
 away
 
 echo
