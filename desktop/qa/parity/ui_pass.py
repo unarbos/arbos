@@ -1263,8 +1263,15 @@ class Pass:
             return
         sc = "right-panel"
         self.inv(sc)
-        self.check("toggle-panel", sc, "click", "panel_open flips", lambda: self.app.click("toggle-panel"), lambda a, b: a["panel_open"] != b["panel_open"])
-        self.check("cmd-b", sc, "cmd-b", "panel_open flips back", lambda: self.app.key("cmd-b"), lambda a, b: a["panel_open"] != b["panel_open"])
+        # `panel_shown` is what is on screen; `panel_open` is the wish (true
+        # at 900 wide while nothing is drawn, F-161). The row asserts on
+        # both: the wish flips and the drawing follows, or says why not.
+        def flips(a, b):
+            drawn = "panel_shown" in b
+            ok = a["panel_open"] != b["panel_open"] and (not drawn or b.get("panel_shown") == b["panel_open"] or f"shown={b.get('panel_shown')} (window too narrow for the drawer)")
+            return ok and f"open {a['panel_open']}->{b['panel_open']} shown={b.get('panel_shown')}"
+        self.check("toggle-panel", sc, "click", "panel_open flips and panel_shown follows", lambda: self.app.click("toggle-panel"), flips)
+        self.check("cmd-b", sc, "cmd-b", "panel_open flips back and panel_shown follows", lambda: self.app.key("cmd-b"), flips)
         if not self.state()["panel_open"]:
             self.app.key("cmd-b")
         if self.app.exists("panel-set-goals"):
