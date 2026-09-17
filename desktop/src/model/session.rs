@@ -1126,10 +1126,16 @@ impl ChatSession {
     fn turn_alive(&mut self) {
         // Real progress: the model is no longer just thinking in silence.
         self.working = None;
-        if self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
+        // A record arriving after the turn's own end is that turn's tail
+        // — however late (the kernel's settled records landed past the
+        // 1 s lag and reopened an idle chat: "stop the turn before
+        // rewinding" on an idle chat, F-122b, cycle 29). A new turn
+        // announces itself first: a prompt sent here, another client's
+        // line, a wake, or the kernel's thinking pulse — each clears
+        // `turn_ended`, and only then does a token reopen the turn.
+        if self.turn_ended.is_some() {
             return;
         }
-        self.turn_ended = None;
         self.turn_open = true;
     }
 
@@ -1928,6 +1934,7 @@ impl ChatSession {
         channel: String,
     ) {
         self.new_turn_steps();
+        self.turn_ended = None;
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         // A line this window sent and is still waiting to see recorded:
         // its card is the newest with these words. However long the kernel
@@ -2181,6 +2188,9 @@ impl ChatSession {
     /// answers, and before a reconnect finishes.
     fn land_turn(&mut self, content: &Prompt) {
         self.new_turn_steps();
+        // A prompt of ours is a new turn: the last one's end no longer
+        // holds back the tokens that follow (F-122b).
+        self.turn_ended = None;
         let squashed: String = content.text.split_whitespace().collect();
         if !squashed.is_empty() {
             self.awaiting_echo.push_back(squashed);
@@ -2860,6 +2870,7 @@ impl ChatSession {
             }
             Event::Woke { kind, text, at } => {
                 self.new_turn_steps();
+                self.turn_ended = None;
                 // The kernel writes `wake` then `user` for a prompt: the
                 // user line is that turn's boundary. Every other kind opens
                 // a segment of its own (F-62).
