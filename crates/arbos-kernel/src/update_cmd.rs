@@ -418,9 +418,27 @@ mod tests {
         }
         let mut child = child.expect("the copied sleep started");
         let pid = child.id() as i32;
-        // CI (ubuntu runner) read Some(true) here on a live copy while
-        // every local run read Some(false): the message carries what
-        // /proc says, so the next red explains itself.
+        // `spawn` returns when the child's exec has been accepted, but
+        // /proc/<pid>/exe can still name the parent's image for an
+        // instant after a vfork-style spawn; on the CI runner that read
+        // as "another file is running" (Some(true)) about one time in
+        // two, never locally. What `serving` reads in life is a kernel
+        // that has run for seconds or days; here, wait for the link to
+        // settle on the copy before judging it.
+        let want = std::fs::canonicalize(&bin).unwrap();
+        let settle = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+            if exe.as_deref() == Some(want.as_path()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < settle,
+                "/proc/{pid}/exe never settled on {}: {exe:?}",
+                want.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
         assert_eq!(
             super::pid_binary_gone(pid, &bin),
@@ -428,7 +446,9 @@ mod tests {
             "bin={} exe={exe:?} exe_exists={:?} running={:?} installed={:?}",
             bin.display(),
             exe.as_ref().map(|e| e.exists()),
-            exe.as_ref().ok().and_then(|e| arbos_core::binary_identity::of(e)),
+            exe.as_ref()
+                .ok()
+                .and_then(|e| arbos_core::binary_identity::of(e)),
             arbos_core::binary_identity::of(&bin),
         );
         // An update: a new file renamed over the same path. /proc names
