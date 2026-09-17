@@ -90,6 +90,10 @@ P_SUB = ("Use parallel sub-agents: one reviews math_utils.py for edge cases, one
          "one drafts a CHANGELOG.md. Then merge their results.")
 P_ART = "Create a file named report.md containing three bullet points about this project, then show me the file."
 P_EDIT = "Add a mul(a, b) function to math_utils.py and call it from main.py with mul(4, 5)."
+# A turn the root does itself — a command of its own — so the fold under
+# test is the turn under test: a delegating turn's fold is bare by design
+# (F-104) and the row had been clicking whatever fold was on screen (R10).
+P_OWN = "Run `ls` yourself with bash — no workers — and tell me in one line what is here."
 P_PERM = "Delete the file README.md with `rm -f README.md`, then recreate it with one line."
 P_PR = ("Spawn one sub-agent whose only task is to run exactly this shell command and report the URL it prints: "
         "gh pr create --base master --head cursor/parity-pill --title 'Parity PR' --body 'Opened by the parity pass.' "
@@ -224,12 +228,21 @@ class Pass:
         return [e["path"] for e in els if e.get("interactive") and (pattern is None or self.drv._matches(pattern, e["path"]))]
 
     def inv(self, screen: str) -> list[str]:
+        # A new scenario: a recover in the last one no longer taints rows.
+        self.current_screen = screen
+        if getattr(self, "context_lost", None) not in (None, screen):
+            self.context_lost = None
         found = sorted(set(p.rsplit(".", 1)[-1] for p in self.ids()))
         self.inventory[screen] = found
         log(f"inventory {screen}: {len(found)} interactive ids")
         return found
 
     def record(self, element: str, screen: str, action: str, expected: str, observed: str, result: str, still: str = "") -> None:
+        # After a recover moved the run to a fresh chat, later rows in the
+        # same scenario run without the scenario's history: a pass there is
+        # not the pass the row names (rig audit R5).
+        if result == "pass" and getattr(self, "context_lost", None) == screen:
+            result = "pass-after-recover"
         self.rows.append({"element": element, "screen": screen, "action": action, "expected": expected,
                           "observed": observed, "result": result, "branch": self.branch, "still": still})
         log(f"{result:13s} {element:38s} {action[:40]}")
@@ -338,6 +351,7 @@ class Pass:
                 self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "Stop All ended the workers", "pass", self.still("recover-stop-all"))
                 return
         self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", "turn still busy after Stop; opening a new chat", "fail", self.still("recover-stuck"))
+        self.context_lost = getattr(self, "current_screen", None)
         self.app.key("cmd-n"); time.sleep(1.5)
         try:
             self.app.wait_element("composer-field", timeout=8, reachable=True)
@@ -382,6 +396,17 @@ class Pass:
         if self.tabs and ix is not None:
             self.app.click(f"tab-{ix}")
             time.sleep(0.8)
+
+    def seen(self, target: str) -> bool:
+        """On screen, not merely laid out: `exists` lists elements scrolled or
+        clipped out of view, and a row that means "the person sees X" must
+        not pass on one of those (rig audit R1)."""
+        if not self.app.exists(target):
+            return False
+        try:
+            return bool(self.app.find(target).get("visible"))
+        except Exception:
+            return False
 
     def first(self, pattern: str) -> str | None:
         found = self.ids(pattern)
@@ -651,6 +676,7 @@ class Pass:
         # Fold lines from an edit turn.
         self.go_main()
         self.send(P_EDIT); self.wait_idle(120); time.sleep(1)
+        self.send(P_OWN); self.wait_idle(90); time.sleep(1)
         sc = "turn-folds"
         self.inv(sc)
         # `work-bare-N` is a headline over nothing foldable (F-104): no chevron,
@@ -1143,7 +1169,7 @@ class Pass:
             st = self.state()
             self.record("new-project-kickoff", "new-project", "after the opener opens an empty folder", "pane chat; kickoff view (project head + greeting); composer asks what you are working on",
                         f"pane={st.get('pane')} kickoff={self.app.exists('kickoff')} greeting={self.app.exists('kickoff-greeting')} changes_pill={self.app.exists('pill-changes')} branch={self.app.exists('composer-branch')}",
-                        "pass" if st.get("pane") == "chat" and self.app.exists("kickoff") and not self.app.exists("pill-changes") else "fail", self.still("new-project-kickoff"))
+                        "pass" if st.get("pane") == "chat" and self.seen("kickoff") and not self.app.exists("pill-changes") else "fail", self.still("new-project-kickoff"))
             # Close that tab again.
             ix = next((p["index"] for p in st["projects"] if p["path"].rstrip("/").endswith("newone")), None)
             if ix is not None:
@@ -1407,7 +1433,7 @@ class Pass:
         self.inv(sc)
         self.record("pill-prs", sc, "worker runs `gh pr create` (fake gh on PATH)", "pills.prs counts the subtree's PR; the pill-prs element shows \"PRs 1\"; .arbos/prs.jsonl has the record",
                     f"pills={json.dumps(pills)[:160]} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')}",
-                    "pass" if pills.get("prs", 0) > n0 and self.app.exists("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
+                    "pass" if pills.get("prs", 0) > n0 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
         if self.app.exists("pill-prs"):
             self.check("pill-prs", sc, "hover the pill", "tooltip lists the PR URLs; no state change", lambda: self.app.hover("pill-prs"), None)
 
