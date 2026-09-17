@@ -1407,8 +1407,26 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
     {
         return Some(path.to_owned());
     }
+    // A page fetched is named by its host, as Cursor's "Fetched
+    // en.wikipedia.org" — a bare "fetch" / "Fetched fetch" was what Jacob
+    // saw on every web page his agent read (report 2026-09-17-12, F-143).
+    if matches!(name, "fetch" | "web")
+        && let Some(url) = obj.and_then(|obj| obj.get("url").and_then(Value::as_str))
+    {
+        let host = url
+            .split("://")
+            .nth(1)
+            .unwrap_or(url)
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or(url)
+            .trim_start_matches("www.");
+        if !host.is_empty() {
+            return Some(host.to_owned());
+        }
+    }
     obj.and_then(|obj| {
-        ["path", "file", "target", "pattern", "query", "command"]
+        ["path", "file", "target", "pattern", "query", "command", "url"]
             .iter()
             .find_map(|key| obj.get(*key).and_then(Value::as_str))
             .map(str::trim)
