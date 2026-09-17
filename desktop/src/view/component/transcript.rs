@@ -462,10 +462,35 @@ fn openable(url: &str) -> Option<String> {
     if let Some(rest) = url.strip_prefix("//") {
         return Some(format!("https://{rest}"));
     }
-    if url.contains('.') && !url.contains(' ') && !url.starts_with('#') && !url.starts_with('/') {
+    if url.starts_with("file://") {
+        return Some(url.to_string());
+    }
+    // A path in the place — `docs/brief.md`, `./notes.md`, `/abs/file.md`:
+    // the first segment is a folder, not a host. A host has a dot in its
+    // first segment (`en.wikipedia.org/wiki`).
+    let first = url.split('/').next().unwrap_or(url);
+    let is_path = url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+        || (url.contains('/') && !first.contains('.') && !url.contains(' '))
+        || (!url.contains('/') && !url.contains(' ') && file_like(url));
+    if is_path && !url.starts_with('#') {
+        return Some(format!("place:{url}"));
+    }
+    if url.contains('.') && !url.contains(' ') && !url.starts_with('#') {
         return Some(format!("https://{url}"));
     }
     None
+}
+
+/// `brief.md`, `main.py`, `notes.txt` — a file name, not a host name.
+fn file_like(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or("");
+    matches!(
+        ext,
+        "md" | "txt" | "toml" | "json" | "yaml" | "yml" | "py" | "rs" | "js" | "ts" | "html" | "css"
+            | "csv" | "svg" | "png" | "jpg" | "jpeg" | "pdf" | "sh"
+    )
 }
 
 /// The prose of an item, for the two kinds that carry any.
@@ -1842,10 +1867,22 @@ fn prose(
                 };
                 url = chat.transcript.point(ix, &shown, pointer);
             });
-            // `arbos://` stays in the app; anything else is the browser's.
+            // `arbos://` stays in the app; a file of the place opens in the
+            // column; anything else is the browser's. The doc chip in an
+            // answer ("Full write-up: 📄 Canada-EU partnership brief") is a
+            // relative link to a file the agent wrote — it went to the
+            // browser as `https://docs/…` and did nothing (Jacob, report
+            // 2026-09-17-16, F-145).
             match url {
                 Some(url) if url.starts_with("arbos://") => {
                     workspace.open_chat_link(&url, cx);
+                }
+                Some(url) if url.starts_with("file://") || url.starts_with("place:") => {
+                    let path = url
+                        .trim_start_matches("file://")
+                        .trim_start_matches("place:")
+                        .to_owned();
+                    workspace.open_shown(id, path, String::new(), "doc".into(), None, None, cx);
                 }
                 Some(url) => cx.open_url(&url),
                 None => {}

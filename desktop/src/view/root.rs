@@ -1913,31 +1913,20 @@ impl Arbos {
                 if this.voice_gen != stamp {
                     return;
                 }
-                let spoken = matches!(&text, Ok(t) if !t.trim().is_empty());
-                // A duplex server answered the words itself (and may have
-                // sent them to its own kernel): the transcript goes into the
-                // composer for the record, but is neither sent nor read back.
-                let server_answers =
-                    crate::voice_ws::configured() && crate::voice_ws::server_answers();
-                if spoken && crate::voice_ws::configured() && !server_answers {
-                    // The answer to a dictated prompt is read aloud.
-                    if let Some(id) = this.workspace.read(cx).active_id() {
-                        this.workspace.update(cx, |workspace, cx| {
-                            workspace.with_session(id, cx, |chat| chat.voice_reply = true);
-                        });
-                    }
-                }
-                let sent = matches!(&text, Ok(t) if !t.trim().is_empty());
+                // Dictation is typing by voice: the words land in the field
+                // and wait for Enter, and the answer is read, not spoken —
+                // as Cursor's mic does. It used to send at once and have the
+                // reply read aloud (Jacob, report 2026-09-17-19: "the message
+                // is immediately sent rather than just appearing in the chat
+                // box … the response is spoken, this is the wrong way").
+                // A call (the phone control) is where speech answers speech.
+                let sent = false;
                 this.composer.update(cx, |composer, cx| {
                     composer.set_voice(VoiceState::Idle, cx);
                     if let Ok(text) = &text
                         && !text.trim().is_empty()
                     {
-                        if server_answers {
-                            composer.dictation_text(text, cx);
-                        } else {
-                            composer.dictation_final(text, cx);
-                        }
+                        composer.dictation_text(text, cx);
                     }
                 });
                 if sent {

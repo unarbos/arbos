@@ -1604,12 +1604,25 @@ pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history:
     // A `user` line while a turn is open (after its wake, before its
     // turn_complete) was a steer: its card stays inside that turn.
     let mut turn_open = false;
+    // The kernel writes `wake user` and then the `user` line that caused
+    // it: that line is the turn's prompt, not a steer into it. Read as a
+    // steer, every prompt of a forked chat folded into the turn before it
+    // and the answers vanished behind shut folds (Jacob, report
+    // 2026-09-17-17, F-147).
+    let mut prompt_pending = false;
     for line in text.lines() {
         if let Ok(ev) = serde_json::from_str::<arbos_core::Event>(line) {
             let thinking = matches!(ev.kind, arbos_core::EventKind::Thinking { .. });
-            let steer = turn_open && matches!(ev.kind, arbos_core::EventKind::User { .. });
+            let is_user = matches!(ev.kind, arbos_core::EventKind::User { .. });
+            let steer = turn_open && is_user && !prompt_pending;
+            if is_user {
+                prompt_pending = false;
+            }
             match &ev.kind {
-                arbos_core::EventKind::Wake { .. } => turn_open = true,
+                arbos_core::EventKind::Wake { wake, .. } => {
+                    turn_open = true;
+                    prompt_pending = wake == "user";
+                }
                 arbos_core::EventKind::TurnComplete { .. }
                 | arbos_core::EventKind::Interrupted { .. } => turn_open = false,
                 _ => {}
