@@ -1181,6 +1181,12 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "mic_device": voice.mic_device,
                 "mic_error": voice.mic_error,
                 "speaker_device": voice.speaker_device,
+                "work": {
+                    "active": voice.work_active,
+                    "agents": voice.work_agents,
+                    "stale": voice.work_stale,
+                    "sound": voice.work_sound,
+                },
                 "played_bytes": crate::voice_ws::counters().0,
                 "level": voice.level,
                 "partial": voice.text,
