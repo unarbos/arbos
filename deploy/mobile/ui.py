@@ -28,12 +28,14 @@ points. Nothing here measures an image.
 `field` and `focus` take no label because the composer has none once there
 is text in it: the placeholder is the label and it goes the moment a
 character lands, so anything that names it can neither read it back nor
-tap it again. `idb ui text` returns before its characters arrive, so a
-scenario that types and presses return without reading the field back sends
-whatever had landed by then (M-162).
+tap it again. Its frame moves too — the box grows taller as the text wraps,
+and the keyboard pushes it up the screen — so a remembered point is wrong
+by the second line. Both work with the keyboard up.
 
-The keyboard must be down for both: while it is up, `describe-all` returns
-the keyboard's own tree and the composer is not in it.
+Read the field back before sending. `idb ui text` returns before its
+characters arrive, so a scenario that types and presses return at once
+sends whatever had landed by then, and a second call weaves itself into the
+first (M-162).
 
 A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.

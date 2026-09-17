@@ -11,13 +11,8 @@
 #
 # Two questions, because there turned out to be two faults:
 #
-#   1. does the journey's fixed tap point still find the composer once the
-#      keyboard is up?
+#   1. is the composer still where the journey taps for it?
 #   2. how long after `idb ui text` returns do its characters arrive?
-#
-# The read-back needs the keyboard down: while it is up `describe-all`
-# returns the keyboard's own tree and the composer is not in it. Tapping the
-# chat body puts it away without sending and without losing what was typed.
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -25,49 +20,48 @@ N=${1:-4}
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 
-# The journey's lines are long. A short probe would pass where they fail, so
-# this is the length of the shortest of them.
+# The journey's lines are long. A short probe would settle where they do not,
+# so this is the length of the shortest of them.
 LINE="probe: fix the failing test, add perimeter(w, h) and diagonal(w, h) with three unit tests each, and commit the work on a branch."
 CHARS=${#LINE}
 
-away() { idb ui tap 196 150 --udid "$UDID" >/dev/null 2>&1; sleep 1; }
-focus() { ui focus >/dev/null 2>&1; }
-
+where() { ui dump | awk '$3 == "TextField" { print $1 " " $2 }'; }
 clear_field() {
   local n
-  away
   n=$(ui field 2>/dev/null | wc -c | tr -d ' ')
-  [ "$n" -gt 0 ] || return 0
-  focus; sleep 0.6
-  # A generous over-count of backspaces: deleting an empty field is a no-op.
+  [ "${n:-0}" -gt 0 ] || return 0
+  ui focus >/dev/null 2>&1; sleep 0.6
   idb ui key-sequence $(for _ in $(seq 1 $((n + 20))); do printf '42 '; done) --udid "$UDID" >/dev/null 2>&1
   sleep 1
-  away
 }
 
-echo "== 1. where the journey's fixed tap point lands =="
+echo "== 1. the composer does not stay put =="
 clear_field
-echo "keyboard down, the composer sits at:"
-ui dump | awk '$3 == "TextField" { print "  " $1 " " $2 }'
-focus; sleep 1
-echo "keyboard up, what covers 200,788:"
-ui dump | awk '$2 > 745 && $2 < 800 && $1 > 150 && $1 < 260 { print "  " $0 }'
-away
+echo "  empty, keyboard down: $(where)"
+ui focus >/dev/null; sleep 1
+echo "  empty, keyboard up:   $(where)"
+idb ui text "$LINE" --udid "$UDID" >/dev/null 2>&1; sleep 4
+echo "  full, keyboard up:    $(where)"
+echo "  the journey taps 200 788 every time"
 
 echo
-echo "== 2. how long the characters take to arrive =="
+echo "== 2. the characters arrive after idb returns =="
 echo "line is $CHARS characters"
-for wait in 0.3 1 2 4; do
-  whole=0
-  for _ in $(seq 1 "$N"); do
-    clear_field
-    focus; sleep 0.8
-    idb ui text "$LINE" --udid "$UDID" >/dev/null 2>&1
-    sleep "$wait"
-    away
-    [ "$(ui field 2>/dev/null)" = "$LINE" ] && whole=$((whole+1))
+for _ in $(seq 1 "$N"); do
+  clear_field
+  ui focus >/dev/null; sleep 0.8
+  start=$(python3 -c 'import time;print(time.time())')
+  idb ui text "$LINE" --udid "$UDID" >/dev/null 2>&1
+  at_return=$(ui field 2>/dev/null); at_return=${#at_return}
+  settled=""
+  for _ in $(seq 1 60); do
+    if [ "$(ui field 2>/dev/null)" = "$LINE" ]; then
+      settled=$(python3 -c "import time;print(round(time.time()-$start,1))")
+      break
+    fi
+    sleep 0.25
   done
-  echo "  waited ${wait}s after idb returned: $whole/$N whole"
+  echo "  $at_return/$CHARS characters when idb returned; whole after ${settled:-never}s"
 done
 clear_field
 echo "field left empty; nothing was sent"
