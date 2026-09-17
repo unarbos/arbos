@@ -50,10 +50,17 @@ clear_field() {
   done
 }
 type_send() {
-  local want=$1 got
+  local want=$1 got why
   for _ in 1 2 3; do
     clear_field
-    ui focus >/dev/null 2>&1 || { sleep 1; continue; }
+    if ! why=$(ui focus 2>&1 >/dev/null); then
+      # Name what is in the way. A run that only says "gave up" sends the
+      # next cycle looking at the app: this one was iOS's own notifications
+      # alert sitting over the chat, which no amount of tapping gets past.
+      echo "type_send: no composer to type into — $why" | tee -a $O/run.txt
+      ui dump 2>/dev/null | tail -5 | sed 's/^/  on screen: /' | tee -a $O/run.txt
+      sleep 1; continue
+    fi
     sleep 0.7
     idb ui text "$want" --udid $U >/dev/null 2>&1
     for _ in $(seq 1 40); do [ "$(ui field plain 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
@@ -78,7 +85,7 @@ echo "kernel $(head -1 $O/kernel-version.txt)" | tee -a $O/run.txt
 
 # J1 — open the project from the list (the phone's "create": the project lives on a machine's kernel)
 xcrun simctl terminate $U $B 2>/dev/null; sleep 1
-xcrun simctl launch --console-pty $U $B -hubURL "$H" -hubToken "$T" -dictateWav ~/mobile-clips/note.wav -injectWav ~/mobile-clips/ask.wav > $O/console.log 2>&1 &
+xcrun simctl launch --console-pty $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" -dictateWav ~/mobile-clips/note.wav -injectWav ~/mobile-clips/ask.wav > $O/console.log 2>&1 &
 sleep 7; shot J1-list
 # By name, not by measuring the still. `find_row.py` knew project names by
 # glyph colour and divided by 3 for a screenshot that is 1.2x the point
@@ -180,7 +187,7 @@ if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v erro
 ~/push-check.sh 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null
 V=$(grep "PUSH verdict" $O/push-check.txt | head -1); case "$V" in *PASS*) score PUSH PASS "$V";; *OFF*) score PUSH U "$V";; *) score PUSH U "$(grep -m1 'PUSH status' $O/push-check.txt)";; esac
 # J6' — kill and reopen: nothing lost
-xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
+xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
 ui tap "$ROW" || score J6k FAIL "no $ROW row after the relaunch"
 sleep 6; shot J6k-reopened
 score J6k EYE "reopened chat ends where it ended; no pending cards"
