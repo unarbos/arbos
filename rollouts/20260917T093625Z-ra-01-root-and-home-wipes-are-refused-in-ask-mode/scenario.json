@@ -1,0 +1,9 @@
+{
+  "name": "ra-01-root-and-home-wipes-are-refused-in-ask-mode",
+  "doc": "The same fifteen spellings in ask mode: refused outright, never offered as an approval card.",
+  "tags": [
+    "landing",
+    "approval",
+    "wipe-guard"
+  ]
+}

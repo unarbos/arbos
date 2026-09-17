@@ -1,0 +1,28 @@
+{
+  "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "doc": "#419's property, probed past its happy path: the checkpoint's work-tree object is made unreadable (one\n        loose object removed, a corrupt repository), then rewind with files: true. `git read-tree` fails. The person\n        must be told the restore failed, and must still have exactly what they had: the later turn's files, their\n        own uncommitted edit, their own untracked note, and HEAD where it was. Anything else is a restore that\n        destroyed before it delivered.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "no-work-checkpoints",
+      "detail": "expected a work tree on three checkpoints, got [None, 'd55155c9fdb1b9488cbe30f52d191e39cb0427d9', '4cc8d4e145d0df8d9884fb4382ff064633786094']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "files_before": [
+      ".gitignore",
+      "f1.txt",
+      "f2.txt",
+      "f3.txt",
+      "my-notes.txt"
+    ]
+  },
+  "duration_s": 1.3,
+  "place": "/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-3x5kqi4i/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T091825Z-rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "branch": "main"
+}

@@ -1,0 +1,33 @@
+{
+  "scenario": "rw-08c-restore-that-fails-half-way-puts-the-tree-back",
+  "doc": "",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "failed-restore-changed-the-tree",
+      "detail": "a restore that failed after its checks left the person somewhere new: f2.txt: GONE; f3.txt: GONE; my-notes.txt: GONE; HEAD: ea57c39ac0 -> ba882540a4; index: changed",
+      "where": "arbos-engine tools::git restore \u2014 put the tree back on any failure (#419 at 0bceb0df)"
+    }
+  ],
+  "notes": {
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: git read-tree be1013c5589706df4b6d585e578224f1385150b2 failed"
+    },
+    "tree_diff_after_failed_restore": [
+      "f2.txt: GONE",
+      "f3.txt: GONE",
+      "my-notes.txt: GONE",
+      "HEAD: ea57c39ac0 -> ba882540a4",
+      "index: changed"
+    ]
+  },
+  "duration_s": 2.5,
+  "place": "/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-main",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T094133Z-rw-08c-restore-that-fails-half-way-puts-the-tree-back",
+  "branch": "main"
+}

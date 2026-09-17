@@ -2576,3 +2576,82 @@
 {"ts": 1789630938476, "rollout": "20260917T074218Z-second-serve", "scenario": "second-serve", "branch": "rust", "status": "pass", "breaks": []}
 {"ts": 1789630938585, "rollout": "20260917T074218Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "rust", "status": "skipped", "breaks": []}
 {"ts": 1789630988154, "rollout": "20260917T074305Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631515031, "rollout": "20260917T075152Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631554863, "rollout": "20260917T075232Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631555305, "rollout": "20260917T075234Z-second-serve", "scenario": "second-serve", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631673499, "rollout": "20260917T075423Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "rust", "status": "break", "breaks": ["driver-gap"]}
+{"ts": 1789631698545, "rollout": "20260917T075445Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631950049, "rollout": "20260917T075907Z-boot-idle", "scenario": "boot-idle", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631986648, "rollout": "20260917T075910Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "rust", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789631987102, "rollout": "20260917T075946Z-second-serve", "scenario": "second-serve", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789631990723, "rollout": "20260917T075947Z-concurrent-sessions", "scenario": "concurrent-sessions", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632002109, "rollout": "20260917T075950Z-rapid-create-delete", "scenario": "rapid-create-delete", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632009056, "rollout": "20260917T080002Z-huge-input", "scenario": "huge-input", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632032252, "rollout": "20260917T075955Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "rust", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789632068940, "rollout": "20260917T080032Z-prompt-no-key", "scenario": "prompt-no-key", "branch": "rust", "status": "break", "breaks": ["turn-never-started", "turn-never-ended", "turn-contract", "restart-replays-wake"]}
+{"ts": 1789632073507, "rollout": "20260917T080009Z-malformed-folder", "scenario": "malformed-folder", "branch": "rust", "status": "break", "breaks": ["state:agent-md-missing", "state:agent-parent-dangling", "state:transcript-bad-lines"]}
+{"ts": 1789632076246, "rollout": "20260917T080113Z-malformed-frames", "scenario": "malformed-frames", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632106397, "rollout": "20260917T080116Z-kill-mid-turn-restart", "scenario": "kill-mid-turn-restart", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632125236, "rollout": "20260917T080146Z-ordinary-task", "scenario": "ordinary-task", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632129445, "rollout": "20260917T080205Z-readonly-arbos", "scenario": "readonly-arbos", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632130953, "rollout": "20260917T080209Z-disk-full", "scenario": "disk-full", "branch": "rust", "status": "break", "breaks": ["state:transcript-unended-turn"]}
+{"ts": 1789632131098, "rollout": "20260917T080210Z-clock-jump-cron", "scenario": "clock-jump-cron", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632131226, "rollout": "20260917T080211Z-plan-shell-verdicts", "scenario": "plan-shell-verdicts", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632137391, "rollout": "20260917T080211Z-restart-during-compaction", "scenario": "restart-during-compaction", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632156327, "rollout": "20260917T080217Z-steer-storm", "scenario": "steer-storm", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632200115, "rollout": "20260917T080236Z-spawn-storm", "scenario": "spawn-storm", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632205141, "rollout": "20260917T080320Z-bench-standing-job", "scenario": "bench-standing-job", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632208498, "rollout": "20260917T080325Z-bench-ask-before-risky", "scenario": "bench-ask-before-risky", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632269195, "rollout": "20260917T080328Z-bench-research-links", "scenario": "bench-research-links", "branch": "rust", "status": "break", "breaks": ["wrong-output", "wrong-output", "wrong-output"]}
+{"ts": 1789632344950, "rollout": "20260917T080429Z-bench-fix-commit-branch", "scenario": "bench-fix-commit-branch", "branch": "rust", "status": "break", "breaks": ["wrong-output", "wrong-output", "wrong-output", "wrong-output", "wrong-output"]}
+{"ts": 1789632398891, "rollout": "20260917T080545Z-bench-screenshot", "scenario": "bench-screenshot", "branch": "rust", "status": "break", "breaks": ["wrong-output"]}
+{"ts": 1789632412636, "rollout": "20260917T080638Z-secrets-leak-hunt", "scenario": "secrets-leak-hunt", "branch": "rust", "status": "break", "breaks": ["secret-leak-encoded"]}
+{"ts": 1789632417802, "rollout": "20260917T080652Z-ask-identity", "scenario": "ask-identity", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632489869, "rollout": "20260917T080657Z-bench-tests-are-spec", "scenario": "bench-tests-are-spec", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632494984, "rollout": "20260917T080809Z-bench-no-screenshot-unasked", "scenario": "bench-no-screenshot-unasked", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632495050, "rollout": "20260917T080815Z-desktop-rapid-session-switch", "scenario": "desktop-rapid-session-switch", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632495110, "rollout": "20260917T080815Z-desktop-kill-kernel-under-ui", "scenario": "desktop-kill-kernel-under-ui", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632495181, "rollout": "20260917T080815Z-desktop-composer-pills", "scenario": "desktop-composer-pills", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632495241, "rollout": "20260917T080815Z-desktop-user-message-card", "scenario": "desktop-user-message-card", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632495301, "rollout": "20260917T080815Z-desktop-fresh-place-no-notice", "scenario": "desktop-fresh-place-no-notice", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632495362, "rollout": "20260917T080815Z-desktop-huge-transcript-scroll", "scenario": "desktop-huge-transcript-scroll", "branch": "rust", "status": "skipped", "breaks": []}
+{"ts": 1789632603264, "rollout": "20260917T080815Z-kickoff-session", "scenario": "kickoff-session", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632718959, "rollout": "20260917T081003Z-inbox:multitasking-audit", "scenario": "inbox:multitasking-audit", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632733290, "rollout": "20260917T081159Z-inbox:project-page-coordinator-protocol", "scenario": "inbox:project-page-coordinator-protocol", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632754286, "rollout": "20260917T081213Z-inbox:swebench-gaps", "scenario": "inbox:swebench-gaps", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789632762126, "rollout": "20260917T081234Z-inbox:swebench-harness-comparison", "scenario": "inbox:swebench-harness-comparison", "branch": "rust", "status": "pass", "breaks": []}
+{"ts": 1789636546753, "rollout": "20260917T091545Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["no-work-checkpoints"]}
+{"ts": 1789636707083, "rollout": "20260917T091825Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["no-work-checkpoints"]}
+{"ts": 1789636722947, "rollout": "20260917T091840Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789636747486, "rollout": "20260917T091905Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789636835435, "rollout": "20260917T092033Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789636888412, "rollout": "20260917T092125Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789636939738, "rollout": "20260917T092217Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789636969561, "rollout": "20260917T092246Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789637059441, "rollout": "20260917T092400Z-rw-01-rewind-with-files-keeps-the-history", "scenario": "rw-01-rewind-with-files-keeps-the-history", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637078766, "rollout": "20260917T092419Z-rw-04-rewind-with-files-in-a-repo-without-git-identity", "scenario": "rw-04-rewind-with-files-in-a-repo-without-git-identity", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637119363, "rollout": "20260917T092517Z-rw-09-clean-that-fails-is-in-what-restored-says", "scenario": "rw-09-clean-that-fails-is-in-what-restored-says", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637206678, "rollout": "20260917T092644Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789637208603, "rollout": "20260917T092646Z-rw-09-clean-that-fails-is-in-what-restored-says", "scenario": "rw-09-clean-that-fails-is-in-what-restored-says", "branch": "main", "status": "break", "breaks": ["failed-clean-called-restored"]}
+{"ts": 1789637759086, "rollout": "20260917T093558Z-ra-01-root-and-home-wipes-are-refused-in-auto-mode", "scenario": "ra-01-root-and-home-wipes-are-refused-in-auto-mode", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637760072, "rollout": "20260917T093559Z-ra-01-root-and-home-wipes-are-refused-in-ask-mode", "scenario": "ra-01-root-and-home-wipes-are-refused-in-ask-mode", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637785499, "rollout": "20260917T093619Z-ra-01-root-and-home-wipes-are-refused-in-auto-mode", "scenario": "ra-01-root-and-home-wipes-are-refused-in-auto-mode", "branch": "main", "status": "break", "breaks": ["ra-01-auto-wipe-not-refused", "ra-01-auto-home-sentinel-gone", "ra-01-auto-tmp-canary-gone", "state:arbos-dir"]}
+{"ts": 1789637876457, "rollout": "20260917T093625Z-ra-01-root-and-home-wipes-are-refused-in-ask-mode", "scenario": "ra-01-root-and-home-wipes-are-refused-in-ask-mode", "branch": "main", "status": "break", "breaks": ["ra-01-ask-wipe-not-refused", "ra-01-ask-wipe-became-a-card"]}
+{"ts": 1789637927855, "rollout": "20260917T093846Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["no-work-checkpoint"]}
+{"ts": 1789637930348, "rollout": "20260917T093847Z-rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back", "scenario": "rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637932262, "rollout": "20260917T093850Z-rw-09-clean-that-fails-is-in-what-restored-says", "scenario": "rw-09-clean-that-fails-is-in-what-restored-says", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637934863, "rollout": "20260917T093852Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789637937357, "rollout": "20260917T093854Z-rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back", "scenario": "rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637939272, "rollout": "20260917T093857Z-rw-09-clean-that-fails-is-in-what-restored-says", "scenario": "rw-09-clean-that-fails-is-in-what-restored-says", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637941870, "rollout": "20260917T093859Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789637944361, "rollout": "20260917T093901Z-rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back", "scenario": "rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789637946269, "rollout": "20260917T093904Z-rw-09-clean-that-fails-is-in-what-restored-says", "scenario": "rw-09-clean-that-fails-is-in-what-restored-says", "branch": "main", "status": "break", "breaks": ["failed-clean-called-restored"]}
+{"ts": 1789638012605, "rollout": "20260917T094010Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638015303, "rollout": "20260917T094012Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638018000, "rollout": "20260917T094015Z-rw-08-failed-restore-leaves-the-tree-where-it-was", "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638082414, "rollout": "20260917T094119Z-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "scenario": "rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638085056, "rollout": "20260917T094122Z-rw-08c-restore-that-fails-half-way-puts-the-tree-back", "scenario": "rw-08c-restore-that-fails-half-way-puts-the-tree-back", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638087749, "rollout": "20260917T094125Z-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "scenario": "rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638090343, "rollout": "20260917T094127Z-rw-08c-restore-that-fails-half-way-puts-the-tree-back", "scenario": "rw-08c-restore-that-fails-half-way-puts-the-tree-back", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}
+{"ts": 1789638093034, "rollout": "20260917T094130Z-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "scenario": "rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree", "branch": "main", "status": "pass", "breaks": []}
+{"ts": 1789638095628, "rollout": "20260917T094133Z-rw-08c-restore-that-fails-half-way-puts-the-tree-back", "scenario": "rw-08c-restore-that-fails-half-way-puts-the-tree-back", "branch": "main", "status": "break", "breaks": ["failed-restore-changed-the-tree"]}

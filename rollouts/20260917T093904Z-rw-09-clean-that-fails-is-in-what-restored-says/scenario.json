@@ -1,0 +1,9 @@
+{
+  "name": "rw-09-clean-that-fails-is-in-what-restored-says",
+  "doc": "#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write\n        bit, a file inside). Rewind with files: true. The tree restore itself works; `git clean` fails on that folder.\n        The person must be told the leftover exists \u2014 \"restored\" alone is a false claim.",
+  "tags": [
+    "landing",
+    "rewind",
+    "misreport"
+  ]
+}

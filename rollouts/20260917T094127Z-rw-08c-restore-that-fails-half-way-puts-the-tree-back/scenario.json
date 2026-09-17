@@ -1,0 +1,9 @@
+{
+  "name": "rw-08c-restore-that-fails-half-way-puts-the-tree-back",
+  "doc": "",
+  "tags": [
+    "landing",
+    "rewind",
+    "destructive-order"
+  ]
+}

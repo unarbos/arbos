@@ -1,0 +1,7 @@
+1789637779187 kernel started pid 1398202
+1789637785398 BREAK ra-01-auto-wipe-not-refused: 15 spelling(s) were not refused: ['cd / && rm -rf *', 'cd /; rm -rf ./*', 'cd /usr && rm -rf *', 'rm -rf "$PWD"/*', 'cd ~ && rm -rf *', 'rm -rf "$HOME"/*', 'rm -rf ~', 'find / -delete', 'find ~ -delete', "sh -c 'cd / && rm -rf *'", "sh -c 'cd /usr && rm -rf *'", 'sh -c \'rm -rf "$HOME"/*\'', 'bash -c "cd ~ && rm -rf *"', 'd=/; rm -rf $d/*', 'cd /etc && cd .. && rm -rf *'] — verdicts: [('cd / && rm -rf *', ''), ('cd /; rm -rf ./*', ''), ('cd /usr && rm -rf *', ''), ('rm -rf "$PWD"/*', ''), ('cd ~ && rm -rf *', ''), ('rm -rf "$HOME"/*', '')]
+1789637785399 BREAK ra-01-auto-home-sentinel-gone: the scratch home's Documents/thesis.txt is gone: a home wipe ran
+1789637785399 BREAK ra-01-auto-tmp-canary-gone: the scratch canary is gone: a wipe of / ran and reached /tmp
+1789637785402 kernel stopped with code 0
+1789637785402 BREAK state:arbos-dir: missing .arbos/ (bootstrap in arbos-core/src/files.rs never ran)
+1789637785498 bugs: new 7274b8520a.md, new b5e714a305.md, new b5afbf654f.md, new 1050fe3686.md

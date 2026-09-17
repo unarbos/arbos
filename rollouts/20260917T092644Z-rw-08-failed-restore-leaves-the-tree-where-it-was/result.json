@@ -1,0 +1,73 @@
+{
+  "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "doc": "#419's property, probed past its happy path: the checkpoint's work-tree object is made unreadable (one\n        loose object removed, a corrupt repository), then rewind with files: true. `git read-tree` fails. The person\n        must be told the restore failed, and must still have exactly what they had: the later turn's files, their\n        own uncommitted edit, their own untracked note, and HEAD where it was. Anything else is a restore that\n        destroyed before it delivered.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "failed-restore-changed-the-tree",
+      "detail": "a restore that failed left the person somewhere new: f1.txt: GONE; f2.txt: GONE; f3.txt: GONE; my-notes.txt: GONE; HEAD: 9aa619a915 -> 8ad8e516b1; index: changed",
+      "where": "arbos-engine tools::git restore \u2014 a destructive step (reset --hard, clean) runs before the step that can fail (read-tree); check the objects first, or take them back"
+    }
+  ],
+  "notes": {
+    "files_before": [
+      ".gitignore",
+      "f1.txt",
+      "f2.txt",
+      "f3.txt",
+      "my-notes.txt"
+    ],
+    "index_before": [
+      "100644 d11765622a85c6af68bf5ce0e7ac728a206b270e 0\t.gitignore",
+      "100644 e019be006cf33489e2d0177a3837a2384eddebc5 0\tf2.txt"
+    ],
+    "status_before": [
+      "?? f1.txt",
+      "?? f3.txt",
+      "?? my-notes.txt",
+      "!! .arbos/"
+    ],
+    "clean_dry_run_by_harness": [
+      "Would remove f1.txt",
+      "Would remove f3.txt",
+      "Would remove my-notes.txt"
+    ],
+    "excludes": [
+      "# For a project mostly in C, the following would be a good set of",
+      "# exclude patterns (uncomment them if you want to use them):",
+      "# *.[oa]",
+      "# *~",
+      ".arbos.nosync/"
+    ],
+    "work_commit": "4b9da6f43efbfa93dc08f4f5d3fa529e4c94b216",
+    "work_object_loose": true,
+    "work_object_readable_after": false,
+    "rewound_frame": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 14,
+      "dropped": 6,
+      "pending": true
+    },
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: git read-tree 4b9da6f43efbfa93dc08f4f5d3fa529e4c94b216 failed"
+    },
+    "tree_diff_after_failed_restore": [
+      "f1.txt: GONE",
+      "f2.txt: GONE",
+      "f3.txt: GONE",
+      "my-notes.txt: GONE",
+      "HEAD: 9aa619a915 -> 8ad8e516b1",
+      "index: changed"
+    ]
+  },
+  "duration_s": 2.6,
+  "place": "/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-b436bptw/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-main",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T092644Z-rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "branch": "main"
+}
