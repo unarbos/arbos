@@ -65,7 +65,7 @@ from pathlib import Path
 from PIL import Image, ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, binary_matches_tree, desktop_build, kernel_build, pulse as display_pulse, still as display_still, tree_sha  # noqa: E402
 
 STORE = Path(os.environ.get("STORE", "/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983"))
 # This folder: the scripts and fake gh beside this file. The driver module
@@ -1850,6 +1850,8 @@ def main() -> int:
     ap.add_argument("--branch", required=True)
     ap.add_argument("--binary", required=True)
     ap.add_argument("--kernel", required=True)
+    ap.add_argument("--binary-from-elsewhere", action="store_true",
+                    help="the desktop binary is not built from this checkout (a release, another branch); skip the tree check")
     ap.add_argument("--driver-py", default=None)
     # openai/* through this OpenRouter key is blocked (403 policy violation, 2026-09-16); Gemini answers
     ap.add_argument("--model", default=os.environ.get("QA_MODEL", "google/gemini-2.5-flash"))
@@ -1888,12 +1890,34 @@ def main() -> int:
     os.environ["FAKE_GH_STATE"] = str(fake_gh / "counter")
     build = kernel_build(args.kernel)
     log(f"kernel under test: {build}")
+    # The desktop's build too, from the binary, against the tree it should
+    # have come from. A `cargo build` that failed leaves the previous binary
+    # in target/, and every copy-then-launch step downstream runs it without
+    # a word: a gate that only reads the kernel's build can pass a whole
+    # cycle on a desktop that is not the PR's (rig audit R21, after the QA
+    # loop's `-- desktop main: app build failed` one-liner cost it fifteen
+    # scenarios). Unless told the binary is from elsewhere, a mismatch fails.
+    app_build = desktop_build(args.binary)
+    src_sha = tree_sha(PARITY.parents[1])
+    log(f"desktop under test: {app_build} (tree {src_sha or '?'})")
     log(f"launching {args.binary}")
     app = drv.Arbos.launch(binary=args.binary, env={"ARBOS_KERNEL_BIN": args.kernel, "DISPLAY": DISPLAY, "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(xdg / "data")},
                            log=str(outdir / "app.log"), timeout=90)
     p = Pass(drv, app, args.branch, outdir, store_dir)
     # The first row of every run names the kernel the run measured against.
     p.record("kernel", "rig", "arbos-kernel --version", "the build under test, from the binary", build, "info")
+    stale = not args.binary_from_elsewhere and not binary_matches_tree(app_build, src_sha)
+    p.record("desktop", "rig", "arbos-desktop --version", f"the binary under test is this tree's ({src_sha or '?'})", app_build,
+             "fail" if stale else "info")
+    if stale:
+        log(f"FAULT: the desktop binary is {app_build}, not a build of tree {src_sha}: a failed build left the old one behind")
+        p.stop_phase("rig", f"desktop binary {app_build} is not tree {src_sha}", list(args.phases), fault=True)
+        p.save()
+        try:
+            app.close()
+        except Exception:
+            pass
+        return 2
     phases = {"L": p.phase_launch, "C": p.phase_composer, "T": p.phase_turn, "Q": p.phase_question, "P": p.phase_plan,
               "S": p.phase_subagents, "A": p.phase_artifacts, "B": p.phase_tabs, "R": p.phase_panel, "W": p.phase_settings,
               "M": p.phase_menus, "G": p.phase_prs, "N": p.phase_permissions,
