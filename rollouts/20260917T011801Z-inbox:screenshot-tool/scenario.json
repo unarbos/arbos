@@ -1,0 +1,8 @@
+{
+  "name": "inbox:screenshot-tool",
+  "doc": "From inbox note 2026-09-12-screenshot-tool.md: exercise feature 'screenshot-tool' and run every detector. Needs a kernel built from branch cursor/screenshot-tool-b027.",
+  "tags": [
+    "inbox",
+    "screenshot-tool"
+  ]
+}

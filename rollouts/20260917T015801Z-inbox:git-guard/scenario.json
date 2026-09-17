@@ -1,0 +1,8 @@
+{
+  "name": "inbox:git-guard",
+  "doc": "From inbox note 2026-09-13-git-guard.md: exercise feature 'git-guard' and run every detector. Needs a kernel built from branch cursor/git-guard-b027.",
+  "tags": [
+    "inbox",
+    "git-guard"
+  ]
+}

@@ -1,0 +1,17 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-research-links-j3nxaj8v/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-research-links-j3nxaj8v/home/.cache/arbos/tgrep/8025a971f7812a69
+tools research-full-duplex: 2 calls, wall 5ms, sum 1ms, speedup 0.2x
+tools research-full-duplex: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 483ms, sum 483ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 391ms, sum 391ms, speedup 1.0x
+tools research-full-duplex: 2 calls, wall 372ms, sum 373ms, speedup 1.0x
+snapshot_failed: git add: warning: could not open directory 'agents/research-full-duplex/jobs/': No such file or directory
+warning: could not open directory 'agents/research-full-duplex/turns/': No such file or directory
+warning: could not open directory 'agents/research-full-duplex/inflight/': No such file or directory
+warning: could not open directory 'agents/research-full-duplex/inbox/': No such file or directory
+warning: could not open directory 'agents/research-full-duplex/pages/': No such file or directory
+fatal: unable to stat 'agents/research-full-duplex/notes.md': No such file or directory

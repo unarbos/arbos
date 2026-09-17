@@ -1,0 +1,5 @@
+1789607580814 kernel started pid 1187688
+1789607881204 timeout waiting for turn root idle after 300s
+1789607881204 BREAK turn-never-ended: feature openrouter-default-provider: turn never ended
+1789607881220 kernel stopped with code 0
+1789607881278 bugs: new fdb9656059.md

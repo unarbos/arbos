@@ -1,0 +1,29 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-cg36lc7h/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8138 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-cg36lc7h/home/.cache/arbos/tgrep/7cc0b65f6afda257
+tools fix-broken-script: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 262ms, sum 256ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 264ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 263ms, sum 256ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 259ms, sum 254ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 261ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 27ms, sum 20ms, speedup 0.7x
+tools fix-broken-script: 2 calls, wall 258ms, sum 254ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 260ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 9ms, sum 1ms, speedup 0.1x
+tools fix-broken-script: 2 calls, wall 263ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 264ms, sum 254ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 255ms, sum 254ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 9ms, sum 1ms, speedup 0.1x
+tools fix-broken-script: 2 calls, wall 262ms, sum 256ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 259ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 5ms, sum 1ms, speedup 0.2x
+tools fix-broken-script: 2 calls, wall 260ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 260ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 261ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 261ms, sum 254ms, speedup 1.0x
+snapshot_failed: git add: fatal: unable to stat 'agents/fix-broken-script/jobs/j8/exit': No such file or directory

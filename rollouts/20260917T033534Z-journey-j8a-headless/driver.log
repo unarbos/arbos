@@ -1,0 +1,6 @@
+1789616134363 kernel started pid 1226732
+1789616139768 kernel SIGKILLed
+1789616140269 kernel-restart started pid 1226809
+1789616181826 BREAK side-effect-doubled: side-effects.log holds the tag 2 time(s) across the kernel restart (expected once; qal-j02)
+1789616181829 kernel-restart SIGKILLed
+1789616181880 bugs: new 21657024a8.md

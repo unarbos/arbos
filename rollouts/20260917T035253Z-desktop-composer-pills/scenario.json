@@ -1,0 +1,9 @@
+{
+  "name": "desktop-composer-pills",
+  "doc": "Feature composer-pills: a PR URL printed twice by bash counts once; a URL merely read from a file is recorded; the strip above the composer must not overflow a 900 px window.",
+  "tags": [
+    "desktop",
+    "inbox",
+    "composer-pills"
+  ]
+}

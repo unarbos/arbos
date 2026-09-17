@@ -7,3 +7,5 @@
 - seen again 20260916T152248Z: exit 1; store docs/: 21 files; branch: 21 files; missing in store: []; notes.md present: True
 
 - seen again 20260916T225217Z: exit 3; store docs/: missing; branch: 22 files; missing in store: ['acceptance-journeys.md', 'arbos-mesh-design.md', 'cursor-coordinator-spec.md', 'cursor-coordinator-tools-appendix.md', 'cursor-parity-process.md', 'cursor-parity-report-2026-09-12.md', 'cursor-parity-report-2026-09-13.md', 'cursor-projects-research.md', 'cursor-vs-arbos-agent-model.md', 'desktop-call-mode-design.md', 'desktop-feedback-design.md', 'features-backlog.md']; notes.md present: True; branch restored to `/home/ubuntu/arbos-qa/state/store-docs-restore-20260916T225217Z` (not copied into the store)
+
+- seen again 20260917T005557Z: exit 1; store docs/: 22 files; branch: 22 files; missing in store: []; notes.md present: True

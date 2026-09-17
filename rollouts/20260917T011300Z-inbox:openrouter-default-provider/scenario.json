@@ -1,0 +1,8 @@
+{
+  "name": "inbox:openrouter-default-provider",
+  "doc": "From inbox note 2026-09-12-openrouter-default-provider.md: exercise feature 'openrouter-default-provider' and run every detector. Needs a kernel built from branch cursor/openrouter-default-provider-b027.",
+  "tags": [
+    "inbox",
+    "openrouter-default-provider"
+  ]
+}

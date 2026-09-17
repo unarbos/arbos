@@ -1,0 +1,21 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-aq92af65/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8138 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-aq92af65/home/.cache/arbos/tgrep/b869b7c0681ce631
+tools fix-broken-script: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 263ms, sum 257ms, speedup 1.0x
+tools fix-broken-script: 2 calls, wall 7ms, sum 0ms, speedup 0.0x
+tools fix-broken-script: 3 calls, wall 25ms, sum 22ms, speedup 0.9x
+tools fix-broken-script: 2 calls, wall 261ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 3 calls, wall 256ms, sum 255ms, speedup 1.0x
+tools fix-broken-script: 3 calls, wall 761ms, sum 761ms, speedup 1.0x
+tools fix-broken-script: 4 calls, wall 783ms, sum 782ms, speedup 1.0x
+tools fix-broken-script: 4 calls, wall 1017ms, sum 1017ms, speedup 1.0x
+tools fix-broken-script: 11 calls, wall 2563ms, sum 2563ms, speedup 1.0x
+tools fix-broken-script: 3 calls, wall 764ms, sum 764ms, speedup 1.0x
+tools fix-broken-script: 6 calls, wall 784ms, sum 784ms, speedup 1.0x
+tools fix-broken-script: 8 calls, wall 1800ms, sum 1799ms, speedup 1.0x
+tools fix-broken-script: 7 calls, wall 785ms, sum 784ms, speedup 1.0x
+tools root: 2 calls, wall 1ms, sum 1ms, speedup 1.0x

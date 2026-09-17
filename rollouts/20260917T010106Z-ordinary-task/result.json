@@ -1,0 +1,49 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "breaks": [
+    {
+      "rule": "no-usage",
+      "detail": "turn_complete carries no usage",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "spawn",
+      "plan",
+      "status",
+      "plan",
+      "status",
+      "write",
+      "status",
+      "bash",
+      "plan",
+      "plan",
+      "plan",
+      "status",
+      "bash",
+      "status",
+      "bash",
+      "status",
+      "bash",
+      "status",
+      "bash",
+      "status",
+      "pr",
+      "plan"
+    ],
+    "tool_errors": [
+      "pr create: this repository has no remote, so there is no pull request to open. The work is on branch fix/fizzbuzz in this checkout only \u2014 report it as local, do not report a PR (git remote add origin <url> && git push -u origin fix/fizzbuzz would make one possible)."
+    ],
+    "trace_files": 4
+  },
+  "duration_s": 33.6,
+  "place": "/tmp/arbos-qa-ordinary-task-dy2c293w/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T010106Z-ordinary-task",
+  "branch": "main",
+  "usd": 0.01662
+}

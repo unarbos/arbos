@@ -2,6 +2,7 @@
 
 - Feature: desktop feedback delivery (#345, `desktop/src/feedback.rs::deliver_pending`, `desktop/src/view/root.rs::deliver_feedback`); `main` @ `0c82887b`
 - Severity: medium. The sheet tells the user *"Saved, and waiting: it could not be sent yet — … It will go by itself when the link is back."* It does not go by itself. `deliver_feedback` has one call site — right after a new report is written — so a report made offline (or before credentials exist) is retried only when the user reports something else. A user who reports one problem offline and never reports again has a report that never leaves the disk, while the app told them it would.
+- **Closed 2026-09-16 22:00 UTC** by #356 (`d152c70f`): the outbox drains on launch, on a kernel reconnecting, on a minute timer and on Send — only Send speaks to the user — and it walks every open place (the old path saw only the active one, so a report filed while another place was on screen was invisible even to a later Send). `fb-01` re-run 2/2 with the driver's new surface: after the unsendable Send, `feedback.message` = `{ok: false, "Saved, and waiting: … It will go by itself when the link is back."}`, `outbox.waiting 1`, `screenshot {attached: true, whole_screen: false}`; credentials written while the *other* place was in front and nothing sent → within 100 s `<A>/delivered`, `<A>` in the store, `outbox {waiting 0, sent_this_run 1}`, no second report folder written; the next Send says `{ok: true, "Sent. It reaches an agent within fifteen minutes … Reference …"}`; the poller took both.
 - Scenario: `fb-01-feedback-report-written-delivered-picked-up`, check `fb-01-a-never-retried`; rollout `internal/qa/rollouts/20260916T211719Z-fb-01-feedback-report-written-delivered-picked-up/` (`parts.a.delivered_later: false`, `parts.b.delivered_marker: true`).
 
 ## Repro
@@ -26,4 +27,4 @@ App with `[feedback] address = "arbos://qa-b/beta/docs/feedback"` and `hub_home`
 
 ## Fix
 
-Not started. Regression check: `fb-01` phase A → credentials appear → `<A>/delivered` within 75 s with no second report sent (`fb-01-a-never-retried`).
+#356 (see the closing line above). Regression check: `fb-01` phase A → credentials appear → `<A>/delivered` within 75 s with no second report sent (`fb-01-a-never-retried`).

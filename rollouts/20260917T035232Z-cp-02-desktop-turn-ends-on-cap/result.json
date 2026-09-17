@@ -1,0 +1,42 @@
+{
+  "scenario": "cp-02-desktop-turn-ends-on-cap",
+  "doc": "In the desktop: a turn that ends on the cost cap leaves the app responsive (driver answers within 1 s) and the reason readable in the chat as a failed notice; the composer takes the next line and that turn, too, ends with the notice rather than silence.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "cp-02-agent-apologises-for-cap",
+      "detail": "an agent bubble apologises for the spend although the model wrote nothing (qal-j05)",
+      "where": ""
+    },
+    {
+      "rule": "cp-02-cap-told-more-than-once",
+      "detail": "2 notice/agent items for one capped turn: ['Hey \u2014 a fresh place, with .arbos pre-populated.\\n\\nWhat can I ', 'Stopped at the per-turn cap: this turn spent $0.003 on model'] (qal-j05)",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "pulse_ms": 95,
+    "new_items": [
+      [
+        "user",
+        "Run `echo one` with bash and tell me the output."
+      ],
+      [
+        "agent",
+        "Hey \u2014 a fresh place, with .arbos pre-populated.\n\nWhat can I work on? You can tel"
+      ],
+      [
+        "notice",
+        "Stopped at the per-turn cap: this turn spent $0.003 on model calls, over the $0."
+      ]
+    ]
+  },
+  "duration_s": 20.9,
+  "place": "/tmp/arbos-qa-cp-02-desktop-turn-ends-on-cap-fzfkbmyy/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T035232Z-cp-02-desktop-turn-ends-on-cap",
+  "branch": "main",
+  "usd": 0.0
+}

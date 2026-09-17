@@ -1,0 +1,5 @@
+1789610281847 kernel started pid 1202983
+1789610582223 timeout waiting for turn root idle after 300s
+1789610582223 BREAK turn-never-ended: feature git-guard: turn never ended
+1789610582240 kernel stopped with code 0
+1789610582311 bugs: new 25d3b522fb.md

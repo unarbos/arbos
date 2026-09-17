@@ -1,0 +1,28 @@
+{
+  "scenario": "mt-01-typed-while-running-steers",
+  "doc": "Item 1. Typed in the desktop while root runs: a kind = steer inbox file within 1 s; the line is on the transcript before turn_complete.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-01-typed-not-a-steer",
+      "detail": "no kind = steer inbox file within 3 s of typing during a running turn; the line waits for turn_complete",
+      "where": "desktop composer: send while running must steer by default"
+    },
+    {
+      "rule": "mt-01-follow-up-after-turn",
+      "detail": "the typed line landed at transcript index None, the first turn_complete at 8; it must land at a tool boundary inside the turn",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "inbox_after_typing": []
+  },
+  "duration_s": 18.2,
+  "place": "/tmp/arbos-qa-mt-01-typed-while-running-steers-173iu8km/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T040154Z-mt-01-typed-while-running-steers",
+  "branch": "main",
+  "usd": 0.02235
+}

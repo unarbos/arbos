@@ -1,0 +1,8 @@
+{
+  "name": "desktop-rapid-session-switch",
+  "doc": "Create six chats and switch between them as fast as the driver allows. The app must stay up and responsive; each chat must keep its own folder.",
+  "tags": [
+    "desktop",
+    "adversarial"
+  ]
+}

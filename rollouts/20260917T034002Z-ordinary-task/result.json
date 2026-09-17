@@ -1,0 +1,34 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "fizz.py not created",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "final reply did not report FizzBuzz: 'e:\"<five words, imperative>\" task:\"<the user\\'s request, in their words>\" wait:true \u2014 its report comes back as that call\\'s result; relay it in one sentence. Do not read or edit the code yourself first.'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "write"
+    ],
+    "tool_errors": [
+      "as coordinator you write only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); code and other files are a worker's job. Do it now: spawn name:\"<five words, imperative>\" task:\"<the user's request, in their words>\" wait:true \u2014 its report comes back as that call's result; relay it in one sentence. Do not read or edit the code yourself first."
+    ],
+    "trace_files": 2
+  },
+  "duration_s": 5.3,
+  "place": "/tmp/arbos-qa-ordinary-task-wtvxwau6/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T034002Z-ordinary-task",
+  "branch": "main",
+  "usd": 0.01083
+}

@@ -1,0 +1,4 @@
+1789609571371 kernel started pid 1192504
+1789609608526 kernel stopped with code 0
+1789609608526 BREAK state:arbos-dir: missing .arbos/ (bootstrap in arbos-core/src/files.rs never ran)
+1789609608538 bugs: new 4feb32581c.md
