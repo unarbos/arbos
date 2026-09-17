@@ -93,8 +93,13 @@ def main():
     if notes:
         record["notes"] = notes
 
+    one_line = json.dumps(record, sort_keys=True)
     (run / "record.json").write_text(json.dumps(record, indent=1) + "\n")
-    print(json.dumps(record, sort_keys=True))
+    # The same record in the shape the ledger wants. `record.json` is
+    # indented for reading, and appending that to a file of one-object-lines
+    # breaks it — which is exactly what happened to run 32's entry.
+    (run / "record.jsonl").write_text(one_line + "\n")
+    print(one_line)
     if not start:
         print("WARNING: the kernel never said hello; this run has no commit", file=sys.stderr)
     if record.get("kernel_changed_mid_run"):
