@@ -21,6 +21,17 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(st.success(), "git {args:?}");
 }
 
+fn wait_for(timeout: Duration, mut ok: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    ok()
+}
+
 fn checkpoints(place: &Path) -> Vec<serde_json::Value> {
     std::fs::read_to_string(place.join(".arbos/agents/root/checkpoints.jsonl"))
         .unwrap_or_default()
@@ -78,7 +89,20 @@ fn rewind_with_files_in_a_repo_without_git_identity_keeps_the_kept_turns_files()
         );
     }
     assert!(k.place.join("f1.txt").exists() && k.place.join("f2.txt").exists());
+    // The record lands before the turn goes on; the tree follows on the
+    // blocking pool and fills it in (#405). A turn with no write never
+    // waits for it, so the third checkpoint can still read "still being
+    // saved" the instant the turn is idle: wait for the trees, as a
+    // restore does, before judging them.
+    let settled = wait_for(Duration::from_secs(20), || {
+        let cps = checkpoints(&k.place);
+        cps.len() == 3
+            && cps
+                .iter()
+                .all(|cp| cp.get("work_error").is_none() || cp["work_error"].is_null())
+    });
     let cps = checkpoints(&k.place);
+    assert!(settled, "the trees settled: {cps:#?}");
     assert_eq!(cps.len(), 3, "{cps:#?}");
     // Turn 1 started on a clean tree; turns 2 and 3 carry the files as a
     // work commit. Nothing is silently empty.
