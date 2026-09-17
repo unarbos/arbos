@@ -2,16 +2,16 @@
 
 Store id: `bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`
 Mount on our machines: `/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`, type `fuse.agent-store` (`rw,nosuid,nodev,relatime,user_id=1000,group_id=1000,default_permissions,allow_other`)
-Period: 2026-09-16 07:43 UTC to 2026-09-17 00:45 UTC. All times UTC.
+Period: 2026-09-16 07:43 UTC to 2026-09-17 06:56 UTC. All times UTC.
 Written by the QA loop, which keeps an off-store mirror of this store and restored it after each episode. Every statement below is from our own records (mirror commits, listings, timestamps); nothing is inferred about the service.
 
 ## Summary
 
-Three phenomena, recorded separately below: selective file loss (six episodes), partial listings, and — live as this is written — one client of the store seeing it empty and unwritable while two others read and write it normally.
+Three phenomena, recorded separately below: selective file loss (seven episodes), partial listings, and — live as this is written — one client of the store seeing it empty and unwritable while two others read and write it normally.
 
-Six times in twenty hours, a set of files and directories vanished from this store while the rest of it stayed intact and writable. The set is not random: it is the same set each time, growing between episodes (every file lost in one episode is lost again in the next, plus more), and inside one directory it separates files by name pattern while leaving files written the same way by the same client untouched. Three independent clients saw the same picture at the same time, stable across repeated reads for minutes. We can restore from our mirror; we cannot see why the files go. The server-side journal for this store id over the windows below should show it.
+Seven times in twenty-four hours, a set of files and directories vanished from this store while the rest of it stayed intact and writable. The set is not random: it is the same set each time, growing between episodes (every file lost in one episode is lost again in the next, plus more), and inside one directory it separates files by name pattern while leaving files written the same way by the same client untouched. Three independent clients saw the same picture at the same time, stable across repeated reads for minutes. We can restore from our mirror; we cannot see why the files go. The server-side journal for this store id over the windows below should show it.
 
-## The six episodes
+## The seven episodes
 
 | # | Window (UTC) | How it was found | What was gone | Certainty |
 |---|---|---|---|---|
@@ -22,6 +22,8 @@ Six times in twenty hours, a set of files and directories vanished from this sto
 | 5 | 09-17 **00:37:11 → 00:45:35** | Mirror pass at 00:37:11 pushed a whole store (`dff30aa7`); a write into `docs/` at 00:45:35 failed with "no such directory"; six reads over 00:45:41–00:47:44 identical | 215 files: all 22 `docs/`, 21 `internal/features-inbox/`, all 15 `internal/parity/`, 148 of 218 `internal/qa/bugs/`, 4 `internal/qa/*`, 4 top-level `internal/*`, 1 `internal/mobile/*` | Loss |
 
 | 6 | 09-17 **03:23:40 → 03:27:29** | Mirror pass at 03:23:40 pushed a whole store (`7d283951`, 24 docs). A write into `docs/` failed at 03:26:4x. Reads seconds apart then caught the deletion **in progress**: 03:26:58 `internal/mirror-docs.sh` present, `features-inbox/` 3 files, `parity/` 15; 03:27:16 the script gone and `features-inbox/` 0; 03:27:29 `parity/` 1; stable from 03:28:57 (`parity/` 0, 133 of 222 bug files) | 174 files: 23 `docs/`, 31 `internal/features-inbox/`, 15 `internal/parity/`, 89 hex-named `internal/qa/bugs/`, 11 top-level `internal/*`, 4 `internal/qa/*`, 1 `internal/mobile/*` | Loss — the counts fell monotonically over about a minute and did not return |
+
+| 7 | 09-17 **06:41:17 → 06:56:17** | Mirror pass at 06:41:17 pushed a whole store (`e8289af5`: 25 docs, 323 files in the watched scope). The QA client's probe at 06:56:17 found `docs/` absent, `internal/mirror-docs.sh` absent, 13 of 243 bug files left, `notes.md` present and writable; its second reader at 06:56:59 found 2 files in scope, root `internal media notes.md`. Restore from the mirror began 07:01:28 (`docs/` first, then `internal/`) and, through the mount at 10–13 files a minute, ran until about 07:25. **The mesh client's second reader read the store at 07:07:26, mid-restore**: `docs/`, `features-inbox/`, `parity/`, `notes.md` present, 86 files in scope, 237 bug files absent — the restore had not reached them yet. Both clients therefore agree on the loss (06:56–06:57) and the 07:07 view is the repair in progress, not a second event | at least 321 of 323 files in scope: all 25 `docs/`, `internal/features-inbox/`, `internal/parity/`, `internal/mirror-docs.sh`, 230+ of 243 `internal/qa/bugs/` | Loss — first caught by a watcher (the QA client's probe and reader, 06:56) rather than by someone tripping over it; the mesh reader's 07:07 alarm was true (files absent) but was the restore, and readers now say RESTORING while a restore is marked |
 
 The sixth episode adds one observation the others could not: the removal is not instantaneous. Over roughly 30–60 seconds, files disappeared from one listing to the next in the same order of directories each time, and none came back.
 

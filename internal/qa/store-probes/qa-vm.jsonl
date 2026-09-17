@@ -1,3 +1,5 @@
 {"ts":"2026-09-17T06:11:56Z","machine":"qa-vm","mounted":true,"docs_dir":true,"docs_md":25,"notes_bytes":52396,"bugs":234,"mirror_script":true,"write_ok":true,"write_err":""}
 {"ts":"2026-09-17T06:25:08Z","machine":"qa-vm","mounted":true,"docs_dir":true,"docs_md":25,"notes_bytes":52396,"bugs":234,"mirror_script":true,"write_ok":true,"write_err":""}
 {"ts":"2026-09-17T06:40:41Z","machine":"qa-vm","mounted":true,"docs_dir":true,"docs_md":25,"notes_bytes":53388,"bugs":243,"mirror_script":true,"write_ok":true,"write_err":""}
+{"ts":"2026-09-17T06:56:17Z","machine":"qa-vm","mounted":true,"docs_dir":false,"docs_md":-1,"notes_bytes":53850,"bugs":13,"mirror_script":false,"write_ok":true,"write_err":""}
+{"ts":"2026-09-17T07:12:16Z","machine":"qa-vm","mounted":true,"docs_dir":true,"docs_md":25,"notes_bytes":54363,"bugs":92,"mirror_script":true,"write_ok":true,"write_err":""}

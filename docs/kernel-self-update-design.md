@@ -258,6 +258,41 @@ version. The display was designed to make exactly this visible and has not
 been built. This incident moves slice 1b from "worth doing" to the thing
 blocking a safe app update.
 
+## Why a rename, not an unlink, kept hiding this
+
+*Added 2026-09-17, after #385's detector was found blind to the app's own
+updater.*
+
+`install::Swap` moves the old tree aside rather than unlinking it, because
+that is what makes a rollback a rename instead of a restore. The cost is that
+a process still executing the old binary keeps an inode that is **still
+linked** — it travels with the rename — so `/proc/self/exe` and
+`current_exe()` name the *backup* path, which exists and is a real file.
+Nothing reads `(deleted)`.
+
+That defeated two safeguards in turn, and both were caught by reading code
+against the incident rather than by a test:
+
+1. **The cross-build warning** compared commits. Jacob's app updated in place,
+   his kernel kept the old image, the commits **matched**, and the bar stayed
+   quiet while five workers hung. Fixed by making `binary_gone` a reason on
+   its own.
+2. **`binary_gone` itself** compared the identity taken at start against the
+   file at `current_exe()` now. After the rename that is the same file, so it
+   answered *not gone* while the path the kernel was started from held a new
+   build. For this updater on macOS it was blind from the moment it was
+   written.
+
+The question that works is about **the path the process was started from**:
+what is at that path now, against what was there at start. Unlink-and-write,
+a directory rename, and a file moved away all answer yes to that, and a kernel
+that has exec'd onto the new build at that path answers no. #385 asks it that
+way now, and `choose()` prefers the start path over `current_exe` with a note
+when they differ.
+
+The rule for anything added here later: **do not ask where this process's
+inode is; ask what is at the path it was started from.**
+
 ## Bootstrapping a kernel too old to update itself
 
 *Added 2026-09-17. [#386](https://github.com/unarbos/arbos/pull/386) is the
