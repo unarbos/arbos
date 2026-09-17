@@ -180,6 +180,12 @@ impl BedSynth {
         }
     }
 
+    /// Whether the sound is on (or fading out): the pacer writes real time then.
+    fn sounding(&self) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.gain > 0.0 || self.tick_pos.is_some() || (self.state.mode.load(Relaxed) != 0 && self.state.on.load(Relaxed))
+    }
+
     fn next(&mut self) -> f32 {
         use std::sync::atomic::Ordering::Relaxed;
         let mode = self.state.mode.load(Relaxed);
@@ -1908,7 +1914,9 @@ impl Player {
                             let block = RATE as usize / 50;
                             while flag.load(std::sync::atomic::Ordering::Relaxed) {
                                 let samples: Vec<f32> = (0..block).map(|_| synth.next()).collect();
-                                if samples.iter().any(|s| s.abs() > 0.0) {
+                                // Real time while the sound is on (silence between ticks
+                                // included), nothing at all while it is off.
+                                if synth.sounding() {
                                     let pcm: Vec<u8> = samples
                                         .iter()
                                         .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
