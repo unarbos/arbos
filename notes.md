@@ -25,6 +25,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — `main` `7017eb7`, eight more merged; the file-deletion fix has been on his Update since build 1270, and the plate that did nothing when he clicked it is fixed on `main` now
 </tldr>
 
+- [ ] [Design side panels for desktop](bc-32dc7892-de92-5f0e-801c-05628fa6bde4) — Jacob's ask, terminals, browsers, documents and files as panels on a grid; being designed from the frame that a panel here is a window onto the agent's work first and a tool second, with the case for it being that every serious bug of the last day was invisibility a live terminal or a files panel would have shown him at a glance; my open doubt is the free grid, since the chat is this app's centre of gravity and Cursor's own Projects release removed chrome rather than adding it
+
 ## Voice and phone (end goal)
 
 - [ ] A call goes silent while the agent works, and Jacob could not tell that from a crash — he asked "what are you working on", heard "let me get that information", and nothing came back, with the strip returning to Listening as though the exchange were over; the cause is being found on the desktop path, with the filler settling the turn as the first suspicion. His ask beside it is the real fix: a sound while commands are running, driven by the actual running state rather than a timer, tolerable for minutes rather than seconds, and ducking out of the way the moment either of them speaks

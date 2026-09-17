@@ -101,6 +101,36 @@ then on `/list` and the desktop's version line carry the fact for every node
 on the hub, `arbos-kernel update --place` carries it for local places, and
 these scripts should be deleted from this document rather than maintained.
 
+**The order of an update, learned at 10:56 UTC on the pod target — read
+before touching ArbosLife again, because its kernels run under `start.sh`
+`while true` loops, the exact shape that bit:**
+
+> **Swap the file first. Then stop. Then wait for a replacement whose running
+> inode is the new one. Relaunch only what did not come back.**
+>
+> A supervised place is the *dangerous* case, not the easy one. Stop a kernel
+> before the swap and its loop relaunches it within a second — from the path,
+> which still holds the **old** file. Then the swap lands. Now a stale kernel
+> holds the place lock, the fresh loop can never start (`Error: place already
+> served`, 1411 times in 32 minutes on the pod), and from outside there is a
+> process serving the place and a supervisor watching it, both wrong. Swap
+> first and the same race relaunches onto the *new* file and does the work for
+> you. `arbos-kernel update --install` stages and renames atomically, so
+> "swap first" costs nothing; every install I did on ArbosLife today happened
+> to be swap-then-kill, which is why none of its loops wedged (checked 11:38:
+> no `place already served` in any kernel log or tmux pane there).
+>
+> "A replacement pid appeared" proves nothing: on the pod one appeared within
+> a second and was already stale. Only `readlink /proc/<pid>/exe` without
+> ` (deleted)`, or the inode matching the new file, says the relaunch took the
+> new build.
+>
+> Every relaunch must close stdin, stdout **and** stderr (`>> log 2>&1
+> </dev/null`). `setsid` does not close descriptors; a `while true` loop that
+> inherits an ssh session's stdout never sends end-of-file, and the session
+> sits open after the work finished — 36 minutes on the pod for a 3-second
+> script. Finished, correct, and indistinguishable from hung.
+
 **The rule that would have prevented tonight's outage, on its own line:**
 
 > **One file can back several processes. After any install over a binary,

@@ -37,7 +37,8 @@ and `ssh` will not load it as written.)
 | `~/.config/arbos/config.toml` | A string `model` and a dummy `api_key`, enough to serve; a real turn would fail at the provider. Nothing here is a secret. |
 | `~/logs/{alpha,beta,gamma}.log` | The kernels' stdout/stderr. |
 | `~/sweep.sh` | One line per `arbos-kernel` process of this user: `GONE` when its running file has lost its name, the pid, start time, the build from its `kernel.json`, its place. |
-| `~/reset.sh` | Puts everything back: kills all three (and the loop), restores the old binary by rename, relaunches the three, prints the sweep. **Run it whenever you want a clean start.** |
+| `~/reset.sh` | Puts everything back: stops the loop *first*, then the kernels, restores the old binary by rename, relaunches the three with all three streams to files, prints the sweep. **Run it whenever you want a clean start.** Rewritten 11:39 UTC after your findings: the loop no longer inherits the session's stdout (your 36 minutes), and the stop order no longer manufactures a stale gamma. |
+| `~/reset.sh wedge` | **Reproduces the 10:56 hazard on purpose**: starts clean, stops the kernels but not the loop so it relaunches gamma from the old path, then swaps the file. Leaves a `GONE` gamma holding the place lock and the loop logging `place already served`. You asked for the hazard to stay available as a feature; this is it, separated from the clean path so nobody trips on it. |
 
 Starting state, 10:20:56 UTC:
 
