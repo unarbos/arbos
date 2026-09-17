@@ -4190,7 +4190,46 @@ fn zone(
             zone = zone.child(heartbeat(&theme, label, chat, cx));
         }
     }
+    // The stall hint is its own element, whatever else is drawn: it used
+    // to live inside the heartbeat line, which is not drawn over a running
+    // tool row unless the chat has a named step — so a silent `sleep 80`
+    // on the chat's own bash could never show it, and QA's control could
+    // not fail (im-02). Keyed on the progress clock, not the turn's age.
+    if running && let Some(hint) = stall_hint(chat, &theme, cx) {
+        zone = zone.child(hint);
+    }
     zone.into_any_element()
+}
+
+/// "Nothing has arrived in 1m 05s …" once the turn has made no visible
+/// progress for `STALL_HINT_AFTER`; over a running command, the command
+/// is named instead of the model key. `None` before that.
+fn stall_hint(chat: &ChatSession, theme: &Theme, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    let silent = chat.quiet_for();
+    if silent < STALL_HINT_AFTER {
+        return None;
+    }
+    Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
+    let hint = match chat.running_command() {
+        Some(command) => format!(
+            "{} has printed nothing in {}. Stop ends it.",
+            crate::model::session::command_short(command),
+            since_short(silent)
+        ),
+        None => format!(
+            "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
+            since_short(silent)
+        ),
+    };
+    Some(
+        div()
+            .id("stall-hint")
+            .py(px(2.))
+            .text_style(TextStyle::Callout)
+            .text_color(theme.text_faint)
+            .child(SharedString::from(hint))
+            .into_any_element(),
+    )
 }
 
 /// Quiet row under a step: ChatView shows only the copy control on hover.
@@ -5652,28 +5691,6 @@ fn heartbeat(
     // gave up, F-77) — says how long, and past a minute what to do. The
     // clock ticks, so it never reads as frozen.
     let quiet = since >= STALL_CLOCK_AFTER;
-    // The hint's clock is the quiet since the last visible progress — a
-    // token, a tool row, a running command's output — not the turn's age:
-    // "Nothing has arrived in 2m 26s" over a command that had been
-    // streaming was wrong (Jacob's Mac, 09-16, kernel #362).
-    let silent = chat.quiet_for();
-    let stalled = silent >= STALL_HINT_AFTER;
-    if quiet {
-        Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
-    }
-    // While a command holds the turn the wait is the command's, not the
-    // model's: name it, and do not send the person to the key.
-    let hint = match chat.running_command() {
-        Some(command) => format!(
-            "{} has printed nothing in {}. Stop ends it.",
-            crate::model::session::command_short(command),
-            since_short(silent)
-        ),
-        None => format!(
-            "Nothing has arrived in {}. Stop to try again, or check the model key in Settings.",
-            since_short(silent)
-        ),
-    };
     // The agent's own step reads as Cursor's "Working  Launching three
     // sort writers": the verb a shade brighter, the step faint and
     // shimmering, no chevron — there is nothing under it to fold.
@@ -5720,15 +5737,6 @@ fn heartbeat(
                         .child(shimmer_label(label, since, theme, cx)),
                 ),
         )
-        .when(stalled, |el| {
-            el.child(
-                div()
-                    .id("stall-hint")
-                    .text_style(TextStyle::Callout)
-                    .text_color(theme.text_faint)
-                    .child(SharedString::from(hint)),
-            )
-        })
         .into_any_element()
 }
 

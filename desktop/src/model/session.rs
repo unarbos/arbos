@@ -2652,7 +2652,30 @@ impl ChatSession {
     fn apply(&mut self, event: Event) {
         self.updated = SystemTime::now();
         self.last_frame_at = Instant::now();
-        if !matches!(event, Event::Alive) {
+        // Progress the person could see. Not `Alive`, not a probe's answer,
+        // not the roster, provider or store bookkeeping the kernel sends
+        // between real frames — those would keep the stall hint away from
+        // a turn that is truly stuck.
+        if matches!(
+            event,
+            Event::TextDelta { .. }
+                | Event::ThoughtDelta { .. }
+                | Event::ThoughtFinal { .. }
+                | Event::AssistantFinal { .. }
+                | Event::Update(_)
+                | Event::Status(_)
+                | Event::Waiting(_)
+                | Event::Incoming { .. }
+                | Event::UserLine { .. }
+                | Event::Woke { .. }
+                | Event::Aside(_)
+                | Event::Refused(_)
+                | Event::Plan(_)
+                | Event::NeedApproval { .. }
+                | Event::NeedQuestion { .. }
+                | Event::Permission(..)
+                | Event::TurnDone(_)
+        ) {
             self.progress_at = Instant::now();
         }
         match event {

@@ -1229,6 +1229,7 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         },
         "streaming": chat.streaming,
         "waiting": chat.waiting,
+        "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
         "pills": project.map(|project| {
