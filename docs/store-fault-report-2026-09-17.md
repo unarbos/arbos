@@ -1,8 +1,31 @@
-# Project Agent Store: the seven "losses" were our own QA loop deleting files — cause found 2026-09-17 07:35 UTC
+# Project Agent Store: a client whose credential is missing lists the store as empty, with no error
 
-Store id: `bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`
-Mount on our machines: `/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`, type `fuse.agent-store`. All times UTC.
-Written by the QA loop. **Do not send the sections below the line to the store's engineers as a fault report.** They were written believing the service was removing files; they are kept as the record that led to the finding, with the errors left in place and named.
+Store id: `bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983`. Client: `cursor-agent-store-fuse`, `--backend-mode direct`, mount `/cursor/stores`, `--pod-grant-path /run/agent-store-fuse/pod-grant`. All times UTC, 2026-09-17.
+
+## The finding — for the store's engineers
+
+When the FUSE client's grant file is gone, every `MintAgentStoreToken` returns **401** and every directory read returns **an empty listing and no error**. `ls` of the store root prints nothing and exits 0; `ls` of any subdirectory prints nothing and exits 0; `[ -e path ]` is false for every file. To a person and to every program on that machine, the store has been emptied. Nothing has: other clients read it whole at the same minute. The client log is the only place the truth appears:
+
+```
+WARN list_files{target="source:cloud"}: agent-store-fuse: failed to stat pod grant file error=No such file or directory (os error 2)
+WARN list_files{target="source:cloud"}: agent_store_bcs.rpc.failed rpc_method="MintAgentStoreToken" … status=401
+WARN agent_store_fuse::fs: host read_dir failed error_kind="permission_denied"
+```
+
+`permission_denied` inside; an empty directory outside. A read that cannot be authenticated should fail the read — `EACCES`, or `EIO` — so that a caller sees an error and a mirror refuses to run, rather than an empty tree it may act on. Two observations support this, one of them with the cause in hand:
+
+1. **This VM, 09:36–now.** `/run/agent-store-fuse/pod-grant` was deleted at 09:36 (by us: a sandboxed test of the kernel's wipe guard ran `cd / && rm -rf *` on a kernel from before the guard; the directory is `drwxrwxrwt` and the grant file was owned by this user). Last successful token mint 09:33:27; first `failed to stat pod grant file` 09:42:27; from then on every listing empty, no error, while a second client on another machine recorded the store whole at 09:37 and after (`store-watch` branch, `readers/cloud-mesh-3b98.jsonl`). The client log is `/tmp/agent-store-fuse.log` on this VM; the relevant lines are on branch `qa-vm-evidence-2026-09-17` as `agent-store-fuse-warn-delete-mint.log`.
+2. **The benchmark loop's VM, 05:35–~06:00.** Its mount listed empty and refused writes for over twenty minutes while two other clients read and wrote the same store normally (details under "A third phenomenon", below the line). We did not have that VM's client log; the shape is the same as (1). Whether its grant went the same way, only that log can say.
+
+Two smaller asks that follow: the grant file should not be removable by the unprivileged user whose processes it serves (the directory is world-writable and sticky, and the file was ours to delete); and a client that has lost its grant should say so once on its own log at WARN or above with the path it looked for — it does, and that line was what let us find this in minutes rather than a day.
+
+## What the rest of this document is
+
+Everything below the line was written believing the service was removing files from this store. It was not. The seven "loss" episodes of 09-16/17 were our own QA loop: an agent under test ran `cd / && rm -rf *` (the kernel's guard did not stop it; fixed in #410) and the store mount was the first user-writable tree under `/`. That account, with its evidence, is kept in full because it is how the finding above was reached, and because it records what we got wrong on the way. None of it is a fault of the service, and none of it should be read as one.
+
+---
+
+# The seven episodes were our own loop (found 07:35; kept as the account)
 
 ## What happened — in one paragraph
 
