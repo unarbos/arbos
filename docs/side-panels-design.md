@@ -1,8 +1,10 @@
 # Side panels: terminals, browsers, documents and files
 
-Design, 2026-09-17. For Jacob. Nothing is built yet; this is what to build and in what order.
+Design, 2026-09-17. For Jacob. **Decided and being built**: the shape is on [#445](https://github.com/unarbos/arbos/pull/445); the four panel kinds follow it.
 
-Terms are defined the first time they appear. Everything here is checked against the code in `unarbos/arbos` at `7017eb75`, and each thing that does not exist yet is listed at the end as a kernel job.
+Terms are defined the first time they appear. Everything here is checked against the code in `unarbos/arbos`, and each thing that does not exist yet is listed at the end as a kernel job.
+
+**What is settled, 2026-09-17.** He read this, chose it, and added the tabs: *"I want to go for this. Note we should be able to tab between these items where there are more than one. Keep the driver chat on the left, the side panel has its own tabs like you suggest, allow command shift {} between them + command t for new ones. Let's just copy exactly how Cursor is doing this with the side panel."* So: chat on the left, one drawer on the right with its own tab row, `⌘⇧{` and `⌘⇧}` between its tabs, `⌘T` for a new one, default closed, everything open listed in it. The co-editing fork at the end is still open; nothing else in §4 is.
 
 ---
 
@@ -16,7 +18,9 @@ Three things you said, in your words:
 
 > The side panel is default closed. "Open the terminal", "open the browser", "open the project" each open that thing in the side panel. Anything being worked with lives there and is listed there while it is open. With the panel closed you do not have to look at any of it; opening it shows what is there.
 
-And your open question: **does the panel show a list of open things that you click through to fill the panel?** Answered in §4.
+> "Keep the driver chat on the left, the side panel has its own tabs like you suggest, allow command shift {} between them + command t for new ones. Let's just copy exactly how Cursor is doing this with the side panel."
+
+And your question, **does the panel show a list of open things that you click through to fill the panel?**, is answered in §4: no menu to pass through — the tab row *is* the list.
 
 *Provenance note, for us and not for you: these three came through the coordinator. They are not in the feedback ledger yet — its rows 2026-09-17-11 through -19 are still marked unread, and no captured report mentions a panel. The poller owner should file them so the words are on the record.*
 
@@ -56,7 +60,7 @@ Two consequences that shape everything below:
 
 ## 4. The shape: one drawer, default closed
 
-**Decision.** One drawer on the right — the surface that already shows `.arbos/`. Default closed. Remembered width, per project. It holds every open thing as rows in a rail, with the content filling the rest. Not a free grid.
+**Decided, and built on [#445](https://github.com/unarbos/arbos/pull/445).** One drawer on the right — the surface that already shows `.arbos/`. Default closed. Remembered width, per project. It holds every open thing as a **tab in its own tab row**, with the content filling the rest. Not a free grid.
 
 **Why not the grid you asked for.** Five reasons, and I would rather argue this now than build it twice:
 
@@ -70,19 +74,23 @@ Where your grid instinct does land: **Show everything**, a grid of cards inside 
 
 ### Your question: a list you click through, or not?
 
-**Not a menu you pass through.** A list-then-fill costs a click every time and loses your place when you come back. So:
+**Not a menu you pass through.** A list-then-fill costs a click every time and loses your place when you come back. So the list *is* the switcher, and it is always visible — which is what you settled on as the tab row:
 
-- The list *is* the switcher, and it is always visible: a narrow rail down the drawer's inner edge, one row per open thing, each row carrying its state. Content fills the rest. On a narrow drawer the rail collapses to glyphs.
-- Opening the drawer lands on the thing you asked for. With no target, it lands on the newest live thing — the terminal that just started, the file being edited. Never on a menu.
-- **Show everything** is the one deliberate list view, for a rail too long to scan.
+- **A tab row across the top of the drawer**, drawn like the window's own strip: `+` on the left, equal pills after it, the drawer's close on the right. The tab in front is filled; the rest are flat and light on hover. Each tab carries its state as a word (§6.6).
+- **`⌘T`** opens a new tab, **`⌘⇧{`** and **`⌘⇧}`** step along the row, wrapping at either end as the window's project tabs already do with the same chords.
+- **The first tab is always Project** — the `.arbos/` view — and it does not close. It is the floor the drawer can always fall back to, and what "open the project" opens.
+- Opening the drawer lands on the tab that was in front when you left it, never on a menu.
+- **Show everything**, a grid of cards for a row too long to scan, is the one deliberate list view. Not built yet.
+
+**One pair of chords, two rows of tabs.** They follow the focus: the panel's tabs while the panel has it, the window's projects otherwise. The state is not invisible — the front tab of the *focused* row is filled **and lit**, the other row's front tab is filled and **muted**, both read from the same focus the chords read. So the lit row is the row that answers, before you press anything. Focus moves only on a click, `⌘B` or `⌘1`; no frame, no agent action and no tab opening moves it. This matters because a chord that does two things depending on hidden state is how "my message went to the wrong project" happens again.
 
 ### Getting back: three ways, always the same three
 
-- **Escape** — leaves zoom first if zoomed, then closes the drawer.
-- **⌘1** — focuses the chat, whatever is open.
-- **A visible chevron** on the drawer's edge, always drawn.
+- **Escape** — closes the drawer (and leaves zoom first, once zoom exists).
+- **⌘1** — the chat, whatever is open, and it takes the focus off the panel, so the next `⌘T` is a project tab again.
+- **A visible control** at the right of the tab row, always drawn.
 
-A keyboard route alone is not enough: you opened the Project page and told us you could not close it. That failure is why the visible control is a requirement, not a nicety.
+A keyboard route alone is not enough: you opened the Project page and told us you could not close it. That failure is why the visible control is a requirement, not a nicety. Escape needed one line of its own to work at all — an action reaches a handler only through the focused element's own ancestors, and the drawer's focus is not under the window's context, so without binding `escape` there too it did nothing.
 
 ### Zoom
 
@@ -90,7 +98,7 @@ A keyboard route alone is not enough: you opened the Project page and told us yo
 
 ### The rest of the frame
 
-- **The `.arbos/` view stays**, as the rail's permanent first row: agents and their workers nested, the processes they started, the resources, the project page. **⌘2** still reaches it, and "open the project" opens it here. This is a change to the layout decision of 2026-09-13, which had that panel always present — it becomes the drawer's first item, and the drawer is closed by default. Flagging it because it is your standing decision to revise.
+- **The `.arbos/` view stays**, as the tab row's permanent first tab: agents and their workers nested, the processes they started, the resources, the project page. **⌘2** still reaches it, and "open the project" opens it here. This is a change to the layout decision of 2026-09-13, which had that panel always present — it becomes the drawer's first tab, and the drawer is closed by default. Flagging it because it is your standing decision to revise.
 - **⌘B** keeps toggling the drawer.
 - **Per project tab.** Drawer state — open or closed, width, rows, which row is in front — belongs to the project, and switches with the tab (§6.5).
 - **The chat is never squeezed below its reading measure.** On a window too narrow for both, the drawer overlays the chat rather than crushing it.
@@ -107,9 +115,11 @@ Your "if it is closed I do not need to look at these things" is a promise the ap
 
 ### Opening is something you ask for
 
-"Open the terminal" is a sentence you say or type; the agent opens it; the drawer opens because you asked, and the chat keeps a card. That makes the conversation the index of everything you have open, which is native to this app rather than borrowed from an editor. There is a menu too, but nobody should need it.
+"Open the terminal" is a sentence you say or type; the agent opens it; and the chat keeps a card — *Terminal · j3* — which is the handle that brings it to the front. That makes the conversation the index of everything you have open, which is native to this app rather than borrowed from an editor.
 
-One rule for both channels: **the drawer opens when you ask, however you ask. It never opens because the agent did something.**
+The rule is **the drawer opens when you ask, however you ask; it never opens because the agent did something** — and today the window can only keep half of it. A `Board` frame from the kernel says a terminal was opened; nothing in it says whether you asked for it in prose or the agent needed it for itself. So the shipped behaviour is the honest one: the window names the route at every call (`OpenedBy::User` for its own clicks, `OpenedBy::Agent` for a frame) and never guesses, which costs one click on a spoken "open the terminal". Kernel handover 2 closes that gap; until it lands, `⌘T` and the Terminal card are the routes that front a tab directly.
+
+**The empty tab.** `⌘T` lands on four cards — Project, Terminal, Browser, File. Project and File act now; Terminal and Browser are the kernel's to open, say so, and put the request in the composer for you to send. No card does nothing.
 
 ---
 
@@ -231,29 +241,35 @@ The rail must not accumulate for ever. Two groups and five rules:
 
 ## 7. Scope and order
 
-### First, and smallest: the terminal panel, jobs only
+### First, and done: the shape — [#445](https://github.com/unarbos/arbos/pull/445)
 
-The drawer, default closed, with the rail, the three ways back, the chat cards, per-tab state — and one panel kind: a read-only follower of the agent's jobs.
+The drawer, default closed and per project, with its tab row, the chords following focus, the three ways back, the empty tab's four cards, and what survives a relaunch. No panel kind is a *feature* yet; the bodies that already render — a job's journal, a terminal, a document, a page — simply render in the drawer now instead of taking the chat's column.
 
-It pays for itself on the day it ships, because it is the answer to "what is my agent actually doing", and it needs nothing new from the kernel: `Frame::Job` deltas, `Frame::Board` and `SurfaceKind::Process` all exist.
+Two behaviour changes fall out of it, both fixes: a file or page the agent opens no longer takes the column (your own complaint about a board arriving over the chat while you typed), and the agent's `focus` command fronts a tab inside the drawer without opening it.
+
+More of this existed than expected. The kernel already runs a pty hub with your own `$SHELL`, and a Chromium page per agent over CDP with `click`, `type` and `press`; the window already had `SurfaceKind::{Terminal, Browser, Process, Panel}`, a git-changes model and a markdown editor. So the four kinds are mostly wiring plus the kernel's missing frames, not new surface.
 
 ### Then, in this order
 
-2. **Files.** `changes.rs` exists; per-turn attribution is the new part.
-3. **Documents**, read-only first, then editing with compare-and-swap saving.
-4. **Browser**, the current picture and URL first, then screencast and takeover.
+2. **Terminal, properly**: a job's live output with a Stop, and *Open a shell here*. Needs kernel handover 2, 3 and 4.
+3. **Files.** `changes.rs` exists; per-turn attribution is the new part (handover 5).
+4. **Documents**, read-only now; editing with compare-and-swap saving next (handover 6).
+5. **Browser**, the current picture and URL, then screencast and takeover (handover 7).
+
+Also waiting, and deliberately not in the first PR: drag-to-resize (no resize handle exists anywhere in the app yet), reorder and drag between rows, the zoom of §4, and **Show everything**.
 
 ### Handover: what the kernel does not have yet
 
 Each of these is a client-visible gap, not an internal refactor.
 
-1. **Open surfaces in the attach snapshot** — the kernel's own list of live jobs, pty pages and browser pages, so a reconnecting or relaunching window rebuilds rows from the kernel's record instead of its memory. This is the F-137 fix at the protocol level.
-2. **Job metadata on the frame** — the command line, cwd, owning agent, started-at, and `journal: present | gone`. Today a `Job` frame carries deltas but not enough to title a row honestly.
-3. **Stop a job from a client**, routed through the kernel's own group kill, with the reason written by a single writer. There is already a known race between two writers on the killed reason; do not add a third.
-4. **Per-turn changed paths** — expose the rewind checkpoint's diff as a frame (`turn N`, paths, `+`/`−`), plus the paths each edit tool call touched. The data exists for rewind and is not readable by a client.
-5. **`write_if_unchanged(path, expected_hash)`** and a `changed` frame per watched path, so an editor can save safely and can tell when the agent wrote underneath it.
-6. **Browser screencast and input** — `Page.startScreencast` frames out, an input frame in, and a `driver: agent | user` field with a loud refusal for whoever is not driving.
-7. **A person's shell in a job's directory** — a client frame that asks for it. `PtyHub::spawn_shell` exists; nothing lets a client ask.
+1. **Open surfaces in the attach snapshot** — the kernel's own list of live jobs, pty pages and browser pages, so a reconnecting or relaunching window rebuilds rows from the kernel's record instead of its memory. This is the F-137 fix at the protocol level, and it is what makes a *live* job's tab survive a relaunch: today only a finished one does, because its journal and `exit` file are a record on disk the window can read for itself.
+2. **`by: user | agent` on `Frame::Board`, and a client frame that asks for a shell.** Together these are what make "open the terminal" open it: the window would know the route, and `PtyHub::spawn_shell` would be reachable from a click. Without them the Terminal card can only put the words in the composer.
+3. **Job metadata on the frame** — the command line, cwd, owning agent, started-at, and `journal: present | gone`. Today a `Job` frame carries deltas but not enough to title a row honestly.
+4. **Stop a job from a client**, routed through the kernel's own group kill, with the reason written by a single writer. There is already a known race between two writers on the killed reason; do not add a third.
+5. **Per-turn changed paths** — expose the rewind checkpoint's diff as a frame (`turn N`, paths, `+`/`−`), plus the paths each edit tool call touched. The data exists for rewind and is not readable by a client.
+6. **`write_if_unchanged(path, expected_hash)`** and a `changed` frame per watched path, so an editor can save safely and can tell when the agent wrote underneath it.
+7. **Browser screencast and input** — `Page.startScreencast` frames out, an input frame in, and a `driver: agent | user` field with a loud refusal for whoever is not driving.
+8. **A person's shell in a job's directory**, so *Open a shell here* starts your shell where the job ran.
 
 ---
 
@@ -261,13 +277,21 @@ Each of these is a client-visible gap, not an internal refactor.
 
 - **A free grid or tiling workspace.** §4.
 - **Presets and saved layouts.** With nothing to arrange there is nothing to save.
-- **A second tab bar** along the top of the chat for panels. That is the chrome Cursor's Projects release removed, and we would be adding it beside the project tabs.
+- **A second tab bar over the chat.** The drawer's tabs live in the drawer; the chat column keeps none of its own.
 - **A code editor.** The article editor is enough for "open this file and let me edit". You asked to edit a file, not to replace Cursor. No language server, no multi-file editing, no find-and-replace across the project.
 - **A revert or discard button in the files panel.** Rewind owns undoing, and six data-loss bugs in one night came from second paths to destroying work.
 - **One terminal object with two owners.** §5.1.
 - **Auto-open, auto-focus, and a badge that nags.** §4.
 - **Cached content across a relaunch.** §6.3.
 - **A panel that speaks.** §6.4.
+
+---
+
+## Against Cursor
+
+"Copy exactly how Cursor is doing this" is being measured rather than remembered: the parity loop is timing its side panel — tab behaviour, what its chords do, widths, drag and reorder, the empty state, one tab and many — and will write it up for this. Where their measurement and this document disagree, Cursor wins and the difference gets noted here. Three questions are already out to them: whether its tab cycling wraps (ours does, following our own project tabs), what the two other icons at the top right of your screenshot are, and its width floor and ceiling.
+
+One note on the screenshot: the four-card empty state in it is not in Arbos today — it is Cursor's own. The cards here are built fresh.
 
 ---
 
