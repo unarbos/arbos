@@ -12,12 +12,13 @@ use crate::{
     },
 };
 use anyhow::{Result, anyhow};
+pub use arbos_core::wire::Surface as KernelSurface;
+
 use arbos_core::wire::Frame;
 use cacp::{
     Error,
     schema::{
-        ContentBlock, Cost, Diff, RequestPermissionRequest, RequestPermissionResponse,
-        SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
+        ContentBlock, Cost, Diff, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
         ToolKind, UsageUpdate,
     },
 };
@@ -31,7 +32,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
     runtime::Runtime,
-    sync::{mpsc, oneshot},
+    sync::mpsc,
 };
 
 pub fn runtime() -> &'static Runtime {
@@ -40,12 +41,8 @@ pub fn runtime() -> &'static Runtime {
 }
 
 pub enum Event {
-    History(crate::model::history::Replay),
     Update(SessionUpdate),
-    Permission(RequestPermissionRequest, Reply<RequestPermissionResponse>),
     TurnDone(Result<StopReason, Error>),
-    Reconnecting,
-    Reconnected,
     Closed,
     /// A message that arrived from outside this window: another chat, or
     /// another door on the same chat.
@@ -66,6 +63,10 @@ pub enum Event {
         /// (empty on lines from before the kernel wrote it).
         channel: String,
     },
+    /// What the kernel holds, in answer to `surfaces`: every job, shell and
+    /// page it has, and nothing it does not. A row the window holds that is
+    /// absent here has no process behind it.
+    Surfaces(Vec<KernelSurface>),
     /// The agent spoke between turns: a callback fired, or background work
     /// finished. Not a turn, and not a failure.
     Aside(String),
@@ -179,11 +180,6 @@ pub enum Event {
         /// build with nothing in it rather than a build assumed to be ours.
         build: crate::kernel::KernelBuild,
     },
-    /// The kernel paused the turn for a tool the user must allow.
-    NeedApproval {
-        request_id: String,
-        title: String,
-    },
     /// The kernel paused the turn for the ask tool.
     NeedQuestion {
         request_id: String,
@@ -202,12 +198,8 @@ pub enum Event {
     /// serving last week's. Better than any version guess, since it is the
     /// kernel itself saying it does not know the frame.
     FeedbackUnavailable(String),
-    /// Provider-generated pictures for the turn that just finished.
-    Images(Vec<crate::model::attachment::MessageImage>),
     /// Files a tool made for the user: screenshots, screen recordings.
     Artifacts(Vec<crate::model::session::Artifact>),
-    /// Web-search sources the provider grounded the last assistant message on.
-    Citations(Vec<Citation>),
     /// The agent presented a file (`show`).
     Show {
         path: String,
@@ -269,28 +261,7 @@ pub enum Event {
     StoreChanged(String),
 }
 
-/// One source the provider named. Title may be empty; URL is not.
-#[derive(Clone)]
-pub struct Citation {
-    pub url: String,
-    pub title: String,
-}
-
 pub type Events = mpsc::UnboundedReceiver<Event>;
-
-pub struct Reply<T>(oneshot::Sender<Result<T, Error>>);
-
-impl<T> Reply<T> {
-    pub fn send(self, value: T) {
-        let _ = self.0.send(Ok(value));
-    }
-
-    /// A sink nobody is waiting on — kernel approvals answer over the socket.
-    pub fn ignore() -> Self {
-        let (tx, _) = oneshot::channel();
-        Self(tx)
-    }
-}
 
 pub struct Session {
     reader: tokio::task::JoinHandle<()>,
@@ -553,14 +524,6 @@ impl Session {
         })
     }
 
-    pub fn approval(&self, request_id: &str, approved: bool) -> Result<()> {
-        self.send_frame(&Frame::Approve {
-            agent: self.session_id.clone(),
-            call_id: request_id.to_string(),
-            allow: approved,
-        })
-    }
-
     pub fn skip_question(&self, request_id: &str) -> Result<()> {
         self.answer_questions(request_id, &[], "", true)
     }
@@ -690,6 +653,23 @@ impl Session {
         });
     }
 
+    /// Ask for a shell of this person's own: their `$SHELL`, interactive, in
+    /// `cwd`. The kernel answers with a `board` frame carrying `by: user`, so
+    /// the row arrives already knowing whose it is and the drawer opens for it
+    /// (#461).
+    pub fn shell(&self, cwd: Option<String>) {
+        let _ = self.send_frame(&Frame::Shell { owner: None, cwd });
+    }
+
+    /// Ask the kernel what it holds — its jobs, shells and pages, with their
+    /// states. Sent when a connection comes back, because the kernel that
+    /// answers may not be the one that opened those rows: a kernel that died
+    /// is replaced, and the replacement knows nothing of its shells. The
+    /// answer arrives on this connection only.
+    pub fn surfaces(&self, agent: Option<String>) {
+        let _ = self.send_frame(&Frame::Surfaces { agent });
+    }
+
     /// Move a plan node from the window: `cancel`, `run`, `reopen`, `answer`.
     pub fn plan_op(&self, node: u64, op: &str, text: &str) {
         let _ = self.send_frame(&Frame::PlanOp {
@@ -760,6 +740,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                 )))]
             }
         }
+        // Not filtered by agent: the list is the place's, and the connection
+        // it arrives on is the one that asked.
+        Frame::SurfaceList { surfaces, .. } => vec![Event::Surfaces(surfaces)],
         Frame::Working { agent: id, secs } if id == agent || agent.is_empty() => {
             vec![Event::Working(secs)]
         }

@@ -132,6 +132,11 @@ fn finished_children_do_not_count_toward_the_cap_and_each_done_reaches_root_once
         (1..=3).contains(&done_wakes.len()),
         "done wakes: {done_wakes:?}\n{root:#?}"
     );
+    // A report that lands while root is on a turn folds into that turn as
+    // a say line (the done-wake fold) and opens no wake of its own; one
+    // that lands between turns opens a wake that names it. So a child is
+    // named in at most one wake, and every child's report is on the
+    // transcript once (asserted above) — never twice, never missing.
     for w in ["w1", "w2", "w3"] {
         let named = done_wakes
             .iter()
@@ -140,9 +145,9 @@ fn finished_children_do_not_count_toward_the_cap_and_each_done_reaches_root_once
                 reported.contains(w)
             })
             .count();
-        assert_eq!(
-            named, 1,
-            "{w} is reported in exactly one wake: {done_wakes:?}"
+        assert!(
+            named <= 1,
+            "{w} is named in at most one wake: {done_wakes:?}"
         );
     }
     let turns = count(&root, "turn_complete");

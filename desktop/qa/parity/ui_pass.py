@@ -94,7 +94,6 @@ P_EDIT = "Add a mul(a, b) function to math_utils.py and call it from main.py wit
 # test is the turn under test: a delegating turn's fold is bare by design
 # (F-104) and the row had been clicking whatever fold was on screen (R10).
 P_OWN = "Run `ls` yourself with bash — no workers — and tell me in one line what is here."
-P_PERM = "Delete the file README.md with `rm -f README.md`, then recreate it with one line."
 P_PR = ("Spawn one sub-agent whose only task is to run exactly this shell command and report the URL it prints: "
         "gh pr create --base master --head cursor/parity-pill --title 'Parity PR' --body 'Opened by the parity pass.' "
         "Wait for it, then reply with that URL.")
@@ -851,21 +850,11 @@ class Pass:
                 self.gap("ask-skip", sc, "click", "no ask-skip element")
         self.wait_idle(60)
         self.recover()
-        # Permission strip.
-        sc = "permission-strip"
-        self.send(P_PERM)
-        s = self.wait(lambda s: (active(s) or {}).get("permission") or not busy(s), 60, what="permission")
-        if s and (active(s) or {}).get("permission"):
-            self.inv(sc)
-            if self.app.exists("permission-always"):
-                self.check("permission-always", sc, "toggle Always allow", "toggle flips (no state field)", lambda: self.app.click("permission-always"), None)
-            deny = self.first("no*") ; allow = self.first("yes*")
-            if allow:
-                self.check(allow.rsplit(".", 1)[-1], sc, "click allow", "permission cleared", lambda: self.app.click(allow), lambda a, b: not (active(b) or {}).get("permission"))
-            else:
-                self.gap("allow", sc, "click", "no yes/yes-always element")
-        else:
-            self.gap("permission-strip", sc, "trigger", "no permission prompt appeared for a shell rm (strip is macOS-alert driven)")
+        # The approval card (`permission-strip`) is gone: nothing ever
+        # emitted the two events that opened it, so this row read
+        # `not-reachable` in every gate since it was written. The kernel's
+        # approvals arrive as `ask` frames and are driven by the ask rows
+        # above (rig audit R23).
         self.wait_idle(90)
 
     def phase_plan(self) -> None:

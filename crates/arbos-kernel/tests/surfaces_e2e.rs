@@ -103,10 +103,22 @@ fn a_replacement_kernel_says_what_it_holds_and_the_dead_ones_rows_are_not_in_it(
     // still holds a job row and a terminal row from its memory.
     let mut k = restart_replay(&mut k, "{\"agent\":\"root\",\"content\":\"back\"}\n");
     let mut b = Attach::connect(&k.url);
-    assert!(
-        b.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
-            .is_some()
-    );
+    let snap = b
+        .wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+        .expect("a snapshot");
+    // The snapshot itself carries the list, so a window that does not
+    // know to ask still rebuilds from the kernel's record: the job is
+    // there (the disk record), the shell is not (it died with its kernel).
+    let snap_rows = |panel: &str| {
+        snap["surfaces"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|s| s["panel"] == panel)
+            .count()
+    };
+    assert_eq!(snap_rows("process"), 1, "{snap:#}");
+    assert_eq!(snap_rows("terminal"), 0, "{snap:#}");
     // The shell died with its kernel: not in the list at all. The job is
     // the kernel's record on disk, so it is listed — and once the leash has
     // ended it (the kernel that owned it is gone), it is listed as not

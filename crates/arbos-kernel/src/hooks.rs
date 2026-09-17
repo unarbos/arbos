@@ -1570,6 +1570,17 @@ impl KernelHooks {
                 if let Some(gone) = self.archived_named(q) {
                     bail!("{}", gone.refusal(&agents, from));
                 }
+                // A path, or another place's agent: a boundary, not a
+                // lookup failure. "no agent is named /Users/…/agents/root"
+                // read as one (Jacob, 2026-09-17: "is this can't-speak-to-
+                // other-agents design correct?").
+                if q.contains('/') || q.contains(".arbos") {
+                    bail!(
+                        "say: {q:?} is a path, not an agent here. say reaches the agents of this place, and agents on machines registered with the hub (machine/project). Another project on this machine is its own place: open it as a project, or register this machine so places can talk. Live agents here: {}{}",
+                        roster(&agents, from),
+                        self.archived_note()
+                    )
+                }
                 bail!(
                     "say: no agent is named {q:?}. Live agents: {}{}",
                     roster(&agents, from),

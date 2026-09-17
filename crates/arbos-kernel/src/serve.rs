@@ -1918,9 +1918,26 @@ enum Page {
 
 fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
     // A finished worker's record lives in the archive; a client asking
-    // for it gets the lines from there, flagged, not an empty page.
-    let (transcript, archived) = arbos_core::files::transcript_for_history(place, agent)
-        .unwrap_or_else(|| (Layout::new(place, agent).transcript(), false));
+    // for it — by id or by the name its card shows — gets the lines from
+    // there, flagged, not an empty page. No such agent anywhere: an empty
+    // page that says so, not one that reads as an empty record.
+    let resolved = arbos_core::files::resolve_history_agent(place, agent);
+    let unknown = resolved.is_none();
+    let (transcript, archived, id) = match resolved {
+        Some(r) => (r.transcript, r.archived, r.id),
+        None => (
+            Layout::new(place, agent).transcript(),
+            false,
+            agent.to_string(),
+        ),
+    };
+    if unknown {
+        klog::warn(
+            "history_unknown",
+            Some(agent),
+            "no agent live or archived by that id or name",
+        );
+    }
     let events = load_transcript(&transcript).unwrap_or_default();
     let total = events.len() as u64;
     let picked: Vec<&Event> = match page {
@@ -1949,7 +1966,7 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
     let to = picked.last().map(|e| e.seq).unwrap_or(anchor);
     for ev in picked {
         let mut event = ev.clone();
-        arbos_core::files::scrub_child_claims(place, agent, &mut event);
+        arbos_core::files::scrub_child_claims(place, &id, &mut event);
         // A record from before `output` existed gets its glance here.
         if let EventKind::Tool(rec) = &mut event.kind
             && rec.output.is_none()
@@ -1968,14 +1985,16 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         total,
         archived,
         path: if archived {
-            format!("archive/agents/{agent}/transcript.jsonl")
+            format!("archive/agents/{id}/transcript.jsonl")
         } else {
             String::new()
         },
+        id: if id == agent { String::new() } else { id },
+        unknown,
     });
 }
 
-fn snapshot(place: &Place) -> Frame {
+fn snapshot(place: &Place, hooks: &KernelHooks) -> Frame {
     let focus = arbos_core::read_focus(place);
     // The focused agent's last measured context, so a client attaching
     // mid-conversation shows the real meter rather than a placeholder.
@@ -1984,6 +2003,10 @@ fn snapshot(place: &Place) -> Frame {
         tree: tree_nodes(place),
         focus,
         budget: last_usage(place, &agent),
+        // The kernel's record of what it holds, read now: a window that
+        // reattaches after a kernel died draws rows from this, not from
+        // what it remembers (#468's frame, at the moment it matters most).
+        surfaces: crate::surfaces::list(place, hooks, None),
     }
 }
 
@@ -2523,7 +2546,7 @@ pub async fn serve_client(
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });
-            let _ = out_tx.send(snapshot(&accept_place));
+            let _ = out_tx.send(snapshot(&accept_place, &accept_hooks));
             let _ = out_tx.send(provider_frame(&accept_place));
             for agent in list_agents(&accept_place).unwrap_or_default() {
                 let _ = out_tx.send(accept_hooks.plan_frame(agent.id.as_str()));

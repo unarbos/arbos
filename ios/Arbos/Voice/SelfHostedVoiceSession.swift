@@ -17,7 +17,7 @@ import Foundation
 ///     `session.end`
 ///
 ///   server → client
-///     `session.ready { engine, reply, tools, kernel, text, project? }`  — project: the kernel on the line
+///     `session.ready { engine, reply, tools, kernel, text, project?, project_info? }`  — project: the kernel on the line
 ///     `error { code: project_unknown|project_offline|project_unreachable|no_hub, message }` then close 4404: the target cannot be reached, no fallback
 ///     `speech.started` / `speech.stopped`      server VAD
 ///     `transcript.delta { text }`   append;  `transcript.final { text }`  replace, may be ""
@@ -29,9 +29,11 @@ import Foundation
 ///     `tool.call { name, arguments }` / `tool.result { name, output }`
 ///     `agent.done { agent, text }`
 ///     `agent.event { agent, kind, text }` / `agent.turn { agent, state }` / `agent.tree { agents }`
+///     `agent.activity { agent, state: working|tool|idle, tool?, detail? }`  the kernel is at work; the working sound follows it
 ///     `error { message }`
 ///
-/// With the `duplex` engine (NemotronLabs VoiceChat) the server answers
+/// With the `duplex` engine (NemotronLabs VoiceChat) or the `openai` engine
+/// (GPT-Live, the kernel behind it by client delegation) the server answers
 /// spoken turns itself and calls Arbos tools mid-conversation; the app only
 /// plays audio, shows text, and flushes playback on `speech.started`.
 final class SelfHostedVoiceSession: VoiceSession {
@@ -155,10 +157,18 @@ final class SelfHostedVoiceSession: VoiceSession {
             info.tools = object["tools"] as? [String] ?? []
             info.kernel = object["kernel"] as? Bool ?? false
             info.text = object["text"] as? String ?? ""
-            if let p = object["project"] as? [String: Any] {
+            // The gateway names the project as `project: "machine/project"` with
+            // the roster's name and icon beside it in `project_info`; older
+            // builds put the dict in `project` itself. Read all three shapes.
+            if let p = (object["project_info"] as? [String: Any]) ?? (object["project"] as? [String: Any]) {
                 let machine = p["machine"] as? String ?? ""
                 let name = p["project"] as? String ?? ""
                 info.project = CallProject(machine: machine, project: name, name: p["name"] as? String ?? name, icon: p["icon"] as? String ?? "folder")
+            } else if let label = object["project"] as? String, !label.isEmpty {
+                let parts = label.split(separator: "/", maxSplits: 1).map(String.init)
+                let machine = parts.count == 2 ? parts[0] : ""
+                let name = parts.count == 2 ? parts[1] : label
+                info.project = CallProject(machine: machine, project: name, name: name, icon: "folder")
             }
             sink.emit(.connected(info))
         case "speech.started":
@@ -204,6 +214,13 @@ final class SelfHostedVoiceSession: VoiceSession {
             sink.emit(.agentTurn(
                 agent: object["agent"] as? String ?? "",
                 running: (object["state"] as? String) == "running"
+            ))
+        case "agent.activity":
+            sink.emit(.agentActivity(
+                agent: object["agent"] as? String ?? "root",
+                state: object["state"] as? String ?? "idle",
+                tool: object["tool"] as? String,
+                detail: object["detail"] as? String
             ))
         case "agent.tree":
             let rows = object["agents"] as? [[String: Any]] ?? []

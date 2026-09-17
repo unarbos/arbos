@@ -9,7 +9,8 @@
 //! why [`Workspace::save`] can take no arguments.
 
 use crate::{
-    agent, boardhub,
+    agent::{self, acp::KernelSurface},
+    boardhub,
     data::{ColType, Column, Data, Edit, Page, Table},
     kernel, memory,
     model::{
@@ -17,17 +18,21 @@ use crate::{
         attachment::Prompt,
         board::{self, Board},
         identity::Identity,
+        panel::{OpenedBy, Panel, PanelTab},
         place::Place,
         project::Project,
         record,
-        session::{self, ChatItem, ChatSession, Command},
+        session::{self, ChatItem, ChatSession, Command, Connection},
         settings::{self, Feature, Settings},
         state::{self, State},
         surface::{self, Bind, Surface, SurfaceId, SurfaceKind},
         watch::{self, Watch},
     },
     reading,
-    view::component::transcript,
+    view::component::{
+        surface::{Link, journal_prime},
+        transcript,
+    },
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bezel::{
@@ -142,6 +147,12 @@ pub struct Workspace {
     pub pending_composer: Option<String>,
     /// Whether the permissions sheet has been shown once.
     pub permissions_seen: bool,
+    /// Side panels of places that are *not* open, so closing a tab and
+    /// opening the folder again brings the drawer back as it was. An open
+    /// project's own [`Project::panel`] is the only copy of its state; a key
+    /// is moved into this map when its tab closes and taken out when it
+    /// opens, so the two can never disagree.
+    panels: BTreeMap<String, state::PanelState>,
 }
 
 /// Under a fork's trailing prompt when the original was still answering it.
@@ -182,6 +193,7 @@ impl Workspace {
                 .unwrap_or(0)
         });
         let restore: Vec<usize> = (0..projects.len()).collect();
+        let panels = state.panels;
         let mut this = Self {
             settings,
             projects,
@@ -209,11 +221,20 @@ impl Workspace {
             dismissed: state.dismissed,
             pending_composer: None,
             permissions_seen: state.permissions_seen,
+            panels,
         };
         for ix in restore {
             this.restore_sessions(ix);
             this.watch_project(ix, cx);
             this.watch_board(ix, cx);
+        }
+        // The side panels, after the projects exist: open or closed, how
+        // wide, and the tabs whose record is still on disk.
+        for ix in 0..this.projects.len() {
+            let key = this.projects[ix].place().encode();
+            if let Some(saved) = this.panels.remove(&key) {
+                this.restore_panel(ix, &saved);
+            }
         }
         for ix in 0..this.projects.len() {
             this.apply_dismissed(ix);
@@ -285,7 +306,92 @@ impl Workspace {
             dismissed: self.dismissed.clone(),
             permissions_seen: self.permissions_seen,
             frame: self.frame,
+            panels: self.panel_states(),
         });
+    }
+
+    /// Each project's side panel as it is filed: open, width, and its tabs as
+    /// addresses. Only a finished job is written — its journal and the `exit`
+    /// file beside it are a record on disk that the next launch can read for
+    /// itself. A live job, a terminal page and a browser page are the
+    /// kernel's own state and it does not yet replay them to a client that
+    /// reattaches, so filing them would be filing a row we could not prove
+    /// (see `docs/side-panels-design.md`, kernel handover 1).
+    fn panel_states(&self) -> BTreeMap<String, state::PanelState> {
+        // The places that are not open keep what was filed for them.
+        let mut filed = self.panels.clone();
+        for ix in 0..self.projects.len() {
+            filed.insert(self.projects[ix].place().encode(), self.panel_state_of(ix));
+        }
+        filed
+    }
+
+    /// One project's drawer as it is filed.
+    fn panel_state_of(&self, ix: usize) -> state::PanelState {
+        let project = &self.projects[ix];
+        let tabs: Vec<state::PanelEntry> = project
+            .panel
+            .tabs()
+            .iter()
+            .filter_map(|tab| match tab {
+                PanelTab::Project | PanelTab::New(_) => None,
+                PanelTab::Surface(id) => project.surface(*id),
+            })
+            .filter_map(|surface| match &surface.bind {
+                Bind::Process {
+                    log, done: Some(_), ..
+                } => Some(state::PanelEntry {
+                    kind: "process".into(),
+                    id: log.display().to_string(),
+                    title: surface.title.clone(),
+                }),
+                Bind::Process { .. }
+                | Bind::Terminal { .. }
+                | Bind::Browser { .. }
+                | Bind::Url(_)
+                | Bind::Path(_)
+                | Bind::Empty => None,
+            })
+            .collect();
+        state::PanelState {
+            open: project.panel.open,
+            width: project.panel.width,
+            active: project.panel.active(),
+            tabs,
+        }
+    }
+
+    /// Put back what a project's side panel held. A tab is restored only when
+    /// its record is on disk now: the journal is there and the job's `exit`
+    /// file says how it ended. Anything else is left out rather than drawn
+    /// from the window's own memory, which is the F-137 shape.
+    fn restore_panel(&mut self, ix: usize, saved: &state::PanelState) {
+        let mut ids = Vec::new();
+        for entry in &saved.tabs {
+            let Some(restored) = state::restorable_tab(entry) else {
+                continue;
+            };
+            let id = self.upsert_surface(
+                ix,
+                None,
+                SurfaceKind::Process,
+                restored.title,
+                Bind::Process {
+                    id: restored.job,
+                    log: restored.log,
+                    live: String::new(),
+                    done: Some(restored.exit),
+                },
+                "process",
+                |surface, bind| {
+                    surface.kernel_id().is_some() && surface.kernel_id() == bind.kernel_id()
+                },
+            );
+            ids.push(id);
+        }
+        self.projects[ix]
+            .panel
+            .restore(saved.open, saved.width, ids, saved.active);
     }
 
     /// The first-launch sheet has been shown; it will not open on its own again.
@@ -628,11 +734,21 @@ impl Workspace {
     /// window did to that place's kernel (the stranger plate's restart).
     /// Nothing if the place is not open: a closed tab has no pane to say
     /// it on, and the bar has already said what the click does.
-    pub fn notice_on_root(&mut self, place: &Place, failed: bool, text: &str, cx: &mut Context<Self>) {
+    pub fn notice_on_root(
+        &mut self,
+        place: &Place,
+        failed: bool,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(project) = self.projects.iter_mut().find(|p| p.place() == *place) else {
             return;
         };
-        let Some(chat) = project.sessions.iter_mut().find(|chat| chat.parent.is_none() && !chat.closed) else {
+        let Some(chat) = project
+            .sessions
+            .iter_mut()
+            .find(|chat| chat.parent.is_none() && !chat.closed)
+        else {
             return;
         };
         chat.notice(failed, text);
@@ -720,6 +836,10 @@ impl Workspace {
         }
         let key = self.projects[ix].place().encode();
         self.board_out.remove(&key);
+        // The drawer's shape goes back into the filed map, so opening this
+        // folder again brings the panel back as it was left.
+        let filed = self.panel_state_of(ix);
+        self.panels.insert(key.clone(), filed);
         self.projects.remove(ix);
         self.active = self.active.and_then(|active| {
             let next = if active > ix { active - 1 } else { active };
@@ -1717,7 +1837,8 @@ impl Workspace {
                 .join(&sid)
                 .is_dir();
             let text = if archived {
-                "this agent is archived: its history stays, but it takes no more messages".to_owned()
+                "this agent is archived: its history stays, but it takes no more messages"
+                    .to_owned()
             } else {
                 format!(
                     "this agent's folder is gone: expected {}. Your line was not sent.",
@@ -1798,13 +1919,20 @@ impl Workspace {
     /// How many automatic reconnects a chat gets before it waits for a
     /// hand.
     pub const RECONNECT_TRIES: u32 = 30;
+    /// How often a fault no retry mends is looked at again.
+    pub const RECHECK_SECS: u64 = 60;
 
     /// The connection failed or dropped: try again after 2, 4, 8, 16, 32,
     /// then 60 s, up to [`Self::RECONNECT_TRIES`] times — a first start
     /// that lost the spawn race to another row, a remote tunnel, a local
     /// kernel that stopped. The row under the composer counts down; a Send
     /// or Stop meanwhile tries at once.
-    pub fn schedule_reconnect(&mut self, id: u64, cx: &mut Context<Self>) {
+    ///
+    /// `slow` is the fault no retry mends — no kernel binary, a path that
+    /// is not a directory: one look every [`Self::RECHECK_SECS`], not
+    /// counted against the tries, so the tab is never dead but never
+    /// hammers either. The reason stays on the bar meanwhile.
+    pub fn schedule_reconnect(&mut self, id: u64, slow: bool, cx: &mut Context<Self>) {
         let Some(chat) = self.session_mut(id) else {
             return;
         };
@@ -1815,17 +1943,28 @@ impl Workspace {
         if chat.reconnect_at.is_some() && chat.reconnect_gen == chat.attach_gen {
             return;
         }
-        if chat.reconnect_attempt >= Self::RECONNECT_TRIES {
+        if !slow && chat.reconnect_attempt >= Self::RECONNECT_TRIES {
+            let why = chat
+                .connect_fault
+                .clone()
+                .map(|why| format!(" ({why})"))
+                .unwrap_or_default();
             chat.notice(
                 true,
-                "connection lost; retries stopped — send a message or press Reconnect to try again",
+                &format!(
+                    "connection lost{why}; retries stopped — send a message or press Reconnect to try again"
+                ),
             );
             chat.flush();
             return;
         }
-        chat.reconnect_attempt += 1;
-        let attempt = chat.reconnect_attempt;
-        let delay = Duration::from_secs(2u64.saturating_pow(attempt.min(6)).min(60));
+        let delay = if slow {
+            Duration::from_secs(Self::RECHECK_SECS)
+        } else {
+            chat.reconnect_attempt += 1;
+            let attempt = chat.reconnect_attempt;
+            Duration::from_secs(2u64.saturating_pow(attempt.min(6)).min(60))
+        };
         chat.reconnect_at = Some(std::time::Instant::now() + delay);
         chat.reconnect_gen = chat.attach_gen;
         let generation = chat.attach_gen;
@@ -2514,11 +2653,13 @@ impl Workspace {
             // live does (F-105).
             chat.adopt_kernel_tail();
             chat.sync_kernel_history();
-            if chat.reconnect_attempt > 0 {
-                chat.notice(false, "reconnected");
-            }
+            // No "reconnected" line on the transcript: the machine pill
+            // said "reconnecting" and now says nothing, which is the
+            // whole news. Cursor writes nothing either; Jacob read the
+            // bare word at the foot of his chat as a blemish (report -32).
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
+            chat.connect_fault = None;
             // What the agent is on right now, from its status file, so a
             // fresh attach draws the line without waiting for a frame.
             if chat.host.is_none()
@@ -2576,8 +2717,294 @@ impl Workspace {
         project.surface(id)
     }
 
-    /// Put a surface in the column. The parent agent stays the focused
-    /// agent, so its children stay listed.
+    /// The Terminal tile: ask this place's kernel for a shell of his own. It
+    /// answers with a row marked `by: user`, which is what opens the drawer on
+    /// it — the window does not have to front it here and then hope.
+    pub fn open_shell(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = self.active_id() else {
+            return;
+        };
+        let cwd = self
+            .active_project()
+            .map(|project| project.path.display().to_string());
+        if let Some(Connection::Live(session)) = self.session(chat).map(|c| &c.connection) {
+            session.shell(cwd);
+            return;
+        }
+        // No socket, so nothing can open a shell: say so where he asked
+        // rather than leaving a tile that did nothing.
+        self.with_session(chat, cx, |chat| {
+            chat.notice(true, "no kernel is attached, so there is no shell to open");
+        });
+    }
+
+    // ── reconciling rows against the kernel ──────────────────────────
+
+    /// Ask the kernel of `chat`'s place what it holds. Sent when a connection
+    /// comes back, because the kernel that answers may not be the one that
+    /// opened the rows this window is drawing: a kernel that dies is replaced,
+    /// and the replacement inherits its jobs from disk but knows nothing of
+    /// its shells.
+    pub fn ask_surfaces(&self, chat: u64) {
+        if let Some(Connection::Live(session)) = self.session(chat).map(|c| &c.connection) {
+            session.surfaces(None);
+        }
+    }
+
+    /// What the kernel says it holds, against what this window is drawing.
+    ///
+    /// Three outcomes per row, and none of them is a guess:
+    ///
+    /// - **listed and running** — nothing to say; it is what we thought.
+    /// - **listed and not running** — take the kernel's own words for why, and
+    ///   for a job take its exit too, so the row is retitled truthfully and
+    ///   its journal stays readable.
+    /// - **not listed** — the kernel does not hold it. The row stays (its
+    ///   output is still worth reading) and says `gone`, which is the fact
+    ///   the absence carries.
+    ///
+    /// This is what ends the flip watched live: a job row that read `link
+    /// lost` while its kernel was dead, then `running` again the moment a
+    /// replacement answered, with nothing behind it either time.
+    pub fn reconcile_surfaces(
+        &mut self,
+        chat: u64,
+        listed: &[KernelSurface],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.project_of(chat) else {
+            return;
+        };
+        let mut changed = false;
+        for surface in &mut self.projects[ix].surfaces {
+            let Some(id) = surface.kernel_id().map(str::to_owned) else {
+                // A file or a URL the window opened itself: no kernel row to
+                // match, so nothing the kernel says bears on it.
+                continue;
+            };
+            let panel = match surface.kind {
+                SurfaceKind::Process => "process",
+                SurfaceKind::Terminal => "terminal",
+                SurfaceKind::Browser => "browser",
+                SurfaceKind::Panel => continue,
+            };
+            let found = listed
+                .iter()
+                .find(|row| row.id == id && row.panel == panel);
+            match found {
+                Some(row) => {
+                    if surface.gone {
+                        surface.gone = false;
+                        changed = true;
+                    }
+                    if surface.status.as_deref() != Some(row.status.as_str()) {
+                        surface.status = Some(row.status.clone());
+                        changed = true;
+                    }
+                    // A job the kernel no longer runs: its end is a fact, and
+                    // an unended row would go on reading `running`.
+                    if let Bind::Process { done, .. } = &mut surface.bind
+                        && !row.running
+                        && done.is_none()
+                    {
+                        *done = Some(row.exit);
+                        changed = true;
+                    }
+                }
+                None if !surface.gone => {
+                    surface.gone = true;
+                    changed = true;
+                }
+                None => {}
+            }
+        }
+        changed |= self.seed_running_jobs(ix, chat, listed);
+        if changed {
+            self.projects[ix].sync_panel();
+            self.push_snapshot(ix);
+            cx.notify();
+        }
+    }
+
+    /// Rows for jobs the kernel says are running that this window does not
+    /// hold. Answers whether it added any.
+    ///
+    /// This is the relaunch a person actually meets: he closes the app, or it
+    /// updates itself, while something long is running; he comes back, and the
+    /// row he most wants is the one still going. Filing tabs on disk cannot
+    /// bring that one back — a live job has no exit file, and inventing one
+    /// from a remembered row is the guess this design refuses — so it comes
+    /// from the kernel's own answer instead. A finished job returning while a
+    /// live one vanished was the wrong way round.
+    ///
+    /// Only running jobs, and only jobs:
+    ///
+    /// - a **finished** job the window never held is history rather than work
+    ///   in progress, and seeding it would repopulate tabs nobody opened;
+    /// - a **shell** cannot be seeded honestly. Its scrollback lives in the
+    ///   pty and is not replayed, so a reattached row would draw an empty
+    ///   screen until the shell next printed — a live thing that looks dead.
+    ///   That wants a decision (and probably a kernel-side replay) rather than
+    ///   a row that misleads;
+    /// - a **page** is a picture the kernel pushes on change, and nothing
+    ///   pushes on attach.
+    ///
+    /// A seeded row is listed and nothing more: it does not open the drawer or
+    /// take the tab in front, because the person did not ask for it — the same
+    /// rule as any other surface the agent owns.
+    fn seed_running_jobs(&mut self, ix: usize, chat: u64, listed: &[KernelSurface]) -> bool {
+        let owner = self.projects[ix].session(chat).map(|c| c.id);
+        let mut added = false;
+        for row in listed
+            .iter()
+            .filter(|row| row.panel == "process" && row.running)
+        {
+            let held = self.projects[ix]
+                .surfaces
+                .iter()
+                .any(|surface| surface.kernel_id() == Some(row.id.as_str()));
+            if held {
+                continue;
+            }
+            // The journal's path is the kernel's to give: `url` on the row.
+            // Without one there is nothing to read, and a row with no output
+            // and no way to get any is not worth drawing.
+            let Some(log) = row.url.as_ref().map(PathBuf::from) else {
+                continue;
+            };
+            let title = row.title.clone().unwrap_or_else(|| row.id.clone());
+            let id = self.upsert_surface(
+                ix,
+                owner,
+                SurfaceKind::Process,
+                title,
+                Bind::Process {
+                    id: row.id.clone(),
+                    // What the job has written so far, then the kernel's
+                    // `job` frames append to it from here — measured: those
+                    // frames carry what is appended *after* a client attaches,
+                    // never a replay, so without this the row starts at
+                    // whatever second the window came back and the work before
+                    // it is invisible. Priming and appending is a row that
+                    // reads whole and keeps moving; priming alone would be the
+                    // frozen screen this exists to avoid.
+                    live: journal_prime(&log),
+                    log,
+                    done: None,
+                },
+                "process",
+                |surface, bind| {
+                    surface.kernel_id().is_some() && surface.kernel_id() == bind.kernel_id()
+                },
+            );
+            if let Some(surface) = self.projects[ix].surface_mut(id) {
+                surface.status = Some(row.status.clone());
+            }
+            self.projects[ix].panel.add_surface(id, false, false);
+            added = true;
+        }
+        added
+    }
+
+    // ── the side panel ───────────────────────────────────────────────
+
+    /// The drawer of the project in front, for the chrome to read.
+    pub fn panel(&self) -> Option<&Panel> {
+        self.active_project().map(|project| &project.panel)
+    }
+
+    /// Whether the kernel of the project in front is answering — what every
+    /// row in its drawer is labelled against. One live chat is enough: they
+    /// share the place's kernel, and a chat read back from disk has no socket
+    /// of its own to prove anything with.
+    pub fn panel_link(&self) -> Link {
+        let live = self.active_project().is_some_and(|project| {
+            project
+                .sessions
+                .iter()
+                .any(|chat| matches!(chat.connection, Connection::Live(_)))
+        });
+        if live { Link::Live } else { Link::Lost }
+    }
+
+    /// Change the drawer of the project in front. Every change is filed at
+    /// once: which tabs are open and whether the drawer is open are part of what a
+    /// relaunch puts back.
+    fn with_panel(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Panel)) {
+        let Some(ix) = self.active else {
+            return;
+        };
+        let Some(project) = self.projects.get_mut(ix) else {
+            return;
+        };
+        change(&mut project.panel);
+        self.save();
+        cx.notify();
+    }
+
+    pub fn set_panel_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.open = open);
+    }
+
+    pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.open = !panel.open);
+    }
+
+    /// A click on a tab. It opens the drawer too, so the row a person
+    /// clicked in the chat's card is never a click that does nothing.
+    pub fn select_panel_tab(&mut self, at: usize, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| {
+            panel.select(at);
+            panel.open = true;
+        });
+    }
+
+    /// `⌘⇧{` and `⌘⇧}` with the drawer focused.
+    pub fn step_panel_tab(&mut self, by: isize, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.step(by));
+    }
+
+    /// `⌘T` with the drawer focused: an empty tab, in front.
+    pub fn new_panel_tab(&mut self, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| {
+            panel.new_tab();
+        });
+    }
+
+    /// Close one tab. The view it holds goes; a job it was following keeps
+    /// running, and the project tab does not close at all.
+    pub fn close_panel_tab(&mut self, at: usize, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.close(at));
+    }
+
+    /// Bring a surface to the front of the side panel. `open` is whether the
+    /// drawer opens with it: true for the person's own click, false for the
+    /// agent's `focus`, which may say what to look at but may not put it on
+    /// screen.
+    pub fn show_surface(&mut self, id: SurfaceId, open: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self
+            .projects
+            .iter()
+            .position(|project| project.surface(id).is_some())
+        else {
+            return;
+        };
+        let owner = self.projects[ix]
+            .surface(id)
+            .and_then(|surface| surface.owner);
+        self.projects[ix].panel.add_surface(id, true, open);
+        self.active = Some(ix);
+        self.push_snapshot(ix);
+        if let Some(owner) = owner {
+            self.wake_session(owner, cx);
+        }
+        cx.notify();
+    }
+
+    /// Put a surface in the column — the panel's zoom, and the only thing
+    /// that still fills the middle of the window with something that is not
+    /// a chat. The parent agent stays the focused agent, so its children
+    /// stay listed.
     pub fn select_surface(&mut self, id: SurfaceId, cx: &mut Context<Self>) {
         let Some(ix) = self
             .projects
@@ -2615,6 +3042,7 @@ impl Workspace {
             }
         }
         project.surfaces.retain(|surface| surface.id != id);
+        project.sync_panel();
         self.push_snapshot(ix);
         cx.notify();
     }
@@ -2650,6 +3078,7 @@ impl Workspace {
             "code".to_string(),
             None,
             None,
+            OpenedBy::User,
             cx,
         );
     }
@@ -2666,6 +3095,7 @@ impl Workspace {
         kind: String,
         cwd: Option<String>,
         url: Option<String>,
+        by: OpenedBy,
         cx: &mut Context<Self>,
     ) {
         let Some(ix) = self.project_of(owner) else {
@@ -2744,25 +3174,20 @@ impl Workspace {
                 _ => false,
             },
         );
-        // The surface comes to the column for the chat that is in front. A
-        // worker's terminal or job opening under its parent's turn goes to
-        // the panel's Processes and stays there: the view does not jump
-        // from the conversation to a sub-agent's shell.
-        let in_front = self.projects[ix]
-            .focused_agent()
-            .is_none_or(|focused| focused == owner);
-        // A process row never takes the column on its own: the kernel opens
-        // one for any command past twenty seconds (#362), and a board over
-        // the chat, composer gone, is not what a person mid-sentence wants
-        // — Jacob's screen would have swapped to `python3 bubble_sort.py`
-        // while he typed. It lands in the panel's Processes, one click away.
-        let takes_column = in_front && surface_kind != SurfaceKind::Process;
-        if takes_column {
-            self.projects[ix].focus_surface(owner, id);
-            if self.active == Some(ix) {
-                cx.emit(PaneRequest::Surface(id));
-            }
+        // Everything the agent opens becomes a tab of the side panel and
+        // nothing more: the drawer stays as it was, the tab in front does not
+        // change, and the chat keeps the column. The person's own routes —
+        // a click on the chat's card, a row in the panel, `⌘T` — are the only
+        // ones that open it. Nothing about a Board frame says whether he
+        // asked for this in prose or the agent needed it for itself, so the
+        // window does not guess.
+        let by_user = by == OpenedBy::User;
+        // Who asked is a fact about the row, not only about this call: the
+        // terminal's own label reads it.
+        if let Some(surface) = self.projects[ix].surface_mut(id) {
+            surface.by = by;
         }
+        self.projects[ix].panel.add_surface(id, by_user, by_user);
         self.push_snapshot(ix);
         cx.notify();
     }
@@ -3553,7 +3978,9 @@ impl Workspace {
 
     fn board_focus(&mut self, ix: usize, target: &str, cx: &mut Context<Self>) {
         if let Some(id) = self.card_surface(ix, target) {
-            self.select_surface(id, cx);
+            // The agent saying "look at this" fronts the tab; it does not
+            // open the drawer over whatever he is doing.
+            self.show_surface(id, false, cx);
             return;
         }
         if let Some(id) = self.card_session(ix, target) {

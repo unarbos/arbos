@@ -9,6 +9,7 @@ pub mod changes;
 pub mod cover;
 pub mod history;
 pub mod identity;
+pub mod panel;
 pub mod permission_center;
 pub mod place;
 pub mod project;
@@ -18,6 +19,8 @@ pub mod session;
 pub mod settings;
 pub mod state;
 pub mod store_view;
+#[cfg(test)]
+pub mod testing;
 pub mod surface;
 pub mod watch;
 pub mod workspace;

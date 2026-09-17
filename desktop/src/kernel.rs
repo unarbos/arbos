@@ -3011,6 +3011,14 @@ fn open_remote_tunnel_steps(
                     .as_ref()
                     .map(|m| m.short())
                     .unwrap_or_else(|| "this build".into()),
+                // What crosses the wire when it is this window's own
+                // binary; a release download's size is the script's.
+                bytes: (local_os_arch() == probe.arch)
+                    .then(|| arbos_bin().ok())
+                    .flatten()
+                    .and_then(|bin| std::fs::metadata(bin).ok())
+                    .map(|meta| meta.len())
+                    .unwrap_or(0),
             }),
         }
         // Swap before stop. Nothing is stopped until the new binary is
@@ -3441,6 +3449,9 @@ fn ssh_put_kernel_from_feed(
 
     step(arbos_core::remote_kernel::Progress::Installing {
         version: offered.version.human(),
+        // #462 installs from the feed: the payload's size is the feed's
+        // word (#467's line says what is crossing the wire).
+        bytes: offered.download.size,
     });
     eprintln!(
         "remote {}: install: {} {} for {remote_arch} from the {} channel",

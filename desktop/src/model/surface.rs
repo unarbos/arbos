@@ -4,7 +4,7 @@
 //! A subagent is a [`crate::model::session::ChatSession`] with a parent, not
 //! a fourth kind here. The sidebar walks [`Child`] so both share one row.
 
-use crate::model::project;
+use crate::model::{panel::OpenedBy, project};
 use bezel::gpui::Image;
 use std::{path::PathBuf, sync::Arc};
 
@@ -70,6 +70,21 @@ pub struct Surface {
     pub key: i32,
     /// When it was opened — the sidebar orders on this.
     pub touched: u128,
+    /// The kernel says it does not hold this row: the shell died with the
+    /// kernel that ran it, or the page went with the process. Set only by an
+    /// answer to `surfaces`, never guessed — and once set the row says so
+    /// rather than going on claiming to be live.
+    pub gone: bool,
+    /// Who asked for this row — the person or the agent. Not the same
+    /// question as [`Self::owner`], which is the agent the row *docks under*
+    /// and is set even for a shell the person asked for: the kernel's board
+    /// frame carries `by` for this, and a terminal's label ("yours" against
+    /// "agent's") is a statement about who asked, not about where it hangs.
+    pub by: OpenedBy,
+    /// The kernel's own words for this row's state, from the same answer:
+    /// "exited with code 143 after 41s", "shell gone". Its wording, not
+    /// ours, because it is the side that knows.
+    pub status: Option<String>,
 }
 
 /// One child of an agent, as the sidebar walks it.
@@ -106,6 +121,9 @@ impl Surface {
             board_kind: board_kind.to_owned(),
             key,
             touched: project::stamp(),
+            by: OpenedBy::Agent,
+            gone: false,
+            status: None,
         }
     }
 

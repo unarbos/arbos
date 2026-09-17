@@ -30,6 +30,27 @@ use crate::{
     math,
 };
 
+/// What sits between two dollars is money or a sentence, not TeX: it opens
+/// on a digit (`$61 bn …`), or it is three or more plain words with no TeX
+/// command or operator in them. `$x$`, `$a^2 + b^2$`, `$\alpha$` are not.
+fn reads_as_prose(tex: &str) -> bool {
+    let t = tex.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with(|c: char| c.is_ascii_digit()) && t.contains(' ') {
+        return true;
+    }
+    if t.contains('\\') || t.contains(['^', '_', '=', '{', '}']) {
+        return false;
+    }
+    let words = t
+        .split_whitespace()
+        .filter(|w| w.len() >= 2 && w.chars().all(|c| c.is_alphabetic() || c == '-' || c == '\''))
+        .count();
+    words >= 3
+}
+
 /// Parse a markdown document.
 pub fn parse(source: &str) -> Doc {
     let options = Options::ENABLE_TABLES
@@ -94,6 +115,16 @@ impl TextBuilder {
     /// does not read back as math — a `$` against whitespace cannot open or
     /// close a span.
     fn math(&mut self, tex: &str) {
+        // Two prices in one sentence are not a formula: "a $61 bn company
+        // (~$2 bn revenue" parsed as math and read "61bnprivateUSdefence"
+        // in italics (Jacob, 2026-09-17-29). Money and prose between two
+        // dollars stay the text they were, dollars included.
+        if reads_as_prose(tex) {
+            self.text.push('$');
+            self.text.push_str(tex);
+            self.text.push('$');
+            return;
+        }
         let tex = tex.trim();
         if tex.is_empty() {
             return;

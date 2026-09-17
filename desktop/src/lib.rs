@@ -1,5 +1,11 @@
 //! Arbos desktop shell — Arbos UI over the Rust kernel (`crates/arbos-kernel`).
 
+// The driver reports the whole of what the window believes as one `json!`, and
+// that macro recurses once per key. The default 128 was reached as the state
+// grew; a larger number costs nothing but lets the driver keep answering in one
+// object rather than being split into shapes no test asked for.
+#![recursion_limit = "512"]
+
 pub mod agent;
 pub mod assets;
 pub mod boardhub;

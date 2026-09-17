@@ -11,6 +11,7 @@ use crate::{
         article::Article,
         board::Board,
         identity::Identity,
+        panel::Panel,
         place::Place,
         session::ChatSession,
         store_view::StoreView,
@@ -49,6 +50,10 @@ pub struct Project {
     pub surfaces: Vec<Surface>,
     /// The agent in front, and whether one of its children fills the column.
     pub focus: Option<Focus>,
+    /// The side panel on the right: what is open in it, which tab is in
+    /// front, and whether it is open at all. One drawer per project, so the
+    /// window's tabs switch it with them.
+    pub panel: Panel,
     /// Board-local card keys, minted here so a snapshot's "#7" is stable
     /// for the life of the process.
     pub next_key: i32,
@@ -114,6 +119,7 @@ impl Project {
             sessions: Vec::new(),
             surfaces: Vec::new(),
             focus: None,
+            panel: Panel::default(),
             next_key: 1,
             board: None,
             article: None,
@@ -240,7 +246,11 @@ impl Project {
         let mut out = Vec::new();
         let mut frontier = vec![id];
         while let Some(parent) = frontier.pop() {
-            for chat in self.sessions.iter().filter(|chat| chat.parent == Some(parent)) {
+            for chat in self
+                .sessions
+                .iter()
+                .filter(|chat| chat.parent == Some(parent))
+            {
                 if chat.busy() {
                     out.push(chat.id);
                 }
@@ -413,10 +423,20 @@ impl Project {
         key
     }
 
+    /// Drop panel tabs whose surface has gone. Every removal from
+    /// [`Self::surfaces`] ends here, so the drawer can never hold a row
+    /// pointing at nothing — the F-137 shape, where the window drew a thing
+    /// the kernel had no record of.
+    pub fn sync_panel(&mut self) {
+        let live: Vec<SurfaceId> = self.surfaces.iter().map(|surface| surface.id).collect();
+        self.panel.retain_surfaces(|id| live.contains(&id));
+    }
+
     /// Drop surfaces this agent owns. Child agents stay; their surfaces go
     /// with them when they are closed.
     pub fn close_surfaces_of(&mut self, agent: u64) {
         self.surfaces.retain(|surface| surface.owner != Some(agent));
+        self.sync_panel();
         if self
             .focus
             .is_some_and(|focus| focus.surface.is_some_and(|id| self.surface(id).is_none()))

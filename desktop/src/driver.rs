@@ -27,11 +27,16 @@
 
 use crate::{
     model::{
+        panel::PanelTab,
         project::Project,
         session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
+        workspace::Workspace,
     },
-    view::root::{Arbos, Front, Pane},
+    view::{
+        component::surface as board,
+        root::{Arbos, Front, Pane},
+    },
 };
 use anyhow::{Context as _, Result, anyhow, bail};
 use bezel::gpui::{
@@ -1035,6 +1040,45 @@ fn snapshot(root: Option<&Entity<Arbos>>, window: &mut Window, cx: &mut App) -> 
 // ---------------------------------------------------------------------------
 // App state
 
+/// The side panel of the project in front: whether it is out, how wide, its own
+/// tabs and which of them the tab chords will move. Its own function because
+/// `state`'s one `json!` reached the macro's recursion limit with it inline —
+/// and because the loops assert on these names.
+fn panel_json(this: &Arbos, workspace: &Workspace, window: &Window, cx: &App) -> Value {
+    let Some(panel) = workspace.panel() else {
+        return Value::Null;
+    };
+    let tabs: Vec<Value> = panel
+        .tabs()
+        .iter()
+        .map(|tab| match tab {
+            PanelTab::Project => json!({ "kind": "project" }),
+            PanelTab::New(n) => json!({ "kind": "new", "id": n }),
+            PanelTab::Surface(id) => {
+                let surface = workspace.active_project().and_then(|p| p.surface(*id));
+                json!({
+                    "kind": "surface",
+                    "id": id.0,
+                    "title": surface.map(board::title),
+                    "board_kind": surface.map(|s| s.board_kind.clone()),
+                    "state": surface.and_then(|s| board::state_word(s, workspace.panel_link())),
+                    // What the kernel said about this row when it was last
+                    // asked, and whether it said it holds nothing behind it.
+                    "status": surface.and_then(|s| s.status.clone()),
+                    "gone": surface.map(|s| s.gone),
+                })
+            }
+        })
+        .collect();
+    json!({
+        "open": panel.open,
+        "width": panel.width(),
+        "active": panel.active(),
+        "focused": this.panel_focused(window, cx),
+        "tabs": tabs,
+    })
+}
+
 /// What the app believes is going on, in words a test can assert on: which
 /// pane shows, what is open, what the composer holds, what was said.
 fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
@@ -1132,7 +1176,12 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         "front": front_name(this.front()),
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
-        "panel_open": this.panel_open,
+        // The side panel: whether it is out, how wide, its own tabs and which
+        // of them is in front, plus whether its row is the one the tab chords
+        // will move. `panel_open` stays under its old name — the parity loop
+        // and the journeys assert on it.
+        "panel_open": workspace.panel().is_some_and(|panel| panel.open),
+        "panel": panel_json(this, workspace, window, cx),
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
         // The rest of the Settings tab's values, so a click on a control
@@ -1265,12 +1314,18 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "held": chat.plan_queued(),
         "asks": chat.plan_open().filter(|n| n.do_kind == "ask").count(),
         "reconnect_attempt": chat.reconnect_attempt,
+        // The plain-words reason the bar keeps while a connection is down,
+        // so a rig can assert the tab says *why* and not only that it failed.
+        "connect_fault": chat.connect_fault,
+        "reconnect_in_secs": chat.reconnect_at.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_secs()),
+        // The item whose link the pointer is over, so a rig can assert the
+        // hand and the underline are drawn for a URL (report -31).
+        "hover_link": chat.transcript.hover_link_item(),
         "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",
             Connection::Connecting => "connecting",
             Connection::Live(_) => "live",
-            Connection::Reconnecting(_) => "reconnecting",
             Connection::Lost => "lost",
         },
         "streaming": chat.streaming,
@@ -1284,7 +1339,6 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
             let (working, prs) = crate::view::detail::pill_counts(project, chat);
             json!({ "working": working.len(), "prs": prs.len(), "pr_urls": prs })
         }),
-        "permission": chat.permission.as_ref().map(|prompt| prompt.title.clone()),
         "questions": chat.questions.as_ref().map(|prompt| prompt.title.clone()),
         "items": chat.items.iter().map(item_json).collect::<Vec<_>>(),
     })

@@ -7,6 +7,7 @@
 
 use crate::{
     model::{
+        panel::OpenedBy,
         session::{ChatItem, ChatSession, ChildState},
         store_view::{FileKind, PageBlock, PageItem, ProjectPage, Resource, StoreFile, Target},
         surface::{Surface, SurfaceId, SurfaceKind},
@@ -14,7 +15,7 @@ use crate::{
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{self, Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
+        root::{Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
     },
 };
 use bezel::{
@@ -233,11 +234,15 @@ impl Arbos {
         rows
     }
 
-    /// The panel, or nothing on a window too narrow to give it room.
-    pub(crate) fn panel(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.panel_open || f32::from(window.viewport_size().width) < PANEL_MIN_WINDOW {
-            return None;
-        }
+    /// The project tab's body: a live view of this project's `.arbos/` —
+    /// its agents and their workers, the processes they started, the
+    /// resources they hold, and the project page. The drawer around it,
+    /// and its other tabs, are in [`crate::view::drawer`].
+    pub(crate) fn panel_store_body(
+        &self,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
         let project = workspace.active_project()?;
@@ -430,21 +435,7 @@ impl Arbos {
                 );
         }
 
-        Some(
-            div()
-                .id("panel")
-                .flex_none()
-                .w(px(PANEL_WIDTH))
-                .h_full()
-                .bg(root::chrome_bg(&theme))
-                .border_l_1()
-                .border_color(theme.border)
-                .flex()
-                .flex_col()
-                .child(body)
-                .child(self.panel_foot(&theme, cx))
-                .into_any_element(),
-        )
+        Some(body.into_any_element())
     }
 
     /// The project's name, where it lives, and the branch checked out there;
@@ -754,7 +745,9 @@ impl Arbos {
                     })
                     .child(SharedString::from(line.title)),
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.select_surface(id, cx)))
+            // Into the drawer's tab row, exactly as a click on its tab does:
+            // one thing a row can mean, whichever list it was clicked in.
+            .on_click(cx.listener(move |this, _, window, cx| this.show_surface(id, window, cx)))
             .into_any_element()
     }
 
@@ -1157,6 +1150,7 @@ impl Arbos {
                 kind.into(),
                 None,
                 None,
+                OpenedBy::User,
                 cx,
             );
         });
@@ -1178,7 +1172,7 @@ impl Arbos {
     }
 
     /// The bottom strip: settings on the left, a sub-chat on the right.
-    fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // No gear here: the bar under the window carries it, bottom-left,
         // where Cursor's sidebar foot keeps its one (cycle 26, panel beside
         // Cursor's sidebar — two gears in one window was one too many).
@@ -1227,11 +1221,12 @@ impl Arbos {
     /// header's right edge.
     pub(crate) fn panel_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let label = if self.panel_open {
-            "Hide panel"
-        } else {
-            "Show panel"
-        };
+        let open = self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_some_and(|panel| panel.open);
+        let label = if open { "Hide panel" } else { "Show panel" };
         theme
             .ghost("toggle-panel")
             .flex_none()
