@@ -17,3 +17,10 @@ for p in $(pgrep -x arbos-kernel; pgrep -x arbos-hub); do
   disk=$( [ -f "$file" ] && stat -c %y "$file" | cut -c1-16 || echo missing)
   printf '%-4s pid %-8s since %-16s runs %-12s %s %s  disk:%s\n' "$st" "$p" "$(ps -o lstart= -p $p | awk '{print $2,$3,$4}')" "${runs:--}" "$role" "$place" "$disk"
 done
+# Two kernels on one place (finding 2, 2026-09-17: the lock moved to runtime/ without a fallback, so an old and a new
+# kernel can serve the same place at once, and the older one is invisible to kernel.json). Say so loudly.
+for p in $(pgrep -x arbos-kernel); do set -- $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null); [ "$2" = serve ] && echo "$3"; done \
+  | sort | uniq -d | while read -r place; do
+    printf 'DOUBLE-SERVED %s by pids:' "$place"
+    for p in $(pgrep -x arbos-kernel); do set -- $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null); [ "$3" = "$place" ] && printf ' %s(%s)' "$p" "$(timeout 5 /proc/$p/exe --version 2>/dev/null | awk '{print $3}')"; done; echo
+  done
