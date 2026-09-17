@@ -49,6 +49,11 @@ pub struct Reply {
     /// records. Default none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// How long the model "takes" before this reply, for tests of what
+    /// lands during a model call (a stop, a steer). Cancellable like a
+    /// real call. Default none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -111,6 +116,17 @@ impl Replay {
             .iter()
             .filter(|u| !**u)
             .count()
+    }
+
+    /// The `delay_ms` of the reply `next` would hand `agent`, without
+    /// taking it.
+    pub fn peek_delay(&self, agent: &str) -> Option<u64> {
+        let used = self.used.lock().unwrap_or_else(|p| p.into_inner());
+        self.replies
+            .iter()
+            .enumerate()
+            .find(|(i, r)| !used[*i] && r.agent.as_deref().is_none_or(|a| a == agent))
+            .and_then(|(_, r)| r.delay_ms)
     }
 
     /// The next reply for `agent`, or the end-of-script notice.

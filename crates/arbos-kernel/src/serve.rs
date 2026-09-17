@@ -540,7 +540,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(id) = done_rx.recv() => {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
+                // A turn superseded before it did anything is cut from
+                // the record once its folder has closed (below), so the
+                // fuller message that follows is the only user line.
+                let superseded_at = control
+                    .as_ref()
+                    .filter(|c| c.stop_reason() == SUPERSEDED)
+                    .and_then(|_| plan::open_turn_lo(&hooks, &id));
                 plan::finish_turn(&hooks, &id);
+                if let Some(lo) = superseded_at {
+                    supersede_cut(&place, &hooks, &mut tails, &id, lo);
+                }
                 // A standing agent's transcript past the cap rolls into the
                 // archive now, between turns; attached windows reload from
                 // the short file the way they do after a rewind.
@@ -835,7 +845,7 @@ fn handle_frame(
     let names = match &frame {
         Frame::User { agent, .. }
         | Frame::Pause { agent, .. }
-        | Frame::Stop { agent }
+        | Frame::Stop { agent, .. }
         | Frame::Compact { agent }
         | Frame::Answer { agent, .. }
         | Frame::Approve { agent, .. }
@@ -1099,12 +1109,28 @@ fn handle_frame(
                 refuse(hooks, None, format!("{e:#}"));
             }
         }
-        Frame::Stop { agent } => {
-            // Stop means all of it: the turn, the standing work, the
-            // children. A running turn ends; scheduled nodes block until
-            // someone presses run.
-            for id in hooks.stop_work(&agent) {
-                sched.stop(&id);
+        Frame::Stop { agent, reason } => {
+            if reason.as_deref() == Some(SUPERSEDED) {
+                // Not a person stopping anything: the message this turn
+                // answers is about to be replaced by a fuller one (a
+                // caller paused mid-sentence; the speech gateway merges
+                // and resends). Only the turn ends — nothing held, no
+                // standing work blocked, no children stopped — and when
+                // it ends the done handler cuts its lines if it had done
+                // nothing yet, so the record shows one utterance once.
+                klog::info(
+                    "turn_superseded",
+                    Some(&agent),
+                    "stop with reason=superseded",
+                );
+                sched.stop_for(&agent, SUPERSEDED);
+            } else {
+                // Stop means all of it: the turn, the standing work, the
+                // children. A running turn ends; scheduled nodes block until
+                // someone presses run.
+                for id in hooks.stop_work(&agent) {
+                    sched.stop(&id);
+                }
             }
         }
         Frame::Seen { through } => {
@@ -2503,6 +2529,77 @@ fn configure(
 /// done here (fast: two file writes); the tail is moved to the new end;
 /// files are restored on the blocking pool, and `rewound` goes out to
 /// every client when that is done.
+/// The `reason` on a `stop` that replaces a message rather than ending work.
+pub const SUPERSEDED: &str = "superseded";
+
+/// A superseded turn's lines, cut when the turn had done nothing a
+/// reader would miss: its wake, the half-said user line, thinking, and
+/// the interrupted/turn_complete close. A turn that had already spoken
+/// or run a tool keeps its lines — the `interrupted` line says
+/// `superseded`, and a client may draw that softly or not at all, but
+/// the record of what ran stands. The cut lines go to the rewind
+/// archive like any rewind's, so what was heard is not lost, only out
+/// of the chat.
+fn supersede_cut(
+    place: &Place,
+    hooks: &Arc<KernelHooks>,
+    tails: &mut std::collections::HashMap<String, TranscriptTail>,
+    agent: &str,
+    lo: u64,
+) {
+    let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
+    let span = events.iter().filter(|e| e.seq >= lo);
+    let quiet = span.clone().count() > 0
+        && span.clone().all(|e| {
+            matches!(
+                e.kind,
+                EventKind::Wake { .. }
+                    | EventKind::User { .. }
+                    | EventKind::Thinking { .. }
+                    | EventKind::Interrupted { .. }
+                    | EventKind::TurnComplete { .. }
+                    | EventKind::Notice { failed: false, .. }
+            )
+        });
+    if !quiet {
+        klog::info(
+            "turn_superseded",
+            Some(agent),
+            format!(
+                "kept: the turn from line {lo} had spoken or run a tool before the fuller message came"
+            ),
+        );
+        return;
+    }
+    let (dropped, archive) = match rewind::cut_from_line(place, agent, lo) {
+        Ok(c) => c,
+        Err(e) => {
+            klog::warn("turn_superseded", Some(agent), format!("kept: {e:#}"));
+            return;
+        }
+    };
+    // The tail's next read starts where the file now ends, so nothing of
+    // what remains is replayed; windows drop the cut lines.
+    let mut fresh = TranscriptTail::default();
+    let _ = fresh.read_new(&Layout::new(place, agent).transcript());
+    tails.insert(agent.to_string(), fresh);
+    hooks.broadcast(Frame::Rewound {
+        agent: agent.to_string(),
+        line: lo,
+        dropped,
+        restored: None,
+        pending: false,
+    });
+    klog::info(
+        "turn_superseded",
+        Some(agent),
+        format!(
+            "cut: the turn from line {lo} had done nothing yet; {dropped} line(s) to {}; one utterance, one line",
+            archive.display()
+        ),
+    );
+}
+
 fn rewind_live(
     place: &Place,
     hooks: &Arc<KernelHooks>,

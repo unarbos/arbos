@@ -220,6 +220,32 @@ fn worktree_note(place: &std::path::Path, agent: &Agent) -> String {
     )
 }
 
+/// The `transcript_lo` of the agent's newest open turn folder — the line
+/// its wake was written at — if a turn is open.
+pub fn open_turn_lo(hooks: &KernelHooks, agent: &str) -> Option<u64> {
+    let turns = inbox::turns_dir(&hooks.place, agent);
+    let mut open: Vec<std::path::PathBuf> = std::fs::read_dir(&turns)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            std::fs::read_to_string(p.join("meta.toml")).is_ok_and(|t| !t.contains("\nended = "))
+                && p.join("cause.md").exists()
+        })
+        .collect();
+    open.sort();
+    let dir = open.pop()?;
+    std::fs::read_to_string(dir.join("meta.toml"))
+        .ok()?
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("transcript_lo = ")?
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+}
+
 /// The newest `turns/tNNNN/meta.toml` without `ended` gets `ended`, the
 /// verdict, and the outcome (the turn's last words, or why it stopped, or
 /// `forced` when the kernel closes it for another reason). True when one
