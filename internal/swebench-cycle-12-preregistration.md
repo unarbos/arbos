@@ -1,0 +1,26 @@
+---
+cursor:
+  subagentId: "bc-bfb2cd63-da09-5a42-920b-3410d3337c9c"
+---
+
+# SWE-bench loop, cycle 12: pre-registration (written before the run)
+
+Written 2026-09-17 03:06 UTC, before the run started. Amended 03:20 UTC, before the run that counts: the first launch (kernel `main` `fa17987e`, 2 rollouts, $0.49) was stopped when Jacob pointed out that #380 changes the reproduction gate and the instructions override; a baseline across that change would not be usable. It is set aside as `c12-reg-aborted-pre380` and not counted.
+
+## What this cycle is
+
+A re-baseline, not a comparison. One arm, no lever.
+
+- Kernel: `864d6b00`, the head of #380 (`main` `fa17987e` + #380: reproduction only from a command that ran code; instructions layer under the headless rules). Built static (`arbos-kernel-c12-380`). #380 is not merged at run time; the baseline is stated on this commit.
+- Harness: one reproduction, mechanism gate on, $8 per-rollout cap, 2400 s timeout, Sonnet 5 via OpenRouter, concurrency 3.
+- Runtime: docker with `--env.agent.runtime.block '["*"]'` — the container reaches only the interception proxy. The harness now refuses to run without this (branch `cursor/swebench-loop-c12-7c9c`). The harness code in use for the run is #380's harness plus the refusal; no `instructions` are passed, so #380's instruction change is not exercised.
+- Set: `reg20` at `-r 2` = 40 rollouts. Cap $55, watcher stops at $50 recorded.
+
+Amended 04:05 UTC, before the run that counts: the second launch (kernel `864d6b00`, 19 rollouts, $18.55) graded every rollout 0 with a patch in place — verifiers grades in the agent's container and the SWE-bench verifier's `uv run parser.py` needs PyPI, which the cut denies. The harness now reopens egress after the agent exits and before grading (`076d752a`); a smoke on django-11099 under the cut then graded solved. That run is set aside as `c12-reg-ungraded-cut`, not counted. Cycle spend so far $19.15, so the run that counts has cap $40, watcher at $37; if it stops short of 40 rollouts the baseline is stated on what it covered.
+
+## What is decided in advance
+
+- The graded rate on the 40 rollouts (or on however many the cap allows, stated as such) **is** the loop's baseline from here on. It is not adjusted, weighted, or compared favourably with the old 74%. The old figure appears only as the number that was wrong.
+- If the cap stops the run before 40, the baseline is reported on the rollouts done, with the instances not reached listed; a second run finishes them in the next cycle before any lever is compared.
+- Soundness checks that must all hold for the number to stand: `arbos_egress_open` = 0.0 on every rollout; a transcript audit (`net_audit.py`) finds zero package fetches; no rollout errored at setup.
+- Also recorded, not part of the number: per-instance results, cost per rollout, capped rollouts, and how the six instances that used to fetch upstream (astropy-13398, django-13449, django-14792, django-15022, django-15252, pylint-8898) fare without the shortcut.

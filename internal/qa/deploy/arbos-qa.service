@@ -1,0 +1,12 @@
+[Unit]
+Description=Arbos QA loop: one cycle (build rust, run scenarios, publish results)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/arbos-qa
+Environment="ARBOS_QA_TRACK_BRANCHES=main"
+ExecStart=%h/arbos-qa/deploy/cycle.sh
+Nice=10
+TimeoutStartSec=3h
+# Kernels the runner leaves behind must not outlive the cycle.
+KillMode=control-group
