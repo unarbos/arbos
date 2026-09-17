@@ -107,27 +107,74 @@ pub fn run(hooks: &crate::hooks::KernelHooks) -> Vec<String> {
         let id = agent.id.as_str();
         let layout = arbos_core::Layout::new(place, id);
         let plan = layout.plan_jsonl();
-        if plan.exists()
-            && let Some(line) = migrate_plan(hooks, id, &plan)
-        {
-            report.push(line);
+        match claim(&plan) {
+            Claim::Taken(source) => {
+                if let Some(line) = migrate_plan(hooks, id, &source) {
+                    report.push(line);
+                }
+                finish(&source);
+            }
+            Claim::Cut(source) => {
+                crate::klog::warn(
+                    "migrate_cut",
+                    Some(id),
+                    format!(
+                        "an earlier migration of plan.jsonl was cut mid-way; the nodes it wrote stand, and its source is kept at {} for a person to read. It is not run again: a second pass would double every cron and task it already wrote (qal-j12).",
+                        source.display()
+                    ),
+                );
+            }
+            Claim::Blocked(why) => {
+                // The completion record could not be written, so nothing
+                // is written on its account: a start that migrated and
+                // could not say so migrated again the next time, and the
+                // standing cron fired twice for ever (qal-j12).
+                crate::klog::warn("migrate_blocked", Some(id), &why);
+                let _ = arbos_core::append_event(
+                    &layout.transcript(),
+                    &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                        text: format!(
+                            "The one-time migration of the old plan (plan.jsonl) could not start: {why}. Nothing was migrated and the old plan stays as it is; fix what blocks writes in this agent's folder and start the kernel again."
+                        ),
+                        failed: true,
+                    }),
+                );
+            }
+            Claim::Absent => {}
         }
         let attempts = layout.attempts_jsonl();
-        if attempts.exists() {
-            let _ = std::fs::rename(&attempts, attempts.with_extension("jsonl.migrated"));
+        if attempts.exists()
+            && let Err(e) = std::fs::rename(&attempts, attempts.with_extension("jsonl.migrated"))
+        {
+            crate::klog::warn("migrate_move", Some(id), format!("attempts.jsonl: {e}"));
         }
         // The old generated render is not anyone's file now; it goes aside.
         // (Root's checklist lives at .arbos/notes.md, the project page.)
         let old_md = layout.plan_md();
-        if old_md.exists() {
-            let _ = std::fs::rename(&old_md, old_md.with_extension("md.migrated"));
+        if old_md.exists()
+            && let Err(e) = std::fs::rename(&old_md, old_md.with_extension("md.migrated"))
+        {
+            crate::klog::warn("migrate_move", Some(id), format!("plan.md: {e}"));
         }
     }
     let json = place.arbos().join("subscriptions.json");
-    if json.exists()
-        && let Some(line) = migrate_github(place, &json)
-    {
-        report.push(line);
+    match claim(&json) {
+        Claim::Taken(source) => {
+            if let Some(line) = migrate_github(place, &source) {
+                report.push(line);
+            }
+            finish(&source);
+        }
+        Claim::Cut(source) => crate::klog::warn(
+            "migrate_cut",
+            None,
+            format!(
+                "an earlier migration of subscriptions.json was cut mid-way; its source is kept at {}; not run again",
+                source.display()
+            ),
+        ),
+        Claim::Blocked(why) => crate::klog::warn("migrate_blocked", None, &why),
+        Claim::Absent => {}
     }
     report
 }
@@ -147,6 +194,65 @@ fn is_inbox_node(n: &OldNode, all: &[OldNode]) -> bool {
             || n.origin.starts_with("spawn:")
             || n.origin == "kernel")
         && !all.iter().any(|k| k.parent == n.id)
+}
+
+/// Whether this start may migrate `old`.
+enum Claim {
+    /// The old file is moved aside as `*.migrating`: this start owns the
+    /// migration and reads from the moved file.
+    Taken(std::path::PathBuf),
+    /// A `*.migrating` file stands and no old file: an earlier start was
+    /// cut between moving the file aside and finishing. Not migrated
+    /// again.
+    Cut(std::path::PathBuf),
+    /// The old file is there and could not be moved aside: nothing is
+    /// migrated, and the reason.
+    Blocked(String),
+    /// Nothing to migrate.
+    Absent,
+}
+
+/// The completion record comes first (the rule in `arbos_core::record`):
+/// the old file is renamed to `*.migrating` *before* a single new record
+/// is written, so a start that cannot record "done" writes nothing, and
+/// a start that dies mid-way leaves a file that says so rather than one
+/// that invites a second pass. `let _ = rename` after the writes was the
+/// only record that the migration happened; when it failed once, the
+/// next start migrated again, and the standing cron fired twice for ever
+/// (qal-j12).
+fn claim(old: &Path) -> Claim {
+    let ext = old
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let migrating = old.with_extension(format!("{ext}.migrating"));
+    if migrating.exists() && !old.exists() {
+        return Claim::Cut(migrating);
+    }
+    if !old.exists() {
+        return Claim::Absent;
+    }
+    match std::fs::rename(old, &migrating) {
+        Ok(()) => Claim::Taken(migrating),
+        Err(e) => Claim::Blocked(format!(
+            "could not move {} aside as {}: {e}",
+            old.display(),
+            migrating.file_name().unwrap_or_default().to_string_lossy()
+        )),
+    }
+}
+
+/// Migration done: `*.migrating` becomes `*.migrated`. A failure here is
+/// logged and harmless — a `*.migrating` file is never migrated again.
+fn finish(source: &Path) {
+    let done = source.with_extension("migrated");
+    if let Err(e) = std::fs::rename(source, &done) {
+        crate::klog::warn(
+            "migrate_move",
+            None,
+            format!("{} → {}: {e}", source.display(), done.display()),
+        );
+    }
 }
 
 fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> Option<String> {
@@ -333,10 +439,11 @@ fn migrate_plan(hooks: &crate::hooks::KernelHooks, agent: &str, path: &Path) -> 
         notes_file.add(&section, &text);
         n_notes += 1;
     }
-    if n_notes > 0 {
-        let _ = notes::save(place, agent, &notes_file);
+    if n_notes > 0
+        && let Err(e) = notes::save(place, agent, &notes_file)
+    {
+        crate::klog::warn("migrate_notes", Some(agent), format!("{e:#}"));
     }
-    let _ = std::fs::rename(path, path.with_extension("jsonl.migrated"));
     Some(format!(
         "{agent}: {} node(s) → {n_notes} notes line(s), {n_subs} subscription(s), {n_inbox} inbox file(s), {n_asks} parked question(s); {n_dropped} closed node(s) dropped",
         nodes.len()
@@ -405,7 +512,7 @@ fn migrate_github(place: &Place, path: &Path) -> Option<String> {
             n += 1;
         }
     }
-    let _ = std::fs::rename(path, path.with_extension("json.migrated"));
+    let _ = path;
     Some(format!(
         "subscriptions.json: {n} pull-request follow(s) → github_pr files"
     ))
@@ -506,5 +613,77 @@ mod tests {
         assert_eq!(subs[0].kind, "github_pr");
         assert_eq!(subs[0].pr, Some(58));
         assert_eq!(subs[0].prompt, "tell me when merged");
+    }
+
+    /// qal-j12: the completion record comes first. A folder where the old
+    /// plan cannot be moved aside migrates nothing (and says so); a second
+    /// start of a completed migration writes nothing; a start cut between
+    /// the move and the finish is not run again.
+    #[cfg(unix)]
+    #[test]
+    fn a_migration_that_cannot_record_itself_writes_nothing_and_never_doubles() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = place("claim");
+        let agent_dir = p.agent_dir("root");
+        let plan = arbos_core::Layout::new(&p, "root").plan_jsonl();
+        let now = arbos_core::now_ms();
+        let lines = format!(
+            "{{\"id\":1,\"goal\":\"tick\",\"when\":{{\"every_ms\":30000,\"next_due_ms\":{}}},\"do\":{{\"kind\":\"shell\",\"cmd\":\"echo legacy-tick >> ticks.txt\",\"report\":\"tick: {{output}}\"}},\"status\":\"pending\"}}\n\
+             {{\"id\":2,\"goal\":\"Reply with the single word MIGRATED.\",\"status\":\"pending\",\"origin\":\"user\",\"when\":{{\"wake\":true}}}}\n",
+            now + 1000
+        );
+        std::fs::write(&plan, &lines).unwrap();
+        // The subfolders the migration writes into exist and are writable;
+        // the folder holding plan.jsonl is not (QA's injector).
+        std::fs::create_dir_all(agent_dir.join("subscriptions")).unwrap();
+        std::fs::create_dir_all(agent_dir.join("inbox")).unwrap();
+        std::fs::write(agent_dir.join("transcript.jsonl"), "").unwrap();
+        let count = |sub: &str| {
+            std::fs::read_dir(agent_dir.join(sub))
+                .map(|d| d.flatten().count())
+                .unwrap_or(0)
+        };
+        std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let h = hooks(&p);
+        for _ in 0..2 {
+            let report = run(&h);
+            assert!(report.is_empty(), "nothing migrated: {report:?}");
+        }
+        std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(plan.exists(), "the old plan stays");
+        assert_eq!(
+            count("subscriptions"),
+            0,
+            "no cron written on an unrecorded migration"
+        );
+        assert_eq!(count("inbox"), 0);
+        let transcript = std::fs::read_to_string(agent_dir.join("transcript.jsonl")).unwrap();
+        assert!(
+            transcript.contains("could not start") && transcript.contains("Nothing was migrated"),
+            "{transcript}"
+        );
+
+        // Writable again: one migration, then a second start writes nothing.
+        for _ in 0..2 {
+            run(&h);
+        }
+        assert!(!plan.exists() && plan.with_extension("jsonl.migrated").exists());
+        assert_eq!(count("subscriptions"), 1, "one cron, not two");
+        assert_eq!(count("inbox"), 1, "one task, not two");
+
+        // Cut mid-way: a `.migrating` file and no plan. Not run again.
+        std::fs::rename(
+            plan.with_extension("jsonl.migrated"),
+            plan.with_extension("jsonl.migrating"),
+        )
+        .unwrap();
+        let report = run(&h);
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!(count("subscriptions"), 1);
+        assert_eq!(count("inbox"), 1);
+        assert!(
+            plan.with_extension("jsonl.migrating").exists(),
+            "kept for a person"
+        );
     }
 }

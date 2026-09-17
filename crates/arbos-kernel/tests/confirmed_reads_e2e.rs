@@ -198,3 +198,97 @@ fn a_stale_undo_mark_is_refused_and_a_kept_commit_stands() {
     assert_eq!(notices.len(), 1, "{notices:#?}");
     let _ = k.child.kill();
 }
+
+/// qal-j12 (QA's `sw-05`): the one-time migration wrote its new records
+/// and then `let _ = rename(plan.jsonl → .migrated)` — the only record
+/// that it had happened. When that rename failed, the next start
+/// migrated again: the standing cron existed twice and fired twice for
+/// ever. Now the completion record comes first: a start that cannot
+/// move the old plan aside migrates nothing and says so; a completed
+/// migration is never repeated.
+#[test]
+#[cfg(unix)]
+fn a_failed_migration_record_writes_nothing_and_a_completed_one_is_not_repeated() {
+    use common::restart_replay;
+    use std::os::unix::fs::PermissionsExt;
+    let now = arbos_core::now_ms();
+    let legacy = format!(
+        "{{\"id\":1,\"goal\":\"tick\",\"when\":{{\"every_ms\":30000,\"next_due_ms\":{}}},\"do\":{{\"kind\":\"shell\",\"cmd\":\"echo legacy-tick >> ticks.txt\",\"report\":\"tick: {{output}}\"}},\"status\":\"pending\"}}\n\
+         {{\"id\":2,\"goal\":\"Reply with the single word MIGRATED.\",\"status\":\"pending\",\"origin\":\"user\",\"when\":{{\"wake\":true}}}}\n",
+        now + 3_600_000
+    );
+    let mut k = start_kernel_replay_prepared(
+        "failed-migration",
+        "{\"agent\":\"root\",\"content\":\"MIGRATED\"}\n",
+        "",
+        |place| {
+            let agent = place.join(".arbos/agents/root");
+            std::fs::create_dir_all(agent.join("subscriptions")).unwrap();
+            std::fs::create_dir_all(agent.join("inbox")).unwrap();
+            std::fs::write(agent.join("agent.md"), "name: root\nmodel: inherit\n").unwrap();
+            std::fs::write(agent.join("plan.jsonl"), &legacy).unwrap();
+            std::fs::write(agent.join("transcript.jsonl"), "").unwrap();
+            // QA's injector: the agent folder read-only, its subfolders
+            // writable — the migration can write its records but not its
+            // completion.
+            std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        },
+    );
+    let agent = k.place.join(".arbos/agents/root");
+    let count = |sub: &str| -> usize {
+        std::fs::read_dir(agent.join(sub))
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| {
+                        std::fs::read_to_string(e.path())
+                            .unwrap_or_default()
+                            .contains("legacy-tick")
+                            || e.file_name().to_string_lossy().contains("user")
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let mut a = Attach::connect(&k.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    drop(a);
+    let mut k2 = restart_replay(&mut k, "{\"agent\":\"root\",\"content\":\"MIGRATED\"}\n");
+    let mut a = Attach::connect(&k2.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    drop(a);
+    let _ = k2.child.kill();
+    let _ = k2.child.wait();
+    assert!(agent.join("plan.jsonl").exists(), "the old plan stays");
+    assert_eq!(
+        count("subscriptions"),
+        0,
+        "no cron on an unrecorded migration"
+    );
+    assert_eq!(count("inbox"), 0, "no task either");
+    let log = std::fs::read_to_string(k2.place.join(".arbos/runtime/kernel.log")).unwrap();
+    assert_eq!(
+        log.matches("\"event\":\"migrate_blocked\"").count(),
+        2,
+        "{log}"
+    );
+
+    // Writable: one migration on the next start, none on the one after.
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut k3 = restart_replay(&mut k2, "{\"agent\":\"root\",\"content\":\"MIGRATED\"}\n");
+    let mut a = Attach::connect(&k3.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    drop(a);
+    let mut k4 = restart_replay(&mut k3, "{\"agent\":\"root\",\"content\":\"MIGRATED\"}\n");
+    let mut a = Attach::connect(&k4.url);
+    let _ = a.wait(Duration::from_secs(5), |f| f["type"] == "hello");
+    assert!(
+        !agent.join("plan.jsonl").exists() && agent.join("plan.jsonl.migrated").exists(),
+        "migrated once"
+    );
+    assert_eq!(
+        count("subscriptions"),
+        1,
+        "exactly one cron after two starts"
+    );
+    let _ = k4.child.kill();
+}
