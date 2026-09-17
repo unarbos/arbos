@@ -1,5 +1,7 @@
 # qal-j22: #444 removes an undo mark it could not write — but the removal needs the folder the write just failed on, so on a read-only `runtime/` the stale mark survives and `undo` still resets past committed work
 
+> **CLOSED on `main` @ `80e6994280f8` (verified 13:27 UTC), by [#392](https://github.com/unarbos/arbos/pull/392) rather than by #444.** The stamped mark decides it: arm (c) now answers *"no checkpoint for this turn: the mark on disk is from the turn at line 24, this turn started at line 30 (its own mark was not written); nothing reset"*, with `a.txt` in place and turn one's commit reachable. The control still fails — #444 alone (`f80f0b663bac`) destroys the commit in arm (c) — so the pass names the mechanism rather than inheriting it. Detail in "The verdict" below; the general rule the bug was filed for stands.
+
 - Measured at: [#444](https://github.com/unarbos/arbos/pull/444) @ `f80f0b663bac` (`arbos-kernel 0.2.0 f80f0b663bac protocol 1`), control `main` @ `cbbe9922d6a2` (`arbos-kernel 0.2.0 cbbe9922d6a2 protocol 1`, #444's own merge-base), separate `CARGO_TARGET_DIR`s (`repo/target`, `target-pr444`), told apart by `strings | grep "the undo mark could not be written"` — 0 in the control, 1 in the PR. Scenario `uw-01-unwritable-undo-mark-refuses-rather-than-using-an-older-turns`, rollouts `internal/qa/rollouts/20260917T1252{40,53}Z-uw-01-…`.
 - Class: destructive with a false "restored" — qal-j10's shape, one layer out. The fix's own repair depends on the permission that caused the fault.
 - Feature: `arbos-engine tools/git.rs snapshot_turn_tree` / `undo`, the turn-start mark `.arbos/runtime/checkpoint`.
@@ -31,9 +33,45 @@ The durable fix is not a repair after the fact but a mark that cannot be believe
 
 Either way, the general rule from this one is worth keeping: **a repair that runs on the failure path must not need the resource that failed.** Removal needs the directory; if the directory is why you are here, you have no repair.
 
+## The verdict, measured on three builds (13:27 UTC)
+
+`#392` merged at 12:59 UTC and `main` @ `80e6994280f8` carries both PRs. The same three arms, run on three
+builds, each build told apart by its own `--version` and by phrases only it holds:
+
+| build | arms that staged the fault | (b) mark file unwritable | (c) mark folder read-only |
+|---|---|---|---|
+| `cbbe9922d6a2` — neither PR | a, b, c | **destroyed committed work**, said `restored …` | **destroyed committed work** |
+| `f80f0b663bac` — #444 only | a, b, c | refused with a reason — fixed | **destroyed committed work** |
+| `80e6994280f8` — `main`, #392 + #444 | **c only** | the arm no longer stages the fault | **refused with a reason** — closed |
+
+Two things that table says, and only the middle column says the second one:
+
+1. **#392 closes it, and does so without depending on any write succeeding.** The mark now carries
+   `line:<n>`, and `undo` compares it with the turn it is in. A stale mark that cannot be removed is
+   simply not believed. That is the repair this bug asked for.
+2. **On `main` the file-permission arm can no longer be staged at all**, because #392 writes the mark with
+   `record::write_atomic` — a temp file and a rename, which replaces an unwritable file without writing
+   to it. So the reachable worlds for an unwritten mark narrowed to two: the folder cannot be written
+   (arm c, now refused by the stamp) or the disk is full. The probe reports this per arm rather than
+   passing quietly: `arms_that_staged_the_fault: ["c"]`.
+
+The second point is the one that would have been missed by reading. A build where two of three arms pass
+because the injection stopped working is not the same as a build where they pass because the fault is
+handled, and only the arm-level record tells them apart.
+
 ## Regression check
 
-`uw-01`, three arms, tagged `undo`, `destructive-order`. It fails arm (c) on both builds today, so it stays red until #392 or an equivalent lands — deliberately, because the class it names is a silent deletion of a person's commits.
+`uw-01`, three arms, tagged `undo`, `destructive-order`. Green on `main` @ `80e6994280f8`; red on
+`cbbe9922d6a2` and on #444 alone, which is what makes the green mean something.
+
+Two guards inside it, both earned:
+
+- **Each arm says whether it staged the fault**, and the scenario refuses to be green if none did
+  (`probe-no-arm-staged-an-unwritten-mark`). Without that, `main` would have read as three passes.
+- **"Staged" is measured as "the mark does not name this turn's starting HEAD"**, not as "the mark's
+  contents changed". The first version used the latter and called #444's *removal* a successful write —
+  reporting a staged arm as unstaged on the one build where the fix worked. Caught by running all three
+  builds and reading a result that disagreed with the run twenty minutes earlier.
 
 The arm that had to be thrown away, and why it is worth recording: the first version of arm (a) made `runtime/` read-only *before* the kernel started. The kernel exits 1 and there is no turn to measure — a world this bug cannot live in. The probe reported `probe-kernel-did-not-start` rather than a pass, which is how it was caught.
 

@@ -146,7 +146,55 @@ desktop step, retention, publish, and the mirror at both ends. Two things about 
   of that cycle's 18 breaks are that contention. The clean cycle is the one that runs with nothing else on
   the machine.
 
-## The 5.9 GB of rollouts: one channel worth trying
+## The budget, raised on the record
+
+Raised **$20.00 → $60.00 for 2026-09-17 only**, on the coordinator's authority, with Jacob told because it
+is his money. The reasoning, and it is in `spend.jsonl` as its own line (`usd: 0`, so it counts as no
+spend): the cap bound at $20.38 before this machine ran a scenario, because the day's spend was the
+outgoing loop's on the same key, and it blocked both headlines — while the benchmark loop spent $87 the
+same morning. A $20 cap that stops the acceptance journey is an old number, not a considered limit.
+
+Two things deliberately not done: the script defaults in `cycle.sh` and `vm-loop.sh` stay at $20, so the
+raise is passed in the environment and tomorrow returns to the standing cap unless renewed; and this
+machine did **not** get a fresh ledger, because two loops on one key with a ledger each would double the
+day's spend without anyone deciding to.
+
+## The 5.9 GB of rollouts: taken, verified, and the release deleted
+
+The channel worked. The outgoing machine tarred them with `zstd` and attached one part to a
+`qa-rollouts-2026-09-17` release on the evidence branch's tip: `rollouts.tar.zst.part-aa`, 310 MB for
+6.0 GB of JSON, plus `SHA256SUMS`.
+
+Verified here before anything was deleted:
+
+- the part's sum matches `e9c5c35b…2baa7d`, and `zstd -t` reports the archive clean, 5,266,984,960 bytes;
+- restored into `~/arbos-qa/loop` and counted: **128 folders here before, 2,798 after — exactly the 2,670
+  the tar was stated to hold**, one `result.json` per folder, 6.2 GB, spanning 13 to 17 September
+  (388 / 239 / 279 / 979 / 913 by day);
+- and the specific runs the day's bug files cite were read out of the restore rather than merely counted:
+  `qal-j19`'s `20260917T115330Z-lk-02-…` (pass, kernel `kernel-pr441`) and `qal-j20`'s
+  `20260917T121650Z-fm-01-…` with both of its named breaks, `stale-sidecar-restored-a-cut-turns-tree`
+  and `new-turns-file-lost`. 20 `kernel-git.log` files, as the handover said.
+
+The count check needed care: several scenario names the bug files cite (`lk-02`, `rw-08`, `ra-01`) also
+ran in this machine's own first cycle, so matching by name alone would have "found" evidence that was
+mine. The restored set is the 2,584 folders timestamped before this machine's first cycle.
+
+**The release and its tag are deleted** — `DELETE` returned 204 for both and a read-back gives 404 for
+the release, the tag ref and the asset; the repository's five other releases are untouched. The 310 MB
+download was removed from `/tmp` afterwards, so the tree under `~/arbos-qa/loop/rollouts` is the copy.
+
+## The desktop app does not build on a stock Ubuntu 24.04
+
+Not filed as a product bug — it is a host gap — but worth a line, because it blocked the journey and it
+will meet anyone who tries to run this project on a fresh machine. The gpui app needs, beyond the X11 and
+Vulkan set: `libfontconfig1-dev`, `libfreetype6-dev`, `libxkbcommon-x11-dev`, the xcb `-dev` family, and
+`libstdc++.so` — which exists only under `/usr/lib/gcc/x86_64-linux-gnu/13/`, where `rust-lld` does not
+look, so the link fails on `-lstdc++` with nothing but "linker command failed" unless the verbose output
+is read. `RUSTFLAGS="-L /usr/lib/gcc/x86_64-linux-gnu/13"` closes it. The first cycle's desktop step
+failed on the first of these and logged one line, `-- desktop main: app build failed`, which is how a
+cycle can skip fifteen scenarios and the acceptance journey without saying what stopped it: worth giving
+that step the same treatment as the other alarms.
 
 The outgoing machine has `loop/rollouts/` (~2,400 runs) and no way to move it: git cannot carry it, its
 store is unreadable, and no path between the machines is known. One channel it already holds everything
@@ -163,6 +211,52 @@ If it would rather not write to the repository, or the compressed size is still 
 fallback stands and nothing is blocked: the index and every broken run's small files are on `qa-results`,
 every rollout behind a finding is on the evidence branch, and the passing runs' snapshots are what the
 30-day retention rule deletes anyway.
+
+## A sixth step for the review list: an assertion must not bound a race
+
+The five inherited steps ask what a **pass** proved. This one asks whether a **failure** would mean
+anything, and it is distinct enough to stand beside them.
+
+The case, from the kernel side on 2026-09-17: a test asserted `(2..=3).contains(&turns)` — a bound on how
+many turns three worker reports are batched into. On a loaded runner the reports landed far enough apart
+that root woke once per report and saw four. Everything the test names passed: three reports, one per
+child, none lost, none doubled. Only the bound failed. Batching there is opportunistic, not enforced, so
+the assertion was right about the intention and wrong about the mechanism.
+
+**So: assert the property the optimisation exists for, or make the kernel enforce the bound and then
+assert it. Never assert the number you happened to observe.** The cost of getting this wrong is not a
+wasted run; it is that the steward now has to judge which reds mean anything. Three kernel tests went red
+on unrelated branches today and two were real faults — the third being a bad assertion is what makes the
+other two cheap to ignore. It is the same corrosion as 29 scenarios printing `pass` while skipping
+themselves, arriving from the opposite direction.
+
+### This loop's own four probes, read against it
+
+Worth doing immediately, since `uw-04` races on purpose:
+
+- `uw-01` — asserts properties only: the file exists, the commit is reachable from HEAD, `undo` said
+  something. No counts. **Clean.**
+- `uw-02` — asserts `notice_count <= 1` over two turns, which *is* a bound. It survives the rule because
+  the bound is structural rather than opportunistic: the notice is written in `init_arbos_repo`, which
+  runs once per start, and #444's own comment states "once per start" as the contract. If that ever
+  becomes best-effort, the assertion must become "at least one, and not one per turn".
+- `uw-03` — asserts presence: a log row by name, a frame carrying the notice, a turn folder holding the
+  error. **Clean.**
+- `uw-04` — races for a millisecond window and **does not assert the rate**. It asserts two properties —
+  no run finished unattributable, and someone was told — and uses the count only as a validity gate
+  (`caught == 0` is a stated skip, never a pass), reporting the rate in the notes. **Clean, and this is
+  the shape the rule asks for**: the race decides whether the probe measured anything, never whether the
+  product is right.
+
+One thing the audit changed: `uw-01`'s per-arm "did this arm stage the fault" test was itself a bad
+assertion of the same family — it read "the mark's contents changed" as "the mark was written", which
+made #444's *removal* look like a successful write. It now tests the property that matters, whether the
+mark names this turn's starting HEAD. A bound on a mechanism, replaced by the fact it stood for.
+
+This sixth step belongs in `docs/qa-loop-design.md` beside the other five. It is recorded here rather
+than written there yet, because that document is the outgoing machine's while it is still up and
+`store_put`'s sound-store path has no content check — the hazard this report's table describes. It goes
+into the review list at the handover boundary.
 
 ## Cross-references
 
