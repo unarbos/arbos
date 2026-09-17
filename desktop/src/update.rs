@@ -144,6 +144,17 @@ pub struct Updater {
     state: State,
     /// The build this binary is, which is what "newer" is measured against.
     current: Version,
+    /// Kernels serving open places that are not the build this app ships.
+    ///
+    /// Cached, and refreshed on a timer rather than per frame: finding one
+    /// reads a file, runs a binary and asks a socket, none of which belongs in
+    /// a render. The quiet case never reaches here — a stranger with nothing
+    /// running in it is stopped and replaced at attach — so what is in this
+    /// list is what needs a person.
+    strangers: Vec<crate::kernel::Skew>,
+    /// When that list was last built, so the bar can ask on every frame
+    /// without the work happening on every frame.
+    looked: Option<std::time::Instant>,
     /// When the channel was last asked, and whether it answered. `None` until
     /// the first check finishes.
     ///
@@ -164,6 +175,8 @@ impl Updater {
             channel,
             state: State::Idle,
             current: build::version(),
+            strangers: Vec::new(),
+            looked: None,
             checked: None,
             running: None,
             polling: None,
@@ -197,6 +210,49 @@ impl Updater {
     /// first check finishes.
     pub fn checked(&self) -> Option<&Checked> {
         self.checked.as_ref()
+    }
+
+    /// Kernels serving open places that are not this build.
+    pub fn strangers(&self) -> &[crate::kernel::Skew] {
+        &self.strangers
+    }
+
+    /// Drop what was found, so the next frame looks again — after a restart
+    /// the answer has changed and waiting thirty seconds to say so would look
+    /// like the click did nothing.
+    pub fn forget_strangers(&mut self, cx: &mut Context<Self>) {
+        self.strangers.clear();
+        self.looked = None;
+        cx.notify();
+    }
+
+    /// Look again, at most this often. Called from the bar's render, which
+    /// happens constantly; the work does not.
+    pub fn look_for_strangers(&mut self, places: Vec<Place>, cx: &mut Context<Self>) {
+        const HOW_OFTEN: Duration = Duration::from_secs(30);
+        if self
+            .looked
+            .is_some_and(|last| last.elapsed() < HOW_OFTEN)
+        {
+            return;
+        }
+        self.looked = Some(std::time::Instant::now());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    places
+                        .iter()
+                        .filter_map(crate::kernel::kernel_skew)
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            let _ = this.update(cx, |updater, cx| {
+                updater.strangers = found;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Whether this build can install an update at all: it knows the key to
@@ -554,6 +610,15 @@ fn installed_root() -> Result<Installed> {
 /// Only the kernels on this machine. A remote place's kernel runs from that
 /// host's own binary, which this update does not touch; the tunnels to it are
 /// already down by the time this is called, and the new app dials them again.
+///
+/// **This is the first of two layers and it cannot be the only one.** It
+/// reaches the places the caller knows about, which is not every kernel on the
+/// machine — one started by the CLI, by a worker, or by another window is
+/// invisible here — and a kernel that does not stop inside
+/// [`KERNEL_STOP_WAIT`] is deliberately left running rather than blocking the
+/// update. So the app must also refuse to *attach* to a kernel that is not the
+/// build it ships, which is the layer that holds however this one fails. See
+/// `docs/kernel-self-update-design.md`.
 fn stop_kernels(places: &[Place]) {
     let mut asked = Vec::new();
     for place in places.iter().filter(|place| !place.is_remote()) {

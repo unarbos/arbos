@@ -82,7 +82,9 @@ struct ProjectChatView: View {
                         micEnabled: settings.isConfigured,
                         focus: $composing,
                         attachments: $attachments,
-                        dictation: dictation
+                        dictation: dictation,
+                        busy: chat.busy,
+                        onStop: { chat.stopTurn() }
                     )
                 }
                 // Scrolled text passes under the inset; the pill and the
@@ -486,14 +488,24 @@ struct WorkersSheet: View {
 struct WorkingLine: View {
     let step: String
 
+    /// "Working", "Starting", "Working <step>" — and the parent's own
+    /// "waiting on <worker> — <its step>" (#366) as "Waiting on …", not
+    /// "Working waiting on …".
+    static func words(_ step: String) -> String {
+        if step.isEmpty { return "Working" }
+        if step == "Starting" { return "Starting" }
+        if step.hasPrefix("waiting on ") { return "W" + step.dropFirst() }
+        return "Working \(step)"
+    }
+
     var body: some View {
         TimelineView(.animation(minimumInterval: 1 / 30)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             let pulse = 0.55 + 0.45 * (sin(t * 2.2) * 0.5 + 0.5)
-            Text(step.isEmpty || step == "Starting" ? (step.isEmpty ? "Working" : "Starting") : "Working \(step)")
+            Text(Self.words(step))
                 .font(ArbosTheme.body)
                 .foregroundStyle(ArbosTheme.textMuted.opacity(pulse))
-                .lineLimit(1)
+                .lineLimit(2)
         }
     }
 }
@@ -635,12 +647,21 @@ struct ChatRow: View {
                 line(symbol: "arrow.turn.down.right", text: "\(name) · \(status)", trailing: "", tint: ArbosTheme.textFaint)
             }
         case .notice(let text, let failed):
-            line(
-                symbol: failed ? "exclamationmark.circle" : "info.circle",
-                text: text,
-                trailing: "",
-                tint: failed ? ArbosTheme.danger : ArbosTheme.textFaint
-            )
+            // A notice is the kernel speaking plainly — the stall line
+            // ("Still working, but nothing has happened for 5m: waiting on
+            // `bash` … Stop ends the turn"), a refused spawn, an older
+            // kernel's limits. It is read whole: inline code as a chip, no
+            // two-line cut that would drop the advice at its end (M-129).
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: failed ? "exclamationmark.circle" : "info.circle")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 12)
+                Text(Self.prose(text))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .font(ArbosTheme.callout)
+            .foregroundStyle(failed ? ArbosTheme.danger : ArbosTheme.textFaint)
         case .ask(let question, let options, _, let answered):
             // The kernel's question: the words as a reply, the options as
             // chips to tap, or the composer ("Answer…") for a typed one.

@@ -1117,6 +1117,11 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "ok": ok,
                 "text": text,
             })),
+            // What the sheet says about the trajectory when there is none. The
+            // fault Jacob hit was invisible to the rig because this was not
+            // here: three rows reading "nothing to send" look exactly like a
+            // report that had nothing to attach.
+            "unavailable": this.feedback_sheet.read(cx).unavailable(),
             "screenshot": {
                 "attached": this.feedback_sheet.read(cx).shot_state().0,
                 "whole_screen": this.feedback_sheet.read(cx).shot_state().1,
@@ -1228,6 +1233,8 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
             Connection::Lost => "lost",
         },
         "streaming": chat.streaming,
+        "waiting": chat.waiting,
+        "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
         "pills": project.map(|project| {

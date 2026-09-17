@@ -17,7 +17,8 @@
 #   ARBOS_WINDOW_TOKENS                  context the loop plans against (default 200000)
 #   ARBOS_VISION_MODEL                   model that describes images (default google/gemini-2.5-flash)
 #   ARBOS_ALLOWLIST                      tools the agent may use (default: file + shell tools)
-#   ARBOS_INSTRUCTIONS                   standing instructions shown in every prompt
+#   ARBOS_INSTRUCTIONS                   instructions added under the standing headless rules
+#   ARBOS_INSTRUCTIONS_REPLACE           1 = ARBOS_INSTRUCTIONS replaces the rules instead (said on stderr)
 #
 # Outputs in $ARBOS_OUT: patch.diff, run.jsonl (the turn's events), run.stderr,
 # kernel.log, rollout/<stamp>-root/ (the exported bundle), result.json.
@@ -111,15 +112,26 @@ ALLOW="${ARBOS_ALLOWLIST:-ls, read, find, grep, write, edit, apply_patch, bash, 
 if [ ! -f "$AGENT_DIR/agent.md" ]; then
   printf 'name: root\nmodel: inherit\nallowlist: %s\ncwd: %s\nmode: %s\n' "$ALLOW" "$PLACE" "$MODE" > "$AGENT_DIR/agent.md"
 fi
-if [ -n "${ARBOS_INSTRUCTIONS:-}" ]; then
-  printf '%s\n' "$ARBOS_INSTRUCTIONS" > "$AGENT_DIR/instructions.md"
-elif [ ! -f "$AGENT_DIR/instructions.md" ]; then
-  cat > "$AGENT_DIR/instructions.md" <<'EOF'
-You run headless inside a container. Nobody reads your replies while you work and nobody can answer a question, so never ask; decide and continue.
+# The standing headless rules, and ARBOS_INSTRUCTIONS layered under them.
+# The override used to *replace* them: anyone passing instructions lost
+# "do not commit, do not create branches" and the rest without a word,
+# and the patch extraction saw an empty diff because the agent had
+# committed on a branch (SWE-bench loop, cycle 11). Replacing is now an
+# explicit choice — ARBOS_INSTRUCTIONS_REPLACE=1 — and says on stderr
+# which rules it displaces.
+HEADLESS_RULES='You run headless inside a container. Nobody reads your replies while you work and nobody can answer a question, so never ask; decide and continue.
 Work only in the repository at your cwd. Make the change in the working tree and leave it there: do not commit, do not create branches, do not push.
 You have no network beyond the model. Do not try to install packages from the internet.
-Run the relevant tests with bash to check your fix before you stop. When the fix is in place and verified, stop with a short summary of what you changed.
-EOF
+Run the relevant tests with bash to check your fix before you stop. When the fix is in place and verified, stop with a short summary of what you changed.'
+if [ -n "${ARBOS_INSTRUCTIONS:-}" ]; then
+  if [ "${ARBOS_INSTRUCTIONS_REPLACE:-0}" = 1 ]; then
+    printf 'arbos-swe-run: ARBOS_INSTRUCTIONS_REPLACE=1 — the standing headless rules are displaced by ARBOS_INSTRUCTIONS; not in force unless restated:\n%s\n' "$HEADLESS_RULES" >&2
+    printf '%s\n' "$ARBOS_INSTRUCTIONS" > "$AGENT_DIR/instructions.md"
+  else
+    printf '%s\n\nFor this run, in addition:\n%s\n' "$HEADLESS_RULES" "$ARBOS_INSTRUCTIONS" > "$AGENT_DIR/instructions.md"
+  fi
+elif [ ! -f "$AGENT_DIR/instructions.md" ]; then
+  printf '%s\n' "$HEADLESS_RULES" > "$AGENT_DIR/instructions.md"
 fi
 
 # 4. Run the turn. A dangerous-command approval (only sudo, rm -rf /, mkfs)

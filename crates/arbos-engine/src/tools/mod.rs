@@ -16,7 +16,7 @@ mod hashline;
 pub mod memory;
 mod web;
 
-pub use bash::{is_readonly_command, kill_job};
+pub use bash::{is_readonly_command, kill_job, reap_by_pid};
 pub use fs::resolve;
 
 pub use crate::tool::ToolOut;

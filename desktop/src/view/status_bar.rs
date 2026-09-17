@@ -59,6 +59,9 @@ impl Arbos {
             .items_center()
             .gap(px(2.))
             .child(self.status_bar_settings(&theme, cx))
+            // Before the update control: a kernel from another build is
+            // already losing work, where an update merely waiting is not.
+            .children(self.status_bar_stranger(&theme, cx))
             .child(self.status_bar_update(&theme, cx))
             .into_any_element()
     }
@@ -103,6 +106,58 @@ impl Arbos {
                 }
             }))
             .into_any_element()
+    }
+
+    /// A kernel serving an open place that is not the build this app ships.
+    ///
+    /// This comes before the update control, because it is worse news. An
+    /// update that is available costs nothing to ignore; a kernel from another
+    /// build is *already* failing — on 2026-09-17 one was 223 commits behind,
+    /// rejected frames it had never heard of, and lost five workers' reports
+    /// and a feedback sheet without a single error reaching the screen.
+    ///
+    /// The quiet one has already been dealt with: a stranger with nothing
+    /// running in it is stopped and replaced at attach. What reaches here is
+    /// the one that needs a person, because something is running inside it.
+    fn status_bar_stranger(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Asked on every frame; the looking happens on a timer inside.
+        let places: Vec<_> = self
+            .workspace
+            .read(cx)
+            .projects
+            .iter()
+            .map(|project| project.place().clone())
+            .collect();
+        self.updater
+            .update(cx, |updater, cx| updater.look_for_strangers(places, cx));
+        let found = self.updater.read(cx).strangers().first()?.clone();
+        let place = found.place.clone();
+        let tooltip = format!(
+            "The kernel serving {} was built from {}, and this app ships {}.\n\n\
+             It will not understand everything this window sends it: work can finish and \n\
+             never be reported. {}.\n\n\
+             Click to stop and restart it on this build. Anything running in it ends the \n\
+             way the stop button ends it.",
+            place.title(),
+            found.running_sha,
+            found.bundled_sha,
+            found.gate.say(),
+        );
+        Some(
+            plate(
+                cx,
+                Plate {
+                    id: "status-bar-stranger-kernel",
+                    label: "Kernel from another build".into(),
+                    icon: None,
+                    fill: theme.warning,
+                    progress: None,
+                    tooltip: Some(tooltip),
+                    action: Action::RestartKernel(place),
+                },
+            )
+            .into_any_element(),
+        )
     }
 
     /// The version, or the button.
@@ -151,7 +206,7 @@ impl Arbos {
                             notes => format!(" — {notes}"),
                         }
                     )),
-                    clickable: true,
+                    action: Action::Install,
                 },
             ),
             State::Downloading { got, total, .. } => {
@@ -168,7 +223,7 @@ impl Arbos {
                         fill: theme.accent,
                         progress: Some(fraction),
                         tooltip: Some(format!("{} of {}", megabytes(*got), megabytes(*total))),
-                        clickable: false,
+                        action: Action::None,
                     },
                 )
             }
@@ -184,7 +239,7 @@ impl Arbos {
                     // be a lie.
                     progress: Some(1.),
                     tooltip: Some("Putting the new build in place".into()),
-                    clickable: false,
+                    action: Action::None,
                 },
             ),
             State::Restarting => plate(
@@ -196,7 +251,7 @@ impl Arbos {
                     fill: theme.accent,
                     progress: Some(1.),
                     tooltip: Some("Arbos is reopening with your tabs and chats".into()),
-                    clickable: false,
+                    action: Action::None,
                 },
             ),
             State::Failed { why, update } => plate(
@@ -208,7 +263,10 @@ impl Arbos {
                     fill: theme.danger,
                     progress: None,
                     tooltip: Some(format!("{why}\n\nArbos is unchanged. Click to try again.",)),
-                    clickable: update.is_some(),
+                    action: match update.is_some() {
+                        true => Action::Install,
+                        false => Action::None,
+                    },
                 },
             ),
         }
@@ -318,6 +376,20 @@ pub(crate) fn last_checked(checked: Option<&Checked>) -> String {
 }
 
 /// Everything the control looks like when it has something to say.
+/// What a click on the plate does. One control, two jobs — and they must not
+/// be confused, because one installs a new app and the other ends whatever a
+/// kernel is running.
+#[derive(Clone)]
+enum Action {
+    /// Nothing; the plate is showing progress.
+    None,
+    /// Download and install the update being offered.
+    Install,
+    /// Stop the kernel serving this place and let the app start it again on
+    /// this build.
+    RestartKernel(crate::model::place::Place),
+}
+
 struct Plate {
     /// The element id. One per state rather than one for the control, so what
     /// the bar is showing can be asserted without a pointer or a colour.
@@ -330,7 +402,7 @@ struct Plate {
     /// plate that is not working on anything.
     progress: Option<f32>,
     tooltip: Option<String>,
-    clickable: bool,
+    action: Action,
 }
 
 /// The filled control.
@@ -347,8 +419,9 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
         fill,
         progress,
         tooltip,
-        clickable,
+        action,
     } = plate;
+    let clickable = !matches!(action, Action::None);
     let ink = on_plate(fill);
     div()
         .id(id)
@@ -403,15 +476,26 @@ fn plate(cx: &mut Context<Arbos>, plate: Plate) -> AnyElement {
         })
         .when(clickable, |el| {
             el.on_click(cx.listener(|this, _, _, cx| {
-                // The open projects: their kernels run on the binary about to
-                // be replaced, so the updater stops them before it swaps.
-                let places = this
-                    .workspace
-                    .read(cx)
+                // Every place this app knows a kernel for, not only the tabs
+                // that happen to be open.
+                //
+                // The open projects alone are not enough, and that gap did
+                // real harm: after an update on 2026-09-17 a kernel from a
+                // closed tab kept running from the deleted old bundle, and
+                // the new app attached to it and sent frames it had never
+                // heard of. Recents are where those kernels are — a place
+                // stops being a tab long before its kernel stops running.
+                let workspace = this.workspace.read(cx);
+                let mut places: Vec<_> = workspace
                     .projects
                     .iter()
                     .map(|project| project.place().clone())
                     .collect();
+                for recent in &workspace.recents {
+                    if !places.contains(recent) {
+                        places.push(recent.clone());
+                    }
+                }
                 this.updater
                     .update(cx, |updater, cx| updater.install(places, cx));
             }))
