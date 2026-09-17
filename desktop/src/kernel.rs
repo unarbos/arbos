@@ -551,11 +551,19 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace is not a directory: {}", workspace.display()))?;
-    // The live kernel bootstraps only at start. A later delete (or a
-    // missing tree) can leave `.arbos/agents/root` gone while the
-    // socket is still up — every new chat attaches as `root`, so
-    // recreate the folder here.
-    let _ = arbos_core::bootstrap(&arbos_core::Place::new(&workspace));
+    // The live kernel bootstraps only at start. A later delete can leave
+    // `.arbos/agents/root` gone while the socket is still up — every new
+    // chat attaches as `root`, so the folder is put back here. Only where
+    // a store already is, though: a path with no `.arbos/project.toml` and
+    // no `agents/` is a place that moved or was deleted, not one to make.
+    // Bootstrapping it built a whole ghost project at the old path after a
+    // rename — PROTOCOL.md, .git/, docs/ — and the window then read the
+    // place as present and the agent as gone (F-165; the features agent's
+    // note 2026-09-17-recreated-place-the-maker-is-attach-or-spawns-bootstrap).
+    let store = workspace.join(".arbos");
+    if store.join("project.toml").is_file() || store.join("agents").is_dir() {
+        let _ = arbos_core::bootstrap(&arbos_core::Place::new(&workspace));
+    }
     if let Some(info) = read_info(&workspace).filter(alive) {
         // Is this kernel the one this app ships? After an update it may not
         // be: the app's own stop cannot reach every kernel on the machine, and
