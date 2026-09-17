@@ -129,8 +129,11 @@ class Gateway:
         self.proc: subprocess.Popen | None = None
 
     async def start(self, timeout: float = 30.0) -> None:
-        env = dict(os.environ, PYTHONPATH=str(ROOT))
-        self.proc = subprocess.Popen(self.cmd, cwd=ROOT, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
+        # ARBOS_VOICE_SERVER_SRC: run another checkout's gateway (a branch under review) against
+        # this tree's desktop and mocks.
+        src = Path(os.environ.get("ARBOS_VOICE_SERVER_SRC") or ROOT)
+        env = dict(os.environ, PYTHONPATH=str(src))
+        self.proc = subprocess.Popen(self.cmd, cwd=src, env=env, stdout=self.log.open("wb"), stderr=subprocess.STDOUT)
         deadline = time.monotonic() + timeout
         async with httpx.AsyncClient(timeout=2.0) as client:
             while time.monotonic() < deadline:
@@ -185,6 +188,8 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
     hub_cfg = sc.get("hub")
     hub: MockHub | None = None
     own: MockKernel | None = None
+    decoy: MockKernel | None = None
+    decoy_name = ""
     extra = [*opts.gateway_args, *sc.get("gateway_args", [])]
     project: "str | dict" = ""
     # `path = "own" | "local" | "missing"`: the call names a folder by its path, as the desktop does.
@@ -217,6 +222,16 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             project = f"{hub_cfg['machine']}/{hub_cfg['project']}"
             hub.kernels[project] = kernel_url
             hub.places[project] = str(place)
+            # `hub.decoy = "name"`: a second, unscripted kernel on the same machine under another roster
+            # name, so a client naming the folder by path must land on the scripted one by `place`.
+            if hub_cfg.get("decoy"):
+                decoy_place = out / "decoy-place"
+                decoy_place.mkdir()
+                decoy = MockKernel(decoy_place)
+                decoy_url = await decoy.start()
+                decoy_name = f"{hub_cfg['machine']}/{hub_cfg['decoy']}"
+                hub.kernels[decoy_name] = decoy_url
+                hub.places[decoy_name] = str(decoy_place)
             hub_url = await hub.start()
             extra += ["--hub", hub_url, "--hub-token", "harness-hub", "--hub-machine", "gateway-box"]
             kernel_url = own_url
@@ -230,7 +245,13 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
         # the gateway must answer with that error code and close, and no kernel may hear a word.
         if sc.get("project"):
             project = sc["project"]
-        caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=project)
+        if isinstance(sc.get("client_project"), dict):
+            # The client's own naming of the project (a dict as the desktop sends it); "$PLACE" is the
+            # scripted kernel's folder. The hub name the harness checks against stays `project`.
+            client_project = {k: (str(place) if v == "$PLACE" else v) for k, v in sc["client_project"].items()}
+        else:
+            client_project = project
+        caller = Caller(url, token=token, screen=sc.get("screen", "on your screen"), project=client_project)
         ready = await caller.connect()
         if sc.get("refused"):
             # `refused = "code"`: the call must be refused with that error code and closed; no kernel hears a word.
@@ -269,6 +290,9 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
         if hub_cfg and own is not None and hub is not None:
             res.checks.append((len(own.users) == 0, f"the gateway's own kernel received no user frames ({len(own.users)})"))
             res.checks.append((project in hub.attaches, f"the hub saw an attach for {project} ({hub.attaches})"))
+            if decoy is not None:
+                res.checks.append((len(decoy.users) == 0, f"the same-named decoy kernel received no user frames ({len(decoy.users)})"))
+                res.checks.append((decoy_name not in hub.attaches, f"the hub saw no attach for the decoy {decoy_name} ({hub.attaches})"))
         if path_mode == "local" and own is not None:
             res.checks.append((len(own.users) == 0, f"the gateway's own kernel (another folder) received no user frames ({len(own.users)})"))
             res.checks.append((len(kernel.users) >= 1, f"the kernel at the named folder received the caller's words ({len(kernel.users)})"))
@@ -291,6 +315,8 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             await hub.stop()
         if own:
             await own.stop()
+        if decoy:
+            await decoy.stop()
         res.inbox = kernel.inbox_files("root")
         (out / "inbox.json").write_text(json.dumps(res.inbox, indent=1))
     res.seconds = time.monotonic() - started
