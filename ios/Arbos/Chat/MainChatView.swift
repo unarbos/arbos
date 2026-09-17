@@ -138,7 +138,9 @@ struct ProjectChatView: View {
             draft = dictation.consume()
         }
         .onChange(of: dictation.problem) { _, problem in
-            if let problem { chat.notice(problem) }
+            // Not red when the words survived: the line's news is that
+            // nothing was lost, and red says the opposite.
+            if let problem { chat.notice(problem, failed: draft.isEmpty && dictation.text.isEmpty) }
         }
         .onChange(of: chat.identity) { _, face in
             if let face { projects.remember(face, for: target) }

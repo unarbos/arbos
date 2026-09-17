@@ -223,18 +223,7 @@ fn worktree_note(place: &std::path::Path, agent: &Agent) -> String {
 /// The `transcript_lo` of the agent's newest open turn folder — the line
 /// its wake was written at — if a turn is open.
 pub fn open_turn_lo(hooks: &KernelHooks, agent: &str) -> Option<u64> {
-    let turns = inbox::turns_dir(&hooks.place, agent);
-    let mut open: Vec<std::path::PathBuf> = std::fs::read_dir(&turns)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            std::fs::read_to_string(p.join("meta.toml")).is_ok_and(|t| !t.contains("\nended = "))
-                && p.join("cause.md").exists()
-        })
-        .collect();
-    open.sort();
-    let dir = open.pop()?;
+    let dir = open_turn_folder(hooks, agent)?;
     std::fs::read_to_string(dir.join("meta.toml"))
         .ok()?
         .lines()
@@ -246,16 +235,11 @@ pub fn open_turn_lo(hooks: &KernelHooks, agent: &str) -> Option<u64> {
         })
 }
 
-/// The newest `turns/tNNNN/meta.toml` without `ended` gets `ended`, the
-/// verdict, and the outcome (the turn's last words, or why it stopped, or
-/// `forced` when the kernel closes it for another reason). True when one
-/// was closed.
-fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> bool {
+/// The newest open turn folder of `agent`, if any.
+fn open_turn_folder(hooks: &KernelHooks, agent: &str) -> Option<std::path::PathBuf> {
     let turns = inbox::turns_dir(&hooks.place, agent);
-    let Ok(rd) = std::fs::read_dir(&turns) else {
-        return false;
-    };
-    let mut open: Vec<std::path::PathBuf> = rd
+    let mut open: Vec<std::path::PathBuf> = std::fs::read_dir(&turns)
+        .ok()?
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
@@ -265,23 +249,68 @@ fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> 
         })
         .collect();
     open.sort();
-    let Some(dir) = open.pop() else {
+    open.pop()
+}
+
+/// The turn returned an error: its folder remembers why, so the close
+/// that follows reads it as failed with the reason even when the
+/// transcript could not take a word of it.
+pub fn note_turn_error(hooks: &KernelHooks, agent: &str, why: &str) {
+    let Some(dir) = open_turn_folder(hooks, agent) else {
+        return;
+    };
+    let meta = dir.join("meta.toml");
+    let mut text = std::fs::read_to_string(&meta).unwrap_or_default();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    let line: String = why.lines().next().unwrap_or("").chars().take(300).collect();
+    text.push_str(&format!("error = {}\n", toml_string(&line)));
+    let tmp = dir.join(format!(".meta.toml.tmp-{}", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, meta);
+    }
+}
+
+/// The newest `turns/tNNNN/meta.toml` without `ended` gets `ended`, the
+/// verdict, and the outcome (the turn's last words, or why it stopped, or
+/// `forced` when the kernel closes it for another reason). True when one
+/// was closed.
+fn close_turn_folder(hooks: &KernelHooks, agent: &str, forced: Option<&str>) -> bool {
+    let Some(dir) = open_turn_folder(hooks, agent) else {
         return false;
     };
     let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
-    let lo = std::fs::read_to_string(dir.join("meta.toml"))
-        .ok()
-        .and_then(|t| {
-            t.lines().find_map(|l| {
-                l.strip_prefix("transcript_lo = ")?
-                    .trim()
-                    .parse::<u64>()
-                    .ok()
-            })
+    let meta_text = std::fs::read_to_string(dir.join("meta.toml")).unwrap_or_default();
+    let lo = meta_text
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("transcript_lo = ")?
+                .trim()
+                .parse::<u64>()
+                .ok()
         })
         .unwrap_or(0);
+    // The error the turn returned, noted by the scheduler before this
+    // close (`note_turn_error`).
+    let noted_error = meta_text
+        .lines()
+        .find_map(|l| l.strip_prefix("error = "))
+        .and_then(|v| toml::from_str::<toml::Value>(&format!("v = {v}")).ok())
+        .and_then(|v| v.get("v")?.as_str().map(str::to_string));
     let (outcome, ok) = match forced {
         Some(why) => (why.to_string(), false),
+        None if noted_error.is_some() => (
+            format!("failed: {}", noted_error.unwrap_or_default()),
+            false,
+        ),
+        // A turn that wrote nothing — not even its wake line — did not
+        // run: the transcript would not take it. That is a failure with a
+        // reason in kernel.log, not "success (no reply)".
+        None if (events.len() as u64) <= lo => (
+            "nothing reached the transcript — it could not be written; see kernel.log".to_string(),
+            false,
+        ),
         None => turn_outcome(&events, lo),
     };
     // A timer with continuity: the words this turn ended with ride on its

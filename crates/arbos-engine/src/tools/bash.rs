@@ -104,9 +104,20 @@ impl Tool for Bash {
         };
         let plan = Plan::access(access);
         // Interactive only when it will wait on a card (ask mode); in
-        // auto the same command is refused in `run`, no card.
+        // auto the same command is refused in `run`, no card. A root or
+        // home wipe is refused in `run` in every mode: never a card.
+        let home = home_dir();
+        let verdict = super::wipe::judge(cmd, &where_it_runs(&dir, cx.root, &home));
+        // Refused here, before any mode's approval card: in ask mode the
+        // card would otherwise come first, and a person could be asked to
+        // allow a wipe of their home (qal-j15, ra-01).
+        if let super::wipe::Verdict::Refuse(why) = &verdict {
+            bail!("bash: refused — {why}");
+        }
         Ok(
-            if needs_approval(cmd) && cx.agent.mode == arbos_core::Mode::Ask {
+            if matches!(verdict, super::wipe::Verdict::Ask(_))
+                && cx.agent.mode == arbos_core::Mode::Ask
+            {
                 plan.interactive()
             } else {
                 plan
@@ -161,19 +172,32 @@ impl Tool for Bash {
                 .await
                 .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
             }
-            // A wipe of the filesystem root, sudo, mkfs, a fork bomb: in
-            // auto mode nothing waits on a card (decision 2026-09-15), so
-            // these are refused outright with the reason — the model can
-            // ask the user in words if it truly needs one. In ask mode
-            // the call was already allowed before it ran.
-            if needs_approval(cmd) && cx.agent.mode != arbos_core::Mode::Ask {
-                bail!(
-                    "bash: refused — this command wipes a system path, escalates with sudo, or formats a disk, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
-                );
-            }
             let dir = opt_str(&args, "cwd")
                 .map(|c| cx.cwd.join(c))
                 .unwrap_or_else(|| cx.cwd.clone());
+            // The wipe guard reads the command from this directory, `cd`
+            // by `cd` (qal-j15: `cd / && rm -rf *` ran, seven times,
+            // because the pieces were read apart). A removal of the
+            // filesystem root, a home, or a top-level system tree is
+            // refused in every mode, ask included: there is no agent's
+            // reason for it. Sudo, mkfs, a fork bomb, a removal the
+            // kernel cannot place: in auto mode nothing waits on a card
+            // (decision 2026-09-15), so these are refused with the reason
+            // — the model can ask the user in words if it truly needs
+            // one. In ask mode the call was already allowed before it ran.
+            {
+                let home = home_dir();
+                match super::wipe::judge(cmd, &where_it_runs(&dir, cx.place.path(), &home)) {
+                    super::wipe::Verdict::Run => {}
+                    super::wipe::Verdict::Refuse(why) => bail!("bash: refused — {why}"),
+                    super::wipe::Verdict::Ask(why) if cx.agent.mode != arbos_core::Mode::Ask => {
+                        bail!(
+                            "bash: refused — this command {why}, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
+                        )
+                    }
+                    super::wipe::Verdict::Ask(_) => {}
+                }
+            }
             if !dir.is_dir() {
                 bail!(
                     "cwd {} does not exist; the working directory is {}. Use a path relative to it, or omit cwd.",
@@ -235,8 +259,10 @@ impl Tool for Bash {
                 let id = job.id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms)).await;
-                    if let Ok(j) = root.load(&id) {
-                        root.kill(&j);
+                    if let Ok(j) = root.load(&id)
+                        && let Err(e) = root.kill(&j)
+                    {
+                        eprintln!("job timeout: {e:#}");
                     }
                 });
             }
@@ -259,8 +285,10 @@ impl Tool for Bash {
                     _ = tokio::time::sleep_until(deadline) => break false,
                     _ = cx.cancel.cancelled() => {
                         // Stop while attached means stop: the user wants it gone.
-                        if let Ok(j) = root.load(&job.id) {
-                            root.kill(&j);
+                        if let Ok(j) = root.load(&job.id)
+                            && let Err(e) = root.kill(&j)
+                        {
+                            bail!("bash interrupted; {e:#}");
                         }
                         bail!("bash interrupted; job {} killed", job.id);
                     }
@@ -598,20 +626,40 @@ fn human_bytes(n: u64) -> String {
 /// No shell here: the syscalls take the numbers as numbers. Pids 0 and 1
 /// (and anything that does not fit) are refused outright, because
 /// `kill(0)` and `killpg(0)` also mean "my whole group" or "everything".
-pub fn kill_job(pid: u32) {
+///
+/// The result says whether the signal was *delivered*: `Ok` when the
+/// group or the pid took it, or was already gone (ESRCH); `Err` when the
+/// system refused (EPERM — a job that became another user's, `sudo` in
+/// its command) or the pid was never a job. A folder that said "killed by
+/// the kernel" before this was checked told the user a stop had worked
+/// when it had not.
+pub fn kill_job(pid: u32) -> std::io::Result<()> {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
-        eprintln!("kill_job: pid {pid} out of range; refusing");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} out of range; refusing"),
+        ));
     };
     if pid <= 1 {
-        eprintln!("kill_job: pid {pid} is not a job; refusing");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} is not a job; refusing"),
+        ));
     }
     // SAFETY: plain syscalls on a validated positive pid; no memory involved.
-    let group_ok = unsafe { libc::killpg(pid, libc::SIGKILL) } == 0;
-    if !group_ok {
-        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
     }
+    let group_err = std::io::Error::last_os_error();
+    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    // Already gone is the outcome asked for.
+    if err.raw_os_error() == Some(libc::ESRCH) && group_err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err)
 }
 
 #[cfg(test)]
@@ -639,7 +687,7 @@ mod kill_tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(200));
 
-        kill_job(job.id());
+        kill_job(job.id()).unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(job.try_wait().unwrap().is_some(), "the job leader is dead");
         assert!(
@@ -654,55 +702,48 @@ mod kill_tests {
     fn kill_job_refuses_pids_that_mean_everything() {
         // 0 = own group, 1 = init; both must be no-ops. If either were
         // signalled, this test process would not be here to assert.
-        kill_job(0);
-        kill_job(1);
+        assert!(kill_job(0).is_err());
+        assert!(kill_job(1).is_err());
     }
 }
 
-/// Commands that ask the user first even in auto mode: wiping the root of
-/// the filesystem (or a top-level directory of it), sudo, mkfs, a fork
-/// bomb. `rm -rf /tmp/scratch` is an ordinary cleanup, not one of these;
-/// the old substring test on `rm -rf /` stopped headless runs on exactly
-/// that.
+/// Where a command runs, for the wipe guard: the call's directory, the
+/// user's home, the place.
+fn where_it_runs<'a>(
+    cwd: &'a std::path::Path,
+    place: &'a std::path::Path,
+    home: &'a std::path::Path,
+) -> super::wipe::Where<'a> {
+    super::wipe::Where {
+        cwd,
+        home,
+        place: Some(place),
+    }
+}
+
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-home"))
+}
+
+/// Commands that ask the user first even in auto mode, or are refused in
+/// every mode: wiping the root of the filesystem, a home, or a top-level
+/// system tree (refused); sudo, mkfs, a fork bomb, a removal the kernel
+/// cannot place (asked). Read from a directory that is no tree, with
+/// `$HOME` as the home, for callers without a directory — the bash tool itself
+/// judges from the call's own directory (`wipe::judge`). `rm -rf
+/// /tmp/scratch` is an ordinary cleanup, not one of these.
 pub fn needs_approval(cmd: &str) -> bool {
-    let c = cmd.to_ascii_lowercase();
-    c.contains("sudo ") || c.contains("mkfs") || c.contains(":(){") || rm_wipes_root(&c)
-}
-
-/// An `rm` with a recursive flag whose target is `/`, `/*`, `~`, or a
-/// top-level directory such as `/usr` or `/etc`.
-fn rm_wipes_root(lower: &str) -> bool {
-    for segment in lower.split(['|', ';', '&', '\n']) {
-        let mut words = segment.split_whitespace();
-        if words.next() != Some("rm") {
-            continue;
-        }
-        let mut recursive = false;
-        for w in words {
-            if let Some(flags) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
-                recursive |= flags.contains('r');
-                continue;
-            }
-            if w == "--recursive" || w == "-r" {
-                recursive = true;
-                continue;
-            }
-            if w.starts_with("--") {
-                continue;
-            }
-            let target = w.trim_matches(['"', '\'']);
-            let t = target.trim_end_matches('/');
-            let top_level = t.starts_with('/')
-                && !t[1..].is_empty()
-                && !t[1..].contains('/')
-                && !matches!(t, "/tmp" | "/var");
-            let wipe = target == "/" || target == "/*" || t == "~" || t == "$home" || top_level;
-            if recursive && wipe {
-                return true;
-            }
-        }
-    }
-    false
+    let home = home_dir();
+    super::wipe::judge(
+        cmd,
+        &where_it_runs(
+            std::path::Path::new("/nonexistent-cwd/here"),
+            std::path::Path::new("/nonexistent-place"),
+            &home,
+        ),
+    ) != super::wipe::Verdict::Run
 }
 
 #[cfg(test)]
@@ -950,14 +991,14 @@ pub(crate) fn kill_jobs_by_pid(root: &JobsRoot, cmd: &str) -> Option<String> {
     }
     let lines: Vec<String> = jobs
         .iter()
-        .map(|j| {
-            root.kill(j);
-            format!(
+        .map(|j| match root.kill(j) {
+            Ok(_) => format!(
                 "job {} (pid {}) ended — the whole process group, not only its shell: `{}`",
                 j.id,
                 j.meta.pid,
                 arbos_core::text::clip(j.meta.command.trim(), 80)
-            )
+            ),
+            Err(e) => format!("{e:#} — it is still running"),
         })
         .collect();
     Some(lines.join("\n"))

@@ -286,8 +286,18 @@ pub fn restore_files(place: &Place, agent: &str, cp: &Checkpoint) -> Result<Stri
             cwd.display()
         );
     }
-    restore(&cwd, cp)
+    // A rewind pressed right after a turn on a busy machine: the turn's
+    // record is on disk but its tree is still being saved. Wait for it
+    // here, on the blocking pool, rather than refuse at once.
+    let cp = arbos_engine::git::settle_tree(&layout.dir, cp, TREE_WAIT);
+    let out = restore(&cwd, &cp);
+    let _ = std::fs::remove_file(arbos_engine::git::tree_sidecar(&layout.dir, cp.line));
+    out
 }
+
+/// How long a `files: true` restore waits for a turn's tree to finish
+/// saving before it refuses.
+const TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub fn run(args: Args) -> Result<i32> {
     let place = Place::new(std::fs::canonicalize(&args.place).unwrap_or(args.place.clone()));

@@ -15,6 +15,7 @@ pub mod git_guard;
 mod hashline;
 pub mod memory;
 mod web;
+pub mod wipe;
 
 pub use bash::{is_readonly_command, kill_job, reap_by_pid};
 pub use fs::resolve;

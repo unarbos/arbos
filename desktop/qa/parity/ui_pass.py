@@ -742,6 +742,13 @@ class Pass:
             self.check("jump-to-end", sc, "scroll up then click", "no error", lambda: (self.app.scroll("composer-field", dy=800), self.app.click(el)), None)
         ids = self.turn_ids()
         if ids["rewind-turn"]:
+            # A worker's late report can wake the root into a new turn right
+            # here; the app then rightly refuses "stop the turn before
+            # rewinding" (cycle 32t: `turn_ended=None` at the click). Let
+            # that turn end first, so the row measures Rewind, not the race.
+            self.wait_idle(90); time.sleep(1.5)
+            ids = self.turn_ids()
+        if ids["rewind-turn"]:
             n_items = len(active(self.state())["items"])
             self.check("rewind-turn", sc, "click Rewind here (idle)", "transcript cut, prompt back in the composer",
                        lambda: self.app.click(ids["rewind-turn"]),

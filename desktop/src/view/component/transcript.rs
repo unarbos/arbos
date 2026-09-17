@@ -17,7 +17,8 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, ClipboardItem, Context, Empty, Hsla, Pixels, ScrollHandle, SharedString,
-        StyledText, TextRun, Window, canvas, div, font, img, point, prelude::*, px, rgb, svg,
+        StyledText, TextRun, Window, canvas, div, font, img, linear_color_stop, linear_gradient,
+        point, prelude::*, px, rgb, svg,
     },
     motion::Painter,
     theme::{HighlightKind, TextStyle, Theme, Typeset, ink},
@@ -56,6 +57,8 @@ const PROMPT_RADIUS: f32 = 10.;
 /// of a 689 pt column — 70 % — with 12 pt side padding and a 10 pt radius.
 const PROMPT_MAX_WIDTH: f32 = (root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER) * 0.70;
 const PROMPT_PAD_X: f32 = 12.;
+/// How many of a worker's brief's lines show before the fade (F-132).
+const BRIEF_LINES: f32 = 3.;
 /// Web diff/terminal: `text-[11.5px] leading-[1.5]`.
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
@@ -1025,13 +1028,124 @@ fn user_prompt(
     let prompt = message.to_prompt();
     let (slash, body) = split_slash(&message.text);
     let group = SharedString::from(format!("prompt-{id}-{ix}"));
+    // A worker's brief is the column's width and folded to its first
+    // lines, the rest behind a fade; a click shows it whole. Cursor's
+    // worker tab draws its brief so (F-132,
+    // `cycle-22/cursor-worker-chat-collapsed.png`); a brief is the length
+    // of a page, and whole it pushed the work off the screen. The project
+    // chat's own prompts stay bubbles.
+    let brief = chat.parent.is_some() && ix == 0;
+    let brief_open = chat.transcript.output.contains(&ix);
+    // The card's colour as painted, for the fade to end in.
+    let card_bg = theme
+        .bg
+        .blend(root::content_bg(theme))
+        .blend(theme.ink(0.06));
+    let content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .when(message.has_attachments(), |el| {
+            el.child(user_attachments(message, theme))
+        })
+        .when(!message.described.is_empty(), |el| {
+            el.child(described_note(message, theme))
+        })
+        .when_some(slash, |el, cmd| {
+            el.child(
+                div()
+                    .text_style(TextStyle::Body)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(cmd)),
+            )
+        })
+        .when(!body.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(6.))
+                    // Spoken on a call: a small microphone leads the line.
+                    .when(message.channel == "voice", |row| {
+                        row.child(
+                            div()
+                                .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
+                                .flex_none()
+                                .mt(px(3.))
+                                .tooltip(|window, cx| Tooltip::text("Spoken on a call", window, cx))
+                                .child(
+                                    icons::icon(icons::media::MICROPHONE)
+                                        .size(px(12.))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_style(TextStyle::Body)
+                            .text_color(theme.text)
+                            // Cursor shows the prompt as typed —
+                            // backticks and stars stay characters,
+                            // nothing is set as code or bold.
+                            .child(prose(chat, ix, &plain_markdown(body), window, cx)),
+                    ),
+            )
+        });
+    // Folded: the first lines, the last of them under a fade into the
+    // card, so the cut reads as "more below" and not as the brief's end.
+    let content = if brief && !brief_open {
+        // Prose leads its lines wider than the role's own box; the fade
+        // covers the last line only, as Cursor's does.
+        let line = TextStyle::Body.painted_line_height() * 1.3;
+        let clip = BRIEF_LINES * line;
+        div()
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .max_h(px(clip))
+            .overflow_hidden()
+            .child(content)
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(line))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(card_bg.opacity(0.), 0.),
+                        linear_color_stop(card_bg, 1.),
+                    )),
+            )
+            .into_any_element()
+    } else {
+        content.into_any_element()
+    };
     // Cursor's user bubble: a card at the column's right edge, flush with
     // the composer's, no wider than most of the column. The edit pencil
     // sits outside the card, to its left, and shows on hover — inside, it
     // widened the card and moved the text's right edge (Jacob's still).
     let card = div()
         .id(group.clone())
-        .max_w(px(PROMPT_MAX_WIDTH))
+        .when(!brief, |el| el.max_w(px(PROMPT_MAX_WIDTH)))
+        .when(brief, |el| {
+            el.w_full()
+                .border_1()
+                .border_color(theme.hairline(0.6))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.with_session(id, cx, |chat| {
+                        if !chat.transcript.output.insert(ix) {
+                            chat.transcript.output.remove(&ix);
+                        }
+                    });
+                }))
+        })
         .px(px(PROMPT_PAD_X))
         .py(px(PROMPT_PAD_Y))
         .rounded(px(PROMPT_RADIUS))
@@ -1042,64 +1156,7 @@ fn user_prompt(
         .flex_row()
         .items_end()
         .gap(px(ROW_GAP))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .when(message.has_attachments(), |el| {
-                    el.child(user_attachments(message, theme))
-                })
-                .when(!message.described.is_empty(), |el| {
-                    el.child(described_note(message, theme))
-                })
-                .when_some(slash, |el, cmd| {
-                    el.child(
-                        div()
-                            .text_style(TextStyle::Body)
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(cmd)),
-                    )
-                })
-                .when(!body.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .gap(px(6.))
-                            // Spoken on a call: a small microphone leads the line.
-                            .when(message.channel == "voice", |row| {
-                                row.child(
-                                    div()
-                                        .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
-                                        .flex_none()
-                                        .mt(px(3.))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::text("Spoken on a call", window, cx)
-                                        })
-                                        .child(
-                                            icons::icon(icons::media::MICROPHONE)
-                                                .size(px(12.))
-                                                .text_color(theme.text_muted),
-                                        ),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_style(TextStyle::Body)
-                                    .text_color(theme.text)
-                                    // Cursor shows the prompt as typed —
-                                    // backticks and stars stay characters,
-                                    // nothing is set as code or bold.
-                                    .child(prose(chat, ix, &plain_markdown(body), window, cx)),
-                            ),
-                    )
-                }),
-        );
+        .child(content);
     let pencil = div()
         .id(SharedString::from(format!("replay-prompt-{id}-{ix}")))
         .flex_none()
@@ -1130,6 +1187,16 @@ fn user_prompt(
     // A row with the card at its end: the card takes its content's width
     // up to PROMPT_MAX_WIDTH and its right edge is the composer's — the
     // composer's plate bleeds past the column gutter by its own pad.
+    // A brief spans the column and takes no pencil: a worker's words come
+    // from its parent, not from this composer.
+    if brief {
+        return div()
+            .group(group)
+            .w_full()
+            .max_w(px(root::CHAT_MAX_WIDTH))
+            .child(card)
+            .into_any_element();
+    }
     div()
         .group(group)
         .w_full()
