@@ -88,6 +88,12 @@ pub enum Link {
 /// to be live: a job reads `link lost`, not `running`. What ended is still
 /// reported, because an exit code on disk is a fact that outlives the socket.
 pub fn state_word(surface: &Surface, link: Link) -> Option<&'static str> {
+    // The kernel has been asked and does not hold it. That answer outranks
+    // everything below, and outlasts the link going down and coming back:
+    // a row nothing is behind is not a row that might be running.
+    if surface.gone {
+        return Some("gone");
+    }
     match &surface.bind {
         Bind::Process { done, log, .. } => match (done, link) {
             (None, Link::Lost) => Some("link lost"),
@@ -161,7 +167,15 @@ pub fn render(
         Bind::Browser { url, shot, .. } => browser_body(&theme, url, shot.clone()),
         Bind::Process {
             log, live, done, ..
-        } => process_body(&theme, log, live, *done, link),
+        } => process_body(
+            &theme,
+            log,
+            live,
+            *done,
+            link,
+            surface.status.as_deref(),
+            surface.gone,
+        ),
         Bind::Url(url) => open_card(&theme, Some(url), url),
         Bind::Empty => quiet(&theme, "Nothing here."),
         Bind::Path(path) => path_body(surface, place, path, window, cx),
@@ -239,6 +253,8 @@ fn process_body(
     live: &str,
     done: Option<Option<i32>>,
     link: Link,
+    kernel_words: Option<&str>,
+    gone: bool,
 ) -> AnyElement {
     let streamed = !live.is_empty() || done.is_some();
     let tail = if streamed {
@@ -259,14 +275,22 @@ fn process_body(
             .map(|code| code.trim().to_owned())
             .filter(|code| !code.is_empty())
     };
-    // A job that has not ended is only "running" while we can still hear
-    // about it; with the link down the tail on screen is the last we know.
-    let status = match (exit, link) {
-        (Some(code), _) if code == "0" => "exited 0".to_owned(),
-        (Some(code), _) if code == "killed" => "killed".to_owned(),
-        (Some(code), _) => format!("exited {code}"),
-        (None, Link::Live) => "running".to_owned(),
-        (None, Link::Lost) => "link lost".to_owned(),
+    // The kernel's own words, when it has told us how this ended — it is the
+    // side that knows, and after a kernel's death its replacement is the only
+    // thing that can say what became of the job. Only for an end: a live
+    // job's "running for 41s (pid 4812)" would go stale between asks, and a
+    // stale clock is its own small lie.
+    let ended = gone || exit.is_some() || done.is_some_and(|code| code.is_some());
+    let status = match (kernel_words, ended) {
+        (Some(words), true) if !words.is_empty() => words.to_owned(),
+        _ => match (exit, link) {
+            (Some(code), _) if code == "0" => "exited 0".to_owned(),
+            (Some(code), _) if code == "killed" => "killed".to_owned(),
+            (Some(code), _) => format!("exited {code}"),
+            (None, _) if gone => "gone".to_owned(),
+            (None, Link::Live) => "running".to_owned(),
+            (None, Link::Lost) => "link lost".to_owned(),
+        },
     };
     let text = if tail.is_empty() {
         SharedString::from("(no output yet)")

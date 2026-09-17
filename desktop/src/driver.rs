@@ -1062,6 +1062,10 @@ fn panel_json(this: &Arbos, workspace: &Workspace, window: &Window, cx: &App) ->
                     "title": surface.map(board::title),
                     "board_kind": surface.map(|s| s.board_kind.clone()),
                     "state": surface.and_then(|s| board::state_word(s, workspace.panel_link())),
+                    // What the kernel said about this row when it was last
+                    // asked, and whether it said it holds nothing behind it.
+                    "status": surface.and_then(|s| s.status.clone()),
+                    "gone": surface.map(|s| s.gone),
                 })
             }
         })

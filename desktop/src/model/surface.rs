@@ -70,6 +70,15 @@ pub struct Surface {
     pub key: i32,
     /// When it was opened — the sidebar orders on this.
     pub touched: u128,
+    /// The kernel says it does not hold this row: the shell died with the
+    /// kernel that ran it, or the page went with the process. Set only by an
+    /// answer to `surfaces`, never guessed — and once set the row says so
+    /// rather than going on claiming to be live.
+    pub gone: bool,
+    /// The kernel's own words for this row's state, from the same answer:
+    /// "exited with code 143 after 41s", "shell gone". Its wording, not
+    /// ours, because it is the side that knows.
+    pub status: Option<String>,
 }
 
 /// One child of an agent, as the sidebar walks it.
@@ -106,6 +115,8 @@ impl Surface {
             board_kind: board_kind.to_owned(),
             key,
             touched: project::stamp(),
+            gone: false,
+            status: None,
         }
     }
 

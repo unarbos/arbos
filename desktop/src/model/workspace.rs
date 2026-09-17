@@ -9,7 +9,8 @@
 //! why [`Workspace::save`] can take no arguments.
 
 use crate::{
-    agent, boardhub,
+    agent::{self, acp::KernelSurface},
+    boardhub,
     data::{ColType, Column, Data, Edit, Page, Table},
     kernel, memory,
     model::{
@@ -2599,6 +2600,93 @@ impl Workspace {
         let project = self.active_project()?;
         let id = project.focus?.surface?;
         project.surface(id)
+    }
+
+    // ── reconciling rows against the kernel ──────────────────────────
+
+    /// Ask the kernel of `chat`'s place what it holds. Sent when a connection
+    /// comes back, because the kernel that answers may not be the one that
+    /// opened the rows this window is drawing: a kernel that dies is replaced,
+    /// and the replacement inherits its jobs from disk but knows nothing of
+    /// its shells.
+    pub fn ask_surfaces(&self, chat: u64) {
+        if let Some(Connection::Live(session)) = self.session(chat).map(|c| &c.connection) {
+            session.surfaces(None);
+        }
+    }
+
+    /// What the kernel says it holds, against what this window is drawing.
+    ///
+    /// Three outcomes per row, and none of them is a guess:
+    ///
+    /// - **listed and running** — nothing to say; it is what we thought.
+    /// - **listed and not running** — take the kernel's own words for why, and
+    ///   for a job take its exit too, so the row is retitled truthfully and
+    ///   its journal stays readable.
+    /// - **not listed** — the kernel does not hold it. The row stays (its
+    ///   output is still worth reading) and says `gone`, which is the fact
+    ///   the absence carries.
+    ///
+    /// This is what ends the flip watched live: a job row that read `link
+    /// lost` while its kernel was dead, then `running` again the moment a
+    /// replacement answered, with nothing behind it either time.
+    pub fn reconcile_surfaces(
+        &mut self,
+        chat: u64,
+        listed: &[KernelSurface],
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.project_of(chat) else {
+            return;
+        };
+        let mut changed = false;
+        for surface in &mut self.projects[ix].surfaces {
+            let Some(id) = surface.kernel_id().map(str::to_owned) else {
+                // A file or a URL the window opened itself: no kernel row to
+                // match, so nothing the kernel says bears on it.
+                continue;
+            };
+            let panel = match surface.kind {
+                SurfaceKind::Process => "process",
+                SurfaceKind::Terminal => "terminal",
+                SurfaceKind::Browser => "browser",
+                SurfaceKind::Panel => continue,
+            };
+            let found = listed
+                .iter()
+                .find(|row| row.id == id && row.panel == panel);
+            match found {
+                Some(row) => {
+                    if surface.gone {
+                        surface.gone = false;
+                        changed = true;
+                    }
+                    if surface.status.as_deref() != Some(row.status.as_str()) {
+                        surface.status = Some(row.status.clone());
+                        changed = true;
+                    }
+                    // A job the kernel no longer runs: its end is a fact, and
+                    // an unended row would go on reading `running`.
+                    if let Bind::Process { done, .. } = &mut surface.bind
+                        && !row.running
+                        && done.is_none()
+                    {
+                        *done = Some(row.exit);
+                        changed = true;
+                    }
+                }
+                None if !surface.gone => {
+                    surface.gone = true;
+                    changed = true;
+                }
+                None => {}
+            }
+        }
+        if changed {
+            self.projects[ix].sync_panel();
+            self.push_snapshot(ix);
+            cx.notify();
+        }
     }
 
     // ── the side panel ───────────────────────────────────────────────

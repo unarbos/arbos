@@ -10,7 +10,7 @@
 //! with it, so a relaunch opens the same chat again.
 
 use crate::{
-    agent::acp::{self, Event, Launch, Reply, Session},
+    agent::acp::{self, Event, KernelSurface, Launch, Reply, Session},
     model::{
         attachment::{DescribedImage, MessageImage, Prompt, UserMessage},
         panel::OpenedBy,
@@ -3652,6 +3652,11 @@ impl ChatSession {
             // chat: a report is not part of the conversation.
             Event::Feedback(bundle) => self.feedback = Some(bundle),
             Event::FeedbackUnavailable(why) => self.feedback_error = Some(why),
+            // The kernel's list of what it holds is about the project's rows,
+            // not this chat's transcript: `pump` hands it to the workspace,
+            // which owns the surfaces. Named rather than swept into a wildcard
+            // so the next frame added has to be thought about here too.
+            Event::Surfaces(_) => {}
         }
     }
 
@@ -4476,6 +4481,11 @@ fn pump(
         if !matches!(attached, Ok(true)) {
             return;
         }
+        // Attached: ask this kernel what it holds. Every attach, not only a
+        // reconnect — the kernel answering now may not be the one that opened
+        // the rows this window is drawing, and after a relaunch it certainly
+        // is not. The answer comes back as `Event::Surfaces` below.
+        let _ = this.update(cx, |workspace, _| workspace.ask_surfaces(id));
 
         while let Some(event) = events.recv().await {
             let mut batch = vec![event];
@@ -4488,6 +4498,8 @@ fn pump(
                 let mut children = Vec::new();
                 let mut ended = false;
                 let mut store_moved = false;
+                // What the kernel says it holds, in answer to the ask above.
+                let mut listed: Option<Vec<KernelSurface>> = None;
                 workspace.with_session(id, cx, |chat| {
                     for event in batch {
                         ended |= matches!(event, Event::TurnDone(_));
@@ -4496,6 +4508,7 @@ fn pump(
                                 shown.push((path, title, kind));
                             }
                             Event::StoreChanged(_) => store_moved = true,
+                            Event::Surfaces(list) => listed = Some(list),
                             // Kernel rows come and go in order; keep it.
                             event @ (Event::Open { .. }
                             | Event::Hide { .. }
@@ -4510,6 +4523,9 @@ fn pump(
                         }
                     }
                 });
+                if let Some(list) = listed {
+                    workspace.reconcile_surfaces(id, &list, cx);
+                }
                 for (path, title, kind) in shown {
                     workspace.open_shown(id, path, title, kind, None, None, OpenedBy::Agent, cx);
                 }
