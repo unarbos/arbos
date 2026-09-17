@@ -144,7 +144,7 @@ impl Tool for Bash {
             // "Waiting on three sorting workers" for the length of the
             // sleep and the person asked where their response was
             // (Jacob, 2026-09-17, twice). Refused with the right move.
-            if let Some(secs) = bare_sleep_secs(cmd)
+            if let Some(secs) = super::wipe::sleep_wait_secs(cmd)
                 && secs >= 5
                 && let Some(n) = children_count(&cx.place, cx.agent.id.as_str())
                 && n > 0
@@ -845,30 +845,6 @@ mod approval_tests {
     }
 }
 
-/// `sleep N` (seconds; `1m` etc. read as their seconds) as the whole
-/// command, or the first of a `sleep N; …` / `sleep N && …` chain.
-fn bare_sleep_secs(cmd: &str) -> Option<u64> {
-    let first = cmd.split(['\n', ';', '&', '|']).next().unwrap_or("").trim();
-    let mut words = first.split_whitespace();
-    if words.next()? != "sleep" {
-        return None;
-    }
-    let n = words.next()?;
-    if words.next().is_some() {
-        return None;
-    }
-    let (num, unit) = n.split_at(n.trim_end_matches(|c: char| c.is_ascii_alphabetic()).len());
-    let v: f64 = num.parse().ok()?;
-    let mult = match unit {
-        "" | "s" => 1.0,
-        "m" => 60.0,
-        "h" => 3600.0,
-        "d" => 86400.0,
-        _ => return None,
-    };
-    Some((v * mult) as u64)
-}
-
 /// How many agents name `agent` as their parent and are not archived —
 /// the workers whose reports it is waiting for. `None` when the place
 /// cannot be read.
@@ -880,23 +856,6 @@ fn children_count(place: &arbos_core::Place, agent: &str) -> Option<usize> {
             .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == agent))
             .count(),
     )
-}
-
-#[cfg(test)]
-mod sleep_tests {
-    use super::bare_sleep_secs;
-
-    #[test]
-    fn a_bare_sleep_is_read_with_its_unit_and_a_sleep_inside_a_script_is_not() {
-        assert_eq!(bare_sleep_secs("sleep 75"), Some(75));
-        assert_eq!(bare_sleep_secs("sleep 75; echo waited"), Some(75));
-        assert_eq!(bare_sleep_secs("sleep 2m && ls"), Some(120));
-        assert_eq!(bare_sleep_secs("  sleep 0.5"), Some(0));
-        assert_eq!(bare_sleep_secs("for i in 1 2 3; do sleep 1; done"), None);
-        assert_eq!(bare_sleep_secs("echo x; sleep 30"), None);
-        assert_eq!(bare_sleep_secs("sleep"), None);
-        assert_eq!(bare_sleep_secs("sleep 5 extra"), None);
-    }
 }
 
 /// Commands whose first word is here never write the place.
