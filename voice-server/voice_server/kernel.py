@@ -23,6 +23,9 @@ log = logging.getLogger("voice.kernel")
 Listener = Callable[[dict], Awaitable[None] | None]
 
 
+DISCONNECTED = "__disconnected__"
+
+
 @dataclass
 class AgentState:
     name: str
@@ -396,17 +399,21 @@ class KernelClient:
 
         def listener(frame: dict) -> None:
             nonlocal started
+            kind = frame.get("type")
+            if kind == "link" and frame.get("state") == "lost":
+                queue.put_nowait(DISCONNECTED)
+                return
             if frame.get("agent") != agent:
                 return
-            kind = frame.get("type")
             if kind == "turn":
                 if frame.get("state") == "running":
                     started = True
                 elif started:
                     queue.put_nowait(None)
-            elif kind == "assistant_delta" and frame.get("text"):
-                queue.put_nowait(frame["text"])
-            elif kind == "event":
+            elif kind == "assistant_delta" and frame.get("text") and started:
+                queue.put_nowait(frame["text"])  # only once *our* turn is running: an earlier turn
+                # still finishing (or being stopped) must not leak into this answer
+            elif kind == "event" and started:
                 event = frame.get("event") or {}
                 if event.get("kind") == "assistant" and event.get("text"):
                     queue.put_nowait(event["text"])
@@ -432,6 +439,9 @@ class KernelClient:
                     if idle:
                         return
                     yield "\n(the agent is still working; I will report when it finishes)"
+                    return
+                if item is DISCONNECTED:
+                    yield "\n(the link to the Arbos kernel dropped; I will reconnect, ask again in a moment)"
                     return
                 if item is None:
                     idle = True

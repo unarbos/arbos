@@ -322,7 +322,17 @@ pub fn create_chat(place: &Place) -> Result<Agent> {
 pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
     let source = Agent::load(&place.agent_dir(source_id))
         .with_context(|| format!("fork: no chat {source_id}"))?;
-    let mut agent = create_chat(place)?;
+    let agent = create_chat(place)?;
+    let id = agent.id.clone();
+    // A fork that could not be finished is not left as a chat with half
+    // a history and no mark: the folder goes with the error.
+    fork_into(place, &source, agent).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(place.agent_dir(id.as_str()));
+    })
+}
+
+fn fork_into(place: &Place, source: &Agent, mut agent: Agent) -> Result<Agent> {
+    let source_id = source.id.as_str();
     agent.model = source.model.clone();
     agent.allowlist = source.allowlist.clone();
     // A pinned mode is part of what the chat is for: the fork keeps it.
@@ -336,10 +346,15 @@ pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
     let from = Layout::new(place, source_id).transcript();
     let to = Layout::new(place, agent.id.as_str()).transcript();
     if from.exists() {
-        let events = load_transcript(&from)?;
-        let copied: Vec<Event> = events
-            .into_iter()
-            .map(|mut ev| {
+        // Line for line: a blank or damaged line in the source stays a
+        // line in the copy, so the checkpoints copied below (indexed by
+        // line) still name the turns they were written for. Parsing and
+        // re-appending dropped such lines and shifted every later
+        // checkpoint onto the wrong turn.
+        let raw = std::fs::read_to_string(&from)?;
+        let mut out = String::with_capacity(raw.len());
+        for line in raw.lines() {
+            let rewritten = serde_json::from_str::<Event>(line).ok().and_then(|mut ev| {
                 if let EventKind::Tool(rec) = &mut ev.kind
                     && rec.child.take().is_some()
                 {
@@ -349,12 +364,15 @@ pub fn fork_chat(place: &Place, source_id: &str) -> Result<Agent> {
                         Some(b) => format!("{note}\n{b}"),
                         None => note.to_string(),
                     });
+                    serde_json::to_string(&ev).ok()
+                } else {
+                    None
                 }
-                ev
-            })
-            .collect();
-        std::fs::write(&to, "")?;
-        append_events(&to, &copied)?;
+            });
+            out.push_str(rewritten.as_deref().unwrap_or(line));
+            out.push('\n');
+        }
+        std::fs::write(&to, out)?;
     }
     // The checkpoints go with the transcript they index: line for line the
     // copy is the same file, so the fork's earlier turns stay rewindable.
@@ -607,6 +625,27 @@ pub fn roll_transcript(place: &Place, agent: &str, max_lines: u64) -> Result<Opt
         ),
     };
     std::fs::rename(&path, &archive)?;
+    // The checkpoints index the file by line, so they roll with it.
+    // Left behind, they indexed the *old* file: after a roll `rewind
+    // turn 1` resolved to the project's very first checkpoint (its line
+    // was small enough) and a files rewind would have put the working
+    // tree back months — the "cut too much" shape, a third time. Into the
+    // archive beside the lines they describe; a rewind into rolled
+    // history is refused rather than guessed.
+    for (from, to) in [
+        (
+            layout.dir.join("checkpoints.jsonl"),
+            dir.join(format!("{n:04}.checkpoints.jsonl")),
+        ),
+        (
+            layout.dir.join("checkpoints.d"),
+            dir.join(format!("{n:04}.checkpoints.d")),
+        ),
+    ] {
+        if from.exists() {
+            std::fs::rename(&from, &to)?;
+        }
+    }
     let opener = Event::new(EventKind::Compaction {
         lo: 1,
         hi: lines,
@@ -857,6 +896,84 @@ mod roll_tests {
     use super::*;
     use crate::event::EventKind;
 
+    /// A fork copies the transcript line for line, a damaged line
+    /// included, so the checkpoints copied with it (indexed by line)
+    /// still name the turns they were written for; and a fork that
+    /// cannot be finished leaves no half chat behind.
+    #[test]
+    fn a_fork_keeps_line_numbers_across_a_damaged_line_and_leaves_no_half_chat_on_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path());
+        std::fs::create_dir_all(place.arbos()).unwrap();
+        let root = create_chat(&place).unwrap();
+        let layout = Layout::new(&place, root.id.as_str());
+        let path = layout.transcript();
+        let user = |t: &str| {
+            Event::new(EventKind::User {
+                text: t.into(),
+                attachments: vec![],
+                channel: String::new(),
+                device: String::new(),
+            })
+        };
+        append_event(&path, &user("one")).unwrap();
+        // A damaged line, as a crash mid-append leaves one.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{\"ts\":1,\"kind\":\"assis\n")
+            .unwrap();
+        append_event(&path, &user("two")).unwrap();
+        // A checkpoint at the second user's line, line 3 (0-based 2).
+        std::fs::write(
+            layout.dir.join("checkpoints.jsonl"),
+            "{\"line\":2,\"ts\":0,\"head\":\"h2\"}\n",
+        )
+        .unwrap();
+        let fork = fork_chat(&place, root.id.as_str()).unwrap();
+        let copy = Layout::new(&place, fork.id.as_str()).transcript();
+        let raw = std::fs::read_to_string(&copy).unwrap();
+        assert_eq!(
+            raw.lines().count(),
+            3,
+            "three lines in, three lines out:\n{raw}"
+        );
+        assert!(
+            raw.lines()
+                .nth(1)
+                .unwrap()
+                .starts_with("{\"ts\":1,\"kind\":\"assis")
+        );
+        let events = load_transcript(&copy).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].seq, 3, "the second user line is still line 3");
+        assert!(
+            Layout::new(&place, fork.id.as_str())
+                .dir
+                .join("checkpoints.jsonl")
+                .exists()
+        );
+
+        // A source whose transcript cannot be read (a directory in its
+        // place) is an error after the fork's folder was made — and the
+        // folder does not stay behind as a chat with no history.
+        let before: Vec<_> = list_agents(&place)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(fork_chat(&place, root.id.as_str()).is_err());
+        let after: Vec<_> = list_agents(&place)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(after, before, "no half fork left behind");
+    }
+
     #[test]
     fn a_long_transcript_rolls_into_the_archive_and_keeps_the_last_summary() {
         let dir = tempfile::tempdir().unwrap();
@@ -894,9 +1011,33 @@ mod roll_tests {
         append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
         // Under the cap: nothing happens.
         assert!(roll_transcript(&place, "root", 100).unwrap().is_none());
+        // Checkpoints index the file by line: they roll with it.
+        let agent_dir = place.agent_dir("root");
+        std::fs::write(
+            agent_dir.join("checkpoints.jsonl"),
+            "{\"line\":1,\"ts\":0,\"head\":\"a\"}\n{\"line\":20,\"ts\":0,\"head\":\"b\"}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(agent_dir.join("checkpoints.d")).unwrap();
+        std::fs::write(agent_dir.join("checkpoints.d/20.json"), "{}").unwrap();
         let rolled = roll_transcript(&place, "root", 20).unwrap().unwrap();
         assert_eq!(rolled.lines, 32);
         assert!(rolled.archive.ends_with("transcript-archive/0001.jsonl"));
+        assert!(
+            !agent_dir.join("checkpoints.jsonl").exists(),
+            "the old file's checkpoints do not describe the new file"
+        );
+        assert!(!agent_dir.join("checkpoints.d").exists());
+        assert!(
+            agent_dir
+                .join("transcript-archive/0001.checkpoints.jsonl")
+                .exists()
+        );
+        assert!(
+            agent_dir
+                .join("transcript-archive/0001.checkpoints.d/20.json")
+                .exists()
+        );
         let archived = load_transcript(&rolled.archive).unwrap();
         assert_eq!(archived.len(), 32);
         let fresh = load_transcript(&path).unwrap();

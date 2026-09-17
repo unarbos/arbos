@@ -22,6 +22,13 @@ final class Dictation: ObservableObject {
     private var startedAt: Date?
     #if DEBUG
     private var injector: DebugInjector?
+    /// Transcript segments seen in this take, and how many *deltas* made
+    /// the text shorter. A take whose deltas only grow has appended; a delta
+    /// that shortens it has replaced, which is the build-956 fault. Finals
+    /// are excluded: a final is the server settling the segment and is
+    /// allowed to tidy it shorter.
+    private var segments = 0
+    private var deltaShrinks = 0
     #endif
 
     func start(settings: AppSettings) {
@@ -30,6 +37,10 @@ final class Dictation: ObservableObject {
         committed = ""
         partial = ""
         text = ""
+        #if DEBUG
+        segments = 0
+        deltaShrinks = 0
+        #endif
         guard settings.provider == .selfHosted, !settings.selfHostedURL.isEmpty, !settings.voiceToken.isEmpty else {
             problem = "Set the speech server in Settings to dictate."
             return
@@ -83,6 +94,9 @@ final class Dictation: ObservableObject {
             partial = ""
             text = committed
         }
+        #if DEBUG
+        print("metric dictation_take segments=\(segments) delta_shrinks=\(deltaShrinks) chars=\(text.count)")
+        #endif
     }
 
     /// The field took the words: start clean next time.
@@ -106,6 +120,24 @@ final class Dictation: ObservableObject {
             } else {
                 partial = join(partial, words)
             }
+            #if DEBUG
+            // Counted rather than eyeballed. The build-956 fault was a
+            // delta replacing the take instead of extending it, which looks
+            // like a plausible short sentence on screen and is only obvious
+            // as a length that goes down.
+            //
+            // Only a *delta* shrinking is that fault. A final legitimately
+            // makes the text shorter: it is the server's settled reading of
+            // the segment, and settling tidies. The first run of this metric
+            // reported shrinks=1 on a final and would have had me chasing a
+            // bug that was the server doing its job.
+            let was = text.count
+            defer {
+                segments += 1
+                if text.count < was, !final { deltaShrinks += 1 }
+                print("metric dictation seg=\(segments) final=\(final) was=\(was) now=\(text.count) delta_shrinks=\(deltaShrinks)")
+            }
+            #endif
             text = join(committed, partial)
         case .error(let message):
             fail(message)
@@ -123,10 +155,21 @@ final class Dictation: ObservableObject {
         return a + (a.hasSuffix(" ") ? "" : " ") + b
     }
 
+    /// The take stopped before it was meant to. `stop()` keeps whatever was
+    /// heard in the field, so this says so: the words are the part Jacob
+    /// cares about, and a bare error string does not mention them.
     private func fail(_ message: String) {
-        problem = message
         stop()
+        problem = heard.isEmpty
+            ? "The speech server stopped listening, and nothing was transcribed. Tap the microphone to try again."
+            : "The speech server stopped listening early. What it heard is in the box — read it before you send."
+        #if DEBUG
+        print("metric dictation_failed chars=\(heard.count) reason=\(message)")
+        #endif
     }
+
+    /// What the take has captured, for deciding what a failure should say.
+    private var heard: String { text }
 
     #if DEBUG
     /// `-dictateWav <path>`: a clip in place of the microphone, for the

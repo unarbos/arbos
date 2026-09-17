@@ -601,6 +601,14 @@ impl Provider {
             body["reasoning_effort"] = json!(effort);
         }
         if let Some(replay) = &self.replay {
+            // A scripted reply may "take" a while, and a stop during it
+            // ends the call the way a stop during a real stream does.
+            if let Some(ms) = replay.peek_delay(&self.trace_agent) {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
+                    _ = cancel.cancelled() => return Err(Interrupted.into()),
+                }
+            }
             return Ok(self.replayed(replay, body, &mut on_delta));
         }
         let url = format!("{}/chat/completions", self.base.trim_end_matches('/'));

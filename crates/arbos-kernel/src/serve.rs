@@ -412,6 +412,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let mut exit_code = 0;
     // Consecutive five-second looks that found the store missing.
     let mut store_gone = 0u8;
+    // `binary_gone` said once; re-exec tried at most once a minute.
+    let mut binary_gone_said = false;
+    let mut reexec_backoff_until: i64 = 0;
     if let Some(u) = &until_idle {
         klog::info(
             "until_idle",
@@ -540,7 +543,17 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             Some(id) = done_rx.recv() => {
                 let control = sched.in_flight.lock().unwrap().remove(&id);
                 hooks.turn_ended(&id);
+                // A turn superseded before it did anything is cut from
+                // the record once its folder has closed (below), so the
+                // fuller message that follows is the only user line.
+                let superseded_at = control
+                    .as_ref()
+                    .filter(|c| c.stop_reason() == SUPERSEDED)
+                    .and_then(|_| plan::open_turn_lo(&hooks, &id));
                 plan::finish_turn(&hooks, &id);
+                if let Some(lo) = superseded_at {
+                    supersede_cut(&place, &hooks, &mut tails, &id, lo);
+                }
                 // A standing agent's transcript past the cap rolls into the
                 // archive now, between turns; attached windows reload from
                 // the short file the way they do after a rewind.
@@ -629,6 +642,35 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     }
                 } else {
                     store_gone = 0;
+                }
+                // The binary replaced under this kernel (an update, an
+                // install into the shared PATH): it serves stale code until
+                // something restarts it, and a kernel started detached with
+                // init as its parent (subnet120) has nothing that will.
+                // Under `idle::update_verdict`'s gate — no turn, no
+                // question waiting, no run in flight, no remote child
+                // mid-turn — it execs onto the file at its own path: same
+                // pid, same place lock (flock, released at exec and taken
+                // again by the new image), clients reconnect. An exec that
+                // fails returns, and the old image serves on and says so.
+                if arbos_core::binary_gone() && !binary_gone_said {
+                    binary_gone_said = true;
+                    klog::warn(
+                        "binary_gone",
+                        None,
+                        "this kernel's file was replaced or moved under it; it runs an old image and will restart onto the new one when idle",
+                    );
+                }
+                if binary_gone_said
+                    && arbos_core::binary_gone()
+                    && reexec_backoff_until <= arbos_core::now_ms()
+                    && matches!(
+                        idle::update_verdict_quiet(&hooks, REEXEC_HORIZON_MS),
+                        idle::Verdict::Idle
+                    )
+                {
+                    reexec_backoff_until = arbos_core::now_ms() + REEXEC_RETRY_MS;
+                    reexec_onto_new_binary(&place, &hooks);
                 }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
@@ -761,20 +803,68 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = sigint.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
+                arbos_engine::set_kill_reason(STOP_REASON);
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
+                end_jobs_for_stop(&place);
                 break;
             }
             _ = sigterm.recv() => {
                 println!("arbos-kernel stopping");
                 klog::info("kernel_stop", None, "signal");
+                arbos_engine::set_kill_reason(STOP_REASON);
                 stop_turns(&sched, &hooks, &mut done_rx).await;
                 crate::remote::stop_all(&hooks).await;
+                end_jobs_for_stop(&place);
                 break;
             }
         }
     }
     Ok(exit_code)
+}
+
+/// A stopping kernel ends its jobs itself, now, with the reason in each
+/// folder — not by leaving them for the leash to notice its pid gone.
+/// The leash is the backstop for a kernel that dies; a kernel that is
+/// asked to stop knows what it started. (SWE-bench cycle 14: 4–10 test
+/// processes alive after the kernel had exited, reparented to init.)
+/// What every job's `killed` marker says during a graceful stop, whoever
+/// writes it — the stop's own sweep or a turn's cancel path.
+pub const STOP_REASON: &str = "the kernel was stopped and ended its jobs with it";
+
+fn end_jobs_for_stop(place: &Place) {
+    let agents = arbos_core::list_agents(place).unwrap_or_default();
+    let mut ended = 0usize;
+    for a in agents {
+        let root = arbos_engine::JobsRoot::for_agent(place, &a.id);
+        for job in root.list() {
+            if !job.running() {
+                continue;
+            }
+            // #407: `kill` says whether the signal was delivered; a refusal
+            // is `Err` and has already withdrawn the `killed` marker, so the
+            // folder keeps reading `running` and the leash stays with it.
+            match root.kill(&job) {
+                // The marker's words come from the kill reason set at the
+                // start of the stop (`STOP_REASON`), the same for every
+                // path that kills during it.
+                Ok(true) => ended += 1,
+                Ok(false) => {}
+                Err(e) => klog::warn(
+                    "kernel_stop_jobs",
+                    None,
+                    format!("could not end job {} (pid {}): {e:#}", job.id, job.meta.pid),
+                ),
+            }
+        }
+    }
+    if ended > 0 {
+        klog::info(
+            "kernel_stop_jobs",
+            None,
+            format!("{ended} running job(s) ended"),
+        );
+    }
 }
 
 /// A graceful stop ends every running turn the way the stop button does:
@@ -835,7 +925,7 @@ fn handle_frame(
     let names = match &frame {
         Frame::User { agent, .. }
         | Frame::Pause { agent, .. }
-        | Frame::Stop { agent }
+        | Frame::Stop { agent, .. }
         | Frame::Compact { agent }
         | Frame::Answer { agent, .. }
         | Frame::Approve { agent, .. }
@@ -1099,12 +1189,28 @@ fn handle_frame(
                 refuse(hooks, None, format!("{e:#}"));
             }
         }
-        Frame::Stop { agent } => {
-            // Stop means all of it: the turn, the standing work, the
-            // children. A running turn ends; scheduled nodes block until
-            // someone presses run.
-            for id in hooks.stop_work(&agent) {
-                sched.stop(&id);
+        Frame::Stop { agent, reason } => {
+            if reason.as_deref() == Some(SUPERSEDED) {
+                // Not a person stopping anything: the message this turn
+                // answers is about to be replaced by a fuller one (a
+                // caller paused mid-sentence; the speech gateway merges
+                // and resends). Only the turn ends — nothing held, no
+                // standing work blocked, no children stopped — and when
+                // it ends the done handler cuts its lines if it had done
+                // nothing yet, so the record shows one utterance once.
+                klog::info(
+                    "turn_superseded",
+                    Some(&agent),
+                    "stop with reason=superseded",
+                );
+                sched.stop_for(&agent, SUPERSEDED);
+            } else {
+                // Stop means all of it: the turn, the standing work, the
+                // children. A running turn ends; scheduled nodes block until
+                // someone presses run.
+                for id in hooks.stop_work(&agent) {
+                    sched.stop(&id);
+                }
             }
         }
         Frame::Seen { through } => {
@@ -2036,6 +2142,7 @@ pub async fn serve_client(
                 kernel: env!("CARGO_PKG_VERSION").to_string(),
                 git_sha: klog::git_sha().to_string(),
                 built_at: klog::built_at().to_string(),
+                binary_gone: arbos_core::binary_gone(),
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });
@@ -2313,6 +2420,66 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
     }
 }
 
+/// How far ahead the re-exec gate looks for due work (a subscription
+/// about to fire is a reason to wait), and how long between attempts.
+const REEXEC_HORIZON_MS: i64 = 60_000;
+const REEXEC_RETRY_MS: i64 = 60_000;
+
+/// Replace this process with the arbos-kernel now at its own path, same
+/// arguments, same environment. Returns only when the exec failed — the
+/// old image then serves on. Set `ARBOS_NO_REEXEC=1` to keep a kernel on
+/// its old image (a test of the notice alone, or a person who wants to
+/// choose the moment).
+fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
+    if std::env::var_os("ARBOS_NO_REEXEC").is_some() {
+        return;
+    }
+    let chosen = match crate::binary::kernel_binary() {
+        Ok(c) => c,
+        Err(e) => {
+            klog::warn(
+                "reexec_failed",
+                None,
+                format!("no binary to restart onto: {e:#}"),
+            );
+            return;
+        }
+    };
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    klog::info(
+        "reexec",
+        None,
+        format!(
+            "restarting onto {} (git {} was serving); clients reconnect",
+            chosen.path.display(),
+            klog::git_sha()
+        ),
+    );
+    let _ = arbos_core::append_event(
+        &Layout::new(place, arbos_core::ROOT_ID).transcript(),
+        &arbos_core::Event::new(arbos_core::EventKind::Notice {
+            text: format!(
+                "The kernel's program file was replaced under it (an update); restarting onto the new build now, nothing in flight. Windows reconnect on their own."
+            ),
+            failed: false,
+        }),
+    );
+    hooks.broadcast(Frame::Error {
+        agent: None,
+        detail: "kernel restarting onto its new build; reconnecting".into(),
+    });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&chosen.path).args(&args).exec();
+        klog::warn(
+            "reexec_failed",
+            None,
+            format!("{}: {err}; the old image serves on", chosen.path.display()),
+        );
+    }
+}
+
 /// A running turn that has shown nothing for [`crate::hooks::stall_secs`] gets
 /// one line on its transcript saying what it is waiting on — the tool
 /// calls in flight (from the `inflight/` records) or, with none, the model
@@ -2511,6 +2678,77 @@ fn configure(
 /// done here (fast: two file writes); the tail is moved to the new end;
 /// files are restored on the blocking pool, and `rewound` goes out to
 /// every client when that is done.
+/// The `reason` on a `stop` that replaces a message rather than ending work.
+pub const SUPERSEDED: &str = "superseded";
+
+/// A superseded turn's lines, cut when the turn had done nothing a
+/// reader would miss: its wake, the half-said user line, thinking, and
+/// the interrupted/turn_complete close. A turn that had already spoken
+/// or run a tool keeps its lines — the `interrupted` line says
+/// `superseded`, and a client may draw that softly or not at all, but
+/// the record of what ran stands. The cut lines go to the rewind
+/// archive like any rewind's, so what was heard is not lost, only out
+/// of the chat.
+fn supersede_cut(
+    place: &Place,
+    hooks: &Arc<KernelHooks>,
+    tails: &mut std::collections::HashMap<String, TranscriptTail>,
+    agent: &str,
+    lo: u64,
+) {
+    let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
+    let span = events.iter().filter(|e| e.seq >= lo);
+    let quiet = span.clone().count() > 0
+        && span.clone().all(|e| {
+            matches!(
+                e.kind,
+                EventKind::Wake { .. }
+                    | EventKind::User { .. }
+                    | EventKind::Thinking { .. }
+                    | EventKind::Interrupted { .. }
+                    | EventKind::TurnComplete { .. }
+                    | EventKind::Notice { failed: false, .. }
+            )
+        });
+    if !quiet {
+        klog::info(
+            "turn_superseded",
+            Some(agent),
+            format!(
+                "kept: the turn from line {lo} had spoken or run a tool before the fuller message came"
+            ),
+        );
+        return;
+    }
+    let (dropped, archive) = match rewind::cut_from_line(place, agent, lo) {
+        Ok(c) => c,
+        Err(e) => {
+            klog::warn("turn_superseded", Some(agent), format!("kept: {e:#}"));
+            return;
+        }
+    };
+    // The tail's next read starts where the file now ends, so nothing of
+    // what remains is replayed; windows drop the cut lines.
+    let mut fresh = TranscriptTail::default();
+    let _ = fresh.read_new(&Layout::new(place, agent).transcript());
+    tails.insert(agent.to_string(), fresh);
+    hooks.broadcast(Frame::Rewound {
+        agent: agent.to_string(),
+        line: lo,
+        dropped,
+        restored: None,
+        pending: false,
+    });
+    klog::info(
+        "turn_superseded",
+        Some(agent),
+        format!(
+            "cut: the turn from line {lo} had done nothing yet; {dropped} line(s) to {}; one utterance, one line",
+            archive.display()
+        ),
+    );
+}
+
 fn rewind_live(
     place: &Place,
     hooks: &Arc<KernelHooks>,

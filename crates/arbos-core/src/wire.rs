@@ -44,6 +44,12 @@ pub enum Frame {
         git_sha: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         built_at: String,
+        /// The file this kernel was started from is gone (replaced or
+        /// moved): it runs an old image, and a restart would run what is on
+        /// disk now. Only ever sent when true; the one-word reason for a
+        /// "restart needed" beside the version. See `arbos_core::binary_gone`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        binary_gone: bool,
         tail: u32,
         focus: String,
     },
@@ -502,8 +508,17 @@ pub enum Frame {
     Focus {
         path: String,
     },
+    /// End the agent's turn and its standing work — the stop button.
+    /// With `reason: "superseded"` it is not a person stopping anything:
+    /// a client is replacing the message this turn answers with a fuller
+    /// one (the speech gateway, when a caller pauses mid-sentence). Only
+    /// the turn ends; nothing is held or blocked; and a turn that had
+    /// done nothing yet is cut from the record so one utterance is one
+    /// line, not two lines and a stop notice.
     Stop {
         agent: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// Summarise the oldest turns now, before the next model call.
     Compact {

@@ -29,6 +29,9 @@ final class ArbosKernelClient {
     private(set) var agents: [KernelAgent] = []
     private(set) var focus: String = "root"
     private(set) var kernelVersion: String = ""
+    /// What the kernel on the other end of this socket says it is running.
+    /// The process we are talking to, never the roster's view of its machine.
+    private(set) var kernelBuild = KernelBuild()
 
     let frames: AsyncStream<KernelFrame>
     private let frameSink: AsyncStream<KernelFrame>.Continuation
@@ -53,7 +56,12 @@ final class ArbosKernelClient {
                 Task { @MainActor in self?.receive(message) }
             },
             onFailure: { [weak self] error in
-                Task { @MainActor in self?.dropped(error.localizedDescription) }
+                // The hub's own words when it refuses, and the transport's
+                // only when the hub said nothing. "arboslife is not
+                // connected" is something Jacob can act on; "Socket is not
+                // connected" is a sentence about our plumbing.
+                let said = socket.closeReason ?? error.localizedDescription
+                Task { @MainActor in self?.dropped(said) }
             }
         )
         let deadline = Date().addingTimeInterval(8)
@@ -150,9 +158,10 @@ final class ArbosKernelClient {
         }
         #endif
         switch frame {
-        case .hello(let focus, let version, _, _):
+        case .hello(let focus, let version, _, _, let build):
             self.focus = focus
             kernelVersion = version
+            kernelBuild = build
             if state == .attaching { state = .attached }
         case .snapshot(let focusPath, let agents):
             focus = focusPath.split(separator: "/").last.map(String.init) ?? focus

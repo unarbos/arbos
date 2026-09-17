@@ -277,16 +277,31 @@ pub fn has_stop_steer(place: &Place, agent: &str) -> bool {
     })
 }
 
-/// The messages a running turn reads now, oldest first, taken out of the
-/// inbox. A file the turn never reaches (it ends first) stays and starts
-/// the next turn, so nothing said mid-turn is lost to timing.
+/// The messages a running turn reads now, oldest first, still in the
+/// inbox. The turn writes them to its transcript and only then calls
+/// [`release`] on each: a person's words are never deleted before the
+/// record that replaces them is on disk. A file the turn never reaches
+/// (it ends first) stays and starts the next turn, so nothing said
+/// mid-turn is lost to timing — and one left behind by a crash between
+/// the write and the release is said twice, which a reader can see,
+/// rather than lost, which nobody can.
+pub fn steers(place: &Place, agent: &str) -> Vec<Filed> {
+    list(place, agent)
+        .into_iter()
+        .filter(|f| is_steer_kind(&f.msg.kind))
+        .collect()
+}
+
+/// The inbox file of a steer the transcript now holds, taken out.
+pub fn release(filed: &Filed) -> Result<()> {
+    std::fs::remove_file(&filed.path).with_context(|| format!("remove {}", filed.path.display()))
+}
+
+/// [`steers`] then [`release`], for callers that keep the words in memory.
 pub fn take_steers(place: &Place, agent: &str) -> Vec<Message> {
     let mut out = Vec::new();
-    for filed in list(place, agent) {
-        if !is_steer_kind(&filed.msg.kind) {
-            continue;
-        }
-        if std::fs::remove_file(&filed.path).is_ok() {
+    for filed in steers(place, agent) {
+        if release(&filed).is_ok() {
             out.push(filed.msg);
         }
     }

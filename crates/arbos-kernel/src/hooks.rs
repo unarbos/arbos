@@ -1165,7 +1165,18 @@ impl KernelHooks {
         for id in &ids {
             let root = arbos_engine::JobsRoot::for_agent(&self.place, &AgentId::new(id));
             for job in root.list() {
-                root.kill(&job);
+                if let Err(e) = root.kill(&job) {
+                    // Stop pressed, and a job the kernel cannot signal: the
+                    // person hears it, on the chat they stopped.
+                    crate::klog::warn("stop_kill_refused", Some(id), format!("{e:#}"));
+                    let _ = arbos_core::append_event(
+                        &self.layout(id).transcript(),
+                        &Event::new(EventKind::Notice {
+                            text: format!("Stop: {e:#}"),
+                            failed: true,
+                        }),
+                    );
+                }
             }
             let mut changed = false;
             // Stop ends the turn and keeps what the user queued: a
@@ -1762,8 +1773,12 @@ impl KernelHooks {
             let mut killed = 0;
             for job in root.list() {
                 if job.running() {
-                    root.kill(&job);
-                    killed += 1;
+                    match root.kill(&job) {
+                        Ok(_) => killed += 1,
+                        Err(e) => {
+                            crate::klog::warn("say_stop_kill_refused", Some(tid), format!("{e:#}"))
+                        }
+                    }
                 }
             }
             let reason = format!("stopped by {from}: {text}");

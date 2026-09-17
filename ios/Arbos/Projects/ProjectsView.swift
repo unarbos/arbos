@@ -292,6 +292,9 @@ struct ProjectRow: View {
 
     private var stateWord: String {
         if working { return step.map { "Working · \($0)" } ?? "Working" }
+        // It answers, so "Off" would be a lie, and "Idle" would hide that
+        // every worker it is asked for will be refused.
+        if entry.needsRestart { return "Restart needed" }
         return entry.live ? "Idle" : "Off"
     }
 }

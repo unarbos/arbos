@@ -164,6 +164,7 @@ pub async fn register(
             version: klog::version().to_string(),
             git_sha: klog::git_sha().to_string(),
             built_at: klog::built_at().to_string(),
+            binary_gone: arbos_core::binary_gone(),
             protocol: HUB_PROTOCOL,
         },
     )
@@ -177,6 +178,35 @@ pub async fn register(
         Ok(HubFrame::Error { detail }) => bail!("hub refused: {detail}"),
         Ok(other) => bail!("hub answered {other:?} instead of registered"),
         Err(e) => bail!("hub answered something that is not a frame: {e}"),
+    }
+}
+
+/// The registrant's build, said again: a `Register` with only the build
+/// fields filled, sent on the open link when `binary_gone()` changes. The
+/// hub reads a second `Register` on a link as a revision of that
+/// registrant's `builds` entry, so the roster says what the socket's
+/// `hello` already says — the state is made *by* a replacement while the
+/// process runs, so a fact from connection time is wrong for exactly the
+/// runs it was added to explain (iPhone loop, cycle 41).
+pub fn build_revision(cfg: &HubConfig, kind: RegistrantKind, project: Option<String>) -> HubFrame {
+    HubFrame::Register {
+        machine: cfg.machine.clone(),
+        kind,
+        user: String::new(),
+        host: String::new(),
+        project,
+        place: None,
+        projects: Vec::new(),
+        identities: Default::default(),
+        shares: Default::default(),
+        kinds: Default::default(),
+        labels: Vec::new(),
+        capabilities: Vec::new(),
+        version: klog::version().to_string(),
+        git_sha: klog::git_sha().to_string(),
+        built_at: klog::built_at().to_string(),
+        binary_gone: arbos_core::binary_gone(),
+        protocol: HUB_PROTOCOL,
     }
 }
 
@@ -218,6 +248,7 @@ pub fn start(
     let _ = SELF_NODE.set((cfg.machine.clone(), project.clone()));
     tokio::spawn(async move {
         let mut attempt = 0u32;
+        let mut said_refusal: Option<String> = None;
         loop {
             match session(&place, &hooks, &frames_in, &cfg, &project).await {
                 Ok(()) => {
@@ -229,11 +260,27 @@ pub fn start(
                     );
                 }
                 Err(e) => {
+                    let text = format!("{e:#}");
                     klog::warn(
                         "hub_error",
                         None,
-                        format!("{}: {e:#}; retry in {:?}", cfg.url, backoff(attempt)),
+                        format!("{}: {text}; retry in {:?}", cfg.url, backoff(attempt)),
                     );
+                    // A refusal is a fact about this place, not a hiccup:
+                    // said once on root's transcript, where a window shows
+                    // it, and not again for the same words.
+                    if text.contains("hub refused") && said_refusal.as_deref() != Some(&text) {
+                        let _ = arbos_core::append_event(
+                            &arbos_core::Layout::new(&place, arbos_core::ROOT_ID).transcript(),
+                            &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                                text: format!(
+                                    "This place is not on the hub: {text}. It keeps working on its own; the hub is retried in the background."
+                                ),
+                                failed: true,
+                            }),
+                        );
+                        said_refusal = Some(text);
+                    }
                 }
             }
             tokio::time::sleep(backoff(attempt)).await;
@@ -291,6 +338,7 @@ async fn session(
     let mut chans: HashMap<u64, (mpsc::UnboundedSender<String>, Arc<AtomicBool>)> = HashMap::new();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
+    let mut said_gone = arbos_core::binary_gone();
     let result = loop {
         tokio::select! {
             out = from_clients.recv() => {
@@ -359,6 +407,17 @@ async fn session(
             _ = ping.tick() => {
                 if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
                     break Ok(());
+                }
+                // The binary replaced under this process since the last
+                // word: the roster hears it now, not at the next connect.
+                let gone = arbos_core::binary_gone();
+                if gone != said_gone {
+                    said_gone = gone;
+                    let f = build_revision(cfg, RegistrantKind::Kernel, Some(project.to_string()));
+                    if let Err(e) = send_json(&mut ws, &f).await {
+                        break Err(e);
+                    }
+                    klog::info("hub_build_revised", None, format!("binary_gone={gone}"));
                 }
             }
         }

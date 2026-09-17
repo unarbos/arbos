@@ -4,6 +4,7 @@
 
 use anyhow::{Result, bail};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::ToolOut;
@@ -104,9 +105,20 @@ impl Tool for Bash {
         };
         let plan = Plan::access(access);
         // Interactive only when it will wait on a card (ask mode); in
-        // auto the same command is refused in `run`, no card.
+        // auto the same command is refused in `run`, no card. A root or
+        // home wipe is refused in `run` in every mode: never a card.
+        let home = home_dir();
+        let verdict = super::wipe::judge(cmd, &where_it_runs(&dir, cx.root, &home));
+        // Refused here, before any mode's approval card: in ask mode the
+        // card would otherwise come first, and a person could be asked to
+        // allow a wipe of their home (qal-j15, ra-01).
+        if let super::wipe::Verdict::Refuse(why) = &verdict {
+            bail!("bash: refused — {why}");
+        }
         Ok(
-            if needs_approval(cmd) && cx.agent.mode == arbos_core::Mode::Ask {
+            if matches!(verdict, super::wipe::Verdict::Ask(_))
+                && cx.agent.mode == arbos_core::Mode::Ask
+            {
                 plan.interactive()
             } else {
                 plan
@@ -161,19 +173,32 @@ impl Tool for Bash {
                 .await
                 .map_err(|e| anyhow::anyhow!("git guard task: {e}"))??;
             }
-            // A wipe of the filesystem root, sudo, mkfs, a fork bomb: in
-            // auto mode nothing waits on a card (decision 2026-09-15), so
-            // these are refused outright with the reason — the model can
-            // ask the user in words if it truly needs one. In ask mode
-            // the call was already allowed before it ran.
-            if needs_approval(cmd) && cx.agent.mode != arbos_core::Mode::Ask {
-                bail!(
-                    "bash: refused — this command wipes a system path, escalates with sudo, or formats a disk, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
-                );
-            }
             let dir = opt_str(&args, "cwd")
                 .map(|c| cx.cwd.join(c))
                 .unwrap_or_else(|| cx.cwd.clone());
+            // The wipe guard reads the command from this directory, `cd`
+            // by `cd` (qal-j15: `cd / && rm -rf *` ran, seven times,
+            // because the pieces were read apart). A removal of the
+            // filesystem root, a home, or a top-level system tree is
+            // refused in every mode, ask included: there is no agent's
+            // reason for it. Sudo, mkfs, a fork bomb, a removal the
+            // kernel cannot place: in auto mode nothing waits on a card
+            // (decision 2026-09-15), so these are refused with the reason
+            // — the model can ask the user in words if it truly needs
+            // one. In ask mode the call was already allowed before it ran.
+            {
+                let home = home_dir();
+                match super::wipe::judge(cmd, &where_it_runs(&dir, cx.place.path(), &home)) {
+                    super::wipe::Verdict::Run => {}
+                    super::wipe::Verdict::Refuse(why) => bail!("bash: refused — {why}"),
+                    super::wipe::Verdict::Ask(why) if cx.agent.mode != arbos_core::Mode::Ask => {
+                        bail!(
+                            "bash: refused — this command {why}, and the default mode runs without approval cards. Do it another way, or ask the user in words and have them run it; ask mode (the mode chip) asks per command instead."
+                        )
+                    }
+                    super::wipe::Verdict::Ask(_) => {}
+                }
+            }
             if !dir.is_dir() {
                 bail!(
                     "cwd {} does not exist; the working directory is {}. Use a path relative to it, or omit cwd.",
@@ -185,6 +210,13 @@ impl Tool for Bash {
             // marked background came back after its first line ("step 1")
             // and the user saw one line of six (F-37, F-43): for anything
             // that is not a server the call stays attached to the floor.
+            // Files an in-place substitution names (`sed -i`, `perl -pi`):
+            // their bytes before, so a pattern that matched no line is
+            // said afterwards. sed exits 0 either way, and an agent that
+            // believed the edit landed carried a wrong model of the file
+            // from then on (the desktop's undispatched restart action,
+            // 2026-09-17: an anchor a merged PR had reworded).
+            let inplace_before = inplace_edit_targets(cmd, &dir);
             let asked_background = opt_bool(&args, "background").unwrap_or(false);
             let background = asked_background && looks_like_server(cmd);
             let background_ignored = asked_background && !background;
@@ -235,8 +267,10 @@ impl Tool for Bash {
                 let id = job.id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms)).await;
-                    if let Ok(j) = root.load(&id) {
-                        root.kill(&j);
+                    if let Ok(j) = root.load(&id)
+                        && let Err(e) = root.kill(&j)
+                    {
+                        eprintln!("job timeout: {e:#}");
                     }
                 });
             }
@@ -259,8 +293,10 @@ impl Tool for Bash {
                     _ = tokio::time::sleep_until(deadline) => break false,
                     _ = cx.cancel.cancelled() => {
                         // Stop while attached means stop: the user wants it gone.
-                        if let Ok(j) = root.load(&job.id) {
-                            root.kill(&j);
+                        if let Ok(j) = root.load(&job.id)
+                            && let Err(e) = root.kill(&j)
+                        {
+                            bail!("bash interrupted; {e:#}");
                         }
                         bail!("bash interrupted; job {} killed", job.id);
                     }
@@ -326,6 +362,9 @@ impl Tool for Bash {
             }
             match job.status {
                 Status::Exited(0) => {
+                    for line in inplace_unchanged(&inplace_before) {
+                        body.push_str(&format!("\n{line}"));
+                    }
                     if let Some(file) = viewed_file(cmd) {
                         // Reading through the shell gives no LINE:HASH, so
                         // the next edit has nothing to anchor on and the
@@ -602,20 +641,40 @@ fn human_bytes(n: u64) -> String {
 /// No shell here: the syscalls take the numbers as numbers. Pids 0 and 1
 /// (and anything that does not fit) are refused outright, because
 /// `kill(0)` and `killpg(0)` also mean "my whole group" or "everything".
-pub fn kill_job(pid: u32) {
+///
+/// The result says whether the signal was *delivered*: `Ok` when the
+/// group or the pid took it, or was already gone (ESRCH); `Err` when the
+/// system refused (EPERM — a job that became another user's, `sudo` in
+/// its command) or the pid was never a job. A folder that said "killed by
+/// the kernel" before this was checked told the user a stop had worked
+/// when it had not.
+pub fn kill_job(pid: u32) -> std::io::Result<()> {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
-        eprintln!("kill_job: pid {pid} out of range; refusing");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} out of range; refusing"),
+        ));
     };
     if pid <= 1 {
-        eprintln!("kill_job: pid {pid} is not a job; refusing");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} is not a job; refusing"),
+        ));
     }
     // SAFETY: plain syscalls on a validated positive pid; no memory involved.
-    let group_ok = unsafe { libc::killpg(pid, libc::SIGKILL) } == 0;
-    if !group_ok {
-        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
     }
+    let group_err = std::io::Error::last_os_error();
+    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    // Already gone is the outcome asked for.
+    if err.raw_os_error() == Some(libc::ESRCH) && group_err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err)
 }
 
 #[cfg(test)]
@@ -643,7 +702,7 @@ mod kill_tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(200));
 
-        kill_job(job.id());
+        kill_job(job.id()).unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(job.try_wait().unwrap().is_some(), "the job leader is dead");
         assert!(
@@ -658,55 +717,48 @@ mod kill_tests {
     fn kill_job_refuses_pids_that_mean_everything() {
         // 0 = own group, 1 = init; both must be no-ops. If either were
         // signalled, this test process would not be here to assert.
-        kill_job(0);
-        kill_job(1);
+        assert!(kill_job(0).is_err());
+        assert!(kill_job(1).is_err());
     }
 }
 
-/// Commands that ask the user first even in auto mode: wiping the root of
-/// the filesystem (or a top-level directory of it), sudo, mkfs, a fork
-/// bomb. `rm -rf /tmp/scratch` is an ordinary cleanup, not one of these;
-/// the old substring test on `rm -rf /` stopped headless runs on exactly
-/// that.
+/// Where a command runs, for the wipe guard: the call's directory, the
+/// user's home, the place.
+fn where_it_runs<'a>(
+    cwd: &'a std::path::Path,
+    place: &'a std::path::Path,
+    home: &'a std::path::Path,
+) -> super::wipe::Where<'a> {
+    super::wipe::Where {
+        cwd,
+        home,
+        place: Some(place),
+    }
+}
+
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-home"))
+}
+
+/// Commands that ask the user first even in auto mode, or are refused in
+/// every mode: wiping the root of the filesystem, a home, or a top-level
+/// system tree (refused); sudo, mkfs, a fork bomb, a removal the kernel
+/// cannot place (asked). Read from a directory that is no tree, with
+/// `$HOME` as the home, for callers without a directory — the bash tool itself
+/// judges from the call's own directory (`wipe::judge`). `rm -rf
+/// /tmp/scratch` is an ordinary cleanup, not one of these.
 pub fn needs_approval(cmd: &str) -> bool {
-    let c = cmd.to_ascii_lowercase();
-    c.contains("sudo ") || c.contains("mkfs") || c.contains(":(){") || rm_wipes_root(&c)
-}
-
-/// An `rm` with a recursive flag whose target is `/`, `/*`, `~`, or a
-/// top-level directory such as `/usr` or `/etc`.
-fn rm_wipes_root(lower: &str) -> bool {
-    for segment in lower.split(['|', ';', '&', '\n']) {
-        let mut words = segment.split_whitespace();
-        if words.next() != Some("rm") {
-            continue;
-        }
-        let mut recursive = false;
-        for w in words {
-            if let Some(flags) = w.strip_prefix('-').filter(|f| !f.starts_with('-')) {
-                recursive |= flags.contains('r');
-                continue;
-            }
-            if w == "--recursive" || w == "-r" {
-                recursive = true;
-                continue;
-            }
-            if w.starts_with("--") {
-                continue;
-            }
-            let target = w.trim_matches(['"', '\'']);
-            let t = target.trim_end_matches('/');
-            let top_level = t.starts_with('/')
-                && !t[1..].is_empty()
-                && !t[1..].contains('/')
-                && !matches!(t, "/tmp" | "/var");
-            let wipe = target == "/" || target == "/*" || t == "~" || t == "$home" || top_level;
-            if recursive && wipe {
-                return true;
-            }
-        }
-    }
-    false
+    let home = home_dir();
+    super::wipe::judge(
+        cmd,
+        &where_it_runs(
+            std::path::Path::new("/nonexistent-cwd/here"),
+            std::path::Path::new("/nonexistent-place"),
+            &home,
+        ),
+    ) != super::wipe::Verdict::Run
 }
 
 #[cfg(test)]
@@ -774,6 +826,147 @@ mod approval_tests {
         ] {
             assert!(!needs_approval(free), "{free:?} should run");
         }
+    }
+}
+
+/// The files an in-place substitution in `cmd` names, with their bytes
+/// now: `sed -i`, `sed -i.bak`, `sed -i ''`, `perl -pi -e`, `perl -i -pe`.
+/// Only files that exist under `dir` count; the expression word is not a
+/// file. Empty when the command has no such step.
+fn inplace_edit_targets(cmd: &str, dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    for segment in cmd.split(['\n', ';', '|', '&']) {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+            .collect();
+        let Some(first) = words.first() else { continue };
+        let prog = first.rsplit('/').next().unwrap_or(first);
+        let rest = &words[1..];
+        let files: Vec<&str> = match prog {
+            "sed"
+                if rest
+                    .iter()
+                    .any(|w| w.starts_with("-i") || *w == "--in-place") =>
+            {
+                // Flags, then the expression (the first bare word, unless
+                // given by -e/-f), then files. `-i ''` (BSD) leaves an
+                // empty quoted word that is not a file.
+                let mut expr_given = false;
+                let mut skip_next = false;
+                let mut seen_expr = false;
+                let mut files = Vec::new();
+                for w in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if *w == "-e" || *w == "-f" || *w == "--expression" || *w == "--file" {
+                        expr_given = true;
+                        skip_next = true;
+                        continue;
+                    }
+                    if w.starts_with('-') || *w == "''" || *w == "\"\"" {
+                        continue;
+                    }
+                    if !expr_given && !seen_expr {
+                        seen_expr = true;
+                        continue;
+                    }
+                    files.push(*w);
+                }
+                files
+            }
+            "perl"
+                if rest
+                    .iter()
+                    .any(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('i')) =>
+            {
+                let mut skip_next = false;
+                let mut files = Vec::new();
+                for w in rest {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if *w == "-e" || *w == "-E" {
+                        skip_next = true;
+                        continue;
+                    }
+                    if w.starts_with('-') {
+                        continue;
+                    }
+                    files.push(*w);
+                }
+                files
+            }
+            _ => Vec::new(),
+        };
+        for f in files {
+            let f = f.trim_matches(['"', '\'']);
+            if f.is_empty() || f.contains('$') || f.contains('*') {
+                continue;
+            }
+            let p = dir.join(f);
+            if let Ok(bytes) = std::fs::read(&p)
+                && p.is_file()
+                && !out.iter().any(|(q, _)| *q == p)
+            {
+                out.push((p, bytes));
+            }
+        }
+    }
+    out
+}
+
+/// The note for each in-place target whose bytes did not change.
+fn inplace_unchanged(before: &[(PathBuf, Vec<u8>)]) -> Vec<String> {
+    before
+        .iter()
+        .filter(|(p, bytes)| std::fs::read(p).is_ok_and(|now| now == *bytes))
+        .map(|(p, _)| {
+            format!(
+                "[the in-place substitution on {} changed nothing: its pattern matched no line — the file is as it was; read it and edit with an anchor]",
+                p.display()
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod inplace_tests {
+    use super::{inplace_edit_targets, inplace_unchanged};
+
+    #[test]
+    fn sed_and_perl_in_place_targets_are_named_and_a_no_op_is_said() {
+        let dir = std::env::temp_dir().join(format!("arbos-inplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "b\n").unwrap();
+        let t = inplace_edit_targets("sed -i 's/old/new/' src/a.rs b.txt", &dir);
+        assert_eq!(t.len(), 2, "{t:?}");
+        let t = inplace_edit_targets("sed -i.bak -e 's/x/y/' src/a.rs && cargo build", &dir);
+        assert_eq!(t.len(), 1);
+        let t = inplace_edit_targets("sed -i '' 's/x/y/' src/a.rs", &dir);
+        assert_eq!(t.len(), 1, "{t:?}");
+        let t = inplace_edit_targets("perl -pi -e 's/x/y/' b.txt", &dir);
+        assert_eq!(t.len(), 1);
+        let t = inplace_edit_targets("perl -i -pe 's/x/y/' src/a.rs b.txt", &dir);
+        assert_eq!(t.len(), 2);
+        // Not in place, or no such file: nothing to watch.
+        assert!(inplace_edit_targets("sed 's/x/y/' src/a.rs", &dir).is_empty());
+        assert!(inplace_edit_targets("sed -i 's/x/y/' nothere.rs", &dir).is_empty());
+        assert!(inplace_edit_targets("grep -rn old src/", &dir).is_empty());
+        // A pattern that matched nothing: the note names the file.
+        let before = inplace_edit_targets("sed -i 's/zzz/y/' src/a.rs", &dir);
+        let notes = inplace_unchanged(&before);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("src/a.rs") && notes[0].contains("changed nothing"));
+        // One that did: no note.
+        std::fs::write(dir.join("src/a.rs"), "fn b() {}\n").unwrap();
+        assert!(inplace_unchanged(&before).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
@@ -954,14 +1147,14 @@ pub(crate) fn kill_jobs_by_pid(root: &JobsRoot, cmd: &str) -> Option<String> {
     }
     let lines: Vec<String> = jobs
         .iter()
-        .map(|j| {
-            root.kill(j);
-            format!(
+        .map(|j| match root.kill(j) {
+            Ok(_) => format!(
                 "job {} (pid {}) ended — the whole process group, not only its shell: `{}`",
                 j.id,
                 j.meta.pid,
                 arbos_core::text::clip(j.meta.command.trim(), 80)
-            )
+            ),
+            Err(e) => format!("{e:#} — it is still running"),
         })
         .collect();
     Some(lines.join("\n"))

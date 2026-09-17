@@ -177,6 +177,7 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
     );
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
+    let mut said_gone = arbos_core::binary_gone();
     loop {
         tokio::select! {
             line = hub_link::next_text(&mut ws) => {
@@ -235,6 +236,19 @@ async fn session(cfg: &HubConfig, dir: &Path, args: &Args) -> Result<()> {
             _ = ping.tick() => {
                 if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
                     return Ok(());
+                }
+                // The daemon's own image replaced under it: the roster's
+                // "Restart needed" comes from here, not from the next
+                // connect (the seven processes running deleted images for
+                // days were mostly daemons).
+                let gone = arbos_core::binary_gone();
+                if gone != said_gone {
+                    said_gone = gone;
+                    let f = hub_link::build_revision(cfg, RegistrantKind::Worker, None);
+                    if hub_link::send_json(&mut ws, &f).await.is_err() {
+                        return Ok(());
+                    }
+                    eprintln!("arbos-kernel worker: build revised on the hub: binary_gone={gone}");
                 }
             }
         }
@@ -315,7 +329,20 @@ fn start_kernel(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let _child = cmd.spawn().context("start arbos-kernel serve")?;
+    let mut child = cmd.spawn().context("start arbos-kernel serve")?;
+    // Waited out on a thread of its own: a worktree kernel ends when its
+    // claim does (hours later, or never), and a child nobody waits for is
+    // a zombie under this daemon for the rest of its life — one from a
+    // test spawn sat on arboslife for hours. The same omission the kernel
+    // was cured of tonight: a parent not noticing its child has ended.
+    let reaped = place.display().to_string();
+    std::thread::Builder::new()
+        .name("reap-kernel".into())
+        .spawn(move || match child.wait() {
+            Ok(status) => eprintln!("worker: kernel for {reaped} ended ({status})"),
+            Err(e) => eprintln!("worker: kernel for {reaped}: wait failed: {e}"),
+        })
+        .ok();
     let deadline = std::time::Instant::now() + KERNEL_READY;
     while std::time::Instant::now() < deadline {
         if live_port(&place).is_some() {

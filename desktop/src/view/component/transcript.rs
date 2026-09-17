@@ -17,7 +17,8 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, ClipboardItem, Context, Empty, Hsla, Pixels, ScrollHandle, SharedString,
-        StyledText, TextRun, Window, canvas, div, font, img, point, prelude::*, px, rgb, svg,
+        StyledText, TextRun, Window, canvas, div, font, img, linear_color_stop, linear_gradient,
+        point, prelude::*, px, rgb, svg,
     },
     motion::Painter,
     theme::{HighlightKind, TextStyle, Theme, Typeset, ink},
@@ -56,6 +57,8 @@ const PROMPT_RADIUS: f32 = 10.;
 /// of a 689 pt column — 70 % — with 12 pt side padding and a 10 pt radius.
 const PROMPT_MAX_WIDTH: f32 = (root::CHAT_MAX_WIDTH - 2. * root::CHAT_GUTTER) * 0.70;
 const PROMPT_PAD_X: f32 = 12.;
+/// How many of a worker's brief's lines show before the fade (F-132).
+const BRIEF_LINES: f32 = 3.;
 /// Web diff/terminal: `text-[11.5px] leading-[1.5]`.
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
@@ -1025,13 +1028,124 @@ fn user_prompt(
     let prompt = message.to_prompt();
     let (slash, body) = split_slash(&message.text);
     let group = SharedString::from(format!("prompt-{id}-{ix}"));
+    // A worker's brief is the column's width and folded to its first
+    // lines, the rest behind a fade; a click shows it whole. Cursor's
+    // worker tab draws its brief so (F-132,
+    // `cycle-22/cursor-worker-chat-collapsed.png`); a brief is the length
+    // of a page, and whole it pushed the work off the screen. The project
+    // chat's own prompts stay bubbles.
+    let brief = chat.parent.is_some() && ix == 0;
+    let brief_open = chat.transcript.output.contains(&ix);
+    // The card's colour as painted, for the fade to end in.
+    let card_bg = theme
+        .bg
+        .blend(root::content_bg(theme))
+        .blend(theme.ink(0.06));
+    let content = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .when(message.has_attachments(), |el| {
+            el.child(user_attachments(message, theme))
+        })
+        .when(!message.described.is_empty(), |el| {
+            el.child(described_note(message, theme))
+        })
+        .when_some(slash, |el, cmd| {
+            el.child(
+                div()
+                    .text_style(TextStyle::Body)
+                    .text_color(theme.text_muted)
+                    .child(SharedString::from(cmd)),
+            )
+        })
+        .when(!body.is_empty(), |el| {
+            el.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(6.))
+                    // Spoken on a call: a small microphone leads the line.
+                    .when(message.channel == "voice", |row| {
+                        row.child(
+                            div()
+                                .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
+                                .flex_none()
+                                .mt(px(3.))
+                                .tooltip(|window, cx| Tooltip::text("Spoken on a call", window, cx))
+                                .child(
+                                    icons::icon(icons::media::MICROPHONE)
+                                        .size(px(12.))
+                                        .text_color(theme.text_muted),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_style(TextStyle::Body)
+                            .text_color(theme.text)
+                            // Cursor shows the prompt as typed —
+                            // backticks and stars stay characters,
+                            // nothing is set as code or bold.
+                            .child(prose(chat, ix, &plain_markdown(body), window, cx)),
+                    ),
+            )
+        });
+    // Folded: the first lines, the last of them under a fade into the
+    // card, so the cut reads as "more below" and not as the brief's end.
+    let content = if brief && !brief_open {
+        // Prose leads its lines wider than the role's own box; the fade
+        // covers the last line only, as Cursor's does.
+        let line = TextStyle::Body.painted_line_height() * 1.3;
+        let clip = BRIEF_LINES * line;
+        div()
+            .flex_1()
+            .min_w_0()
+            .relative()
+            .max_h(px(clip))
+            .overflow_hidden()
+            .child(content)
+            .child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(line))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(card_bg.opacity(0.), 0.),
+                        linear_color_stop(card_bg, 1.),
+                    )),
+            )
+            .into_any_element()
+    } else {
+        content.into_any_element()
+    };
     // Cursor's user bubble: a card at the column's right edge, flush with
     // the composer's, no wider than most of the column. The edit pencil
     // sits outside the card, to its left, and shows on hover — inside, it
     // widened the card and moved the text's right edge (Jacob's still).
     let card = div()
         .id(group.clone())
-        .max_w(px(PROMPT_MAX_WIDTH))
+        .when(!brief, |el| el.max_w(px(PROMPT_MAX_WIDTH)))
+        .when(brief, |el| {
+            el.w_full()
+                .border_1()
+                .border_color(theme.hairline(0.6))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.with_session(id, cx, |chat| {
+                        if !chat.transcript.output.insert(ix) {
+                            chat.transcript.output.remove(&ix);
+                        }
+                    });
+                }))
+        })
         .px(px(PROMPT_PAD_X))
         .py(px(PROMPT_PAD_Y))
         .rounded(px(PROMPT_RADIUS))
@@ -1042,64 +1156,7 @@ fn user_prompt(
         .flex_row()
         .items_end()
         .gap(px(ROW_GAP))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .when(message.has_attachments(), |el| {
-                    el.child(user_attachments(message, theme))
-                })
-                .when(!message.described.is_empty(), |el| {
-                    el.child(described_note(message, theme))
-                })
-                .when_some(slash, |el, cmd| {
-                    el.child(
-                        div()
-                            .text_style(TextStyle::Body)
-                            .text_color(theme.text_muted)
-                            .child(SharedString::from(cmd)),
-                    )
-                })
-                .when(!body.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .gap(px(6.))
-                            // Spoken on a call: a small microphone leads the line.
-                            .when(message.channel == "voice", |row| {
-                                row.child(
-                                    div()
-                                        .id(SharedString::from(format!("prompt-voice-{id}-{ix}")))
-                                        .flex_none()
-                                        .mt(px(3.))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::text("Spoken on a call", window, cx)
-                                        })
-                                        .child(
-                                            icons::icon(icons::media::MICROPHONE)
-                                                .size(px(12.))
-                                                .text_color(theme.text_muted),
-                                        ),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .text_style(TextStyle::Body)
-                                    .text_color(theme.text)
-                                    // Cursor shows the prompt as typed —
-                                    // backticks and stars stay characters,
-                                    // nothing is set as code or bold.
-                                    .child(prose(chat, ix, &plain_markdown(body), window, cx)),
-                            ),
-                    )
-                }),
-        );
+        .child(content);
     let pencil = div()
         .id(SharedString::from(format!("replay-prompt-{id}-{ix}")))
         .flex_none()
@@ -1130,6 +1187,16 @@ fn user_prompt(
     // A row with the card at its end: the card takes its content's width
     // up to PROMPT_MAX_WIDTH and its right edge is the composer's — the
     // composer's plate bleeds past the column gutter by its own pad.
+    // A brief spans the column and takes no pencil: a worker's words come
+    // from its parent, not from this composer.
+    if brief {
+        return div()
+            .group(group)
+            .w_full()
+            .max_w(px(root::CHAT_MAX_WIDTH))
+            .child(card)
+            .into_any_element();
+    }
     div()
         .group(group)
         .w_full()
@@ -1518,12 +1585,7 @@ fn children_lines(
         // One worker: its own live step (Jacob's Cursor still reads "1
         // Working  Reading project context…"); several: the coordinator's
         // step over all of them ("Waiting on three writers").
-        let own = chat
-            .status
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+        let own = chat.live_status();
         // The coordinator's step only where nothing above says it: under a
         // live "Working <step>" headline the line names the workers instead
         // (cycle 23: "Working Updating the plan" over "2 Working Updating
@@ -2925,11 +2987,13 @@ struct WorkStats {
 /// one line above the answer. A click takes over from there.
 /// Cursor leaves the newest turn's timeline open — "Worked 6s ⌄" with its
 /// Thought / Explored / Edited lines — until the next prompt folds it.
-fn auto_work_open(items: &[ChatItem], first: usize, running: bool) -> bool {
+fn auto_work_open(_items: &[ChatItem], _first: usize, running: bool) -> bool {
+    // Open while it runs; shut once settled — the last turn too. Cursor's
+    // settled headline is "Worked 1m 15s" with the timeline behind it in
+    // both chat styles (`cycle-23/cursor-13-reopened-settled.png`, the
+    // worker tab in `cycle-22/`); ours kept the newest turn open (cycle 3),
+    // which read as a timeline the person had asked for (F-127, cycle 28).
     running
-        || turns(items)
-            .last()
-            .is_some_and(|turn| turn.range.start == first)
 }
 
 /// The files a chat's own edit calls in `body` wrote, one row per path
@@ -3910,9 +3974,7 @@ fn zone(
     let live_headline = running && foldable && !kickoff_turn && rows_under;
     if live_headline {
         let step = chat
-            .status
-            .clone()
-            .filter(|s| !s.trim().is_empty())
+            .live_status()
             .or_else(|| chat.current_step())
             .unwrap_or_else(|| "Planning next moves".to_string());
         let id = chat.id;
@@ -4091,9 +4153,22 @@ fn zone(
         .flex_col()
         .gap(px(ITEM_GAP));
     let mut has_tail = false;
+    // The worker lines go under the prose that spawned them and *above*
+    // any line the person typed into the turn afterwards: Jacob's "where
+    // is my response" drew with three "Done <worker>" lines under it, as if
+    // they were the answer to it (his report 2026-09-17-8). Taken here at
+    // the first steer card; otherwise after the tail.
+    let mut workers = workers;
     // The tail starts where the body ended: the report line under a wake
     // segment's header is drawn above, not again here.
     for ix in turn.answer_from.max(body_start)..turn.range.end {
+        if inline_user(&chat.items, ix)
+            && matches!(chat.items[ix], ChatItem::User(_))
+            && let Some((lines, _)) = workers.take()
+        {
+            has_tail = true;
+            tail = tail.child(lines);
+        }
         // The interruption is on the fold line already; once is enough.
         if header_drawn
             && let ChatItem::Notice { text, .. } = &chat.items[ix]
@@ -5581,13 +5656,8 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
     }
     // The agent named its step (Cursor's UpdateCurrentStep on the
     // timeline: "Copying stills to artifacts"): that is the line.
-    if let Some(step) = chat
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return Some(step.to_string());
+    if let Some(step) = chat.live_status() {
+        return Some(step);
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
     let tool_running = matches!(
@@ -5698,11 +5768,7 @@ fn heartbeat(
     // The agent's own step reads as Cursor's "Working  Launching three
     // sort writers": the verb a shade brighter, the step faint and
     // shimmering, no chevron — there is nothing under it to fold.
-    let is_step = chat
-        .status
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|step| step == label);
+    let is_step = chat.live_status().is_some_and(|step| step == label);
     let label = if quiet {
         format!("{label} · {}", since_short(since))
     } else {
@@ -5846,13 +5912,13 @@ mod selection_tests {
             12
         );
         assert!(matches!(segs.last(), Some(Seg::Run(range)) if range.start == 12));
-        // Cursor: the timeline shows while the turn runs and stays open on
-        // the newest turn; an older turn folds once it settles, and from
-        // there a click owns the fold.
+        // Cursor: the timeline shows while the turn runs and folds once it
+        // settles — the newest turn too (F-127); from there a click owns
+        // the fold.
         assert!(auto_work_open(&items, 0, true));
         assert!(
-            auto_work_open(&items, 0, false),
-            "the newest turn stays open"
+            !auto_work_open(&items, 0, false),
+            "a settled turn folds, the newest too"
         );
         let mut older = items.clone();
         older.push(ChatItem::User("Next".to_string().into()));

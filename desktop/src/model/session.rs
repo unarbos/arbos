@@ -526,6 +526,10 @@ pub struct ChatSession {
     /// The last user bubble is already in the pane; the kernel has not
     /// seen it yet. Replay lands the card before the socket is back.
     pending_wire: bool,
+    /// How many prompts at the queue's front already have their card on
+    /// the pane — lines held while the place was unreachable (`af-03`).
+    /// Their turn opens when each is sent; no second card lands.
+    held_cards: usize,
     pub transcript: transcript::State,
     /// What is sitting in the composer for this session. Written with the
     /// transcript so a kill mid-type comes back with the same line.
@@ -712,6 +716,7 @@ impl ChatSession {
             streaming: false,
             queue: seed.into_iter().map(Prompt::from).collect(),
             pending_wire: false,
+            held_cards: 0,
             transcript: transcript::State::default(),
             draft: String::new(),
             live: Vec::new(),
@@ -805,6 +810,7 @@ impl ChatSession {
             streaming: false,
             queue: VecDeque::new(),
             pending_wire: false,
+            held_cards: 0,
             transcript: transcript::State::default(),
             draft: record.draft,
             live: Vec::new(),
@@ -898,6 +904,7 @@ impl ChatSession {
             streaming: false,
             queue: VecDeque::new(),
             pending_wire: false,
+            held_cards: 0,
             transcript: transcript::State::default(),
             draft: String::new(),
             live: Vec::new(),
@@ -1023,6 +1030,7 @@ impl ChatSession {
         self.turn_open = false;
         self.closed = true;
         self.pending_wire = false;
+        self.held_cards = 0;
         self.queue.clear();
         self.flush();
     }
@@ -1031,7 +1039,21 @@ impl ChatSession {
     /// it, for the "Worked 21s" line. Once per turn; a late duplicate end
     /// leaves the first figure.
     fn stamp_worked(&mut self) {
-        let Some(elapsed) = self.elapsed() else {
+        // No clock of this window's own when the turn opened before it
+        // attached — a worker's brief is on the card before the worker's
+        // chat is joined mid-turn — the opener's own stamp says when it
+        // began (F-131, cycle 32: the worker tab read its summary phrase
+        // where Cursor's says "Worked for 20s").
+        let since_opener = || {
+            let began = self.items.iter().rev().find_map(|item| match item {
+                ChatItem::User(message) => Some(message.sent_at),
+                ChatItem::Wake { at, .. } => Some(*at),
+                _ => None,
+            })??;
+            let now = arbos_core::now_ms();
+            (now > began).then(|| Duration::from_millis((now - began) as u64))
+        };
+        let Some(elapsed) = self.elapsed().or_else(since_opener) else {
             return;
         };
         // The kickoff turn has no prompt: its time is the chat's, measured
@@ -1126,10 +1148,16 @@ impl ChatSession {
     fn turn_alive(&mut self) {
         // Real progress: the model is no longer just thinking in silence.
         self.working = None;
-        if self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
+        // A record arriving after the turn's own end is that turn's tail
+        // — however late (the kernel's settled records landed past the
+        // 1 s lag and reopened an idle chat: "stop the turn before
+        // rewinding" on an idle chat, F-122b, cycle 29). A new turn
+        // announces itself first: a prompt sent here, another client's
+        // line, a wake, or the kernel's thinking pulse — each clears
+        // `turn_ended`, and only then does a token reopen the turn.
+        if self.turn_ended.is_some() {
             return;
         }
-        self.turn_ended = None;
         self.turn_open = true;
     }
 
@@ -1483,12 +1511,69 @@ impl ChatSession {
     /// place, its agent folder still exists. A child deleted under a live
     /// window is not attached to again and again.
     pub fn resumable(&self) -> bool {
-        !self.closed && !self.agent_gone()
+        !self.closed && !self.agent_gone() && !self.place_gone()
     }
 
-    /// A local agent whose folder is no longer on disk.
+    /// A local place whose folder is no longer where the window knew it —
+    /// renamed, moved or deleted under a running kernel (QA `af-03`). Not
+    /// an archived agent: the kernel stops, the words must not.
+    pub fn place_gone(&self) -> bool {
+        self.host.is_none() && !self.cwd.as_os_str().is_empty() && !self.cwd.is_dir()
+    }
+
+    /// Keep a line typed while the place is unreachable: its card on the
+    /// pane, the words in the queue for the next attach, no turn opened —
+    /// nothing is coming until the folder is back, so no shimmer.
+    pub fn hold_offline(&mut self, content: Prompt) {
+        if content.is_empty() {
+            return;
+        }
+        // The card is on the pane now; the kernel's own record of the line,
+        // when the queue drains, is its echo and must not land twice.
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
+        }
+        self.items.push(ChatItem::User(content.message()));
+        self.updated = SystemTime::now();
+        self.queue.push_back(content);
+        self.held_cards += 1;
+        self.flush();
+    }
+
+    /// Lines held while the place was away are still waiting, the socket is
+    /// back and nothing is in flight: a new line queues behind them so they
+    /// go in the order they were typed.
+    pub fn has_held_lines(&self) -> bool {
+        self.held_cards > 0
+            && self.live()
+            && !self.streaming
+            && !self.has_running_tool()
+            && !self.queue.is_empty()
+    }
+
+    /// Whether the newest notice already says the place is gone — one
+    /// line per disappearance, however many lines are typed into it.
+    pub fn has_place_gone_notice(&self) -> bool {
+        self.items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ChatItem::Notice { text, .. } => Some(text.starts_with(PLACE_GONE)),
+                _ => None,
+            })
+            .unwrap_or(false)
+    }
+
+    /// A local agent whose folder is no longer on disk while its place is:
+    /// the kernel archived it (or someone removed it). A place that is gone
+    /// takes every agent with it and is [`Self::place_gone`], not this.
     pub fn agent_gone(&self) -> bool {
         self.host.is_none()
+            && !self.place_gone()
             && self.agent_session.as_deref().is_some_and(|sid| {
                 !arbos_core::agent_exists(&arbos_core::Place::new(&self.cwd), sid)
             })
@@ -1565,6 +1650,26 @@ pub struct ChildSummary {
 }
 
 impl ChatSession {
+    /// The status line the agent named — unless it has since moved on to a
+    /// tool of its own that is still running: then that tool is the truer
+    /// line. Jacob's report 2026-09-17-6: "Waiting on three sorting
+    /// workers" stood over three "Done" lines for minutes while the
+    /// coordinator itself sat in `sleep 75`; the line that was true was
+    /// "Running sleep 75; echo waited".
+    pub fn live_status(&self) -> Option<String> {
+        for item in self.items.iter().rev() {
+            if let ChatItem::Tool { label, status, .. } = item {
+                if label.split_whitespace().next() == Some("status") {
+                    break;
+                }
+                if *status == ToolStatus::Running {
+                    return Some(step_label(label));
+                }
+            }
+        }
+        self.status.clone().filter(|s| !s.trim().is_empty())
+    }
+
     /// The one line that says what this chat is doing: the kernel's status
     /// event, else the running tool's title, else the last tool's.
     pub fn current_step(&self) -> Option<String> {
@@ -1910,7 +2015,27 @@ impl ChatSession {
             self.pending_wire = false;
             return;
         }
+        if self.held_cards > 0 {
+            self.held_cards -= 1;
+            self.open_turn();
+            return;
+        }
         self.land_turn(&content);
+    }
+
+    /// The turn a card already on the pane now starts: the clock, the
+    /// shimmer, the step table — everything `land_turn` does but the card.
+    fn open_turn(&mut self) {
+        self.new_turn_steps();
+        self.turn_ended = None;
+        self.flight = Some(Flight {
+            at: SystemTime::now(),
+            used: self.usage.map_or(0, |usage| usage.used),
+        });
+        self.updated = SystemTime::now();
+        self.streaming = true;
+        self.answered_ask = None;
+        self.flush();
     }
 
     /// A prompt another client sent to this agent — the caller's words on
@@ -1928,6 +2053,7 @@ impl ChatSession {
         channel: String,
     ) {
         self.new_turn_steps();
+        self.turn_ended = None;
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         // A line this window sent and is still waiting to see recorded:
         // its card is the newest with these words. However long the kernel
@@ -2181,6 +2307,9 @@ impl ChatSession {
     /// answers, and before a reconnect finishes.
     fn land_turn(&mut self, content: &Prompt) {
         self.new_turn_steps();
+        // A prompt of ours is a new turn: the last one's end no longer
+        // holds back the tokens that follow (F-122b).
+        self.turn_ended = None;
         let squashed: String = content.text.split_whitespace().collect();
         if !squashed.is_empty() {
             self.awaiting_echo.push_back(squashed);
@@ -2310,6 +2439,18 @@ impl ChatSession {
         // ("stop the turn before rewinding", gate cycle-22b). The kernel
         // checks the agent itself and refuses if it is running.
         if self.streaming || self.turn_open {
+            // Which flag held, and how long since anything arrived: F-122
+            // recurred once on cycle 28 after passing three times, and the
+            // notice alone cannot say why (rig, cycle 29).
+            eprintln!(
+                "arbos: rewind refused: streaming={} turn_open={} working={} last_frame={}s ago progress={}s ago turn_ended={:?}",
+                self.streaming,
+                self.turn_open,
+                self.working.is_some(),
+                self.last_frame_at.elapsed().as_secs(),
+                self.progress_at.elapsed().as_secs(),
+                self.turn_ended.map(|at| at.elapsed().as_secs()),
+            );
             self.notice(true, "stop the turn before rewinding");
             return;
         }
@@ -2848,6 +2989,7 @@ impl ChatSession {
             }
             Event::Woke { kind, text, at } => {
                 self.new_turn_steps();
+                self.turn_ended = None;
                 // The kernel writes `wake` then `user` for a prompt: the
                 // user line is that turn's boundary. Every other kind opens
                 // a segment of its own (F-62).
@@ -3228,16 +3370,35 @@ impl ChatSession {
             }
             Event::Waiting(line) => self.waiting = line,
             Event::TurnEndedAt(ended) => {
-                if let Some(ChatItem::User(message)) = self
+                // The turn read back is the newest opener's: a prompt, or a
+                // wake — a worker's whole first turn opens on its `plan`
+                // wake and has no `user` line at all, so a replayed worker
+                // tab read "Edited 2 files, …" where Cursor's says "Worked
+                // for 46s" (F-131, cycle 32).
+                let opener = self
                     .items
                     .iter_mut()
                     .rev()
-                    .find(|item| matches!(item, ChatItem::User(_)))
-                    && message.worked_secs.is_none()
-                    && let Some(sent) = message.sent_at
-                    && ended > sent
-                {
-                    message.worked_secs = Some(((ended - sent) / 1000).min(u32::MAX as i64) as u32);
+                    .find(|item| matches!(item, ChatItem::User(_) | ChatItem::Wake { .. }));
+                let stamp = |began: i64| ((ended - began) / 1000).min(u32::MAX as i64) as u32;
+                match opener {
+                    Some(ChatItem::User(message)) => {
+                        if message.worked_secs.is_none()
+                            && let Some(sent) = message.sent_at
+                            && ended > sent
+                        {
+                            message.worked_secs = Some(stamp(sent));
+                        }
+                    }
+                    Some(ChatItem::Wake { at, secs, .. }) => {
+                        if secs.is_none()
+                            && let Some(began) = *at
+                            && ended > began
+                        {
+                            *secs = Some(stamp(began));
+                        }
+                    }
+                    _ => {}
                 }
             }
             Event::TurnDone(result) => {
@@ -4281,7 +4442,19 @@ fn pump(
                     let busy = chat.streaming || chat.has_running_tool();
                     let queued = !chat.queue.is_empty();
                     chat.forget_socket();
-                    if busy && !queued {
+                    // The kernel stops itself when its folder moves out
+                    // from under it: say what happened and where the
+                    // window looked, at the moment it happens (QA `af-03`).
+                    if chat.place_gone() {
+                        if !chat.has_place_gone_notice() {
+                            let text = format!(
+                                "{PLACE_GONE}: expected {}. The kernel stopped; a line typed here is kept until the folder is back or the project is reopened.",
+                                chat.cwd.display()
+                            );
+                            chat.notice(true, &text);
+                        }
+                        chat.flush();
+                    } else if busy && !queued {
                         chat.notice(false, "Stopped.");
                         chat.flush();
                     }
@@ -4429,6 +4602,9 @@ pub fn interrupt_label(detail: &str) -> String {
 
 /// The notice text for a turn the user stopped; the fold line keys on it.
 pub const STOPPED_BY_YOU: &str = "Stopped by you";
+/// The head of the notice for a place whose folder moved under the window
+/// (QA `af-03`); the path it expected follows.
+pub const PLACE_GONE: &str = "This project's folder is gone or was moved";
 
 /// The kernel's line for a turn that ended at the user's own per-turn
 /// spend cap ("Stopped at the per-turn cap: this turn spent $… over the $…

@@ -16,6 +16,11 @@ final class LiveKernelChat: ChatSource {
     private var stream: AsyncStream<ChatUpdate>.Continuation?
     private var pump: Task<Void, Never>?
     private var focus = "root"
+    /// What `hello` said about the kernel's own binary, and whether the line
+    /// about it has been said. A reconnect sends `hello` again; the line is
+    /// said once per attachment, not once per dropped socket.
+    private var binaryGone = false
+    private var saidBinaryGone = false
     private var children: Set<String> = []
     private var childNames: [String: String] = [:]
     private var workers: [String: WorkerStatus] = [:]
@@ -124,10 +129,13 @@ final class LiveKernelChat: ChatSource {
 
     private func handle(_ frame: KernelFrame) {
         switch frame {
-        case .hello(let focus, _, let identity, let store):
+        case .hello(let focus, _, let identity, let store, let build):
             self.focus = focus
             if let identity { stream?.yield(.identity(identity.filled(key: "hello"))) }
             if let store { stream?.yield(.store(store)) }
+            // Said once the replay is in, not here: the seed replaces the
+            // items and would take this line with it.
+            binaryGone = build.binaryGone
         case .snapshot(let focusPath, let agents):
             focus = focusPath.split(separator: "/").last.map(String.init) ?? focus
             remember(agents)
@@ -155,6 +163,17 @@ final class LiveKernelChat: ChatSource {
             let earlier = from > 0 ? from - 1 : max(0, total - history.count)
             stream?.yield(.history(history, earlier: earlier, firstSeq: from))
             history.removeAll()
+            // A kernel started from a file that has since been deleted keeps
+            // answering and refuses every worker it is asked to start, with
+            // an error that reaches nobody (JB-6). Nothing else on the phone
+            // shows it. One plain line at the tail, where the refusals would
+            // otherwise appear unexplained — after the replay, because the
+            // replay seeds the list and would overwrite anything said before
+            // it, and once per attachment, not once per dropped socket.
+            if binaryGone, !saidBinaryGone {
+                saidBinaryGone = true
+                stream?.yield(.item(ChatItem(.notice("This project's kernel is running from a file that has been deleted, so it will refuse to start workers. Restarting it on its machine picks up the build that is there now.", failed: false))))
+            }
         case .assistantDelta(let agent, let text, let step):
             guard agent == focus, !text.isEmpty else { return }
             streamed = true

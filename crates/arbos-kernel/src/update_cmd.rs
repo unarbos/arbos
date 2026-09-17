@@ -24,24 +24,35 @@
 use anyhow::{Context, Result};
 use arbos_update::{
     Channel,
-    kernel::{self, Refusal},
+    kernel::{self, Probe, Refusal},
     net, sign,
 };
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 arbos-kernel update [--install] [--channel stable|dev] [--binary PATH] [--pin X.Y.Z+N]
-                    [--place DIR ...]
+                    [--from PATH] [--place DIR ...]
     What the channel has, and whether this binary is behind it. --install
-    replaces it; without that it only reports. Replacing the binary does not
+    replaces it; --from PATH installs a kernel already on this machine instead
+    of asking the channel, which is how an installation too old to update
+    itself is bootstrapped and how a box with no route to the feed is served.
+    Without --install it only reports. Replacing the binary does not
     update a running kernel: it keeps the code it started with until it
-    restarts, and --place says which ones are still serving what.";
+    restarts, and --place says which ones are still serving what.
+    --binary PATH checks and replaces that file instead of this one. That is
+    how a kernel too old to have `update` (it answers `unknown command
+    update`) is brought forward: run this from any newer arbos-kernel against
+    the old file; afterwards it updates itself.";
 
 pub struct Args {
     pub install: bool,
     pub channel: Option<Channel>,
     pub binary: Option<PathBuf>,
     pub pin: Option<String>,
+    /// A kernel binary already on this machine to install instead of asking
+    /// the channel. What bootstraps an installation too old to update itself,
+    /// and what works on a box with no route to the feed.
+    pub from: Option<PathBuf>,
     /// Places whose running kernel to report on. Defaults to the working
     /// directory when it is one.
     pub places: Vec<PathBuf>,
@@ -54,6 +65,7 @@ impl Args {
             channel: None,
             binary: None,
             pin: None,
+            from: None,
             places: Vec::new(),
         };
         let mut rest = argv.peekable();
@@ -70,6 +82,11 @@ impl Args {
                         Some(PathBuf::from(rest.next().context("--binary wants a path")?));
                 }
                 "--pin" => args.pin = Some(rest.next().context("--pin wants a version")?),
+                "--from" => {
+                    args.from = Some(PathBuf::from(
+                        rest.next().context("--from wants a path to a kernel binary")?,
+                    ));
+                }
                 "--place" => args.places.push(PathBuf::from(
                     rest.next().context("--place wants a directory")?,
                 )),
@@ -115,6 +132,29 @@ pub fn run(args: Args) -> Result<i32> {
     );
     println!("channel   {}", channel.as_str());
 
+    // A file on this machine instead of the channel. Nothing is fetched and
+    // nothing is compared with a feed: the caller has named the build.
+    if let Some(source) = &args.from {
+        let coming = kernel::Running::read(source)?;
+        println!("from      {} {} ({})", coming.version.human(), coming.sha, source.display());
+        if !args.install {
+            println!("\nrun again with --install to replace it");
+            return Ok(0);
+        }
+        let known = places(&args);
+        let probe = match known.first() {
+            Some(place) => kernel::Probe::Place(place),
+            None => kernel::Probe::Version,
+        };
+        kernel::install_file(source, &binary, probe)?;
+        let now = kernel::Running::read(&binary)?;
+        println!("installed {} {}", now.version.human(), now.sha);
+        report_serving(&args, &now);
+        println!();
+        println!("{}", restart_note(&binary));
+        return Ok(0);
+    }
+
     let feed = net::feed(channel)?;
     let offered = match kernel::plan(&running, &feed, args.pin.as_deref()) {
         Ok(offered) => offered,
@@ -159,7 +199,15 @@ pub fn run(args: Args) -> Result<i32> {
     println!("\nfetching  {} bytes", offered.download.size);
     let bytes = net::bytes(&offered.download.url)?;
     let scratch = std::env::temp_dir().join("arbos-kernel-update");
-    kernel::verify_and_install(&bytes, &offered, &binary, &key, &scratch)?;
+    // A place to try the new binary against, when there is one. Reading the
+    // store with the parsers `serve` boots on is as close to "it will work" as
+    // anything can get before the exec.
+    let known = places(&args);
+    let probe = match known.first() {
+        Some(place) => Probe::Place(place),
+        None => Probe::Version,
+    };
+    kernel::verify_and_install(&bytes, &offered, &binary, &key, &scratch, probe)?;
 
     let now = kernel::Running::read(&binary)?;
     println!("installed {} {}", now.version.human(), now.sha);
@@ -183,9 +231,28 @@ struct Serving {
     pid: i32,
     version: String,
     sha: String,
+    /// The file the serving process was started from is gone (Linux:
+    /// `/proc/<pid>/exe` reads `… (deleted)`): it runs an image no file
+    /// holds any more. None where the machine cannot say (no /proc).
+    binary_gone: Option<bool>,
 }
 
-fn serving(place_dir: &std::path::Path) -> Option<Serving> {
+/// Whether `pid` runs an image that is not the file at `on_disk`, where
+/// /proc can say: its exe unlinked (`(deleted)`), or a different file
+/// from the one at the binary's path — a directory renamed to a backup
+/// moves the running inode to a real, undeleted path, so existence alone
+/// would call it fine.
+fn pid_binary_gone(pid: i32, on_disk: &std::path::Path) -> Option<bool> {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    if !exe.exists() || exe.to_string_lossy().ends_with(" (deleted)") {
+        return Some(true);
+    }
+    let running = arbos_core::binary_identity::of(&exe);
+    let installed = arbos_core::binary_identity::of(on_disk);
+    Some(running.is_some() && installed.is_some() && running != installed)
+}
+
+fn serving(place_dir: &std::path::Path, on_disk: &std::path::Path) -> Option<Serving> {
     let place = arbos_core::Place::new(place_dir.to_path_buf());
     let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -207,6 +274,7 @@ fn serving(place_dir: &std::path::Path) -> Option<Serving> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_owned(),
+        binary_gone: pid_binary_gone(pid, on_disk),
     })
 }
 
@@ -238,7 +306,10 @@ fn places(args: &Args) -> Vec<PathBuf> {
 /// Returns whether anything is running code older than the file — the state in
 /// which "the kernel is up to date" would be a lie.
 fn report_serving(args: &Args, on_disk: &kernel::Running) -> bool {
-    let running: Vec<Serving> = places(args).iter().filter_map(|dir| serving(dir)).collect();
+    let running: Vec<Serving> = places(args)
+        .iter()
+        .filter_map(|dir| serving(dir, &on_disk.path))
+        .collect();
     if running.is_empty() {
         return false;
     }
@@ -247,15 +318,25 @@ fn report_serving(args: &Args, on_disk: &kernel::Running) -> bool {
     for one in &running {
         let matches = same_build(&one.sha, &on_disk.sha);
         stale |= !matches;
+        // A process whose own file is gone runs an image nothing on disk
+        // holds: whatever its sha says, only a restart puts it on the
+        // build in front of you. Seven such on two machines went unseen
+        // for days because nothing printed this (mesh sweep, 2026-09-17).
+        let gone = one.binary_gone == Some(true);
+        stale |= gone;
         println!(
             "serving   {} {} (pid {}) in {}{}",
             one.version,
             one.sha,
             one.pid,
             one.place.display(),
-            match matches {
-                true => "",
-                false => "  ← older than the binary on disk",
+            match (gone, matches) {
+                (true, _) => format!(
+                    "  ← binary replaced under it; restart to run {} (on disk)",
+                    on_disk.sha
+                ),
+                (false, true) => String::new(),
+                (false, false) => "  ← older than the binary on disk".to_string(),
             }
         );
     }
@@ -284,8 +365,12 @@ fn restart_note(binary: &std::path::Path) -> String {
          \x20       <place>/.arbos/runtime/kernel.json)\n\
          \n\
          That is the graceful stop: every running turn ends the way the stop button ends\n\
-         it. Started by hand, start it again from {}.",
-        binary.display()
+         it. Started by hand, start it again from {}.\n\
+         \n\
+         The build it replaced is kept beside it as {}. If the new one will not start,\n\
+         moving that back over it is the way out.",
+        binary.display(),
+        arbos_update::kernel::previous_path(binary).display()
     )
 }
 
@@ -339,5 +424,78 @@ mod tests {
         assert!(note.contains("/usr/local/bin/arbos-kernel"), "{note}");
         assert!(note.contains("kill -TERM"), "{note}");
         assert!(note.contains("kernel.json"), "{note}");
+    }
+
+    /// `serving`'s "binary replaced under it": a process whose own file
+    /// was unlinked reads `(deleted)` in /proc, and the line says so.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_whose_file_was_unlinked_reads_binary_gone() {
+        let dir = std::env::temp_dir().join(format!("arbos-pid-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("sleeper");
+        std::fs::copy("/bin/sleep", &bin).unwrap();
+        // ETXTBSY: another test's fork in this process can hold the fresh
+        // file's write descriptor for the instant between its fork and
+        // exec. Not the thing under test; try again.
+        let mut child = None;
+        for _ in 0..50 {
+            match std::process::Command::new(&bin).arg("30").spawn() {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("spawn: {e}"),
+            }
+        }
+        let mut child = child.expect("the copied sleep started");
+        let pid = child.id() as i32;
+        // `spawn` returns when the child's exec has been accepted, but
+        // /proc/<pid>/exe can still name the parent's image for an
+        // instant after a vfork-style spawn; on the CI runner that read
+        // as "another file is running" (Some(true)) about one time in
+        // two, never locally. What `serving` reads in life is a kernel
+        // that has run for seconds or days; here, wait for the link to
+        // settle on the copy before judging it.
+        let want = std::fs::canonicalize(&bin).unwrap();
+        let settle = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+            if exe.as_deref() == Some(want.as_path()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < settle,
+                "/proc/{pid}/exe never settled on {}: {exe:?}",
+                want.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe"));
+        assert_eq!(
+            super::pid_binary_gone(pid, &bin),
+            Some(false),
+            "bin={} exe={exe:?} exe_exists={:?} running={:?} installed={:?}",
+            bin.display(),
+            exe.as_ref().map(|e| e.exists()),
+            exe.as_ref()
+                .ok()
+                .and_then(|e| arbos_core::binary_identity::of(e)),
+            arbos_core::binary_identity::of(&bin),
+        );
+        // An update: a new file renamed over the same path. /proc names
+        // the old inode as deleted although the path exists.
+        std::fs::copy("/bin/sleep", dir.join("sleeper.new")).unwrap();
+        std::fs::rename(dir.join("sleeper.new"), &bin).unwrap();
+        assert!(bin.exists());
+        assert_eq!(super::pid_binary_gone(pid, &bin), Some(true));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

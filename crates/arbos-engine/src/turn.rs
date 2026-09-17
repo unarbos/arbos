@@ -554,30 +554,57 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
 
     let cwd = agent.work_dir(&place.path);
     let turn_line = events.len() as u64;
+    let mut tree_ready: Option<tokio::sync::watch::Receiver<bool>> = None;
     {
         let snap = cwd.clone();
         let agent_dir = layout.dir.clone();
         let agent_id = agent.id.to_string();
-        let transcript_for_note = transcript.clone();
-        let hooks_for_note = Arc::clone(&hooks);
-        tokio::task::spawn_blocking(move || {
-            // A checkpoint that could not be written is said, once, on the
-            // transcript: `undo` and `rewind --files` will refuse this
-            // turn, and the person should know why before they reach for
-            // them (the qal-j08 family).
-            if let Err(e) =
-                crate::tools::git::snapshot_turn(&snap, &agent_dir, &agent_id, turn_line)
-            {
+        // The checkpoint's record — HEAD and this turn's line — lands
+        // before the turn goes on, so a rewind arriving at any point
+        // after resolves to this turn and not the one before it. The
+        // working tree (the slow part on a large repository) follows on
+        // the blocking pool and fills the record in.
+        let record = {
+            let (snap, agent_dir, agent_id) = (snap.clone(), agent_dir.clone(), agent_id.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::tools::git::snapshot_turn_record(&snap, &agent_dir, &agent_id, turn_line)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("checkpoint task: {e}"))
+            .and_then(|r| r)
+        };
+        match record {
+            Ok(Some(cp)) => {
+                // The first tool that writes waits for this to finish,
+                // so the tree is the one before the turn, never one the
+                // turn has already touched.
+                let (tx, rx) = tokio::sync::watch::channel(false);
+                tree_ready = Some(rx);
+                tokio::task::spawn_blocking(move || {
+                    if let Err(e) =
+                        crate::tools::git::snapshot_turn_tree(&snap, &agent_dir, &agent_id, &cp)
+                    {
+                        eprintln!("checkpoint {agent_id}:{turn_line}: tree not saved: {e:#}");
+                    }
+                    let _ = tx.send(true);
+                });
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // A checkpoint that could not be written is said, once, on
+                // the transcript: `undo` and `rewind --files` will refuse
+                // this turn, and the person should know why before they
+                // reach for them (the qal-j08 family).
                 let ev = Event::new(EventKind::Notice {
                     text: format!(
                         "Checkpoint not written for this turn: {e:#}. Until it is, undo and a rewind of files to this turn are refused rather than guessed."
                     ),
                     failed: true,
                 });
-                let _ = append_event(&transcript_for_note, &ev);
-                hooks_for_note.emit(&ev);
+                let _ = append_event(&transcript, &ev);
+                hooks.emit(&ev);
             }
-        });
+        }
     }
 
     // No key or no usable base: the turn cannot start. Say so on the
@@ -824,6 +851,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         bash_wait_ms: host.config.bash_wait_ms,
         hops: wake.hops,
         turn_line,
+        tree_ready,
         web: Arc::new(crate::tool::WebCfg {
             search_url: host.config.search_url.clone(),
             search_key: host.config.search_key.clone(),
@@ -923,13 +951,19 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // a job finished). One file per message, so none is lost when they
         // come faster than the model steps (qa-014), and one a kernel
         // crash leaves behind starts the next turn instead.
-        let steers = arbos_core::inbox::take_steers(&place, agent.id.as_str());
+        //
+        // The files stay until the transcript holds their words: an
+        // append that fails (the disk full, the store gone) leaves the
+        // person's mid-turn message in the inbox for the next turn rather
+        // than deleted with nothing written in its place.
+        let steers = arbos_core::inbox::steers(&place, agent.id.as_str());
         if !steers.is_empty() {
             // An answer's words are already on the transcript (the kernel
             // appended the `answer` line when the user replied); taking the
             // file is what makes this step read them.
             let batch: Vec<Event> = steers
-                .into_iter()
+                .iter()
+                .map(|f| f.msg.clone())
                 .filter(|msg| msg.kind != "answer")
                 .map(|msg| match msg.from.as_str() {
                     "kernel" => Event::new(EventKind::Notice {
@@ -950,6 +984,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 .collect();
             if !batch.is_empty() {
                 append_events(&transcript, &batch)?;
+            }
+            for f in &steers {
+                if let Err(e) = arbos_core::inbox::release(f) {
+                    eprintln!(
+                        "{}: steer {} written but not released: {e:#}",
+                        agent.id, f.name
+                    );
+                }
             }
             events = load_transcript(&transcript)?;
         }

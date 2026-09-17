@@ -138,6 +138,7 @@ impl Scheduler {
                 agent: wake.agent.clone(),
             };
             let transcript = hooks.layout(&id).transcript();
+            let (wake_kind, wake_text) = (wake.kind.clone(), wake.text.clone());
             let opts = arbos_engine::TurnOpts {
                 place,
                 agent,
@@ -169,11 +170,31 @@ impl Scheduler {
                     Some(&id),
                     format!("{:.1}s", started.elapsed().as_secs_f64()),
                 ),
-                Ok(Err(e)) => crate::klog::error(
-                    "turn_error",
-                    Some(&id),
-                    format!("{e:#} after {:.1}s", started.elapsed().as_secs_f64()),
-                ),
+                Ok(Err(e)) => {
+                    crate::klog::error(
+                        "turn_error",
+                        Some(&id),
+                        format!("{e:#} after {:.1}s", started.elapsed().as_secs_f64()),
+                    );
+                    // The error was only a log line: the transcript ended
+                    // on whatever came before it, the turn folder closed as
+                    // "success (no reply)", and a window drew a turn that
+                    // simply stopped. Now the record ends in words, like a
+                    // panic's does — and when the transcript itself cannot
+                    // be written (the store read-only, the disk full), the
+                    // words go to the attached windows live, and a person
+                    // whose message never reached the record is told where
+                    // it is kept and to send it again.
+                    crate::plan::note_turn_error(&hooks, &id, &format!("{e:#}"));
+                    turn_error_said(
+                        &hooks,
+                        &id,
+                        &transcript,
+                        wake_kind,
+                        wake_text.as_deref(),
+                        &e,
+                    );
+                }
                 Err(e) => {
                     let why = panic_text(e);
                     crate::klog::error(
@@ -222,6 +243,60 @@ struct DoneGuard {
 impl Drop for DoneGuard {
     fn drop(&mut self) {
         let _ = self.done.send(std::mem::take(&mut self.id));
+    }
+}
+
+/// A turn that returned an error, said: a failed notice and
+/// `turn_complete` on the transcript unless the turn already closed
+/// itself; the same notice live to attached windows when the transcript
+/// cannot take it; and, for a user's turn whose words never landed, the
+/// place they are kept.
+fn turn_error_said(
+    hooks: &Arc<KernelHooks>,
+    id: &str,
+    transcript: &std::path::Path,
+    wake_kind: arbos_core::WakeKind,
+    wake_text: Option<&str>,
+    e: &anyhow::Error,
+) {
+    use arbos_core::{Event, EventKind, wire::Frame};
+    let events = arbos_core::load_transcript(transcript).unwrap_or_default();
+    if matches!(
+        events.last().map(|ev| &ev.kind),
+        Some(EventKind::TurnComplete { .. })
+    ) {
+        return;
+    }
+    let words_lost = wake_kind == arbos_core::WakeKind::User
+        && wake_text.is_some_and(|t| {
+            !events
+                .iter()
+                .rev()
+                .take(50)
+                .any(|ev| matches!(&ev.kind, EventKind::User { text, .. } if text == t))
+        });
+    let mut text = format!(
+        "The turn ended on an error: {e:#}. What ran before it stands; send again to go on. (kernel.log has the detail.)"
+    );
+    if words_lost && let Some(t) = wake_text {
+        text = format!(
+            "Your message did not reach the record: {e:#}. It is kept under .arbos/agents/{id}/turns/ as the cause of this turn — \"{}\" — send it again once the store can be written.",
+            arbos_core::text::clip(t.trim(), 120)
+        );
+    }
+    let notice = Event::new(EventKind::Notice { text, failed: true });
+    let close = Event::new(EventKind::TurnComplete { usage: None });
+    if let Err(write_err) = arbos_core::append_events(transcript, &[notice.clone(), close]) {
+        crate::klog::error(
+            "turn_error_unrecorded",
+            Some(id),
+            format!("the transcript would not take the notice: {write_err:#}"),
+        );
+        // Live, at least: the tail will never carry it.
+        hooks.broadcast(Frame::Event {
+            agent: id.to_string(),
+            event: notice,
+        });
     }
 }
 
@@ -328,6 +403,11 @@ impl arbos_engine::Hooks for TurnHooks {
     fn spoke_status(&self, step: &str) {
         self.inner.note_progress(self.agent.as_str());
         let _ = self.inner.set_status(self.agent.as_str(), step, "agent");
+    }
+
+    fn kernel_step(&self, step: &str) {
+        self.inner.note_progress(self.agent.as_str());
+        let _ = self.inner.set_status(self.agent.as_str(), step, "derived");
     }
 
     fn working(&self, secs: u64) {

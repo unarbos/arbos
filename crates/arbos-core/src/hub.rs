@@ -95,6 +95,10 @@ pub enum HubFrame {
         git_sha: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         built_at: String,
+        /// The registrant's own file is gone from disk: it runs an old
+        /// image and needs a restart. Sent only when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        binary_gone: bool,
         protocol: u32,
     },
     /// Hub → registrant: accepted under this name.
@@ -242,12 +246,24 @@ pub struct MachineInfo {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub version: String,
-    /// The newest registrant's build: short git sha and build time
-    /// (`YYYY-MM-DDTHH:MMZ`). Facts only; staleness is the client's call.
+    /// The machine's build, when every process registered from it agrees
+    /// — short git sha and build time (`YYYY-MM-DDTHH:MMZ`). Empty when
+    /// they differ: a machine is not one process, and a row that named one
+    /// registrant's build for all of them said the arboslife daemon was on
+    /// a build it was not running, for two and a half days. `builds` has
+    /// each. Facts only; staleness is the client's call.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub git_sha: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub built_at: String,
+    /// Each process registered from this machine — the worker daemon, and
+    /// a kernel per project — with its own build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub builds: Vec<RegistrantBuild>,
+    /// Some registrant runs from a file that is gone: it needs a restart
+    /// (`builds` says which). Sent only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary_gone: bool,
     /// A worker daemon is connected: `spawn host=<name>` can claim it.
     #[serde(default)]
     pub worker: bool,
@@ -256,6 +272,24 @@ pub struct MachineInfo {
     /// Unix millis of the first registration still connected.
     #[serde(default)]
     pub since: i64,
+}
+
+/// One registered process's build, as it reported itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistrantBuild {
+    /// `worker` for the daemon; `kernel` for a project's kernel.
+    pub role: String,
+    /// The project a kernel serves; empty for the worker.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub git_sha: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub built_at: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary_gone: bool,
 }
 
 impl MachineInfo {
@@ -1004,6 +1038,15 @@ Report: link [the audit](arbos://cloud/demo/docs/echo.md); read arbos://cloud/de
             version: "0.2.0".into(),
             git_sha: "abc123def456".into(),
             built_at: "2026-09-16T11:55Z".into(),
+            builds: vec![RegistrantBuild {
+                role: "kernel".into(),
+                project: "demo".into(),
+                version: "0.2.0".into(),
+                git_sha: "abc123def456".into(),
+                built_at: "2026-09-16T11:55Z".into(),
+                binary_gone: false,
+            }],
+            binary_gone: false,
             worker: true,
             projects: vec![ProjectInfo {
                 identity: Some(crate::project::ProjectIdentity {

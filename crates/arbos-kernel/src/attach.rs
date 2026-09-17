@@ -437,9 +437,10 @@ pub async fn answer_http(
         (
             "200 OK",
             format!(
-                "{{\"kernel\":\"{kernel}\",\"git_sha\":\"{}\",\"built_at\":\"{}\",\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\",\"update_gate\":{update_gate}}}\n",
+                "{{\"kernel\":\"{kernel}\",\"git_sha\":\"{}\",\"built_at\":\"{}\",\"binary_gone\":{},\"protocol\":{protocol},\"attach\":\"websocket\",\"auth\":\"{auth}\",\"update_gate\":{update_gate}}}\n",
                 crate::klog::git_sha(),
-                crate::klog::built_at()
+                crate::klog::built_at(),
+                arbos_core::binary_gone()
             ),
         )
     } else {

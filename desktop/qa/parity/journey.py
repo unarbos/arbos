@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DRIVER_PY = Path(os.environ.get("ARBOS_DRIVER_PY", HERE.parent.parent / "driver" / "arbosdriver.py"))
@@ -125,6 +125,17 @@ class Journey:
         self.rows.append(row)
         log(f"{'pass' if ok else 'FAIL':5} {step:28} {observed[:110]}")
         return ok
+
+    def seen(self, target: str) -> bool:
+        """On screen, not merely laid out (rig audit R1/R15): exists, and the
+        driver says visible or reachable."""
+        if not self.app.exists(target):
+            return False
+        try:
+            f = self.app.find(target)
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(f.get("visible")) or bool(f.get("reachable"))
 
     def still(self, name: str) -> str:
         path = self.out / f"{self.n:02d}-{name}.png"
@@ -273,9 +284,9 @@ class Journey:
         c = self.root() or {}
         users = [i for i in c.get("items", []) if i.get("kind") == "user" and FIRST_LINE in (i.get("text") or "")]
         notices = [i for i in c.get("items", []) if i.get("kind") == "notice"]
-        offer = self.app.exists("provider-offer-remember") or "no key" in json.dumps(self.state()).lower()
+        offer = self.seen("provider-offer-remember") or "no key" in json.dumps(self.state()).lower()
         ok = (len(users) == 1 and len(notices) == 1 and c.get("held") == 1 and not c.get("streaming")
-              and not c.get("turn_open") and self.app.exists("followups-head"))
+              and not c.get("turn_open") and self.seen("followups-head"))
         self.score("K01-keyless-first-line", "the card lands once; one line says no key and that the words are kept; the follow-up row shows them waiting for a key; no shimmer, no second red line",
                    ok, f"cards={len(users)} notices={len(notices)} held={c.get('held')} streaming={c.get('streaming')} row={self.app.exists('followups-head')} offer_bar={offer} settled={bool(settled)}", t0)
 
@@ -331,7 +342,7 @@ class Journey:
         st = self.state()
         ix = self.project_ix()
         made = self.proj.is_dir()
-        kickoff = self.app.exists("kickoff")
+        kickoff = self.seen("kickoff")
         # A fast kernel has the kickoff turn running by now and the
         # transcript has taken the view over: that is the same landing.
         c = self.root() or {}
@@ -377,8 +388,8 @@ class Journey:
             return found or None
         line = self.wait(lines, 30) or []
         root_live = bool((self.root() or {}).get("turn_open") or (self.root() or {}).get("streaming"))
-        card = self.app.exists("working-card")
-        pill = self.app.exists("pill-working")
+        card = self.seen("working-card")
+        pill = self.seen("pill-working")
         one_line_while_live = (not root_live) or line == ["child-line-live"]
         self.score("J05-live-shape-one-line", "while workers run the root shows one 'N Working  <step>' line (or one per worker once its own turn ended) and the Working pill; no card until asked (F-82)",
                    bool(line) and pill and not card and one_line_while_live, f"lines={line} root_live={root_live} pill={pill} card_open={card}", t0)
@@ -413,7 +424,7 @@ class Journey:
 
     def j08_continue(self) -> None:
         t0 = time.time()
-        if self.app.exists("pill-continue"):
+        if self.seen("pill-continue"):
             self.app.click("pill-continue")
         else:
             self.send("Continue where you stopped and finish the to-do app and its tests.")
@@ -602,6 +613,7 @@ def main() -> int:
     for k in range(args.runs):
         run = next_run + k
         log(f"== journey run {run} on {args.label}")
+        log(f"kernel under test: {kernel_build(f'{args.bindir}/arbos-kernel')}")
         rows = Journey(drv, args, run).run_all()
         with record.open("a") as f:
             for r in rows:
