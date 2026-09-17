@@ -11,10 +11,12 @@ custom OpenAI-compatible provider, so the trace verifiers records is the sample.
         --client.base-url https://openrouter.ai/api/v1 --client.api-key-var OPENROUTER_API_KEY
 
 `--env.agent.runtime.block '["*"]'` leaves the container only the interception
-route. Without it the docker runtime uses the host network, and the agent can
-`pip download` the release that already carries the fix: in the SWE-bench loop's
-cycle-10 baseline run 6 of 35 rollouts did, all six graded solved; in cycle 11,
-8 of 29. The `arbos_egress_open` metric records which rollouts ran open.
+route, and the harness refuses to run without it: with the docker runtime's
+default host network the agent `pip download`s the release that already carries
+the fix (133 of 948 rollouts across the SWE-bench loop's first eleven cycles,
+114 of them graded solved), so an open-network rollout is not a measurement.
+`--env.agent.harness.allow-open-egress true` overrides the refusal for debugging;
+the `arbos_egress_open` metric then marks those rollouts.
 """
 
 from __future__ import annotations
@@ -84,6 +86,9 @@ class ArbosHarnessConfig(HarnessConfig):
     at $4 the cap cut three hard rollouts that had solved at $6 before (cycle 9), so $8."""
     changes_before_done: bool = False
     """Nudge a final reply after edits to run `changes` first (`ARBOS_CHANGES_BEFORE_DONE`)."""
+    allow_open_egress: bool = False
+    """Run even when the runtime's egress is unrestricted. Off: setup refuses, the
+    rollout is an error and gets no score. On: it runs, and `arbos_egress_open` is 1.0."""
     artifacts: str = "outputs/arbos"
     """Host folder that receives each rollout's `/logs/artifacts/arbos` (patch,
     rollout bundle, kernel log, result.json) under `<task>--<trace id>/`. Empty = keep
@@ -104,6 +109,12 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         return kernel_from_image(self.config.image)
 
     async def setup(self, runtime: Runtime) -> None:
+        if not runtime.network_restricted and not self.config.allow_open_egress:
+            raise RuntimeError(
+                "arbos: the runtime's egress is open, so the agent could fetch the upstream "
+                "fix; this rollout is not a measurement and is refused. Pass "
+                "--env.agent.runtime.block '[\"*\"]' (or allow-open-egress true to run anyway)."
+            )
         kernel = self.kernel_path()
         logger.info("arbos: installing %s into the runtime", kernel)
         await runtime.write(KERNEL_BIN, kernel.read_bytes())
@@ -181,11 +192,6 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         Also brings the rollout's artifacts to the host when `artifacts` is set."""
         r = await self.result(runtime)
         code = int(r.get("kernel_exit", -1))
-        if not runtime.network_restricted:
-            logger.warning(
-                "arbos: runtime egress is open; the agent could fetch upstream releases. "
-                "Pass --env.agent.runtime.block '[\"*\"]' for a clean measurement."
-            )
         collected = 0
         if self.config.artifacts:
             collected = await self.collect(task, trace, runtime)
