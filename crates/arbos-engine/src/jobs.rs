@@ -596,11 +596,23 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 /// The log is cut back when it passes the cap; a job that refills it past
 /// the cap on the very next look is writing faster than anyone reads and
 /// is ended as runaway (a poll cannot hard-cap a writer doing 500 MB/s).
+/// `$2` is the place's `.arbos` store: gone (the project deleted, a
+/// scratch folder removed), the job has no folder to be checked, read,
+/// capped or killed from, and its `out.log` is an unlinked inode growing
+/// on the disk unseen — 164 GB on QA's machine, with the cap blind
+/// because `wc -c` on a deleted path reads as 0. No store, no job; the
+/// kernel's own liveness is not asked, since the kernel may be the thing
+/// that leaked.
 fn leashed(dir: &Path, program: String, args: Vec<String>) -> (String, Vec<String>) {
-    const LEASH: &str = r#"D=$1; shift; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0
+    const LEASH: &str = r#"D=$1; P=$2; shift 2; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0
 "$@" & F=$!
 trap 'kill -TERM "$F" 2>/dev/null' INT TERM
 while kill -0 "$F" 2>/dev/null; do
+  if [ ! -d "$P" ]; then
+    kill -9 "$F" 2>/dev/null
+    kill -9 -$$ 2>/dev/null
+    exit 137
+  fi
   if ! kill -0 "$K" 2>/dev/null; then
     echo "killed: the kernel exited and the job was ended with it" > "$D/killed"
     kill -9 "$F" 2>/dev/null
@@ -629,10 +641,22 @@ wait "$F""#;
         LEASH.to_string(),
         "job-leash".to_string(),
         dir.display().to_string(),
+        store_of(dir).display().to_string(),
         program,
     ];
     all.extend(args);
     ("sh".to_string(), all)
+}
+
+/// The `.arbos` store a job folder lives under: the nearest ancestor so
+/// named, or three levels up (`.arbos/agents/<id>/jobs/<job>`).
+fn store_of(job_dir: &Path) -> PathBuf {
+    job_dir
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == ".arbos"))
+        .map(Path::to_path_buf)
+        .or_else(|| job_dir.ancestors().nth(4).map(Path::to_path_buf))
+        .unwrap_or_else(|| job_dir.to_path_buf())
 }
 
 fn job_num(id: &str) -> i64 {
