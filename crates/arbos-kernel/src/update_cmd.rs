@@ -193,13 +193,22 @@ struct Serving {
     binary_gone: Option<bool>,
 }
 
-/// Whether `pid`'s own binary is gone from disk, where /proc can say.
-fn pid_binary_gone(pid: i32) -> Option<bool> {
+/// Whether `pid` runs an image that is not the file at `on_disk`, where
+/// /proc can say: its exe unlinked (`(deleted)`), or a different file
+/// from the one at the binary's path — a directory renamed to a backup
+/// moves the running inode to a real, undeleted path, so existence alone
+/// would call it fine.
+fn pid_binary_gone(pid: i32, on_disk: &std::path::Path) -> Option<bool> {
     let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-    Some(!exe.exists() || exe.to_string_lossy().ends_with(" (deleted)"))
+    if !exe.exists() || exe.to_string_lossy().ends_with(" (deleted)") {
+        return Some(true);
+    }
+    let running = arbos_core::binary_identity::of(&exe);
+    let installed = arbos_core::binary_identity::of(on_disk);
+    Some(running.is_some() && installed.is_some() && running != installed)
 }
 
-fn serving(place_dir: &std::path::Path) -> Option<Serving> {
+fn serving(place_dir: &std::path::Path, on_disk: &std::path::Path) -> Option<Serving> {
     let place = arbos_core::Place::new(place_dir.to_path_buf());
     let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
@@ -221,7 +230,7 @@ fn serving(place_dir: &std::path::Path) -> Option<Serving> {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_owned(),
-        binary_gone: pid_binary_gone(pid),
+        binary_gone: pid_binary_gone(pid, on_disk),
     })
 }
 
@@ -253,7 +262,10 @@ fn places(args: &Args) -> Vec<PathBuf> {
 /// Returns whether anything is running code older than the file — the state in
 /// which "the kernel is up to date" would be a lie.
 fn report_serving(args: &Args, on_disk: &kernel::Running) -> bool {
-    let running: Vec<Serving> = places(args).iter().filter_map(|dir| serving(dir)).collect();
+    let running: Vec<Serving> = places(args)
+        .iter()
+        .filter_map(|dir| serving(dir, &on_disk.path))
+        .collect();
     if running.is_empty() {
         return false;
     }
@@ -394,13 +406,14 @@ mod tests {
         }
         let mut child = child.expect("the copied sleep started");
         let pid = child.id() as i32;
-        assert_eq!(super::pid_binary_gone(pid), Some(false));
+        assert_eq!(super::pid_binary_gone(pid, &bin), Some(false));
         // An update: a new file renamed over the same path. /proc names
         // the old inode as deleted although the path exists.
         std::fs::copy("/bin/sleep", dir.join("sleeper.new")).unwrap();
         std::fs::rename(dir.join("sleeper.new"), &bin).unwrap();
         assert!(bin.exists());
-        assert_eq!(super::pid_binary_gone(pid), Some(true));
+        assert_eq!(super::pid_binary_gone(pid, &bin), Some(true));
+
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);

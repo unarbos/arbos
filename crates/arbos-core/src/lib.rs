@@ -121,7 +121,14 @@ pub mod binary_identity {
         mtime_ms: i128,
     }
 
-    static AT_START: OnceLock<Option<Identity>> = OnceLock::new();
+    /// The path this process was started from and that file's identity,
+    /// both taken at start. The path, not `current_exe()` later: when an
+    /// update renames the whole `Arbos.app` directory to a backup, the
+    /// running kernel's inode travels with it and `current_exe()` names
+    /// the *backup* — a real file, identical to the one at start — while
+    /// the path the kernel was started from now holds the new build. The
+    /// question is what is at that path now.
+    static AT_START: OnceLock<Option<(std::path::PathBuf, Identity)>> = OnceLock::new();
 
     /// Read `path`'s identity now.
     pub fn of(path: &Path) -> Option<Identity> {
@@ -151,7 +158,17 @@ pub mod binary_identity {
     /// before anything can replace the file; a later first call takes
     /// whatever is there then, which is the best a late start can do.
     pub fn remember_start() {
-        let _ = AT_START.get_or_init(|| std::env::current_exe().ok().and_then(|p| of(&p)));
+        let _ = AT_START.get_or_init(|| {
+            let p = std::env::current_exe().ok()?;
+            let id = of(&p)?;
+            Some((p, id))
+        });
+    }
+
+    /// The path this process was started from, as remembered at start.
+    pub fn start_path() -> Option<std::path::PathBuf> {
+        remember_start();
+        AT_START.get().and_then(|s| s.as_ref().map(|(p, _)| p.clone()))
     }
 
     /// Whether the file at `path` is not the one recorded as `start`:
@@ -172,15 +189,21 @@ pub mod binary_identity {
     /// looking healthy from outside (mesh sweep, 2026-09-17).
     pub fn gone() -> bool {
         remember_start();
-        let Ok(path) = std::env::current_exe() else {
+        let Ok(now) = std::env::current_exe() else {
             return true;
         };
         // Linux names the unlinked inode "… (deleted)": gone whatever a
         // same-named file says.
-        if path.to_string_lossy().ends_with(" (deleted)") {
+        if now.to_string_lossy().ends_with(" (deleted)") {
             return true;
         }
-        replaced(AT_START.get().copied().flatten(), &path)
+        match AT_START.get().and_then(|s| s.as_ref()) {
+            // What is at the start path *now* against what was there at
+            // start — not where this inode has been moved to.
+            Some((start_path, start_id)) => replaced(Some(*start_id), start_path),
+            // No identity taken at start: only absence can be known.
+            None => !now.exists(),
+        }
     }
 
     #[cfg(test)]
@@ -218,6 +241,32 @@ pub mod binary_identity {
         #[test]
         fn this_test_binary_is_not_gone() {
             assert!(!gone());
+        }
+
+        /// The app's update renames the whole directory to a backup: the
+        /// running inode travels, so its own current path is a real,
+        /// unchanged file — and the start path holds a new build. Judged
+        /// by the start path, that is replaced; judged by where the inode
+        /// went, it would read as fine for ever.
+        #[test]
+        fn a_directory_renamed_to_a_backup_reads_as_replaced_by_the_start_path() {
+            let dir = std::env::temp_dir().join(format!("arbos-binmove-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let app = dir.join("Arbos.app");
+            std::fs::create_dir_all(&app).unwrap();
+            let start_path = app.join("kernel");
+            std::fs::write(&start_path, b"old image").unwrap();
+            let start_id = of(&start_path).unwrap();
+            // The update: the directory becomes the backup, a new one takes
+            // its place with a new build at the same relative path.
+            std::fs::rename(&app, dir.join("Arbos.app.backup")).unwrap();
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::write(&start_path, b"new image!").unwrap();
+            let moved_inode_path = dir.join("Arbos.app.backup").join("kernel");
+            assert_eq!(of(&moved_inode_path), Some(start_id), "the inode travelled unchanged");
+            assert!(!replaced(Some(start_id), &moved_inode_path), "by its own current path: fine");
+            assert!(replaced(Some(start_id), &start_path), "by the start path: replaced");
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
