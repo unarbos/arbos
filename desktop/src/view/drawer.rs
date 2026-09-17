@@ -14,13 +14,13 @@
 
 use crate::{
     model::{
-        panel::PanelTab,
+        panel::{MAX_WIDTH, MIN_WIDTH, PanelTab},
         surface::{Surface, SurfaceId},
     },
     view::{
         component::surface as board,
         panel::{PANEL_MIN_WINDOW, PANEL_WIDTH},
-        root::{self, Arbos, Pane, TogglePanel},
+        root::{self, Arbos, Pane, TogglePanel, ZoomPanel},
     },
 };
 use bezel::{
@@ -32,17 +32,26 @@ use bezel::{
     ui::{icons, tooltip::Tooltip, widgets::Buttons},
 };
 
-/// The tab row's height and its pills, as the window's own tab strip draws
-/// them: one row of equal pills, the live one shaded.
-const TAB_HEIGHT: f32 = 24.;
+/// The tab row's pills, measured off Cursor's side panel
+/// (`internal/cursor-side-panel-measured.md`): a 26 px pill in a 40 px row,
+/// radius 6, icon then a 6 px gap then the label, and no minimum width — a
+/// panel tab hugs its label rather than sitting in an equal cell the way the
+/// window's project tabs do.
+const TAB_ROW_HEIGHT: f32 = 40.;
+const TAB_HEIGHT: f32 = 26.;
 const TAB_RADIUS: f32 = 6.;
-const TAB_MIN_WIDTH: f32 = 84.;
 const TAB_MAX_WIDTH: f32 = 180.;
 
-/// How much of the window the drawer may take. The chat is this app's centre
-/// of gravity and never goes below a readable measure, so a wide drawer on a
-/// small window is clamped rather than honoured.
-const CHAT_MIN_WIDTH: f32 = 560.;
+/// One tile of the empty tab, and the gap between them: Cursor's are about
+/// 110 by 80, 16 apart.
+const CARD_WIDTH: f32 = 110.;
+const CARD_HEIGHT: f32 = 80.;
+const CARD_GAP: f32 = 16.;
+
+/// The chat's floor. Cursor's divider clamps at 418 and never squeezes the
+/// chat under it; this app has no left sidebar, so the same floor leaves more
+/// room, not less.
+const CHAT_MIN_WIDTH: f32 = 418.;
 
 /// What the four cards on an empty tab offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +112,7 @@ impl Arbos {
         // `CHAT_MIN_WIDTH` is narrowed instead.
         let width = panel
             .width()
+            .clamp(PANEL_WIDTH.min(MIN_WIDTH), MAX_WIDTH)
             .min((viewport - CHAT_MIN_WIDTH).max(PANEL_WIDTH));
         let on_project = tabs.get(active) == Some(&PanelTab::Project);
         let body = match tabs.get(active).copied().unwrap_or(PanelTab::Project) {
@@ -151,7 +161,7 @@ impl Arbos {
         div()
             .id("panel-tabs")
             .flex_none()
-            .h(px(root::HEADER_HEIGHT))
+            .h(px(TAB_ROW_HEIGHT))
             .w_full()
             .px(px(6.))
             .flex()
@@ -194,6 +204,26 @@ impl Arbos {
                     .gap(px(4.))
                     .children(tabs.iter().enumerate().map(|(at, tab)| {
                         self.panel_tab(at, *tab, at == active, focused, &theme, cx)
+                    })),
+            )
+            .child(
+                theme
+                    .ghost("panel-expand")
+                    .flex_none()
+                    .size(px(TAB_HEIGHT))
+                    .rounded(px(TAB_RADIUS))
+                    .items_center()
+                    .justify_center()
+                    .tooltip(|window, cx| {
+                        Tooltip::with_keystroke("Expand panel", "⌘\\", window, cx)
+                    })
+                    .child(
+                        icons::icon(icons::system::WIDGET)
+                            .size(px(12.))
+                            .text_color(theme.text_muted),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.zoom_panel_action(&ZoomPanel, window, cx);
                     })),
             )
             .child(
@@ -278,7 +308,6 @@ impl Arbos {
             .group(group)
             .flex_none()
             .h(px(TAB_HEIGHT))
-            .min_w(px(TAB_MIN_WIDTH))
             .max_w(px(TAB_MAX_WIDTH))
             .pl(px(8.))
             .pr(px(4.))
@@ -360,25 +389,38 @@ impl Arbos {
         )
     }
 
-    /// An empty tab: the four things a tab can hold. Two of them the window
-    /// opens itself; the other two are the agent's to open, and their cards
-    /// say so and put the request in the composer rather than pretending to
-    /// do it here.
+    /// An empty tab: the four things a tab can hold, as Cursor's own empty
+    /// panel draws them — a 2×2 of tiles, an icon over a label, sitting low
+    /// in the panel rather than centred. Two of them the window opens itself;
+    /// the other two are the agent's to open, and their tiles say so and put
+    /// the request in the composer rather than pretending to do it here.
     fn panel_cards(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let row = |cards: [Card; 2], this: &Self, cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .flex_row()
+                .gap(px(CARD_GAP))
+                .children(
+                    cards
+                        .into_iter()
+                        .map(|card| this.panel_card(card, theme, cx)),
+                )
+        };
         div()
             .id("panel-cards")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .p(px(12.))
+            .overflow_hidden()
             .flex()
             .flex_col()
-            .gap(px(8.))
-            .children(
-                Card::ALL
-                    .into_iter()
-                    .map(|card| self.panel_card(card, theme, cx)),
-            )
+            .items_center()
+            .justify_center()
+            .gap(px(CARD_GAP))
+            .child(row([Card::Project, Card::Browser], self, cx))
+            .child(row([Card::Terminal, Card::File], self, cx))
+            // Cursor's tiles sit at about 60% of the panel's height, near the
+            // composer's line rather than in the middle.
+            .child(div().flex_none().h(px(80.)))
             .into_any_element()
     }
 
@@ -386,42 +428,30 @@ impl Arbos {
         div()
             .id(("panel-card", card as usize))
             .flex_none()
-            .w_full()
-            .p(px(10.))
+            .w(px(CARD_WIDTH))
+            .h(px(CARD_HEIGHT))
             .rounded(px(8.))
             .border_1()
             .border_color(theme.border)
             .flex()
-            .flex_row()
+            .flex_col()
             .items_center()
-            .gap(px(10.))
+            .justify_center()
+            .gap(px(6.))
             .cursor_pointer()
             .hover(|el| el.bg(theme.element_hover))
+            .tooltip(move |window, cx| Tooltip::text(card.detail(), window, cx))
             .child(
                 icons::icon(card.glyph())
-                    .size(px(16.))
+                    .size(px(18.))
                     .flex_none()
                     .text_color(theme.text_muted),
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_style(TextStyle::Body)
-                            .text_color(theme.text)
-                            .child(card.title()),
-                    )
-                    .child(
-                        div()
-                            .text_style(TextStyle::Caption)
-                            .text_color(theme.text_faint)
-                            .child(card.detail()),
-                    ),
+                    .text_style(TextStyle::Callout)
+                    .text_color(theme.text)
+                    .child(card.title()),
             )
             .on_click(cx.listener(move |this, _, window, cx| this.take_card(card, window, cx)))
             .into_any_element()

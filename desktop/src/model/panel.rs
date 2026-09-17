@@ -14,11 +14,19 @@
 
 use crate::model::surface::SurfaceId;
 
-/// The drawer's width when the person has not set one. The `.arbos/` view was
-/// drawn for the narrow measure; anything else wants room for a command's
-/// output.
+/// The drawer's width when the person has not set one, and the range a drag
+/// may take it to. Measured off Cursor at a 1440-wide window
+/// (`internal/cursor-side-panel-measured.md`): its side panel opens at half
+/// the space beside the sidebar — 592 — and clamps between 377 and 766, with
+/// the chat never squeezed under 418.
+///
+/// The project tab keeps the narrow measure it was drawn for, which is the
+/// width already matched against Cursor's *sidebar*; the wide one is for
+/// Cursor's *side panel*, which is what every other tab is.
 pub const PAGE_WIDTH: f32 = 280.;
-pub const SURFACE_WIDTH: f32 = 560.;
+pub const SURFACE_WIDTH: f32 = 592.;
+pub const MIN_WIDTH: f32 = 377.;
+pub const MAX_WIDTH: f32 = 766.;
 
 /// Which side opened a surface. The window knows its own clicks; it cannot
 /// know whether a terminal the agent started was asked for in prose, so the
@@ -140,8 +148,11 @@ impl Panel {
                     self.tabs[at] = PanelTab::Surface(id);
                     at
                 } else {
-                    self.tabs.push(PanelTab::Surface(id));
-                    self.tabs.len() - 1
+                    // Beside the tab in front rather than at the end, which
+                    // is where Cursor puts a new one.
+                    let at = (self.active() + 1).min(self.tabs.len());
+                    self.tabs.insert(at, PanelTab::Surface(id));
+                    at
                 }
             }
         };
@@ -152,12 +163,14 @@ impl Panel {
         at
     }
 
-    /// A new empty tab, in front. What `⌘T` does with the drawer focused.
+    /// A new empty tab, beside the one in front — where Cursor opens one.
+    /// What `⌘T` does with the drawer focused.
     pub fn new_tab(&mut self) -> usize {
         let id = self.next_new;
         self.next_new += 1;
-        self.tabs.push(PanelTab::New(id));
-        self.active = self.tabs.len() - 1;
+        let at = (self.active() + 1).min(self.tabs.len());
+        self.tabs.insert(at, PanelTab::New(id));
+        self.active = at;
         self.open = true;
         self.active
     }
@@ -275,6 +288,26 @@ mod tests {
         assert_eq!(panel.tabs().len(), 2);
         panel.add_surface(id(7), true, true);
         assert_eq!(panel.tabs(), &[PanelTab::Project, PanelTab::Surface(id(7))]);
+    }
+
+    #[test]
+    fn a_new_tab_lands_beside_the_one_in_front() {
+        let mut panel = Panel::default();
+        panel.add_surface(id(1), true, true);
+        panel.add_surface(id(2), true, true);
+        panel.select(1);
+        panel.add_surface(id(3), true, true);
+        assert_eq!(
+            panel.tabs(),
+            &[
+                PanelTab::Project,
+                PanelTab::Surface(id(1)),
+                PanelTab::Surface(id(3)),
+                PanelTab::Surface(id(2)),
+            ],
+            "beside the front tab, which is where Cursor opens one"
+        );
+        assert_eq!(panel.active(), 2);
     }
 
     #[test]
