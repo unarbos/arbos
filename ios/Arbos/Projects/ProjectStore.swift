@@ -104,6 +104,9 @@ final class ProjectStore: ObservableObject {
         // to tap (M-151, M-168).
         if hubAnswered {
             let machines = Set(rosterMachines)
+            #if DEBUG
+            print("roster: kept-row pass — listed \(list.count), opened before \(openedBefore.count), machines \(machines.sorted())")
+            #endif
             for target in openedBefore where !list.contains(where: { $0.target == target }) {
                 guard case .hub(let machine, let project) = target else { continue }
                 var row = entry(target: target, folder: project, machine: machine,
@@ -111,6 +114,9 @@ final class ProjectStore: ObservableObject {
                 row.waitingOn = machines.contains(machine)
                     ? "\(project) isn't running on \(machine)"
                     : "\(machine) is off"
+                #if DEBUG
+                print("roster: keeping \(target.stored) — \(row.waitingOn)")
+                #endif
                 list.append(row)
             }
         }
@@ -180,11 +186,19 @@ final class ProjectStore: ObservableObject {
 
     /// Called when a project is opened, so its row survives its machine.
     func remember(opened target: KernelTarget) {
-        guard case .hub = target else { return }
+        guard case .hub = target else {
+            #if DEBUG
+            print("roster: not remembering \(target.stored) — not a hub target")
+            #endif
+            return
+        }
         var seen = defaults.array(forKey: "projects.opened") as? [String] ?? []
         guard !seen.contains(target.stored) else { return }
         seen.append(target.stored)
-        defaults.set(seen.suffix(40).map { $0 }, forKey: "projects.opened")
+        defaults.set(Array(seen.suffix(40)), forKey: "projects.opened")
+        #if DEBUG
+        print("roster: remembered \(target.stored) — \(seen.count) opened before")
+        #endif
     }
 
     /// One project, one row: the pod row goes when its twin is in the list.
