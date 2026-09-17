@@ -25,7 +25,18 @@ final class DebugInjector {
         frameBytes = Int(AudioEngine.sampleRate) * 2 * Self.frameMilliseconds / 1000
     }
 
+    /// Either stand-in for the microphone is in play, so the real one stays
+    /// shut: `-injectWav` writes to the socket, `-micWav` to the capture
+    /// path (see `CallViewModel.startMicClipIfAsked`).
     static func isRequested() -> Bool {
+        UserDefaults.standard.string(forKey: "injectWav") != nil
+            || UserDefaults.standard.string(forKey: "micWav") != nil
+    }
+
+    /// Only `-injectWav` drives the socket-side injector; with `-micWav` the
+    /// frames arrive through capture instead and a second stream would give
+    /// the duplex model two clocks.
+    static func socketInjectionRequested() -> Bool {
         UserDefaults.standard.string(forKey: "injectWav") != nil
     }
 
