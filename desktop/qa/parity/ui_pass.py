@@ -746,7 +746,12 @@ class Pass:
             # here; the app then rightly refuses "stop the turn before
             # rewinding" (cycle 32t: `turn_ended=None` at the click). Let
             # that turn end first, so the row measures Rewind, not the race.
-            self.wait_idle(90); time.sleep(1.5)
+            self.wait_idle(90)
+            # Idle is not enough: cycle 33's run had a wake land one second
+            # before the click (`progress=1s ago`). Wait for a quiet stretch
+            # — no worker running, nothing arrived for four seconds — so the
+            # click meets a chat with no turn about to open.
+            self.wait(lambda s: not busy(s) and not ((active(s) or {}).get("pills") or {}).get("working") and (active(s) or {}).get("quiet_secs", 0) >= 4, 120, what="quiet before rewind")
             ids = self.turn_ids()
         if ids["rewind-turn"]:
             n_items = len(active(self.state())["items"])
