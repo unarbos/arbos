@@ -1,0 +1,4 @@
+{"ts": 1789637935264, "frame": {"type": "user", "agent": "root", "text": "one", "steer": false, "attachments": []}}
+{"ts": 1789637935614, "frame": {"type": "user", "agent": "root", "text": "two", "steer": false, "attachments": []}}
+{"ts": 1789637935915, "frame": {"type": "user", "agent": "root", "text": "three", "steer": false, "attachments": []}}
+{"ts": 1789637936233, "frame": {"type": "rewind", "agent": "root", "turn": 3, "files": true}}

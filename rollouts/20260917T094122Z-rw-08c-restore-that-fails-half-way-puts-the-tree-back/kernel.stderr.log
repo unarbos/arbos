@@ -1,0 +1,9 @@
+No API key for OpenRouter. Run `arbos-kernel setup`, or set OPENROUTER_API_KEY, or put api_key in /tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-zp6cnann/xdg/arbos/config.toml. Keys: https://openrouter.ai/settings/keys
+Walking /tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-zp6cnann/place...
+Found 29 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Skipped 6 additional binary files (detected by content)
+Writing index (5087 trigrams, 23 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-zp6cnann/home/.cache/arbos/tgrep/68729b1672718f01
+fatal: cannot unlink 'f1.txt/inner.txt': Permission denied
+error: unable to unlink old 'f1.txt/inner.txt': Permission denied

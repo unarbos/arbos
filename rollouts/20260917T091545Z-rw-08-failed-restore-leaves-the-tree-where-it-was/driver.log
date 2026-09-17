@@ -1,0 +1,4 @@
+1789636545179 kernel started pid 1378985
+1789636546656 BREAK no-work-checkpoints: expected a work tree on three checkpoints, got []
+1789636546663 kernel stopped with code 0
+1789636546736 bugs: new 0f3a8c0a9c.md

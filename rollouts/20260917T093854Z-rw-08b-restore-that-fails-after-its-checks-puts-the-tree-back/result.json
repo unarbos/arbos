@@ -1,0 +1,22 @@
+{
+  "scenario": "rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back",
+  "doc": "The failure that object checks cannot catch: `.git/index.lock` exists (a crashed git, another git running),\n        so `git reset --hard` fails after every object was verified. The checkpoint is whole. The person must be told,\n        and must still have exactly what they had \u2014 on #419 at 0bceb0df by the tree being put back.",
+  "status": "pass",
+  "reason": null,
+  "breaks": [],
+  "notes": {
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: git reset --hard f863fcbadecc0885c3560b4de52ab8ecfae41a4c failed"
+    },
+    "tree_diff_after_failed_restore": [],
+    "put_back_said": false
+  },
+  "duration_s": 2.4,
+  "place": "/tmp/arbos-qa-rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back-dpmt3rn_/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T093854Z-rw-08b-restore-that-fails-after-its-checks-puts-the-tree-back",
+  "branch": "main"
+}

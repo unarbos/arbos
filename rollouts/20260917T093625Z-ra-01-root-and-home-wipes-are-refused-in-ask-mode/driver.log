@@ -1,0 +1,6 @@
+1789637785533 kernel started pid 1398374
+1789637875899 timeout waiting for turn root idle after 90s
+1789637876399 BREAK ra-01-ask-wipe-not-refused: 15 spelling(s) were not refused: ['cd / && rm -rf *', 'cd /; rm -rf ./*', 'cd /usr && rm -rf *', 'rm -rf "$PWD"/*', 'cd ~ && rm -rf *', 'rm -rf "$HOME"/*', 'rm -rf ~', 'find / -delete', 'find ~ -delete', "sh -c 'cd / && rm -rf *'", "sh -c 'cd /usr && rm -rf *'", 'sh -c \'rm -rf "$HOME"/*\'', 'bash -c "cd ~ && rm -rf *"', 'd=/; rm -rf $d/*', 'cd /etc && cd .. && rm -rf *'] — verdicts: [('cd / && rm -rf *', ''), ('cd /; rm -rf ./*', ''), ('cd /usr && rm -rf *', ''), ('rm -rf "$PWD"/*', ''), ('cd ~ && rm -rf *', ''), ('rm -rf "$HOME"/*', '')]
+1789637876399 BREAK ra-01-ask-wipe-became-a-card: a root/home wipe must be refused, never offered as a card: ['allow bash: cd / && rm -rf *']
+1789637876407 kernel stopped with code 0
+1789637876453 bugs: new 3887939734.md, new 030e850365.md

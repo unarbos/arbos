@@ -1,0 +1,9 @@
+{
+  "name": "ra-01-root-and-home-wipes-are-refused-in-auto-mode",
+  "doc": "qal-j15 / #410: fifteen spellings of a root, /usr or home wipe through the bash tool in auto mode \u2014 cd, $PWD, ~, $HOME, find -delete, sh -c, bash -c, a variable, cd .. \u2014 each must be refused with a reason naming the tree; no card, no job, the home sentinel and the /tmp canary still there.",
+  "tags": [
+    "landing",
+    "approval",
+    "wipe-guard"
+  ]
+}

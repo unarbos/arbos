@@ -1,0 +1,22 @@
+{
+  "scenario": "rw-08c-restore-that-fails-half-way-puts-the-tree-back",
+  "doc": "",
+  "status": "pass",
+  "reason": null,
+  "breaks": [],
+  "notes": {
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: git read-tree 2224c6cd348c5ec003ef38f83586641e3aafcd5f failed; and the tree could not be put back \u2014 recover by hand: git reset --hard a373289cb89fdaa56a11f70c8d930efaafdffbb5 && git read-tree -u --reset 0811b2f30b6486c29a9b6e997d7575ad493c6220 && git reset -q"
+    },
+    "tree_diff_after_failed_restore": [],
+    "put_back_said": true
+  },
+  "duration_s": 2.6,
+  "place": "/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-zp6cnann/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419b",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T094122Z-rw-08c-restore-that-fails-half-way-puts-the-tree-back",
+  "branch": "main"
+}

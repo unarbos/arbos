@@ -1,0 +1,12 @@
+{"ts":1789637944763,"kind":"wake","wake":"user","text":"one"}
+{"ts":1789637944764,"kind":"user","text":"one","channel":"text"}
+{"ts":1789637945044,"kind":"assistant","text":"","step":1}
+{"ts":1789637945045,"kind":"tool","name":"bash","call_id":"replay_1","step":1,"paths":["/tmp/arbos-qa-rw-09-clean-that-fails-is-in-what-restored-says-_fcgqktv/place/.arbos/agents/root/jobs/j1/out.log"],"started":1789637944774,"ended":1789637945044,"result_size":11,"body":"(no output)","args":{"command":"echo first > f1.txt","description":"write f1"},"label":"write f1","output":"(no output)"}
+{"ts":1789637945050,"kind":"assistant","text":"first","step":2}
+{"ts":1789637945050,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}
+{"ts":1789637945063,"kind":"wake","wake":"user","text":"two"}
+{"ts":1789637945064,"kind":"user","text":"two","channel":"text"}
+{"ts":1789637945337,"kind":"assistant","text":"","step":1}
+{"ts":1789637945338,"kind":"tool","name":"bash","call_id":"replay_2","step":1,"paths":["/tmp/arbos-qa-rw-09-clean-that-fails-is-in-what-restored-says-_fcgqktv/place/.arbos/agents/root/jobs/j2/out.log"],"started":1789637945070,"ended":1789637945337,"result_size":11,"body":"(no output)","args":{"command":"echo second > f2.txt","description":"write f2"},"label":"write f2","output":"(no output)"}
+{"ts":1789637945342,"kind":"assistant","text":"second","step":2}
+{"ts":1789637945343,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}

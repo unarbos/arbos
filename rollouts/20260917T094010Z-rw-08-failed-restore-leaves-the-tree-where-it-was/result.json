@@ -1,0 +1,81 @@
+{
+  "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "doc": "#419's property, probed past its happy path: the checkpoint's work-tree object is made unreadable (one\n        loose object removed, a corrupt repository), then rewind with files: true. `git read-tree` fails. The person\n        must be told the restore failed, and must still have exactly what they had: the later turn's files, their\n        own uncommitted edit, their own untracked note, and HEAD where it was. Anything else is a restore that\n        destroyed before it delivered.",
+  "status": "pass",
+  "reason": null,
+  "breaks": [],
+  "notes": {
+    "files_before": [
+      ".gitignore",
+      "f1.txt",
+      "f2.txt",
+      "f3.txt",
+      "my-notes.txt"
+    ],
+    "index_before": [
+      "100644 d11765622a85c6af68bf5ce0e7ac728a206b270e 0\t.gitignore",
+      "100644 e019be006cf33489e2d0177a3837a2384eddebc5 0\tf2.txt"
+    ],
+    "status_before": [
+      "?? f1.txt",
+      "?? f3.txt",
+      "?? my-notes.txt",
+      "!! .arbos/"
+    ],
+    "clean_dry_run_by_harness": [
+      "Would remove f1.txt",
+      "Would remove f3.txt",
+      "Would remove my-notes.txt"
+    ],
+    "excludes": [
+      "# For a project mostly in C, the following would be a good set of",
+      "# exclude patterns (uncomment them if you want to use them):",
+      "# *.[oa]",
+      "# *~",
+      ".arbos.nosync/"
+    ],
+    "checkpoints": [
+      {
+        "line": "2",
+        "ts": "1789638010422",
+        "head": "09cb20db04e2001b78bd081c4df1a50af41b73dc",
+        "clean": "True"
+      },
+      {
+        "line": "8",
+        "ts": "1789638010772",
+        "head": "09cb20db04e2001b78bd081c4df1a50af41b73dc",
+        "work": "a74efe2701479ba26343e92a97c030cfa1c5c8cb"
+      },
+      {
+        "line": "14",
+        "ts": "1789638011124",
+        "head": "09cb20db04e2001b78bd081c4df1a50af41b73dc",
+        "work": "0594475f31e5bdedd8a1adc13c7cf420229ffeaa"
+      }
+    ],
+    "work_commit": "0594475f31e5bdedd8a1adc13c7cf420229ffeaa",
+    "work_object_loose": true,
+    "work_object_readable_after": false,
+    "work_object_readable_after_rewind": false,
+    "rewound_frame": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 14,
+      "dropped": 6,
+      "pending": true
+    },
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: the checkpoint's working tree (0594475f31e5) is not in the repository (a missing or corrupt object); files left as they are"
+    },
+    "tree_diff_after_failed_restore": []
+  },
+  "duration_s": 2.5,
+  "place": "/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-xkvdc_3h/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419b",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T094010Z-rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "branch": "main"
+}

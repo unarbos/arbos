@@ -1,0 +1,27 @@
+{
+  "scenario": "rw-09-clean-that-fails-is-in-what-restored-says",
+  "doc": "#419's second claim: a later turn left an untracked folder git cannot remove (a directory with no write\n        bit, a file inside). Rewind with files: true. The tree restore itself works; `git clean` fails on that folder.\n        The person must be told the leftover exists \u2014 \"restored\" alone is a false claim.",
+  "status": "pass",
+  "reason": null,
+  "breaks": [],
+  "notes": {
+    "restore_report": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 14,
+      "dropped": 6,
+      "restored": "f9039b935817 + working tree 5c138cc8b2ce; untracked files from later turns may remain (git clean: warning: failed to remove later-dir/keep.txt: Permission denied)"
+    },
+    "files_after": [
+      "f1.txt",
+      "f2.txt"
+    ],
+    "leftover_still_there": true
+  },
+  "duration_s": 1.9,
+  "place": "/tmp/arbos-qa-rw-09-clean-that-fails-is-in-what-restored-says-_dup7rbw/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419b",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T093850Z-rw-09-clean-that-fails-is-in-what-restored-says",
+  "branch": "main"
+}

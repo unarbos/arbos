@@ -1,0 +1,22 @@
+{
+  "scenario": "rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree",
+  "doc": "",
+  "status": "pass",
+  "reason": null,
+  "breaks": [],
+  "notes": {
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: git reset --hard 6e3f4529e5d2e5974b4472af547f2b2f3dcbee16 failed; and the tree could not be put back \u2014 recover by hand: git reset --hard 66269d2670dfec16b83dbdd1499a3a6568a17bc6 && git read-tree -u --reset 22e588f803139f79c43a12b3bbcb2ffa1c64ae1b && git reset -q"
+    },
+    "tree_diff_after_failed_restore": [],
+    "put_back_said": true
+  },
+  "duration_s": 2.6,
+  "place": "/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-0mpcjpdj/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419b",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T094119Z-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree",
+  "branch": "main"
+}

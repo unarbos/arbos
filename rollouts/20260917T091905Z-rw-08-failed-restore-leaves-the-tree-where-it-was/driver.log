@@ -1,0 +1,4 @@
+1789636745090 kernel started pid 1381522
+1789636747426 BREAK failed-restore-changed-the-tree: a restore that failed left the person somewhere new: f2.txt: GONE; HEAD: 534eb158b7 -> f1417d22e4; index: changed
+1789636747429 kernel stopped with code 0
+1789636747474 bugs: seen aafa04ee56.md

@@ -1,0 +1,182 @@
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=check-ignore -q .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=check-ignore -q .arbos.nosync 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=init -q -b main 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse HEAD 
+rc=0
+  | ba882540a4d26714deeacb435494dd78afc312be
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse HEAD 
+rc=0
+  | ba882540a4d26714deeacb435494dd78afc312be
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --git-path index 
+rc=0
+  | .git/index
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=status --porcelain 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --short HEAD 
+rc=0
+  | ba88254
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 write-tree 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=config --get user.name 
+rc=0
+  | qa
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse ba882540a4d26714deeacb435494dd78afc312be^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=config --get user.email 
+rc=0
+  | qa@qa
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --short HEAD 
+rc=0
+  | ba88254
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L6: first 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 176874dec11f
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse HEAD 
+rc=0
+  | ba882540a4d26714deeacb435494dd78afc312be
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse HEAD 
+rc=0
+  | ba882540a4d26714deeacb435494dd78afc312be
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --git-path index 
+rc=0
+  | .git/index
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --short HEAD 
+rc=0
+  | ba88254
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 write-tree 
+rc=0
+  | 5221337621602bbc1cb5f3bd238b8ea6e41c5c89
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse ba882540a4d26714deeacb435494dd78afc312be^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 commit-tree 5221337621602bbc1cb5f3bd238b8ea6e41c5c89 -p ba882540a4d26714deeacb435494dd78afc312be -m arbos checkpoint 
+rc=0
+  | 40c590dd99bd6f9edd29824c4e364f8796dc93c0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=update-ref refs/arbos/cp/root/8 40c590dd99bd6f9edd29824c4e364f8796dc93c0 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --short HEAD 
+rc=0
+  | ba88254
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L12: second 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 00a89bf89b0a
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse HEAD 
+rc=0
+  | ba882540a4d26714deeacb435494dd78afc312be
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse HEAD 
+rc=0
+  | ba882540a4d26714deeacb435494dd78afc312be
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --git-path index 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | .git/index
+  | master
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --short HEAD 
+rc=0
+  | ba88254
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 write-tree 
+rc=0
+  | 4621918d4f2ab4190f1df5b8efafd77238722dad
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse ba882540a4d26714deeacb435494dd78afc312be^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos/index-scratch-excludes-1406695 commit-tree 4621918d4f2ab4190f1df5b8efafd77238722dad -p ba882540a4d26714deeacb435494dd78afc312be -m arbos checkpoint 
+rc=0
+  | be1013c5589706df4b6d585e578224f1385150b2
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=update-ref refs/arbos/cp/root/14 be1013c5589706df4b6d585e578224f1385150b2 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+  | ?? f3.txt
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=rev-parse --short HEAD 
+rc=0
+  | ba88254
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L18: third 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | b0ab92b405bc
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=ls-files -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=reset --hard ba882540a4d26714deeacb435494dd78afc312be 
+rc=0
+  | HEAD is now at ba88254 ignore .arbos
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=clean -fd -e .arbos -e .arbos/** 
+rc=1
+  | Removing f3.txt
+  | Removing my-notes.txt
+  ! warning: failed to remove f1.txt/inner.txt: Permission denied
+cwd=/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-qz0vo71n/place args=read-tree -u --reset be1013c5589706df4b6d585e578224f1385150b2 
+rc=128
+  ! fatal: cannot unlink 'f1.txt/inner.txt': Permission denied

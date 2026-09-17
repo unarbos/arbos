@@ -1,0 +1,1 @@
+{"command":"arbos-kernel rollout replay internal/qa/rollouts/swebench/loop-cycle-1/A-1/rollout.tar.gz","cwd":"/tmp/arbos-qa-inbox:swebench-loop-cycle-1-fi9qsh7m/place/./","pid":212918,"started_ms":1789333306867,"timeout_ms":600000}

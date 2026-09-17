@@ -1,0 +1,61 @@
+{"ts": 1789636745394, "frame": {"type": "hello", "identity": {"name": "place", "icon": "folder"}, "protocol": 1, "kernel": "0.2.0", "git_sha": "7e19f9e90947", "built_at": "2026-09-17T09:15Z", "tail": 200, "focus": "root"}}
+{"ts": 1789636745394, "frame": {"type": "snapshot", "tree": [{"id": "root", "name": "root", "parent": null, "paused": false, "model": "inherit", "kind": "agent", "mode": "auto"}], "focus": ".arbos/agents/root", "budget": null}}
+{"ts": 1789636745394, "frame": {"type": "provider", "provider": "openrouter", "model": "anthropic/claude-opus-5", "key": false, "source": "none"}}
+{"ts": 1789636745394, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636745394, "frame": {"type": "history_end", "agent": "root", "from": 0, "to": 0, "total": 0}}
+{"ts": 1789636745443, "frame": {"type": "plan", "agent": "root", "nodes": [{"id": 1101831790814, "parent": 0, "goal": "one", "status": "pending", "when": "ready", "do_kind": "agent", "origin": "user", "standing": false, "inbox": true}]}}
+{"ts": 1789636745444, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636745444, "frame": {"type": "turn", "agent": "root", "state": "running", "budget": null}}
+{"ts": 1789636745458, "frame": {"type": "status", "agent": "root", "step": "Running echo first > f1.txt", "since": "2026-09-17T09:19:05Z", "source": "derived"}}
+{"ts": 1789636745459, "frame": {"type": "event", "agent": "root", "event": {"ts": 1789636745458, "kind": "tool", "name": "bash", "call_id": "replay_1", "step": 1, "started": 1789636745458, "args": {"command": "echo first > f1.txt", "description": "write f1"}, "label": "write f1"}}}
+{"ts": 1789636745514, "frame": {"type": "event", "agent": "root", "event": {"seq": 1, "ts": 1789636745444, "kind": "wake", "wake": "user", "text": "one"}}}
+{"ts": 1789636745514, "frame": {"type": "event", "agent": "root", "event": {"seq": 2, "ts": 1789636745445, "kind": "user", "text": "one", "channel": "text"}}}
+{"ts": 1789636745714, "frame": {"type": "job", "agent": "root", "id": "j1", "running": false, "exit": 0}}
+{"ts": 1789636745737, "frame": {"type": "assistant_delta", "agent": "root", "text": "first", "step": 2}}
+{"ts": 1789636745739, "frame": {"type": "status", "agent": "root", "step": ""}}
+{"ts": 1789636745739, "frame": {"type": "notify", "id": 1, "ts": 1789636745739, "agent": "root", "kind": "reply", "title": "root replied", "body": "first"}}
+{"ts": 1789636745739, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636745739, "frame": {"type": "turn", "agent": "root", "state": "idle", "budget": {"used": 0, "size": 128000, "cost": 0.0}}}
+{"ts": 1789636745739, "frame": {"type": "tree", "tree": [{"id": "root", "name": "root", "parent": null, "paused": false, "model": "inherit", "kind": "agent", "mode": "auto"}]}}
+{"ts": 1789636745784, "frame": {"type": "plan", "agent": "root", "nodes": [{"id": 1101831790814, "parent": 0, "goal": "two", "status": "pending", "when": "ready", "do_kind": "agent", "origin": "user", "standing": false, "inbox": true}]}}
+{"ts": 1789636745785, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636745785, "frame": {"type": "turn", "agent": "root", "state": "running", "budget": null}}
+{"ts": 1789636745785, "frame": {"type": "status", "agent": "root", "step": "Running echo second > f2.txt", "since": "2026-09-17T09:19:05Z", "source": "derived"}}
+{"ts": 1789636745785, "frame": {"type": "event", "agent": "root", "event": {"ts": 1789636745754, "kind": "tool", "name": "bash", "call_id": "replay_2", "step": 1, "started": 1789636745754, "args": {"command": "echo second > f2.txt", "description": "write f2"}, "label": "write f2"}}}
+{"ts": 1789636745914, "frame": {"type": "job", "agent": "root", "id": "j2", "running": false, "exit": 0}}
+{"ts": 1789636745914, "frame": {"type": "event", "agent": "root", "event": {"seq": 3, "ts": 1789636745731, "kind": "assistant", "text": "", "step": 1}}}
+{"ts": 1789636745914, "frame": {"type": "event", "agent": "root", "event": {"seq": 4, "ts": 1789636745732, "kind": "tool", "name": "bash", "call_id": "replay_1", "step": 1, "paths": ["/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-2jxxjhad/place/.arbos/agents/root/jobs/j1/out.log"], "started": 1789636745458, "ended": 1789636745731, "result_size": 11, "body": "(no output)", "args": {"command": "echo first > f1.txt", "description": "write f1"}, "label": "write f1", "output": "(no output)"}}}
+{"ts": 1789636745915, "frame": {"type": "event", "agent": "root", "event": {"seq": 5, "ts": 1789636745737, "kind": "assistant", "text": "first", "step": 2}}}
+{"ts": 1789636745915, "frame": {"type": "event", "agent": "root", "event": {"seq": 6, "ts": 1789636745738, "kind": "turn_complete", "usage": {"used": 0, "size": 128000, "cost": 0.0}}}}
+{"ts": 1789636745915, "frame": {"type": "event", "agent": "root", "event": {"seq": 7, "ts": 1789636745744, "kind": "wake", "wake": "user", "text": "two"}}}
+{"ts": 1789636745915, "frame": {"type": "event", "agent": "root", "event": {"seq": 8, "ts": 1789636745745, "kind": "user", "text": "two", "channel": "text"}}}
+{"ts": 1789636746032, "frame": {"type": "assistant_delta", "agent": "root", "text": "second", "step": 2}}
+{"ts": 1789636746033, "frame": {"type": "status", "agent": "root", "step": ""}}
+{"ts": 1789636746033, "frame": {"type": "notify", "id": 2, "ts": 1789636746033, "agent": "root", "kind": "reply", "title": "root replied", "body": "second"}}
+{"ts": 1789636746033, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636746034, "frame": {"type": "turn", "agent": "root", "state": "idle", "budget": {"used": 0, "size": 128000, "cost": 0.0}}}
+{"ts": 1789636746034, "frame": {"type": "tree", "tree": [{"id": "root", "name": "root", "parent": null, "paused": false, "model": "inherit", "kind": "agent", "mode": "auto"}]}}
+{"ts": 1789636746088, "frame": {"type": "plan", "agent": "root", "nodes": [{"id": 1100572432417, "parent": 0, "goal": "three", "status": "pending", "when": "ready", "do_kind": "agent", "origin": "user", "standing": false, "inbox": true}]}}
+{"ts": 1789636746089, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636746089, "frame": {"type": "turn", "agent": "root", "state": "running", "budget": null}}
+{"ts": 1789636746089, "frame": {"type": "status", "agent": "root", "step": "Running echo third > f3.txt", "since": "2026-09-17T09:19:06Z", "source": "derived"}}
+{"ts": 1789636746089, "frame": {"type": "event", "agent": "root", "event": {"ts": 1789636746052, "kind": "tool", "name": "bash", "call_id": "replay_3", "step": 1, "started": 1789636746052, "args": {"command": "echo third > f3.txt", "description": "write f3"}, "label": "write f3"}}}
+{"ts": 1789636746115, "frame": {"type": "event", "agent": "root", "event": {"seq": 9, "ts": 1789636746025, "kind": "assistant", "text": "", "step": 1}}}
+{"ts": 1789636746115, "frame": {"type": "event", "agent": "root", "event": {"seq": 10, "ts": 1789636746027, "kind": "tool", "name": "bash", "call_id": "replay_2", "step": 1, "paths": ["/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-2jxxjhad/place/.arbos/agents/root/jobs/j2/out.log"], "started": 1789636745754, "ended": 1789636746025, "result_size": 11, "body": "(no output)", "args": {"command": "echo second > f2.txt", "description": "write f2"}, "label": "write f2", "output": "(no output)"}}}
+{"ts": 1789636746115, "frame": {"type": "event", "agent": "root", "event": {"seq": 11, "ts": 1789636746032, "kind": "assistant", "text": "second", "step": 2}}}
+{"ts": 1789636746115, "frame": {"type": "event", "agent": "root", "event": {"seq": 12, "ts": 1789636746032, "kind": "turn_complete", "usage": {"used": 0, "size": 128000, "cost": 0.0}}}}
+{"ts": 1789636746115, "frame": {"type": "event", "agent": "root", "event": {"seq": 13, "ts": 1789636746045, "kind": "wake", "wake": "user", "text": "three"}}}
+{"ts": 1789636746115, "frame": {"type": "event", "agent": "root", "event": {"seq": 14, "ts": 1789636746046, "kind": "user", "text": "three", "channel": "text"}}}
+{"ts": 1789636746314, "frame": {"type": "job", "agent": "root", "id": "j3", "running": false, "exit": 0}}
+{"ts": 1789636746327, "frame": {"type": "assistant_delta", "agent": "root", "text": "third", "step": 2}}
+{"ts": 1789636746329, "frame": {"type": "status", "agent": "root", "step": ""}}
+{"ts": 1789636746329, "frame": {"type": "notify", "id": 3, "ts": 1789636746329, "agent": "root", "kind": "reply", "title": "root replied", "body": "third"}}
+{"ts": 1789636746329, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636746329, "frame": {"type": "turn", "agent": "root", "state": "idle", "budget": {"used": 0, "size": 128000, "cost": 0.0}}}
+{"ts": 1789636746329, "frame": {"type": "tree", "tree": [{"id": "root", "name": "root", "parent": null, "paused": false, "model": "inherit", "kind": "agent", "mode": "auto"}]}}
+{"ts": 1789636746408, "frame": {"type": "rewound", "agent": "root", "line": 14, "dropped": 6, "pending": true}}
+{"ts": 1789636746409, "frame": {"type": "plan", "agent": "root", "nodes": []}}
+{"ts": 1789636746409, "frame": {"type": "error", "agent": "root", "detail": "rewind: transcript cut, files not restored: git read-tree b1cad957c52b6839b3bfbe294fac7a6a6ba30941 failed"}}
+{"ts": 1789636747114, "frame": {"type": "changed", "path": "agents/root/checkpoints.jsonl", "kind": "modified", "size": 223}}
+{"ts": 1789636747114, "frame": {"type": "changed", "path": "agents/root/status.toml", "kind": "removed", "size": 0}}
+{"ts": 1789636747114, "frame": {"type": "changed", "path": "agents/root/transcript.jsonl", "kind": "modified", "size": 1472}}

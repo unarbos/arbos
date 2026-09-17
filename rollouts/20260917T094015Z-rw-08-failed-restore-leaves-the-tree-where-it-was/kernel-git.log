@@ -1,0 +1,176 @@
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=check-ignore -q .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=check-ignore -q .arbos.nosync 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=init -q -b main 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse HEAD 
+rc=0
+  | 6ad9183bb9873aa9babf42cfd074a49ee7126073
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse HEAD 
+rc=0
+  | 6ad9183bb9873aa9babf42cfd074a49ee7126073
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --git-path index 
+rc=0
+  | .git/index
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=status --porcelain 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --short HEAD 
+rc=0
+  | 6ad9183
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 write-tree 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=config --get user.name 
+rc=0
+  | qa
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse 6ad9183bb9873aa9babf42cfd074a49ee7126073^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=config --get user.email 
+rc=0
+  | qa@qa
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --short HEAD 
+rc=0
+  | 6ad9183
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L6: first 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | aeadc046bb99
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse HEAD 
+rc=0
+  | 6ad9183bb9873aa9babf42cfd074a49ee7126073
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse HEAD 
+rc=0
+  | 6ad9183bb9873aa9babf42cfd074a49ee7126073
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --git-path index 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | .git/index
+  | master
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --short HEAD 
+rc=0
+  | 6ad9183
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 write-tree 
+rc=0
+  | 5221337621602bbc1cb5f3bd238b8ea6e41c5c89
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse 6ad9183bb9873aa9babf42cfd074a49ee7126073^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 commit-tree 5221337621602bbc1cb5f3bd238b8ea6e41c5c89 -p 6ad9183bb9873aa9babf42cfd074a49ee7126073 -m arbos checkpoint 
+rc=0
+  | 0a6fb5cf8c820c2dd52b0b864ee9a18c1af369c3
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=update-ref refs/arbos/cp/root/8 0a6fb5cf8c820c2dd52b0b864ee9a18c1af369c3 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --short HEAD 
+rc=0
+  | 6ad9183
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L12: second 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 3f727acaab99
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse HEAD 
+rc=0
+  | 6ad9183bb9873aa9babf42cfd074a49ee7126073
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse HEAD 
+rc=0
+  | 6ad9183bb9873aa9babf42cfd074a49ee7126073
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --git-path index 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | .git/index
+  | master
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --short HEAD 
+rc=0
+  | 6ad9183
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 write-tree 
+rc=0
+  | 4621918d4f2ab4190f1df5b8efafd77238722dad
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse 6ad9183bb9873aa9babf42cfd074a49ee7126073^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos/index-scratch-excludes-1402593 commit-tree 4621918d4f2ab4190f1df5b8efafd77238722dad -p 6ad9183bb9873aa9babf42cfd074a49ee7126073 -m arbos checkpoint 
+rc=0
+  | 41a51906c7ae3f24678d87b0867a841389687279
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=update-ref refs/arbos/cp/root/14 41a51906c7ae3f24678d87b0867a841389687279 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+  | ?? f3.txt
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=rev-parse --short HEAD 
+rc=0
+  | 6ad9183
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L18: third 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 47fcee9ee389
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=ls-files -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=cat-file -e 6ad9183bb9873aa9babf42cfd074a49ee7126073^{commit} 
+rc=0
+cwd=/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5wotkdh1/place args=cat-file -e 41a51906c7ae3f24678d87b0867a841389687279^{tree} 
+rc=128
+  ! fatal: Not a valid object name 41a51906c7ae3f24678d87b0867a841389687279^{tree}

@@ -1,0 +1,4 @@
+1789637944411 kernel started pid 1401067
+1789637946214 BREAK failed-clean-called-restored: git clean could not remove later-dir/ yet the client was told: {"type": "rewound", "agent": "root", "line": 14, "dropped": 6, "restored": "fc461ddd60c1 + working tree 3a0350867930"}
+1789637946217 kernel stopped with code 0
+1789637946258 bugs: seen c007f5e7ec.md

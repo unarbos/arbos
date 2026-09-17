@@ -1,0 +1,180 @@
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=check-ignore -q .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=check-ignore -q .arbos.nosync 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=init -q -b main 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse HEAD 
+rc=0
+  | bb3b78918b0b967c0c869cbf3c295d0c583b70eb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse HEAD 
+rc=0
+  | bb3b78918b0b967c0c869cbf3c295d0c583b70eb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --git-path index 
+rc=0
+  | .git/index
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=status --porcelain 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --short HEAD 
+rc=0
+  | bb3b789
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 write-tree 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=config --get user.name 
+rc=0
+  | qa
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse bb3b78918b0b967c0c869cbf3c295d0c583b70eb^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=config --get user.email 
+rc=0
+  | qa@qa
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --short HEAD 
+rc=0
+  | bb3b789
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L6: first 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | ad0fa579815b
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse HEAD 
+rc=0
+  | bb3b78918b0b967c0c869cbf3c295d0c583b70eb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse HEAD 
+rc=0
+  | bb3b78918b0b967c0c869cbf3c295d0c583b70eb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --git-path index 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=  | .git/index
+rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --short HEAD 
+rc=0
+  | bb3b789
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 write-tree 
+rc=0
+  | 5221337621602bbc1cb5f3bd238b8ea6e41c5c89
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse bb3b78918b0b967c0c869cbf3c295d0c583b70eb^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 commit-tree 5221337621602bbc1cb5f3bd238b8ea6e41c5c89 -p bb3b78918b0b967c0c869cbf3c295d0c583b70eb -m arbos checkpoint 
+rc=0
+  | a91558e46dee5c466c88ff8fb9073fe56a6aa0de
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=update-ref refs/arbos/cp/root/8 a91558e46dee5c466c88ff8fb9073fe56a6aa0de 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --short HEAD 
+rc=0
+  | bb3b789
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L12: second 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 97ae824a088e
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse HEAD 
+rc=0
+  | bb3b78918b0b967c0c869cbf3c295d0c583b70eb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse HEAD 
+rc=0
+  | bb3b78918b0b967c0c869cbf3c295d0c583b70eb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --git-path index 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | .git/index
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --short HEAD 
+rc=0
+  | bb3b789
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 write-tree 
+rc=0
+  | 4621918d4f2ab4190f1df5b8efafd77238722dad
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse bb3b78918b0b967c0c869cbf3c295d0c583b70eb^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos/index-scratch-excludes-1404826 commit-tree 4621918d4f2ab4190f1df5b8efafd77238722dad -p bb3b78918b0b967c0c869cbf3c295d0c583b70eb -m arbos checkpoint 
+rc=0
+  | d996d2853b7f0b473bd0e115755a42291d9efe71
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=update-ref refs/arbos/cp/root/14 d996d2853b7f0b473bd0e115755a42291d9efe71 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+  | ?? f3.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=rev-parse --short HEAD 
+rc=0
+  | bb3b789
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L18: third 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 8d4c588a168c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=ls-files -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place args=reset --hard bb3b78918b0b967c0c869cbf3c295d0c583b70eb 
+rc=128
+  ! fatal: Unable to create '/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-wjj5e9jn/place/.git/index.lock': File exists.
+  ! 
+  ! Another git process seems to be running in this repository, e.g.
+  ! an editor opened by 'git commit'. Please make sure all processes
+  ! are terminated then try again. If it still fails, a git process
+  ! may have crashed in this repository earlier:
+  ! remove the file manually to continue.

@@ -1,0 +1,1 @@
+{"command":"mkdir -p /tmp/vf-arbos/out && echo \"dummy artifact\" > /tmp/vf-arbos/out/test_artifact.txt","cwd":"/tmp/arbos-qa-inbox:swebench-loop-cycle-1-g_ascc5q/place","pid":835675,"started_ms":1789568690784}

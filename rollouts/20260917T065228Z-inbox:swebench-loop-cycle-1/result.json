@@ -1,0 +1,18 @@
+{
+  "scenario": "inbox:swebench-loop-cycle-1",
+  "doc": "From inbox note 2026-09-13-swebench-loop-cycle-1.md: exercise feature 'swebench-loop-cycle-1' and run every detector.",
+  "status": "pass",
+  "reason": null,
+  "breaks": [],
+  "notes": {
+    "feature": "swebench-loop-cycle-1",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-swebench-loop-cycle-1.md"
+  },
+  "duration_s": 177.1,
+  "place": "/tmp/arbos-qa-inbox:swebench-loop-cycle-1-s2rxu3fo/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T065228Z-inbox:swebench-loop-cycle-1",
+  "branch": "rust",
+  "usd": 0.18717
+}

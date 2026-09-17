@@ -1,0 +1,12 @@
+{"ts":1789638088150,"kind":"wake","wake":"user","text":"one"}
+{"ts":1789638088151,"kind":"user","text":"one","channel":"text"}
+{"ts":1789638088456,"kind":"assistant","text":"","step":1}
+{"ts":1789638088457,"kind":"tool","name":"bash","call_id":"replay_1","step":1,"paths":["/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-9xqcqp_t/place/.arbos/agents/root/jobs/j1/out.log"],"started":1789638088180,"ended":1789638088456,"result_size":11,"body":"(no output)","args":{"command":"echo first > f1.txt","description":"write f1"},"label":"write f1","output":"(no output)"}
+{"ts":1789638088472,"kind":"assistant","text":"first","step":2}
+{"ts":1789638088473,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}
+{"ts":1789638088501,"kind":"wake","wake":"user","text":"two"}
+{"ts":1789638088502,"kind":"user","text":"two","channel":"text"}
+{"ts":1789638088792,"kind":"assistant","text":"","step":1}
+{"ts":1789638088793,"kind":"tool","name":"bash","call_id":"replay_2","step":1,"paths":["/tmp/arbos-qa-rw-08c-restore-that-fails-half-way-puts-the-tree-back-9xqcqp_t/place/.arbos/agents/root/jobs/j2/out.log"],"started":1789638088526,"ended":1789638088792,"result_size":11,"body":"(no output)","args":{"command":"echo second > f2.txt","description":"write f2"},"label":"write f2","output":"(no output)"}
+{"ts":1789638088808,"kind":"assistant","text":"second","step":2}
+{"ts":1789638088809,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}

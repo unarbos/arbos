@@ -1,0 +1,18 @@
+{"ts":1789636545534,"kind":"wake","wake":"user","text":"one"}
+{"ts":1789636545535,"kind":"user","text":"one","channel":"text"}
+{"ts":1789636545861,"kind":"assistant","text":"","step":1}
+{"ts":1789636545869,"kind":"tool","name":"bash","call_id":"replay_1","step":1,"paths":["/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5s4gk_ul/place/.arbos/agents/root/jobs/j1/out.log"],"started":1789636545576,"ended":1789636545861,"result_size":11,"body":"(no output)","args":{"command":"echo first > f1.txt","description":"write f1"},"label":"write f1","output":"(no output)"}
+{"ts":1789636545878,"kind":"assistant","text":"first","step":2}
+{"ts":1789636545884,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}
+{"ts":1789636545933,"kind":"wake","wake":"user","text":"two"}
+{"ts":1789636545934,"kind":"user","text":"two","channel":"text"}
+{"ts":1789636546232,"kind":"assistant","text":"","step":1}
+{"ts":1789636546236,"kind":"tool","name":"bash","call_id":"replay_2","step":1,"paths":["/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5s4gk_ul/place/.arbos/agents/root/jobs/j2/out.log"],"started":1789636545950,"ended":1789636546232,"result_size":11,"body":"(no output)","args":{"command":"echo second > f2.txt","description":"write f2"},"label":"write f2","output":"(no output)"}
+{"ts":1789636546241,"kind":"assistant","text":"second","step":2}
+{"ts":1789636546244,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}
+{"ts":1789636546284,"kind":"wake","wake":"user","text":"three"}
+{"ts":1789636546285,"kind":"user","text":"three","channel":"text"}
+{"ts":1789636546573,"kind":"assistant","text":"","step":1}
+{"ts":1789636546575,"kind":"tool","name":"bash","call_id":"replay_3","step":1,"paths":["/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-5s4gk_ul/place/.arbos/agents/root/jobs/j3/out.log"],"started":1789636546295,"ended":1789636546573,"result_size":11,"body":"(no output)","args":{"command":"echo third > f3.txt","description":"write f3"},"label":"write f3","output":"(no output)"}
+{"ts":1789636546588,"kind":"assistant","text":"third","step":2}
+{"ts":1789636546589,"kind":"turn_complete","usage":{"used":0,"size":128000,"cost":0.0}}

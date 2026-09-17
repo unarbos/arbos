@@ -1,0 +1,180 @@
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=check-ignore -q .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=check-ignore -q .arbos.nosync 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=init -q -b main 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse HEAD 
+rc=0
+  | 0198d930839c887e3590e00cb754d4d71c128a0c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse HEAD 
+rc=0
+  | 0198d930839c887e3590e00cb754d4d71c128a0c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --git-path index 
+rc=0
+  | .git/index
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=status --porcelain 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --short HEAD 
+rc=0
+  | 0198d93
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 write-tree 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=config --get user.name 
+rc=0
+  | qa
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse 0198d930839c887e3590e00cb754d4d71c128a0c^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=config --get user.email 
+rc=0
+  | qa@qa
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --short HEAD 
+rc=0
+  | 0198d93
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L6: first 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | baba95a15011
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse HEAD 
+rc=0
+  | 0198d930839c887e3590e00cb754d4d71c128a0c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse HEAD 
+rc=0
+  | 0198d930839c887e3590e00cb754d4d71c128a0c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --git-path index 
+rc=0
+  | .git/index
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --short HEAD 
+rc=0
+  | 0198d93
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 write-tree 
+rc=0
+  | 5221337621602bbc1cb5f3bd238b8ea6e41c5c89
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse 0198d930839c887e3590e00cb754d4d71c128a0c^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 commit-tree 5221337621602bbc1cb5f3bd238b8ea6e41c5c89 -p 0198d930839c887e3590e00cb754d4d71c128a0c -m arbos checkpoint 
+rc=0
+  | 56ce701d45b8e4388bbc20aa129f9f5452d311ba
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=update-ref refs/arbos/cp/root/8 56ce701d45b8e4388bbc20aa129f9f5452d311ba 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --short HEAD 
+rc=0
+  | 0198d93
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L12: second 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | 196b031185ad
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse HEAD 
+rc=0
+  | 0198d930839c887e3590e00cb754d4d71c128a0c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse HEAD 
+rc=0
+  | 0198d930839c887e3590e00cb754d4d71c128a0c
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --git-path index 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | .git/index
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=config --get core.excludesFile 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --short HEAD 
+rc=0
+  | 0198d93
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 rm -r -q --cached --ignore-unmatch -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 write-tree 
+rc=0
+  | 4621918d4f2ab4190f1df5b8efafd77238722dad
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse 0198d930839c887e3590e00cb754d4d71c128a0c^{tree} 
+rc=0
+  | e7c1926678509b70f4f587ea11f2f64b619bfb30
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=-c core.excludesFile=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos/index-scratch-excludes-1406076 commit-tree 4621918d4f2ab4190f1df5b8efafd77238722dad -p 0198d930839c887e3590e00cb754d4d71c128a0c -m arbos checkpoint 
+rc=0
+  | 158f13e8a39891c1942950d72d199fdb55cf0203
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=update-ref refs/arbos/cp/root/14 158f13e8a39891c1942950d72d199fdb55cf0203 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --abbrev-ref HEAD 
+rc=0
+  | master
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=status --porcelain 
+rc=0
+  | ?? f1.txt
+  | ?? f2.txt
+  | ?? f3.txt
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=rev-parse --short HEAD 
+rc=0
+  | 0198d93
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost add -A -- . 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=diff --cached --quiet 
+rc=1
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=-c user.name=arbos -c user.email=arbos@localhost commit -q --no-verify -m root turn L18: third 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.arbos args=rev-parse --short=12 HEAD 
+rc=0
+  | dbd4f65df7bb
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=ls-files -- .arbos 
+rc=0
+cwd=/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place args=reset --hard 0198d930839c887e3590e00cb754d4d71c128a0c 
+rc=128
+  ! fatal: Unable to create '/tmp/arbos-qa-rw-08b-restore-that-fails-before-anything-moves-leaves-the-tree-pcszfpod/place/.git/index.lock': File exists.
+  ! 
+  ! Another git process seems to be running in this repository, e.g.
+  ! an editor opened by 'git commit'. Please make sure all processes
+  ! are terminated then try again. If it still fails, a git process
+  ! may have crashed in this repository earlier:
+  ! remove the file manually to continue.
