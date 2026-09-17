@@ -1,9 +1,0 @@
-# Parity prompt set. One prompt per line. Format:  id|what it exercises|prompt text
-# Lines starting with # are ignored. Both apps get the exact same text.
-# Run inside the sample project ($PROJ), which has README.md, math_utils.py, main.py.
-p1-question|simple question, short streamed answer|What does main.py print when run? Answer in one line.
-p2-multifile|multi-file edit, diff cards, file chips|Add a mul(a, b) function to math_utils.py and call it from main.py with mul(4, 5). Also list it in README.md.
-p3-subagents|task that spawns sub-agents or background agents; sub-agent status strip|Use parallel sub-agents: one reviews math_utils.py for edge cases, one writes docstrings for every function, one drafts a CHANGELOG.md. Then merge their results.
-p4-longrun|long-running turn; working/thinking animation; stop button|Write a detailed 400-word explanation of how Python's import system finds math_utils from main.py, thinking step by step. Then run main.py and show the output.
-p5-voice|voice input; live transcript appearing in the box|(Voice) Say aloud: "Add a divide function that raises on zero." Watch the words appear in the chat box as they arrive.
-p6-followup|follow-up in the same thread; queued message while working|While p4 is still running, send: Also add type hints to every function.
