@@ -461,6 +461,10 @@ pub struct ChatSession {
     /// in-app report, waiting for the review sheet to take it. Drained
     /// rather than kept — it is one sheet's worth, not session state.
     pub feedback: Option<Box<crate::feedback::Bundle>>,
+    /// Why there will be no bundle, when the kernel has said so. Held for the
+    /// sheet exactly like the bundle: a report's trouble is not a line of the
+    /// conversation.
+    pub feedback_error: Option<String>,
     /// Try Live (A-02): the latest screen frame from the agent's machine,
     /// and whether the live view is open (the poll runs while it is).
     pub live_screen: Option<LiveScreen>,
@@ -678,6 +682,7 @@ impl ChatSession {
             streaming_agent: None,
             answered_ask: None,
             feedback: None,
+            feedback_error: None,
             live_screen: None,
             live_open: false,
             stop_requested: false,
@@ -769,6 +774,7 @@ impl ChatSession {
             streaming_agent: None,
             answered_ask: None,
             feedback: None,
+            feedback_error: None,
             live_screen: None,
             live_open: false,
             stop_requested: false,
@@ -860,6 +866,7 @@ impl ChatSession {
             streaming_agent: None,
             answered_ask: None,
             feedback: None,
+            feedback_error: None,
             live_screen: None,
             live_open: false,
             stop_requested: false,
@@ -3319,6 +3326,7 @@ impl ChatSession {
             // Held for the review sheet to collect. Nothing is drawn in the
             // chat: a report is not part of the conversation.
             Event::Feedback(bundle) => self.feedback = Some(bundle),
+            Event::FeedbackUnavailable(why) => self.feedback_error = Some(why),
         }
     }
 
@@ -3345,6 +3353,10 @@ impl ChatSession {
 
     pub fn take_feedback(&mut self) -> Option<Box<crate::feedback::Bundle>> {
         self.feedback.take()
+    }
+
+    pub fn take_feedback_error(&mut self) -> Option<String> {
+        self.feedback_error.take()
     }
 
     /// What this window believes the chat holds, for a report to carry beside

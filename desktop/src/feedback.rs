@@ -195,6 +195,13 @@ pub struct Draft {
     /// invented complaint, which is the worst case — a reader diagnoses a
     /// complaint the events were never about. A fixture has to say so itself.
     pub fixture: bool,
+    /// Why there is no trajectory, when the kernel would not give one.
+    ///
+    /// Without it the report would say `included.trajectory: true` with no
+    /// events in it — a lie the other way round from the one `chose` exists to
+    /// stop. He kept the part; the kernel did not supply it, and a reader has
+    /// to be told which.
+    pub trajectory_unavailable: Option<String>,
 }
 
 impl Draft {
@@ -229,6 +236,7 @@ impl Draft {
     /// applied, and `included` naming every decision.
     pub fn report(&self, id: &str, sent_ms: i64) -> Value {
         let b = self.bundle.clone().unwrap_or_default();
+        let log_present = !b.log.is_empty();
         let mut events = if self.parts.trajectory {
             b.events
         } else {
@@ -289,9 +297,12 @@ impl Draft {
             // merely absent would leave a loop guessing.
             "included": {
                 "screenshot": self.parts.screenshot && self.shot.is_some(),
-                "trajectory": self.parts.trajectory,
-                "log": self.parts.log,
-                "tail": self.parts.tail && self.parts.trajectory,
+                // Kept *and* present. A kernel too old for the `feedback` frame
+                // supplies nothing, and a report claiming a trajectory it does
+                // not carry sends a reader hunting events that never existed.
+                "trajectory": self.parts.trajectory && !events.is_empty(),
+                "log": self.parts.log && log_present,
+                "tail": self.parts.tail && self.parts.trajectory && !tail.is_empty(),
                 "session": self.parts.session && self.session.is_some(),
                 "tool_io": self.parts.tool_io,
             },
@@ -311,6 +322,7 @@ impl Draft {
                 "tool_io": self.parts.tool_io,
             },
             "screenshot_error": self.shot_error,
+            "trajectory_unavailable": self.trajectory_unavailable,
         });
 
         // The last thing that happens to a report before it is written: every
@@ -627,6 +639,9 @@ pub fn write(place: &Place, draft: &Draft, id: &str, now_ms: i64) -> Result<Path
     // Last, and only once everything else is on disk: delivery looks for
     // this file, so a half-written report is never picked up.
     write_atomic(&dir.join("ready"), b"")?;
+    // And note the place, so this report is retried whether or not the project
+    // is still open. He closes a project because the thing he reported is over.
+    remember_outbox(place);
     Ok(dir)
 }
 
@@ -672,7 +687,13 @@ const BACKOFF_SECS: [u64; 7] = [30, 60, 120, 300, 900, 1800, 3600];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Delivery {
     /// On his disk, waiting for a link or for an address to send it to.
-    Waiting { attempts: u32, last_error: Option<String> },
+    Waiting {
+        attempts: u32,
+        last_error: Option<String>,
+        /// When the reason above was current. A reason with no time behind it
+        /// reads as the present tense whatever its age.
+        tried_ms: Option<i64>,
+    },
     /// In the store, where the loop can read it.
     Sent { at_ms: i64 },
 }
@@ -811,11 +832,21 @@ pub fn deliver_pending(
                     Delivery::Waiting { attempts, .. } => attempts + 1,
                     Delivery::Sent { .. } => 1,
                 };
+                // Only the current reason, and the moment it was current. The
+                // old text used to sit on a report that nobody had retried
+                // since, so a cause that had been fixed still read as "still
+                // broken" — `tried_ms` is what lets a reader tell a live
+                // failure from a stale one.
                 let last_error = format!("{e:#}");
                 let _ = write_atomic(
                     &dir.join("attempts.json"),
-                    (json!({"attempts": attempts, "at_ms": now_ms, "error": last_error})
-                        .to_string()
+                    (json!({
+                        "attempts": attempts,
+                        "at_ms": now_ms,
+                        "tried_ms": now_ms,
+                        "error": last_error,
+                    })
+                    .to_string()
                         + "\n")
                         .as_bytes(),
                 );
@@ -824,6 +855,7 @@ pub fn deliver_pending(
                     Delivery::Waiting {
                         attempts,
                         last_error: Some(last_error),
+                        tried_ms: Some(now_ms),
                     },
                 ));
             }
@@ -840,19 +872,23 @@ fn state_of(dir: &Path) -> Delivery {
             at_ms: v.get("at_ms").and_then(Value::as_i64).unwrap_or(0),
         };
     }
-    let (attempts, last_error) = std::fs::read_to_string(dir.join("attempts.json"))
+    let (attempts, last_error, tried_ms) = std::fs::read_to_string(dir.join("attempts.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .map(|v| {
             (
                 v.get("attempts").and_then(Value::as_u64).unwrap_or(0) as u32,
                 v.get("error").and_then(Value::as_str).map(str::to_string),
+                v.get("tried_ms")
+                    .or_else(|| v.get("at_ms"))
+                    .and_then(Value::as_i64),
             )
         })
-        .unwrap_or((0, None));
+        .unwrap_or((0, None, None));
     Delivery::Waiting {
         attempts,
         last_error,
+        tried_ms,
     }
 }
 
@@ -868,6 +904,73 @@ fn due(dir: &Path, attempts: u32, now_ms: i64) -> bool {
         .unwrap_or(0);
     let wait = BACKOFF_SECS[(attempts as usize - 1).min(BACKOFF_SECS.len() - 1)] as i64 * 1000;
     now_ms - last >= wait
+}
+
+// --------------------------------------------------------------------------
+// Which outboxes exist
+//
+// A report must not depend on Jacob keeping a tab open. He closes a project
+// *because* the thing he was reporting is over — and two of his reports sat at
+// attempt three with a stale reason for exactly that: the sweep walked the list
+// of open places, so a closed project's outbox was never looked at again.
+//
+// So the outboxes are remembered on the machine, once, when a report is
+// written. The drain reads that list and never asks what is on screen.
+// --------------------------------------------------------------------------
+
+fn registry_path() -> Option<PathBuf> {
+    crate::model::settings::data_dir()
+        .ok()
+        .map(|dir| dir.join("feedback-outboxes.json"))
+}
+
+/// Note that this place holds reports. Idempotent.
+pub fn remember_outbox(place: &Place) {
+    let Some(path) = registry_path() else { return };
+    let mut places = read_registry(&path);
+    let here = place.path().to_string_lossy().into_owned();
+    if places.iter().any(|p| p == &here) {
+        return;
+    }
+    places.push(here);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, json!({"places": places}).to_string() + "\n");
+}
+
+fn read_registry(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            v.get("places").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_str().map(str::to_string))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Every place known to hold an outbox, open or not.
+///
+/// A place whose outbox folder has gone — the project deleted, the store
+/// cleared — is dropped from the list as it is read, so this cannot grow for
+/// ever from folders that no longer exist.
+pub fn known_outboxes() -> Vec<Place> {
+    let Some(path) = registry_path() else {
+        return vec![];
+    };
+    let all = read_registry(&path);
+    let (alive, gone): (Vec<String>, Vec<String>) = all
+        .iter()
+        .cloned()
+        .partition(|p| outbox(&Place::new(p)).is_dir());
+    if !gone.is_empty() {
+        let _ = std::fs::write(&path, json!({"places": alive}).to_string() + "\n");
+    }
+    alive.into_iter().map(Place::new).collect()
 }
 
 /// Reports written and not yet delivered, oldest first.
@@ -1443,7 +1546,10 @@ mod tests {
         let (_dir, place) = outbox_with_one_report();
         let dir = pending(&place).remove(0);
 
-        assert_eq!(state_of(&dir), Delivery::Waiting { attempts: 0, last_error: None });
+        assert_eq!(
+            state_of(&dir),
+            Delivery::Waiting { attempts: 0, last_error: None, tried_ms: None }
+        );
         assert!(due(&dir, 0, 0), "a fresh report is tried at once");
 
         // An address the kernel cannot resolve: the attempt fails, and the
@@ -1451,7 +1557,7 @@ mod tests {
         let now = 1_789_573_400_000;
         let out = deliver_pending(&place, "arbos://nowhere/nothing/internal/feedback", Path::new("/nonexistent"), now);
         assert_eq!(out.len(), 1);
-        let Delivery::Waiting { attempts, last_error } = &out[0].1 else {
+        let Delivery::Waiting { attempts, last_error, .. } = &out[0].1 else {
             panic!("a report with no hub cannot have been sent: {:?}", out[0].1);
         };
         assert_eq!(*attempts, 1);
@@ -1501,7 +1607,7 @@ mod tests {
         assert_eq!(tried.len(), 2, "both were tried: {tried:?}");
         for (_, state) in &tried {
             assert!(
-                matches!(state, Delivery::Waiting { attempts: 1, last_error: Some(_) }),
+                matches!(state, Delivery::Waiting { attempts: 1, last_error: Some(_), .. }),
                 "each kept its reason: {state:?}"
             );
         }
@@ -1509,6 +1615,42 @@ mod tests {
         // being in the wrong project.
         assert_eq!(pending(&pa).len(), 1);
         assert_eq!(pending(&pb).len(), 1);
+    }
+
+    /// A report from a project he has since closed is still retried.
+    ///
+    /// Two of Jacob's sat at attempt three with a reason that had already been
+    /// fixed, because the sweep walked the list of *open* places. He closes a
+    /// project because the thing he was reporting is over, so the outbox has to
+    /// be findable without it.
+    #[test]
+    fn a_closed_project_s_outbox_is_still_found() {
+        let scratch = Scratch::new("closed");
+        let data = scratch.path().join("data");
+        // `data_dir` reads this, so the registry lands under the scratch folder
+        // rather than this machine's real one.
+        let restore = std::env::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
+
+        let place = Place::new(scratch.path().join("project"));
+        let mut draft = Draft::new(Parts::default());
+        draft.note = "it drew the sidebar twice".into();
+        write(&place, &draft, "20260916T154210Z-cc33", 1_789_573_330_000).unwrap();
+
+        // Nothing here knows or asks which projects are open.
+        let known = known_outboxes();
+        assert_eq!(known.len(), 1, "the place was remembered: {known:?}");
+        assert_eq!(known[0].path(), place.path());
+        assert_eq!(pending(&known[0]).len(), 1, "and its report is there to send");
+
+        // A place whose outbox has gone drops out rather than lingering.
+        std::fs::remove_dir_all(outbox(&place)).unwrap();
+        assert!(known_outboxes().is_empty(), "a vanished outbox is forgotten");
+
+        match restore {
+            Some(v) => unsafe { std::env::set_var("XDG_DATA_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_DATA_HOME") },
+        }
     }
 
     /// A delivered report keeps its folder: the loop writes `fixed.json` back

@@ -185,6 +185,12 @@ pub enum Event {
     /// answered — all redacted of credentials by the kernel. Goes to the
     /// review sheet, which shows it before anything is sent.
     Feedback(Box<crate::feedback::Bundle>),
+    /// The kernel will not answer a `feedback` ask, in its own words — most
+    /// often because it predates the frame. A kernel older than the app is
+    /// ordinary: the app carries its own binary and Jacob's places may still be
+    /// serving last week's. Better than any version guess, since it is the
+    /// kernel itself saying it does not know the frame.
+    FeedbackUnavailable(String),
     /// Provider-generated pictures for the turn that just finished.
     Images(Vec<crate::model::attachment::MessageImage>),
     /// Files a tool made for the user: screenshots, screen recordings.
@@ -845,6 +851,16 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             agent: Some(id),
             detail,
         } if id == agent => vec![Event::Refused(detail)],
+        // An unknown frame is refused with no agent on it, so this used to fall
+        // off the end of the match and be dropped — which is why a sheet on an
+        // old kernel sat reading "still reading the exchange" for ever instead
+        // of saying what was wrong.
+        Frame::Error {
+            agent: None,
+            detail,
+        } if detail.contains("unknown frame type") && detail.contains("feedback") => {
+            vec![Event::FeedbackUnavailable(detail)]
+        }
         // A `put` of an attachment's bytes the kernel would not take (too
         // large, a bad path): the words went through without the file, and
         // the chat says so.
