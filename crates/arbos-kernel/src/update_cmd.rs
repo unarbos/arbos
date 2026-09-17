@@ -84,7 +84,8 @@ impl Args {
                 "--pin" => args.pin = Some(rest.next().context("--pin wants a version")?),
                 "--from" => {
                     args.from = Some(PathBuf::from(
-                        rest.next().context("--from wants a path to a kernel binary")?,
+                        rest.next()
+                            .context("--from wants a path to a kernel binary")?,
                     ));
                 }
                 "--place" => args.places.push(PathBuf::from(
@@ -136,7 +137,12 @@ pub fn run(args: Args) -> Result<i32> {
     // nothing is compared with a feed: the caller has named the build.
     if let Some(source) = &args.from {
         let coming = kernel::Running::read(source)?;
-        println!("from      {} {} ({})", coming.version.human(), coming.sha, source.display());
+        println!(
+            "from      {} {} ({})",
+            coming.version.human(),
+            coming.sha,
+            source.display()
+        );
         if !args.install {
             println!("\nrun again with --install to replace it");
             return Ok(0);
