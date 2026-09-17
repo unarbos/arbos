@@ -338,8 +338,8 @@ impl Arbos {
                     .truncate()
                     .child(SharedString::from(label)),
             )
-            // The state a row is in, on its face and in a word: `running`,
-            // `exit 0`, `stopped`, `gone`. Never a colour on its own.
+            // The state it is in, in a word rather than a colour:
+            // `board::state_word` is the one place those words are decided.
             .children(state.map(|word| {
                 div()
                     .flex_none()
@@ -395,17 +395,6 @@ impl Arbos {
     /// the other two are the agent's to open, and their tiles say so and put
     /// the request in the composer rather than pretending to do it here.
     fn panel_cards(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let row = |cards: [Card; 2], this: &Self, cx: &mut Context<Self>| {
-            div()
-                .flex()
-                .flex_row()
-                .gap(px(CARD_GAP))
-                .children(
-                    cards
-                        .into_iter()
-                        .map(|card| this.panel_card(card, theme, cx)),
-                )
-        };
         div()
             .id("panel-cards")
             .flex_1()
@@ -416,11 +405,29 @@ impl Arbos {
             .items_center()
             .justify_center()
             .gap(px(CARD_GAP))
-            .child(row([Card::Project, Card::Browser], self, cx))
-            .child(row([Card::Terminal, Card::File], self, cx))
-            // Cursor's tiles sit at about 60% of the panel's height, near the
-            // composer's line rather than in the middle.
-            .child(div().flex_none().h(px(80.)))
+            // Cursor's tiles sit at about 60% of the panel's height — down
+            // near the composer's line rather than in the middle.
+            .pb(px(CARD_HEIGHT))
+            .child(self.panel_card_row([Card::Project, Card::Browser], theme, cx))
+            .child(self.panel_card_row([Card::Terminal, Card::File], theme, cx))
+            .into_any_element()
+    }
+
+    fn panel_card_row(
+        &self,
+        cards: [Card; 2],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(CARD_GAP))
+            .children(
+                cards
+                    .into_iter()
+                    .map(|card| self.panel_card(card, theme, cx)),
+            )
             .into_any_element()
     }
 

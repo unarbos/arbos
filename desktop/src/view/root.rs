@@ -7,6 +7,7 @@ use crate::{
         panel::{Panel, PanelTab},
         permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
+        surface::SurfaceId,
         settings::Settings,
         state::{self, State},
         workspace::{PaneRequest, Reloaded, Workspace},
@@ -1499,7 +1500,7 @@ impl Arbos {
     /// of the side panel and the drawer opens with it.
     pub(crate) fn show_surface(
         &mut self,
-        id: crate::model::surface::SurfaceId,
+        id: SurfaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
