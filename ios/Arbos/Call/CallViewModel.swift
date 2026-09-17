@@ -193,6 +193,9 @@ final class CallViewModel: ObservableObject {
         }
         do {
             try audio.start(captureMic: captureMic)
+            #if DEBUG
+            startMicClipIfAsked()
+            #endif
             try await link.connect()
         } catch {
             audio.onCapture = nil
@@ -503,6 +506,45 @@ final class CallViewModel: ObservableObject {
     /// 16-bit): what is held while the socket is still connecting.
     private static let heldCaptureLimit = Int(AudioEngine.sampleRate) * 2 * MemoryLayout<Int16>.size
 
+    #if DEBUG
+    /// `-micWav <file>`: play a clip down the **capture** path, starting the
+    /// moment the engine is up and so before the socket is.
+    ///
+    /// `-injectWav` cannot test this. It writes straight into the socket's
+    /// sink, bypassing the microphone altogether, which is right for
+    /// measuring round trips and useless for asking what happens to audio
+    /// captured before there is a socket to send it to. That question is
+    /// what dropped a caller's first word, and nothing in the rig could see
+    /// it.
+    private func startMicClipIfAsked() {
+        guard let clip = DebugInjector.clip(named: "micWav") else { return }
+        let frameBytes = Int(AudioEngine.sampleRate) * 2 * DebugInjector.frameMilliseconds / 1000
+        let silence = Data(count: frameBytes)
+        micClipTask = Task.detached { [weak self] in
+            var offset = 0
+            // The clip, then silence for as long as the call lasts: a real
+            // microphone does not stop producing frames when someone stops
+            // talking, and a duplex model only advances while audio arrives.
+            while !Task.isCancelled {
+                let frame: Data
+                if offset < clip.count {
+                    let end = min(offset + frameBytes, clip.count)
+                    frame = clip.subdata(in: offset..<end)
+                    offset = end
+                } else {
+                    frame = silence
+                }
+                guard let self else { return }
+                await MainActor.run { self.audio.onCapture?(frame) }
+                try? await Task.sleep(for: .milliseconds(DebugInjector.frameMilliseconds))
+            }
+        }
+    }
+    private var micClipTask: Task<Void, Never>?
+
+    private func stopMicClip() { micClipTask?.cancel(); micClipTask = nil }
+    #endif
+
     // MARK: - Teardown
 
     private func fail(_ message: String) {
@@ -531,6 +573,7 @@ final class CallViewModel: ObservableObject {
         #if DEBUG
         injector?.stop()
         injector = nil
+        stopMicClip()
         #endif
         link.unsubscribe(subscription)
         subscription = nil
@@ -605,7 +648,7 @@ final class CallViewModel: ObservableObject {
     /// `DebugInjector`); `-bargeWav` fires a second clip 1.5 s into the
     /// reply to exercise barge-in.
     private func startInjectionIfAsked() {
-        guard DebugInjector.isRequested() else { return }
+        guard DebugInjector.socketInjectionRequested() else { return }
         let sink = link.audioSink()
         let injector = DebugInjector(sink: { [weak self] data in
             sink(data)
