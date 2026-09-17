@@ -96,6 +96,8 @@ enum ChatUpdate {
     case step(String)
     /// `.arbos/project.toml` read off the kernel.
     case identity(ProjectIdentity)
+    /// The kernel's address on its hub, from `hello.store`.
+    case store(String)
     /// The link to the kernel went; the store reconnects on its own.
     case dropped(String)
     /// The hub or kernel refused this target for good; no retry.

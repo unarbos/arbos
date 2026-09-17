@@ -141,6 +141,9 @@ struct ProjectChatView: View {
         .onChange(of: chat.identity) { _, face in
             if let face { projects.remember(face, for: target) }
         }
+        .onChange(of: chat.store) { _, address in
+            if let address, target == .pod { projects.podIsAlso(address) }
+        }
     }
 
     // MARK: - Chrome
