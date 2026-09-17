@@ -4,14 +4,24 @@
 use std::process::Command;
 
 fn main() {
-    let sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
+    // A build without `.git` (the harness image builds from a context that
+    // excludes it) can be told its sha: ARBOS_GIT_SHA in the build
+    // environment wins, git is asked next, "unknown" is the honest last word.
+    let sha = std::env::var("ARBOS_GIT_SHA")
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["rev-parse", "--short=12", "HEAD"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "unknown".into());
+    println!("cargo:rerun-if-env-changed=ARBOS_GIT_SHA");
     println!("cargo:rustc-env=ARBOS_GIT_SHA={sha}");
     // When this binary was built (UTC, to the minute): with the sha, what
     // `hello` and the hub's roster show so a days-old kernel is visible

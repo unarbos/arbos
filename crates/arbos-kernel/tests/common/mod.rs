@@ -176,6 +176,13 @@ pub fn spawn_with_env(scratch: PathBuf, extra: &[&str], env: &[(&str, &str)]) ->
     for var in KEY_VARS {
         cmd.env_remove(var);
     }
+    // A chat's model-made title (F-156) is one more provider call after a
+    // first turn; a test that counts a fake provider's calls would see it.
+    // Off unless the test's process says otherwise (chat_title_e2e).
+    cmd.env(
+        "ARBOS_CHAT_TITLES",
+        std::env::var("ARBOS_CHAT_TITLES").unwrap_or_else(|_| "off".into()),
+    );
     for (k, v) in env {
         cmd.env(k, v);
     }

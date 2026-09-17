@@ -57,6 +57,7 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
                 tree: vec![TreeNode {
                     id: "root".into(),
                     name: "root".into(),
+                    title: String::new(),
                     parent: None,
                     paused: false,
                     model: "inherit".into(),
@@ -197,6 +198,30 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
         (Frame::VoiceStart, "voice_start"),
         (Frame::VoiceStop, "voice_stop"),
         (Frame::Refresh, "refresh"),
+        (Frame::Surfaces { agent: None }, "surfaces"),
+        (
+            Frame::SurfaceList {
+                agent: Some("root".into()),
+                surfaces: vec![arbos_core::wire::Surface {
+                    owner: "root".into(),
+                    panel: "process".into(),
+                    id: "j1".into(),
+                    cwd: Some("/tmp".into()),
+                    title: Some("sleep 300".into()),
+                    url: None,
+                    by: "agent".into(),
+                    running: true,
+                    status: "running for 4s (pid 12)".into(),
+                    pid: Some(12),
+                    started_ms: Some(1),
+                    ended_ms: None,
+                    exit: None,
+                    journal: Some("present".into()),
+                }],
+                at_ms: 2,
+            },
+            "surface_list",
+        ),
         (
             Frame::Shell {
                 owner: None,

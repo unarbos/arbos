@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, binary_matches_tree, desktop_build, kernel_build, pulse as display_pulse, still as display_still, tree_sha  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DRIVER_PY = Path(os.environ.get("ARBOS_DRIVER_PY", HERE.parent.parent / "driver" / "arbosdriver.py"))
@@ -582,6 +582,8 @@ def rates(record: Path, label: str | None, last: int = 10) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--bindir")
+    ap.add_argument("--binary-from-elsewhere", action="store_true",
+                    help="the desktop binary is not built from this checkout; skip the tree check")
     ap.add_argument("--label")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--model", default=os.environ.get("QA_MODEL", "google/gemini-2.5-flash"))
@@ -610,6 +612,16 @@ def main() -> int:
     record.parent.mkdir(parents=True, exist_ok=True)
     prior = [json.loads(l) for l in record.read_text().splitlines() if l.strip()] if record.exists() else []
     next_run = max([r["run"] for r in prior if r["label"] == args.label], default=0) + 1
+    # The desktop under test, from the binary, against this tree: a failed
+    # build leaves the previous binary in place and every step below would
+    # score a build that is not the PR's (rig audit R21). Not a step row —
+    # nothing ran yet — but a refusal, said in full.
+    app_build = desktop_build(f"{args.bindir}/arbos-desktop")
+    src_sha = tree_sha(HERE.parents[1])
+    log(f"desktop under test: {app_build} (tree {src_sha or '?'})")
+    if not args.binary_from_elsewhere and not binary_matches_tree(app_build, src_sha):
+        log(f"FAULT: {args.bindir}/arbos-desktop is {app_build}, not a build of tree {src_sha}; nothing run")
+        return 2
     for k in range(args.runs):
         run = next_run + k
         log(f"== journey run {run} on {args.label}")

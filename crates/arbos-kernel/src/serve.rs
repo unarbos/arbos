@@ -438,6 +438,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
     ptys.bind(place.path.clone(), pty_tx);
+    let _ = hooks.ptys.set(Arc::clone(&ptys));
     let mut registry = kernel_registry(&hooks, &ptys);
     // MCP: every tool of every configured server (`.arbos/mcp.toml`,
     // `.cursor/mcp.json`, `~/.config/arbos/mcp.toml`, `ARBOS_MCP_CMD`)
@@ -857,6 +858,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 if let Some(lo) = superseded_at {
                     supersede_cut(&place, &hooks, &mut tails, &id, lo);
                 }
+                // A chat nobody named gets its label from the model after
+                // its first turn (F-156); decided on disk, called off-loop.
+                crate::title::after_turn(&hooks, &id);
                 // A standing agent's transcript past the cap rolls into the
                 // archive now, between turns; attached windows reload from
                 // the short file the way they do after a rewind.
@@ -2079,6 +2083,7 @@ fn tree_nodes(place: &Place) -> Vec<TreeNode> {
         .map(|a| TreeNode {
             id: a.id.to_string(),
             name: a.name.clone(),
+            title: a.title.clone(),
             // Never an agent as its own ancestor: a parent that is itself,
             // is missing, or leads back around reads as top-level.
             parent: sane_parent(&agents, a),
@@ -2712,6 +2717,39 @@ pub async fn serve_client(
                                 redacted: b.redacted,
                                 truncated: b.truncated,
                                 bytes: b.bytes,
+                            });
+                        }
+                        // What this kernel holds, for a window reconciling
+                        // its rows after a kernel's death: answered to the
+                        // asker alone, read now, never from a cache.
+                        Frame::Surfaces { agent } => {
+                            if let Some(a) = agent.as_deref()
+                                && !arbos_core::agent_exists(&place_for_history, a)
+                            {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(a.to_string()),
+                                    detail: format!("surfaces: no agent is named {a}"),
+                                });
+                                continue;
+                            }
+                            let surfaces = crate::surfaces::list(
+                                &place_for_history,
+                                &hooks_for_feedback,
+                                agent.as_deref(),
+                            );
+                            klog::info(
+                                "surfaces",
+                                agent.as_deref(),
+                                format!(
+                                    "who={who_name} rows={} running={}",
+                                    surfaces.len(),
+                                    surfaces.iter().filter(|s| s.running).count()
+                                ),
+                            );
+                            let _ = out_for_history.send(Frame::SurfaceList {
+                                agent,
+                                surfaces,
+                                at_ms: arbos_core::now_ms(),
                             });
                         }
                         // Files under .arbos/, answered here too; a slow

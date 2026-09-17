@@ -19,6 +19,24 @@ pub struct PtyHub {
 struct PtyPage {
     writer: Mutex<Box<dyn Write + Send>>,
     pid: u32,
+    /// The agent the row docks under, and who asked (`user` | `agent`);
+    /// empty for a page a client wrote to before any shell was opened.
+    owner: String,
+    by: String,
+    cwd: std::path::PathBuf,
+    started_ms: i64,
+}
+
+/// One live shell, as `surfaces` reports it.
+pub struct PtyRow {
+    pub agent: String,
+    pub page: String,
+    pub pid: u32,
+    pub alive: bool,
+    pub owner: String,
+    pub by: String,
+    pub cwd: std::path::PathBuf,
+    pub started_ms: i64,
 }
 
 impl PtyHub {
@@ -99,6 +117,12 @@ impl PtyHub {
             PtyPage {
                 writer: Mutex::new(writer),
                 pid,
+                // #461 carries (owner, by) together; #468 records both on
+                // the page so `surfaces` can report who asked.
+                owner: owner.map(|(o, _)| o.to_string()).unwrap_or_default(),
+                by: owner.map(|(_, b)| b.to_string()).unwrap_or_default(),
+                cwd: cwd.to_path_buf(),
+                started_ms: arbos_core::now_ms(),
             },
         );
         let agent = agent.to_string();
@@ -158,6 +182,31 @@ impl PtyHub {
             p.writer.lock().unwrap().write_all(bytes)?;
         }
         Ok(())
+    }
+
+    /// Every shell this kernel has opened and not yet seen end. `alive` is
+    /// the process, checked now: a shell whose reader thread has not yet
+    /// noticed the EOF still lists, as gone.
+    pub fn list(&self) -> Vec<PtyRow> {
+        let guard = self.inner.lock().unwrap();
+        let mut rows: Vec<PtyRow> = guard
+            .iter()
+            .map(|(key, p)| {
+                let (agent, page) = key.split_once(':').unwrap_or((key.as_str(), ""));
+                PtyRow {
+                    agent: agent.to_string(),
+                    page: page.to_string(),
+                    pid: p.pid,
+                    alive: p.pid != 0 && unsafe { libc::kill(p.pid as i32, 0) == 0 },
+                    owner: p.owner.clone(),
+                    by: p.by.clone(),
+                    cwd: p.cwd.clone(),
+                    started_ms: p.started_ms,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| a.started_ms.cmp(&b.started_ms).then(a.page.cmp(&b.page)));
+        rows
     }
 
     pub fn pid(&self, agent: &str, page: &str) -> Option<u32> {

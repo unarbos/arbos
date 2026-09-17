@@ -151,6 +151,17 @@ impl Replay {
         }
     }
 
+    /// Whether the script pins at least one unused line to `agent`. A side
+    /// call that is optional (a chat's title) is made under replay only
+    /// when the script meant it, so it never takes a turn's line.
+    pub fn has_line_for(&self, agent: &str) -> bool {
+        let used = self.used.lock().unwrap_or_else(|p| p.into_inner());
+        self.replies
+            .iter()
+            .enumerate()
+            .any(|(i, r)| !used[i] && r.agent.as_deref() == Some(agent))
+    }
+
     /// The next reply for `agent`, or the end-of-script notice.
     pub fn next(&self, agent: &str) -> Completion {
         let mut used = self.used.lock().unwrap_or_else(|p| p.into_inner());
