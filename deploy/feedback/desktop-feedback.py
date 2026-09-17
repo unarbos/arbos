@@ -517,7 +517,12 @@ def summarise(report: dict, name: str, report_id: str, shot: bool) -> str:
         if chose is False:
             return f"- {label}: **he removed it**"
         if inc.get(key) is False:
-            why = report.get("screenshot_error") if key == "screenshot" else None
+            why = {
+                "screenshot": report.get("screenshot_error"),
+                "trajectory": report.get("trajectory_unavailable"),
+                "log": report.get("trajectory_unavailable"),
+                "tail": report.get("trajectory_unavailable"),
+            }.get(key)
             return (
                 f"- {label}: **missing, and he did not remove it** — a fault"
                 + (f": {why}" if why else ", cause unrecorded")
