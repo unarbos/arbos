@@ -218,3 +218,39 @@ The screenshot #502 owed, and a correction to my own claim.
 - PR: **#502**. #433 and #480 also open. Feedback poll hourly, nothing new.
 - Media: `media/mobile/cycle-53/01-chat-shows-the-call.png`, `02-call-screen.png`, `evidence.txt`.
 - Next: `type_send` (M-162), still the oldest open rig problem; then a recording, now two cycles overdue.
+
+## Cycle 54 report (22:30 UTC, 09-17)
+
+**Looked at:** the shape decision on the chat mirror, then the oldest open
+harness problem, M-162 — typed lines going missing in the journey.
+
+**The decision, built.** The project chat shows the spoken conversation.
+Where Live spoke the kernel's answer, the spoken row stays and the kernel's
+parallel row for that turn goes. Scoped to the *turn*, not the text, because
+the two wordings differ by design. Shown on screen, with the kernel's own
+record proving it wrote the other wording for the same turns and that it is
+not displayed: `media/mobile/cycle-54/01-one-wording-per-turn.png`, kernel
+seq 1957 and 1961. M-179 closed. On #502; no further pushes.
+
+**M-162 closed, and it was never the app.** Three faults in the one line of
+shell that types a line into the composer. The tap point was fixed at
+`200,788`; the composer is near `196,470` and moves as the box grows, and
+with the keyboard up `200,788` is the space bar. Tapping a text box's centre
+puts the caret in the middle of what is already written, so a second line
+wove itself through the first — the box's own value showed it. And nothing
+read the box back before pressing return.
+
+Counted, four long lines twice each way: **6 of 8 reached the kernel the old
+way, 8 of 8 the new way.** #515, with the measurement kept as
+`deploy/mobile/scenarios/type-send-measured.sh` so the next person reruns it
+rather than trusting the table.
+
+**Two readings of mine corrected mid-cycle** (M-181): `idb ui text` does not
+truncate, and the box can be read with the keyboard up. Both came from
+looking at part of the evidence — a stripped prefix that was no longer a
+prefix, and a `tail -8` of a long dump.
+
+**Owed:** a recording, now three cycles overdue. The journey has not been
+re-run against the fixed `type_send`; that is the first item of cycle 55 and
+it is the run that tells us how much of the journey's history was measuring
+the harness.

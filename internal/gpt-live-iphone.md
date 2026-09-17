@@ -204,3 +204,7 @@ and its composer and close button only exist once the screen is pulled down,
 so a tap for the close button before the pull gesture finds nothing.
 
 M-179 is closed.
+
+**22:30Z — CI green on #502**, all five checks including the iPhone
+simulator build, on the commit that carries the rule. Nothing further has
+been pushed to that branch.
