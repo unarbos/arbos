@@ -1290,7 +1290,8 @@ mod tests {
         assert_eq!(on_disk[0].work_error.as_deref(), Some(TREE_PENDING));
         let err = restore(&dir, &on_disk[0]).unwrap_err();
         assert!(
-            err.to_string().contains("no checkpoint of the working tree"),
+            err.to_string()
+                .contains("no checkpoint of the working tree"),
             "{err}"
         );
         assert!(err.to_string().contains("still being saved"), "{err}");
