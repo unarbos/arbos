@@ -90,6 +90,7 @@ final class ProjectStore: ObservableObject {
                 list.append(row)
             }
         }
+        fold(&list)
         if list.isEmpty, entries.isEmpty {
             problem = problem ?? "No kernel or hub is set. Open Settings."
         }
@@ -111,6 +112,34 @@ final class ProjectStore: ObservableObject {
                 await self.refresh()
             }
         }
+    }
+
+    /// The direct kernel said where it lives on the hub (`hello.store`,
+    /// `arbos://<machine>/<project>/`). Since the ArbosLife cutover that is
+    /// the same kernel the roster lists as `phone`, and the list drew it
+    /// twice — once as "pod", once under its name (M-121). Kept, so the
+    /// roster row stands for both from now on.
+    func podIsAlso(_ address: String) {
+        let path = address.replacingOccurrences(of: "arbos://", with: "")
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard parts.count >= 2 else { return }
+        let twin = "\(parts[0])/\(parts[1])"
+        guard twin != podTwin else { return }
+        defaults.set(twin, forKey: "pod.twin")
+        var list = entries
+        fold(&list)
+        entries = list
+    }
+
+    /// `<machine>/<project>` the pod row is another door to, once known.
+    private var podTwin: String? { defaults.string(forKey: "pod.twin") }
+
+    /// One project, one row: the pod row goes when its twin is in the list.
+    private func fold(_ list: inout [ProjectEntry]) {
+        guard let twin = podTwin,
+              list.contains(where: { if case .hub(let m, let p) = $0.target { return "\(m)/\(p)" == twin } else { return false } })
+        else { return }
+        list.removeAll { $0.target == .pod }
     }
 
     /// The face a chat read off its kernel: keep it for the list.

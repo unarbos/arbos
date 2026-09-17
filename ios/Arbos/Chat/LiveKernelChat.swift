@@ -120,9 +120,10 @@ final class LiveKernelChat: ChatSource {
 
     private func handle(_ frame: KernelFrame) {
         switch frame {
-        case .hello(let focus, _, let identity):
+        case .hello(let focus, _, let identity, let store):
             self.focus = focus
             if let identity { stream?.yield(.identity(identity.filled(key: "hello"))) }
+            if let store { stream?.yield(.store(store)) }
         case .snapshot(let focusPath, let agents):
             focus = focusPath.split(separator: "/").last.map(String.init) ?? focus
             remember(agents)

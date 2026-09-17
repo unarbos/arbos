@@ -36,6 +36,9 @@ final class ChatStore: ObservableObject {
     @Published private(set) var step = ""
     /// The project's face from `.arbos/project.toml`, once read.
     @Published private(set) var identity: ProjectIdentity?
+    /// The kernel's own hub address (`arbos://<machine>/<project>/`), so the
+    /// list can tell that the direct kernel and a roster row are one project.
+    @Published private(set) var store: String?
     /// Send → first token of the last typed turn.
     @Published private(set) var lastFirstToken: TimeInterval?
     /// Transcript lines before the first one shown (the kernel replays its
@@ -331,6 +334,7 @@ final class ChatStore: ObservableObject {
             items.removeAll()
             earlierLines = 0
             identity = nil
+            store = nil
             unseen.removeAll()
             // Lines typed for the old project stay with it: never carried
             // to the next chat and sent there (Jacob, build 956).
@@ -585,6 +589,8 @@ final class ChatStore: ObservableObject {
             step = text
         case .identity(let face):
             identity = face
+        case .store(let address):
+            store = address
         case .dropped:
             // One calm line under the transcript (the mode notice), not an
             // error plus a reassurance. A second drop for the same close

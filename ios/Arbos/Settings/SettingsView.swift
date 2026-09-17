@@ -35,12 +35,16 @@ struct SettingsView: View {
                             .keyboardType(.URL)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
+                        // `.oneTimeCode`, not `.password`: a token is not a
+                        // site password, and `.password` had iOS put up its
+                        // own "Save Password?" sheet over the list after every
+                        // edit (M-122).
                         SecureField(tokenPlaceholder, text: $tokenDraft)
-                            .textContentType(.password)
+                            .textContentType(.oneTimeCode)
                             .autocorrectionDisabled()
                     case .openAIRealtime:
                         SecureField(keyPlaceholder, text: $keyDraft)
-                            .textContentType(.password)
+                            .textContentType(.oneTimeCode)
                             .autocorrectionDisabled()
                         TextField("Model", text: $settings.openAIModel)
                             .autocorrectionDisabled()
@@ -57,7 +61,7 @@ struct SettingsView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                     SecureField(kernelTokenPlaceholder, text: $kernelTokenDraft)
-                        .textContentType(.password)
+                        .textContentType(.oneTimeCode)
                         .autocorrectionDisabled()
                 } header: {
                     Text("Arbos kernel")
@@ -70,7 +74,7 @@ struct SettingsView: View {
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                     SecureField(hubTokenPlaceholder, text: $hubTokenDraft)
-                        .textContentType(.password)
+                        .textContentType(.oneTimeCode)
                         .autocorrectionDisabled()
                 } header: {
                     Text("Mesh hub")

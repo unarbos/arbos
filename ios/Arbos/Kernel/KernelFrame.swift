@@ -117,7 +117,9 @@ struct KernelToolRecord: Equatable {
 /// tagged by `type` in snake_case.
 enum KernelFrame {
     /// First frame from a 0.2 kernel over WebSocket.
-    case hello(focus: String, kernel: String, identity: ProjectIdentity?)
+    /// `store` is the kernel's own address on its hub
+    /// (`arbos://<machine>/<project>/`), absent when it is on no hub.
+    case hello(focus: String, kernel: String, identity: ProjectIdentity?, store: String?)
     /// The agent tree and which agent the desktop last focused.
     case snapshot(focus: String, agents: [KernelAgent])
     case tree([KernelAgent])
@@ -210,7 +212,8 @@ enum KernelFrame {
             self = .hello(
                 focus: object["focus"] as? String ?? "root",
                 kernel: object["kernel"] as? String ?? "",
-                identity: identity
+                identity: identity,
+                store: object["store"] as? String
             )
         case "replayed":
             self = .replayed(

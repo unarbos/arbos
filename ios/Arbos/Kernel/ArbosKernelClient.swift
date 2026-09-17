@@ -150,7 +150,7 @@ final class ArbosKernelClient {
         }
         #endif
         switch frame {
-        case .hello(let focus, let version, _):
+        case .hello(let focus, let version, _, _):
             self.focus = focus
             kernelVersion = version
             if state == .attaching { state = .attached }
