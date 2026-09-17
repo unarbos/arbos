@@ -92,10 +92,18 @@ fn a_kernel_whose_binary_was_replaced_under_it_says_so_on_hello_and_healthz() {
     assert!(hello.get("binary_gone").is_none(), "{hello}");
     assert_eq!(healthz(&k.url)["binary_gone"], false);
 
-    // The update: unlink, write the new build at the same path. The
-    // process keeps serving the old image.
-    std::fs::remove_file(&bin).unwrap();
-    std::fs::copy(env!("CARGO_BIN_EXE_arbos-kernel"), &bin).unwrap();
+    // The update as the installer does it: a new build staged beside,
+    // then renamed over the same path. The path still exists and holds
+    // the new file; the process keeps serving the old image. (A check on
+    // the path alone would say "not gone" here — the macOS shape; the
+    // kernel compares the file's identity with the one it started from.)
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_arbos-kernel"),
+        bin.with_extension("new"),
+    )
+    .unwrap();
+    std::fs::rename(bin.with_extension("new"), &bin).unwrap();
+    assert!(bin.exists());
 
     let mut b = Attach::connect(&k.url);
     let hello = b

@@ -372,10 +372,30 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let bin = dir.join("sleeper");
         std::fs::copy("/bin/sleep", &bin).unwrap();
-        let mut child = std::process::Command::new(&bin).arg("30").spawn().unwrap();
+        // ETXTBSY: another test's fork in this process can hold the fresh
+        // file's write descriptor for the instant between its fork and
+        // exec. Not the thing under test; try again.
+        let mut child = None;
+        for _ in 0..50 {
+            match std::process::Command::new(&bin).arg("30").spawn() {
+                Ok(c) => {
+                    child = Some(c);
+                    break;
+                }
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("spawn: {e}"),
+            }
+        }
+        let mut child = child.expect("the copied sleep started");
         let pid = child.id() as i32;
         assert_eq!(super::pid_binary_gone(pid), Some(false));
-        std::fs::remove_file(&bin).unwrap();
+        // An update: a new file renamed over the same path. /proc names
+        // the old inode as deleted although the path exists.
+        std::fs::copy("/bin/sleep", dir.join("sleeper.new")).unwrap();
+        std::fs::rename(dir.join("sleeper.new"), &bin).unwrap();
+        assert!(bin.exists());
         assert_eq!(super::pid_binary_gone(pid), Some(true));
         let _ = child.kill();
         let _ = child.wait();

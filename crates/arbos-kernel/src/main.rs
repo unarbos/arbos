@@ -28,6 +28,9 @@ fn main() -> Result<()> {
             );
         }
     }
+    // This binary's identity (device, inode, size, mtime) before anything
+    // can replace the file under it: `binary_gone` compares against it.
+    arbos_core::binary_identity::remember_start();
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_else(|| "serve".into());
     match cmd.as_str() {
