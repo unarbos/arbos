@@ -8,6 +8,7 @@ pub mod check;
 pub mod cli;
 pub mod doors;
 pub mod feedback;
+pub mod feedback_cmd;
 pub mod files;
 pub mod github;
 pub mod grep;
