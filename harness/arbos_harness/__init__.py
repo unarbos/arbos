@@ -74,7 +74,8 @@ class ArbosHarnessConfig(HarnessConfig):
     allowlist: list[str] = Field(default_factory=list)
     """Tools the agent may use. Empty = the program's headless default."""
     instructions: str = ""
-    """Standing instructions shown in every prompt. Empty = the program's default."""
+    """Extra standing instructions, appended to the program's headless rules (never
+    replacing them)."""
     repro_required: int = Field(1, ge=0)
     """Failing reproductions the first edit needs (`ARBOS_REPRO_REQUIRED`): 0 = no gate,
     1 = one, 2 = the reporter's example plus a second input the agent derives."""

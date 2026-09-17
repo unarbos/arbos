@@ -111,15 +111,19 @@ ALLOW="${ARBOS_ALLOWLIST:-ls, read, find, grep, write, edit, apply_patch, bash, 
 if [ ! -f "$AGENT_DIR/agent.md" ]; then
   printf 'name: root\nmodel: inherit\nallowlist: %s\ncwd: %s\nmode: %s\n' "$ALLOW" "$PLACE" "$MODE" > "$AGENT_DIR/agent.md"
 fi
-if [ -n "${ARBOS_INSTRUCTIONS:-}" ]; then
-  printf '%s\n' "$ARBOS_INSTRUCTIONS" > "$AGENT_DIR/instructions.md"
-elif [ ! -f "$AGENT_DIR/instructions.md" ]; then
+# The standing rules are always written; ARBOS_INSTRUCTIONS adds to them and
+# never replaces them (an override once dropped "do not commit" and the agent
+# committed on a branch, so the patch extraction saw nothing).
+if [ ! -f "$AGENT_DIR/instructions.md" ]; then
   cat > "$AGENT_DIR/instructions.md" <<'EOF'
 You run headless inside a container. Nobody reads your replies while you work and nobody can answer a question, so never ask; decide and continue.
 Work only in the repository at your cwd. Make the change in the working tree and leave it there: do not commit, do not create branches, do not push.
 You have no network beyond the model. Do not try to install packages from the internet.
 Run the relevant tests with bash to check your fix before you stop. When the fix is in place and verified, stop with a short summary of what you changed.
 EOF
+  if [ -n "${ARBOS_INSTRUCTIONS:-}" ]; then
+    printf '\nFor this run also:\n%s\n' "$ARBOS_INSTRUCTIONS" >> "$AGENT_DIR/instructions.md"
+  fi
 fi
 
 # 4. Run the turn. A dangerous-command approval (only sudo, rm -rf /, mkfs)
