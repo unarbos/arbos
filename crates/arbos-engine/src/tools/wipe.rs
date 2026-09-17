@@ -386,6 +386,13 @@ fn judge_target(spelled: &str, recursive: bool, what: &str, st: &State) -> Verdi
         Tree::Place => Verdict::Ask(format!(
             "{what} of {how} removes the project folder itself, its `.arbos` record with it"
         )),
+        Tree::HomeFolder => {
+            if recursive || glob {
+                Verdict::Ask(format!("{what} of {how} removes {}", tree.name(&resolved)))
+            } else {
+                Verdict::Run
+            }
+        }
     }
 }
 
@@ -395,6 +402,8 @@ enum Tree {
     Home,
     System,
     Place,
+    /// A top-level folder of the home: Documents, Projects.
+    HomeFolder,
 }
 
 impl Tree {
@@ -404,6 +413,7 @@ impl Tree {
             Tree::Home => format!("the home directory {}", p.display()),
             Tree::System => format!("the system tree {}", p.display()),
             Tree::Place => format!("the project folder {}", p.display()),
+            Tree::HomeFolder => format!("the home folder {}", p.display()),
         }
     }
 }
@@ -436,8 +446,19 @@ fn tree_of(p: &Path, st: &State) -> Option<Tree> {
             _ => Some(Tree::System),
         };
     }
-    if st.place.as_deref() == Some(p) {
+    if let Some(place) = &st.place
+        && (place == p || place.starts_with(p))
+    {
+        // The place, or a folder that holds it.
         return Some(Tree::Place);
+    }
+    // A top-level folder of the home — Documents, Projects, code — is a
+    // person's tree; their dot-folders (.cache, .npm) are cleanups.
+    if let Ok(rel) = p.strip_prefix(&home)
+        && rel.components().count() == 1
+        && !rel.to_string_lossy().starts_with('.')
+    {
+        return Some(Tree::HomeFolder);
     }
     None
 }
@@ -786,6 +807,11 @@ mod tests {
         asks("rm -rf *");
         asks("rm -rf /home/jacob/code/app");
         asks("cd .. && rm -rf app");
+        // A folder that holds the place, and a person's top-level home folders.
+        asks("rm -rf ~/code");
+        asks("rm -rf ~/Documents");
+        asks("rm -rf $HOME/Projects/*");
+        asks("cd ~ && rm -rf Documents");
     }
 
     #[test]
@@ -805,6 +831,10 @@ mod tests {
         runs("cd /home/jacob/code/app/target && rm -rf *");
         runs("rm -rf ~/code/app/target");
         runs("rm -rf $HOME/.cache/thing");
+        runs("rm -rf ~/.cache");
+        runs("rm -rf ~/Downloads/build.zip");
+        runs("rm -rf ~/Documents/old-notes");
+        runs("rm ~/Documents");
         runs("cd / && ls -la");
         runs("cd / && rm -rf /tmp/scratch");
         runs("find . -name '*.pyc' -delete");
