@@ -162,6 +162,13 @@ pub fn snapshot_turn_tree(
 ) -> Result<()> {
     let line = cp.line;
     let head = &cp.head;
+    // Test knob: a slow `add -A`, as a large repository has.
+    if let Some(ms) = std::env::var("ARBOS_TEST_TREE_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let (work, clean, work_error) = match work_commit(cwd, head) {
         Ok(Some(w)) => (Some(w), false, None),
         Ok(None) => (None, true, None),
