@@ -165,6 +165,27 @@ pub enum WaitEnd {
 /// The `source` of a parent's "waiting on <worker>" status line.
 pub const WAITING_SOURCE: &str = "waiting";
 
+/// One running turn's silence clock (see [`KernelHooks::progress`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Progress {
+    pub last_ms: i64,
+    pub told: bool,
+}
+
+/// How long a running turn may show nothing before the kernel says what
+/// it is waiting on: five minutes, or `ARBOS_STALL_SECS` (tests). A
+/// model call that streams nothing for that long, a command that never
+/// returns, a wait on a child whose kernel is gone: all of them look to
+/// the user like the app hanging, and this is the one line that says
+/// otherwise.
+pub fn stall_secs() -> u64 {
+    std::env::var("ARBOS_STALL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(300)
+}
+
 pub struct KernelHooks {
     pub place: Place,
     /// Housekeeping wakes only (`Serve`, `Compact`). Work goes through the plan.
@@ -218,6 +239,14 @@ pub struct KernelHooks {
     pub plan_lock: Mutex<()>,
     /// Agents with a turn in flight. The serve loop keeps it current.
     pub running: Mutex<HashSet<String>>,
+    /// When each running turn last did something the transcript or a
+    /// window could see (a streamed word, a tool starting or ending, a
+    /// status), and whether the stall notice for the current silence has
+    /// been said. The serve loop reads it every few seconds: a turn silent
+    /// past [`stall_secs`] gets one line saying what it is waiting on,
+    /// so "still running" and "finished and unnoticed" stop looking the
+    /// same to the user.
+    pub progress: Mutex<HashMap<String, Progress>>,
     /// The control handle of every turn in flight, shared with the
     /// scheduler. `say mode=steer` reaches a live turn through it.
     pub in_flight: Arc<Mutex<HashMap<String, TurnControl>>>,
@@ -279,6 +308,7 @@ impl KernelHooks {
             browsers: BrowserHub::new(),
             plan_lock: Mutex::new(()),
             running: Mutex::new(HashSet::new()),
+            progress: Mutex::new(HashMap::new()),
             in_flight: Arc::new(Mutex::new(HashMap::new())),
             sent: Mutex::new(HashMap::new()),
             spawn_lock: Mutex::new(()),
@@ -342,8 +372,55 @@ impl KernelHooks {
         self.running.lock().unwrap().contains(agent)
     }
 
+    /// Something the user could see happened in `agent`'s turn: the
+    /// silence clock restarts, and a stall said for the old silence is
+    /// forgotten so a second one can be said if the turn goes quiet again.
+    pub fn note_progress(&self, agent: &str) {
+        let mut map = self.progress.lock().unwrap();
+        if let Some(p) = map.get_mut(agent) {
+            p.last_ms = arbos_core::now_ms();
+            p.told = false;
+        }
+    }
+
+    /// Running turns silent for `stall_ms` or more whose stall has not
+    /// been said yet — marked said on the way out — with the moment their
+    /// silence began. A parent blocked on a child that is itself alive is
+    /// not stalled: the child's own line says what it is on, and a
+    /// coordinator waiting twenty minutes on a worker is the normal shape.
+    pub fn stalled(&self, stall_ms: i64) -> Vec<(String, i64)> {
+        let now = arbos_core::now_ms();
+        let waiting_on_live_child: HashSet<String> = {
+            let waits = self.waits.lock().unwrap();
+            let running = self.running.lock().unwrap();
+            waits
+                .iter()
+                .filter(|(child, _)| running.contains(child.as_str()))
+                .map(|(_, (parent, _))| parent.clone())
+                .collect()
+        };
+        let mut map = self.progress.lock().unwrap();
+        let mut out = Vec::new();
+        for (agent, p) in map.iter_mut() {
+            if p.told || now - p.last_ms < stall_ms || waiting_on_live_child.contains(agent) {
+                continue;
+            }
+            p.told = true;
+            out.push((agent.clone(), p.last_ms));
+        }
+        out.sort();
+        out
+    }
+
     pub fn turn_started(&self, agent: &str) {
         self.running.lock().unwrap().insert(agent.to_string());
+        self.progress.lock().unwrap().insert(
+            agent.to_string(),
+            Progress {
+                last_ms: arbos_core::now_ms(),
+                told: false,
+            },
+        );
         self.status_said.lock().unwrap().remove(agent);
         self.sent.lock().unwrap().remove(agent);
         if let Some(parent) = self.parent_of(agent) {
@@ -359,6 +436,7 @@ impl KernelHooks {
 
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
+        self.progress.lock().unwrap().remove(agent);
         // Nothing is being done now: the live line goes.
         self.status_said.lock().unwrap().remove(agent);
         self.status_pending.lock().unwrap().remove(agent);

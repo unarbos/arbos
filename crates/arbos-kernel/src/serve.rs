@@ -603,6 +603,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             _ = tick.tick() => {
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
+                say_stalls(&hooks);
             }
             _ = watch_tick.tick() => {
                 // Nobody attached: nothing to tell, and no stats to pay for.
@@ -2261,6 +2262,56 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
                 _ => (false, "none".into()),
             }
         }
+    }
+}
+
+/// A running turn that has shown nothing for [`crate::hooks::stall_secs`] gets
+/// one line on its transcript saying what it is waiting on — the tool
+/// calls in flight (from the `inflight/` records) or, with none, the model
+/// — and since when. A command that never returns, a model that streams
+/// nothing, a wait on a child whose kernel is gone: to the user each of
+/// them is the app hanging, and the working line alone cannot tell
+/// "still running" from "finished and unnoticed". Said once per silence;
+/// progress resets it. Not a stop: Stop stays the user's call, and the
+/// line says so.
+fn say_stalls(hooks: &Arc<KernelHooks>) {
+    let stall_ms = crate::hooks::stall_secs() as i64 * 1000;
+    for (agent, since_ms) in hooks.stalled(stall_ms) {
+        let now = arbos_core::now_ms();
+        let quiet = arbos_core::subscription::human_ms((now - since_ms).max(0) as u64);
+        let id = arbos_core::AgentId::new(&agent);
+        let running: Vec<String> = arbos_engine::inflight::peek(&hooks.place, &id)
+            .iter()
+            .filter(|r| r.name != "status")
+            .map(|r| {
+                let started = r.started.unwrap_or(since_ms);
+                format!(
+                    "`{}` ({}) since {}",
+                    r.name,
+                    arbos_core::status::derived(&r.name, r.args.as_ref()),
+                    arbos_core::subscription::clock(started)
+                )
+            })
+            .collect();
+        let what = if running.is_empty() {
+            format!(
+                "waiting on the model, which has returned nothing since {}",
+                arbos_core::subscription::clock(since_ms)
+            )
+        } else {
+            format!("waiting on {}", running.join("; "))
+        };
+        let text = format!(
+            "Still working, but nothing has happened for {quiet}: {what}. If it is stuck, Stop ends the turn; what ran so far stands."
+        );
+        klog::warn("turn_stalled", Some(&agent), &what);
+        let _ = arbos_core::append_event(
+            &hooks.layout(&agent).transcript(),
+            &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                text,
+                failed: false,
+            }),
+        );
     }
 }
 
