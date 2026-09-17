@@ -38,7 +38,10 @@ the QA loop's — `store-second-reader.sh`:
 4. **Shouts** on `FAULT`: writes
    `internal/qa/inbox/<date>-store-second-reader-fault-<hhmm>.md` (if the
    store will take it) and the mesh worker reports it to the coordinator in
-   that turn. `AGREE` and `BEHIND` are silent.
+   that turn. `AGREE` and `BEHIND` are silent — and silent means the timer's
+   turn ends with zero characters, not "nothing to report". Only `FAULT`, or
+   the reader itself failing to run, earns words. A line every half hour
+   saying nothing is wrong is how a real fault gets read past.
 
 ## The three verdicts
 

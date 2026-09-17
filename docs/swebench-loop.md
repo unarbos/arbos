@@ -7,7 +7,7 @@ cursor:
 
 # SWE-bench improvement loop — living doc
 
-> **CORRECTION (2026-09-17, cycle 12).** Every number in this document from cycle 1 through cycle 11 was measured with the container on the Docker host network. The agent used it: in 133 of 948 rollouts it downloaded the newer release of the package under repair — the one carrying the fix — and 114 of those were graded solved. The score board below is left as it was written, as the record of what was claimed; none of those figures is a measure of the agent. The per-cycle count is in [`swebench-open-network-audit.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-open-network-audit.md). **The baseline is the cycle-12 figure: 21 of 36 rollouts (58%) on the regression 20 at `-r 2`, network cut, kernel `864d6b00`.** The 74% that cycles 10–11 reported was wrong and is not to be compared against.
+> **CORRECTION (2026-09-17, cycle 12).** Every number in this document from cycle 1 through cycle 11 was measured with the container on the Docker host network. The agent used it: in 133 of 948 rollouts it downloaded the newer release of the package under repair — the one carrying the fix — and 114 of those were graded solved. The score board below is left as it was written, as the record of what was claimed; none of those figures is a measure of the agent. The per-cycle count is in [`swebench-open-network-audit.md`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-open-network-audit.md). **The baseline is the cycle-12/13 figure: 24 of 40 rollouts (60%) on the regression 20 at `-r 2`, network cut, kernel `864d6b00`.** The 74% that cycles 10–11 reported was wrong and is not to be compared against.
 
 One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every loss, fix the top cause in the agent, re-run, record the delta. Model: Claude Sonnet 5 via OpenRouter (cache breakpoints on). Grader: `primeintellect/swebench-verified` (Harbor). Data: [`media/swebench/loop/`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop/) (`loop-state.json` = stratified order and slices; `cycle-N/` = traces, A-vs-B table, scripts), history in [`media/swebench/loop-history.jsonl`](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/swebench/loop-history.jsonl). Failing bundles for QA: `internal/qa/rollouts/swebench/loop-cycle-N/`.
 
@@ -33,7 +33,7 @@ One cycle = run Arbos on 50 fresh SWE-bench Verified instances, classify every l
 
 Cost per instance: Arbos $0.42–0.53 before the gates, ~$0.59 with both gates; Codex $1.72 on the same 24. Wall time per instance (median): Arbos 139–157 s; Codex 56 s.
 
-~~**Baseline to beat (set 2026-09-13 after cycle 1): parity with Codex on the 24-set, 22/24 each.**~~ Withdrawn 2026-09-17: both harnesses ran on the open network; neither 22 is verified. The baseline is cycle 12's 21/36 (58%) under the cut; see the correction at the top.
+~~**Baseline to beat (set 2026-09-13 after cycle 1): parity with Codex on the 24-set, 22/24 each.**~~ Withdrawn 2026-09-17: both harnesses ran on the open network; neither 22 is verified. The baseline is cycles 12–13's 24/40 (60%) under the cut; see the correction at the top.
 
 ## Cause histogram (losses on the cycle slices, before the fix)
 
@@ -282,9 +282,47 @@ Not reached: sympy-20590 and sympy-13878 (both solved 2/2 in every earlier cycle
 
 Spend $56.29 (aborted pre-#380 run $0.49, ungraded run $18.55, smokes $0.11, the counted run $37.14). Orphaned containers after each SIGINT stop (2 + 2, `sleep infinity`, no agent) removed by ID.
 
-## Next (cycle 13)
+## Cycle 13 (2026-09-17) — the baseline on 40 rollouts, the twelve clean failures, and whether the set is still the right one
 
-1. Finish the baseline: sympy-20590 and sympy-13878 at `-r 2` under the cut on `864d6b00` (or `main` once #380 merges, noting the commit), so the figure is on 40 rollouts.
-2. Then the first lever against the honest baseline. The clean failures are now concentrated and legible: 13398, 14792, 15022, 8898, 7590, xarray-6992 (requests-2317 is the grader hang). Read those twelve rollouts first; the class may not be "wrong mechanism" once the copied fixes are gone.
-3. The Codex comparison (22/24) is unverified; if parity is still the question, re-run Codex under the cut too.
-4. Still open: Django `runtests.py` to the timeout; `bash_wait_ms` 600 s for headless runs.
+**Baseline finished: 24 of 40 rollouts, 60%.** The two instances the cycle-12 watcher cut off, run under the cut on the same kernel `864d6b00`: sympy-20590 2/2 ($0.26), sympy-13878 1/2 ($9.62 — the loss ran 121 model calls and finished with a patch the hidden tests reject; first clean loss of that instance in six runs). `arbos_egress_open` 0.0, no fetch, 0 live survivors on all four. With cycle 12's 21/36, the regression 20 at `-r 2` stands at **24/40 (60%)**. This is the number. The 74% is the number that was wrong.
+
+**The grading boundary is structural now** ([#393](https://github.com/unarbos/arbos/pull/393) merged; [#397](https://github.com/unarbos/arbos/pull/397) refines it). Before egress reopens for the verifier, the harness kills every live process in the container except PID 1 and reads `/proc` back; a live survivor keeps the cut and fails the rollout. Smoke with the agent told to `nohup sleep 100000 &`: 2 killed, 0 left, graded. Plain rollouts leave 0 live processes and 1 zombie (PID 1 is `sleep infinity` and reaps nothing) — #393 counted that zombie as a kill; #397 does not.
+
+### The twelve clean failures, read
+
+Six instances at 0/2 under the cut. For each: what the agent did, what the hidden tests wanted, and what kind of gap that is.
+
+| Instance | What the agent changed | What the hidden tests want | Gap |
+|---|---|---|---|
+| django-14792 | `_prepare_tzname_delta` in the postgresql, mysql and oracle backends: parse the offset out of `Etc/GMT-10` and flip it correctly (both rollouts, 11–13 edits) | `django/utils/timezone.py::_get_timezone_name` returns the offset for fixed-offset zones; tested directly | **Wrong layer.** Both rollouts *named* the root cause correctly in their summary ("`_get_timezone_name()` changed in 3.2 to return the full name") and then fixed the three consumers. One rollout passed the mechanism gate with the literal text `placeholder`. |
+| django-15022 | Rollout 1: combine the per-word `Q`s into one `filter()` but keep chaining for multi-valued lookups. Rollout 2: `Exists()` subqueries for multi-valued lookups | Gold: `queryset.filter(Q(*term_queries))` once — the maintainers accepted that a multi-word search over a multi-valued relation now matches within one related row | **Deliberate conservatism lost.** The agent saw that the simple fix changes semantics and preserved them; the maintainers changed them. |
+| pylint-8898 | A depth-aware CSV splitter that respects `()`, `[]`, `{}` and backslash escapes (both rollouts) | `test_csv_regex_error`: `(foo{1,}, foo{1,3}})` must error with `"(foo{1,} beginning at index 0"` — the gold splitter tracks only `{}`, so it splits at the comma and the *first half* errors | **Hidden test pins an incidental detail.** The agent's splitter is the more thorough one; it produces a different error string on malformed input. |
+| sphinx-7590 | User-defined literals in the C++ parser, both rollouts, with `get_id` mangling `cl` + `li` + ident + literal + `E` | `test_expressions` checks the exact mangled ID `clL_Zli{ident}E{literal}E` | **Hidden test pins an unspecified output.** The issue says nothing about ID mangling; the Itanium ABI form the gold uses is knowable but not stated. |
+| xarray-6992 | One line in `reset_index`: subtract `drop_variables` from `_coord_names` (both rollouts; 12–16 tool calls, the cheapest failures in the set) | 12 tests across `reset_index`/`set_index`, including `test_reset_index_drop_convert[...]` — the gold reworks `dataset.py` and `indexes.py` (8.9 kB) | **The issue is one symptom of a redesign.** The agent fixed what was reported; the tests grade the redesign. |
+| astropy-13398 | A new `itrs_observed_transforms.py` from the issue's draft (both rollouts), registered in `__init__.py` | `test_itrs_topo_to_altaz_with_refraction`, `..._hadec_with_refraction`, `test_cirs_itrs_topo`: the gold also gives `ITRS` a `location` attribute and applies refraction | **The accepted PR grew past the issue text.** Refraction and topocentric ITRS are in the tests and not in the issue. |
+
+**Wrong mechanism: 0 of 12.** With the copied fixes gone, the class the last four cycles aimed at is not in the clean failures at all. What is: two rollouts at the wrong layer (agent-addressable, and the "fix at the root" rule from cycle 1 plainly did not hold — the agent wrote the root cause down and fixed elsewhere); two where the agent preserved behaviour the maintainers changed; and **eight of twelve where the hidden tests grade something the issue text does not determine** — an error string, a mangling scheme, a redesign, a feature's final scope. Those eight are not reachable by a behaviour lever; a stronger agent would fail them the same way, and the audit shows the only way past them so far was the upstream diff.
+
+One gate finding from the read: `mechanism: "placeholder"` satisfied the mechanism gate (django-14792, second rollout). The gate checks length, not content. Filed in the QA note.
+
+### Is regression 20 still the right set?
+
+No. Across all clean rollouts of cycles 1–13 the set decomposes as: **ten instances at 100%** (11–27 clean rollouts each: 12907, 11099, 11133, 13449, 14017, 6903, 5787, 7432, 13142, 20590), **five at 0%** (13398 0/13, 14792 0/12, requests-2317 0/16 — the grader hang, xarray-6992 0/19, sphinx-7590 0/4), two near it (15022 2/19, 15252 1/7), and **two with variance** (pylint-8898 6/10, scikit-learn-25102 3/5). Thirty of forty rollouts are decided before the run starts. The set has a floor of ~14 and a ceiling of ~34 that no lever can move, and the four to six rollouts in between are inside the noise band we already refuse to read. A lever would have to be very large to show here, and cycle 12's re-baseline already told us what the twelve fixed failures are.
+
+Proposed **regression 20b**, from the audit data, for cycle 14 to baseline under the cut (about $40 at `-r 2`):
+
+- The 12 instances with a clean 1/2 split in cycles 1–5, never fetched: astropy-13236, astropy-14182, django-11728, django-16454, matplotlib-24870, pylint-6386, scikit-learn-14629, sphinx-8035, sphinx-8265, sympy-15017, sympy-17318, sympy-18698.
+- The 2 with variance in the old set: pylint-8898, scikit-learn-25102.
+- The 2 near-floor instances where the agent has solved cleanly at least once: django-15022, django-15252.
+- 4 fresh medium/hard instances from `order_remaining` (never run), so the set is not entirely selected on past variance.
+
+Keep the old regression 20 as a yearly-style check, not the loop's instrument: run it once per kernel base to see that the ten still solve and the five still do not, at $40 a time, and nothing more.
+
+Spend $10.83 (finish $9.89, sweep smokes $0.94). Cycle total for 12+13: $67.12; the overrun is the ungraded run.
+
+## Next (cycle 14)
+
+1. Pre-register and baseline regression 20b under the cut at `-r 2` on one pinned kernel. That becomes the loop's instrument; regression 20 stays as the per-kernel check.
+2. First lever against 20b, chosen from *its* failures, not from the old set's. The only agent-addressable pattern the twelve clean failures showed — root cause named, fix applied to the consumers — is a candidate if 20b shows it too.
+3. The mechanism gate should reject a mechanism that names nothing (a word, a placeholder); that is a kernel change for the features agent.
+4. Still open: requests-2317's grader hang; Django `runtests.py` to the timeout; `bash_wait_ms` 600 s for headless runs.
