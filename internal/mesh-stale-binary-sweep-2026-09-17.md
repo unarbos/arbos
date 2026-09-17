@@ -94,8 +94,9 @@ checklist for any install; the note below asks the node to say it itself.
 ## How to run this sweep again
 
 **This is a stopgap with an end date.** It exists only until `binary_gone`
-lands on `hello`, on `register`, and on the hub roster
-(`internal/features-inbox/2026-09-17-running-binary-gone-in-hello.md`). From
+lands on `hello`, on `register`, and on the hub roster — that work is
+[#385](https://github.com/unarbos/arbos/pull/385), from the proposal in
+`internal/features-inbox/2026-09-17-running-binary-gone-in-hello.md`. From
 then on `/list` and the desktop's version line carry the fact for every node
 on the hub, `arbos-kernel update --place` carries it for local places, and
 these scripts should be deleted from this document rather than maintained.

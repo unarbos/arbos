@@ -64,6 +64,18 @@ The "more" each time are files created since the previous episode that match the
 - Surviving paths answered reads and writes normally during the episodes.
 - The client is a FUSE mount; a client-side cache fault would not be expected to agree across machines or to remove a directory (`docs/`) while keeping its siblings (`media/`, `notes.md`).
 
+## Could the client have done it? — checked, and no
+
+The first question a service engineer will ask, so we asked it of ourselves first. The same day we found a bug in our own kernel of exactly the worrying shape (our `qal-j09`): a read of a page that fails is treated as an empty page, and the next write replaces the real page with the empty one by temp-file-and-rename. If any of the losses above were that, this report would be blaming the service for our bug. Three checks, all against the record rather than the pattern:
+
+1. **Truncation versus absence.** Our bug shrinks a file to a smaller *valid* file; it cannot remove a file, and it cannot remove a directory. Every loss above was recorded as *absence* — `[ -e path ]` false, `ls docs` → "no such file or directory" for the directory itself. Across all 108 mirror snapshots of the day (one every pass, 09-16 09:48 → 09-17 04:50), **no file present in two consecutive snapshots shrank by more than half**; the 22 shrinks that did occur are ordinary edits (the root `notes.md` pruned by its author, 1–5%; two documents trimmed by theirs), none inside an episode's window, none to near-empty. A client truncation would have appeared exactly there.
+2. **Reach.** The write path of our bug touches only files the kernel itself owns through one module (`.arbos/notes.md` and an agent's own checklist page). This store has no `.arbos/` at its root and is not served by a kernel; the files lost (`docs/*.md`, `internal/features-inbox/*`, `internal/parity/*`, `internal/mirror-docs.sh`, the hex-named drafts) are written by agents' plain file writes and by `cp` from other machines, never through that module. The one file in the store with the shape our bug would rewrite — the root `notes.md` — is the one file that has never been lost.
+3. **Our own tooling.** Nothing we run deletes inside the store: the mirror script removes only its own temp files and index; the QA loop's cycle removes only its VM-side staging and rollouts older than 30 days; the publisher removes only its results clone. The restores copy in; nothing copies out with `--delete`.
+
+Also checked and set aside: the four files that vanished between consecutive snapshots *outside* the episode windows are two deliberate moves by their authors (`internal/kernel-self-update-design.md`, twice — the second was our own re-deletion of a duplicate), one file of ours that reappeared unchanged on the next pass, and one report folder moved by the desktop loop. None coincides with an episode.
+
+So: nothing in the record fits a client write. The losses are absences of files and of whole directories, at times when no client of ours wrote to those paths, seen identically from three machines. That is what we are asking about.
+
 ## Partial views — a second phenomenon, kept separate
 
 On 09-16 at ~14:20 one client observed *unstable* counts seconds apart (1092, 1122, 1092 files under `internal/`), every sampled file present, and a clean pass minutes later. That is a listing that returns a subset for a while and then completes. It is why episodes #2 and #3 are marked uncertain: they were single reads and could have been partial views. Episodes #1, #4 and #5 were not: stable for minutes, across clients. If the service distinguishes "listing incomplete" from "object deleted", that distinction would tell us which of the two we saw in #2 and #3.
