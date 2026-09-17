@@ -751,18 +751,17 @@ fn short_notice(text: &str) -> String {
     // "google/gemini-2.5-flash: connection failed: error sending request
     // for url (…) — retrying in 2.4s (attempt 4/5)": the attempt is the
     // news; the URL and the model id are the detail.
+    // Cursor's line for the same moment is soft and counts nothing: "We
+    // are having difficulties reaching the AI provider. Retrying
+    // automatically…" (F-114, `cycle-23/cursor-04-working-12s.png`). The
+    // attempt and the URL stay behind Details.
     if crate::model::session::is_retry_line(text) {
-        let attempt = text
-            .split("(attempt ")
-            .nth(1)
-            .and_then(|rest| rest.split(')').next())
-            .unwrap_or("?");
         let what = if text.contains("connection failed") {
-            "Connection failed"
+            "Having trouble reaching the model provider"
         } else {
-            "The model did not answer"
+            "The model provider did not answer"
         };
-        return format!("{what}; retrying (attempt {attempt}).");
+        return format!("{what}. Retrying automatically…");
     }
     if let Some(rest) = text.strip_prefix("switched to ")
         && let Some((model, _)) = rest.split_once(" for this turn")
@@ -2933,6 +2932,52 @@ fn auto_work_open(items: &[ChatItem], first: usize, running: bool) -> bool {
             .is_some_and(|turn| turn.range.start == first)
 }
 
+/// The files a chat's own edit calls in `body` wrote, one row per path
+/// with the lines its diffs added and removed — the worker chat's Files
+/// Changed card (F-111), where no working tree of its own can be read.
+fn worker_changes(items: &[ChatItem], body: Range<usize>) -> crate::model::changes::GitChanges {
+    use crate::model::changes::{FileChange, GitChanges};
+    let mut files: Vec<FileChange> = Vec::new();
+    for item in &items[body] {
+        let ChatItem::Tool {
+            kind,
+            label,
+            output,
+            diff,
+            status: ToolStatus::Success,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if coalesce_kind(*kind, label).unwrap_or(*kind) != ToolKind::Edit {
+            continue;
+        }
+        let path = tool_rest(label).split_whitespace().next().unwrap_or("").to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let counted = diff
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(output);
+        let (add, del) = diff_counts(counted).unwrap_or((0, 0));
+        match files.iter_mut().find(|f| f.path == path) {
+            Some(file) => {
+                file.add += add as u32;
+                file.del += del as u32;
+            }
+            None => files.push(FileChange {
+                path,
+                add: add as u32,
+                del: del as u32,
+                new: false,
+            }),
+        }
+    }
+    GitChanges { files, ahead: 0 }
+}
+
 fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
     let mut stats = WorkStats {
         tools: 0,
@@ -3165,13 +3210,26 @@ pub fn render(
                 .any(|item| matches!(item, ChatItem::From { .. }))
             || !spawned_in(&chat.items, turn.range.clone()).is_empty()
     });
+    // A worker's chat has no tree of its own to read: its card is built
+    // from its own edits — one row per file it wrote, with the lines its
+    // diffs added and removed — as Cursor's worker tab shows "1 File
+    // Changed · Review" with `test_todo.py +88` (F-111, cycle 22).
+    let own_edits = (chat.parent.is_some() && !chat.busy())
+        .then(|| turns.last().map(|turn| worker_changes(&chat.items, turn.range.clone())))
+        .flatten()
+        .filter(|c| !c.files.is_empty());
+    let changes = if chat.parent.is_some() {
+        own_edits.as_ref()
+    } else {
+        changes.as_ref()
+    };
     if !chat.busy()
         && !workers_busy
-        && newest_worked
-        && chat.parent.is_none()
+        && (newest_worked || own_edits.is_some())
+        && (chat.parent.is_none() || own_edits.is_some())
         && chat.host.is_none()
         && !turns.is_empty()
-        && let Some(changes) = changes.as_ref().filter(|c| !c.is_empty())
+        && let Some(changes) = changes.filter(|c| !c.is_empty())
     {
         zones.push(
             div()
@@ -4470,6 +4528,12 @@ fn work_header(
     // line at all; the caller shows the body as it is.
     if verb == "Worked" && rest.is_empty() {
         return None;
+    }
+    // Cursor's worker tab reads "Worked for 46s"; its Project chat "Worked
+    // 25s" (F-111, `cycle-22/cursor-worker-chat-*.png`). Not on a stopped
+    // line, whose label stands alone (F-110).
+    if verb == "Worked" && chat.parent.is_some() && elapsed.as_secs() > 0 {
+        rest = format!("for {rest}");
     }
     // Cursor's headline is "Worked 12s ⌄" alone; the +3 −3 sits on the
     // "Edited 2 files" run line inside the fold.
