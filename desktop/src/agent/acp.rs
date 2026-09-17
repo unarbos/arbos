@@ -88,6 +88,9 @@ pub enum Event {
     AssistantFinal {
         text: String,
         step: u64,
+        /// The record's line number, so a line the pane already holds is
+        /// not appended a second time (F-135).
+        seq: u64,
     },
     /// Streamed text of model step `step` (1-based within the turn), from
     /// a kernel that numbers its steps; the settled line of the same step
@@ -134,6 +137,7 @@ pub enum Event {
         kind: String,
         text: Option<String>,
         at: Option<i64>,
+        seq: u64,
     },
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
@@ -1039,12 +1043,17 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             kind: wake,
             text,
             at: (ts > 0).then_some(ts),
+            seq: event.seq,
         }],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
         EventKind::Assistant { text, step, .. } if recorded => {
-            vec![Event::AssistantFinal { text, step }]
+            vec![Event::AssistantFinal {
+                text,
+                step,
+                seq: event.seq,
+            }]
         }
         EventKind::Assistant { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(

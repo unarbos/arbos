@@ -609,6 +609,13 @@ pub struct ChatSession {
     /// minutes (Jacob's report 2026-09-17-6; #432's author handed the
     /// drawing here). Runtime only.
     status_over_workers: bool,
+    /// The highest record line (`seq`) this pane has taken from the kernel's
+    /// transcript. A recorded line at or below it is one the pane already
+    /// holds: a replay reaching a live pane appended the record's head a
+    /// second time (F-135, cycle 33). Reset when the kernel rewinds, since
+    /// the numbering starts again below. Runtime only; primed from the
+    /// cards' own `seq` at load.
+    record_seq: u64,
     /// The attached command this chat has running as a job, by title —
     /// set by the workspace before a draw, like `children`. Runtime only.
     pub running_job: Option<String>,
@@ -751,6 +758,7 @@ impl ChatSession {
             status: None,
             waiting: None,
             status_over_workers: false,
+            record_seq: 0,
             running_job: None,
             turn_open: false,
             turn_ended: None,
@@ -847,6 +855,7 @@ impl ChatSession {
             status: None,
             waiting: None,
             status_over_workers: false,
+            record_seq: 0,
             running_job: None,
             turn_open: false,
             turn_ended: None,
@@ -943,6 +952,7 @@ impl ChatSession {
             status: None,
             waiting: None,
             status_over_workers: false,
+            record_seq: 0,
             running_job: None,
             turn_open: false,
             turn_ended: None,
@@ -1557,6 +1567,32 @@ impl ChatSession {
         self.queue.push_back(content);
         self.held_cards += 1;
         self.flush();
+    }
+
+    /// Whether a recorded line at `seq` is one this pane already holds. A
+    /// line above the high-water mark moves it and is news; `0` (a live
+    /// frame, an older kernel) is never a record and always passes.
+    fn record_held(&mut self, seq: u64) -> bool {
+        if seq == 0 {
+            return false;
+        }
+        if self.record_seq == 0 {
+            // Primed once, from the cards the record already matched.
+            self.record_seq = self
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    ChatItem::User(message) => message.seq,
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+        }
+        if seq <= self.record_seq {
+            return true;
+        }
+        self.record_seq = seq;
+        false
     }
 
     /// Lines held while the place was away are still waiting, the socket is
@@ -2903,7 +2939,12 @@ impl ChatSession {
                 ts,
                 seq,
                 channel,
-            } => self.foreign_prompt(text, attachments, ts, seq, channel),
+            } => {
+                if self.record_held(seq) {
+                    return;
+                }
+                self.foreign_prompt(text, attachments, ts, seq, channel)
+            }
             Event::Provider {
                 provider,
                 model,
@@ -2935,6 +2976,9 @@ impl ChatSession {
                 restored,
                 pending,
             } => {
+                // The record is shorter now and numbers on from where it
+                // was cut: the lines to come are new however low they sit.
+                self.record_seq = 0;
                 // The second frame of a rewind with files: the restore is
                 // done. The chat was already cut on the first; only the
                 // line changes.
@@ -3027,7 +3071,10 @@ impl ChatSession {
                     self.flush();
                 }
             }
-            Event::Woke { kind, text, at } => {
+            Event::Woke { kind, text, at, seq } => {
+                if self.record_held(seq) {
+                    return;
+                }
                 self.new_turn_steps();
                 self.turn_ended = None;
                 // The kernel writes `wake` then `user` for a prompt: the
@@ -3154,7 +3201,10 @@ impl ChatSession {
                 }
                 self.flush();
             }
-            Event::AssistantFinal { text, step } => {
+            Event::AssistantFinal { text, step, seq } => {
+                if self.record_held(seq) {
+                    return;
+                }
                 self.finish_thinking();
                 // The kernel cuts tool markup from the settled line (#278);
                 // the same cut here covers a kernel from before it.
