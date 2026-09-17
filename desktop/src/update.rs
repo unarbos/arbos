@@ -144,6 +144,15 @@ pub struct Updater {
     state: State,
     /// The build this binary is, which is what "newer" is measured against.
     current: Version,
+    /// A kernel this window is restarting, and why the last attempt failed.
+    ///
+    /// Held here because restarting one is slow — a graceful stop waits for
+    /// the kernel to go, and starting the replacement waits for it to answer
+    /// — so it cannot run on the thread that draws. Without a state to show,
+    /// a click on a control that takes a minute is indistinguishable from a
+    /// click that did nothing, which is exactly how this was reported.
+    restarting: Option<Place>,
+    restart_failed: Option<(Place, String)>,
     /// Kernels serving open places that are not the build this app ships.
     ///
     /// Cached, and refreshed on a timer rather than per frame: finding one
@@ -175,6 +184,8 @@ impl Updater {
             channel,
             state: State::Idle,
             current: build::version(),
+            restarting: None,
+            restart_failed: None,
             strangers: Vec::new(),
             looked: None,
             checked: None,
@@ -215,6 +226,52 @@ impl Updater {
     /// Kernels serving open places that are not this build.
     pub fn strangers(&self) -> &[crate::kernel::Skew] {
         &self.strangers
+    }
+
+    /// The place whose kernel is being restarted, if any.
+    pub fn restarting(&self) -> Option<&Place> {
+        self.restarting.as_ref()
+    }
+
+    /// Why the last restart failed, if it did.
+    pub fn restart_failed(&self) -> Option<&(Place, String)> {
+        self.restart_failed.as_ref()
+    }
+
+    /// Stop the kernel serving `place` and start one from this bundle.
+    ///
+    /// Whatever the kernel's own gate says. A kernel too old to answer
+    /// `update_gate` is the most likely one to be a stranger, and refusing on
+    /// "it would not say" would leave the only control offered doing nothing.
+    /// The tooltip warns that running work ends before the click, which is
+    /// the promise this keeps.
+    pub fn restart_kernel(&mut self, place: Place, cx: &mut Context<Self>) {
+        if self.restarting.is_some() {
+            return;
+        }
+        self.restarting = Some(place.clone());
+        self.restart_failed = None;
+        cx.notify();
+        self.running = Some(cx.spawn(async move |this, cx| {
+            let done = {
+                let place = place.clone();
+                cx.background_executor()
+                    .spawn(async move { crate::kernel::restart_kernel(&place) })
+                    .await
+            };
+            let _ = this.update(cx, |updater, cx| {
+                updater.restarting = None;
+                updater.restart_failed = match done {
+                    Ok(()) => None,
+                    Err(e) => Some((place, format!("{e:#}"))),
+                };
+                // Look again either way: on success the stranger should be
+                // gone, and on failure it is still there and should say so.
+                updater.strangers.clear();
+                updater.looked = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// Drop what was found, so the next frame looks again — after a restart
