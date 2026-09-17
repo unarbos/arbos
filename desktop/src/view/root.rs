@@ -330,9 +330,6 @@ pub fn init(cx: &mut App) {
 const WINDOW_WIDTH: f32 = 1100.;
 const WINDOW_HEIGHT: f32 = 761.;
 
-/// The main window's AppKit title, as `open` sets it.
-const WINDOW_TITLE: &str = "Arbos";
-
 fn restore_usable_bounds(window: &mut Window) {
     let now = window.bounds().size;
     if now.width < px(600.) || now.height < px(320.) {

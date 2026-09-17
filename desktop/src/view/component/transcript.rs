@@ -2069,16 +2069,6 @@ fn display_title(kind: ToolKind, label: &str, output: &str, running: bool) -> St
     }
 }
 
-/// ChatView SummaryRow: muted verb + 11.5px mono argument.
-fn display_parts(
-    kind: ToolKind,
-    label: &str,
-    output: &str,
-    running: bool,
-) -> (String, Option<String>) {
-    display_parts_for(kind, label, output, running, false)
-}
-
 /// A refused call never reads as an empty step: the row says `refused:`
 /// and the error's first line; the fold body holds the whole error.
 fn display_parts_for(

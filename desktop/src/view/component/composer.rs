@@ -1571,32 +1571,6 @@ impl Composer {
             .unwrap_or(0);
     }
 
-    /// Ghost mark inside the pill. No second circle, no glass of its own.
-    fn icon_btn(
-        &self,
-        id: &'static str,
-        icon: AnyElement,
-        tip: &'static str,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-        on_click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        div()
-            .id(id)
-            .flex_none()
-            .size(px(root::COMPOSER_HIT))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .hover(|button| button.bg(theme.element_hover))
-            .tooltip(move |window, cx| Tooltip::text(tip, window, cx))
-            .on_click(cx.listener(move |this, _, window, cx| on_click(this, window, cx)))
-            .child(icon)
-            .into_any_element()
-    }
-
     fn glyph(icon: &'static str, theme: &Theme) -> AnyElement {
         icons::icon(icon)
             .size(px(15.))
