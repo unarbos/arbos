@@ -32,6 +32,7 @@ import websockets
 
 from . import protocol as P
 from .narrator import Narrator
+from .routing import is_small_talk
 from .audio import float_to_pcm16, pcm16_to_float
 from .duplex import UPSTREAM_CHUNK_BYTES, DuplexSession, _ascii
 from .tts import speakable
@@ -210,16 +211,20 @@ class OpenAILiveSession(DuplexSession):
             return
         if self.ack_watch is not None and not self.ack_watch.done():
             self.ack_watch.cancel()
-        self.ack_watch = asyncio.create_task(self._watch_orphan_ack(self.delegations_seen, text))
+        self.ack_watch = asyncio.create_task(self._ensure_delegated(self.delegations_seen, text))
 
-    async def _watch_orphan_ack(self, seen_before: int, text: str) -> None:
-        """A filler with no delegation behind it is this morning's failure. If the model says it
-        will check and GPT-Live has not created a delegation within the grace period, delegate."""
+    async def _ensure_delegated(self, seen_before: int, text: str) -> None:
+        """The gateway's guarantee, whatever the model decides: anything that is not allowlisted
+        small talk reaches the kernel. If GPT-Live has not created a delegation within the grace
+        period for such an utterance, or said it would check without one, delegate it ourselves."""
         await asyncio.sleep(ACK_GRACE_S)
-        if self.delegations_seen > seen_before or not _ACK_WORDS.search(self.live_output_since_final):
+        if self.delegations_seen > seen_before:
             return
-        log.warning("[%s] model said %r without delegating; delegating %r ourselves", self.sid,
-                    self.live_output_since_final.strip()[-80:], text)
+        said_check = bool(_ACK_WORDS.search(self.live_output_since_final))
+        if is_small_talk(text) and not said_check:
+            return  # allowlisted small talk: the model's own answer is the answer
+        log.warning("[%s] model %s without delegating; delegating %r ourselves", self.sid,
+                    "said it would check" if said_check else "took a work question itself", text)
         await self._delegate(None, forced_question=text)
 
     # ------------------------------------------------------------------ the kernel as backend
