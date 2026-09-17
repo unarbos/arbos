@@ -521,11 +521,94 @@ fn place_lock_refuses_a_second_holder() {
 fn place_lock_writes_the_pid_and_removes_the_file_on_drop() {
     let dir = tmp("lockpid");
     let place = Place::new(&dir);
-    let path = place.lock_path();
     {
         let _lock = PlaceLock::acquire(&place).unwrap();
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text.trim(), std::process::id().to_string());
+        // Both files carry the pid: the one an old kernel reads and the
+        // one a new kernel reads.
+        for path in place.lock_paths() {
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                text.trim(),
+                std::process::id().to_string(),
+                "{}",
+                path.display()
+            );
+        }
     }
-    assert!(!path.exists(), "dropping the lock removes the file");
+    for path in place.lock_paths() {
+        assert!(
+            !path.exists(),
+            "dropping the lock removes {}",
+            path.display()
+        );
+    }
+}
+
+/// The update worker's proof, 2026-09-17: an old kernel takes `.arbos/lock`,
+/// a new one took only `.arbos/runtime/lock`, and two builds served one
+/// store at once through every update's mixed-version window. A kernel
+/// holds both files, legacy first — so against an old kernel's lock the
+/// new one loses honestly, and an old kernel started later finds its file
+/// held by the new one.
+#[test]
+fn a_kernel_contends_with_an_old_kernel_on_the_legacy_lock_and_holds_it_against_one() {
+    use fs4::fs_std::FileExt;
+    let dir = tmp("lock-legacy");
+    let place = Place::new(&dir);
+    std::fs::create_dir_all(place.runtime_dir()).unwrap();
+
+    // An old build: it holds the legacy file and nothing else.
+    let old = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(place.legacy_lock_path())
+        .unwrap();
+    assert!(old.try_lock_exclusive().unwrap());
+    writeln!(&old, "4242").unwrap();
+    let err = PlaceLock::acquire(&place).unwrap_err().to_string();
+    assert!(err.contains("place already served"), "{err}");
+    assert!(
+        err.contains(&place.legacy_lock_path().display().to_string()),
+        "the refusal names the file the old kernel holds: {err}"
+    );
+    assert_eq!(
+        PlaceLock::holder_pid(&place),
+        Some(4242),
+        "the holder is readable"
+    );
+    // The loser left nothing behind: the new-path file is not held.
+    let probe = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(place.lock_path())
+        .unwrap();
+    assert!(
+        probe.try_lock_exclusive().unwrap(),
+        "a loser does not keep the new lock"
+    );
+    FileExt::unlock(&probe).unwrap();
+    FileExt::unlock(&old).unwrap();
+    drop(old);
+
+    // The other order: a new kernel holds both; an old kernel's acquire on
+    // the legacy file must fail.
+    let held = PlaceLock::acquire(&place).unwrap();
+    let old_again = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(place.legacy_lock_path())
+        .unwrap();
+    assert!(
+        !old_again.try_lock_exclusive().unwrap(),
+        "an old kernel started beside a new one must find the legacy lock held"
+    );
+    drop(held);
+    assert!(
+        old_again.try_lock_exclusive().unwrap(),
+        "free again once the new kernel is gone"
+    );
 }

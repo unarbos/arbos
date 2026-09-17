@@ -243,6 +243,12 @@ pub fn check(place: &Place) -> Result<Report> {
         );
         let cps = layout.dir.join("checkpoints.jsonl");
         check_jsonl::<arbos_engine::git::Checkpoint>(&mut r, &rel(&cps), &cps, "checkpoint");
+        check_two_writers(
+            &mut r,
+            &rel(&layout.transcript()),
+            &layout.transcript(),
+            &cps,
+        );
         // Inbox files: front matter must parse, the kind must be known.
         let inbox_dir = arbos_core::inbox::inbox_dir(place, a.id.as_str());
         for e in std::fs::read_dir(&inbox_dir)
@@ -662,6 +668,64 @@ pub fn check(place: &Place) -> Result<Report> {
 
 /// Every `subscriptions/*.toml` must parse and validate; ids must not
 /// repeat; a due instant must be an RFC 3339 stamp.
+/// Marks two kernels leave when they serve one place at once (the lock
+/// split across the `runtime/` move, 2026-09-17): a turn's wake written
+/// while another turn of the same agent was still open — one kernel never
+/// runs two turns of one agent together — and two checkpoints at one
+/// transcript line with different times. A kernel that died mid-turn also
+/// leaves a turn open, so the next boot's cut line (`interrupted`, or the
+/// restart notice) between the two wakes clears it; only a wake with no
+/// such line before it is reported.
+fn check_two_writers(r: &mut Report, rel: &str, transcript: &Path, cps: &Path) {
+    use arbos_core::EventKind;
+    let events = arbos_core::load_transcript(transcript).unwrap_or_default();
+    let mut open_wake: Option<u64> = None;
+    for e in &events {
+        match &e.kind {
+            EventKind::Wake { .. } => {
+                if let Some(at) = open_wake {
+                    r.warn(
+                        rel,
+                        Some(e.seq as usize),
+                        format!(
+                            "a turn started here while the turn from line {at} was still open, with nothing between saying it was cut: two kernels may have served this place at once (see runtime/kernel.json and .arbos/kernel.json for two pids). The lines of the two turns are interleaved; read them by turn folder (turns/tNNNN/meta.toml has each turn's transcript_lo/hi)."
+                        ),
+                    );
+                }
+                open_wake = Some(e.seq);
+            }
+            EventKind::TurnComplete { .. } | EventKind::Interrupted { .. } => open_wake = None,
+            EventKind::Notice { text, .. }
+                if text.contains("kernel restarted") || text.contains("cut by a restart") =>
+            {
+                open_wake = None
+            }
+            _ => {}
+        }
+    }
+    let Ok(text) = std::fs::read_to_string(cps) else {
+        return;
+    };
+    let mut seen: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
+    for (i, line) in text.lines().enumerate() {
+        let Ok(cp) = serde_json::from_str::<arbos_engine::git::Checkpoint>(line) else {
+            continue;
+        };
+        if let Some(prev) = seen.insert(cp.line, cp.ts)
+            && prev != cp.ts
+        {
+            r.warn(
+                cps.display().to_string(),
+                Some(i + 1),
+                format!(
+                    "two checkpoints for transcript line {} with different times: two kernels wrote this file at once, or a rewind's cut left one behind",
+                    cp.line
+                ),
+            );
+        }
+    }
+}
+
 fn check_subscriptions(r: &mut Report, rel: &str, dir: &Path) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
@@ -890,4 +954,67 @@ fn writers_into(place: &Place) -> Vec<(u32, String, std::path::PathBuf)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod two_writers_tests {
+    use super::*;
+    use arbos_core::{Event, EventKind, append_event};
+
+    fn wake(t: &str) -> Event {
+        Event::new(EventKind::Wake {
+            wake: "user".into(),
+            text: Some(t.into()),
+            brief: None,
+        })
+    }
+
+    /// Two kernels on one transcript interleave their turns: a wake lands
+    /// while another turn is open. One kernel's crash also leaves a turn
+    /// open, but the next boot writes a cut line first; that is not
+    /// reported.
+    #[test]
+    fn a_wake_inside_an_open_turn_is_reported_and_a_cut_turn_is_not() {
+        let dir = std::env::temp_dir().join(format!("arbos-two-writers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let t = dir.join("transcript.jsonl");
+        let cps = dir.join("checkpoints.jsonl");
+        // Turn A opens; turn B's wake lands before A completes.
+        append_event(&t, &wake("a")).unwrap();
+        append_event(&t, &wake("b")).unwrap();
+        append_event(&t, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        // A crash: turn C open, the restart's notice, then turn D — fine.
+        append_event(&t, &wake("c")).unwrap();
+        append_event(
+            &t,
+            &Event::new(EventKind::Notice {
+                text: "kernel restarted before this turn ended".into(),
+                failed: false,
+            }),
+        )
+        .unwrap();
+        append_event(&t, &wake("d")).unwrap();
+        append_event(&t, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        std::fs::write(
+            &cps,
+            "{\"line\":0,\"ts\":1,\"head\":\"h\"}\n{\"line\":0,\"ts\":2,\"head\":\"h\"}\n{\"line\":3,\"ts\":3,\"head\":\"h\"}\n",
+        )
+        .unwrap();
+        let mut r = Report::default();
+        check_two_writers(&mut r, "t", &t, &cps);
+        let warns: Vec<String> = r.findings.iter().map(|w| w.what.clone()).collect();
+        assert_eq!(warns.len(), 2, "{warns:#?}");
+        assert!(
+            warns[0].contains("while the turn from line 1 was still open"),
+            "{}",
+            warns[0]
+        );
+        assert!(
+            warns[1].contains("two checkpoints for transcript line 0"),
+            "{}",
+            warns[1]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

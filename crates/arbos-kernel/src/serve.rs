@@ -189,7 +189,11 @@ impl HeldRecord {
 /// How long the holder has had the place, with no record at all: the
 /// lock file is written by the holder when it takes the lock.
 fn held_since_lock(place: &Place) -> Option<i64> {
-    let modified = std::fs::metadata(place.lock_path()).ok()?.modified().ok()?;
+    let modified = place
+        .lock_paths()
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok()?.modified().ok())
+        .max()?;
     Some(modified.elapsed().ok()?.as_secs() as i64)
 }
 
@@ -198,10 +202,7 @@ fn held_since_lock(place: &Place) -> Option<i64> {
 /// escalation after `HELD_ESCALATE_SECS`, and otherwise nothing at all.
 fn say_held(place: &Place, wait_secs: u64) {
     let now = arbos_core::now_ms();
-    let holder_pid = std::fs::read_to_string(place.lock_path())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let holder_pid = PlaceLock::holder_pid(place).unwrap_or(0);
     let mut rec = match HeldRecord::load(place) {
         Some(r) if r.holder_pid == holder_pid => r,
         _ => HeldRecord {
@@ -297,9 +298,7 @@ fn say_held(place: &Place, wait_secs: u64) {
 /// whether it is alive, which build it runs (kernel.json), whether its
 /// file has been replaced under it (a stale image), and its url.
 fn describe_holder(place: &Place) -> String {
-    let pid = std::fs::read_to_string(place.lock_path())
-        .ok()
-        .and_then(|t| t.trim().parse::<u32>().ok());
+    let pid = PlaceLock::holder_pid(place);
     let Some(pid) = pid else {
         return "a holder whose pid the lock file does not say".to_string();
     };
@@ -745,7 +744,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // appended since the last one.
     let mut tails: std::collections::HashMap<String, TranscriptTail> =
         std::collections::HashMap::new();
-    shutdown_backstop(place.lock_path());
+    shutdown_backstop(place.lock_paths().to_vec());
     // How far each detached job's journal has been streamed (`agent/jN` →
     // bytes, and whether its final frame went out).
     let mut offsets: std::collections::HashMap<String, (u64, bool)> =
@@ -1793,7 +1792,7 @@ fn handle_frame(
 /// if the loop has not returned a few seconds later, drop the lock file
 /// (the `PlaceLock` guard would have) and exit, rather than leave a kernel
 /// the user cannot stop.
-fn shutdown_backstop(lock_path: std::path::PathBuf) {
+fn shutdown_backstop(lock_paths: Vec<std::path::PathBuf>) {
     tokio::spawn(async move {
         use tokio::signal::unix::{SignalKind, signal};
         let (Ok(mut int), Ok(mut term)) = (
@@ -1808,7 +1807,9 @@ fn shutdown_backstop(lock_path: std::path::PathBuf) {
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
         eprintln!("arbos-kernel: serve loop did not stop within 5s of the signal; exiting");
-        let _ = std::fs::remove_file(&lock_path);
+        for p in &lock_paths {
+            let _ = std::fs::remove_file(p);
+        }
         std::process::exit(130);
     });
 }
