@@ -439,6 +439,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let ptys = Arc::new(PtyHub::new());
     let (pty_tx, mut pty_rx) = mpsc::unbounded_channel::<Frame>();
     ptys.bind(place.path.clone(), pty_tx);
+    let _ = hooks.ptys.set(Arc::clone(&ptys));
     let mut registry = kernel_registry(&hooks, &ptys);
     // MCP: every tool of every configured server (`.arbos/mcp.toml`,
     // `.cursor/mcp.json`, `~/.config/arbos/mcp.toml`, `ARBOS_MCP_CMD`)
@@ -2644,6 +2645,39 @@ pub async fn serve_client(
                                 redacted: b.redacted,
                                 truncated: b.truncated,
                                 bytes: b.bytes,
+                            });
+                        }
+                        // What this kernel holds, for a window reconciling
+                        // its rows after a kernel's death: answered to the
+                        // asker alone, read now, never from a cache.
+                        Frame::Surfaces { agent } => {
+                            if let Some(a) = agent.as_deref()
+                                && !arbos_core::agent_exists(&place_for_history, a)
+                            {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(a.to_string()),
+                                    detail: format!("surfaces: no agent is named {a}"),
+                                });
+                                continue;
+                            }
+                            let surfaces = crate::surfaces::list(
+                                &place_for_history,
+                                &hooks_for_feedback,
+                                agent.as_deref(),
+                            );
+                            klog::info(
+                                "surfaces",
+                                agent.as_deref(),
+                                format!(
+                                    "who={who_name} rows={} running={}",
+                                    surfaces.len(),
+                                    surfaces.iter().filter(|s| s.running).count()
+                                ),
+                            );
+                            let _ = out_for_history.send(Frame::SurfaceList {
+                                agent,
+                                surfaces,
+                                at_ms: arbos_core::now_ms(),
                             });
                         }
                         // Files under .arbos/, answered here too; a slow
