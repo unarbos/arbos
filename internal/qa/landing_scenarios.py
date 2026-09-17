@@ -33,6 +33,12 @@
          the kernel; the wrapper watches its own parent).
   sb-01  #377's stated cost: a shell subscription whose command backgrounds something must still finish promptly, not
          hold until its timeout.
+  rw-04  the same rewind in a repo without git identity: checkpoints carry no work tree and files: true deletes the
+         kept turns' uncommitted files while reporting success (qal-j08).
+  rw-01  rewind with files: true keeps the history: the turns before the rewind point stay on the transcript and are
+         what a fresh window is handed — measured with a sampler reading the file every 50 ms through the rewind,
+         so "briefly empty" is reported as what a person sees: their history vanishing. Run bare, pinned to one
+         core beside four spinners (the standing_pass_e2e shape), and under disk churn.
   fb-01  the desktop feedback chain (#336, #345, #331): the sheet opens from a thumbs-down and the window keeps
          answering; the report is on disk before anything is sent; with no credentials it waits ("saved, and
          waiting"); with credentials it is delivered through `store put` into a store a kernel serves; the poller
@@ -740,6 +746,156 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.expect(told is not None, "sb-01-held-until-timeout", f"a shell subscription whose command backgrounds a child did not deliver its reading within 45 s (the command itself exits at once) — held on the backgrounded child", "arbos-kernel plan.rs shell run + jobs.rs group wait (#377 vs #364)")
         # Clean the backgrounded sleep so it does not outlive the scenario.
         subprocess.run(["pkill", "-f", "^sleep 300$"], capture_output=True)
+
+
+    # ── rewind keeps the history (the standing_pass_e2e lead) ──────────────
+    import threading
+
+    def rewind_round(cx, k, c, keep_texts, rewind_turn, sample_s=8.0):
+        """Send one rewind with files: true, sample the transcript file every 50 ms for sample_s, and return what
+        a person could have seen: the lowest line count observed, any read that came back empty, the settled
+        transcript, and whether every kept turn is still there."""
+        tr = cx.place / ".arbos" / "agents" / "root" / "transcript.jsonl"
+        samples = []
+        stop = threading.Event()
+
+        def sampler():
+            while not stop.is_set():
+                try:
+                    text = tr.read_text(errors="replace")
+                    n = sum(1 for l in text.splitlines() if l.strip())
+                    samples.append((round(time.time(), 3), n, len(text)))
+                except FileNotFoundError:
+                    samples.append((round(time.time(), 3), -1, -1))
+                except Exception:  # noqa: BLE001
+                    samples.append((round(time.time(), 3), -2, -2))
+                time.sleep(0.05)
+
+        th = threading.Thread(target=sampler, daemon=True)
+        before_n = sum(1 for l in tr.read_text(errors="replace").splitlines() if l.strip())
+        th.start()
+        t0 = time.time()
+        c.send({"type": "rewind", "agent": "root", "turn": rewind_turn, "files": True})
+        first = c.wait(lambda f: f.get("type") == "rewound" and f.get("agent") == "root", 15, "the rewound frame")
+        follow = c.wait(lambda f: (f.get("type") == "rewound" and f.get("restored") is not None) or f.get("type") == "error", 30, "the restore's report")
+        # Settle: the transcript must end on a finished turn; poll, never infer.
+        settled = None
+        end = time.time() + 10
+        while time.time() < end:
+            evs, _ = transcript(cx.place, "root")
+            if evs and evs[-1].get("kind") == "turn_complete":
+                settled = evs
+                break
+            time.sleep(0.1)
+        while time.time() - t0 < sample_s:
+            time.sleep(0.05)
+        stop.set()
+        th.join(timeout=2)
+        evs, _ = transcript(cx.place, "root")
+        texts = [e.get("text", "") for e in evs if e.get("kind") in ("user", "assistant")]
+        missing = [t for t in keep_texts if t not in texts]
+        nums = [n for _, n, _ in samples if n >= 0]
+        return {
+            "before_lines": before_n,
+            "after_lines": len(evs),
+            "rewound_ms": round((first.get("_at", time.time()) - t0) * 1000) if first else None,
+            "restore_reported": (follow or {}).get("type"),
+            "restore_error": (follow or {}).get("detail") or (follow or {}).get("message") if follow and follow.get("type") == "error" else None,
+            "samples": len(samples),
+            "min_lines_seen": min(nums) if nums else None,
+            "empty_reads": sum(1 for n in nums if n == 0),
+            "missing_reads": sum(1 for _, n, _ in samples if n == -1),
+            "settled_on_turn_complete": settled is not None,
+            "kept_turns_missing_after": missing,
+            "ends_with": evs[-1].get("kind") if evs else None,
+        }
+
+    def rw_scenario(name, doc, load):
+        @reg(name, tags=("rewind", "history"))
+        def rw(cx):
+            # Three turns, each writing a file, in a place that is a git repository (checkpoints need a commit).
+            place = cx.place
+            place.mkdir(parents=True, exist_ok=True)
+            for args in (["init", "-q"], ["config", "user.name", "qa"], ["config", "user.email", "qa@qa"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+                subprocess.run(["git", *args], cwd=place, capture_output=True)
+            if os.environ.get("ARBOS_QA_RW_NO_IDENTITY") or load == "no-identity":
+                # Variant: a repository with no git identity — commit-tree fails, and the checkpoint silently has no work tree.
+                subprocess.run(["git", "config", "--unset", "user.name"], cwd=place, capture_output=True)
+                subprocess.run(["git", "config", "--unset", "user.email"], cwd=place, capture_output=True)
+            (place / ".gitignore").write_text(".arbos/\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=place, capture_output=True)
+            subprocess.run(["git", "-c", "user.name=qa", "-c", "user.email=qa@qa", "commit", "-q", "-m", "ignore .arbos"], cwd=place, capture_output=True)
+            replies = []
+            for i, word in enumerate(("first", "second", "third", "fourth", "fifth"), 1):
+                # bash, not write: a coordinator root refuses to write project files itself.
+                replies.append({"agent": "root", "content": "", "calls": [{"name": "bash", "arguments": {"command": f"echo {word} > f{i}.txt", "description": f"write f{i}"}}]})
+                replies.append({"agent": "root", "content": word})
+            spinners = []
+            churn = None
+            preexec = None
+            if load == "pinned":
+                # The e2e's failing shape: the kernel on one core, four spinners on the same core.
+                def pin():
+                    os.sched_setaffinity(0, {0})
+                preexec = pin
+                for _ in range(4):
+                    spinners.append(subprocess.Popen(["taskset", "-c", "0", "sh", "-c", "while :; do :; done"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            elif load == "churn":
+                churn = subprocess.Popen(["sh", "-c", "while :; do dd if=/dev/zero of=" + str(cx.scratch / "churn.bin") + " bs=1M count=200 conv=fsync 2>/dev/null; sync; done"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                for _ in range(max(2, os.cpu_count() or 2)):
+                    spinners.append(subprocess.Popen(["sh", "-c", "while :; do :; done"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            try:
+                k = cx.kernel(preexec=preexec, extra_args=["--provider", "replay", "--replies", str(replies_file(cx, replies))])
+                cx.rec.expect(k.start(), "kernel-start", "kernel did not come up")
+                c = k.attach()
+                c.wait(lambda f: f.get("type") == "snapshot", 5)
+                rounds = []
+                # Round 1: turns one, two, three → rewind to turn 3 (keep one, two). Round 2: turns four, five → rewind to turn 4.
+                for texts, rewind_turn, keep in ((("one", "two", "three"), 3, ("one", "first", "two", "second")), (("four", "five"), 4, ("one", "first", "two", "second", "four", "fourth"))):
+                    for t in texts:
+                        c.user("root", t)
+                        cx.rec.expect(c.wait_turn("root", "idle", 60) is not None, f"{name}-turn-never-ended", f"turn {t!r} never ended")
+                    r = rewind_round(cx, k, c, keep, rewind_turn)
+                    r["files_after"] = sorted(p_.name for p_ in place.glob("f*.txt"))
+                    cps = (place / ".arbos" / "agents" / "root" / "checkpoints.jsonl")
+                    r["checkpoints_with_work_tree"] = sum(1 for l in cps.read_text().splitlines() if '"work"' in l) if cps.exists() else None
+                    r["checkpoints"] = sum(1 for l in cps.read_text().splitlines() if l.strip()) if cps.exists() else None
+                    rounds.append(r)
+                    if r["kept_turns_missing_after"] or r["empty_reads"] or r["missing_reads"]:
+                        break
+                cx.rec.notes["rounds"] = rounds
+                cx.rec.notes["load"] = load
+                # What a fresh window is handed: history for root must carry the kept turns.
+                # A fresh attach is handed the history as `replayed` events with the snapshot (and `history` pages
+                # more on request): everything the new client received is what its window would draw.
+                c2 = k.attach()
+                c2.wait(lambda f: f.get("type") == "snapshot", 5)
+                c2.send({"type": "history", "agent": "root", "limit": 50, "before": 10**9})
+                c2.wait(lambda f: f.get("type") == "history_end" and f.get("agent") == "root", 10, "history_end")
+                time.sleep(0.5)
+                shown = " ".join(json.dumps(f) for _, f in list(c2.frames) if f.get("type") in ("replayed", "event", "snapshot"))
+                kept_all = rounds[-1]["kept_turns_missing_after"] == [] if rounds else False
+                window_has = [t for t in ("one", "first", "two", "second") if t in shown]
+                cx.rec.notes["window_history_has"] = window_has
+                for i, r in enumerate(rounds, 1):
+                    cx.rec.expect(not r["kept_turns_missing_after"], f"{name}-history-lost", f"round {i}: after the rewind the transcript no longer holds {r['kept_turns_missing_after']} (before {r['before_lines']} lines, after {r['after_lines']}, min seen {r['min_lines_seen']})", "arbos-kernel serve rewind / arbos-engine git restore")
+                    cx.rec.expect(r["empty_reads"] == 0 and r["missing_reads"] == 0, f"{name}-history-briefly-gone", f"round {i}: the transcript read empty {r['empty_reads']} time(s) / missing {r['missing_reads']} time(s) during the rewind ({r['samples']} reads at 50 ms) — what a person sees as their history vanishing, even if it comes back")
+                    cx.rec.expect(r["settled_on_turn_complete"], f"{name}-not-settled", f"round {i}: the transcript did not end on turn_complete within 10 s of the rewind (ends with {r['ends_with']})")
+                    cx.rec.expect(r["restore_reported"] == "rewound", f"{name}-restore-not-reported", f"round {i}: the file restore reported {r['restore_reported']} {r['restore_error'] or ''}")
+                cx.rec.expect(len(window_has) == 4, f"{name}-window-missing-history", f"a fresh window's history lacks {sorted(set(('one', 'first', 'two', 'second')) - set(window_has))}")
+                cx.rec.expect(rounds and rounds[0]["files_after"] == ["f1.txt", "f2.txt"], f"{name}-files-not-restored", f"after rewinding to turn 3 the files are {rounds[0]['files_after'] if rounds else None}, expected f1, f2")
+            finally:
+                for sp in spinners:
+                    sp.kill()
+                if churn:
+                    churn.kill()
+        rw.__doc__ = doc
+        return rw
+
+    rw_scenario("rw-01-rewind-with-files-keeps-the-history", "Rewind with files: true, no load: the turns before the rewind point stay on the transcript, the file every 50 ms never reads empty, the restore reports, and a fresh window's history shows them.", "none")
+    rw_scenario("rw-02-rewind-with-files-keeps-the-history-pinned", "The same rewind with the kernel pinned to one core beside four spinners — the shape in which standing_pass_e2e read the transcript as empty.", "pinned")
+    rw_scenario("rw-03-rewind-with-files-keeps-the-history-under-churn", "The same rewind under disk churn (200 MB fsync loops) and a spinner per core.", "churn")
+    rw_scenario("rw-04-rewind-with-files-in-a-repo-without-git-identity", "The same rewind in a repository with no git user.name/user.email (a new user's fresh place): the checkpoint's work-tree commit fails silently, so `files: true` resets to HEAD and cleans — deleting the kept turns' uncommitted files too — and reports success (qal-j08).", "no-identity")
 
     # ── the feedback chain: sheet → disk → delivery → pickup ────────────────
     @reg("fb-01-feedback-report-written-delivered-picked-up", needs_model=True, tags=("feedback", "desktop"))

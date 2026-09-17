@@ -258,6 +258,41 @@ version. The display was designed to make exactly this visible and has not
 been built. This incident moves slice 1b from "worth doing" to the thing
 blocking a safe app update.
 
+## Bootstrapping a kernel too old to update itself
+
+*Added 2026-09-17. [#386](https://github.com/unarbos/arbos/pull/386) is the
+kernel's half; the desktop's half is not built.*
+
+A kernel from before `arbos-kernel update` existed answers `unknown command
+update`, which reads like a typo rather than "this build predates the
+feature". It happened on Templar. The way through is to run the command from a
+*newer* kernel against the old file —
+`arbos-kernel update --install --binary <path>` — after which that
+installation can update itself normally, forever.
+
+**Every kernel installed before this feature is in that state**, which is most
+of the ones in the wild. Each is a machine where connecting looks broken for
+no reason the user can see.
+
+So Jacob should never meet the line. When the desktop's remote install or
+connect finds a kernel too old to self-update, it runs the bootstrap itself
+and carries on, reporting progress the way the remote update already does
+(`remote_kernel::Progress`), rather than putting a shell recipe in front of
+him.
+
+Two constraints, both learned the expensive way last night:
+
+- **Restart every process backed by that binary, not only the one you came
+  for.** One file can back a worker daemon and several kernels. Restarting
+  only the one being connected to left ArbosLife's spawns dead for five and a
+  half hours. [#385](https://github.com/unarbos/arbos/pull/385)'s
+  `binary_gone` on `hello`, `/healthz` and the update line is the signal for
+  this: after a swap it says which processes are still running the file that
+  is gone, so they can be found rather than inferred.
+- **Do not hand-copy a binary over a running one.** Use the kernel's own
+  `update --binary`, which is what made the Templar update clean — it stages,
+  probes and swaps rather than writing over a file something is executing.
+
 ## Slice 4 must be driven, not reasoned
 
 Three claims about what survives a restart were read out of the code and
