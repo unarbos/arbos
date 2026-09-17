@@ -95,8 +95,24 @@ done
 # check <name> <tip> <here> <feed> <expected build|none> <state...>
 check() {
   local name="$1" tip="$2" here="$3" feed="$4" expect="$5"; shift 5
+  local EVENT_CONCLUSION_OVERRIDE="${EVENT_CONCLUSION_OVERRIDE-}"
   : > "$tmp/table"
   while [ $# -gt 0 ]; do printf '%s %s\n' "$1" "$2" >> "$tmp/table"; shift 2; done
+  # The event that started the run is the commit it is about, and its
+  # conclusion follows what the table says CI did — except that "pending"
+  # is not a conclusion an event can carry. A table entry of `pending` for
+  # the triggering commit means its *sibling* run is still going, which is
+  # the case this distinction exists for. $EVENT_*_OVERRIDE let a case
+  # disagree with the table on purpose.
+  local from_table
+  from_table="$(awk -v s="$here" '$1==s{print $2}' "$tmp/table")"
+  export EVENT_SHA="${EVENT_SHA_OVERRIDE:-$here}"
+  # `:-` and not `-`: the override is set-but-empty in the common case,
+  # and `-` only substitutes for an unset name.
+  case "${EVENT_CONCLUSION_OVERRIDE:-${from_table:-success}}" in
+    failed|failure) export EVENT_CONCLUSION=failure ;;
+    *) export EVENT_CONCLUSION=success ;;
+  esac
 
   git -C "$repo" checkout -q --detach "$here"
   git -C "$repo" update-ref FETCH_HEAD "$tip"
@@ -104,6 +120,7 @@ check() {
   local why
   why="$( cd "$repo" && \
     PATH="$tmp/bin:$PATH" TABLE="$tmp/table" FEED="$feed" \
+    EVENT_SHA="$EVENT_SHA" EVENT_CONCLUSION="$EVENT_CONCLUSION" \
     HAVE_KEY=true SCAN=40 TAG=dev GITHUB_REPOSITORY=o/r \
     GITHUB_OUTPUT="$out" GITHUB_STEP_SUMMARY=/dev/null \
     bash -c "$(sed 's|\${{ github.event_name }}|push|g' "$tmp/plan-body.sh")" 2>&1 \
@@ -146,8 +163,11 @@ check "what is already on the channel is not published twice" \
   "${SHA[4]}" "${SHA[4]}" 4 none \
   "${SHA[4]}" success
 
+# The tip never got a run of its own — a commit pushed inside a batch, say.
+# The run was started by the green commit behind it. "No run" must read as
+# "nothing to wait for", not as pending, or the walk stops here for ever.
 check "a commit with no CI run of its own is not waited for" \
-  "${SHA[4]}" "${SHA[4]}" 0 3 \
+  "${SHA[4]}" "${SHA[3]}" 0 3 \
   "${SHA[3]}" success
 
 check "nothing green anywhere is a refusal, not a guess" \
@@ -180,6 +200,27 @@ MERGE="$(git -C "$repo" rev-parse HEAD)"
 check "a red merge falls back along main, not into the branch it merged" \
   "$MERGE" "$MERGE" 0 4 \
   "$MERGE" failed "$BRANCH_HEAD" success "${SHA[4]}" success
+
+# --- the commit this run was started by -----------------------------------
+# A commit gets two CI runs. The first to finish fires the event; the API
+# a moment later still shows its sibling going, and says "pending". Asking
+# the API about the triggering commit therefore makes the run wait on
+# itself — for an event that has already happened. Four runs did exactly
+# that on 2026-09-17 and the channel sat for forty-two minutes.
+check "the run does not wait on the commit that started it" \
+  "${SHA[4]}" "${SHA[4]}" 0 4 \
+  "${SHA[4]}" pending
+
+# And a green sibling still counts when the triggering run was the red one.
+EVENT_CONCLUSION_OVERRIDE=failure check \
+  "a failed trigger still sees a sibling run that went green" \
+  "${SHA[4]}" "${SHA[4]}" 0 4 \
+  "${SHA[4]}" success
+
+# A genuinely red commit is still red, and the walk still goes back.
+check "a failed trigger with nothing green on it falls back" \
+  "${SHA[4]}" "${SHA[4]}" 0 3 \
+  "${SHA[4]}" failed "${SHA[3]}" success
 
 echo
 if [ "$failures" -eq 0 ]; then
