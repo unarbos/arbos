@@ -1047,8 +1047,12 @@ fn process_args(pid: u32) -> Option<String> {
     if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
         return Some(String::from_utf8_lossy(&raw).replace('\0', " "));
     }
+    // `-ww`: BSD ps (macOS) cuts the line at the window width — or 79
+    // columns off a terminal — and a job folder under a person's
+    // Documents is longer than that, so the leash's argv proof of a pid
+    // never matched on a Mac. Twice means unbounded; procps takes it too.
     let out = std::process::Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
+        .args(["-ww", "-o", "args=", "-p", &pid.to_string()])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
