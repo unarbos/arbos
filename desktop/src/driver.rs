@@ -1316,6 +1316,9 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         // so a rig can assert the tab says *why* and not only that it failed.
         "connect_fault": chat.connect_fault,
         "reconnect_in_secs": chat.reconnect_at.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_secs()),
+        // The item whose link the pointer is over, so a rig can assert the
+        // hand and the underline are drawn for a URL (report -31).
+        "hover_link": chat.transcript.hover_link_item(),
         "usage": chat.usage.map(|u| json!({"used": u.used, "size": u.size, "spent": u.spent, "last_cost": u.last_cost})),
         "connection": match chat.connection {
             Connection::Idle => "idle",

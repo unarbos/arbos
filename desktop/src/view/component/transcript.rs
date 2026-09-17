@@ -216,6 +216,9 @@ pub struct State {
     selection: Option<(usize, Selection)>,
     /// Whether the pointer is down and dragging the selection's head about.
     dragging: bool,
+    /// The link under the pointer, as the item and the span it covers: the
+    /// hand and the underline are drawn from this (Jacob, report -31).
+    hover_link: Option<(usize, Selection)>,
     /// What each item painted, so a press can be resolved against what is on
     /// screen rather than against the source.
     ///
@@ -367,6 +370,11 @@ impl State {
     /// including a click that jittered but stayed on that one link. A later
     /// Up does not: `bezel-markdown` reports release twice (on the text and
     /// off it), and both would otherwise open a tab.
+    /// The transcript item whose link the pointer is over, if any.
+    pub fn hover_link_item(&self) -> Option<usize> {
+        self.hover_link.map(|(ix, _)| ix)
+    }
+
     pub fn point(&mut self, ix: usize, text: &str, pointer: Pointer) -> Option<String> {
         match pointer {
             Pointer::Down(cursor) => {
@@ -388,6 +396,21 @@ impl State {
                 if let Some((item, selection)) = self.selection.filter(|(item, _)| *item == ix) {
                     self.selection = Some((item, selection.extend_to(cursor)));
                 }
+                None
+            }
+            Pointer::Hover(at) => {
+                let next = at.and_then(|cursor| {
+                    let (_, range) = link_at(&self.doc(ix, text), cursor)?;
+                    let a = Cursor::new(cursor.block, cursor.part, range.start);
+                    let b = Cursor::new(cursor.block, cursor.part, range.end);
+                    Some((ix, Selection::new(a, b)))
+                });
+                // A leave reaches every item; only the one that held the
+                // hover clears it.
+                if next.is_none() && self.hover_link.is_some_and(|(item, _)| item != ix) {
+                    return None;
+                }
+                self.hover_link = next;
                 None
             }
             Pointer::Up => {
@@ -476,9 +499,14 @@ fn openable(url: &str) -> Option<String> {
     // the first segment is a folder, not a host. A host has a dot in its
     // first segment (`en.wikipedia.org/wiki`).
     let first = url.split('/').next().unwrap_or(url);
+    // `.arbos/docs/brief.md`: a dot-folder, not a host — a host has
+    // letters on both sides of its dot (Jacob's link opened
+    // `https://.arbos/docs/anduril.md` in the browser, report -30).
+    let dot_folder = first.starts_with('.') && first.len() > 1;
     let is_path = url.starts_with('/')
         || url.starts_with("./")
         || url.starts_with("../")
+        || (url.contains('/') && dot_folder && !url.contains(' '))
         || (url.contains('/') && !first.contains('.') && !url.contains(' '))
         || (!url.contains('/') && !url.contains(' ') && file_like(url));
     if is_path && !url.starts_with('#') {
@@ -1871,11 +1899,38 @@ fn prose(
         &chat.transcript.layouts(ix),
         chat.transcript.selection(ix),
         chat.transcript.dragging,
+        chat.transcript
+            .hover_link
+            .filter(|(item, _)| *item == ix)
+            .map(|(_, sel)| sel),
         reveal.as_deref(),
         bionic,
         window,
         cx,
         move |workspace, pointer, cx| {
+            // A hover that changes nothing must not touch the session:
+            // `with_session` notifies, and the pointer moves every frame.
+            if let Pointer::Hover(at) = &pointer
+                && let Some(chat) = workspace.session(id)
+            {
+                let held = chat.transcript.hover_link;
+                let over_link = at.is_some_and(|cursor| {
+                    chat.items.get(ix).and_then(item_text).is_some_and(|text| {
+                        link_at(&chat.transcript.doc(ix, text), cursor).is_some()
+                    })
+                });
+                let same = match (held, over_link) {
+                    (None, false) => true,
+                    (Some((item, _)), false) => item != ix,
+                    (Some((item, sel)), true) => {
+                        item == ix && at.is_some_and(|c| sel.anchor.block == c.block && sel.anchor.part == c.part && sel.anchor.offset <= c.offset && c.offset <= sel.head.offset)
+                    }
+                    (None, true) => false,
+                };
+                if same {
+                    return;
+                }
+            }
             let mut url = None;
             workspace.with_session(id, cx, |chat| {
                 let Some(item) = chat.items.get(ix) else {
@@ -4016,6 +4071,8 @@ fn zone(
     // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
     // every call.
     let project_style = chat.parent.is_none();
+    let body_prose = segs.iter().filter(|seg| matches!(seg, Seg::Prose(_))).count();
+    let hide_tentative = running && project_style && (kickoff_turn || body_prose >= 2);
     // Whether the body draws rows a headline could fold: a thought, a run
     // with tool rows, a checklist card. Prose alone is not folded.
     let rows_under = segs.iter().any(|seg| match seg {
@@ -4261,6 +4318,17 @@ fn zone(
         {
             continue;
         }
+        // Prose after the last tool is the answer only once the turn has
+        // ended. While it runs, in Cursor's Project chat, it is a guess:
+        // a model that alternates a sentence and a command every second
+        // made the pane flash text / shimmer / text for forty seconds
+        // (Jacob's report 2026-09-17-33, a kickoff on a custom model).
+        // The kickoff shows its one shimmering line and nothing else until
+        // it ends; any other turn holds its tentative answer back once the
+        // body has shown the sentence-then-tool pattern twice.
+        if hide_tentative && matches!(chat.items[ix], ChatItem::Agent(_)) {
+            continue;
+        }
         has_tail = true;
         // The turn's own end: say how long it had run before the cut.
         if let ChatItem::Notice { text, failed } = &chat.items[ix]
@@ -4346,7 +4414,7 @@ fn zone(
     // first thought token, and again whenever the turn is deciding its
     // next move with nothing streaming.
     if running && !live_fold_shown {
-        if let Some(label) = heartbeat_label(chat, turn) {
+        if let Some(label) = heartbeat_label(chat, turn, hide_tentative) {
             zone = zone.child(heartbeat(&theme, label, chat, cx));
         }
     }
@@ -5723,7 +5791,7 @@ const STALE_TAIL_MS: u128 = 1000;
 
 /// Web WorkingIndicator copy. A fresh prompt is "Planning next moves";
 /// a lull mid-turn is "Working".
-fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
+fn heartbeat_label(chat: &ChatSession, turn: &Turn, hidden_prose: bool) -> Option<String> {
     // The kickoff turn (no prompt of the user's, the chat's first) reads
     // as Cursor's "Setting up environment" whatever step the kernel derives
     // — and whatever is running: its first `ls` left the transcript blank
@@ -5763,6 +5831,12 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
             ..
         }
     );
+    // A tentative answer the Project chat is holding back (report -33) is
+    // nothing the person can see: the line says Working over it rather
+    // than standing down for it.
+    if hidden_prose && matches!(last, ChatItem::Agent(_)) {
+        return Some("Working".to_string());
+    }
     let live = match last {
         ChatItem::Thinking {
             done: false, text, ..
@@ -6077,6 +6151,7 @@ mod selection_tests {
                     &self.state.layouts(0),
                     self.state.selection(0),
                     self.state.dragging,
+                    None,
                     None,
                     false,
                     window,

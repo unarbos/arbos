@@ -2653,9 +2653,10 @@ impl Workspace {
             // live does (F-105).
             chat.adopt_kernel_tail();
             chat.sync_kernel_history();
-            if chat.reconnect_attempt > 0 {
-                chat.notice(false, "reconnected");
-            }
+            // No "reconnected" line on the transcript: the machine pill
+            // said "reconnecting" and now says nothing, which is the
+            // whole news. Cursor writes nothing either; Jacob read the
+            // bare word at the foot of his chat as a blemish (report -32).
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
             chat.connect_fault = None;
