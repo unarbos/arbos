@@ -26,7 +26,47 @@ hist() {
 seq_of() { python3 ~/kernel.py $TARGET history 120 2>/dev/null | grep -E "$1" | tail -1 | awk '{print $1}'; }
 score() { echo "$1 $2 $3" | tee -a $O/score.txt; }
 wait_hist() { local s=$1 re=$2 secs=$3 t=0; while [ $t -lt $secs ]; do if hist | grep -qE "$re"; then score "$s" PASS "/$re/ after ${t}s"; return 0; fi; sleep 5; t=$((t+5)); done; score "$s" FAIL "no /$re/ within ${secs}s"; return 1; }
-type_send() { idb ui tap 200 788 --udid $U; sleep 0.8; idb ui text "$1" --udid $U; sleep 0.3; idb ui key 40 --udid $U; }
+# Type a line and make sure the whole of it is in the box before sending it.
+#
+# Cycle 48 lost six of its eight typed lines here and the journey scored the
+# app for it. Three faults, all in the one line of shell this replaces.
+# The tap point was fixed at 200,788: the composer sits near y=470 with the
+# keyboard down, and 200,788 is the space bar with it up. Tapping a text
+# box's centre puts the caret in the middle of what is already written, so a
+# second line wove itself through the first. And nothing read the field
+# back, so whatever had landed when the return key fired is what went.
+#
+# Counted on a four-line probe, twice each: 6 of 8 lines reached the kernel
+# the old way, 8 of 8 the new way.
+ui() { python3 ~/arbos/deploy/mobile/ui.py $U "$@"; }
+field_len() { local v; v=$(ui field 2>/dev/null); echo ${#v}; }
+clear_field() {
+  local n
+  for _ in 1 2 3 4 5; do
+    n=$(field_len); [ "$n" -gt 0 ] || return 0
+    ui focus >/dev/null 2>&1; sleep 0.6
+    idb ui key-sequence $(for _ in $(seq 1 $((n + 5))); do printf '42 '; done) --udid $U >/dev/null 2>&1
+    sleep 0.8
+  done
+}
+type_send() {
+  local want=$1 got
+  for _ in 1 2 3; do
+    clear_field
+    ui focus >/dev/null 2>&1 || { sleep 1; continue; }
+    sleep 0.7
+    idb ui text "$want" --udid $U >/dev/null 2>&1
+    for _ in $(seq 1 40); do [ "$(ui field 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
+    got=$(ui field 2>/dev/null)
+    if [ "$got" = "$want" ]; then
+      ui tap "Up" >/dev/null 2>&1 || idb ui key 40 --udid $U >/dev/null 2>&1
+      return 0
+    fi
+    echo "type_send: the box held ${#got} of ${#want} characters; clearing and retrying" | tee -a $O/run.txt
+  done
+  echo "type_send: gave up on a line after three tries" | tee -a $O/run.txt
+  return 1
+}
 rd() { python3 ~/kernel.py $TARGET read "$1" 2>/dev/null; }
 echo "run $RUN id $ID target $TARGET dir $DIR" | tee $O/run.txt
 # Which kernel this run is measured against. Asked of the kernel on the
