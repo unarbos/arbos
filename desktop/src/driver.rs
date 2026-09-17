@@ -1249,6 +1249,8 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         },
         "streaming": chat.streaming,
         "waiting": chat.waiting,
+        "status": chat.status,
+        "live_status": chat.live_status(),
         "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
