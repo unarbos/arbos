@@ -59,3 +59,35 @@ DNS could not be changed, so the site is served from ArbosLife, with Pages ready
 - `/docs/` links to `docs/design/{filesystem-state-design,cursor-vs-arbos-agent-model,desktop-call-mode-design,arbos-mesh-design,qa-loop-design}.md` on `main` — the store's document names. No branch has `docs/design/` yet; rename links if the release uses other paths.
 - Download button: `href` is `releases/latest`; `assets/site.js` rewrites it to the `Arbos-*.dmg` asset URL once a release has one. Latest release today is still Go-era `v0.1.47`.
 - Contact link points at new-issue on GitHub; swap for an email if Jacob wants one.
+
+## 2026-09-17 — Jacob's review: download, favicon, minimal, image
+
+**PR:** https://github.com/unarbos/arbos/pull/478 (`cursor/arbos-life-download-218b` → `main`). Live on https://arbos.life (ArbosLife) and mirrored to https://arbos-life.pages.dev.
+**Stills:** `media/website/2026-09-17/` — `before-home-desktop-1440.png` (174 175 B), `before-home-mobile-390.png` (98 742 B), `after-home-desktop-1440.png` (215 316 B), `after-home-mobile-390.png` (103 951 B), `after-install-desktop-1440.png` (234 160 B).
+
+### Download button
+
+- Before: `href=releases/latest` → GitHub's "latest" is the Go-era `v0.1.47` (no Mac app). `v0.2.0` (with `Arbos-0.2.0-arm64.dmg`) is a **draft**: its assets 404 for anyone but the repo's writers. The JS asset lookup found no `.dmg` on `latest`, so the button opened a page.
+- What is genuinely published for Mac: only the **dev channel** (tag `dev`, pre-release): `Arbos-<ver>-<build>-macos-arm64.zip`, Developer ID signed, notarized (run 35232241272: `status: Accepted`, "The staple and validate action worked!"), stapled; three builds kept, older ones pruned. **It is a zip of `Arbos.app`, not a DMG.** The dev workflow never runs `make dmg`.
+- Now: button → `/download/mac` → 302 to the newest published build. Picker `deploy/www/mac-download.py`: stable release with a `.dmg` first (via API; drafts invisible), else newest dev build from `arbos-dev.json` (plain file, no rate limit; the anonymous API 403'd from this VM). Server: `~/arbos-www/refresh-download.sh` + `arbos-www-refresh.timer` (every 15 min, `User=const`, sudoers rule for `systemctl reload arbos-www.service` only) writes `download.caddy` and `site/download/mac.json`. Pages: the workflow runs the picker at deploy and appends to `_redirects`. JS reads `/download/mac.json`, points the button at the file, and prints "dev build 0.2.0+1509, 25 MB zip" beside it.
+- Verified from this VM: `curl -JLO https://arbos.life/download/mac` → 302 → GitHub → `Content-Disposition: attachment; filename=Arbos-0.2.0-1509-macos-arm64.zip`, 26 495 826 B, `unzip -t` clean, `Arbos.app/Contents/_CodeSignature/CodeResources` and stapled `Contents/CodeResources` present, `CFBundleVersion 1509`, `LSMinimumSystemVersion 13.0`. Headless Chrome DOM after JS: `href="…/Arbos-0.2.0-1509-macos-arm64.zip"`. The timer already rolled the pick from 1478 to 1509 during the work.
+- One file, not a choice: everything shipped is **arm64 only** (draft DMG `-arm64.dmg`, dev zip `-macos-arm64.zip`); the old caption "Apple silicon and Intel" was wrong and now says Apple silicon. A universal build needs `desktop/Makefile` to build `x86_64-apple-darwin` too and `lipo` the binaries before signing (macOS runner is arm64; `rustup target add x86_64-apple-darwin`), and the asset names to drop `-arm64`. Not done here; a release-worker change, unverifiable from this VM.
+- Honest status: **the published artefact is the dev channel's zip.** A DMG on click needs either publishing `v0.2.0` or adding `make dmg` to `dev-channel.yml`.
+
+### Favicon
+
+Was: `<link rel="icon" href="/assets/favicon.svg">` only. Safari does not use SVG favicons and requests `/favicon.ico` → 404 (blank tab icon on Jacob's Mac); no `apple-touch-icon` (iOS home screen got a page thumbnail); the mark was my hand-drawn SVG, purple on a dark tile, not the app's icon (black trunk on a white squircle). Now rendered from `desktop/bundle/icon.png` following `artwork.swift` (tallest ink band = the mark, white→warm-grey tile, hairline edge): `favicon.ico` 16/32/48, `favicon-32.png`, `icon-192.png`, `icon-512.png`, `apple-touch-icon.png` 180 (opaque). All 200 on the live site.
+
+### Minimal
+
+One page: headline, one sentence, one button, screenshot, three one-line facts, footer GitHub · Docs · MIT. Cut: "How it works" cards, "Get started" section, `/what/` (301 → `/`), `/docs/` (302 → README), the TOC and callouts on `/install/`. Kept `/install/`: the zip path has steps a visitor needs (drag to Applications, microphone, model key). Nav: Install · GitHub.
+
+### Image
+
+Real and current: `arbos-desktop` build 1478 (`main` `f451cbe` at the time) from the dev channel's Linux tarball, run under Xvfb 1600×1000 with the OpenRouter key from the vault and a copy of this site as the project. Prompt: run a site-wide link check as a job and review the two pages. Frame: the agent's real answer, worker running, drawer showing Agents / Project (Link check: running, streaming) / Files. The agent's own review found a contradiction on the install page (Gatekeeper warning vs notarized builds); fixed.
+
+### Checks
+
+- Benchmark claims: none on the site (grep of `www/` for bench/SWE/Codex/%/22/24: only CSS percentages). README on `main` has none either.
+- Lighthouse live: 98 / 100 / 100 / 100 (CLS 0.084 from the caption text changing when JS fills it).
+- Server: `arbos-www.service` active, `arbos-www-refresh.timer` next run 14:56; `/etc/sudoers.d/arbos-www` (one command). `forest-head.service` still disabled.

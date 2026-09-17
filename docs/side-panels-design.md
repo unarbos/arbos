@@ -315,6 +315,14 @@ Each of these is a client-visible gap, not an internal refactor.
 
 ---
 
+## Running any of this yourself
+
+Build the kernel from the branch under test before you judge a panel feature: `cargo build -p arbos-kernel`, then let the app find it (`ARBOS_KERNEL_BIN`, or `target/debug/`). A kernel binary older than the branch answers nothing to a frame it has never heard of, and the window then draws exactly what a broken feature draws. That cost an hour here, and it was the third time in one day that someone lost time to a binary that was not what its path implied.
+
+The Xvfb check is `desktop/driver/examples/side_panel.py`. For anything a harness cannot reach — a real pty, a real job, a kernel that dies — drive a real turn with no model: `arbos-kernel serve <place> --provider replay --replies <file>`, where the file is one JSON object per line with `content` and `calls`.
+
+---
+
 ## Against Cursor
 
 "Copy exactly how Cursor is doing this" was measured rather than remembered. The parity loop timed Cursor's own side panel at a 1440-wide window, pixel by pixel: `internal/cursor-side-panel-measured.md`, with stills in `media/cursor-reference/side-panel/`. What it found, and what this took:

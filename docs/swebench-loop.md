@@ -524,6 +524,16 @@ The counts are what a rule *would have had to change*, not what it will; whether
 
 No model spend this cycle.
 
+### Can each arm's binary prove its label? (asked by Jacob after QA's control was rebuilt underneath it, 14:42 UTC)
+
+Checked the same afternoon, before any next measurement. Two questions, two answers.
+
+**Does anything else write to the path an arm's kernel lives at?** No. Every kernel the loop has run is its own file under `/tmp/swe/loop/arbos-kernel-<tag>`, produced once by `docker cp` out of an image built for it, and the harness copies those bytes into each rollout's container at setup — so a rollout's kernel cannot change under it. Both arms of every A/B read the *same* file by design (one kernel per comparison). No loop step builds into a path an arm reads from. The one in-place rebuild — `arbos-kernel-c11`, after the smoke and before the arms, when the critique's clipping was fixed — was recorded at the time. The bisect builds of cycle 16 went to their own names and were never run.
+
+**Can the binaries prove their labels?** Cycles 1–10: yes. Those kernels were host builds; `--version` reports a sha, and every one matches its role (c4b = c5a = `6d452f51`, the mechanism commit; c7 = `d7a59534`, the N-reproduction gate; c9 = `c5ce595c`, the cost cap; c10 = `90a33cb2`). **Cycles 11–16: no.** From cycle 11 the kernels were built in Docker from a context that excludes `.git`, and every one of them says `arbos-kernel 0.2.0 unknown protocol 1`. Their labels rest on file names, the `BUILD_OK <commit>` lines in the build logs (cycles 12-380, 16), and the tmux build commands in this loop's transcript (cycles 11, 12, 14, 15). That is documentary evidence, not proof from the artefact. So: no past arm is *known* to have measured the wrong kernel, the file discipline makes it unlikely, and for cycles 11–16 the binaries cannot rule it out. The full inventory — every kernel file, its sha256, what it says it is, what it was meant to be, and the evidence — is `media/swebench/loop/kernels-manifest.json`.
+
+**Fixed so the next reader does not have to take the loop's word** ([#477](https://github.com/unarbos/arbos/pull/477)): `build.rs` takes `ARBOS_GIT_SHA` from the environment when `.git` is absent; the Dockerfile passes it as a build argument; the harness runs the kernel's `--version` at setup, hashes the bytes it installs, writes `kernel-identity.json` into every rollout's artifacts, and — given `kernel_sha` in the run config — refuses a binary that says anything else, `unknown` included. Smoke: a run labelled `deadbeef0000` against a `3f114bf50447` binary is refused at $0; the right label runs and the artifact carries version, sha, sha256. The loop's build script now names kernels by their sha under `kernels/`, checks `--version` against the commit before keeping the file, and makes it read-only; run scripts pass `kernel-sha`. From here a measured run's label is proved by the binary or the run does not start.
+
 ## Next (cycle 19)
 
 1. When any of the five rules lands: five rollouts each on the instances that carry the pattern (twin: 11728, 24870, 14182; F: 13236; B: 14629; E2: 6386), read for whether the choice was made and made differently, with the caution above.
