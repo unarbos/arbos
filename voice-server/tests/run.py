@@ -101,6 +101,7 @@ def kernel_behaviour(k: dict) -> Behaviour:
         reply=k.get("reply", ""), reply_delay=float(k.get("reply_delay", 0.3)), spawn=spawn,
         reply_after_done=k.get("reply_after_done", ""), ask=k.get("ask", ""), ask_options=list(k.get("ask_options", [])),
         tool_output_lines=int(k.get("tool_output_lines", 0)), steer_reply=k.get("steer_reply", ""),
+        tool_seconds=float(k.get("tool_seconds", 1.0)),
         approval=k.get("approval", ""), reply_denied=k.get("reply_denied", ""),
     )
 
@@ -377,6 +378,19 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
         limit = float(exp["approval_answered_within_s"])
         ok = len(asks) >= 2 and asks[1] - asks[0] <= limit
         add(ok, f"the approval was closed within {limit:.0f} s of being spoken ({[round(a, 1) for a in asks]})")
+    if "activity_states" in exp:
+        got = [(f.msg.get("agent"), f.msg.get("state")) for f in rec.of("agent.activity") if not f.msg.get("heartbeat")]
+        root = [st for ag, st in got if ag == "root"]
+        add(root == list(exp["activity_states"]), f"root's agent.activity transitions are {exp['activity_states']} (got {root})")
+    if "activity_tool" in exp:
+        tools = [f.msg.get("tool") for f in rec.of("agent.activity") if f.msg.get("state") == "tool"]
+        add(exp["activity_tool"] in tools, f"agent.activity named the tool {exp['activity_tool']!r} (got {tools})")
+    if "activity_heartbeats_min" in exp:
+        beats = [f for f in rec.of("agent.activity") if f.msg.get("heartbeat")]
+        add(len(beats) >= int(exp["activity_heartbeats_min"]), f"at least {exp['activity_heartbeats_min']} heartbeat(s) while work ran ({len(beats)})")
+    if exp.get("activity_idle_last"):
+        acts = rec.of("agent.activity")
+        add(bool(acts) and acts[-1].msg.get("state") == "idle", "the last agent.activity frame says idle")
     if "user_frames" in exp:
         add(len(kernel.users) == int(exp["user_frames"]), f"kernel received {exp['user_frames']} user frame(s) ({len(kernel.users)})")
     for needle in exp.get("kernel_user_not", []):
