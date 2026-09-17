@@ -1162,7 +1162,7 @@ fn handle_frame(
         Frame::Pause { agent, paused } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.paused = paused;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "pause", a.save(&place.agent_dir(&agent)));
             }
             if paused {
                 sched.stop(&agent);
@@ -1356,7 +1356,7 @@ fn handle_frame(
         Frame::SetModel { agent, model } => {
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.model = model;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "model", a.save(&place.agent_dir(&agent)));
             }
         }
         Frame::SetMode { agent, mode } => {
@@ -1366,7 +1366,7 @@ fn handle_frame(
             };
             if let Ok(mut a) = load_agent(place, &arbos_core::AgentId::new(&agent)) {
                 a.mode = mode;
-                let _ = a.save(&place.agent_dir(&agent));
+                say_if_unsaved(hooks, &agent, "mode", a.save(&place.agent_dir(&agent)));
                 // On the record, so the transcript says when the leash changed.
                 let _ = append_event(
                     &Layout::new(place, &agent).transcript(),
@@ -2669,6 +2669,21 @@ fn configure(
 /// done here (fast: two file writes); the tail is moved to the new end;
 /// files are restored on the blocking pool, and `rewound` goes out to
 /// every client when that is done.
+/// A setting the client asked for that did not reach the agent's file:
+/// the window shows it set, the next start would not — said as an
+/// error frame instead of believed (the unchecked-write pass).
+fn say_if_unsaved(hooks: &KernelHooks, agent: &str, what: &str, saved: anyhow::Result<()>) {
+    if let Err(e) = saved {
+        klog::warn("agent_save_failed", Some(agent), format!("{what}: {e:#}"));
+        hooks.broadcast(Frame::Error {
+            agent: Some(agent.to_string()),
+            detail: format!(
+                "{what} changed for this run only: the agent's file could not be written ({e:#}); it would revert at the next start"
+            ),
+        });
+    }
+}
+
 /// The `reason` on a `stop` that replaces a message rather than ending work.
 pub const SUPERSEDED: &str = "superseded";
 
@@ -2853,7 +2868,15 @@ fn resolve_approve(
         tool,
         allowed: allow,
     });
-    let _ = append_event(&Layout::new(place, &agent).transcript(), &event);
+    // The decision drove the tool whether or not this line lands; a
+    // record without it would show a tool that ran with no one's say-so.
+    if let Err(e) = append_event(&Layout::new(place, &agent).transcript(), &event) {
+        klog::warn(
+            "approval_unrecorded",
+            Some(&agent),
+            format!("allowed={allow}: the decision could not be written to the transcript: {e:#}"),
+        );
+    }
     hooks.broadcast(Frame::Event { agent, event });
 }
 

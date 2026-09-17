@@ -202,14 +202,13 @@ pub fn snapshot_turn_tree(
         (None, true, _) => "clean".to_string(),
         (None, false, why) => format!("error:{}", why.as_deref().unwrap_or("unknown")),
     };
-    let _ = std::fs::write(
-        &mark,
-        format!(
-            "{head}
-{second}
-"
-        ),
-    );
+    // A mark that could not be written is removed rather than left
+    // stale: `undo` on a mark from an earlier turn would reset HEAD to
+    // that turn's commit. No mark → `undo` refuses and says so.
+    if let Err(e) = std::fs::write(&mark, format!("{head}\n{second}\n")) {
+        let _ = std::fs::remove_file(&mark);
+        return Err(e).context("the undo mark could not be written; undo is refused for this turn");
+    }
     let filled = Checkpoint {
         line,
         ts: cp.ts,
