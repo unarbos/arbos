@@ -16,6 +16,9 @@ final class LiveKernelChat: ChatSource {
     private var stream: AsyncStream<ChatUpdate>.Continuation?
     private var pump: Task<Void, Never>?
     private var focus = "root"
+    /// A reconnect sends `hello` again; the deleted-binary line is said once
+    /// per attachment, not once per dropped socket.
+    private var saidBinaryGone = false
     private var children: Set<String> = []
     private var childNames: [String: String] = [:]
     private var workers: [String: WorkerStatus] = [:]
@@ -124,10 +127,18 @@ final class LiveKernelChat: ChatSource {
 
     private func handle(_ frame: KernelFrame) {
         switch frame {
-        case .hello(let focus, _, let identity, let store):
+        case .hello(let focus, _, let identity, let store, let build):
             self.focus = focus
             if let identity { stream?.yield(.identity(identity.filled(key: "hello"))) }
             if let store { stream?.yield(.store(store)) }
+            // A kernel started from a file that has since been deleted keeps
+            // answering and refuses every worker it is asked to start, with
+            // an error no one sees (JB-6). Nothing else on the phone shows
+            // it, so say it once, plainly, where the refusals will appear.
+            if build.binaryGone, !saidBinaryGone {
+                saidBinaryGone = true
+                stream?.yield(.item(ChatItem(.notice("This project's kernel is running from a file that has been deleted, so it will refuse to start workers. Restarting it on its machine picks up the build that is there now.", failed: false))))
+            }
         case .snapshot(let focusPath, let agents):
             focus = focusPath.split(separator: "/").last.map(String.init) ?? focus
             remember(agents)
