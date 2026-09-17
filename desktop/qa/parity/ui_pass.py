@@ -655,7 +655,17 @@ class Pass:
         self.inv(sc)
         # `work-bare-N` is a headline over nothing foldable (F-104): no chevron,
         # nothing to click. Only a real fold is exercised here.
-        work = next((w for w in self.ids("work-*") if "work-bare-" not in w), None)
+        # The last fold that is actually on screen. The first non-bare fold
+        # in id order was the kickoff's, scrolled far out of view after an
+        # edit turn; the click landed on nothing and the row read "no state
+        # change" (F-123's last case, cycle 27).
+        def on_screen(w):
+            try:
+                f = self.app.find(w); return bool(f.get("visible")) and f.get("y", -1) >= 0
+            except Exception:
+                return False
+        folds = [w for w in self.ids("work-*") if "work-bare-" not in w and on_screen(w)]
+        work = folds[-1] if folds else None
         if work:
             # What a fold shows or hides is the rows under it — `run-*`,
             # `tool-*`, `thought-*`, a card. The footer's y is not a proxy:
@@ -675,7 +685,7 @@ class Pass:
             self.check("work", sc, "click 'Worked' fold again", "fold toggles back", lambda: self.app.click(work), lambda a, b: rows() == r0 and f"rows back to {len(r0)}")
         else:
             bare = self.first("work-bare-*")
-            self.gap("work", sc, "click", "no work-* fold after an edit turn" + (" (a bare 'Worked' headline over a delegating turn — nothing to fold, F-104)" if bare else ""))
+            self.gap("work", sc, "click", "no work-* fold on screen after an edit turn" + (" (a bare 'Worked' headline over a delegating turn — nothing to fold, F-104)" if bare else ""))
         for kind in ("tool", "thought", "diff-card", "term-card", "term-body", "diff-body"):
             el = self.first(f"{kind}-*")
             if not el:
