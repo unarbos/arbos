@@ -1326,6 +1326,10 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         // The plain-words reason the bar keeps while a connection is down,
         // so a rig can assert the tab says *why* and not only that it failed.
         "connect_fault": chat.connect_fault,
+        // The row's own word in the panel — Working / Asking / Done /
+        // Waiting — so a rig can assert what the agents list draws (d15:
+        // workers mid-tool read as idle after a relaunch, F-172).
+        "child_state": format!("{:?}", chat.child_state()).to_ascii_lowercase(),
         "reconnect_in_secs": chat.reconnect_at.map(|at| at.saturating_duration_since(std::time::Instant::now()).as_secs()),
         // The item whose link the pointer is over, so a rig can assert the
         // hand and the underline are drawn for a URL (report -31).
