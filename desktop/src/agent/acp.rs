@@ -174,7 +174,10 @@ pub enum Event {
     /// or `None` when the kernel predates the handshake.
     Handshake {
         protocol: Option<u32>,
-        kernel: String,
+        /// Which kernel answered, as it described itself. Every field is empty
+        /// from a kernel that predates the handshake, which is why this is a
+        /// build with nothing in it rather than a build assumed to be ours.
+        build: crate::kernel::KernelBuild,
     },
     /// The kernel paused the turn for a tool the user must allow.
     NeedApproval {
@@ -378,14 +381,24 @@ impl Session {
                         first = false;
                         let hand = match &frame {
                             Frame::Hello {
-                                protocol, kernel, ..
+                                protocol,
+                                kernel,
+                                git_sha,
+                                built_at,
+                                binary_gone,
+                                ..
                             } => Event::Handshake {
                                 protocol: Some(*protocol),
-                                kernel: kernel.clone(),
+                                build: crate::kernel::KernelBuild {
+                                    version: kernel.clone(),
+                                    git_sha: git_sha.clone(),
+                                    built_at: built_at.clone(),
+                                    binary_gone: *binary_gone,
+                                },
                             },
                             _ => Event::Handshake {
                                 protocol: None,
-                                kernel: String::new(),
+                                build: crate::kernel::KernelBuild::default(),
                             },
                         };
                         if tx.send(hand).is_err() {

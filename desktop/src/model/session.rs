@@ -424,6 +424,12 @@ pub struct ChatSession {
     /// Where `.arbos` extras are written. A remote place uses a local sidecar.
     pub store: PathBuf,
     pub connection: Connection,
+    /// Which kernel answered on this socket, as its `hello` described it.
+    /// `None` until the handshake and again as soon as the socket is gone, so
+    /// it is never a build nothing is attached to. Read it through
+    /// [`crate::model::project::Project::kernel_build`], which asks the
+    /// connection rather than this field.
+    pub kernel_build: Option<crate::kernel::KernelBuild>,
     pub items: Vec<ChatItem>,
     /// The agent's plan as the kernel last sent it: every node, inbox
     /// rows included. The strip above the composer draws the open ones.
@@ -693,6 +699,7 @@ impl ChatSession {
             host: place.host.clone(),
             cwd: place.path,
             connection: Connection::Connecting,
+            kernel_build: None,
             items: Vec::new(),
             plan: Vec::new(),
             answering: None,
@@ -791,6 +798,7 @@ impl ChatSession {
             host: place.host.clone(),
             cwd: place.path,
             connection: Connection::Idle,
+            kernel_build: None,
             items: record.items,
             plan: Vec::new(),
             answering: None,
@@ -889,6 +897,7 @@ impl ChatSession {
             host: place.host.clone(),
             cwd: place.path,
             connection: Connection::Idle,
+            kernel_build: None,
             items,
             plan: Vec::new(),
             answering: None,
@@ -1168,6 +1177,9 @@ impl ChatSession {
 
     fn forget_socket(&mut self) {
         self.connection = Connection::Lost;
+        // The build belonged to that socket. Nothing is attached now, and
+        // "nothing is attached" is an answer; last week's version is not.
+        self.kernel_build = None;
         self.streaming = false;
         self.turn_open = false;
         self.flight = None;
@@ -3040,8 +3052,13 @@ impl ChatSession {
                 self.notice(false, &what);
                 self.flush();
             }
-            Event::Handshake { protocol, kernel } => {
+            Event::Handshake { protocol, build } => {
                 let ok = protocol.is_some_and(|p| p >= crate::kernel::PROTOCOL);
+                let kernel = build.version.clone();
+                // Which kernel is on the other end of this socket, in its own
+                // words. Kept only while the socket is: `forget_socket` drops
+                // it, so the field cannot outlive the connection it describes.
+                self.kernel_build = ok.then_some(build);
                 // An empty root on a place opened for the first time wants
                 // the kickoff turn once. It goes when the kernel says it has
                 // a key (the `provider` frame follows hello): on a fresh

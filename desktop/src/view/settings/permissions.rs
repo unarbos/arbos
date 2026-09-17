@@ -17,7 +17,7 @@ use bezel::{
     gpui::{AnyElement, Context, div, prelude::*, px},
     motion::Painter,
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{ButtonStyle, Buttons, Scaffolding},
+    ui::widgets::{ButtonStyle, Buttons},
 };
 
 impl SettingsPane {
@@ -37,7 +37,7 @@ impl SettingsPane {
             let c = center.read(cx);
             (c.rows.clone(), c.all_settled(), c.enabling_all)
         };
-        let mut group = theme.group_box();
+        let mut group = settings::rows();
         for (n, row) in rows.iter().enumerate() {
             group = group.child(permission_row(n, row, &center, painter, &theme, cx));
         }
