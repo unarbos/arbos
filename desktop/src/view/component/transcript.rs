@@ -835,13 +835,25 @@ fn short_notice(text: &str) -> String {
         return format!("Switched to {model} for this turn.");
     }
     if text.chars().count() > 160 {
-        let first = text
-            .split_inclusive(['.', ':'])
-            .next()
-            .unwrap_or(text)
-            .trim_end_matches(':')
-            .trim();
-        return shorten(first, 100);
+        // The first sentence ends at a stop followed by space, not at any
+        // dot: "…(openai/gpt-5.4-mini was refused…" was cut to "(openai/gpt-5."
+        // on the version's own dot (cycle 35, f1 cold kickoff).
+        let end = text
+            .match_indices(['.', ':'])
+            .find(|(at, _)| {
+                text[at + 1..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+            })
+            .map(|(at, _)| at)
+            .unwrap_or(text.len());
+        let first = if text[end..].starts_with('.') {
+            &text[..=end]
+        } else {
+            &text[..end]
+        };
+        return shorten(first.trim(), 100);
     }
     text.to_owned()
 }
@@ -6024,6 +6036,15 @@ fn since(elapsed: Duration) -> String {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn a_long_notice_is_cut_at_a_sentence_end_not_a_version_dot() {
+        let text = "This key cannot use openai models (openai/gpt-5.4-mini was refused by the provider), so anthropic/claude-opus-5 answers this turn instead. Pick another model in Settings to make it stick; the kernel keeps trying yours first.";
+        assert_eq!(
+            short_notice(text),
+            "This key cannot use openai models (openai/gpt-5.4-mini was refused by the provider), so anthropic/cl…"
+        );
+    }
 
     #[test]
     fn a_steer_stays_inside_the_turn_it_steered() {
