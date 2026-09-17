@@ -1015,8 +1015,19 @@ async fn run_job(
     if timed_out {
         tail = format!("timed out after {}s\n{tail}", CMD_TIMEOUT.as_secs());
     }
-    // Seen to its end by this kernel: not a run a restart cut.
-    let _ = std::fs::write(job.dir.join("settled"), "ok\n");
+    // Seen to its end by this kernel: not a run a restart cut. Without
+    // the marker the next boot reports this run as cut — a repeat of an
+    // outcome already delivered, not a loss — so its absence is said.
+    if let Err(e) = std::fs::write(job.dir.join("settled"), "ok\n") {
+        crate::klog::warn(
+            "settled_unwritten",
+            None,
+            format!(
+                "job {}: {e} — the next start will report this finished run as cut",
+                job.id
+            ),
+        );
+    }
     (Some(id), code, tail)
 }
 

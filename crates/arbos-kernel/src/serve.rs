@@ -595,7 +595,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
             if job.dir.join("settled").exists() {
                 continue;
             }
-            let _ = std::fs::write(job.dir.join("settled"), "cut by a restart\n");
+            if let Err(e) = std::fs::write(job.dir.join("settled"), "cut by a restart\n") {
+                // Without the marker the next boot says "cut" again for
+                // the same run: a repeat, not a loss, and said as one.
+                crate::klog::warn(
+                    "settled_unwritten",
+                    None,
+                    format!(
+                        "job {}: {e} — this cut will be reported again at the next start",
+                        job.id
+                    ),
+                );
+            }
             let state = if job.running() {
                 "still running, its outcome will not be read"
             } else {
