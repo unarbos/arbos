@@ -5,25 +5,39 @@
 //! half installed.** A user who loses power, or a payload that unpacks into
 //! something unrunnable, must end up with the app they had.
 //!
-//! So the work is two renames and nothing else. Renaming a directory within
-//! one filesystem is atomic, which unpacking over the top of a live bundle is
-//! not — and the staging and backup directories are deliberately made beside
-//! the target so that both renames stay within one filesystem.
+//! There is a second rule underneath it, which cost a real fault to learn:
+//! **the path never stops resolving.** Not "is restored quickly" — never
+//! stops. Anything replacing a live installation has readers, and a reader
+//! that looks while the path is empty does not conclude "it is being
+//! replaced"; it concludes the file is gone, and acts on that.
+//!
+//! This file used to do the work as two renames: the old tree aside, then the
+//! new tree in. Between them the path resolved to nothing. A kernel's update
+//! tick landing in that interval found no binary and waited its full minute
+//! for a file that was already back — the fault [#453] makes the kernel side
+//! patient about, and the window this side now does not open.
+//!
+//! So the swap is **one step** wherever the system offers one:
+//! `renamex_np(RENAME_SWAP)` on macOS, `renameat2(RENAME_EXCHANGE)` on Linux.
+//! The path resolves to the old tree before it and the new tree after it, and
+//! to nothing in between only if the machine cannot do either — see [`Swap`]
+//! for the ladder and what each rung costs.
 //!
 //! 1. unpack the payload into a staging directory, beside the target
 //! 2. look at what came out; refuse it here if it is not an Arbos
-//! 3. rename the target aside to a backup
-//! 4. rename the staged tree into the target's place
-//! 5. look again, now that it is where it will run from
-//! 6. delete the backup
+//! 3. exchange the staged tree with the target, in one step
+//! 4. look again, now that it is where it will run from
+//! 5. delete the old tree
 //!
-//! Anything that fails from step 3 on puts the backup back. [`Swap`] does that
-//! from its `Drop`, so an early return, a `?`, or a panic unwinds into a
+//! Anything that fails from step 3 on puts the old tree back. [`Swap`] does
+//! that from its `Drop`, so an early return, a `?`, or a panic unwinds into a
 //! working app rather than into no app at all.
 //!
-//! A crash between the two renames is the one case no running code can catch,
-//! and it leaves the backup on disk next to where the app should be.
-//! [`recover`] is what the next launch calls to finish the job.
+//! [`recover`] exists for the one rung of the ladder that still has an
+//! interval — a directory on a filesystem with no exchange — where a crash
+//! leaves the backup on disk next to where the app should be.
+//!
+//! [#453]: https://github.com/unarbos/arbos/pull/453
 
 use crate::feed::Format;
 use anyhow::{Context, Result, bail};
@@ -39,24 +53,66 @@ const BACKUP_SUFFIX: &str = ".arbos-old";
 /// And the one the new tree is unpacked into.
 const STAGING_SUFFIX: &str = ".arbos-new";
 
-/// A swap in progress: the old tree is aside, the new tree is in place, and
+/// How the old tree got to where it is, which is how it goes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum How {
+    /// Target and staged tree changed places in one step. The path never
+    /// stopped resolving, and putting it back is the same step again.
+    Exchanged,
+    /// The old file was given a second name, then the new one was renamed
+    /// over the top — which for a file replaces it in one step. The path
+    /// never stopped resolving either.
+    Linked,
+    /// The old tree was renamed aside and the new one renamed in. There is
+    /// an interval between those two in which the path resolves to
+    /// nothing. Only reached for a directory on a filesystem with no
+    /// exchange.
+    Asided,
+}
+
+/// A swap in progress: the new tree is in place, the old one is kept, and
 /// nobody has yet said it worked.
 ///
 /// Dropping one that was never committed puts the old tree back. That is the
-/// whole design — every failure path after the first rename is an early
-/// return, and every early return is a rollback.
+/// whole design — every failure path after the swap is an early return, and
+/// every early return is a rollback.
+///
+/// # Why this is not just a rename
+///
+/// A rename cannot replace a directory that has anything in it, so a bundle
+/// cannot simply be renamed over. The obvious way round that is to move the
+/// old one aside first, and it is what this did — at the cost of an interval
+/// in which the path resolved to nothing. That interval is not theoretical:
+/// it is the fault behind [`#453`](https://github.com/unarbos/arbos/pull/453),
+/// where a kernel's update tick looked during it, found no binary, and waited
+/// a minute for a file that was already back.
+///
+/// So there is a ladder, and only its bottom rung has the interval:
+///
+/// 1. **Exchange.** `renamex_np(RENAME_SWAP)` on macOS,
+///    `renameat2(RENAME_EXCHANGE)` on Linux. Both paths change places in one
+///    step; a reader sees the old tree or the new one and nothing else.
+/// 2. **Link, then rename.** For a single file, which is what a kernel
+///    binary is. A hard link gives the old file a second name without
+///    touching the first, and a rename onto an existing file replaces it
+///    atomically. Also no interval.
+/// 3. **Aside, then in.** A directory on a filesystem that offers no
+///    exchange. Two renames, and the interval is back — narrow, but real,
+///    which is what [`recover`] is for.
 #[derive(Debug)]
 pub struct Swap {
     target: PathBuf,
+    /// Where the tree that was at `target` is now.
     backup: PathBuf,
+    how: How,
     committed: bool,
 }
 
 impl Swap {
-    /// Move `staged` to `target`, keeping what was there.
+    /// Put `staged` at `target`, keeping what was there.
     ///
-    /// `staged` must be beside `target`: both renames have to be within one
-    /// filesystem or neither is atomic.
+    /// `staged` must be beside `target`: an exchange, a hard link and a
+    /// rename all need the two to be on one filesystem.
     pub fn begin(target: &Path, staged: &Path) -> Result<Self> {
         if !target.exists() {
             bail!("nothing at {} to replace", target.display());
@@ -70,6 +126,44 @@ impl Swap {
         if backup.exists() {
             remove(&backup)?;
         }
+
+        // Rung 1. The exchange leaves the old tree where the new one was
+        // staged. Give it the backup name, so that every rung leaves it in
+        // the same place and so that what sits beside the app is hidden
+        // whatever the caller chose to call its staging path — on a Mac an
+        // unhidden second `.app` is one Launch Services will register and
+        // ⌘Space may open. The swap has already happened by then, so a
+        // failure here costs the tidier name and nothing else.
+        if exchange(target, staged).is_ok() {
+            let backup = match std::fs::rename(staged, &backup) {
+                Ok(()) => backup,
+                Err(_) => staged.to_path_buf(),
+            };
+            return Ok(Self {
+                target: target.to_path_buf(),
+                backup,
+                how: How::Exchanged,
+                committed: false,
+            });
+        }
+
+        // Rung 2. `hard_link` fails on a directory, and on a filesystem
+        // with no links, which is exactly when to fall through.
+        if target.is_file() && std::fs::hard_link(target, &backup).is_ok() {
+            let swap = Self {
+                target: target.to_path_buf(),
+                backup,
+                how: How::Linked,
+                committed: false,
+            };
+            std::fs::rename(staged, target).with_context(|| {
+                format!("could not move the new build into {}", target.display())
+            })?;
+            return Ok(swap);
+        }
+
+        // Rung 3, with the interval. `recover` is what finishes this if the
+        // machine stops between the two renames.
         std::fs::rename(target, &backup).with_context(|| {
             format!(
                 "could not move {} aside — is the app somewhere you can write to?",
@@ -79,6 +173,7 @@ impl Swap {
         let swap = Self {
             target: target.to_path_buf(),
             backup,
+            how: How::Asided,
             committed: false,
         };
         // From here on, `swap` going out of scope puts the old tree back.
@@ -103,10 +198,87 @@ impl Drop for Swap {
         if self.committed {
             return;
         }
-        // Order matters: the new tree has to be out of the way before the old
-        // one can have its name back.
-        let _ = remove(&self.target);
-        let _ = std::fs::rename(&self.backup, &self.target);
+        match self.how {
+            // Back the way it came, and the path does not stop resolving on
+            // the way back either — a rollback is the moment least able to
+            // afford a second failure. The exchange puts the refused tree
+            // at the backup name, where it is no more wanted than it was.
+            How::Exchanged => {
+                if exchange(&self.target, &self.backup).is_ok() {
+                    let _ = remove(&self.backup);
+                }
+            }
+            // Order matters: the new tree has to be out of the way before
+            // the old one can have its name back.
+            How::Linked | How::Asided => {
+                let _ = remove(&self.target);
+                let _ = std::fs::rename(&self.backup, &self.target);
+            }
+        }
+    }
+}
+
+/// Make `a` and `b` change places in one step.
+///
+/// Both must exist. The point is not speed but that there is no observable
+/// moment between: a reader of either path sees what was there before or
+/// what is there after, never nothing and never a half-written tree.
+///
+/// `Unsupported` where the system has no such call, and the operating
+/// system's error where it has one and it failed — an old kernel, or a
+/// filesystem that does not implement the flag. Callers fall down the
+/// ladder rather than treating it as fatal.
+fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+    // A machine with an exchange never walks down the ladder, so without
+    // this the rungs below would be written and never run. Thread-local
+    // and test-only: tests share a process, and a switch that could turn
+    // off the thing this file exists for has no business in a release.
+    #[cfg(test)]
+    if no_exchange::is_set() {
+        let _ = (a, b);
+        return Err(std::io::ErrorKind::Unsupported.into());
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let (Ok(a), Ok(b)) = (
+            CString::new(a.as_os_str().as_bytes()),
+            CString::new(b.as_os_str().as_bytes()),
+        ) else {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        };
+        #[cfg(target_os = "macos")]
+        // SAFETY: two valid NUL-terminated paths, and a flag the call defines.
+        let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+        #[cfg(target_os = "linux")]
+        let rc = {
+            // `RENAME_EXCHANGE`. Stable kernel ABI since 3.15 and not in
+            // `libc` for this target. Called through `syscall` rather than
+            // the wrapper, which needs glibc 2.28 to link.
+            const RENAME_EXCHANGE: libc::c_uint = 2;
+            // SAFETY: as above; `syscall` returns -1 and sets errno on
+            // failure, including when the kernel does not know the number.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_renameat2,
+                    libc::AT_FDCWD,
+                    a.as_ptr(),
+                    libc::AT_FDCWD,
+                    b.as_ptr(),
+                    RENAME_EXCHANGE,
+                ) as libc::c_int
+            }
+        };
+        match rc {
+            0 => Ok(()),
+            _ => Err(std::io::Error::last_os_error()),
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (a, b);
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 }
 
@@ -327,9 +499,35 @@ fn remove(path: &Path) -> Result<()> {
     removed.with_context(|| format!("removing {}", path.display()))
 }
 
+/// Pretending, on this thread only, that the system has no exchange.
+#[cfg(test)]
+mod no_exchange {
+    use std::cell::Cell;
+    thread_local! {
+        static OFF: Cell<bool> = const { Cell::new(false) };
+    }
+    pub(super) fn is_set() -> bool {
+        OFF.with(Cell::get)
+    }
+    /// Restores itself when it goes out of scope, so a failing assertion
+    /// cannot leave the rest of the thread's tests on a lower rung.
+    pub(super) struct Off;
+    impl Off {
+        pub(super) fn new() -> Self {
+            OFF.with(|f| f.set(true));
+            Self
+        }
+    }
+    impl Drop for Off {
+        fn drop(&mut self) {
+            OFF.with(|f| f.set(false));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Swap, check_tree, recover, staging_for, unpack};
+    use super::{How, Swap, check_tree, no_exchange, recover, staging_for, unpack};
     use crate::feed::Format;
     use std::{
         fs,
@@ -481,6 +679,144 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left, ["Arbos.app"], "afterwards: {left:?}");
+    }
+
+    /// The guard that cannot be wrong without failing. Where the system
+    /// offers a one-step exchange, the swap must take it — because the
+    /// alternative is a rung with an interval, and the interval is the
+    /// fault. A regression that quietly drops back to two renames would
+    /// pass every behavioural test here and still reopen #453.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_swap_is_one_step_where_the_system_offers_one() {
+        let home = tempfile::tempdir().unwrap();
+        let target = tree(&home.path().join("Arbos.app"), "old");
+        let staged = tree(&home.path().join(".Arbos.app.arbos-new"), "new");
+
+        let swap = Swap::begin(&target, &staged).unwrap();
+        assert_eq!(
+            swap.how,
+            How::Exchanged,
+            "this filesystem has an atomic exchange and the swap did not use it"
+        );
+        assert_eq!(marker_of(&target), "app new");
+        assert_eq!(marker_of(&swap.backup), "app old", "the old tree is kept");
+        swap.commit().unwrap();
+        assert_eq!(marker_of(&target), "app new");
+    }
+
+    /// The property itself, watched rather than reasoned about.
+    ///
+    /// Honest about what it is: an observer sampling as fast as it can,
+    /// so it could miss a narrow interval rather than prove there is
+    /// none. The test above is the one that fails by itself; this one
+    /// says what the path actually looked like to somebody reading it,
+    /// which is how the fault was met in the first place — a kernel's
+    /// update tick, not a proof.
+    #[test]
+    fn a_reader_watching_the_path_never_sees_it_missing() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let home = tempfile::tempdir().unwrap();
+        let target = tree(&home.path().join("Arbos.app"), "old");
+        let bin = target.join("arbos-kernel");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let missing = Arc::new(AtomicU64::new(0));
+        let looks = Arc::new(AtomicU64::new(0));
+        let watcher = {
+            let (stop, missing, looks, bin) =
+                (stop.clone(), missing.clone(), looks.clone(), bin.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // What a reader asks: is there a binary at that path?
+                    if !bin.is_file() {
+                        missing.fetch_add(1, Ordering::Relaxed);
+                    }
+                    looks.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+
+        for i in 0..40 {
+            let staged = tree(&home.path().join(".Arbos.app.arbos-new"), &format!("{i}"));
+            Swap::begin(&target, &staged).unwrap().commit().unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        watcher.join().unwrap();
+
+        assert!(
+            looks.load(Ordering::Relaxed) > 0,
+            "the observer never got to look"
+        );
+        assert_eq!(
+            missing.load(Ordering::Relaxed),
+            0,
+            "the path stopped resolving during a swap, after {} looks over 40 swaps",
+            looks.load(Ordering::Relaxed)
+        );
+    }
+
+    /// A kernel binary is a single file, and a file can be replaced with
+    /// no interval even where there is no exchange: give the old one a
+    /// second name, then rename over it. This is the rung that matters
+    /// most, because the file a kernel polls is a file.
+    #[test]
+    fn a_file_is_replaced_with_no_interval_even_without_an_exchange() {
+        let _off = no_exchange::Off::new();
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("arbos-kernel");
+        fs::write(&target, "old").unwrap();
+        let staged = home.path().join(".arbos-kernel.arbos-new");
+        fs::write(&staged, "new").unwrap();
+
+        let swap = Swap::begin(&target, &staged).unwrap();
+        assert_eq!(swap.how, How::Linked, "a file should not need the aside");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+        assert_eq!(fs::read_to_string(&swap.backup).unwrap(), "old");
+        swap.commit().unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
+    }
+
+    /// And the same rung rolls back.
+    #[test]
+    fn a_file_swap_without_an_exchange_still_rolls_back() {
+        let _off = no_exchange::Off::new();
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("arbos-kernel");
+        fs::write(&target, "old").unwrap();
+        let staged = home.path().join(".arbos-kernel.arbos-new");
+        fs::write(&staged, "new").unwrap();
+
+        drop(Swap::begin(&target, &staged).unwrap());
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "old",
+            "an uncommitted swap puts the old file back"
+        );
+    }
+
+    /// The bottom rung, which a directory on a filesystem with no
+    /// exchange still falls to. It has the interval, and `recover` is
+    /// what covers it — so this checks the swap is correct and that the
+    /// interval is the *only* thing it gives up.
+    #[test]
+    fn a_directory_without_an_exchange_still_swaps_and_rolls_back() {
+        let _off = no_exchange::Off::new();
+        let home = tempfile::tempdir().unwrap();
+        let target = tree(&home.path().join("Arbos.app"), "old");
+        let staged = tree(&home.path().join(".Arbos.app.arbos-new"), "new");
+
+        let swap = Swap::begin(&target, &staged).unwrap();
+        assert_eq!(swap.how, How::Asided);
+        assert_eq!(marker_of(&target), "app new");
+        swap.commit().unwrap();
+        assert_eq!(marker_of(&target), "app new");
+
+        let staged = tree(&home.path().join(".Arbos.app.arbos-new"), "newer");
+        drop(Swap::begin(&target, &staged).unwrap());
+        assert_eq!(marker_of(&target), "app new", "rolled back");
     }
 
     #[test]
