@@ -146,6 +146,10 @@ pub enum Event {
     /// event, one line, replaced by the next. Drawn on the parent's
     /// "1 Working  …" line for a worker.
     Status(String),
+    /// The parent's "waiting on <worker> — <the worker's step>" line (kernel
+    /// #366, `status` with `source: "waiting"`): someone else's step,
+    /// watched. `None` when no worker is live any more.
+    Waiting(Option<String>),
     /// The kernel's model provider and whether it holds a key (`provider`
     /// frame). `key: false` is the cue to offer this window's own key.
     Provider {
@@ -876,6 +880,15 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         Frame::Plan { agent: id, nodes } if id == agent => vec![Event::Plan(nodes)],
         // The agent's own line on what it is doing (or the kernel's guess
         // from the tool in flight); an empty step means idle.
+        Frame::Status {
+            agent: id,
+            step,
+            source,
+            ..
+        } if id == agent && source == "waiting" => {
+            let step = step.trim().to_string();
+            vec![Event::Waiting((!step.is_empty()).then_some(step))]
+        }
         Frame::Status { agent: id, step, .. } if id == agent => vec![Event::Status(step)],
         // Not agent-scoped: every attached chat hears it, and the
         // workspace's re-read is idempotent.

@@ -595,6 +595,10 @@ pub struct ChatSession {
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
+    /// The kernel's "waiting on <worker> — <step>" for a parent whose
+    /// worker is live (#366). Runtime only; the kernel clears it the
+    /// moment no worker is live.
+    pub waiting: Option<String>,
     /// When each running tool call began, by call id, so its finished
     /// item can say how long it took.
     tool_started: HashMap<String, Instant>,
@@ -731,6 +735,7 @@ impl ChatSession {
             to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
+            waiting: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -823,6 +828,7 @@ impl ChatSession {
             to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
+            waiting: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -915,6 +921,7 @@ impl ChatSession {
             to_notify: Vec::new(),
             kickoff_wanted: false,
             status: None,
+            waiting: None,
             turn_open: false,
             turn_ended: None,
             probed_at: None,
@@ -2652,7 +2659,30 @@ impl ChatSession {
     fn apply(&mut self, event: Event) {
         self.updated = SystemTime::now();
         self.last_frame_at = Instant::now();
-        if !matches!(event, Event::Alive) {
+        // Progress the person could see. Not `Alive`, not a probe's answer,
+        // not the roster, provider or store bookkeeping the kernel sends
+        // between real frames — those would keep the stall hint away from
+        // a turn that is truly stuck.
+        if matches!(
+            event,
+            Event::TextDelta { .. }
+                | Event::ThoughtDelta { .. }
+                | Event::ThoughtFinal { .. }
+                | Event::AssistantFinal { .. }
+                | Event::Update(_)
+                | Event::Status(_)
+                | Event::Waiting(_)
+                | Event::Incoming { .. }
+                | Event::UserLine { .. }
+                | Event::Woke { .. }
+                | Event::Aside(_)
+                | Event::Refused(_)
+                | Event::Plan(_)
+                | Event::NeedApproval { .. }
+                | Event::NeedQuestion { .. }
+                | Event::Permission(..)
+                | Event::TurnDone(_)
+        ) {
             self.progress_at = Instant::now();
         }
         match event {
@@ -3182,13 +3212,21 @@ impl ChatSession {
             Event::Permission(request, reply) => self.open_permission(request, reply),
             Event::Working(secs) => {
                 self.working = Some((secs, Instant::now()));
-                self.turn_open = true;
-                self.turn_ended = None;
+                // A heartbeat straggling in after the turn's own end must
+                // not reopen it: the chat then looked idle everywhere but
+                // refused "Rewind here" with "stop the turn before
+                // rewinding" and drew no footer (F-122, cycle 24 gate).
+                // Same lag rule as `turn_alive`.
+                if !self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
+                    self.turn_open = true;
+                    self.turn_ended = None;
+                }
             }
             Event::Status(text) => {
                 let text = text.trim().to_string();
                 self.status = (!text.is_empty()).then_some(text);
             }
+            Event::Waiting(line) => self.waiting = line,
             Event::TurnEndedAt(ended) => {
                 if let Some(ChatItem::User(message)) = self
                     .items
