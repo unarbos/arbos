@@ -300,11 +300,33 @@ fn a_bundle_lets_a_reader_diagnose_a_worker_that_never_starts() {
         std::thread::sleep(Duration::from_millis(50));
     }
     // The worker is mid-turn: the bundle's roster says so, from the
-    // kernel's own state.
-    a.send(serde_json::json!({"type":"feedback","agent":"root","note":"the worker line says Starting forever"}));
-    let b = a
-        .wait(Duration::from_secs(10), |f| f["type"] == "feedback_bundle")
-        .expect("the bundle");
+    // kernel's own state. That state follows the disk by a moment — the
+    // turn writes `turn_complete`, then the serve loop marks the agent
+    // not running — so the bundle is asked again until root reads idle
+    // (CI on `main`, 2026-09-17: root still `running` in the first
+    // bundle taken right after the line landed).
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let b = loop {
+        a.send(serde_json::json!({"type":"feedback","agent":"root","note":"the worker line says Starting forever"}));
+        let b = a
+            .wait(Duration::from_secs(10), |f| f["type"] == "feedback_bundle")
+            .expect("the bundle");
+        let root_running = b["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["id"] == "root")
+            .map(|r| r["running"] == true)
+            .unwrap_or(true);
+        if !root_running {
+            break b;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "root reads idle once the serve loop has caught up: {b}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
     let agents = b["agents"].as_array().unwrap();
     let worker = agents
         .iter()
