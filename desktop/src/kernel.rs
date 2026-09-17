@@ -227,14 +227,66 @@ impl Gate {
     }
 }
 
-/// A kernel that is not the build this app ships.
+/// Why a running kernel is not one this app should be talking to.
+///
+/// Three of them, because they are three different problems and saying the
+/// wrong one is its own harm: a person told "another build" who is actually
+/// looking at a deleted file will go looking for the wrong thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The file it is executing has been replaced or removed underneath it.
+    /// **On its own, whatever the commits say** — a kernel still serving a
+    /// deleted image of the *same* build is exactly as stale as one from
+    /// another build, and it is what happened on 2026-09-17: the app updated
+    /// in place, the commits matched, the bar stayed quiet, five workers hung.
+    BinaryGone { built_at: Option<String> },
+    /// Its commit is not the one this app ships.
+    DifferentBuild { running: String, bundled: String },
+    /// It could not say what it was built from. Older kernels did not record
+    /// a commit, and a build that cannot account for itself is not one to
+    /// assume is current.
+    UnknownBuild { bundled: String },
+}
+
+impl Reason {
+    /// The three or four words on the plate. What is wrong, not that
+    /// something is.
+    pub fn headline(&self) -> &'static str {
+        match self {
+            Self::BinaryGone { .. } => "Kernel running a deleted build",
+            Self::DifferentBuild { .. } | Self::UnknownBuild { .. } => "Kernel from another build",
+        }
+    }
+
+    /// The sentence, for a log line or the first line of a tooltip.
+    pub fn say(&self, place: &str) -> String {
+        match self {
+            Self::BinaryGone { built_at } => format!(
+                "the kernel serving {place} was replaced on disk{} and is still running the \
+                 old image",
+                match built_at {
+                    Some(at) => format!(" (it was built {at})"),
+                    None => String::new(),
+                }
+            ),
+            Self::DifferentBuild { running, bundled } => format!(
+                "the kernel serving {place} was built from {running}, and this app ships {bundled}"
+            ),
+            // Not "was built from unknown", which reads as a commit called
+            // unknown. It is a kernel that did not record one.
+            Self::UnknownBuild { bundled } => format!(
+                "the kernel serving {place} is from a build that did not record its commit, \
+                 and this app ships {bundled}"
+            ),
+        }
+    }
+}
+
+/// A kernel this app should not be quietly talking to.
 #[derive(Debug, Clone)]
 pub struct Skew {
     pub place: Place,
-    /// The commit the running process was built from, as it recorded itself.
-    pub running_sha: String,
-    /// The commit of the kernel beside this app.
-    pub bundled_sha: String,
+    pub reason: Reason,
     pub gate: Gate,
 }
 
@@ -251,23 +303,44 @@ fn bundled_kernel_sha() -> Option<&'static str> {
     .as_deref()
 }
 
-/// Whether the kernel described by `info` is a stranger, and what its gate
-/// says if so.
+/// Whether the kernel described by `info` is one to warn about, and why.
 fn skew(workspace: &Path, info: &WebInfo) -> Option<Skew> {
     let bundled = bundled_kernel_sha()?;
-    let running = read_info_sha(workspace)?;
-    if arbos_update::kernel::same_commit(&running, bundled) {
-        return None;
-    }
+    let health = health_of(info);
+    let running = read_info_sha(workspace);
+
+    // Order matters. A deleted image is the most specific thing wrong and the
+    // most urgent, and it is true whatever the commits say.
+    let reason = if health.binary_gone {
+        Reason::BinaryGone {
+            built_at: health.built_at.clone(),
+        }
+    } else {
+        match running {
+            // A kernel from before commits were recorded. It used to fall out
+            // of this function as "nothing to say", which left the one machine
+            // most likely to be stale showing nothing at all.
+            None => Reason::UnknownBuild {
+                bundled: bundled.to_owned(),
+            },
+            Some(running) if !arbos_update::kernel::same_commit(&running, bundled) => {
+                Reason::DifferentBuild {
+                    running,
+                    bundled: bundled.to_owned(),
+                }
+            }
+            Some(_) => return None,
+        }
+    };
     Some(Skew {
         place: Place::local(workspace),
-        running_sha: running,
-        bundled_sha: bundled.to_owned(),
-        gate: gate_of(info),
+        reason,
+        gate: health.gate,
     })
 }
 
-/// The `git_sha` a kernel wrote about itself when it started.
+/// The `git_sha` a kernel wrote about itself when it started, where it said
+/// one. `unknown` is not a commit; it is a kernel saying it does not know.
 fn read_info_sha(workspace: &Path) -> Option<String> {
     let place = arbos_core::Place::new(workspace.to_path_buf());
     let text = std::fs::read_to_string(place.kernel_json_read()).ok()?;
@@ -278,35 +351,65 @@ fn read_info_sha(workspace: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Ask the kernel whether it may be restarted. `/healthz` on the attach port
-/// carries `update_gate` — the same verdict the self-updater uses, so the app
-/// and the kernel agree about what "safe to restart" means.
-fn gate_of(info: &WebInfo) -> Gate {
+/// What a kernel says about itself on `/healthz`.
+struct Health {
+    /// Whether it may be restarted, in its own words.
+    gate: Gate,
+    /// Whether the file it is executing is gone. Absent from kernels older
+    /// than the flag, where it reads false — they are covered by the commit
+    /// comparison instead.
+    binary_gone: bool,
+    built_at: Option<String>,
+}
+
+/// One request, because two reads of the same document should not be two trips
+/// to the same socket.
+///
+/// `update_gate` is the same verdict the self-updater uses, so the app and the
+/// kernel agree about what "safe to restart" means rather than the app
+/// guessing.
+fn health_of(info: &WebInfo) -> Health {
+    let quiet = Health {
+        gate: Gate::Unknown,
+        binary_gone: false,
+        built_at: None,
+    };
     let Some(addr) = tcp_addr(&info.url) else {
-        return Gate::Unknown;
+        return quiet;
     };
     let Ok(response) = http()
         .get(&format!("http://{addr}/healthz"))
         .call()
         .and_then(|mut r| r.body_mut().read_to_string().map_err(Into::into))
     else {
-        return Gate::Unknown;
+        return quiet;
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&response) else {
-        return Gate::Unknown;
+        return quiet;
     };
-    match json.get("update_gate") {
-        None => Gate::Unknown,
-        Some(gate) => match gate.get("verdict").and_then(|v| v.as_str()) {
-            Some("idle") => Gate::Idle,
-            Some("busy") => Gate::Busy(
-                gate.get("reason")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("something is running in it")
-                    .to_owned(),
-            ),
-            _ => Gate::Unknown,
+    Health {
+        gate: match json.get("update_gate") {
+            None => Gate::Unknown,
+            Some(gate) => match gate.get("verdict").and_then(|v| v.as_str()) {
+                Some("idle") => Gate::Idle,
+                Some("busy") => Gate::Busy(
+                    gate.get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("something is running in it")
+                        .to_owned(),
+                ),
+                _ => Gate::Unknown,
+            },
         },
+        binary_gone: json
+            .get("binary_gone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        built_at: json
+            .get("built_at")
+            .and_then(|v| v.as_str())
+            .filter(|at| !at.is_empty())
+            .map(str::to_owned),
     }
 }
 
@@ -387,10 +490,8 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
             // build this app came with. No question worth asking.
             Some(found) if found.gate.idle() => {
                 eprintln!(
-                    "arbos: the kernel serving {} is {} and this app ships {} — restarting it",
-                    workspace.display(),
-                    found.running_sha,
-                    found.bundled_sha
+                    "arbos: {} — restarting it",
+                    found.reason.say(&workspace.display().to_string())
                 );
                 stop_kernel(&info);
             }
@@ -400,10 +501,8 @@ pub fn attach_or_spawn(workspace: &Path) -> Result<WebInfo> {
             // reads this back through `kernel_skew`.
             Some(found) => {
                 eprintln!(
-                    "arbos: the kernel serving {} is {} and this app ships {} — {}",
-                    workspace.display(),
-                    found.running_sha,
-                    found.bundled_sha,
+                    "arbos: {} — {}",
+                    found.reason.say(&workspace.display().to_string()),
                     found.gate.say()
                 );
                 return Ok(info);

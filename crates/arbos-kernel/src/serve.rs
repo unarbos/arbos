@@ -1426,7 +1426,11 @@ enum Page {
 }
 
 fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::UnboundedSender<Frame>) {
-    let events = load_transcript(&Layout::new(place, agent).transcript()).unwrap_or_default();
+    // A finished worker's record lives in the archive; a client asking
+    // for it gets the lines from there, flagged, not an empty page.
+    let (transcript, archived) = arbos_core::files::transcript_for_history(place, agent)
+        .unwrap_or_else(|| (Layout::new(place, agent).transcript(), false));
+    let events = load_transcript(&transcript).unwrap_or_default();
     let total = events.len() as u64;
     let picked: Vec<&Event> = match page {
         Page::Tail => {
@@ -1471,6 +1475,12 @@ fn replay(place: &Place, agent: &str, page: Page, limit: u32, out: &mpsc::Unboun
         from,
         to,
         total,
+        archived,
+        path: if archived {
+            format!("archive/agents/{agent}/transcript.jsonl")
+        } else {
+            String::new()
+        },
     });
 }
 

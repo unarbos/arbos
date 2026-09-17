@@ -163,12 +163,20 @@ pub enum Frame {
     },
     /// Kernel → client: the replay is complete. `from`/`to` are the first
     /// and last `seq` sent (equal to `since` when nothing was), `total` the
-    /// transcript's length now.
+    /// transcript's length now. `archived`: the agent has finished and its
+    /// folder moved to `archive/agents/<id>/`; the lines came from there
+    /// (M-27: a Done worker read as "Nothing on record yet"). `path` is
+    /// that transcript, relative to `.arbos/`, for a client that reads
+    /// files.
     HistoryEnd {
         agent: String,
         from: u64,
         to: u64,
         total: u64,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        archived: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        path: String,
     },
     /// Client → kernel: one file under `.arbos/`, as text. `path` is
     /// relative to `.arbos/` (`agents/root/plan.md`). Answered with `file`;

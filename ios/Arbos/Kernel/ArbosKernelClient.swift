@@ -29,6 +29,9 @@ final class ArbosKernelClient {
     private(set) var agents: [KernelAgent] = []
     private(set) var focus: String = "root"
     private(set) var kernelVersion: String = ""
+    /// What the kernel on the other end of this socket says it is running.
+    /// The process we are talking to, never the roster's view of its machine.
+    private(set) var kernelBuild = KernelBuild()
 
     let frames: AsyncStream<KernelFrame>
     private let frameSink: AsyncStream<KernelFrame>.Continuation
@@ -150,9 +153,10 @@ final class ArbosKernelClient {
         }
         #endif
         switch frame {
-        case .hello(let focus, let version, _, _):
+        case .hello(let focus, let version, _, _, let build):
             self.focus = focus
             kernelVersion = version
+            kernelBuild = build
             if state == .attaching { state = .attached }
         case .snapshot(let focusPath, let agents):
             focus = focusPath.split(separator: "/").last.map(String.init) ?? focus

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import DisplayHung, pulse as display_pulse, still as display_still  # noqa: E402
+from rig import DisplayHung, kernel_build, pulse as display_pulse, still as display_still  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 DRIVER_PY = Path(os.environ.get("ARBOS_DRIVER_PY", HERE.parent.parent / "driver" / "arbosdriver.py"))
@@ -602,6 +602,7 @@ def main() -> int:
     for k in range(args.runs):
         run = next_run + k
         log(f"== journey run {run} on {args.label}")
+        log(f"kernel under test: {kernel_build(f'{args.bindir}/arbos-kernel')}")
         rows = Journey(drv, args, run).run_all()
         with record.open("a") as f:
             for r in rows:

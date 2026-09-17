@@ -132,15 +132,16 @@ impl Arbos {
             .update(cx, |updater, cx| updater.look_for_strangers(places, cx));
         let found = self.updater.read(cx).strangers().first()?.clone();
         let place = found.place.clone();
+        // Capitalised: `say` gives the sentence, this is the start of one.
+        let what = found.reason.say(&place.title());
         let tooltip = format!(
-            "The kernel serving {} was built from {}, and this app ships {}.\n\n\
+            "{}{}.\n\n\
              It will not understand everything this window sends it: work can finish and \n\
              never be reported. {}.\n\n\
              Click to stop and restart it on this build. Anything running in it ends the \n\
              way the stop button ends it.",
-            place.title(),
-            found.running_sha,
-            found.bundled_sha,
+            what[..1].to_uppercase(),
+            &what[1..],
             found.gate.say(),
         );
         Some(
@@ -148,7 +149,7 @@ impl Arbos {
                 cx,
                 Plate {
                     id: "status-bar-stranger-kernel",
-                    label: "Kernel from another build".into(),
+                    label: found.reason.headline().into(),
                     icon: None,
                     fill: theme.warning,
                     progress: None,
