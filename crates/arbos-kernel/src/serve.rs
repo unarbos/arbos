@@ -965,8 +965,18 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                         idle::Verdict::Idle
                     )
                 {
-                    reexec_backoff_until = arbos_core::now_ms() + REEXEC_RETRY_MS;
-                    reexec_onto_new_binary(&place, &hooks);
+                    // A new file still being written (the app's swap is a
+                    // directory rename, then a copy; an installer streams
+                    // the binary) is not a failed restart: look again in
+                    // a moment. Only an exec that returned an error waits
+                    // the full minute. A restart that missed its window
+                    // by a few milliseconds used to wait sixty seconds
+                    // for it (binary_gone_e2e red one run in six).
+                    reexec_backoff_until = arbos_core::now_ms()
+                        + match reexec_onto_new_binary(&place, &hooks) {
+                            Reexec::NotReady => REEXEC_LOOK_AGAIN_MS,
+                            Reexec::Failed => REEXEC_RETRY_MS,
+                        };
                 }
                 hooks.kick();
                 hooks.broadcast(tree_frame(&place));
@@ -2730,27 +2740,67 @@ fn key_source(place: &Place, host: &Host) -> (bool, String) {
 /// about to fire is a reason to wait), and how long between attempts.
 const REEXEC_HORIZON_MS: i64 = 60_000;
 const REEXEC_RETRY_MS: i64 = 60_000;
+/// How soon to look again when the new file was not there or was still
+/// being written.
+const REEXEC_LOOK_AGAIN_MS: i64 = 2_000;
+
+/// Why a re-exec did not happen (a successful one never returns).
+enum Reexec {
+    /// No usable new file yet, or one whose bytes were still changing.
+    NotReady,
+    /// `execv` itself returned an error; the old image serves on.
+    Failed,
+}
 
 /// Replace this process with the arbos-kernel now at its own path, same
 /// arguments, same environment. Returns only when the exec failed — the
 /// old image then serves on. Set `ARBOS_NO_REEXEC=1` to keep a kernel on
 /// its old image (a test of the notice alone, or a person who wants to
 /// choose the moment).
-fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
+fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) -> Reexec {
     if std::env::var_os("ARBOS_NO_REEXEC").is_some() {
-        return;
+        return Reexec::NotReady;
     }
     let chosen = match crate::binary::kernel_binary() {
         Ok(c) => c,
         Err(e) => {
-            klog::warn(
-                "reexec_failed",
+            klog::info(
+                "reexec_wait",
                 None,
-                format!("no binary to restart onto: {e:#}"),
+                format!("no binary to restart onto yet: {e:#}; looking again"),
             );
-            return;
+            return Reexec::NotReady;
         }
     };
+    // The file must be whole and at rest: the same size and mtime across
+    // a short pause, executable, and not this process's own image.
+    let settled = {
+        let first = arbos_core::binary_identity::of(&chosen.path);
+        std::thread::sleep(Duration::from_millis(250));
+        let second = arbos_core::binary_identity::of(&chosen.path);
+        match (first, second) {
+            (Some(a), Some(b))
+                if a == b
+                    && std::fs::metadata(&chosen.path)
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false) =>
+            {
+                true
+            }
+            _ => false,
+        }
+    };
+    if !settled {
+        klog::info(
+            "reexec_wait",
+            None,
+            format!(
+                "{} is still being written or is not there; looking again",
+                chosen.path.display()
+            ),
+        );
+        return Reexec::NotReady;
+    }
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     klog::info(
         "reexec",
@@ -2784,6 +2834,7 @@ fn reexec_onto_new_binary(place: &Place, hooks: &Arc<KernelHooks>) {
             format!("{}: {err}; the old image serves on", chosen.path.display()),
         );
     }
+    Reexec::Failed
 }
 
 /// A running turn that has shown nothing for [`crate::hooks::stall_secs`] gets
