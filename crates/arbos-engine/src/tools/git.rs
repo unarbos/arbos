@@ -484,10 +484,12 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
     if !st.success() {
         anyhow::bail!("git reset --hard {} failed", cp.head);
     }
-    let _ = Command::new("git")
-        .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
-        .current_dir(cwd)
-        .status();
+    // The checkpoint's tree comes back *before* anything untracked is
+    // removed: with the old order (clean, then read-tree) a read-tree
+    // that failed left the person with neither the later files nor the
+    // checkpoint's — the untracked ones were already gone. Now the tree
+    // is in the index when `clean` runs, so `clean` removes only what
+    // the checkpoint did not have.
     if let Some(work) = &cp.work {
         let st = Command::new("git")
             .args(["read-tree", "-u", "--reset", work])
@@ -496,19 +498,42 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
         if !st.success() {
             anyhow::bail!("git read-tree {work} failed");
         }
+    }
+    // What `clean` did is part of what was restored: a failure here is
+    // not "restored" with leftovers unmentioned.
+    let clean = Command::new("git")
+        .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
+        .current_dir(cwd)
+        .output();
+    let clean_note = match &clean {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => Some(format!(
+            "untracked files from later turns may remain (git clean: {})",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+        Err(e) => Some(format!(
+            "untracked files from later turns may remain (git clean: {e})"
+        )),
+    };
+    if cp.work.is_some() {
         let _ = Command::new("git")
             .args(["reset", "-q"])
             .current_dir(cwd)
             .status();
     }
-    Ok(match &cp.work {
+    let mut what = match &cp.work {
         Some(w) => format!(
             "{} + working tree {}",
             &cp.head[..cp.head.len().min(12)],
             &w[..w.len().min(12)]
         ),
         None => cp.head[..cp.head.len().min(12)].to_string(),
-    })
+    };
+    if let Some(note) = clean_note {
+        what.push_str("; ");
+        what.push_str(&note);
+    }
+    Ok(what)
 }
 
 pub fn snapshot(cwd: &Path) -> Result<()> {
@@ -1180,9 +1205,19 @@ mod tests {
         let mark = std::fs::read_to_string(dir.join(".arbos/runtime/checkpoint")).unwrap();
         assert_eq!(mark.lines().nth(1), cps[0].work.as_deref(), "{mark}");
         std::fs::write(dir.join("f2.txt"), "later\n").unwrap();
+        // And the kept file changed and removed since: both come back.
+        std::fs::remove_file(dir.join("f1.txt")).unwrap();
         let what = restore(&dir, &cps[0]).unwrap();
         assert!(what.contains("working tree"), "{what}");
-        assert!(dir.join("f1.txt").exists(), "the kept turn's file is back");
+        assert!(
+            !what.contains("may remain"),
+            "a clean that worked is not reported as doubtful: {what}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("f1.txt")).unwrap(),
+            "first\n",
+            "the kept turn's file is back with its content"
+        );
         assert!(
             !dir.join("f2.txt").exists(),
             "the later turn's file is gone"
@@ -1290,7 +1325,8 @@ mod tests {
         assert_eq!(on_disk[0].work_error.as_deref(), Some(TREE_PENDING));
         let err = restore(&dir, &on_disk[0]).unwrap_err();
         assert!(
-            err.to_string().contains("no checkpoint of the working tree"),
+            err.to_string()
+                .contains("no checkpoint of the working tree"),
             "{err}"
         );
         assert!(err.to_string().contains("still being saved"), "{err}");
