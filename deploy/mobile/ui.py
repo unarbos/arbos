@@ -21,7 +21,21 @@ points. Nothing here measures an image.
   find   print "x y" — the centre, in points — of the first match
   tap    tap that centre
   value  print the element's AXValue (the composer's placeholder or text)
+  field  print what the text field holds, found by being a text field
+  focus  tap that same text field
   dump   print every label and frame, for writing a new scenario
+
+`field` and `focus` take no label because the composer has none once there
+is text in it: the placeholder is the label and it goes the moment a
+character lands, so anything that names it can neither read it back nor
+tap it again. Its frame moves too — the box grows taller as the text wraps,
+and the keyboard pushes it up the screen — so a remembered point is wrong
+by the second line. Both work with the keyboard up.
+
+Read the field back before sending. `idb ui text` returns before its
+characters arrive, so a scenario that types and presses return at once
+sends whatever had landed by then, and a second call weaves itself into the
+first (M-162).
 
 A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.
@@ -69,6 +83,22 @@ def main():
         sys.exit(__doc__)
     udid, verb = sys.argv[1], sys.argv[2]
     els = elements(udid)
+
+    if verb in ("field", "focus"):
+        fields = [e for e in els if (e.get("type") or "") == "TextField"]
+        if not fields:
+            print("ui: no text field on screen — is the keyboard up?", file=sys.stderr)
+            sys.exit(1)
+        if len(fields) > 1:
+            print(f"ui: {len(fields)} text fields on screen, want one", file=sys.stderr)
+            sys.exit(1)
+        if verb == "field":
+            print(fields[0].get("AXValue") or "", end="")
+            return
+        x, y = centre(fields[0])
+        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        print(f"focused the text field at {x},{y}")
+        return
 
     if verb == "dump":
         for e in els:

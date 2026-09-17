@@ -172,11 +172,36 @@ fn stop_keeps_the_users_queued_follow_up_held_until_send_now_or_remove() {
         })
         .expect("Send now runs it");
     let _ = reply;
+    // The assistant's words reach the wire as they stream; the turn's
+    // own lines are on disk before its model call, but the file is read
+    // here, not the stream, so wait for the fact itself. On a failure,
+    // say what the file and the kernel's log hold: a red here on CI
+    // (three runs, 2026-09-17) said only "the words are the prompt".
+    let has_user = |events: &[serde_json::Value]| {
+        events
+            .iter()
+            .position(|e| e["kind"] == "user" && e["text"] == "then do this next")
+    };
+    assert!(
+        common::wait_for(Duration::from_secs(5), || has_user(&transcript(&k.place))
+            .is_some()),
+        "the words are the prompt — transcript: {:#?}
+kernel.log tail:
+{}",
+        transcript(&k.place),
+        std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log"))
+            .unwrap_or_default()
+            .lines()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
     let events = transcript(&k.place);
-    let user_at = events
-        .iter()
-        .position(|e| e["kind"] == "user" && e["text"] == "then do this next")
-        .expect("the words are the prompt");
+    let user_at = has_user(&events).expect("the words are the prompt");
     assert!(
         events[user_at - 1]["kind"] == "wake" && events[user_at - 1]["wake"] == "user",
         "its own turn: {events:?}"

@@ -1434,8 +1434,11 @@ fn first_transcript_title(path: &Path) -> Option<String> {
         let Ok(ev) = serde_json::from_str::<arbos_core::Event>(line) else {
             continue;
         };
-        if let Some(prompt) = ev.user_text()
-            && let Some(title) = arbos_core::chattitle::from_prompt(prompt)
+        // The person's first line names the chat — never a wake: the
+        // kickoff's instructions titled the kernel-started chat "This
+        // place was just opened" (cycle 36, F-169).
+        if let arbos_core::EventKind::User { text, .. } = &ev.kind
+            && let Some(title) = arbos_core::chattitle::from_prompt(text)
         {
             return Some(title);
         }
