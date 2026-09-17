@@ -8,6 +8,7 @@
 use crate::{
     model::{
         attachment::{MessageImage, Prompt, UserMessage},
+        panel::OpenedBy,
         session::{Artifact, ArtifactKind, ChatItem, ChatSession, PlanNode, ToolStatus},
         workspace::Workspace,
     },
@@ -393,8 +394,14 @@ impl State {
                 if !self.dragging {
                     return None;
                 }
-                self.dragging = false;
+                // Release reaches every prose item, and the ones above the
+                // pressed one hear it first: an Up on an item that does not
+                // hold the press must leave the gesture alone, or the
+                // pressed item's own Up finds `dragging` already false and
+                // no link ever opened — every URL and doc chip in an answer
+                // was dead to a click (Jacob, reports 2026-09-17-15/-16).
                 let (_, selection) = self.selection.filter(|(item, _)| *item == ix)?;
+                self.dragging = false;
                 click_url(&self.doc(ix, text), selection)
             }
         }
@@ -462,10 +469,35 @@ fn openable(url: &str) -> Option<String> {
     if let Some(rest) = url.strip_prefix("//") {
         return Some(format!("https://{rest}"));
     }
-    if url.contains('.') && !url.contains(' ') && !url.starts_with('#') && !url.starts_with('/') {
+    if url.starts_with("file://") {
+        return Some(url.to_string());
+    }
+    // A path in the place — `docs/brief.md`, `./notes.md`, `/abs/file.md`:
+    // the first segment is a folder, not a host. A host has a dot in its
+    // first segment (`en.wikipedia.org/wiki`).
+    let first = url.split('/').next().unwrap_or(url);
+    let is_path = url.starts_with('/')
+        || url.starts_with("./")
+        || url.starts_with("../")
+        || (url.contains('/') && !first.contains('.') && !url.contains(' '))
+        || (!url.contains('/') && !url.contains(' ') && file_like(url));
+    if is_path && !url.starts_with('#') {
+        return Some(format!("place:{url}"));
+    }
+    if url.contains('.') && !url.contains(' ') && !url.starts_with('#') {
         return Some(format!("https://{url}"));
     }
     None
+}
+
+/// `brief.md`, `main.py`, `notes.txt` — a file name, not a host name.
+fn file_like(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or("");
+    matches!(
+        ext,
+        "md" | "txt" | "toml" | "json" | "yaml" | "yml" | "py" | "rs" | "js" | "ts" | "html" | "css"
+            | "csv" | "svg" | "png" | "jpg" | "jpeg" | "pdf" | "sh"
+    )
 }
 
 /// The prose of an item, for the two kinds that carry any.
@@ -547,10 +579,13 @@ fn turn_answer(items: &[ChatItem], turn: &Turn) -> Option<String> {
 /// reason only — the instruction half is the agent's to act on, not the
 /// reader's. No strip, no retry.
 fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
-    // "project page not updated last turn: a worker was started or
-    // reported and .arbos/notes.md did not change — update it" is the
-    // kernel's whole sentence; the reader needs the first clause, as a
-    // sentence of its own.
+    // The kernel's nudges are written to the agent ("correction not kept:
+    // last turn the user corrected you … keep it now, in one call…"). The
+    // person sees a system line in their own words, in a class of its
+    // own — a left rule and the faint caption, never the prose's colour —
+    // so a log entry does not read as part of the reply (Jacob, report
+    // 2026-09-17-28: "Correction not kept with a loop glyph … reads like
+    // part of the reply").
     let clause = text
         .split(" — ")
         .next()
@@ -559,15 +594,17 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .next()
         .unwrap_or(text)
         .trim();
-    let mut shown = String::with_capacity(clause.len());
-    let mut chars = clause.chars();
-    if let Some(first) = chars.next() {
-        shown.extend(first.to_uppercase());
-        shown.push_str(chars.as_str());
-    }
-    let shown = if shown.starts_with("Project page not updated") {
+    let shown = if clause.starts_with("project page not updated") {
         "Project page not updated this turn".to_string()
+    } else if clause.starts_with("correction not kept") {
+        "Your correction was not saved last turn; the agent has been asked to keep it now.".to_string()
     } else {
+        let mut shown = String::with_capacity(clause.len());
+        let mut chars = clause.chars();
+        if let Some(first) = chars.next() {
+            shown.extend(first.to_uppercase());
+            shown.push_str(chars.as_str());
+        }
         shown
     };
     div()
@@ -576,15 +613,12 @@ fn page_nudge(text: &str, theme: &Theme) -> AnyElement {
         .max_w(px(root::CHAT_MAX_WIDTH))
         .flex()
         .flex_row()
-        .items_center()
-        .gap(px(6.))
-        .child(
-            icons::icon(icons::media::REPEAT)
-                .size(px(11.))
-                .text_color(theme.text_faint),
-        )
+        .items_stretch()
+        .gap(px(8.))
+        .child(div().flex_none().w(px(2.)).rounded(px(1.)).bg(theme.hairline(0.9)))
         .child(
             div()
+                .py(px(1.))
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_faint)
                 .child(SharedString::from(shown)),
@@ -1842,10 +1876,34 @@ fn prose(
                 };
                 url = chat.transcript.point(ix, &shown, pointer);
             });
-            // `arbos://` stays in the app; anything else is the browser's.
+            // `arbos://` stays in the app; a file of the place opens in the
+            // column; anything else is the browser's. The doc chip in an
+            // answer ("Full write-up: 📄 Canada-EU partnership brief") is a
+            // relative link to a file the agent wrote — it went to the
+            // browser as `https://docs/…` and did nothing (Jacob, report
+            // 2026-09-17-16, F-145).
             match url {
                 Some(url) if url.starts_with("arbos://") => {
                     workspace.open_chat_link(&url, cx);
+                }
+                Some(url) if url.starts_with("file://") || url.starts_with("place:") => {
+                    let path = url
+                        .trim_start_matches("file://")
+                        .trim_start_matches("place:")
+                        .to_owned();
+                    // His click on a link in the reply: the person's own route, so it
+                    // fills the side panel's tab and brings it to the front
+                    // (report 2026-09-17-16 was this link doing nothing).
+                    workspace.open_shown(
+                        id,
+                        path,
+                        String::new(),
+                        "doc".into(),
+                        None,
+                        None,
+                        OpenedBy::User,
+                        cx,
+                    );
                 }
                 Some(url) => cx.open_url(&url),
                 None => {}
@@ -4137,9 +4195,20 @@ fn zone(
     // Standing work the turn set up: a small card at the moment it was made.
     zone = zone.children(subscription_cards(chat, body.clone(), &theme));
     // Screenshots and clips the work produced stay in view when the work
-    // folds: they are what the user asked to see.
+    // folds: they are what the user asked to see. Not one the answer
+    // itself shows: the agent drew a cat, screenshotted it twice on the
+    // way, and embedded the last shot in its reply — three cats (Jacob,
+    // report 2026-09-17-11, F-142). A file the answer's prose embeds is
+    // the answer's to show.
+    let answer_text = turn_answer(&chat.items, turn).unwrap_or_default();
     for ix in body.clone() {
         if let ChatItem::Artifacts(files) = &chat.items[ix] {
+            let shown_in_answer = files
+                .iter()
+                .all(|file| !file.path.is_empty() && answer_text.contains(&file.path));
+            if shown_in_answer {
+                continue;
+            }
             zone = zone.child(artifacts_row(chat, ix, files, &theme, cx));
         }
     }
@@ -5660,6 +5729,17 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
         return Some(step);
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
+    // The Project chat hides a thought that has no headline over it
+    // (F-117), and this line stood down for the same thought as "live":
+    // between the kernel's "Thinking" heartbeat and the answer's first
+    // words the pane went blank, and Jacob read it as something broken
+    // (report 2026-09-17-27). A streaming thought nobody can see is a
+    // reason to say "Thinking", not to say nothing.
+    if chat.parent.is_none()
+        && matches!(last, ChatItem::Thinking { done: false, .. })
+    {
+        return Some("Thinking".to_string());
+    }
     let tool_running = matches!(
         last,
         ChatItem::Tool {

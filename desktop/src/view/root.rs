@@ -24,7 +24,7 @@ use crate::{
             tab_sheet::{TabSheet, TabSheetEvent},
         },
         naming::Renaming,
-        settings::{self, Section, SettingsWindow},
+        settings::{CloseSettings, Section, SettingsPane},
     },
 };
 use anyhow::Result;
@@ -610,6 +610,30 @@ pub enum Pane {
     Project,
 }
 
+/// Which tab of the strip the window's middle draws. Everywhere else in the
+/// app a tab is a project; Settings is the one tab that is not, so this is the
+/// one place that says which kind is in front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Front {
+    /// The project `Workspace::active` points at, in whichever [`Pane`] it was
+    /// left on.
+    Project,
+    /// The Settings tab, filling the width.
+    Settings,
+}
+
+/// The Settings tab while it is in the strip: the pane that draws it, and
+/// whether it is the tab in front.
+///
+/// One field holds both, so nothing can claim Settings is in front while no
+/// tab holds it: closing the tab is dropping this whole value, and the project
+/// underneath is untouched — which is why leaving Settings needs no memory of
+/// where to go back to.
+pub(crate) struct SettingsTab {
+    pub(crate) pane: Entity<SettingsPane>,
+    front: bool,
+}
+
 /// One step from `at` through `len` entries. Past either end is
 /// nowhere — stay on the first or the last. A list of none, or no
 /// current place in it, has nowhere to land.
@@ -713,7 +737,12 @@ pub struct Arbos {
     pub(crate) permission_center: Entity<PermissionCenter>,
     /// ⌘K: the palette over every open tab's chats.
     pub(crate) chat_search: Entity<ChatSearch>,
-    settings_window: Option<WindowHandle<SettingsWindow>>,
+    /// The Settings tab, or nothing when it is not open. It is not remembered
+    /// across a launch: a tab in this strip is a place with a kernel and a
+    /// chat, `state.toml` restores those, and a relaunch that landed on a
+    /// preferences form instead of the work would be the wrong side of the
+    /// trade — ⌘, is one chord away.
+    pub(crate) settings_tab: Option<SettingsTab>,
     pub(crate) pane: Pane,
     pub(crate) menu: Option<Menu>,
     /// Which of the open menu's rows is live. Held here rather than in the
@@ -1008,8 +1037,8 @@ impl Arbos {
             &workspace,
             window,
             |this, _, request: &PaneRequest, _, cx| match request {
-                PaneRequest::Surface(_) => this.show_pane(Pane::Surface, cx),
-                PaneRequest::Chat => this.show_pane(Pane::Chat, cx),
+                PaneRequest::Surface(_) => this.set_pane(Pane::Surface, cx),
+                PaneRequest::Chat => this.set_pane(Pane::Chat, cx),
             },
         )
         .detach();
@@ -1045,7 +1074,7 @@ impl Arbos {
             permissions_sheet,
             permission_center,
             chat_search,
-            settings_window: None,
+            settings_tab: None,
             pane: Pane::Chat,
             menu: None,
             menu_cursor: Cursor::default(),
@@ -1079,8 +1108,10 @@ impl Arbos {
         .detach();
         cx.on_release(|this, cx| {
             this.flush_composer_draft(cx);
-            if let Some(handle) = this.settings_window.take() {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
+            // The Settings tab goes with the window, and what it had running —
+            // the permission poll, a microphone test — goes with it.
+            if let Some(tab) = this.settings_tab.take() {
+                tab.pane.update(cx, |pane, cx| pane.went_behind(cx));
             }
         })
         .detach();
@@ -1323,23 +1354,34 @@ impl Arbos {
     }
 
     /// Step to the neighbouring tab, wrapping at either end as a browser
-    /// does — in the panel's row when the panel has the focus, in the
-    /// window's own otherwise.
+    /// does — the side panel's own row when the panel has the focus, and the
+    /// window's strip otherwise. That strip's ring is the projects in their
+    /// order, then Settings when it is open, because a tab the cycle cannot
+    /// reach is not a tab.
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel_focused(window, cx) {
             self.workspace
                 .update(cx, |workspace, cx| workspace.step_panel_tab(step, cx));
             return;
         }
-        let (at, len) = {
-            let workspace = self.workspace.read(cx);
-            (workspace.active, workspace.projects.len())
+        let projects = self.workspace.read(cx).projects.len();
+        // The Settings slot's index, when the strip holds one: past the last
+        // project, which is where the strip draws it.
+        let settings = self.settings_tab.is_some().then_some(projects);
+        let slots = projects + usize::from(settings.is_some());
+        let at = match self.front() {
+            Front::Settings => settings,
+            Front::Project => self.workspace.read(cx).active,
         };
-        let (Some(at), true) = (at, len > 1) else {
+        let (Some(at), true) = (at, slots > 1) else {
             return;
         };
-        let next = (at as isize + step).rem_euclid(len as isize) as usize;
-        self.select_project(next, cx);
+        let next = (at as isize + step).rem_euclid(slots as isize) as usize;
+        if settings == Some(next) {
+            self.show_settings(window, cx);
+        } else {
+            self.select_project(next, cx);
+        }
     }
 
     /// Copy what the transcript has selected. Bound app-wide and reached only
@@ -1496,14 +1538,33 @@ impl Arbos {
             self.focus_composer(window, cx);
             return;
         }
-        // Nothing to close: Escape leaves the Project page (or a document)
-        // for the chat, as ⌘1 does.
-        if self.pane != Pane::Chat {
+        // Nothing to close: Escape leaves the Settings tab, the Project page or
+        // a document for the chat, as ⌘1 does. The pane binds `escape` on its
+        // own key context as well, and both are wanted: this one answers when
+        // the focus has come back to the window (a pane that stopped being
+        // drawn dispatches nothing), that one when the pane itself holds it.
+        let leaving = match self.front() {
+            Front::Settings => true,
+            Front::Project => self.pane != Pane::Chat,
+        };
+        if leaving {
             self.show_chat(&ShowChat, window, cx);
         }
     }
 
+    /// Show a pane of the project in front, and leave the Settings tab if it
+    /// was the tab showing. Every caller is a person asking to see something in
+    /// the column — a tab, a chat, a surface, the project page — and none of
+    /// them means it to happen behind Settings.
     pub(crate) fn show_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        self.leave_settings(cx);
+        self.set_pane(pane, cx);
+    }
+
+    /// Set the pane without touching which tab is in front. The kernel's own
+    /// [`PaneRequest`] takes this route: an agent opening a terminal must not
+    /// pull a person out of the settings they are reading.
+    pub(crate) fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         self.pane = pane;
         cx.notify();
     }
@@ -1553,10 +1614,10 @@ impl Arbos {
     pub(crate) fn open_settings_action(
         &mut self,
         _: &OpenSettings,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings(Section::General, cx);
+        self.open_settings(Section::General, window, cx);
     }
 
     /// Kernel notifications (#293), sorted the way Cursor sorts them: one
@@ -1695,16 +1756,22 @@ impl Arbos {
 
     /// ⌘W and the menu's Close Tab: the tab in front. A tab's own close
     /// mark names its tab; the chord has only the one in front.
+    /// ⌘W closes the tab in front, and Settings is a tab.
     pub(crate) fn close_project_action(
         &mut self,
         _: &CloseProject,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(ix) = self.workspace.read(cx).active else {
-            return;
-        };
-        self.close_project(ix, cx);
+        match self.front() {
+            Front::Settings => self.close_settings(window, cx),
+            Front::Project => {
+                let Some(ix) = self.workspace.read(cx).active else {
+                    return;
+                };
+                self.close_project(ix, cx);
+            }
+        }
     }
 
     /// ⌘K and the panel's magnifier: search every open tab's chats by
@@ -1766,9 +1833,9 @@ impl Arbos {
         self.show_pane(Pane::Project, cx);
     }
 
-    /// ⌘1: the chat, whatever else is open. One of the three ways back, and
-    /// the one that always works — it takes the focus off the side panel too,
-    /// so the next `⌘T` is a project tab again.
+    /// ⌘1: the chat, whatever else is open — the way back from the Settings
+    /// tab as much as from the Project page or the side panel, and the one
+    /// that always works.
     pub(crate) fn show_chat(&mut self, _: &ShowChat, window: &mut Window, cx: &mut Context<Self>) {
         self.workspace.update(cx, |workspace, _| {
             if let Some(project) = workspace.active_project_mut() {
@@ -1778,40 +1845,94 @@ impl Arbos {
             }
         });
         self.show_pane(Pane::Chat, cx);
+        // The composer takes the keyboard either way, so the next keystroke
+        // lands in the chat: the Settings tab stays in the strip where its
+        // close mark is, and the side panel gives the tab chords back to the
+        // window's own strip. Unconditional because "⌘1 goes to the chat" has
+        // to mean the caret too, or the drawer keeps answering ⌘T.
         self.focus_composer(window, cx);
     }
 
-    pub(crate) fn open_settings(&mut self, section: Section, cx: &mut Context<Self>) {
-        let workspace = self.workspace.clone();
-        let had = self.settings_window.is_some();
-        self.settings_window = settings::open(workspace, self.settings_window, section, cx);
-        // When the window goes — Escape, ⌘W, the title bar — this window
-        // comes back forward and the composer takes the keyboard, so the
-        // settings never sit between the user and the chat.
-        if !had
-            && let Some(view) = self
-                .settings_window
-                .and_then(|handle| handle.entity(cx).ok())
-        {
-            cx.observe_release(&view, |this, _, cx| {
-                this.settings_window = None;
-                if let Some(main) = cx
-                    .windows()
-                    .into_iter()
-                    .find(|w| w.downcast::<Self>().is_some())
-                {
-                    let _ = main.update(cx, |_, window, _| window.activate_window());
-                }
-                let composer = this.composer.read(cx).focus_handle(cx);
-                if let Some(main) = cx
-                    .windows()
-                    .into_iter()
-                    .find(|w| w.downcast::<Self>().is_some())
-                {
-                    let _ = main.update(cx, |_, window, cx| window.focus(&composer, cx));
-                }
-            })
-            .detach();
+    /// ⌘, the gear, and the menu item: open the Settings tab on `section`, or
+    /// bring the open one forward. Never a second one — two Settings tabs
+    /// would be two views of one preference file, and the strip would hold a
+    /// tab whose twin already answers to the same chord.
+    pub(crate) fn open_settings(
+        &mut self,
+        section: Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.settings_tab {
+            Some(tab) => {
+                let pane = tab.pane.clone();
+                pane.update(cx, |pane, cx| pane.show(section, cx));
+            }
+            None => {
+                let workspace = self.workspace.clone();
+                let pane = cx.new(|cx| SettingsPane::new(workspace, section, cx));
+                self.settings_tab = Some(SettingsTab { pane, front: false });
+            }
+        }
+        self.dismiss_menu(cx);
+        self.show_settings(window, cx);
+    }
+
+    /// Put the Settings tab in front. The pane takes the keyboard, so Escape
+    /// reaches its own key context.
+    pub(crate) fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = &mut self.settings_tab else {
+            return;
+        };
+        tab.front = true;
+        let focus = tab.pane.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    /// Leave the Settings tab without closing it: Escape, ⌘1, a click on a
+    /// project tab, ⌃Tab, the rail's own row. It keeps its place in the strip,
+    /// where its close mark is.
+    fn leave_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(tab) = &mut self.settings_tab else {
+            return;
+        };
+        if !tab.front {
+            return;
+        }
+        tab.front = false;
+        let pane = tab.pane.clone();
+        pane.update(cx, |pane, cx| pane.went_behind(cx));
+        cx.notify();
+    }
+
+    /// Close the tab: its close mark, ⌘W with it in front, and the driver's
+    /// `arbos_settings::CloseSettings`. Whatever is underneath comes back —
+    /// the chat of the project in front, or, when Settings was the only tab
+    /// left, the launch view with its folder button.
+    pub(crate) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.settings_tab.take() else {
+            return;
+        };
+        tab.pane.update(cx, |pane, cx| pane.went_behind(cx));
+        self.focus_composer(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn close_settings_action(
+        &mut self,
+        _: &CloseSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_settings(window, cx);
+    }
+
+    /// Which tab the window's middle draws.
+    pub(crate) fn front(&self) -> Front {
+        match &self.settings_tab {
+            Some(tab) if tab.front => Front::Settings,
+            _ => Front::Project,
         }
     }
 
@@ -2034,31 +2155,20 @@ impl Arbos {
                 if this.voice_gen != stamp {
                     return;
                 }
-                let spoken = matches!(&text, Ok(t) if !t.trim().is_empty());
-                // A duplex server answered the words itself (and may have
-                // sent them to its own kernel): the transcript goes into the
-                // composer for the record, but is neither sent nor read back.
-                let server_answers =
-                    crate::voice_ws::configured() && crate::voice_ws::server_answers();
-                if spoken && crate::voice_ws::configured() && !server_answers {
-                    // The answer to a dictated prompt is read aloud.
-                    if let Some(id) = this.workspace.read(cx).active_id() {
-                        this.workspace.update(cx, |workspace, cx| {
-                            workspace.with_session(id, cx, |chat| chat.voice_reply = true);
-                        });
-                    }
-                }
-                let sent = matches!(&text, Ok(t) if !t.trim().is_empty());
+                // Dictation is typing by voice: the words land in the field
+                // and wait for Enter, and the answer is read, not spoken —
+                // as Cursor's mic does. It used to send at once and have the
+                // reply read aloud (Jacob, report 2026-09-17-19: "the message
+                // is immediately sent rather than just appearing in the chat
+                // box … the response is spoken, this is the wrong way").
+                // A call (the phone control) is where speech answers speech.
+                let sent = false;
                 this.composer.update(cx, |composer, cx| {
                     composer.set_voice(VoiceState::Idle, cx);
                     if let Ok(text) = &text
                         && !text.trim().is_empty()
                     {
-                        if server_answers {
-                            composer.dictation_text(text, cx);
-                        } else {
-                            composer.dictation_final(text, cx);
-                        }
+                        composer.dictation_text(text, cx);
                     }
                 });
                 if sent {
@@ -2584,6 +2694,13 @@ impl Arbos {
         draft: &crate::feedback::Draft,
         cx: &mut Context<Self>,
     ) {
+        // The host as well as the path: a remote place's path is not a local
+        // path, and staging a report inside one is what stranded his.
+        let host = self
+            .workspace
+            .read(cx)
+            .active_project()
+            .and_then(|project| project.host.clone());
         let Some(place) = self
             .workspace
             .read(cx)
@@ -2597,13 +2714,24 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let written = crate::feedback::write(&place, draft, &id, arbos_core::now_ms());
-        if let Err(e) = written {
-            sheet.update(cx, |sheet, cx| {
-                sheet.settled(Err(format!("could not write the report: {e:#}")), cx)
-            });
-            return;
-        }
+        let written = match crate::feedback::write(
+            &place,
+            host.as_deref(),
+            draft,
+            &id,
+            arbos_core::now_ms(),
+        ) {
+            Ok(written) => written,
+            Err(e) => {
+                // Every outbox refused it. His words are still in the field and
+                // must not die there, so the sheet offers to put them on the
+                // clipboard rather than a button that repeats the failure.
+                sheet.update(cx, |sheet, cx| {
+                    sheet.nowhere_to_save(format!("{e:#}"), cx);
+                });
+                return;
+            }
+        };
         // The thumbs-down he pressed now reads as reported.
         if let Some((chat_id, seq)) = self.report_anchor.take() {
             self.workspace.update(cx, |workspace, cx| {
@@ -2616,14 +2744,23 @@ impl Arbos {
         let address = self.workspace.read(cx).settings.feedback.address.clone();
         sheet.update(cx, |sheet, cx| {
             sheet.settled(
-                Ok(if address.trim().is_empty() {
-                    format!(
-                        "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk. Reference {id}."
-                    )
-                } else {
-                    format!(
-                        "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix. Reference {id}."
-                    )
+                Ok({
+                    // Where it went, when that is not where it usually goes.
+                    // A report saved somewhere unexpected is only honest if it
+                    // says so.
+                    let where_ = match written.elsewhere {
+                        Some(why) => format!(" Saved to {why} — {}.", written.dir.display()),
+                        None => String::new(),
+                    };
+                    if address.trim().is_empty() {
+                        format!(
+                            "Saved. It has nowhere to go yet — this machine has no feedback address — so it waits on disk.{where_} Reference {id}."
+                        )
+                    } else {
+                        format!(
+                            "Sent. It reaches an agent within fifteen minutes, and you will be told which build carries the fix.{where_} Reference {id}."
+                        )
+                    }
                 }),
                 cx,
             )
@@ -2653,17 +2790,18 @@ impl Arbos {
         if address.trim().is_empty() {
             return;
         }
-        // Every place that holds reports, open or not. Walking the open tabs
-        // meant a report from a project he had closed was never retried — and he
-        // closes a project because the thing he reported is over.
-        let mut places = crate::feedback::known_outboxes();
+        // Every outbox that holds reports, whatever is open. Walking the open
+        // tabs meant a report from a project he had closed was never retried,
+        // and a report staged outside a project — because his home went
+        // read-only — belongs to no tab at all.
+        let mut roots = crate::feedback::known_outboxes();
         for project in &self.workspace.read(cx).projects {
-            let place = arbos_core::Place::new(project.path.clone());
-            if !places.iter().any(|p| p.path() == place.path()) {
-                places.push(place);
+            let root = crate::feedback::outbox(&arbos_core::Place::new(project.path.clone()));
+            if !roots.contains(&root) {
+                roots.push(root);
             }
         }
-        if places.is_empty() {
+        if roots.is_empty() {
             return;
         }
         let sheet = self.feedback_sheet.clone();
@@ -2673,10 +2811,10 @@ impl Arbos {
                 .spawn(async move {
                     let home = std::path::Path::new(&hub_home);
                     let now = arbos_core::now_ms();
-                    places
+                    roots
                         .iter()
-                        .flat_map(|place| {
-                            crate::feedback::deliver_pending(place, &address, home, now)
+                        .flat_map(|root| {
+                            crate::feedback::deliver_pending(root, &address, home, now)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -2858,8 +2996,9 @@ impl Render for Arbos {
             // element's ancestors. Sized at nothing, so the pane that does hold
             // a field keeps its focus through a click anywhere else.
             .child(div().key_context(WINDOW_CONTEXT).track_focus(&self.focus))
-            // The strip of tabs across the top, then the chat column with
-            // the panel on its right.
+            // The strip of tabs across the top, then whichever tab is in
+            // front: a project — the chat column with the panel on its right —
+            // or Settings, which is not a project and so fills the width.
             .child(self.tab_bar(cx))
             .child(
                 div()
@@ -2868,8 +3007,16 @@ impl Render for Arbos {
                     .w_full()
                     .flex()
                     .flex_row()
-                    .child(self.detail(window, cx))
-                    .children(self.panel(window, cx)),
+                    .map(|row| match self.front() {
+                        // No panel beside it: the panel is a view of a
+                        // project's `.arbos/`, and Settings has none.
+                        Front::Settings => {
+                            row.children(self.settings_tab.as_ref().map(|tab| tab.pane.clone()))
+                        }
+                        Front::Project => row
+                            .child(self.detail(window, cx))
+                            .children(self.panel(window, cx)),
+                    }),
             )
             // Under everything, the width of the window: settings and the
             // update control, where Cursor keeps them.

@@ -114,8 +114,10 @@ class Arbos:
         self._sock: Optional[socket.socket] = None
         self._reader = None
         self._next_id = 1
-        # Which window requests go to: "main" (the chat window), "settings",
-        # or an id from ``windows()``. ``use_window`` switches it.
+        # Which window requests go to: "main" (the chat window), "other", or an
+        # id from ``windows()``. ``use_window`` switches it. There is no
+        # "settings": Settings is a tab of the chat window, and ``state()``
+        # reports it as ``settings_open`` / ``front`` / ``settings_section``.
         self.window: str = "main"
 
     def use_window(self, window: str) -> "Arbos":
@@ -123,7 +125,7 @@ class Arbos:
         return self
 
     def windows(self) -> list[dict]:
-        """Every open window: kind ("main", "settings", "other"), id, size."""
+        """Every open window: kind ("main", "other"), id, size."""
         return self.call("windows")
 
     # -- lifecycle ---------------------------------------------------------

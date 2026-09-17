@@ -8,7 +8,7 @@
 
 use crate::{
     model::{watch, workspace::Resident},
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, SettingsPane},
 };
 use bezel::{
     gpui::{AnyElement, Context, div, prelude::*, px},
@@ -25,7 +25,7 @@ const BOUNCES: [(u64, &str); 3] = [
     (500, "Relaxed"),
 ];
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn performance_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         div()

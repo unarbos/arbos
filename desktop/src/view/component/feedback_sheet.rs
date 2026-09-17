@@ -123,6 +123,9 @@ pub struct FeedbackSheet {
     /// also looks like. He was one click from sending a report that looked
     /// empty, with no way to tell that anything had gone wrong.
     unavailable: Option<Unavailable>,
+    /// Every outbox refused the report, so the only thing left that helps is
+    /// getting his words off this screen.
+    stranded: bool,
     open: Open,
     /// Set once the report is on disk: what to tell him, and whether it is
     /// waiting for the network.
@@ -147,6 +150,7 @@ impl FeedbackSheet {
             anchor: None,
             awaiting: false,
             unavailable: None,
+            stranded: false,
             open: Open::None,
             outcome: None,
             is_open: false,
@@ -170,6 +174,7 @@ impl FeedbackSheet {
         self.anchor = agent.map(|a| (a, seq));
         self.awaiting = self.anchor.is_some();
         self.unavailable = None;
+        self.stranded = false;
         self.open = Open::None;
         self.outcome = None;
         self.is_open = true;
@@ -250,6 +255,22 @@ impl FeedbackSheet {
 
     pub fn settled(&mut self, outcome: Result<String, String>, cx: &mut Context<Self>) {
         self.outcome = Some(outcome);
+        self.stranded = false;
+        cx.notify();
+    }
+
+    /// Nowhere on the machine would take the report.
+    ///
+    /// Jacob's home directory went read-only, the outbox could not be created,
+    /// and the sheet offered Close and Send again — one of which loses his words
+    /// and the other of which repeats the failure. So this state offers to put
+    /// his words on the clipboard. A person's words must always have somewhere
+    /// to go, even when the disk has none.
+    pub fn nowhere_to_save(&mut self, why: String, cx: &mut Context<Self>) {
+        self.outcome = Some(Err(format!(
+            "Nothing on this machine would take the report: {why}. Your words are still here — copy them out and they are not lost."
+        )));
+        self.stranded = true;
         cx.notify();
     }
 
@@ -263,6 +284,20 @@ impl FeedbackSheet {
             return;
         }
         cx.emit(FeedbackSheetEvent::Send(Box::new(self.draft.clone())));
+        cx.notify();
+    }
+
+    /// His words onto the clipboard, so a report that cannot be saved anywhere
+    /// still leaves with him.
+    fn copy_note(&mut self, cx: &mut Context<Self>) {
+        let note = self.field.read(cx).content().to_string();
+        if note.trim().is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(note));
+        self.outcome = Some(Ok(
+            "Copied. Paste it wherever you like — it is out of this window and safe.".into(),
+        ));
         cx.notify();
     }
 
@@ -874,6 +909,17 @@ impl FeedbackSheet {
                             .id("feedback-close")
                             .on_click(cx.listener(|this, _, _, cx| this.dismiss(cx))),
                     )
+                    // When nothing would take the report, the thing that helps
+                    // is his words leaving this screen. Offered before Send, so
+                    // it is the first thing his eye lands on.
+                    .when(self.stranded, |row| {
+                        row.child(
+                            theme
+                                .button("Copy my words", ButtonStyle::Ghost, None)
+                                .id("feedback-copy")
+                                .on_click(cx.listener(|this, _, _, cx| this.copy_note(cx))),
+                        )
+                    })
                     // Send is always here. It used to be hidden once anything
                     // settled, which left a failed send with no way to retry.
                     .child(

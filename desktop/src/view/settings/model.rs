@@ -8,7 +8,7 @@
 
 use crate::{
     kernel::{self, HostSummary},
-    view::settings::{self, SettingsWindow},
+    view::settings::{self, SettingsPane},
 };
 use arbos_core::host::{KeySource, ProviderKind};
 use bezel::{
@@ -45,7 +45,7 @@ pub(super) enum Note {
 }
 
 impl HostPanel {
-    pub fn new(cx: &mut Context<SettingsWindow>) -> Self {
+    pub fn new(cx: &mut Context<SettingsPane>) -> Self {
         let summary = kernel::host_summary();
         let key_field = cx.new(|cx| {
             TextField::new(cx)
@@ -63,7 +63,7 @@ impl HostPanel {
         for field in [&key_field, &base_field, &model_search] {
             cx.subscribe(
                 field,
-                |_this: &mut SettingsWindow, _, event: &FieldEvent, cx| {
+                |_this: &mut SettingsPane, _, event: &FieldEvent, cx| {
                     if *event == FieldEvent::Changed {
                         cx.notify();
                     }
@@ -86,7 +86,7 @@ impl HostPanel {
     }
 }
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn model_body(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let panel = &self.host;

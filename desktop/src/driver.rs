@@ -31,11 +31,11 @@ use crate::{
         project::Project,
         session::{ArtifactKind, ChatItem, ChatSession, Connection, ToolStatus},
         surface::{Bind, Surface},
+        workspace::Workspace,
     },
     view::{
         component::surface as board,
-        root::{Arbos, Pane},
-        settings::SettingsWindow,
+        root::{Arbos, Front, Pane},
     },
 };
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -192,12 +192,11 @@ fn failure(id: Value, err: &anyhow::Error) -> Value {
     json!({ "id": id, "ok": false, "error": format!("{err:#}") })
 }
 
-/// What kind of window a handle is, by its root view type.
+/// What kind of window a handle is, by its root view type. Settings used to be
+/// one of these; it is a tab of the main window now, and `state` reports it.
 fn window_kind(window: &AnyWindowHandle) -> &'static str {
     if window.downcast::<Arbos>().is_some() {
         "main"
-    } else if window.downcast::<SettingsWindow>().is_some() {
-        "settings"
     } else {
         "other"
     }
@@ -230,8 +229,8 @@ fn windows_json(main: WindowHandle<Arbos>, cx: &mut App) -> Value {
 }
 
 /// `"window"` param -> handle. Missing or `"main"` is the chat window;
-/// `"settings"` is the settings window; anything else is a window id from
-/// `windows`.
+/// anything else is a window id from `windows`. There is no `"settings"`
+/// window: Settings is a tab of the main one.
 fn resolve_window(
     main: WindowHandle<Arbos>,
     wanted: &Value,
@@ -239,7 +238,7 @@ fn resolve_window(
 ) -> Result<AnyWindowHandle> {
     match wanted.as_str() {
         None | Some("") | Some("main") => Ok(main.into()),
-        Some(kind @ ("settings" | "other")) => cx
+        Some(kind @ "other") => cx
             .windows()
             .into_iter()
             .find(|window| window_kind(window) == kind)
@@ -717,20 +716,10 @@ fn act(
             let ActionParams { name, data } = parse(params)?;
             // ⌘W's handler acts on the key window through a nested window
             // update, which cannot run from inside this request's own update
-            // of the target. Close the target here instead, with the menu's
-            // semantics: the chat window takes Settings with it.
+            // of the target. Close the target here instead.
             if name == "arbos::CloseWindow" {
                 if root.is_some() {
                     crate::kernel::shutdown_tunnels();
-                    cx.defer(|cx| {
-                        for other in cx.windows() {
-                            if let Some(handle) =
-                                other.downcast::<crate::view::settings::SettingsWindow>()
-                            {
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                            }
-                        }
-                    });
                 }
                 window.remove_window();
                 return Ok(json!({ "action": name, "window_closed": true }));
@@ -1051,6 +1040,41 @@ fn snapshot(root: Option<&Entity<Arbos>>, window: &mut Window, cx: &mut App) -> 
 // ---------------------------------------------------------------------------
 // App state
 
+/// The side panel of the project in front: whether it is out, how wide, its own
+/// tabs and which of them the tab chords will move. Its own function because
+/// `state`'s one `json!` reached the macro's recursion limit with it inline —
+/// and because the loops assert on these names.
+fn panel_json(this: &Arbos, workspace: &Workspace, window: &Window, cx: &App) -> Value {
+    let Some(panel) = workspace.panel() else {
+        return Value::Null;
+    };
+    let tabs: Vec<Value> = panel
+        .tabs()
+        .iter()
+        .map(|tab| match tab {
+            PanelTab::Project => json!({ "kind": "project" }),
+            PanelTab::New(n) => json!({ "kind": "new", "id": n }),
+            PanelTab::Surface(id) => {
+                let surface = workspace.active_project().and_then(|p| p.surface(*id));
+                json!({
+                    "kind": "surface",
+                    "id": id.0,
+                    "title": surface.map(board::title),
+                    "board_kind": surface.map(|s| s.board_kind.clone()),
+                    "state": surface.and_then(|s| board::state_word(s, workspace.panel_link())),
+                })
+            }
+        })
+        .collect();
+    json!({
+        "open": panel.open,
+        "width": panel.width(),
+        "active": panel.active(),
+        "focused": this.panel_focused(window, cx),
+        "tabs": tabs,
+    })
+}
+
 /// What the app believes is going on, in words a test can assert on: which
 /// pane shows, what is open, what the composer holds, what was said.
 fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
@@ -1091,6 +1115,10 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         })
         .collect();
     json!({
+        // Which tab the middle draws, and — for a project tab — which of its
+        // panes. `showing` is the project's, so a test that means "the chat is
+        // on screen" has to read `front` as well.
+        "front": front_name(this.front()),
         "pane": pane_name(Some(this.pane)),
         "showing": pane_name(this.showing(cx)),
         // The side panel: whether it is out, how wide, its own tabs and which
@@ -1098,29 +1126,10 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
         // will move. `panel_open` stays under its old name — the parity loop
         // and the journeys assert on it.
         "panel_open": workspace.panel().is_some_and(|panel| panel.open),
-        "panel": workspace.panel().map(|panel| json!({
-            "open": panel.open,
-            "width": panel.width(),
-            "active": panel.active(),
-            "focused": this.panel_focused(window, cx),
-            "tabs": panel.tabs().iter().map(|tab| match tab {
-                PanelTab::Project => json!({ "kind": "project" }),
-                PanelTab::New(n) => json!({ "kind": "new", "id": n }),
-                PanelTab::Surface(id) => {
-                    let surface = workspace.active_project().and_then(|p| p.surface(*id));
-                    json!({
-                        "kind": "surface",
-                        "id": id.0,
-                        "title": surface.map(board::title),
-                        "board_kind": surface.map(|s| s.board_kind.clone()),
-                        "state": surface.and_then(|s| board::state_word(s, workspace.panel_link())),
-                    })
-                }
-            }).collect::<Vec<_>>(),
-        })),
+        "panel": panel_json(this, workspace, window, cx),
         "text_size": workspace.text_size,
         "bionic_reading": workspace.bionic_reading,
-        // The rest of the Settings window's values, so a click on a control
+        // The rest of the Settings tab's values, so a click on a control
         // there can be asserted on state and not recorded `unverified`
         // (rig audit R3, cycle 32).
         "appearance": format!("{:?}", workspace.appearance).to_ascii_lowercase(),
@@ -1140,7 +1149,11 @@ fn state(root: Option<&Entity<Arbos>>, window: &Window, cx: &App) -> Value {
                 "error": n.error,
             })).collect::<Vec<_>>(),
         },
-        "settings_open": cx.windows().iter().any(|w| w.downcast::<SettingsWindow>().is_some()),
+        // The Settings tab is in the strip. `front` says whether it is the tab
+        // being looked at, and `settings_section` which section it is on.
+        "settings_open": this.settings_tab.is_some(),
+        "settings_section": this.settings_tab.as_ref()
+            .map(|tab| json!(tab.pane.read(cx).section().key())),
         "opener_open": this.opener.read(cx).open,
         "search_open": this.chat_search.read(cx).is_open(),
         "feedback": {
@@ -1246,6 +1259,13 @@ fn pane_name(pane: Option<Pane>) -> Value {
     }
 }
 
+fn front_name(front: Front) -> Value {
+    match front {
+        Front::Project => json!("project"),
+        Front::Settings => json!("settings"),
+    }
+}
+
 fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
     json!({
         "id": chat.id,
@@ -1275,6 +1295,8 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         },
         "streaming": chat.streaming,
         "waiting": chat.waiting,
+        "status": chat.status,
+        "live_status": chat.live_status(),
         "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
