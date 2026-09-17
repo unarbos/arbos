@@ -316,6 +316,22 @@ class Pass:
     def gap(self, element: str, screen: str, action: str, why: str) -> None:
         self.record(element, screen, action, "-", why, "not-reachable")
 
+    def stop_phase(self, screen: str, why: str, remaining: list[str], fault: bool) -> None:
+        """A phase that cannot go on says so for every row it will not run.
+
+        A gap followed by a bare `return` shrank the results instead of
+        marking them: the settings phase would have recorded one
+        `not-reachable` and stopped once its window was gone (#451's author
+        found it), and the gate stayed green over a phase that had quit.
+        `fault` says whether the stop is the app's or the rig's (a fail) or
+        the world's — a model that never asked, a kernel from before a
+        frame (not-reachable, said as such on each row).
+        """
+        kind = "fail" if fault else "not-reachable"
+        self.record(f"phase {screen} stopped", screen, "-", "the phase runs to its end", f"{why}; {len(remaining)} check(s) after it did not run", kind)
+        for name in remaining:
+            self.record(name, screen, "-", "-", f"not run: the phase stopped early ({why})", "not-reachable")
+
     # -- app helpers ------------------------------------------------------
 
     def wait(self, pred, timeout: float = 60, every: float = 0.5, what: str = "condition"):
@@ -805,7 +821,7 @@ class Pass:
         self.send(P_ASK)
         s = self.wait(lambda s: (active(s) or {}).get("questions"), 90, what="question card")
         if not s:
-            self.gap("question-card", sc, "wait for ask", "model never asked (no state.questions within 90 s)")
+            self.stop_phase(sc, "the model never asked (no state.questions within 90 s)", ["ask-option", "ask-other", "ask-prev", "ask-next", "ask-continue", "ask-skip", "ask-skip follow-through", "ask-typed-text"], fault=False)
             self.wait_idle(60); return
         self.inv(sc)
         opt = self.first("ask-*-0")
@@ -1321,11 +1337,13 @@ class Pass:
             self.check("settings-cmd-w", "settings", "⌘W in the Settings window", "window closes; composer focused",
                        close_settings, lambda a, b: b.get("settings_open") is False and b["composer"]["focused"], settle=1.2)
         sc = "settings"
+        SETTINGS_ROWS = ["section-*", "model-pick-*", "appearance-*", "watch-bounce-*", "update-channel-*", "size-up", "size-down", "reduce-transparency", "cursor-blink", "bionic-reading", "weight-visible", "cmd-,"]
         if not self.app.exists(gear):
-            self.gap("settings", sc, "click gear", "no settings element on screen")
+            self.stop_phase(sc, "no settings control on screen", SETTINGS_ROWS, fault=True)
             return
         self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click(gear), lambda a, b: b.get("settings_open") is True, settle=1.5)
         if not self.state().get("settings_open"):
+            self.stop_phase(sc, "the gear did not open settings", SETTINGS_ROWS, fault=True)
             return
         try:
             wins = self.app.windows()
@@ -1333,7 +1351,7 @@ class Pass:
             self.app.use_window("settings")
             found = self.inv("settings-window")
         except Exception as err:
-            self.record("settings window", sc, "use_window('settings')", "driver can address the second window", str(err), "not-reachable")
+            self.stop_phase(sc, f"the driver cannot address the settings surface ({err})", SETTINGS_ROWS, fault=True)
             self.app.use_window("main"); self.close_second_windows(); return
         try:
             secs = self.ids("section-*")
@@ -1514,7 +1532,7 @@ class Pass:
                 self.app.key("escape"); time.sleep(0.6)
             opened = self.wait(lambda s: root_of(place) is not None, 20, what="world place open")
             if not opened:
-                self.gap("world-open", sc, "open a scratch place", "the opener did not open it; the phase has no place to change")
+                self.stop_phase(sc, "the opener did not open the scratch place", ["world-moved-notice", "world-moved-line-kept", "world-moved-second-line", "world-back-in-order", "world-deleted-build-plate", "world-deleted-build-click"], fault=True)
                 return
             self.wait(lambda s: (lambda c: c and not (c.get("streaming") or c.get("turn_open")) and any(i.get("kind") == "agent" for i in c.get("items", [])))(root_of(place)), 90, what="world kickoff")
             # --- the folder moves under the kernel (af-03) ---
@@ -1564,6 +1582,7 @@ class Pass:
                 # A kernel from before #385 says nothing about its file; the
                 # bar cannot know. Said as a gap, not a fail.
                 self.gap("world-deleted-build-plate", sc, "replace the kernel's file under a running turn", "no plate within 75 s — this kernel may predate `binary_gone` (#385); read its --version in the first row")
+                self.stop_phase(sc, "no stranger plate for the replaced file (a kernel from before #385?)", ["world-deleted-build-click"], fault=False)
                 return
             self.record("world-deleted-build-plate", sc, "replace the kernel's file under a running turn", "the bar's plate appears while the turn runs", "plate on the bar", "pass", self.still("world-plate"))
             before = kernel_pids(place)
