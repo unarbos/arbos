@@ -330,8 +330,12 @@ final class ChatStore: ObservableObject {
     }
 
     /// A line the app itself has to say (a picker or dictation problem).
-    func notice(_ text: String) {
-        items.append(ChatItem(.notice(text, failed: true)))
+    /// `failed` is red, and is for something that went wrong and stayed
+    /// wrong. A setback the app has already handled is said in the calm
+    /// muted voice instead — red on a line whose news is "nothing of yours
+    /// was lost" reads as the opposite of what it says.
+    func notice(_ text: String, failed: Bool = true) {
+        items.append(ChatItem(.notice(text, failed: failed)))
     }
 
     /// Open another kernel: the pod, or a machine/project on the hub.
