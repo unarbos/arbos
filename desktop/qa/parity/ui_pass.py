@@ -40,7 +40,7 @@ Result values:
 Phases (letters, default all):
     L launch+inventory  C composer  T turn (stop/follow-ups/footer/folds)  Q question card
     P standing work (panel only, no strip)  S sub-agents  A artifacts  B tab bar+opener
-    R right panel/sidebar  W settings window  M menus  K shortcuts
+    R right panel/sidebar  W settings tab  M menus  K shortcuts
     X multitasking audit (steer file, queue held by the kernel and across a relaunch,
       typed words while a question stands, deleted child, first-spawn connect)
     G pull-request flow (a worker runs `gh pr create` against the fake gh on PATH;

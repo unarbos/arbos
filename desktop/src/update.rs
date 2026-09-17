@@ -114,7 +114,7 @@ impl State {
     }
 }
 
-/// The window's updater, reachable from the settings window too.
+/// The window's updater, reachable from the Settings tab too.
 ///
 /// A global for the same reason [`crate::model::permission_center::Permissions`]
 /// is one: settings is its own window with its own view, and the thing it is

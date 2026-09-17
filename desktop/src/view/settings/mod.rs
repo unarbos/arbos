@@ -32,9 +32,10 @@ use bezel::{
 actions!(arbos_settings, [CloseSettings]);
 
 /// The key context the pane claims while it holds the keyboard, so Escape
-/// leaves it for the chat. The window's own `escape` handler answers when the
-/// focus rests elsewhere; both routes are wanted, because a settings surface
-/// with no way out is the bug Jacob hit on the Project page.
+/// leaves it for the chat. The root view's own `escape` handler answers when
+/// the focus rests elsewhere — a pane that stopped being drawn dispatches
+/// nothing — and both routes are wanted, because a settings surface with no way
+/// out is the bug Jacob hit on the Project page.
 const KEY_CONTEXT: &str = "ArbosSettings";
 
 pub fn init(cx: &mut App) {
@@ -49,8 +50,8 @@ mod theme;
 mod typography;
 
 /// The section rail. The reference's 18rem is read against a 120rem panel;
-/// against this window it would take a third of the width, so it matches the
-/// right-hand panel's width instead.
+/// against a window this size it would take a third of the width, so it matches
+/// the right-hand panel's width instead.
 const SIDEBAR_WIDTH: f32 = 200.;
 
 /// The gap between a group and the label of the next one, and between a label
@@ -64,7 +65,7 @@ pub(super) const LABEL_GAP: f32 = 8.;
 /// here is stretched to fill the extra room.
 const CONTENT_MAX_WIDTH: f32 = 860.;
 
-/// Which section the sidebar has selected.
+/// Which section the rail has selected.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     General,
