@@ -1798,13 +1798,20 @@ impl Workspace {
     /// How many automatic reconnects a chat gets before it waits for a
     /// hand.
     pub const RECONNECT_TRIES: u32 = 30;
+    /// How often a fault no retry mends is looked at again.
+    pub const RECHECK_SECS: u64 = 60;
 
     /// The connection failed or dropped: try again after 2, 4, 8, 16, 32,
     /// then 60 s, up to [`Self::RECONNECT_TRIES`] times — a first start
     /// that lost the spawn race to another row, a remote tunnel, a local
     /// kernel that stopped. The row under the composer counts down; a Send
     /// or Stop meanwhile tries at once.
-    pub fn schedule_reconnect(&mut self, id: u64, cx: &mut Context<Self>) {
+    ///
+    /// `slow` is the fault no retry mends — no kernel binary, a path that
+    /// is not a directory: one look every [`Self::RECHECK_SECS`], not
+    /// counted against the tries, so the tab is never dead but never
+    /// hammers either. The reason stays on the bar meanwhile.
+    pub fn schedule_reconnect(&mut self, id: u64, slow: bool, cx: &mut Context<Self>) {
         let Some(chat) = self.session_mut(id) else {
             return;
         };
@@ -1815,17 +1822,28 @@ impl Workspace {
         if chat.reconnect_at.is_some() && chat.reconnect_gen == chat.attach_gen {
             return;
         }
-        if chat.reconnect_attempt >= Self::RECONNECT_TRIES {
+        if !slow && chat.reconnect_attempt >= Self::RECONNECT_TRIES {
+            let why = chat
+                .connect_fault
+                .clone()
+                .map(|why| format!(" ({why})"))
+                .unwrap_or_default();
             chat.notice(
                 true,
-                "connection lost; retries stopped — send a message or press Reconnect to try again",
+                &format!(
+                    "connection lost{why}; retries stopped — send a message or press Reconnect to try again"
+                ),
             );
             chat.flush();
             return;
         }
-        chat.reconnect_attempt += 1;
-        let attempt = chat.reconnect_attempt;
-        let delay = Duration::from_secs(2u64.saturating_pow(attempt.min(6)).min(60));
+        let delay = if slow {
+            Duration::from_secs(Self::RECHECK_SECS)
+        } else {
+            chat.reconnect_attempt += 1;
+            let attempt = chat.reconnect_attempt;
+            Duration::from_secs(2u64.saturating_pow(attempt.min(6)).min(60))
+        };
         chat.reconnect_at = Some(std::time::Instant::now() + delay);
         chat.reconnect_gen = chat.attach_gen;
         let generation = chat.attach_gen;
@@ -2519,6 +2537,7 @@ impl Workspace {
             }
             chat.reconnect_attempt = 0;
             chat.reconnect_at = None;
+            chat.connect_fault = None;
             // What the agent is on right now, from its status file, so a
             // fresh attach draws the line without waiting for a frame.
             if chat.host.is_none()

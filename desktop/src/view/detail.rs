@@ -956,31 +956,52 @@ impl Arbos {
         };
         // A kernel that dropped, or a start still being tried: say what the
         // window is doing about it.
+        let mut full_fault: Option<String> = None;
         if let Some(chat) = workspace.active_session() {
+            // The reason the last try failed stays on the line for as
+            // long as the state lasts — "no kernel binary", "ssh refused
+            // the key" — rather than a counter alone: Jacob's dead tab
+            // said "reconnecting, try 8" for three hours and never why.
+            let fault = chat
+                .connect_fault
+                .as_deref()
+                .map(|why| shorten_bar(why, 84));
+            full_fault = chat.connect_fault.clone();
+            // A remote place being set up narrates its step (installing
+            // the kernel, starting it) — on the first try and on every
+            // retry; the counter never hides the work.
+            let step = matches!(chat.connection, Connection::Connecting)
+                .then(|| chat.host.as_deref().and_then(crate::kernel::connect_step))
+                .flatten();
             match (&chat.connection, chat.reconnect_at) {
                 (Connection::Lost, Some(at)) => {
                     let left = at
                         .saturating_duration_since(std::time::Instant::now())
                         .as_secs();
+                    machine = match &fault {
+                        Some(why) => format!("{machine} · {why} — retry in {left}s"),
+                        None => format!(
+                            "{machine} · reconnecting, try {} in {left}s",
+                            chat.reconnect_attempt
+                        ),
+                    };
+                    Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
+                }
+                (Connection::Lost, None) if fault.is_some() || chat.reconnect_attempt > 0 => {
+                    machine = match &fault {
+                        Some(why) => format!("{machine} · {why} — press Reconnect"),
+                        None => format!("{machine} · connection lost"),
+                    };
+                }
+                (Connection::Connecting, _) if step.is_some() => {
                     machine = format!(
-                        "{machine} · reconnecting, try {} in {left}s",
-                        chat.reconnect_attempt
+                        "{machine} · {}",
+                        step.as_deref().unwrap_or_default().trim_end_matches('…')
                     );
                     Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
                 }
-                (Connection::Lost, None) if chat.reconnect_attempt > 0 => {
-                    machine = format!("{machine} · connection lost");
-                }
                 (Connection::Connecting, _) if chat.reconnect_attempt > 0 => {
                     machine = format!("{machine} · reconnecting, try {}…", chat.reconnect_attempt);
-                }
-                // A remote place being set up: the step beside the machine,
-                // with the braille tick so it reads as work in progress.
-                (Connection::Connecting, _) => {
-                    if let Some(step) = chat.host.as_deref().and_then(crate::kernel::connect_step) {
-                        machine = format!("{machine} · {}", step.trim_end_matches('…'));
-                        Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
-                    }
                 }
                 _ => {}
             }
@@ -1035,19 +1056,26 @@ impl Arbos {
                     .gap(px(4.))
                     .pl(px(8.))
                     .pr(px(4.))
-                    .max_w(px(260.))
+                    // A reason on the line needs the room; the pill is
+                    // short again once the connection is back.
+                    .max_w(px(if full_fault.is_some() { 560. } else { 260. }))
                     .rounded(px(Theme::control_radius()))
                     .cursor_pointer()
                     .hover(|el| el.bg(theme.element_hover))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .tooltip(|window, cx| {
-                        Tooltip::with_keystroke(
+                    .tooltip(move |window, cx| match &full_fault {
+                        Some(why) => Tooltip::text(
+                            format!("{why}. Send a message or press Reconnect to try now."),
+                            window,
+                            cx,
+                        ),
+                        None => Tooltip::with_keystroke(
                             "Where the agent runs. Open another machine or folder",
                             "⌘T",
                             window,
                             cx,
-                        )
+                        ),
                     })
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.new_tab_action(&crate::view::root::NewTab, window, cx)
@@ -1671,6 +1699,18 @@ fn letter_of(ix: usize) -> String {
         ((b'A' + ix as u8) as char).to_string()
     } else {
         (ix + 1).to_string()
+    }
+}
+
+/// A reason cut to the bar's width; the notice under the transcript holds
+/// the whole of it.
+fn shorten_bar(why: &str, max: usize) -> String {
+    let mut chars = why.chars();
+    let short: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{}…", short.trim_end())
+    } else {
+        short
     }
 }
 

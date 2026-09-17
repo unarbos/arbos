@@ -2984,6 +2984,14 @@ fn open_remote_tunnel_steps(
                     .as_ref()
                     .map(|m| m.short())
                     .unwrap_or_else(|| "this build".into()),
+                // What crosses the wire when it is this window's own
+                // binary; a release download's size is the script's.
+                bytes: (local_os_arch() == probe.arch)
+                    .then(|| arbos_bin().ok())
+                    .flatten()
+                    .and_then(|bin| std::fs::metadata(bin).ok())
+                    .map(|meta| meta.len())
+                    .unwrap_or(0),
             }),
         }
         // Swap before stop. Nothing is stopped until the new binary is
