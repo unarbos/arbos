@@ -2272,6 +2272,18 @@ impl Arbos {
         if let Some(chat) = workspace.session(session) {
             target.context = call_context(chat);
         }
+        // No machine name and a speech server elsewhere: the gateway would
+        // refuse (`project_not_on_hub`) — say so now, in the chat, with what
+        // to do, instead of dialing. A gateway on this computer can still
+        // reach the folder by its path.
+        if target.machine.is_none() && !crate::voice_ws::gateway_is_local() {
+            let why = format!("voice · call refused: {}", crate::voice_ws::NOT_ON_HUB);
+            self.workspace.update(cx, |workspace, cx| {
+                workspace.with_session(session, cx, |chat| chat.notice(true, &why));
+            });
+            self.voice_error(&format!("call refused: {}", crate::voice_ws::NOT_ON_HUB), cx);
+            return;
+        }
         // Dictation, if a take is open, ends: the call owns the mic.
         if self.composer.read(cx).is_recording() {
             self.stop_voice(cx);
@@ -2303,6 +2315,13 @@ impl Arbos {
                     }
                     Err(e) => {
                         this.call = None;
+                        // The refusal in the chat too, where the caller looks
+                        // (`project_not_on_hub: … put the hub url … then call again`).
+                        this.workspace.update(cx, |workspace, cx| {
+                            workspace.with_session(session, cx, |chat| {
+                                chat.notice(true, &format!("voice · call refused: {e:#}"));
+                            });
+                        });
                         this.voice_error(&format!("call failed: {e:#}"), cx);
                     }
                 }

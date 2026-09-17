@@ -308,7 +308,8 @@ pub struct CallTarget {
     /// The tab's label.
     pub name: String,
     /// The chat so far, so the call starts knowing it: the last lines and
-    /// the sub-agents on the right panel.
+    /// the sub-agents on the right panel. A gateway that reads the chat from
+    /// the kernel itself may ignore it.
     #[serde(skip_serializing_if = "CallContext::is_empty")]
     pub context: CallContext,
 }
@@ -339,13 +340,19 @@ pub struct ContextLine {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContextAgent {
     pub name: String,
-    /// `working`, `asking`, `waiting`, `done`, `failed`.
+    /// `working`, `asking`, `waiting`, `done`.
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
 }
 
+/// The words the desktop says when a call cannot name its machine: the
+/// gateway would refuse it (`project_not_on_hub`), so the caller hears why
+/// before dialing.
+pub const NOT_ON_HUB: &str = "this computer is not on the hub, so the speech server cannot reach this project's kernel. Put the hub url, machine name and token in ~/.config/arbos/hub.toml, restart the kernel (close and reopen the tab), then call again.";
+
 impl CallTarget {
+
     /// `<machine>/<folder>`, or the folder alone off the hub.
     pub fn label(&self) -> String {
         match &self.machine {
@@ -494,6 +501,24 @@ fn hold() -> &'static Mutex<Option<Session>> {
 /// Whether a speech server is configured (`voice_url` in config.toml).
 pub fn configured() -> bool {
     crate::kernel::voice_config().is_some()
+}
+
+/// Whether the configured speech server runs on this computer (a loopback
+/// `voice_url`). A gateway elsewhere can only reach this computer's kernels
+/// through the hub, so a call from a machine off the hub has nowhere to go.
+pub fn gateway_is_local() -> bool {
+    let Some(cfg) = crate::kernel::voice_config() else {
+        return false;
+    };
+    let rest = cfg
+        .url
+        .split("://")
+        .nth(1)
+        .unwrap_or(&cfg.url);
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    let host = host.trim_matches(['[', ']']);
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
 }
 
 pub fn status() -> Peek {
@@ -979,7 +1004,10 @@ async fn run(
         start["channel"] = json!("voice");
         start["device"] = json!("desktop");
         start["screen"] = json!("on your screen");
-        if !project.path.is_empty() || !project.project.is_empty() {
+        // The tab's identity, whole: the gateway binds by `path` (its own
+        // kernel, a kernel on its host, or the hub by the roster's place) and
+        // refuses with the path in its message when nothing serves it.
+        if !project.project.is_empty() || !project.path.is_empty() {
             start["project"] = json!(project);
         }
     }
@@ -1004,6 +1032,7 @@ async fn run(
     let mut ready_sent = false;
     let mut speaking = false;
     let mut reply_speaker = String::new();
+    let mut narrated_recently: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     // The last sign of life from the reply now playing — its start, or its
     // latest audio frame — for the stall guard.
     let mut reply_alive_at: Option<Instant> = None;
@@ -1198,9 +1227,17 @@ async fn run(
                                 s.text_backend = field("text");
                                 s.call = field("mode") == "call"
                                     && v.get("narrator").and_then(Value::as_bool).unwrap_or(false);
-                                s.project_path = field("project_path");
-                                s.project_label = v
-                                    .get("project_info")
+                                // Where the call is: the folder the kernel serves,
+                                // from the hub roster (`project_info.place`), or
+                                // nothing from a gateway that does not say.
+                                let info = v.get("project_info");
+                                s.project_path = info
+                                    .and_then(|i| i.get("place").or_else(|| i.get("path")))
+                                    .and_then(Value::as_str)
+                                    .or_else(|| v.get("project_path").and_then(Value::as_str))
+                                    .unwrap_or("")
+                                    .to_string();
+                                s.project_label = info
                                     .and_then(|i| i.get("name"))
                                     .and_then(Value::as_str)
                                     .unwrap_or("")
@@ -1288,10 +1325,14 @@ async fn run(
                                 reply_alive_at = None;
                                 let interrupted = v.get("interrupted").and_then(Value::as_bool).unwrap_or(false);
                                 // The model's own words into the chat as they
-                                // finish; the narrator's are there already.
+                                // finish; the narrator's are there already (as
+                                // narrator.say), so a reply that repeats one of
+                                // the last narrator lines is that line, not news —
+                                // a gateway that does not tag `speaker` is covered.
                                 if in_call && reply_speaker != "narrator" {
                                     let said: String = s.reply.split_whitespace().collect::<Vec<_>>().join(" ");
-                                    if !said.is_empty() {
+                                    let squashed: String = said.split_whitespace().collect();
+                                    if !said.is_empty() && !narrated_recently.iter().any(|n| *n == squashed) {
                                         push_mirror(&mut s, Mirror { kind: "model.reply".into(), agent: String::new(), text: if interrupted { format!("{said} —") } else { said } });
                                     }
                                 }
@@ -1323,6 +1364,10 @@ async fn run(
                             // the chat as a `voice ·` line, and onto the call strip.
                             "narrator.say" => {
                                 let text = field("text");
+                                narrated_recently.push_back(text.split_whitespace().collect());
+                                while narrated_recently.len() > 6 {
+                                    narrated_recently.pop_front();
+                                }
                                 s.last_said = text.clone();
                                 push_mirror(&mut s, Mirror { kind: format!("narrator.say/{}", field("kind")), agent: field("ref"), text });
                             }
@@ -1387,7 +1432,16 @@ async fn run(
                             }
                             "error" => {
                                 let m = field("message");
-                                s.error = Some(if m.is_empty() { "voice server error".into() } else { m });
+                                let code = field("code");
+                                // A refusal names its cause (`project_not_on_hub`,
+                                // `project_unknown`, `project_offline`, …); the
+                                // caller reads the code and the gateway's words.
+                                s.error = Some(match (code.is_empty(), m.is_empty()) {
+                                    (true, true) => "voice server error".into(),
+                                    (true, false) => m,
+                                    (false, true) => code,
+                                    (false, false) => format!("{code}: {m}"),
+                                });
                             }
                             _ => {}
                         }
