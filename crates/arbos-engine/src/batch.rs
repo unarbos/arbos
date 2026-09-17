@@ -562,6 +562,12 @@ fn log_speedup(agent: &arbos_core::AgentId, outcomes: &[(ToolCall, Outcome)]) {
 /// the result and may add context for the model.
 async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Result<ToolOut> {
     let name = call.name.clone();
+    // A writing tool after the project folder was renamed under the
+    // kernel would recreate the project at the old path (a ghost the next
+    // open reads as a project). The store's identity is checked first.
+    if !prepared.plan.access.is_readonly() {
+        arbos_core::check_store(&cx.place.arbos())?;
+    }
     // The scheduler holds a writing tool until the turn's checkpoint has
     // its tree (qal-j17/j18), so this is normally already true; a caller
     // that reached here another way still does not write before it.
@@ -634,7 +640,8 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
             );
             // A source edit reports which existing tests name what it
             // changed; "none" is the wrong-layer signal (see git::coverage_note).
-            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch") {
+            if error.is_none() && matches!(name.as_str(), "edit" | "write" | "apply_patch" | "bash")
+            {
                 if let Some(note) = tools::git::coverage_note(&cwd, &paths) {
                     after.context.push(note);
                 }

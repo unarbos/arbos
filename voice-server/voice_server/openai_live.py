@@ -32,6 +32,7 @@ import websockets
 
 from . import protocol as P
 from .activity import ActivityReporter, _detail
+from .base import context_text
 from .narrator import Narrator
 from .routing import is_small_talk
 from .audio import float_to_pcm16, pcm16_to_float
@@ -40,10 +41,11 @@ from .tts import speakable
 
 log = logging.getLogger("voice.openai")
 
-LIVE_URL = "wss://api.openai.com/v1/live/sessions"
+LIVE_URL = os.environ.get("VOICE_OPENAI_URL") or "wss://api.openai.com/v1/live/sessions"
 DEFAULT_MODEL = os.environ.get("VOICE_OPENAI_MODEL", "gpt-live-1")
 DEFAULT_VOICE = os.environ.get("VOICE_OPENAI_VOICE", "marin")
 MAX_APPEND_CHARS = 1500  # the append limit is 500 tokens; stay well under it
+SCREEN_BRIEF_CHARS = 8000  # the on-screen chat in the instructions; session.input holds the rest
 
 # The model's "I'll check" only makes sense if a delegation is really in flight. If it says such a
 # thing and no session.delegation.created follows, the gateway delegates the utterance itself.
@@ -53,32 +55,139 @@ ACK_GRACE_S = 2.5
 
 LIVE_INSTRUCTIONS = (
     "You are Arbos, the voice of a software engineer's agent system, on a call. Be brief, warm and "
-    "direct: one or two sentences. Delegate to the backend anything about the user's project, code, "
-    "agents, files, work, status or progress, and any request to do something (write, fix, run, "
-    "check, send an agent). When in doubt, delegate. The backend is the Arbos kernel; it does the work "
-    "and returns the result for you to say. Say 'one sec, let me check' only when you have actually "
-    "delegated; then wait for the result and say it when it arrives, even if the conversation has "
-    "moved on. Never invent a result or a status. Answer yourself only greetings, thanks, small talk "
-    "and general knowledge that has nothing to do with the user's work."
+    "direct: one or two sentences. You are given three stores and they are updated while you talk: "
+    "which project this is, the chat the caller is looking at, and what the main agent and its "
+    "sub-agents (workers) are doing. Answer those from the stores. Never invent a folder, a status "
+    "or a result. Never quote diffs, file contents or a whole repository. Delegate to the backend "
+    "to do work (write, fix, run, send an agent) or when the stores do not have the answer. The "
+    "backend is the Arbos kernel; it does the work and returns the result for you to say. Say "
+    "'one sec, let me check' only when you have actually delegated; then wait for the result and "
+    "say it when it arrives, even if the conversation has moved on. Answer yourself greetings, "
+    "thanks, small talk, and anything the stores already cover."
 )
 
 # Recent project-chat lines seeded into the session at start (session.input): how many, and how
 # much of each. The API takes 128 messages / 8,192 tokens; this stays far under.
-HISTORY_LINES = int(os.environ.get("VOICE_LIVE_HISTORY", "12"))
+HISTORY_LINES = int(os.environ.get("VOICE_LIVE_HISTORY", "40"))
 HISTORY_LINE_CHARS = 600
-HISTORY_TOTAL_CHARS = 6000
+HISTORY_TOTAL_CHARS = 12000
 # Live context appends (typed lines, chat replies, what workers do) are coalesced to this rate.
 CONTEXT_MIN_GAP_S = 3.0
 
+# Roles the desktop (and the phone) send as the on-screen chat. Thinking/notice/asked are
+# visible rows; tool lines are labels only (never a diff or a file body).
+_SCREEN_ROLES = {
+    "user": "user",
+    "assistant": "assistant",
+    "arbos": "assistant",
+    "worker": "worker",
+    "tool": "tool",
+    "notice": "notice",
+    "asked": "asked",
+    "thinking": "thinking",
+}
 
-def _context_agents(context: dict) -> str:
-    """The sub-agents the client showed at session.start, one line, for the brief."""
+
+def _clip_line(text: object, limit: int = HISTORY_LINE_CHARS) -> str:
+    return " ".join(str(text or "").split())[:limit]
+
+
+def _squash_line(text: str) -> str:
+    return "".join(text.split()).lower()
+
+
+def _lines_from_screen(context: dict) -> list[dict]:
+    """What the caller is looking at: session.start.project.context.recent."""
+    out: list[dict] = []
+    for line in (context or {}).get("recent") or []:
+        if not isinstance(line, dict):
+            continue
+        text = _clip_line(line.get("text"))
+        if not text:
+            continue
+        kind = _SCREEN_ROLES.get(str(line.get("role") or ""), "")
+        if not kind:
+            continue
+        out.append({"kind": kind, "text": text})
+    return out
+
+
+def _lines_from_transcript(events: list[dict]) -> list[dict]:
+    """The kernel transcript as visible chat: user, Arbos, worker reports, tool names.
+
+    Tool bodies, diffs and file contents are dropped. A tool line is the name and a
+    short detail (the command or path), nothing else.
+    """
+    out: list[dict] = []
+    for event in events:
+        kind = event.get("kind")
+        text = event.get("text")
+        if kind in ("user", "assistant") and str(text or "").strip():
+            out.append({"kind": kind, "text": _clip_line(text)})
+        elif kind == "say" and str(text or "").strip():
+            who = event.get("from") or "worker"
+            out.append({"kind": "worker", "text": _clip_line(f"{who}: {text}")})
+        elif kind == "tool" and event.get("name"):
+            detail = _detail(event)
+            label = str(event["name"]) + (f" ({detail})" if detail else "")
+            out.append({"kind": "tool", "text": _clip_line(label)})
+    return out
+
+
+def _merge_chat_lines(screen: list[dict], kernel: list[dict], *, cap: int) -> list[dict]:
+    """On-screen chat first (what he is looking at), then older kernel lines he has not seen."""
+    seen = {_squash_line(line["text"]) for line in screen}
+    extra = [line for line in kernel if _squash_line(line["text"]) not in seen]
+    screen = screen[-cap:]
+    room = max(0, cap - len(screen))
+    return extra[-room:] + screen
+
+
+def _seed_messages(lines: list[dict]) -> list[dict]:
+    seed: list[dict] = []
+    total = 0
+    for line in lines:
+        text = line["text"]
+        total += len(text)
+        if total > HISTORY_TOTAL_CHARS:
+            break
+        kind = line["kind"]
+        if kind == "user":
+            seed.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": _ascii(text)}]})
+        elif kind == "assistant":
+            seed.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": _ascii(text)}]})
+        else:
+            seed.append({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": _ascii(f"{kind}: {text}")}]})
+    if seed:
+        seed.insert(0, {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": _ascii(
+            "The following messages are this project's on-screen chat and recent history, oldest first, "
+            "as the caller sees them. Worker and tool lines are names and short labels only — not diffs "
+            "or file contents. They are context; the caller may refer to them.")}]})
+    return seed
+
+
+def _workers_brief(context: dict, kernel, activity) -> str:
+    """Sub-agents on the screen, plus live kernel and activity state."""
+    parts: list[str] = []
     agents = [a for a in (context or {}).get("agents", []) if isinstance(a, dict) and a.get("name")]
-    parts = [f"{a['name']} ({a.get('state', '')}{': ' + str(a['step'])[:60] if a.get('step') else ''})" for a in agents]
-    line = ("Sub-agents on the caller's screen when the call started: " + "; ".join(parts) + ".") if parts else ""
+    if agents:
+        parts.append("Sub-agents on the caller's screen:")
+        for agent in agents:
+            step = f" — {str(agent['step'])[:80]}" if agent.get("step") else ""
+            parts.append(f"- {agent['name']}: {agent.get('state', '')}{step}")
     if (context or {}).get("running"):
-        line += " The main agent had a turn running when the call started."
-    return line.strip()
+        parts.append("The main agent had a turn running when the call started.")
+    if kernel is not None:
+        status = kernel.status_text()
+        if status:
+            parts.append("Live worker state from the kernel: " + status)
+    if activity is not None:
+        summary = activity.summary()
+        if summary:
+            parts.append("Live activity right now: " + summary)
+    if not parts:
+        return "No sub-agents were on the caller's screen when the call started, and none are running now."
+    return "\n".join(parts)
 
 
 class OpenAILiveSession(DuplexSession):
@@ -119,15 +228,16 @@ class OpenAILiveSession(DuplexSession):
             self._emit(P.ERROR, code="no_openai_key", message="OPENAI_API_KEY is not set on the voice server")
             raise RuntimeError("no OPENAI_API_KEY")
         t0 = time.monotonic()
-        # What the model knows from the first word: who and where (the brief) and what was said
-        # in the project's chat lately (the seed). Both come from the call's kernel, never from
-        # the gateway's own.
+        # What the model knows from the first word: who and where, the chat on screen, and the
+        # workers (the brief) plus the same chat as session.input. From the call's kernel and
+        # the client's snapshot, never from the gateway's own folder.
         brief = self._project_brief()
         seed_task = self.seed_task or asyncio.create_task(self._history_seed())
         # The connect and the chat-history read run side by side; the seed may cost the model's
         # start at most a moment, never the caller's first word.
+        live_url = os.environ.get("VOICE_OPENAI_URL") or LIVE_URL
         connect = asyncio.ensure_future(websockets.connect(
-            LIVE_URL, additional_headers={"Authorization": f"Bearer {self.api_key}"},
+            live_url, additional_headers={"Authorization": f"Bearer {self.api_key}"},
             max_size=16 * 1024 * 1024, compression=None, open_timeout=20,
         ))
         try:
@@ -162,6 +272,7 @@ class OpenAILiveSession(DuplexSession):
         self.started_at = time.monotonic()
         self.pump_task = asyncio.create_task(self._pump(), name=f"live-pump-{self.sid}")
         self._feed_context_from(self.kernel)
+        self._context_snapshot()
         log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, client delegation; brief for %s, %d history lines)",
                  self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice,
                  (self.project_info or {}).get("place") or (self.project_info or {}).get("name") or "no kernel", len(seed))
@@ -169,9 +280,10 @@ class OpenAILiveSession(DuplexSession):
     # ------------------------------------------------------------------ what the model knows
 
     def _project_brief(self) -> str:
-        """The call's place, said plainly, so the model never invents a folder or a machine. From
-        the hub roster when the call named a project; the gateway's own kernel is named as
-        such, never presented as the caller's project."""
+        """The call's place, the chat on screen, and the workers — so the model can answer
+        those without guessing and without waking the kernel. From the hub roster when the
+        call named a project; the gateway's own kernel is named as such, never presented as
+        the caller's project."""
         info = self.project_info or {}
         folder = info.get("path") or info.get("place") or ""
         if info.get("via") in ("hub", "local", "own"):
@@ -180,74 +292,71 @@ class OpenAILiveSession(DuplexSession):
             label = f"{machine}/{info.get('project')}" if machine else str(info.get("project"))
             where = f"on the machine '{machine}'" if machine else "on the caller's own machine"
             lines = [
-                "PROJECT CONTEXT (authoritative; never invent or guess any of it):",
+                "PROJECT IDENTITY (authoritative; never invent or guess any of it):",
                 f"This call is about the project '{name}' ({label}) {where}.",
             ]
             if folder:
                 lines.append(f"Its folder, the working directory of everything the backend runs for this call, is {folder}.")
             else:
-                lines.append("Its folder is not known to you; the backend knows it. If asked, delegate.")
+                lines.append("Its folder is not known to you; the backend knows it. If asked and you cannot see it here, delegate.")
             if info.get("store"):
                 lines.append(f"Its Arbos address is {info['store']}.")
+            if info.get("via"):
+                lines.append(f"The call reached this kernel via {info['via']}.")
             lines.append("If asked where you are, which folder, which machine or which project: answer from this, and only this.")
-            screen = _context_agents(self.start_context)
+            screen = context_text(self.start_context, lines=HISTORY_LINES, clip_at=400)
             if screen:
-                lines.append(screen)
-            return " ".join(lines)
+                lines.append("ON-SCREEN CHAT (what the caller is looking at; answer 'what is on screen' and 'what were we talking about' from this):")
+                lines.append(screen[:SCREEN_BRIEF_CHARS])
+            else:
+                lines.append(
+                    "ON-SCREEN CHAT: the client sent no snapshot of the chat. Recent history, if any, is in the "
+                    "session input. If asked what is on screen and you have no history, say you cannot see the chat yet."
+                )
+            lines.append("WORKERS AND ACTIVITY (answer 'what are the agents doing' from this, then from later project updates):")
+            lines.append(_workers_brief(self.start_context, self.kernel, self.activity))
+            lines.append(
+                "Do not dump diffs, file contents or a whole repository. Delegate only to do work, or when "
+                "these stores do not have the answer."
+            )
+            return "\n".join(lines)
         if info:
             where = f"serving the folder {folder}" if folder else f"at {info.get('url') or 'its address'}"
             return (
-                "PROJECT CONTEXT: no project was named for this call, so the backend is the voice server's "
+                "PROJECT IDENTITY: no project was named for this call, so the backend is the voice server's "
                 f"default kernel, {where}. Do not present it as the caller's project or machine. If the caller "
                 "asks about their project, say this call is not attached to a project and where the backend really is."
             )
         return (
-            "PROJECT CONTEXT: no Arbos kernel is attached to this call. If asked to check, run or change "
+            "PROJECT IDENTITY: no Arbos kernel is attached to this call. If asked to check, run or change "
             "anything, say so plainly; never invent files, folders, machines or status."
         )
 
     async def _history_seed(self) -> list[dict]:
-        """The last lines of the call kernel's main chat as session.input, so the model knows what
-        was said in the project before the call. User lines and Arbos replies only; nothing from
-        a different kernel."""
-        kernel = self.kernel
+        """The chat the caller is looking at, plus older kernel lines, as session.input.
+
+        The client's snapshot is what is on screen (user, Arbos, workers, tool labels, notices).
+        The kernel transcript fills in older lines the snapshot dropped. Tool bodies and diffs
+        are never seeded. Nothing from a different kernel.
+        """
         if HISTORY_LINES <= 0:
             return []
-        lines: list[dict] = []
+        kernel_lines: list[dict] = []
+        kernel = self.kernel
         if kernel is not None:
             try:
                 events = await asyncio.wait_for(kernel.transcript_tail("root", bytes_=80_000), 4.0)
-                lines = [e for e in events if e.get("kind") in ("user", "assistant") and str(e.get("text") or "").strip()]
+                kernel_lines = _lines_from_transcript(events)
             except Exception as exc:
                 log.warning("[%s] no chat history from the kernel for the seed: %s", self.sid, type(exc).__name__)
-        if not lines:
-            # The client's view of the chat at session.start (the desktop sends its last lines): the
-            # same project, second-hand. Only when the kernel's own record could not be read.
-            recent = (self.start_context or {}).get("recent") or []
-            lines = [{"kind": "user" if l.get("role") == "user" else "assistant", "text": l.get("text")}
-                     for l in recent if isinstance(l, dict) and l.get("role") in ("user", "assistant") and str(l.get("text") or "").strip()]
-        lines = lines[-HISTORY_LINES:]
-        seed: list[dict] = []
-        total = 0
-        for e in lines:
-            text = " ".join(str(e["text"]).split())[:HISTORY_LINE_CHARS]
-            total += len(text)
-            if total > HISTORY_TOTAL_CHARS:
-                break
-            if e["kind"] == "user":
-                seed.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": _ascii(text)}]})
-            else:
-                seed.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": _ascii(text)}]})
-        if seed:
-            seed.insert(0, {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": _ascii(
-                "The following messages are the most recent lines of this project's chat with Arbos, oldest first, "
-                "before this call started. They are context; the caller may refer to them.")}]})
-        return seed
+        screen = _lines_from_screen(self.start_context)
+        return _seed_messages(_merge_chat_lines(screen, kernel_lines, cap=HISTORY_LINES))
 
     def _feed_context_from(self, kernel) -> None:
         """Follow the call kernel's frames so GPT-Live hears what happens in the project while it
         talks: lines typed in the chat, Arbos's text replies it did not relay itself, workers
-        starting and finishing. Quiet context (session.thinking.append), never spoken on its own."""
+        starting and finishing, and live activity. Quiet context (session.thinking.append),
+        never spoken on its own."""
         if kernel is None or kernel is self.context_kernel:
             return
         if self.context_kernel is not None and self._context_frame in self.context_kernel.listeners:
@@ -256,24 +365,46 @@ class OpenAILiveSession(DuplexSession):
         kernel.listeners.append(self._context_frame)
         self.workers_known = {name for name in kernel.agents if name != "root"}
 
+    def _who(self, agent: str) -> str:
+        return "The main agent" if agent in ("", "root") else f"Worker {agent}"
+
+    def _context_snapshot(self) -> None:
+        """One quiet line of who is running right now, so a question at the start of the call
+        has an answer before the next tree or tool frame."""
+        if self.kernel is None:
+            return
+        status = self.kernel.status_text()
+        if status:
+            self._context("Workers and activity now: " + status)
+        if self.activity is not None:
+            summary = self.activity.summary()
+            if summary:
+                self._context("Live activity: " + summary)
+
     def _context_frame(self, frame: dict) -> None:
         kind = frame.get("type")
         agent = str(frame.get("agent") or "")
+        who = self._who(agent)
         if kind == "event":
             ev = frame.get("event") or {}
             ek, text = ev.get("kind"), " ".join(str(ev.get("text") or "").split())
             if ek == "user" and text and agent == "root":
                 if ev.get("channel") == "voice":
                     return  # the caller's own words, already in the conversation
-                who = f"on the {ev['device']}" if ev.get("device") else "in the project chat"
-                self._context(f"The user typed {who}: {text[:500]}")
+                device = f"on the {ev['device']}" if ev.get("device") else "in the project chat"
+                self._context(f"The user typed {device}: {text[:500]}")
             elif (ek == "assistant" and text and agent == "root" and not self.delegations_in_flight()
                   and time.monotonic() - self.last_answer_at > 8.0):
                 # a reply to a typed line or to another client; a delegation's own answer already
                 # went to the model as commentary and is skipped
                 self._context(f"Arbos replied in the project chat (text, not spoken): {text[:700]}")
-            elif ek == "tool" and agent != "root" and ev.get("name") and not ev.get("seq") and ev.get("ended") is None:
-                self._context(f"Worker {agent} is running {ev['name']}" + (f": {_ascii(_detail(ev))}" if _detail(ev) else ""))
+            elif ek == "say" and text:
+                src = ev.get("from") or agent or "worker"
+                self._context(f"Worker {src} reported: {text[:500]}")
+            elif ek == "tool" and ev.get("name") and not ev.get("seq") and ev.get("ended") is None:
+                # name + short detail only — never a body or a diff
+                detail = _ascii(_detail(ev)) if _detail(ev) else ""
+                self._context(f"{who} is running {ev['name']}" + (f": {detail}" if detail else ""))
         elif kind in ("tree", "snapshot"):
             names = {str(n.get("id")) for n in frame.get("tree", []) if n.get("id") and n.get("id") != "root"}
             new, gone = names - self.workers_known, self.workers_known - names
@@ -282,8 +413,13 @@ class OpenAILiveSession(DuplexSession):
                 self._context("Workers (sub-agents) now running for this project: " + ", ".join(sorted(new)))
             if gone:
                 self._context("Workers finished: " + ", ".join(sorted(gone)))
-        elif kind == "turn" and agent != "root" and frame.get("state") == "idle":
-            self._context(f"Worker {agent} finished its turn.")
+        elif kind == "turn":
+            if frame.get("state") == "running":
+                self._context(f"{who} started a turn.")
+            elif frame.get("state") == "idle" and agent != "root":
+                self._context(f"{who} finished its turn.")
+            elif frame.get("state") == "idle" and agent == "root" and time.monotonic() - self.last_answer_at > 2.0:
+                self._context("The main agent finished its turn.")
 
     def delegations_in_flight(self) -> bool:
         return any(not t.done() for t in self.delegations.values())
@@ -510,6 +646,7 @@ class OpenAILiveSession(DuplexSession):
                 self.brief_sent = brief
                 await self._append("session.instructions.append", None, brief)
             self._feed_context_from(self.kernel)
+            self._context_snapshot()
         info = self.project_info or {}
         log.info("[%s] call mode (GPT-Live, client delegation) on %s (%s, folder %s)", self.sid,
                  self.project or "the gateway's kernel", info.get("via", "none"), info.get("place") or "unknown")

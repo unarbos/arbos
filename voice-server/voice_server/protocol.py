@@ -74,7 +74,8 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                 with a message saying how to register. It never answers from another project.
                 "context" (optional): what the client shows when the call starts, so the narrator
                 and the speech model know the chat: {"recent":[{"role":"user"|"assistant"|"worker"|
-                "tool","text":"..."}], "agents":[{"name","state","step"}], "running":bool}.
+                "tool"|"notice"|"asked"|"thinking","text":"..."}], "agents":[{"name","state","step"}],
+                "running":bool}. Tool lines are labels only (never a diff or a file body).
           "agents": true|false  mirror kernel events (agent.*) to this client (default on when a kernel is attached)
           "mode": "call"  CALL MODE (see below): talk to a project's main agent; the narrator speaks highlights
           "project": "<machine>/<project>"  which project the call is for. A hub name, when the gateway has --hub:
@@ -203,16 +204,21 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
         are still ours: spoken in the model's voice, answered by the caller's yes or no. Our VAD +
         Whisper still produce transcript.final. Billing: $0.05 per minute of session, per second,
         plus the kernel's own model calls.
-        What GPT-Live is told about the project (all from the call's kernel, never the gateway's):
-        at session start, a PROJECT CONTEXT brief in its instructions (name, machine/project, the
-        folder the kernel serves = the working directory, the arbos:// address; or, when the call
-        named no project, that the backend is the gateway's default kernel and where that is) and
-        the last VOICE_LIVE_HISTORY (12) user/assistant lines of the project's main chat as startup
-        history (session.input). During the call, quiet context (session.thinking.append, coalesced
-        every 3 s): lines typed in the project chat, Arbos's text replies it did not relay, workers
-        starting/finishing and the tools they run. Delegated utterances reach the kernel as `user`
-        lines with channel "voice" and the caller's device. Typed text.input during a GPT-Live call
-        goes to the kernel (steer while a turn runs) unless an ask is open, which it answers.
+        What GPT-Live is told about the project (all from the call's kernel and the caller's
+        on-screen snapshot, never the gateway's own folder): at session start, a brief in its
+        instructions with three stores — PROJECT IDENTITY (name, machine/project, the folder the
+        kernel serves = the working directory, the arbos:// address; or, when the call named no
+        project, that the backend is the gateway's default kernel and where that is), ON-SCREEN
+        CHAT (what the client is showing: user, Arbos, workers, tool labels, notices, asks), and
+        WORKERS AND ACTIVITY (the client's sub-agent list plus the kernel's live status). The last
+        VOICE_LIVE_HISTORY (40) visible lines of that chat go in as startup history (session.input),
+        on-screen first, older kernel lines filling the rest; tool lines are names only, never
+        diffs or file bodies. During the call, quiet context (session.thinking.append, coalesced
+        every 3 s): lines typed in the project chat, Arbos's text replies it did not relay, worker
+        reports, the main agent and workers starting/finishing, and the tools they run (name +
+        short detail). Delegated utterances reach the kernel as `user` lines with channel "voice"
+        and the caller's device. Typed text.input during a GPT-Live call goes to the kernel (steer
+        while a turn runs) unless an ask is open, which it answers.
         Voice rows in a client's chat are DISPLAY ONLY: draw transcript.final as the caller's line
         and response.transcript (accumulated to response.done) as Arbos's spoken line; the kernel's
         own `user` event with channel "voice" for the same words is that same line, not a new one.

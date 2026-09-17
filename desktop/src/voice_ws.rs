@@ -307,9 +307,10 @@ pub struct CallTarget {
     pub host: Option<String>,
     /// The tab's label.
     pub name: String,
-    /// The chat so far, so the call starts knowing it: the last lines and
-    /// the sub-agents on the right panel. A gateway that reads the chat from
-    /// the kernel itself may ignore it.
+    /// The chat so far, so the call starts knowing it: the last lines
+    /// (user, Arbos, workers, tool labels, notices, asks) and the
+    /// sub-agents on the right panel. The gateway uses this as the
+    /// on-screen chat; it does not replace the kernel's own record.
     #[serde(skip_serializing_if = "CallContext::is_empty")]
     pub context: CallContext,
 }
@@ -332,7 +333,8 @@ impl CallContext {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContextLine {
-    /// `user`, `assistant`, `worker` (a sub-agent's report), `tool`.
+    /// `user`, `assistant`, `worker` (a sub-agent's report), `tool` (label
+    /// only), `notice`, `asked`, `thinking`.
     pub role: String,
     pub text: String,
 }

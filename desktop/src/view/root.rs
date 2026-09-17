@@ -1942,8 +1942,16 @@ impl Arbos {
     /// While a speech-server session is live, what its agent does
     /// (`agent.*`, `tool.*`, `text.done`) lands in the active chat as
     /// notices, a few times a second. Ends when the session does.
+    ///
+    /// A live call owns the same queue (`start_call_mirror`). This loop
+    /// must not run then: it writes to whichever tab is in front, so Home
+    /// or another project would get the spoken rows.
     pub(crate) fn start_voice_mirror(&mut self, cx: &mut Context<Self>) {
-        if self.voice_mirror_on || !crate::voice_ws::configured() {
+        if self.voice_mirror_on
+            || self.call.is_some()
+            || crate::voice_ws::in_call()
+            || !crate::voice_ws::configured()
+        {
             return;
         }
         self.voice_mirror_on = true;
@@ -1952,9 +1960,13 @@ impl Arbos {
                 cx.background_executor()
                     .timer(Duration::from_millis(400))
                     .await;
-                let lines = crate::voice_ws::drain_mirror();
-                let live = crate::voice_ws::status().phase.is_some();
                 let keep = this.update(cx, |this, cx| {
+                    if this.call.is_some() || crate::voice_ws::in_call() {
+                        this.voice_mirror_on = false;
+                        return false;
+                    }
+                    let lines = crate::voice_ws::drain_mirror();
+                    let live = crate::voice_ws::status().phase.is_some();
                     if !lines.is_empty() {
                         let id = this.workspace.read(cx).active_id();
                         if let Some(id) = id {
@@ -2250,10 +2262,12 @@ impl Arbos {
             return;
         }
         let workspace = self.workspace.read(cx);
-        let Some(session) = workspace.active_id() else {
+        let Some(project) = workspace.active_project() else {
             return;
         };
-        let Some(project) = workspace.active_project() else {
+        // That project's own chat — not a worker under it, and not Home
+        // unless Home is the tab in front (the call is then Home's).
+        let Some(session) = project.main_session().or_else(|| workspace.active_id()) else {
             return;
         };
         if !crate::voice_ws::configured() {
@@ -2288,6 +2302,9 @@ impl Arbos {
         if self.composer.read(cx).is_recording() {
             self.stop_voice(cx);
         }
+        // Stop the dictation mirror so it cannot steal call frames onto
+        // the front tab (Home, another project) while this call is live.
+        self.voice_mirror_on = false;
         self.call = Some(Call {
             session,
             label: label.clone(),
@@ -2358,9 +2375,9 @@ impl Arbos {
         cx.notify();
     }
 
-    /// While the call is live: the narrator's lines land in the call's chat
-    /// as `voice ·` notices, the strip repaints, and a dropped session ends
-    /// the call on this side too.
+    /// While the call is live: spoken lines land only in the call's project
+    /// chat (`call.session`). The dictation mirror is off, so Home and other
+    /// projects cannot receive them. A dropped session ends the call here.
     fn start_call_mirror(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -3207,29 +3224,21 @@ fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
         "narrator.say/error" => Some(format!("voice · {text}")),
         "narrator.say/detail" => Some(format!("voice · detail: {text}")),
         k if k.starts_with("narrator.say") => Some(format!("voice · {text}")),
-        // The speech model's own answer to the caller (small talk, or GPT
-        // Live talking for itself): in the record like a narrator line. Its
-        // "On it." is heard, not read, like the narrator's.
-        "model.reply" if is_spoken_ack(&text) => None,
+        // GPT Live's own words, including short small talk ("hey"). The
+        // narrator's "On it." is `narrator.say/ack` above, not this.
         "model.reply" => Some(format!("voice · {text}")),
         _ => None,
     }
 }
 
-/// A bare acknowledgement ("On it.", "One moment.", "Noted."): three words
-/// or fewer, no digits, nothing the record needs.
-fn is_spoken_ack(text: &str) -> bool {
-    let words = text.split_whitespace().count();
-    words <= 3 && !text.chars().any(|c| c.is_ascii_digit()) && !text.contains('?')
-}
-
 /// What the call starts knowing: the last lines of this chat, clipped, and
 /// the sub-agents, so the narrator and the speech model can answer "what
-/// were we doing" before the first new turn.
+/// were we doing" before the first new turn. Tool lines are the label and
+/// state only — never the output or the diff.
 fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::CallContext {
     use crate::model::session::{ChatItem, ChildState, ToolStatus};
     use crate::voice_ws::{CallContext, ContextAgent, ContextLine};
-    const LINES: usize = 12;
+    const LINES: usize = 40;
     const CLIP: usize = 400;
     let clip = |text: &str| -> String {
         let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -3256,6 +3265,20 @@ fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::C
                     ToolStatus::Failure => "failed",
                 };
                 Some(ContextLine { role: "tool".into(), text: clip(&format!("{label} ({state})")) })
+            }
+            ChatItem::Notice { text, .. } if !text.trim().is_empty() => {
+                Some(ContextLine { role: "notice".into(), text: clip(text) })
+            }
+            ChatItem::Asked { question, answer } => {
+                let line = if answer.trim().is_empty() {
+                    format!("asked: {question}")
+                } else {
+                    format!("asked: {question} → {answer}")
+                };
+                Some(ContextLine { role: "asked".into(), text: clip(&line) })
+            }
+            ChatItem::Thinking { text, done, .. } if !done && !text.trim().is_empty() => {
+                Some(ContextLine { role: "thinking".into(), text: clip(text) })
             }
             _ => None,
         })
