@@ -400,7 +400,7 @@ fn migrate_plan(
         // put to anyone (qa-028).
         if matches!(n.do_, OldDo::Ask) {
             let call_id = format!("migrated-{}", n.id);
-            if have_asks.iter().any(|id| *id == call_id) {
+            if have_asks.contains(&call_id) {
                 c.already += 1;
                 continue;
             }
