@@ -323,6 +323,11 @@ pub fn init(cx: &mut App) {
         // A context menu closes on Escape wherever the focus rests; the
         // composer forwards its own Escape here when it has nothing to close.
         KeyBinding::new("escape", DismissMenu, Some(WINDOW_CONTEXT)),
+        // And in the side panel, where Escape is one of its three ways back.
+        // An action reaches a handler only through the focused element's own
+        // ancestors, and the panel's focus is not under `WINDOW_CONTEXT`, so
+        // without this line Escape in the drawer went nowhere at all.
+        KeyBinding::new("escape", DismissMenu, Some(PANEL_CONTEXT)),
         KeyBinding::new("enter", CommitName, Some(RENAME_CONTEXT)),
         KeyBinding::new("escape", DismissName, Some(RENAME_CONTEXT)),
     ]);

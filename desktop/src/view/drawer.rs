@@ -232,21 +232,23 @@ impl Arbos {
         let group = SharedString::from(format!("panel-tab-{at}"));
         let workspace = self.workspace.read(cx);
         let (label, glyph, state) = match tab {
-            PanelTab::Project => ("Project".to_string(), icons::files::FOLDER, None),
-            PanelTab::New(_) => ("New tab".to_string(), icons::system::PLUS, None),
+            PanelTab::Project => ("Project".to_string(), Some(icons::files::FOLDER), None),
+            // No glyph: the `+` that made it is two pills to the left, and a
+            // second one on the tab reads as a second control.
+            PanelTab::New(_) => ("New tab".to_string(), None, None),
             PanelTab::Surface(id) => match workspace
                 .active_project()
                 .and_then(|project| project.surface(id))
             {
                 Some(surface) => (
                     board::title(surface),
-                    board::glyph(&surface.board_kind),
+                    Some(board::glyph(&surface.board_kind)),
                     board::state_word(surface),
                 ),
                 // A tab is dropped the moment its surface goes, so this is
                 // unreachable; drawn as gone rather than as nothing, because
                 // a row the window cannot account for must never read live.
-                None => ("gone".to_string(), icons::system::CLOSE, Some("gone")),
+                None => ("gone".to_string(), Some(icons::system::CLOSE), Some("gone")),
             },
         };
         let closable = at != 0;
@@ -294,12 +296,12 @@ impl Arbos {
                 el.text_color(theme.text_muted)
                     .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
             })
-            .child(
+            .children(glyph.map(|glyph| {
                 icons::icon(glyph)
                     .size(px(13.))
                     .flex_none()
-                    .text_color(theme.text_muted),
-            )
+                    .text_color(theme.text_muted)
+            }))
             .child(
                 div()
                     .flex_1()
