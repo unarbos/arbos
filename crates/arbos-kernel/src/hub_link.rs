@@ -218,6 +218,7 @@ pub fn start(
     let _ = SELF_NODE.set((cfg.machine.clone(), project.clone()));
     tokio::spawn(async move {
         let mut attempt = 0u32;
+        let mut said_refusal: Option<String> = None;
         loop {
             match session(&place, &hooks, &frames_in, &cfg, &project).await {
                 Ok(()) => {
@@ -229,11 +230,27 @@ pub fn start(
                     );
                 }
                 Err(e) => {
+                    let text = format!("{e:#}");
                     klog::warn(
                         "hub_error",
                         None,
-                        format!("{}: {e:#}; retry in {:?}", cfg.url, backoff(attempt)),
+                        format!("{}: {text}; retry in {:?}", cfg.url, backoff(attempt)),
                     );
+                    // A refusal is a fact about this place, not a hiccup:
+                    // said once on root's transcript, where a window shows
+                    // it, and not again for the same words.
+                    if text.contains("hub refused") && said_refusal.as_deref() != Some(&text) {
+                        let _ = arbos_core::append_event(
+                            &arbos_core::Layout::new(&place, arbos_core::ROOT_ID).transcript(),
+                            &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                                text: format!(
+                                    "This place is not on the hub: {text}. It keeps working on its own; the hub is retried in the background."
+                                ),
+                                failed: true,
+                            }),
+                        );
+                        said_refusal = Some(text);
+                    }
                 }
             }
             tokio::time::sleep(backoff(attempt)).await;
