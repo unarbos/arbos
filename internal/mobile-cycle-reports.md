@@ -298,3 +298,47 @@ branch`, and the reply at 2:02 with the branch name and `OK (7 tests ran)`.
 
 **Owed:** P1, P2e and P3 are the only steps the journey cannot speak for, and
 P2e is now understood. That is cycle 56.
+
+## Cycle 56 report (23:30 UTC, 09-17)
+
+**Looked at:** P3, the journey's last open phone-only failure, and the store
+report that cycle 55's recordings were missing.
+
+**The recordings were never missing.** All 23 files were in
+`media/mobile/cycle-55/`, on two reads five seconds apart, with md5s
+identical to the Mac mirror. Logged as a read failure (M-188), not a loss,
+and deliberately not "restored" — copying an older copy over content that
+was merely unreadable is the damage, not the repair. A checksum against the
+mirror settles this in one command where a directory listing cannot, since a
+listing is what failed.
+
+**P3 and P2 were one fault, not two.** P2's photo tap was at y=230 points,
+which is the "Private Access to Photos" banner rather than the grid. Nothing
+was selected, so the picker's tick stayed disabled, so the picker never
+closed — and it then swallowed the photo line *and the entire call step*.
+Run 32's `P3-call.png` and `P3-call-answered.png` are stills of the photo
+grid. Nobody had noticed because the step scored on the kernel's reply, and
+the model answers a question about a photo it cannot see, plausibly.
+
+Both fixed (#524) and proven:
+
+- the photo attaches and the picker closes itself — `media/mobile/cycle-56/01-photo-attached-picker-closed-itself.png`;
+- the call opens from the chat menu by name and the question lands in **this
+  project's** transcript, which is what P3 exists to check — seq 2175 `Hello
+  Arbus. What are we working on right now?` and 2176 the answer.
+
+A picker that has to be dismissed by hand now scores P2 as *no photo
+attached*, rather than quietly asking the model about nothing.
+
+**I walked into the pixel/point trap myself** (M-190). I read the tick's
+position off the rendered still as `426,157`; the screenshot is 472 wide and
+the device is 393 points, so the tap landed nowhere. The original `355,131`
+had been right. `sim-lib.sh` has existed for this since cycle 46 — the
+journey simply never sourced it. It does now, and the picker taps read as
+the pixels anyone would measure. A rule only holds where it is reachable
+from.
+
+**Open:** the app itself has had no scrutiny for two cycles; the loop has
+been repairing its own instruments. With the journey honest again, cycle 57
+goes back to the oldest coverage row — the list composer, last checked at
+cycle 11.
