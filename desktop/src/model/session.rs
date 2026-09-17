@@ -2310,6 +2310,18 @@ impl ChatSession {
         // ("stop the turn before rewinding", gate cycle-22b). The kernel
         // checks the agent itself and refuses if it is running.
         if self.streaming || self.turn_open {
+            // Which flag held, and how long since anything arrived: F-122
+            // recurred once on cycle 28 after passing three times, and the
+            // notice alone cannot say why (rig, cycle 29).
+            eprintln!(
+                "arbos: rewind refused: streaming={} turn_open={} working={} last_frame={}s ago progress={}s ago turn_ended={:?}",
+                self.streaming,
+                self.turn_open,
+                self.working.is_some(),
+                self.last_frame_at.elapsed().as_secs(),
+                self.progress_at.elapsed().as_secs(),
+                self.turn_ended.map(|at| at.elapsed().as_secs()),
+            );
             self.notice(true, "stop the turn before rewinding");
             return;
         }
