@@ -664,7 +664,11 @@ class Pass:
             # it was — "no state change" on this row, cycles 23–25 (F-123),
             # while the fold had in fact opened.
             def rows():
-                return set(self.ids("run-*")) | set(self.ids("tool-*")) | set(self.ids("thought-*")) | set(self.ids("diff-card-*")) | set(self.ids("term-card-*"))
+                # Everything a Project-chat fold can hold: runs, tools,
+                # thoughts, cards — and the checklist card, which is all a
+                # delegating turn's fold holds.
+                kinds = ("run-*", "tool-*", "thought-*", "diff-card-*", "term-card-*", "todo-card-*", "worker-line-*")
+                return set().union(*(set(self.ids(k)) for k in kinds))
             r0 = rows()
             self.check("work", sc, "click 'Worked' fold", "fold toggles: rows under it appear or disappear",
                        lambda: self.app.click(work), lambda a, b: (rows() != r0) and f"rows {len(r0)} -> {len(rows())}")
