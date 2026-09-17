@@ -44,9 +44,28 @@ pub fn read(place: &Place, agent: &str) -> Option<Status> {
 
 /// Write the status, whole or not at all. `step` is trimmed and capped.
 pub fn write(place: &Place, agent: &str, step: &str, source: &str) -> Result<Status> {
+    write_since(
+        place,
+        agent,
+        step,
+        source,
+        &crate::inbox::rfc3339(crate::now_ms()),
+    )
+}
+
+/// `write` with the clock carried over: a parent's "waiting on <worker>"
+/// line keeps the worker's own `since`, so its timer reads the worker's
+/// time on the step, not the time since the parent last copied it.
+pub fn write_since(
+    place: &Place,
+    agent: &str,
+    step: &str,
+    source: &str,
+    since: &str,
+) -> Result<Status> {
     let status = Status {
         step: clip(step),
-        since: crate::inbox::rfc3339(crate::now_ms()),
+        since: since.to_string(),
         source: source.to_string(),
     };
     let p = path(place, agent);

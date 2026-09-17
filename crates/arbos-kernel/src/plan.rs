@@ -456,6 +456,22 @@ fn batch_done_files(
 /// moves to `.arbos/archive/agents/<id>/`. The tree frame tells every
 /// window.
 fn archive_finished(hooks: &KernelHooks, reported: &[String]) {
+    let parents: std::collections::BTreeSet<String> = reported
+        .iter()
+        .filter_map(|r| {
+            let id = r.strip_prefix("agent:").unwrap_or(r);
+            arbos_core::load_agent(&hooks.place, &arbos_core::AgentId::new(id))
+                .ok()
+                .and_then(|a| a.parent.map(|p| p.to_string()))
+        })
+        .collect();
+    archive_finished_inner(hooks, reported);
+    for p in parents {
+        hooks.refresh_waiting(&p);
+    }
+}
+
+fn archive_finished_inner(hooks: &KernelHooks, reported: &[String]) {
     if !arbos_core::project::load(&hooks.place)
         .root
         .archives_children()

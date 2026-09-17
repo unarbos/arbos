@@ -162,6 +162,9 @@ pub enum WaitEnd {
     Stopped,
 }
 
+/// The `source` of a parent's "waiting on <worker>" status line.
+pub const WAITING_SOURCE: &str = "waiting";
+
 pub struct KernelHooks {
     pub place: Place,
     /// Housekeeping wakes only (`Serve`, `Compact`). Work goes through the plan.
@@ -343,6 +346,9 @@ impl KernelHooks {
         self.running.lock().unwrap().insert(agent.to_string());
         self.status_said.lock().unwrap().remove(agent);
         self.sent.lock().unwrap().remove(agent);
+        if let Some(parent) = self.parent_of(agent) {
+            self.refresh_waiting(&parent);
+        }
         let lo = count_lines(&self.layout(agent).transcript());
         self.turn_lo.lock().unwrap().insert(agent.to_string(), lo);
         self.notes_at_start.lock().unwrap().insert(
@@ -364,6 +370,12 @@ impl KernelHooks {
                 source: String::new(),
             });
         }
+        // A worker ended: its parent's "waiting on" line moves on or goes.
+        // A parent ended with workers still at work: it says so while idle.
+        if let Some(parent) = self.parent_of(agent) {
+            self.refresh_waiting(&parent);
+        }
+        self.refresh_waiting(agent);
         // The status page moved during this turn: tell every window now,
         // not at the watch's next second. Root is the only writer, so a
         // change seen at a child's turn end is root's, and still worth
@@ -576,6 +588,8 @@ impl KernelHooks {
                         self.stop_waiting(child);
                         return WaitEnd::Steered;
                     }
+                    // The parent's live line follows the worker it waits on.
+                    self.refresh_waiting(parent);
                 }
             }
         }
@@ -920,6 +934,20 @@ impl KernelHooks {
         if source == "derived" && self.status_said.lock().unwrap().contains(agent) {
             return Ok(());
         }
+        // A worker's step is its parent's news while the parent waits.
+        if source != WAITING_SOURCE
+            && let Ok(a) = arbos_core::load_agent(&self.place, &AgentId::new(agent))
+            && let Some(parent) = a.parent.as_ref()
+        {
+            let parent = parent.to_string();
+            self.status_inner(agent, step, source)?;
+            self.refresh_waiting(&parent);
+            return Ok(());
+        }
+        self.status_inner(agent, step, source)
+    }
+
+    fn status_inner(&self, agent: &str, step: &str, source: &str) -> Result<()> {
         if source == "agent" || source == "title" {
             self.status_said.lock().unwrap().insert(agent.to_string());
         }
@@ -1956,6 +1984,120 @@ impl KernelHooks {
     }
 
     /// The agent's name for a notification title (its id when unnamed).
+    fn parent_of(&self, agent: &str) -> Option<String> {
+        arbos_core::load_agent(&self.place, &AgentId::new(agent))
+            .ok()
+            .and_then(|a| a.parent.map(|p| p.to_string()))
+    }
+
+    /// The parent's live line while a worker is at work and the parent
+    /// has nothing of its own to say: "waiting on <worker> — <the
+    /// worker's step>", with the worker's own clock. Jacob watched a
+    /// coordinator sit silent for 2m 26s while its worker ran a script
+    /// (2026-09-16); Cursor keeps the person informed. Refreshed as the
+    /// worker's step changes; gone the moment no worker is live — a stale
+    /// "waiting on" is worse than none. The parent's own `status` line
+    /// (source agent/title) is never overwritten.
+    pub fn refresh_waiting(&self, parent: &str) {
+        let current = arbos_core::status::read(&self.place, parent);
+        let own = current
+            .as_ref()
+            .is_some_and(|s| s.source == "agent" || s.source == "title");
+        if own {
+            return;
+        }
+        // Only a running parent's own tool line is left alone; a parent
+        // blocked in `spawn wait` or idle shows the worker's step.
+        let running = self.is_running(parent);
+        if running
+            && current.as_ref().is_some_and(|s| s.source == "derived")
+            && !self.waiting_in_spawn(parent)
+        {
+            return;
+        }
+        let children: Vec<arbos_core::Agent> = list_agents(&self.place)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.parent.as_ref().is_some_and(|p| p.as_str() == parent))
+            .filter(|a| self.is_live(a.id.as_str()) || self.is_running(a.id.as_str()))
+            .collect();
+        if children.is_empty() {
+            if current.as_ref().is_some_and(|s| s.source == WAITING_SOURCE)
+                && arbos_core::status::clear(&self.place, parent)
+            {
+                self.broadcast(Frame::Status {
+                    agent: parent.to_string(),
+                    step: String::new(),
+                    since: String::new(),
+                    source: String::new(),
+                });
+            }
+            return;
+        }
+        // The worker whose step changed last speaks for the group.
+        let mut lead: Option<(String, arbos_core::status::Status)> = None;
+        let mut nameless: Option<String> = None;
+        for c in &children {
+            let name = if c.name.is_empty() {
+                c.id.to_string()
+            } else {
+                c.name.clone()
+            };
+            match arbos_core::status::read(&self.place, c.id.as_str()) {
+                Some(s) => {
+                    if lead.as_ref().is_none_or(|(_, l)| s.since > l.since) {
+                        lead = Some((name, s));
+                    }
+                }
+                None => {
+                    if nameless.is_none() {
+                        nameless = Some(name);
+                    }
+                }
+            }
+        }
+        let (name, step, since) = match (lead, nameless) {
+            (Some((n, s)), _) => (n, s.step, s.since),
+            (None, Some(n)) => (
+                n,
+                "starting".to_string(),
+                arbos_core::inbox::rfc3339(arbos_core::now_ms()),
+            ),
+            (None, None) => return,
+        };
+        let line = if children.len() == 1 {
+            format!("waiting on {name} — {step}")
+        } else {
+            format!("waiting on {} workers — {name}: {step}", children.len())
+        };
+        if current.as_ref().is_some_and(|s| {
+            s.source == WAITING_SOURCE
+                && s.step == arbos_core::status::clip(&line)
+                && s.since == since
+        }) {
+            return;
+        }
+        if let Ok(s) =
+            arbos_core::status::write_since(&self.place, parent, &line, WAITING_SOURCE, &since)
+        {
+            self.broadcast(Frame::Status {
+                agent: parent.to_string(),
+                step: s.step,
+                since: s.since,
+                source: s.source,
+            });
+        }
+    }
+
+    /// Whether `parent` is blocked in a `spawn wait=true` right now.
+    fn waiting_in_spawn(&self, parent: &str) -> bool {
+        self.waits
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(p, _)| p == parent)
+    }
+
     fn display_name(&self, agent: &str) -> String {
         arbos_core::load_agent(&self.place, &AgentId::new(agent))
             .map(|a| {
