@@ -235,8 +235,10 @@ impl Tool for Bash {
                 let id = job.id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms)).await;
-                    if let Ok(j) = root.load(&id) {
-                        root.kill(&j);
+                    if let Ok(j) = root.load(&id)
+                        && let Err(e) = root.kill(&j)
+                    {
+                        eprintln!("job timeout: {e:#}");
                     }
                 });
             }
@@ -259,8 +261,10 @@ impl Tool for Bash {
                     _ = tokio::time::sleep_until(deadline) => break false,
                     _ = cx.cancel.cancelled() => {
                         // Stop while attached means stop: the user wants it gone.
-                        if let Ok(j) = root.load(&job.id) {
-                            root.kill(&j);
+                        if let Ok(j) = root.load(&job.id)
+                            && let Err(e) = root.kill(&j)
+                        {
+                            bail!("bash interrupted; {e:#}");
                         }
                         bail!("bash interrupted; job {} killed", job.id);
                     }
@@ -598,20 +602,40 @@ fn human_bytes(n: u64) -> String {
 /// No shell here: the syscalls take the numbers as numbers. Pids 0 and 1
 /// (and anything that does not fit) are refused outright, because
 /// `kill(0)` and `killpg(0)` also mean "my whole group" or "everything".
-pub fn kill_job(pid: u32) {
+///
+/// The result says whether the signal was *delivered*: `Ok` when the
+/// group or the pid took it, or was already gone (ESRCH); `Err` when the
+/// system refused (EPERM — a job that became another user's, `sudo` in
+/// its command) or the pid was never a job. A folder that said "killed by
+/// the kernel" before this was checked told the user a stop had worked
+/// when it had not.
+pub fn kill_job(pid: u32) -> std::io::Result<()> {
     let Ok(pid) = libc::pid_t::try_from(pid) else {
-        eprintln!("kill_job: pid {pid} out of range; refusing");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} out of range; refusing"),
+        ));
     };
     if pid <= 1 {
-        eprintln!("kill_job: pid {pid} is not a job; refusing");
-        return;
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("pid {pid} is not a job; refusing"),
+        ));
     }
     // SAFETY: plain syscalls on a validated positive pid; no memory involved.
-    let group_ok = unsafe { libc::killpg(pid, libc::SIGKILL) } == 0;
-    if !group_ok {
-        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    if unsafe { libc::killpg(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
     }
+    let group_err = std::io::Error::last_os_error();
+    if unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    // Already gone is the outcome asked for.
+    if err.raw_os_error() == Some(libc::ESRCH) && group_err.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(err)
 }
 
 #[cfg(test)]
@@ -639,7 +663,7 @@ mod kill_tests {
             .unwrap();
         std::thread::sleep(Duration::from_millis(200));
 
-        kill_job(job.id());
+        kill_job(job.id()).unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(job.try_wait().unwrap().is_some(), "the job leader is dead");
         assert!(
@@ -654,8 +678,8 @@ mod kill_tests {
     fn kill_job_refuses_pids_that_mean_everything() {
         // 0 = own group, 1 = init; both must be no-ops. If either were
         // signalled, this test process would not be here to assert.
-        kill_job(0);
-        kill_job(1);
+        assert!(kill_job(0).is_err());
+        assert!(kill_job(1).is_err());
     }
 }
 
@@ -950,14 +974,14 @@ pub(crate) fn kill_jobs_by_pid(root: &JobsRoot, cmd: &str) -> Option<String> {
     }
     let lines: Vec<String> = jobs
         .iter()
-        .map(|j| {
-            root.kill(j);
-            format!(
+        .map(|j| match root.kill(j) {
+            Ok(_) => format!(
                 "job {} (pid {}) ended — the whole process group, not only its shell: `{}`",
                 j.id,
                 j.meta.pid,
                 arbos_core::text::clip(j.meta.command.trim(), 80)
-            )
+            ),
+            Err(e) => format!("{e:#} — it is still running"),
         })
         .collect();
     Some(lines.join("\n"))
