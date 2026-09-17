@@ -1,9 +1,10 @@
 //! The frame meter, floating over the app's window.
 //!
 //! One for the program: a second meter counts the first one's frames, and
-//! neither reads zero again. It hangs here rather than on the settings window
-//! whose switch turns it on, so closing that window leaves it where you
-//! dragged it — and its CPU figure is the whole process either way.
+//! neither reads zero again. It floats over the window rather than living in
+//! the Settings tab whose switch turns it on, so leaving that tab leaves the
+//! meter where you dragged it — and its CPU figure is the whole process either
+//! way.
 
 use bezel::{
     gpui::{AnyElement, Entity, Window, point, prelude::*, px},

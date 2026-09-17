@@ -10,9 +10,8 @@ use crate::{
     model::permission_center::Permissions,
     view::{
         component::permissions_sheet::{mic_test_row, permission_row},
-        settings::{self, SettingsWindow},
+        settings::{self, SettingsPane},
     },
-    voice_ws,
 };
 use bezel::{
     gpui::{AnyElement, Context, div, prelude::*, px},
@@ -21,7 +20,7 @@ use bezel::{
     ui::widgets::{ButtonStyle, Buttons, Scaffolding},
 };
 
-impl SettingsWindow {
+impl SettingsPane {
     pub(super) fn permissions_body(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         self.keep_rechecking(cx);
@@ -82,8 +81,10 @@ impl SettingsWindow {
             .into_any_element()
     }
 
-    /// While this section shows, the centre re-reads every second; this
-    /// window follows it. Leaving the section stops the microphone test.
+    /// While this section shows, the centre re-reads every second; this pane
+    /// follows it. Leaving the section stops the microphone test, and so does
+    /// leaving the tab — see [`SettingsPane::went_behind`], which is what
+    /// clears `rechecking` from outside this loop.
     fn keep_rechecking(&mut self, cx: &mut Context<Self>) {
         if self.rechecking {
             return;
@@ -97,11 +98,9 @@ impl SettingsWindow {
                     .timer(crate::model::permission_center::POLL)
                     .await;
                 let live = this.update(cx, |this, cx| {
-                    let on = this.section == settings::Section::Permissions;
+                    let on = this.rechecking && this.section == settings::Section::Permissions;
                     if !on {
-                        this.rechecking = false;
-                        voice_ws::mic_test_stop();
-                        center.update(cx, |center, _| center.unwatch());
+                        this.stop_rechecking(cx);
                     }
                     on
                 });

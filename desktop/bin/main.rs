@@ -59,14 +59,6 @@ fn main() -> Result<()> {
         {
             return;
         }
-        // ⌘W of the chat window used to leave Settings holding a dead
-        // Workspace. Drop those leftovers before a new one is made.
-        for window in cx.windows() {
-            if let Some(handle) = window.downcast::<arbos_desktop::view::settings::SettingsWindow>()
-            {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            }
-        }
         let settings = settings::load().unwrap_or_else(|err| {
             eprintln!("settings: {err:#}; using defaults");
             settings::Settings::default()

@@ -456,7 +456,7 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The settings window's choice. bezel repaints on `set_mode`; the state
+    /// The Settings tab's choice. bezel repaints on `set_mode`; the state
     /// file is what makes it survive a relaunch.
     pub fn set_appearance(&mut self, mode: AppearanceMode, cx: &mut Context<Self>) {
         self.appearance = mode;
