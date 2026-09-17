@@ -1,0 +1,5 @@
+1789640493353 kernel started pid 1484919
+1789640500073 BREAK probe-did-not-wait: the first tool ran after 0.1s; the delay knob did not hold it, this run proves nothing
+1789640500073 BREAK silent-wait: 0.1s between the person's message and the first tool with nothing on any client-visible surface naming the wait (frames seen: {'plan': 2, 'turn': 1, 'status': 1, 'event/tool': 1}; status: ['']; notices: []) — the silent stall shape (st-01), with correct data underneath
+1789640500088 kernel stopped with code 0
+1789640500143 bugs: new 256dca13ca.md, new 1efe7d6a7f.md

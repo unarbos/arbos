@@ -1,0 +1,9 @@
+{
+  "name": "lk-02-held-record-in-a-read-only-runtime-folder",
+  "doc": "The record that makes 'once' possible (runtime/place-held.json, or the machine's temp folder since #441 at\n        46477c88). Three shapes, six relaunches each, folders made read-only before any record exists: runtime/ read-only\n        with temp writable (one long line expected); a stale runtime/ record that cannot be updated beside a writable temp\n        (which copy is read?); both read-only (six short lines that say the record could not be kept, never the long line,\n        never the escalation). qal-j19.",
+  "tags": [
+    "landing",
+    "lock",
+    "destructive-order"
+  ]
+}

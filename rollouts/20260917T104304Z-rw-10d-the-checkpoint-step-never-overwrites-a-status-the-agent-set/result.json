@@ -1,0 +1,33 @@
+{
+  "scenario": "rw-10d-the-checkpoint-step-never-overwrites-a-status-the-agent-set",
+  "doc": "qal-j18's fix (#419 at a5072074) shows `Saving a checkpoint of the working tree` as a derived status. A status\n        the agent set itself this turn (the `status` tool) must stay: the derived line is a guess, the agent's words are\n        not. Same six-second tree delay; the reply sets a status first, then writes.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "probe-did-not-wait",
+      "detail": "the kernel did not wait for the tree (tool ended under 4 s after the message, nothing on stderr); this run proves nothing",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "statuses": [
+      [
+        0.01,
+        "Sorting the samples",
+        "agent"
+      ],
+      [
+        6.29,
+        "",
+        null
+      ]
+    ]
+  },
+  "duration_s": 7.0,
+  "place": "/tmp/arbos-qa-rw-10d-the-checkpoint-step-never-overwrites-a-status-the-agent-set-v5ba2f4y/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419e",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T104304Z-rw-10d-the-checkpoint-step-never-overwrites-a-status-the-agent-set",
+  "branch": "main"
+}

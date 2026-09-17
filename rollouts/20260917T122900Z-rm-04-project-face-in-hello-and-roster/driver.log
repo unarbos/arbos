@@ -1,0 +1,5 @@
+1789648140648 kernel started pid 1558067
+1789648171064 timeout waiting for changed project.toml after 30s
+1789648171365 BREAK rm-04-rewrite-not-announced: no `changed project.toml` frame after the file was rewritten
+1789648171369 kernel stopped with code 0
+1789648171408 bugs: seen 7221f4ca1f.md

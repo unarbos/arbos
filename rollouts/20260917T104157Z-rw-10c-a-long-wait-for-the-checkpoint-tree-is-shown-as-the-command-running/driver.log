@@ -1,0 +1,4 @@
+1789641717771 kernel started pid 1503393
+1789641724736 BREAK probe-did-not-wait: the kernel's stderr does not say it waited; the delay knob did not hold the tool, this run proves nothing
+1789641724739 kernel stopped with code 0
+1789641724780 bugs: new ff948a7969.md

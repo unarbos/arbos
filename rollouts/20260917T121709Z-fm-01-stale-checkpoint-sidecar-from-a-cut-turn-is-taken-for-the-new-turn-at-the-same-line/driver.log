@@ -1,0 +1,6 @@
+1789647429955 kernel-a started pid 1552682
+1789647432414 kernel-a stopped with code 0
+1789647432414 kernel-b started pid 1552906
+1789647433135 BREAK probe-record-not-pending: turn 4''s record is not pending ({'line': 20, 'ts': 1789647433070, 'head': '5fead8797f366e6730a4afab168e474806cb49d3', 'work': '0b7f2edbe82bdb084c21d3a93e53c7eb22084b1d'}); the sidecar is never consulted, this run proves nothing
+1789647433688 kernel-b stopped with code 0
+1789647433741 bugs: new 2d013b03b5.md

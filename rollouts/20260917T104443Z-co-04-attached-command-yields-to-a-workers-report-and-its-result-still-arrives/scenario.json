@@ -1,0 +1,9 @@
+{
+  "name": "co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "doc": "The yielding path is the one that can lose work. Root runs an attached `sleep 12; echo finished-after-yield`\n        while a worker finishes in ~2 s. #432: the command yields when the worker's report lands, goes on as a job, and\n        its result follows. Check both halves: the yield is said, and the command's own output reaches the record.",
+  "tags": [
+    "landing",
+    "coordinator",
+    "yield"
+  ]
+}

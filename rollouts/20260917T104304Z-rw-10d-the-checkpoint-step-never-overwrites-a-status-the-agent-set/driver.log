@@ -1,0 +1,4 @@
+1789641784776 kernel started pid 1503994
+1789641791739 BREAK probe-did-not-wait: the kernel did not wait for the tree (tool ended under 4 s after the message, nothing on stderr); this run proves nothing
+1789641791742 kernel stopped with code 0
+1789641791782 bugs: seen dc07a90a9b.md

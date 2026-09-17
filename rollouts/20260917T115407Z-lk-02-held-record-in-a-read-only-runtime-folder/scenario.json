@@ -1,0 +1,9 @@
+{
+  "name": "lk-02-held-record-in-a-read-only-runtime-folder",
+  "doc": "The record that makes 'once' possible lives in runtime/place-held.json and is saved with `let _ =`. If the\n        folder cannot be written (read-only, full, permissions), every relaunch finds no record and says the full line\n        again \u2014 the 1411 lines back, plus a write failing silently: qal-j09's shape one layer down. Probe: runtime/ made\n        read-only after the holder starts, eight relaunches.",
+  "tags": [
+    "landing",
+    "lock",
+    "destructive-order"
+  ]
+}

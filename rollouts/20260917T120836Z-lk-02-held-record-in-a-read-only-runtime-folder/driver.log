@@ -1,0 +1,4 @@
+1789646916832 holder started pid 1545808
+1789646920796 BREAK stale-runtime-record-shadows-the-temp-copy: a stale runtime/ record that cannot be updated, beside a writable temp: the error-level escalation went out 6 of 6 — `load` reads runtime/ first, so the copy that is being kept is never the one read: arbos-kernel: place already served — a person needs to look: /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-vynrgpj5/place has been held for 361s by pid 1545808, build 46477c883538, url tcp://127.0.0.1:392
+1789646920799 holder stopped with code 0
+1789646920844 bugs: new 4c145516bd.md

@@ -1,0 +1,11 @@
+1789639415208 kernel started pid 1448083
+1789639475607 timeout waiting for turn root idle after 60s
+1789639475607 BREAK turn-never-ended: turn 'one' never ended
+1789639535608 timeout waiting for turn root idle after 60s
+1789639535608 BREAK turn-never-ended: turn 'two' never ended
+1789639595611 timeout waiting for turn root idle after 60s
+1789639595611 BREAK turn-never-ended: turn 'three' never ended
+1789639615636 BREAK probe-did-not-swap: the index was not swapped for every checkpoint: [120] — this run proves nothing
+1789639620659 kernel stopped with code 130
+1789639620660 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789639620704 bugs: seen 8386d04c9a.md, seen 8386d04c9a.md, seen 8386d04c9a.md, seen 258fab2a92.md, seen b96def4492.md

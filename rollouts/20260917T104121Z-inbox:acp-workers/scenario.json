@@ -1,0 +1,8 @@
+{
+  "name": "inbox:acp-workers",
+  "doc": "From inbox note 2026-09-13-acp-workers.md: exercise feature 'acp-workers' and run every detector. Needs a kernel built from branch cursor/acp-workers-b027.",
+  "tags": [
+    "inbox",
+    "acp-workers"
+  ]
+}

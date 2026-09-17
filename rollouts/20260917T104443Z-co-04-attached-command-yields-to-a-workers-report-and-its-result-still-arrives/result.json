@@ -1,0 +1,30 @@
+{
+  "scenario": "co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "doc": "The yielding path is the one that can lose work. Root runs an attached `sleep 12; echo finished-after-yield`\n        while a worker finishes in ~2 s. #432: the command yields when the worker's report lands, goes on as a job, and\n        its result follows. Check both halves: the yield is said, and the command's own output reaches the record.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "yielded-command-dropped",
+      "detail": "the yielded command never finished as a job: no jobs/*/out.log holds its output",
+      "where": "arbos-engine tools/bash.rs \u2014 a yielded command must go on as a job (#432)"
+    }
+  ],
+  "notes": {
+    "first_turn_s": 0.1,
+    "long_command_record": {
+      "started": "1789641884047",
+      "ended": "1789641884048",
+      "error": "bash: refused \u2014 `sleep 12; echo finished-after-yield` while 1 worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the turn now (an empty reply is",
+      "body": "bash: refused \u2014 `sleep 12; echo finished-after-yield` while 1 worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the turn now (an empty reply is",
+      "output": "bash: refused \u2014 `sleep 12; echo finished-after-yield` while 1 worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the turn now (an empty reply is"
+    },
+    "job_output_file": null
+  },
+  "duration_s": 0.5,
+  "place": "/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-omm33j_i/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr432",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T104443Z-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "branch": "main"
+}

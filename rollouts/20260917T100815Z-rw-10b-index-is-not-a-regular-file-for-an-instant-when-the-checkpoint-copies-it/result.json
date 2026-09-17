@@ -1,0 +1,49 @@
+{
+  "scenario": "rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it",
+  "doc": "The instant rw-10's churn rarely lands on, made certain: as each turn's checkpoint record appears, .git/index\n        is swapped for a directory for 120 ms and put back \u2014 to a copy, the same \"not a regular file\" that another git's\n        index.lock \u2192 index rename shows for a moment, held long enough to be sure. (Not a FIFO: the first version used\n        one, and an open() on a FIFO with no writer blocks forever \u2014 the kernel's turn hung for good on every build, a\n        failure the harness had invented.) The checkpoint's index copy must ride it out (#419 at 5340c0d2 retries for a\n        quarter second) and every turn must end with a work tree.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "checkpoint-taken-after-the-turn-wrote",
+      "detail": "checkpoint 2 (561884adb3) already holds f2.txt, which turn 2 wrote",
+      "where": "arbos-engine turn.rs \u2014 the tree snapshot runs beside the turn; the turn's first tool call can land first"
+    }
+  ],
+  "notes": {
+    "checkpoint_after_turn_wrote": [
+      "checkpoint 2 (561884adb3) already holds f2.txt, which turn 2 wrote"
+    ],
+    "swaps_ms": [
+      120,
+      120,
+      120
+    ],
+    "checkpoints": [
+      {
+        "line": 2,
+        "work": "",
+        "clean": true,
+        "work_error": ""
+      },
+      {
+        "line": 8,
+        "work": "561884adb3",
+        "clean": null,
+        "work_error": ""
+      },
+      {
+        "line": 14,
+        "work": "06ca426be3",
+        "clean": null,
+        "work_error": ""
+      }
+    ]
+  },
+  "duration_s": 1.3,
+  "place": "/tmp/arbos-qa-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it-h4h7tvs6/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419c",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T100815Z-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it",
+  "branch": "main"
+}

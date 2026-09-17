@@ -1,0 +1,57 @@
+{
+  "scenario": "lk-02-held-record-in-a-read-only-runtime-folder",
+  "doc": "The record that makes 'once' possible (runtime/place-held.json, or the machine's temp folder since #441 at\n        46477c88). Three shapes, six relaunches each, folders made read-only before any record exists: runtime/ read-only\n        with temp writable (one long line expected); a stale runtime/ record that cannot be updated beside a writable temp\n        (which copy is read?); both read-only (six short lines that say the record could not be kept, never the long line,\n        never the escalation). qal-j19.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "runtime-ro-temp-rw-not-once",
+      "detail": "runtime/ read-only with a writable temp: full line 6 of 6, escalation 0 \u2014 the temp fallback did not give 'once': arbos-kernel: place already served \u2014 another kernel already serves /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place: pid 1546435, build b5b24dba7b16, url tcp://127.0.0.1:32981. This process ex",
+      "where": "arbos-kernel serve.rs HeldRecord::save/paths (#441)"
+    },
+    {
+      "rule": "stale-runtime-record-shadows-the-temp-copy",
+      "detail": "a stale runtime/ record that cannot be updated, beside a writable temp: the error-level escalation went out 6 of 6 \u2014 `load` reads runtime/ first, so the copy that is being kept is never the one read: arbos-kernel: place already served \u2014 a person needs to look: /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place has been held for 361s by pid 1546435, build b5b24dba7b16, url tcp://127.0.0.1:329",
+      "where": "arbos-kernel serve.rs HeldRecord::load \u2014 prefer the newest record, or the one that save() last wrote"
+    },
+    {
+      "rule": "nowhere-to-keep-it-not-short",
+      "detail": "runtime/ and temp both read-only: full 6, escalation 0, lines saying the record could not be kept 0 of 6 \u2014 expected six short lines that say so: arbos-kernel: place already served \u2014 another kernel already serves /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place: pid 1546435, build b5b24dba7b16, url tcp://127.0.0.1:32981. This process ex",
+      "where": "arbos-kernel serve.rs say_held \u2014 a record kept nowhere means the short form, every time, saying why"
+    }
+  ],
+  "notes": {
+    "exit_codes": [
+      3
+    ],
+    "results": {
+      "a_runtime_ro_temp_rw": {
+        "full": 6,
+        "escalation": 0,
+        "short": 6,
+        "says_record_unkept": 0,
+        "sample": "arbos-kernel: place already served \u2014 another kernel already serves /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place: pid 1546435, build b5b24dba7b16, url tcp://127.0.0.1:32981. This process ex"
+      },
+      "b_stale_runtime_record_ro_temp_rw": {
+        "full": 0,
+        "escalation": 6,
+        "short": 6,
+        "says_record_unkept": 0,
+        "sample": "arbos-kernel: place already served \u2014 a person needs to look: /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place has been held for 361s by pid 1546435, build b5b24dba7b16, url tcp://127.0.0.1:329"
+      },
+      "c_runtime_ro_temp_ro": {
+        "full": 6,
+        "escalation": 0,
+        "short": 6,
+        "says_record_unkept": 0,
+        "sample": "arbos-kernel: place already served \u2014 another kernel already serves /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place: pid 1546435, build b5b24dba7b16, url tcp://127.0.0.1:32981. This process ex"
+      }
+    }
+  },
+  "duration_s": 4.0,
+  "place": "/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-viusaj8l/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr441",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T120844Z-lk-02-held-record-in-a-read-only-runtime-folder",
+  "branch": "main"
+}

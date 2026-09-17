@@ -1,0 +1,33 @@
+{
+  "scenario": "lk-02-held-record-in-a-read-only-runtime-folder",
+  "doc": "The record that makes 'once' possible lives in runtime/place-held.json and is saved with `let _ =`. If the\n        folder cannot be written (read-only, full, permissions), every relaunch finds no record and says the full line\n        again \u2014 the 1411 lines back, plus a write failing silently: qal-j09's shape one layer down. Probe: runtime/ made\n        read-only after the holder starts, eight relaunches.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "unwritable-record-says-it-every-time",
+      "detail": "with no record and runtime/ read-only, the full line went to stderr 6 of 6 relaunches: the record's save fails silently and 'once' becomes 'every time' \u2014 the 1411 lines, one layer down",
+      "where": "arbos-kernel serve.rs HeldRecord::save \u2014 `let _ =`; when the record cannot be kept, say so once and fall back to the short line"
+    },
+    {
+      "rule": "unwritable-record-escalates-every-time",
+      "detail": "with a six-minute-old record that cannot be updated, the error-level escalation went out 6 of 6 relaunches (it is meant to repeat every ten minutes at most): `escalated` is never saved",
+      "where": "arbos-kernel serve.rs HeldRecord::save \u2014 a save that fails must not be treated as done"
+    }
+  ],
+  "notes": {
+    "exit_codes": [
+      3
+    ],
+    "a_no_record_readonly_full_line_count_of_6": 6,
+    "b_stale_record_readonly_escalation_count_of_6": 6,
+    "sample_a": "arbos-kernel: place already served \u2014 another kernel already serves /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-77gef1od/place: pid 1528807, build b5b24dba7b16, url tcp://127.0.0.1:39",
+    "sample_b": "arbos-kernel: place already served \u2014 a person needs to look: /tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-77gef1od/place has been held for 361s by pid 1528807, build b5b24dba7b16, url"
+  },
+  "duration_s": 3.4,
+  "place": "/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-77gef1od/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr441",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T115407Z-lk-02-held-record-in-a-read-only-runtime-folder",
+  "branch": "main"
+}

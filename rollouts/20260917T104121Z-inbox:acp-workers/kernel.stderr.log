@@ -1,0 +1,32 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:acp-workers-2ddxjux4/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8138 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:acp-workers-2ddxjux4/home/.cache/arbos/tgrep/39cd7d3b09f2e6c0
+tools root: 8 calls, wall 2ms, sum 2ms, speedup 1.0x
+tools root: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools fake-acp-worker: 3 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools fake-acp-worker: 3 calls, wall 1ms, sum 0ms, speedup 0.0x
+tools fake-acp-worker: 3 calls, wall 7ms, sum 1ms, speedup 0.1x
+tools fake-acp-worker: 3 calls, wall 9ms, sum 0ms, speedup 0.0x
+tools fake-acp-worker: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools fake-acp-worker: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+snapshot_failed: git add: fatal: unable to stat 'agents/test-ask-permission/inbox/20260917T104252.000Z-agent-fake-acp-worker-000.md': No such file or directory
+tools test-plan-permission: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+tools test-plan-permission: 2 calls, wall 9402ms, sum 9403ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 1ms, sum 2ms, speedup 2.0x
+tools test-plan-permission: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 6ms, sum 1ms, speedup 0.2x
+tools test-plan-permission: 2 calls, wall 4573ms, sum 4574ms, speedup 1.0x
+tools test-plan-permission: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools test-plan-permission: 5 calls, wall 10ms, sum 3ms, speedup 0.3x
+tools test-plan-permission: 2 calls, wall 14ms, sum 1ms, speedup 0.1x
+tools test-plan-permission: 2 calls, wall 6ms, sum 0ms, speedup 0.0x
+child_archive_failed fake-acp-worker: already archived
+tools fake-acp-worker-2: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools fake-acp-worker-2: 2 calls, wall 1ms, sum 1ms, speedup 1.0x

@@ -1,0 +1,4 @@
+1789639712936 kernel started pid 1456239
+1789639714190 BREAK checkpoint-tree-lost-to-a-momentary-index: 2 of 3 checkpoints have no work tree after a 120 ms instant in which .git/index was not a regular file: ['copy the index: the source path is neither a regular file nor a symlink to a regular file', 'copy the index: the source path is neither a regular file nor a symlink to a regular file']
+1789639714194 kernel stopped with code 0
+1789639714239 bugs: seen 9924907206.md

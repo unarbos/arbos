@@ -1,0 +1,92 @@
+{
+  "scenario": "rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person",
+  "doc": "#419 at 2daa555d: a tool that writes waits for the turn's checkpoint tree. On a large repository that wait is\n        seconds (here: ARBOS_TEST_TREE_DELAY_MS=6000, the kernel's own knob for a slow `add -A`). New behaviour, so the\n        question is what a person sees during it: a turn that has said nothing and shows no tool for six seconds is the\n        silent stall of qal-j05/st-01 unless the wait is named on a surface the window draws.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "probe-did-not-wait",
+      "detail": "the kernel's stderr does not say it waited; the delay knob did not hold the tool, this run proves nothing",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "timeline_after_message": [
+      [
+        0.0,
+        "plan",
+        "{\"type\": \"plan\", \"agent\": \"root\", \"nodes\": [{\"id\": 1100145917398, \"parent\": 0, \"goal\": \"one\", \"status\": \"pending\", \"when\": \"ready\", \"do_kind\": \"agent\", \"origin\""
+      ],
+      [
+        0.0,
+        "plan",
+        "{\"type\": \"plan\", \"agent\": \"root\", \"nodes\": []}"
+      ],
+      [
+        0.0,
+        "turn",
+        "{\"type\": \"turn\", \"agent\": \"root\", \"state\": \"running\", \"budget\": null}"
+      ],
+      [
+        0.01,
+        "status",
+        "{\"type\": \"status\", \"agent\": \"root\", \"step\": \"Running echo first > f1.txt\", \"since\": \"2026-09-17T10:22:56Z\", \"source\": \"derived\"}"
+      ],
+      [
+        0.01,
+        "event/tool",
+        "{\"type\": \"event\", \"agent\": \"root\", \"event\": {\"ts\": 1789640576836, \"kind\": \"tool\", \"name\": \"bash\", \"call_id\": \"replay_1\", \"step\": 1, \"started\": 1789640576836, \"a"
+      ],
+      [
+        0.07,
+        "event/wake",
+        "{\"type\": \"event\", \"agent\": \"root\", \"event\": {\"seq\": 1, \"ts\": 1789640576822, \"kind\": \"wake\", \"wake\": \"user\", \"text\": \"one\"}}"
+      ],
+      [
+        0.07,
+        "event/user",
+        "{\"type\": \"event\", \"agent\": \"root\", \"event\": {\"seq\": 2, \"ts\": 1789640576823, \"kind\": \"user\", \"text\": \"one\", \"channel\": \"text\"}}"
+      ],
+      [
+        0.27,
+        "job",
+        "{\"type\": \"job\", \"agent\": \"root\", \"id\": \"j1\", \"running\": false, \"exit\": 0}"
+      ],
+      [
+        0.29,
+        "assistant_delta",
+        "{\"type\": \"assistant_delta\", \"agent\": \"root\", \"text\": \"first\", \"step\": 2}"
+      ],
+      [
+        0.29,
+        "status",
+        "{\"type\": \"status\", \"agent\": \"root\", \"step\": \"\"}"
+      ],
+      [
+        0.29,
+        "notify",
+        "{\"type\": \"notify\", \"id\": 1, \"ts\": 1789640577116, \"agent\": \"root\", \"kind\": \"reply\", \"title\": \"root replied\", \"body\": \"first\"}"
+      ],
+      [
+        0.3,
+        "plan",
+        "{\"type\": \"plan\", \"agent\": \"root\", \"nodes\": []}"
+      ]
+    ],
+    "seconds_to_first_visible_frame": 0.0,
+    "frames_naming_the_wait": [],
+    "notices": [],
+    "tool_record": {
+      "started_after_message_s": 0.0,
+      "started_to_ended_s": 0.3,
+      "label": "write f1"
+    },
+    "kernel_stderr_waited": ""
+  },
+  "duration_s": 1.0,
+  "place": "/tmp/arbos-qa-rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person-qqcybr3w/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419c",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T102256Z-rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person",
+  "branch": "main"
+}

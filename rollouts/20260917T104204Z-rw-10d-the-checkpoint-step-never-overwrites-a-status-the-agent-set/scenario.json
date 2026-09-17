@@ -1,0 +1,9 @@
+{
+  "name": "rw-10d-the-checkpoint-step-never-overwrites-a-status-the-agent-set",
+  "doc": "qal-j18's fix (#419 at a5072074) shows `Saving a checkpoint of the working tree` as a derived status. A status\n        the agent set itself this turn (the `status` tool) must stay: the derived line is a guess, the agent's words are\n        not. Same six-second tree delay; the reply sets a status first, then writes.",
+  "tags": [
+    "landing",
+    "rewind",
+    "misreport"
+  ]
+}

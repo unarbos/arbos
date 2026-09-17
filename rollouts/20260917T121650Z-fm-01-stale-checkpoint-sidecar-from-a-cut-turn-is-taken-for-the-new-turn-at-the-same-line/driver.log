@@ -1,0 +1,7 @@
+1789647410527 kernel-a started pid 1552306
+1789647412988 kernel-a stopped with code 0
+1789647412988 kernel-b started pid 1552541
+1789647422273 BREAK stale-sidecar-restored-a-cut-turns-tree: rewinding to the new turn 4 brought back f3.txt, a file the earlier rewind removed: the restore took the cut turn's sidecar at the same line (same HEAD) for the new turn's tree — files now ['f1.txt', 'f2.txt', 'f3.txt'], expected f1, f2, g3
+1789647422273 BREAK new-turns-file-lost: g3.txt, written by the new turn 3', is gone after rewinding to the new turn 4: ['f1.txt', 'f2.txt', 'f3.txt']
+1789647429701 kernel-b stopped with code 0
+1789647429762 bugs: new 594c6178fd.md, new 7d04049a84.md

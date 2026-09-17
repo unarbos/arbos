@@ -1,0 +1,47 @@
+{
+  "scenario": "rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it",
+  "doc": "The instant rw-10's churn rarely lands on, made certain: as each turn's checkpoint record appears, .git/index\n        is swapped for a directory for 120 ms and put back \u2014 to a copy, the same \"not a regular file\" that another git's\n        index.lock \u2192 index rename shows for a moment, held long enough to be sure. (Not a FIFO: the first version used\n        one, and an open() on a FIFO with no writer blocks forever \u2014 the kernel's turn hung for good on every build, a\n        failure the harness had invented.) The checkpoint's index copy must ride it out (#419 at 5340c0d2 retries for a\n        quarter second) and every turn must end with a work tree.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "checkpoint-tree-lost-to-a-momentary-index",
+      "detail": "1 of 3 checkpoints have no work tree after a 120 ms instant in which .git/index was not a regular file: ['copy the index: the source path is neither a regular file nor a symlink to a regular file']",
+      "where": "arbos-engine tools::git snapshot_turn_tree \u2014 copy the index (#419 at 5340c0d2 retries 10 \u00d7 25 ms)"
+    }
+  ],
+  "notes": {
+    "checkpoint_after_turn_wrote": [],
+    "swaps_ms": [
+      120,
+      120,
+      120
+    ],
+    "checkpoints": [
+      {
+        "line": 2,
+        "work": "",
+        "clean": null,
+        "work_error": "copy the index: the source path is neither a regular file nor a symlink to a regular file"
+      },
+      {
+        "line": 8,
+        "work": "dae2010887",
+        "clean": null,
+        "work_error": ""
+      },
+      {
+        "line": 14,
+        "work": "a5b17f557a",
+        "clean": null,
+        "work_error": ""
+      }
+    ]
+  },
+  "duration_s": 1.3,
+  "place": "/tmp/arbos-qa-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it-6go5e9bn/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419b",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T100825Z-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it",
+  "branch": "main"
+}

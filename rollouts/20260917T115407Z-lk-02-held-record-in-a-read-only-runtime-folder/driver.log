@@ -1,0 +1,5 @@
+1789646047025 holder started pid 1528807
+1789646050372 BREAK unwritable-record-says-it-every-time: with no record and runtime/ read-only, the full line went to stderr 6 of 6 relaunches: the record's save fails silently and 'once' becomes 'every time' — the 1411 lines, one layer down
+1789646050372 BREAK unwritable-record-escalates-every-time: with a six-minute-old record that cannot be updated, the error-level escalation went out 6 of 6 relaunches (it is meant to repeat every ten minutes at most): `escalated` is never saved
+1789646050377 holder stopped with code 0
+1789646050552 bugs: new 4a03f6313b.md, new 196b28469b.md

@@ -1,0 +1,29 @@
+{
+  "scenario": "co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "doc": "The yielding path is the one that can lose work. Root runs an attached twelve-second loop (not a bare sleep, which\n        would be refused outright) while a worker finishes in ~2 s. #432: the command yields when the worker's report lands, goes on as a job, and\n        its result follows. Check both halves: the yield is said, and the command's own output reaches the record.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "yielded-command-dropped",
+      "detail": "the yielded command never finished as a job: no jobs/*/out.log holds its output",
+      "where": "arbos-engine tools/bash.rs \u2014 a yielded command must go on as a job (#432)"
+    }
+  ],
+  "notes": {
+    "first_turn_s": 2.6,
+    "long_command_record": {
+      "started": "1789641928083",
+      "ended": "1789641930589",
+      "body": "(no output yet)\n\nStill running as job j1 (pid 1507385). A worker's report landed while it ran \u2014 it follows this result. Read it and act on it; follow the command with await if you still need it. Follo",
+      "output": "(no output yet)\n\nStill running as job j1 (pid 1507385). A worker's report landed while it ran \u2014 it follows this result. Read it and act on it; follow the command with await if you still need it. Fol\n\u2026"
+    },
+    "job_output_file": null
+  },
+  "duration_s": 3.0,
+  "place": "/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-vxlgig52/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr432",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T104527Z-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "branch": "main"
+}

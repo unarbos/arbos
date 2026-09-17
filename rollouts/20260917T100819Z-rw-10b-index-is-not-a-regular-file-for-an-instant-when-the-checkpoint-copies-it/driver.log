@@ -1,0 +1,4 @@
+1789639699638 kernel started pid 1454465
+1789639700895 BREAK checkpoint-taken-after-the-turn-wrote: checkpoint 2 (f7cbaf7caf) already holds f2.txt, which turn 2 wrote; checkpoint 3 (4bf591b63e) already holds f3.txt, which turn 3 wrote
+1789639700898 kernel stopped with code 0
+1789639700944 bugs: seen 499332afd5.md

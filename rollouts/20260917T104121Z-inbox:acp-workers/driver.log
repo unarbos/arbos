@@ -1,0 +1,6 @@
+1789641681199 kernel started pid 1503251
+1789641981575 timeout waiting for turn root idle after 300s
+1789641981575 BREAK turn-never-ended: feature acp-workers: turn never ended
+1789641981591 kernel stopped with code 0
+1789641981593 BREAK state:agent-parent-dangling: parent 'test-plan-permission' has no folder
+1789641981715 bugs: new 8bd23ff825.md, new c5c36c4ab1.md

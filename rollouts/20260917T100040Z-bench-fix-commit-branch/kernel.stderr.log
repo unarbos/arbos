@@ -1,0 +1,34 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-7xsu8a3b/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8137 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-7xsu8a3b/home/.cache/arbos/tgrep/de13754e0f7d95df
+snapshot_failed: git add: warning: could not open directory 'agents/fix-broken-python-script/jobs/j14/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j12/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j23/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j1/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j13/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j8/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j19/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j15/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j4/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j20/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j7/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j9/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j10/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j22/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j17/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j6/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j21/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j18/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j2/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j5/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j3/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j16/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/jobs/j11/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/turns/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/inflight/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/inbox/': No such file or directory
+warning: could not open directory 'agents/fix-broken-python-script/pages/': No such file or directory
+fatal: unable to stat 'agents/fix-broken-python-script/mechanism.md': No such file or directory

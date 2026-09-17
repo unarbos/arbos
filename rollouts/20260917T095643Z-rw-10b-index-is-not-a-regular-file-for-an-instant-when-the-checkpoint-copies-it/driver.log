@@ -1,0 +1,12 @@
+1789639003768 kernel started pid 1444635
+1789639064121 timeout waiting for turn root idle after 60s
+1789639064121 BREAK turn-never-ended: turn 'one' never ended
+1789639124166 timeout waiting for turn root idle after 60s
+1789639124166 BREAK turn-never-ended: turn 'two' never ended
+1789639184207 timeout waiting for turn root idle after 60s
+1789639184207 BREAK turn-never-ended: turn 'three' never ended
+1789639204225 BREAK probe-did-not-swap: the index was not swapped for every checkpoint: [120] — this run proves nothing
+1789639204226 BREAK checkpoint-tree-lost-to-a-momentary-index: 1 of 1 checkpoints have no work tree after a 120 ms instant in which .git/index was not a regular file: ['the working tree for this turn is still being saved; try again in a moment']
+1789639209248 kernel stopped with code 130
+1789639209249 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789639209306 bugs: new 8386d04c9a.md, seen 8386d04c9a.md, seen 8386d04c9a.md, new 258fab2a92.md, new 9924907206.md, new b96def4492.md

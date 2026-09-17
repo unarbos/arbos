@@ -1,0 +1,9 @@
+{
+  "name": "rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it",
+  "doc": "The instant rw-10's churn rarely lands on, made certain: as each turn's checkpoint record appears, .git/index\n        is swapped for a FIFO for 120 ms and put back \u2014 exactly what another git's index.lock \u2192 index rename looks like\n        to a copy, held open long enough to be sure. The checkpoint's index copy must ride it out (#419 at 5340c0d2\n        retries for a quarter second) and every turn must end with a work tree.",
+  "tags": [
+    "landing",
+    "rewind",
+    "concurrency"
+  ]
+}

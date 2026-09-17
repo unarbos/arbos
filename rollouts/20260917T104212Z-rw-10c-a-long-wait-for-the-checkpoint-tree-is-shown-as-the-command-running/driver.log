@@ -1,0 +1,5 @@
+1789641732037 kernel started pid 1503592
+1789641739002 BREAK wait-not-named-first: the status steps shown were ['Running echo first > f1.txt']: no `Saving a checkpoint…` step before the command's own
+1789641739002 BREAK wait-charged-to-the-tool: the window showed ['Running echo first > f1.txt'] and a running tool card for the whole wait, and the transcript's tool record says `write f1` ran for 6.3s (started 0.0s after the message): the checkpoint wait is shown and recorded as the command's own running time — a person sees `echo` hang for six seconds, and history and any duration view blame it
+1789641739005 kernel stopped with code 0
+1789641739052 bugs: new 21aa5552b7.md, seen e4271924c6.md

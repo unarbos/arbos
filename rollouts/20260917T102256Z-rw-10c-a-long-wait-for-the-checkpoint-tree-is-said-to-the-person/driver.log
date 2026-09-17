@@ -1,0 +1,4 @@
+1789640576469 kernel started pid 1485698
+1789640577422 BREAK probe-did-not-wait: the kernel's stderr does not say it waited; the delay knob did not hold the tool, this run proves nothing
+1789640577426 kernel stopped with code 0
+1789640577469 bugs: seen 256dca13ca.md

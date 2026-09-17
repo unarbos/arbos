@@ -1,0 +1,9 @@
+{
+  "name": "rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person",
+  "doc": "#419 at 2daa555d: a tool that writes waits for the turn's checkpoint tree. On a large repository that wait is\n        seconds (here: ARBOS_TEST_TREE_DELAY_MS=6000, the kernel's own knob for a slow `add -A`). New behaviour, so the\n        question is what a person sees during it: a turn that has said nothing and shows no tool for six seconds is the\n        silent stall of qal-j05/st-01 unless the wait is named on a surface the window draws.",
+  "tags": [
+    "landing",
+    "rewind",
+    "silence"
+  ]
+}

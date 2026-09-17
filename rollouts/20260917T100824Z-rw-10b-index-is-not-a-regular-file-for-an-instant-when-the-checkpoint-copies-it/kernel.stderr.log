@@ -1,0 +1,9 @@
+No API key for OpenRouter. Run `arbos-kernel setup`, or set OPENROUTER_API_KEY, or put api_key in /tmp/arbos-qa-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it-kpvip9cl/xdg/arbos/config.toml. Keys: https://openrouter.ai/settings/keys
+Walking /tmp/arbos-qa-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it-kpvip9cl/place...
+Found 29 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Skipped 6 additional binary files (detected by content)
+Writing index (5092 trigrams, 23 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-rw-10b-index-is-not-a-regular-file-for-an-instant-when-the-checkpoint-copies-it-kpvip9cl/home/.cache/arbos/tgrep/1ceb478e4d30142e
+checkpoint root:2: working tree not saved: copy the index: the source path is neither a regular file nor a symlink to a regular file
+checkpoint root:14: working tree not saved: copy the index: the source path is neither a regular file nor a symlink to a regular file

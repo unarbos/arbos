@@ -1,0 +1,39 @@
+{
+  "scenario": "rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person",
+  "doc": "#419 at 2daa555d: a tool that writes waits for the turn's checkpoint tree. On a large repository that wait is\n        seconds (here: ARBOS_TEST_TREE_DELAY_MS=6000, the kernel's own knob for a slow `add -A`). New behaviour, so the\n        question is what a person sees during it: a turn that has said nothing and shows no tool for six seconds is the\n        silent stall of qal-j05/st-01 unless the wait is named on a surface the window draws.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "probe-did-not-wait",
+      "detail": "the first tool ran after 0.1s; the delay knob did not hold it, this run proves nothing",
+      "where": ""
+    },
+    {
+      "rule": "silent-wait",
+      "detail": "0.1s between the person's message and the first tool with nothing on any client-visible surface naming the wait (frames seen: {'plan': 2, 'turn': 1, 'status': 1, 'event/tool': 1}; status: ['']; notices: []) \u2014 the silent stall shape (st-01), with correct data underneath",
+      "where": "arbos-engine turn.rs \u2014 the checkpoint wait (#419 at 2daa555d) is logged to stderr only"
+    }
+  ],
+  "notes": {
+    "seconds_to_first_tool": 0.1,
+    "frames_during_wait": {
+      "plan": 2,
+      "turn": 1,
+      "status": 1,
+      "event/tool": 1
+    },
+    "frames_naming_the_wait": [],
+    "notices": [],
+    "status_texts": [
+      ""
+    ],
+    "kernel_stderr_waited": "root: bash waited 6.0s for the turn's checkpoint tree"
+  },
+  "duration_s": 6.8,
+  "place": "/tmp/arbos-qa-rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person-jaj_yso3/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernel-pr419d",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T102133Z-rw-10c-a-long-wait-for-the-checkpoint-tree-is-said-to-the-person",
+  "branch": "main"
+}
