@@ -7,9 +7,9 @@ Written by the QA loop, which keeps an off-store mirror of this store and restor
 
 ## Summary
 
-Five times in seventeen hours, a set of files and directories vanished from this store while the rest of it stayed intact and writable. The set is not random: it is the same set each time, growing between episodes (every file lost in one episode is lost again in the next, plus more), and inside one directory it separates files by name pattern while leaving files written the same way by the same client untouched. Three independent clients saw the same picture at the same time, stable across repeated reads for minutes. We can restore from our mirror; we cannot see why the files go. The server-side journal for this store id over the windows below should show it.
+Six times in twenty hours, a set of files and directories vanished from this store while the rest of it stayed intact and writable. The set is not random: it is the same set each time, growing between episodes (every file lost in one episode is lost again in the next, plus more), and inside one directory it separates files by name pattern while leaving files written the same way by the same client untouched. Three independent clients saw the same picture at the same time, stable across repeated reads for minutes. We can restore from our mirror; we cannot see why the files go. The server-side journal for this store id over the windows below should show it.
 
-## The five episodes
+## The six episodes
 
 | # | Window (UTC) | How it was found | What was gone | Certainty |
 |---|---|---|---|---|
@@ -18,6 +18,10 @@ Five times in seventeen hours, a set of files and directories vanished from this
 | 3 | 09-16 **14:20:32 → 14:23:24** | Mirror pass at 14:20:32 saw the store whole (22 docs, 377 files under `internal/`); the next pass at 14:23:24 found the mirror script itself absent; a full listing at 14:23:51–14:25:11 found 155 files missing; store root again `internal/ media/ notes.md`, `internal/` at 15 entries | 155 files: all 21 `docs/`, 99 of 184 `internal/qa/bugs/`, all `internal/parity/`, all `internal/features-inbox/`, 8 top-level `internal/*`, 4 `internal/qa/*` | Uncertain — one read per file; another client in the same minutes saw *unstable* counts (1092, 1122, 1092 files under `internal/` seconds apart), i.e. a partial view |
 | 4 | 09-16 **22:37 → 22:52:16** | Mirror pass at 22:15:28 pushed a whole store (`0321076e`: 22 docs, 434 files under `internal/`); the pass at ~22:30–22:37 found no change; at 22:52:16 the mirror script was absent. Three clients on three machines listed the store independently within the same minutes and saw the same picture; this client read it six times over 22:54:21–22:56:31 with identical results | 191 files: all 22 `docs/`, all 23 `internal/features-inbox/`, all 15 `internal/parity/`, 11 top-level `internal/*`, 115 of 216 `internal/qa/bugs/`, 4 `internal/qa/*`, 1 `internal/mobile/*` | Loss |
 | 5 | 09-17 **00:37:11 → 00:45:35** | Mirror pass at 00:37:11 pushed a whole store (`dff30aa7`); a write into `docs/` at 00:45:35 failed with "no such directory"; six reads over 00:45:41–00:47:44 identical | 215 files: all 22 `docs/`, 21 `internal/features-inbox/`, all 15 `internal/parity/`, 148 of 218 `internal/qa/bugs/`, 4 `internal/qa/*`, 4 top-level `internal/*`, 1 `internal/mobile/*` | Loss |
+
+| 6 | 09-17 **03:23:40 → 03:27:29** | Mirror pass at 03:23:40 pushed a whole store (`7d283951`, 24 docs). A write into `docs/` failed at 03:26:4x. Reads seconds apart then caught the deletion **in progress**: 03:26:58 `internal/mirror-docs.sh` present, `features-inbox/` 3 files, `parity/` 15; 03:27:16 the script gone and `features-inbox/` 0; 03:27:29 `parity/` 1; stable from 03:28:57 (`parity/` 0, 133 of 222 bug files) | 174 files: 23 `docs/`, 31 `internal/features-inbox/`, 15 `internal/parity/`, 89 hex-named `internal/qa/bugs/`, 11 top-level `internal/*`, 4 `internal/qa/*`, 1 `internal/mobile/*` | Loss — the counts fell monotonically over about a minute and did not return |
+
+The sixth episode adds one observation the others could not: the removal is not instantaneous. Over roughly 30–60 seconds, files disappeared from one listing to the next in the same order of directories each time, and none came back.
 
 Between episodes, and throughout each one, the store answered reads and writes on the surviving paths normally: `notes.md` was written by another client at 22:54:31 during episode 4 and read back correctly.
 
@@ -72,11 +76,11 @@ On 09-16 at ~14:20 one client observed *unstable* counts seconds apart (1092, 11
 
 ## What we cannot see
 
-The server-side journal for this store id: which objects were deleted, evicted, unlinked or hidden, by what actor or process, at 09-16 07:43–09:01, ~12:20, 14:20–14:23, 22:37–22:52, and 09-17 00:37–00:45 UTC. Our client sees only the result. Two observations that may narrow the search on that side: directory mtimes read through the mount are constant (`2026-09-12 22:04:36`, the store's creation) regardless of content changes; and `chmod` on a file in the mount is refused (`Operation not permitted`).
+The server-side journal for this store id: which objects were deleted, evicted, unlinked or hidden, by what actor or process, at 09-16 07:43–09:01, ~12:20, 14:20–14:23, 22:37–22:52, 09-17 00:37–00:45 and 03:23–03:27 UTC. Our client sees only the result. Two observations that may narrow the search on that side: directory mtimes read through the mount are constant (`2026-09-12 22:04:36`, the store's creation) regardless of content changes; and `chmod` on a file in the mount is refused (`Operation not permitted`).
 
 ## Appendix — where the primary records are
 
 - QA worker's episode record (all five, with the exact missing lists and restore steps): `internal/store-docs-loss-2026-09-16-qa-record.md` in this store
 - Recovery worker's account of episode #1: `internal/store-docs-loss-2026-09-16.md`
 - Mirror design, boundary and procedure: `internal/store-docs-mirror.md`
-- Per-pass loss list: `internal/qa/store-mirror-losses.jsonl` (QA loop); mirror branch `store-docs` in the `unarbos/arbos` repository — commits `bdb3578f` (11:00), `8764ff48` (14:20), `0321076e` (22:15), `dff30aa7` (00:37) are the last-good snapshots before episodes #2–#5
+- Per-pass loss list: `internal/qa/store-mirror-losses.jsonl` (QA loop); mirror branch `store-docs` in the `unarbos/arbos` repository — commits `bdb3578f` (11:00), `8764ff48` (14:20), `0321076e` (22:15), `dff30aa7` (00:37), `7d283951` (03:23) are the last-good snapshots before episodes #2–#6
