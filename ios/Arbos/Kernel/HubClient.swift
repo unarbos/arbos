@@ -38,18 +38,69 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         private enum CodingKeys: String, CodingKey { case name, place, live, identity, kind }
     }
 
+    /// One process registered from this machine — the worker daemon, or a
+    /// kernel serving one project — with the build it reported for itself.
+    struct Build: Decodable, Equatable {
+        /// `worker` for the daemon, `kernel` for a project's kernel.
+        var role: String
+        /// The project a kernel serves; empty for the worker.
+        var project: String
+        var version: String
+        var gitSha: String
+        var builtAt: String
+        /// The file this process started from is gone. It keeps serving and
+        /// refuses every spawn, which is the shape of JB-6.
+        var binaryGone: Bool
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
+            project = try c.decodeIfPresent(String.self, forKey: .project) ?? ""
+            version = try c.decodeIfPresent(String.self, forKey: .version) ?? ""
+            gitSha = try c.decodeIfPresent(String.self, forKey: .gitSha) ?? ""
+            builtAt = try c.decodeIfPresent(String.self, forKey: .builtAt) ?? ""
+            binaryGone = try c.decodeIfPresent(Bool.self, forKey: .binaryGone) ?? false
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case role, project, version
+            case gitSha = "git_sha"
+            case builtAt = "built_at"
+            case binaryGone = "binary_gone"
+        }
+    }
+
     var name: String
     var host: String
     var worker: Bool
     var projects: [Project]
+    /// Every process on this machine, each with its own build.
+    ///
+    /// Deliberately not the roster's machine-level `git_sha`: the hub fills
+    /// that only when every process agrees and leaves it empty when they
+    /// differ, so empty means "they differ, read these" and not "unknown".
+    /// A phone that showed the top-level field would go blank on exactly the
+    /// machines whose build is worth knowing.
+    var builds: [Build]
+    /// Some process here runs a deleted file. `builds` says which.
+    var binaryGone: Bool
 
     var id: String { name }
 
-    init(name: String, host: String = "", worker: Bool = false, projects: [Project] = []) {
+    /// The build of the kernel serving `project` — the process a person in
+    /// that project is actually talking to, which is the only build that
+    /// answers "what am I using?" on a machine running several.
+    func build(forProject project: String) -> Build? {
+        builds.first { $0.role == "kernel" && $0.project == project }
+    }
+
+    init(name: String, host: String = "", worker: Bool = false, projects: [Project] = [], builds: [Build] = [], binaryGone: Bool = false) {
         self.name = name
         self.host = host
         self.worker = worker
         self.projects = projects
+        self.builds = builds
+        self.binaryGone = binaryGone
     }
 
     init(from decoder: Decoder) throws {
@@ -58,9 +109,14 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         host = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
         worker = try c.decodeIfPresent(Bool.self, forKey: .worker) ?? false
         projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? []
+        builds = try c.decodeIfPresent([Build].self, forKey: .builds) ?? []
+        binaryGone = try c.decodeIfPresent(Bool.self, forKey: .binaryGone) ?? false
     }
 
-    private enum CodingKeys: String, CodingKey { case name, host, worker, projects }
+    private enum CodingKeys: String, CodingKey {
+        case name, host, worker, projects, builds
+        case binaryGone = "binary_gone"
+    }
 }
 
 /// Read-only view of the mesh hub (`crates/arbos-hub`): the roster from

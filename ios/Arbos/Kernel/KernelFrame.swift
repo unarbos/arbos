@@ -112,6 +112,30 @@ struct KernelToolRecord: Equatable {
     }
 }
 
+/// Which build a kernel is running, as that kernel reported it in `hello`.
+///
+/// Read this, not the hub roster's machine-level `git_sha`: a machine runs
+/// several processes (a worker daemon, a kernel per project) and they can be
+/// on different builds. `binaryGone` is the file the process started from
+/// having been deleted under it — it keeps serving and refuses every spawn,
+/// which is the state that broke remote workers for hours while every other
+/// signal said the machine was healthy.
+struct KernelBuild: Equatable {
+    var version: String = ""
+    var gitSha: String = ""
+    var builtAt: String = ""
+    var binaryGone: Bool = false
+
+    /// `0.2.0 · b6e70980b60a`, for a settings row. Empty when the kernel
+    /// told us neither, which older kernels do not.
+    var label: String {
+        [version, gitSha.isEmpty ? nil : String(gitSha.prefix(12))]
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
+}
+
 /// The kernel → client frames the phone cares about. The wire type is
 /// `Frame` in `crates/arbos-core/src/wire.rs`: one JSON object per line,
 /// tagged by `type` in snake_case.
@@ -119,7 +143,9 @@ enum KernelFrame {
     /// First frame from a 0.2 kernel over WebSocket.
     /// `store` is the kernel's own address on its hub
     /// (`arbos://<machine>/<project>/`), absent when it is on no hub.
-    case hello(focus: String, kernel: String, identity: ProjectIdentity?, store: String?)
+    /// `build` is what this kernel says about itself — the process on the
+    /// other end of this socket, not a roster row about its machine.
+    case hello(focus: String, kernel: String, identity: ProjectIdentity?, store: String?, build: KernelBuild)
     /// The agent tree and which agent the desktop last focused.
     case snapshot(focus: String, agents: [KernelAgent])
     case tree([KernelAgent])
@@ -213,7 +239,13 @@ enum KernelFrame {
                 focus: object["focus"] as? String ?? "root",
                 kernel: object["kernel"] as? String ?? "",
                 identity: identity,
-                store: object["store"] as? String
+                store: object["store"] as? String,
+                build: KernelBuild(
+                    version: object["kernel"] as? String ?? "",
+                    gitSha: object["git_sha"] as? String ?? "",
+                    builtAt: object["built_at"] as? String ?? "",
+                    binaryGone: object["binary_gone"] as? Bool ?? false
+                )
             )
         case "replayed":
             self = .replayed(
