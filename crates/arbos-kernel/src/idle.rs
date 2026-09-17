@@ -103,7 +103,10 @@ pub fn verdict(hooks: &Arc<KernelHooks>, horizon_ms: i64) -> Verdict {
         return Verdict::Busy(format!("turns running: {}", running.join(", ")));
     }
     if crate::subs::busy() {
-        return Verdict::Busy("subscription runs in flight".into());
+        return Verdict::Busy(format!(
+            "subscription runs in flight: {}",
+            crate::subs::in_flight_lines().join(", ")
+        ));
     }
     let now = arbos_core::now_ms();
     for agent in list_agents(&hooks.place).unwrap_or_default() {
