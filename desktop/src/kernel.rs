@@ -2901,12 +2901,19 @@ fn open_remote_tunnel_steps(
                     .unwrap_or_else(|| "this build".into()),
             }),
         }
-        if probe.running.is_some() {
-            step(Progress::Stopping);
-            ssh_stop_kernel(&target, path)?;
-            probe.running = None;
+        // Swap before stop. Nothing is stopped until the new binary is
+        // already at the path, because a supervisor that relaunches into
+        // the gap does it from the path — and a stop-then-swap ordering
+        // hands it the build we are replacing. That process is stale from
+        // birth and pins the place's lock against its own supervisor.
+        //
+        // A machine with no kernel yet has nothing to swap and nothing to
+        // restart, so it takes the plain install.
+        if probe.has_bin {
+            ssh_bootstrap_kernel(&target, &probe.arch, path, step)?;
+        } else {
+            ssh_install_kernel(&target, &probe.arch, &target.bin, false, step)?;
         }
-        ssh_install_kernel(&target, &probe.arch, probe.has_bin, step)?;
         probe = ssh_probe(&target, path)?;
         if !probe.has_bin {
             return Err(anyhow!(
@@ -3051,18 +3058,24 @@ fn local_kernel_version() -> String {
         .clone()
 }
 
-/// Put `arbos-kernel` on the host at the target's path. Same machine
-/// type: copy this window's binary (also over a stale one). Different
-/// type: build from source only when the machine allows it in
-/// `machines.toml` (`build = true`); otherwise say where a binary must go.
+/// Put `arbos-kernel` on the host at `dest`. Same machine type: copy this
+/// window's binary (also over a stale one). Different type: build from
+/// source only when the machine allows it in `machines.toml`
+/// (`build = true`); otherwise say where a binary must go.
+///
+/// `dest` is the installation's own path only when the machine has no
+/// kernel yet. When it has one, `dest` is a staging path and the swap is
+/// [`ssh_bootstrap_kernel`]'s, so that nothing is stopped before the new
+/// binary is in place.
 fn ssh_install_kernel(
     target: &RemoteTarget,
     remote_arch: &str,
+    dest: &str,
     replacing: bool,
     step: &dyn Fn(arbos_core::remote_kernel::Progress),
 ) -> Result<()> {
     let host = target.ssh.as_str();
-    let bin_dir = parent_of(&target.bin);
+    let bin_dir = parent_of(dest);
     let mkdir = ssh_run(
         host,
         &format!(
@@ -3079,22 +3092,18 @@ fn ssh_install_kernel(
         if bin.is_file() {
             // Into a temp name first, then moved: a kernel that is being
             // executed must not be overwritten in place.
-            let tmp = format!("{}.new", target.bin);
+            let tmp = format!("{dest}.new");
             ssh_put(host, &bin, &tmp)?;
             let swap = ssh_run(
                 host,
-                &format!(
-                    r#"chmod +x "{tmp}" && mv -f "{tmp}" "{bin}""#,
-                    tmp = tmp,
-                    bin = target.bin
-                ),
+                &format!(r#"chmod +x "{tmp}" && mv -f "{tmp}" "{dest}""#),
             )?;
             if swap.status == 0 {
                 return Ok(());
             }
             return Err(anyhow!(
                 "could not place arbos-kernel at {} on {}: {}",
-                target.bin,
+                dest,
                 target.name,
                 swap.problem()
             ));
@@ -3109,7 +3118,7 @@ fn ssh_install_kernel(
         let sha = mine.as_ref().map(|m| m.sha.clone()).unwrap_or_default();
         if !version.is_empty() {
             let script = arbos_core::remote_kernel::install_script(
-                &target.bin,
+                dest,
                 &version,
                 if sha.is_empty() { "main" } else { &sha },
                 remote_arch,
@@ -3134,7 +3143,7 @@ fn ssh_install_kernel(
                     steps.last().cloned().unwrap_or_else(|| out.problem()),
                     there = remote_arch,
                     name = target.name,
-                    bin = target.bin,
+                    bin = dest,
                 ));
             }
             // Fall through: the machine allows a build; the old tarred
@@ -3178,11 +3187,12 @@ fi
 cd "$HOME/.cache/arbos/src"
 cargo build --release -p arbos-kernel
 mkdir -p "{bin_dir}"
-cp target/release/arbos-kernel "{bin}"
+cp target/release/arbos-kernel "{bin}.new"
+mv -f "{bin}.new" "{bin}"
 test -x "{bin}"
 "#,
         bin_dir = bin_dir,
-        bin = target.bin
+        bin = dest
     );
     let out = ssh_run(host, &script)?;
     if out.status != 0 {
@@ -3191,10 +3201,119 @@ test -x "{bin}"
     Ok(())
 }
 
+/// Where a new binary waits on the remote until it is swapped in. Under
+/// the cache rather than beside the installation, so a half-finished
+/// download is never one `mv` away from being the kernel.
+const REMOTE_INCOMING: &str = "$HOME/.cache/arbos/arbos-kernel.incoming";
+
+/// How long a kernel gets to end its turn after TERM, and how long the
+/// pass then watches for a supervisor to put a replacement back.
+///
+/// The stop window is the existing `stop_script`'s 20 s. The watch window
+/// is 10 s, which is the horizon the features agent asked for: long
+/// enough for a `while true; do …; sleep 2; done` loop to come round,
+/// short enough that a place with an hourly timer is not held open.
+const REMOTE_STOP_SECS: u32 = 20;
+const REMOTE_WATCH_SECS: u32 = 10;
+
+/// Replace the kernel on a machine that already has one, and bring every
+/// process that was running it onto the new build.
+///
+/// The new binary is staged first and swapped second, and nothing is
+/// stopped until the swap has landed — see
+/// [`arbos_core::remote_kernel::bootstrap_script`] for why that ordering
+/// is not interchangeable with the obvious one.
+///
+/// This replaces the older "stop the kernel for this place, then install"
+/// path. That path had two faults this one does not: it stopped before it
+/// swapped, and it only ever knew about the kernel for the place being
+/// opened, so the other processes sharing that binary stayed on a dead
+/// image. On 2026-09-17 that left three processes on two machines running
+/// builds nobody could see, one of them for five and a half hours.
+fn ssh_bootstrap_kernel(
+    target: &RemoteTarget,
+    remote_arch: &str,
+    path: &Path,
+    step: &dyn Fn(arbos_core::remote_kernel::Progress),
+) -> Result<()> {
+    use arbos_core::remote_kernel::{Outcome, bootstrap_report, bootstrap_script};
+    let host = target.ssh.as_str();
+    ssh_install_kernel(target, remote_arch, REMOTE_INCOMING, true, step)?;
+
+    step(arbos_core::remote_kernel::Progress::Stopping);
+    // Real paths, not `$HOME/…`: the pass matches against
+    // `/proc/<pid>/exe`, which is always absolute.
+    let bin = remote_home_path(host, &target.bin)?;
+    let incoming = remote_home_path(host, REMOTE_INCOMING)?;
+    let script = bootstrap_script(&bin, &incoming, REMOTE_STOP_SECS, REMOTE_WATCH_SECS);
+    // The pass writes its report to a file and we read it back, rather
+    // than letting it stream through this session. Anything it relaunches
+    // that inherited our stdout would hold this connection open for as
+    // long as the kernel runs, turning a finished update into a hang.
+    let out = ssh_run(
+        host,
+        &format!(
+            r#"out="$HOME/.cache/arbos/bootstrap.out"; mkdir -p "$HOME/.cache/arbos"
+{{ {script}
+}} > "$out" 2>&1 </dev/null
+rc=$?
+cat "$out"
+exit $rc"#
+        ),
+    )?;
+    let report = bootstrap_report(&out.stdout);
+    for line in &report.steps {
+        eprintln!("remote {}: bootstrap: {line}", target.name);
+    }
+    if out.status != 0 || !report.errors.is_empty() {
+        return Err(anyhow!(
+            "could not bring {} on {} onto this build: {}",
+            target.bin,
+            target.name,
+            report
+                .errors
+                .first()
+                .cloned()
+                .unwrap_or_else(|| out.problem())
+        ));
+    }
+    step(arbos_core::remote_kernel::Progress::Restarting {
+        running: report.ended.len(),
+    });
+
+    // A refusal is reported as a refusal. The place being opened is the
+    // one the person is waiting on, so that one is an error; another
+    // place left on its old kernel is said out loud and does not stop
+    // this window from connecting, because refusing to open a project
+    // over somebody else's stuck kernel helps nobody.
+    let here = path.to_string_lossy();
+    for stuck in report.unhappy() {
+        let what = match stuck.outcome {
+            Outcome::RefusedStillRunning => "would not stop, so it was left as it was",
+            Outcome::Failed => "stopped but would not start again",
+            Outcome::Supervised | Outcome::Relaunched | Outcome::Ended => continue,
+        };
+        let place = stuck.place.as_deref().unwrap_or("a kernel with no place");
+        if place == here {
+            return Err(anyhow!(
+                "the kernel serving {place} on {} {what} (pid {})",
+                target.name,
+                stuck.pid
+            ));
+        }
+        eprintln!(
+            "remote {}: bootstrap: {place} {what} (pid {}); it is still on the old build",
+            target.name, stuck.pid
+        );
+    }
+    Ok(())
+}
+
 /// Stop the kernel serving `path` on the host so a newer binary can take
 /// its place: TERM to that one process (its jobs die with it through
 /// their leash), then wait for it to leave. An error names the pid when
 /// it would not.
+#[allow(dead_code)]
 fn ssh_stop_kernel(target: &RemoteTarget, path: &Path) -> Result<()> {
     let host = target.ssh.as_str();
     let dir = shell_path(&path.to_string_lossy());
@@ -3295,22 +3414,32 @@ fn kernel_workspace_toml(root: &Path) -> Result<String> {
     Ok(format!("{}\n", text[..cut].trim_end()))
 }
 
+/// A remote path with a leading `$HOME` or `~` turned into the directory
+/// it names, by asking the host.
+///
+/// Two callers need this for different reasons. `scp` over SFTP takes the
+/// path as it is, with no shell there to expand it. And the bootstrap
+/// pass compares paths against `/proc/<pid>/exe`, which is always a real
+/// absolute path — a literal `$HOME/…` would match nothing, silently, and
+/// the pass would report that it found no processes rather than that it
+/// could not look.
+fn remote_home_path(host: &str, remote: &str) -> Result<String> {
+    if !remote.starts_with("$HOME") && !remote.starts_with('~') {
+        return Ok(remote.to_string());
+    }
+    let home = ssh_run(host, r#"printf %s "$HOME""#)?;
+    if home.status != 0 || home.stdout.trim().is_empty() {
+        return Err(anyhow!(
+            "could not read $HOME on {host}: {}",
+            home.problem()
+        ));
+    }
+    let rest = remote.trim_start_matches("$HOME").trim_start_matches('~');
+    Ok(format!("{}{}", home.stdout.trim(), rest))
+}
+
 fn ssh_put(host: &str, local: &Path, remote: &str) -> Result<()> {
-    // scp over SFTP (OpenSSH 9+) takes the remote path as it is: no shell
-    // there to turn `$HOME` or `~` into a directory. Ask the host once.
-    let remote = if remote.starts_with("$HOME") || remote.starts_with('~') {
-        let home = ssh_run(host, r#"printf %s "$HOME""#)?;
-        if home.status != 0 || home.stdout.trim().is_empty() {
-            return Err(anyhow!(
-                "could not read $HOME on {host}: {}",
-                home.problem()
-            ));
-        }
-        let rest = remote.trim_start_matches("$HOME").trim_start_matches('~');
-        format!("{}{}", home.stdout.trim(), rest)
-    } else {
-        remote.to_string()
-    };
+    let remote = remote_home_path(host, remote)?;
     let dest = format!("{host}:{remote}");
     // Its own connection, not the probe's mux: with ControlPersist=no the
     // probe's master is closing as scp starts, and scp through that socket
