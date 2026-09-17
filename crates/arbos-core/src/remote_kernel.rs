@@ -656,7 +656,16 @@ for p in $(cat "$work/pids"); do
   arg0=$(tr '\0' '\n' < "$work/$p.argv" | head -n1)
   tail -c +$(( ${#arg0} + 2 )) "$work/$p.argv" > "$work/$p.rest"
   cwd=$(cat "$work/$p.cwd" 2>/dev/null); [ -d "$cwd" ] || cwd=$place
-  if command -v setsid >/dev/null 2>&1; then launch="setsid"; else launch="nohup"; fi
+  # setsid without --fork execs in place, so xargs stays as the kernel's
+  # parent for as long as it runs: an idle process per relaunch, and a
+  # process tree in which an unsupervised kernel appears to have
+  # something watching it -- the exact reading that made ppid useless for
+  # telling the two apart. --fork lets setsid return, xargs finish, and
+  # the kernel reparent to init, which is what "nothing restarts this"
+  # should look like from outside.
+  if ! command -v setsid >/dev/null 2>&1; then launch="nohup"
+  elif setsid --help 2>&1 | grep -q -- --fork; then launch="setsid -f"
+  else launch="setsid"; fi
   ( cd "$cwd" 2>/dev/null || cd / ; exec </dev/null >>"$log" 2>&1; xargs -0 -a "$work/$p.rest" $launch "$target" ) &
   back=$(wait_for_new) || back=""
   if [ -n "$back" ]; then
@@ -888,6 +897,18 @@ mod tests {
             !s.contains("window * 10)") && !s.contains("grace * 10)"),
             "counting turns makes the horizon mean different things on different machines: {s}"
         );
+    }
+
+    /// Seen on the target: plain `setsid` execs in place, so the `xargs`
+    /// that ran it stayed as the relaunched kernel's parent for the
+    /// kernel's whole life. Harmless in itself, but it gives an
+    /// unsupervised kernel a parent that looks like a supervisor, which
+    /// is the reading this whole pass refuses to rely on.
+    #[test]
+    fn a_relaunched_kernel_is_left_with_no_parent_pretending_to_watch_it() {
+        let s = bootstrap_script("/home/u/.local/bin/arbos-kernel", "/tmp/incoming", 20, 10);
+        assert!(s.contains(r#"launch="setsid -f""#), "{s}");
+        assert!(s.contains("--fork"), "{s}");
     }
 
     #[test]
