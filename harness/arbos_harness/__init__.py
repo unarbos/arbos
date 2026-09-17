@@ -66,7 +66,11 @@ class ArbosHarnessConfig(HarnessConfig):
     allowlist: list[str] = Field(default_factory=list)
     """Tools the agent may use. Empty = the program's headless default."""
     instructions: str = ""
-    """Standing instructions shown in every prompt. Empty = the program's default."""
+    """Instructions added under the program's standing headless rules (never ask, do not
+    commit or branch, no network, run the tests). Empty = the rules alone."""
+    instructions_replace: bool = False
+    """Make `instructions` replace the standing headless rules instead of adding to them.
+    The run says on stderr which rules it displaces; you restate what you still want."""
     repro_required: int = Field(1, ge=0)
     """Failing reproductions the first edit needs (`ARBOS_REPRO_REQUIRED`): 0 = no gate,
     1 = one, 2 = the reporter's example plus a second input the agent derives."""
@@ -154,6 +158,12 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
             )
         if self.config.instructions:
             env["ARBOS_INSTRUCTIONS"] = self.config.instructions
+            if self.config.instructions_replace:
+                env["ARBOS_INSTRUCTIONS_REPLACE"] = "1"
+        elif self.config.instructions_replace:
+            raise ValueError(
+                "arbos: instructions_replace without instructions would leave the agent no rules"
+            )
         return await runtime.run_program([PROGRAM_BIN, prompt], env)
 
     async def result(self, runtime: Runtime) -> dict:
