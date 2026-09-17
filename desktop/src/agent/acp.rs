@@ -231,6 +231,9 @@ pub enum Event {
         kind: String,
         cwd: Option<String>,
         url: Option<String>,
+        /// Who asked for it: `user`, `agent`, or empty from a kernel that
+        /// predates the field (unknown — never read as `user`).
+        by: String,
     },
     /// The kernel closed one: the shell exited, the job ended, the page
     /// was dropped.
@@ -680,6 +683,14 @@ impl Session {
         });
     }
 
+    /// Ask for a shell of this person's own: their `$SHELL`, interactive, in
+    /// `cwd`. The kernel answers with a `board` frame carrying `by: user`, so
+    /// the row arrives already knowing whose it is and the drawer opens for it
+    /// (#461).
+    pub fn shell(&self, cwd: Option<String>) {
+        let _ = self.send_frame(&Frame::Shell { owner: None, cwd });
+    }
+
     /// Ask the kernel what it holds — its jobs, shells and pages, with their
     /// states. Sent when a connection comes back, because the kernel that
     /// answers may not be the one that opened those rows: a kernel that died
@@ -924,6 +935,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             cwd,
             title,
             url,
+            by,
         } if owner == agent && matches!(panel.as_str(), "terminal" | "browser" | "process") => {
             let title = title.unwrap_or_default();
             terminal_ids
@@ -941,6 +953,7 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                             kind: panel.clone(),
                             cwd: cwd.clone(),
                             url: url.clone(),
+                            by: by.clone(),
                         }
                     }
                 })

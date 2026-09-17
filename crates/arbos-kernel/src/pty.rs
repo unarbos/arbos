@@ -63,15 +63,23 @@ impl PtyHub {
     }
 
     /// Start a shell the Mac pane can attach to (`PtyIn` agent `root`).
-    /// `owner` is the agent that asked; it gets the close when the shell ends.
-    pub fn spawn_shell(&self, page: &str, cwd: &std::path::Path, owner: &str) -> Result<u32> {
+    /// `owner` is the agent the row docks under; it gets the close when the
+    /// shell ends. `by` is who asked for it — `user` or `agent` — and rides
+    /// on that close, so the window can pair it with the open.
+    pub fn spawn_shell(
+        &self,
+        page: &str,
+        cwd: &std::path::Path,
+        owner: &str,
+        by: &str,
+    ) -> Result<u32> {
         let frames = self
             .out
             .lock()
             .unwrap()
             .clone()
             .ok_or_else(|| anyhow!("pty hub not bound"))?;
-        self.open("root", page, cwd, frames, Some(owner))
+        self.open("root", page, cwd, frames, Some((owner, by)))
     }
 
     pub fn open(
@@ -80,7 +88,7 @@ impl PtyHub {
         page: &str,
         cwd: &std::path::Path,
         frames: mpsc::UnboundedSender<Frame>,
-        owner: Option<&str>,
+        owner: Option<(&str, &str)>,
     ) -> Result<u32> {
         let pair = NativePtySystem::default().openpty(PtySize {
             rows: 32,
@@ -109,15 +117,19 @@ impl PtyHub {
             PtyPage {
                 writer: Mutex::new(writer),
                 pid,
-                owner: owner.unwrap_or_default().to_string(),
-                by: String::new(),
+                // #461 carries who asked beside the owner; #468 keeps both on
+                // the page so `surfaces` can report them. The tuple is
+                // (owner, by), and an absent one is a page with no owner
+                // recorded rather than a page owned by nobody in particular.
+                owner: owner.map(|(o, _)| o.to_string()).unwrap_or_default(),
+                by: owner.map(|(_, by)| by.to_string()).unwrap_or_default(),
                 cwd: cwd.to_path_buf(),
                 started_ms: arbos_core::now_ms(),
             },
         );
         let agent = agent.to_string();
         let page = page.to_string();
-        let owner = owner.map(str::to_string);
+        let owner = owner.map(|(o, by)| (o.to_string(), by.to_string()));
         let pages = Arc::clone(&self.inner);
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
@@ -141,7 +153,7 @@ impl PtyHub {
             // EOF: the shell is gone. Forget the page so a later write
             // starts a fresh one, and tell the desktop to drop the row.
             pages.lock().unwrap().remove(&key);
-            if let Some(owner) = owner {
+            if let Some((owner, by)) = owner {
                 let _ = frames.send(Frame::Board {
                     owner,
                     action: "close".into(),
@@ -150,6 +162,7 @@ impl PtyHub {
                     cwd: None,
                     title: None,
                     url: None,
+                    by,
                 });
             }
         });

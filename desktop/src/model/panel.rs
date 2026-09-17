@@ -28,16 +28,48 @@ pub const SURFACE_WIDTH: f32 = 592.;
 pub const MIN_WIDTH: f32 = 377.;
 pub const MAX_WIDTH: f32 = 766.;
 
-/// Which side opened a surface. The window knows its own clicks; it cannot
-/// know whether a terminal the agent started was asked for in prose, so the
-/// two routes are named at the call rather than guessed at from the frame.
+/// Whether a document tab lets him type into the file.
+///
+/// **Jacob's ruling, 2026-09-17: his version wins and the agent is refused.**
+/// The window owns three of the four rules that follow from it — the file is
+/// always his to type in, nothing is reloaded under him, and his save is a
+/// compare-and-swap — but the fourth is the kernel's: while his editor holds
+/// unsaved edits, the agent's write to that path must be *refused*, and told
+/// so in its own turn. That frame does not exist yet (side-panel handover 6).
+///
+/// So this is `false`, and it is not a preference: a tab that took his
+/// keystrokes today could not keep them, and offering an edit we cannot defend
+/// is worse than offering a view. Turning it on means claiming the path and
+/// having the kernel refuse — not adding a text field.
+pub const DOCUMENTS_EDITABLE: bool = false;
+
+/// Which side opened a surface. The window knows its own clicks, and since
+/// [#461](https://github.com/unarbos/arbos/pull/461) a `board` frame says as
+/// well: `by: user` for a shell a client asked for or a `terminal` call the
+/// agent marked as the person's request, `by: agent` for the agent's own work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenedBy {
-    /// A click in the window, or `⌘T` and a card: the drawer opens and the
-    /// tab comes to the front.
+    /// A click in the window, `⌘T` and a card, or a frame that says `user`:
+    /// the drawer opens and the tab comes to the front.
     User,
-    /// A Board frame from the kernel: listed, and nothing moves.
+    /// The agent's own work: listed, and nothing moves.
     Agent,
+}
+
+impl OpenedBy {
+    /// What a `board` frame's `by` means here.
+    ///
+    /// Anything that is not plainly `user` is treated as the agent's. A kernel
+    /// from before that field sends nothing at all, and reading silence as
+    /// "the person asked for this" would let an old kernel throw the drawer
+    /// open over what he is typing — the guess this whole rule exists to
+    /// avoid. Unknown is not a third behaviour; it is the quiet one.
+    pub fn from_frame(by: &str) -> Self {
+        match by {
+            "user" => Self::User,
+            _ => Self::Agent,
+        }
+    }
 }
 
 /// What one tab holds.

@@ -337,8 +337,14 @@ pub fn settle_tree(agent_dir: &Path, cp: &Checkpoint, wait: std::time::Duration)
     let sidecar = tree_sidecar(agent_dir, cp.line);
     let deadline = std::time::Instant::now() + wait;
     loop {
+        // The sidecar is *this* record's when its `ts` is this record's:
+        // the fact that identifies it. Line and HEAD alone took a cut
+        // turn's sidecar for the new turn at the same line (qal-j20: HEAD
+        // had not moved all session, the common case) and restored the
+        // tree the person had rewound away, saying restored.
         if let Ok(text) = std::fs::read_to_string(&sidecar)
             && let Ok(filled) = serde_json::from_str::<Checkpoint>(&text)
+            && filled.ts == cp.ts
             && filled.head == cp.head
         {
             return filled;
@@ -1933,6 +1939,63 @@ mod tests {
             "{mark}"
         );
         assert_eq!(mark.lines().nth(2), Some("line:9"), "{mark}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// qal-j20 (QA's `fm-01`): a rewind cut turns whose sidecars stayed
+    /// in `checkpoints.d/`; a new turn at the same line, tree pending,
+    /// was settled from the cut turn's sidecar because line and HEAD
+    /// matched (HEAD had not moved all session), and a rewind restored
+    /// the tree the person had rewound away, saying restored. The
+    /// sidecar is this record's only when its `ts` is this record's.
+    #[test]
+    fn a_cut_turns_sidecar_at_the_same_line_is_not_taken_for_the_new_turn() {
+        let dir = identityless_repo("stale-sidecar");
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // The cut turn's tree, at line 20: it had f3.
+        std::fs::write(dir.join("f3.txt"), "bad turn's file\n").unwrap();
+        let old = snapshot_turn_record(&dir, &agent_dir, "root", 20)
+            .unwrap()
+            .unwrap();
+        snapshot_turn_tree(&dir, &agent_dir, "root", &old).unwrap();
+        let stale_sidecar = std::fs::read_to_string(tree_sidecar(&agent_dir, 20)).unwrap();
+        let stale: Checkpoint = serde_json::from_str(&stale_sidecar).unwrap();
+        assert!(stale.work.is_some());
+        // The rewind removed f3 and the record — and (before the fix) left
+        // the sidecar. Stage exactly that.
+        std::fs::remove_file(dir.join("f3.txt")).unwrap();
+        std::fs::write(agent_dir.join("checkpoints.jsonl"), "").unwrap();
+        std::fs::write(dir.join("g3.txt"), "new turn's file\n").unwrap();
+        // The new turn at the same line, its tree still pending.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let fresh = snapshot_turn_record(&dir, &agent_dir, "root", 20)
+            .unwrap()
+            .unwrap();
+        assert_ne!(fresh.ts, stale.ts);
+        assert_eq!(
+            fresh.head, stale.head,
+            "HEAD has not moved: the weak fact matches"
+        );
+        // A rewind arrives while the tree is pending: settle must not take
+        // the stale sidecar for it.
+        let settled = settle_tree(&agent_dir, &fresh, std::time::Duration::from_millis(300));
+        assert_eq!(
+            settled.work_error.as_deref(),
+            Some(TREE_PENDING),
+            "the cut turn's sidecar was taken for the new turn: {settled:?}"
+        );
+        assert!(settled.work.is_none());
+        // When the new turn's own tree lands, it settles to that one: g3, not f3.
+        snapshot_turn_tree(&dir, &agent_dir, "root", &fresh).unwrap();
+        let settled = settle_tree(&agent_dir, &fresh, std::time::Duration::from_millis(300));
+        let work = settled.work.expect("the new turn's tree");
+        assert_ne!(Some(work.as_str()), stale.work.as_deref());
+        let names = git_out(&dir, &["ls-tree", "--name-only", &work]).unwrap();
+        assert!(
+            names.contains("g3.txt") && !names.contains("f3.txt"),
+            "{names}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

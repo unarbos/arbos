@@ -226,11 +226,16 @@ fn truncate(
         },
     )?;
     // Checkpoints of the cut turns go too, the target's own included: the
-    // next turn starts on that line and writes a fresh one.
+    // next turn starts on that line and writes a fresh one — and their
+    // tree sidecars with them, or a later turn at the same line inherits
+    // a cut turn's tree (qal-j20).
     let mut text = String::new();
     for cp in cps.iter().filter(|cp| cp.line < keep_below) {
         text.push_str(&serde_json::to_string(cp)?);
         text.push('\n');
+    }
+    for cp in cps.iter().filter(|cp| cp.line >= keep_below) {
+        let _ = std::fs::remove_file(arbos_engine::git::tree_sidecar(&layout.dir, cp.line));
     }
     if !cps.is_empty() || layout.dir.join("checkpoints.jsonl").exists() {
         replace_file(&layout.dir.join("checkpoints.jsonl"), &text)?;
@@ -598,6 +603,71 @@ mod roll_tests {
         // A line of the old file no longer names anything here.
         assert!(resolve(&events, &cps, Target::Line(0)).is_err());
         assert!(resolve(&events, &cps, Target::Back(2)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// qal-j20's second fix: a rewind's cut takes the cut turns' tree
+    /// sidecars with their records, so no later turn at the same line
+    /// inherits a cut turn's tree.
+    #[test]
+    fn a_cut_removes_the_cut_turns_sidecars_and_keeps_the_kept_ones() {
+        let dir = std::env::temp_dir().join(format!("arbos-cut-sidecars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let place = Place::new(dir.clone());
+        let layout = Layout::new(&place, "root");
+        std::fs::create_dir_all(layout.dir.join("checkpoints.d")).unwrap();
+        std::fs::write(layout.agent_md(), "# root\n").unwrap();
+        let path = layout.transcript();
+        let mut cps = String::new();
+        for i in 0..3u64 {
+            let at = load_transcript(&path).unwrap().len() as u64;
+            cps.push_str(&format!(
+                "{{\"line\":{at},\"ts\":{i},\"head\":\"h{i}\",\"work\":null,\"clean\":true}}\n"
+            ));
+            std::fs::write(layout.dir.join(format!("checkpoints.d/{at}.json")), "{}").unwrap();
+            for kind in [
+                EventKind::Wake {
+                    wake: "user".into(),
+                    text: Some(format!("ask {i}")),
+                    brief: None,
+                },
+                EventKind::User {
+                    text: format!("ask {i}"),
+                    attachments: vec![],
+                    channel: String::new(),
+                    device: String::new(),
+                },
+                EventKind::TurnComplete { usage: None },
+            ] {
+                append_event(&path, &Event::new(kind)).unwrap();
+            }
+        }
+        std::fs::write(layout.dir.join("checkpoints.jsonl"), &cps).unwrap();
+        let before: Vec<_> = checkpoints(&layout.dir);
+        assert_eq!(before.len(), 3);
+        // Rewind to turn 2: turns 2 and 3 are cut; turn 1 is kept.
+        cut(&place, "root", Target::Turn(2)).unwrap();
+        assert!(
+            layout
+                .dir
+                .join(format!("checkpoints.d/{}.json", before[0].line))
+                .exists(),
+            "the kept turn's sidecar stays"
+        );
+        assert!(
+            !layout
+                .dir
+                .join(format!("checkpoints.d/{}.json", before[1].line))
+                .exists(),
+            "the target's sidecar goes"
+        );
+        assert!(
+            !layout
+                .dir
+                .join(format!("checkpoints.d/{}.json", before[2].line))
+                .exists(),
+            "the later cut turn's sidecar goes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -119,8 +119,13 @@ pub fn release_asset(os_arch: &str, version: &str) -> Option<Asset> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
     Probing,
-    Installing { version: String },
-    Updating { from: String, to: String },
+    Installing {
+        version: String,
+    },
+    Updating {
+        from: String,
+        to: String,
+    },
     Building,
     Stopping,
     /// Bringing the processes that were running the replaced binary onto
@@ -133,7 +138,10 @@ pub enum Progress {
     Starting,
     Connecting,
     Ready,
-    Failed { step: String, why: String },
+    Failed {
+        step: String,
+        why: String,
+    },
 }
 
 impl fmt::Display for Progress {
@@ -840,7 +848,11 @@ mod tests {
         // The path forms, which are the only thing that finds a process
         // whose image was unlinked two installs ago.
         assert!(s.contains(r#"path=${link% (deleted)}"#), "{s}");
-        for suffix in ["\"$target\"", "\"$target\".previous", "\"$target\".arbos-old"] {
+        for suffix in [
+            "\"$target\"",
+            "\"$target\".previous",
+            "\"$target\".arbos-old",
+        ] {
             assert!(s.contains(suffix), "missing {suffix} in the match: {s}");
         }
         // Never by name: matching `arbos-kernel` anywhere would reach
@@ -924,7 +936,10 @@ mod tests {
     #[test]
     fn paths_with_a_quote_in_them_stay_one_shell_word() {
         let s = bootstrap_script("/home/o'brien/bin/arbos-kernel", "/tmp/in", 20, 10);
-        assert!(s.contains(r#"target='/home/o'\''brien/bin/arbos-kernel'"#), "{s}");
+        assert!(
+            s.contains(r#"target='/home/o'\''brien/bin/arbos-kernel'"#),
+            "{s}"
+        );
     }
 
     /// A generated script has no compiler behind it, so this is the only

@@ -110,7 +110,7 @@ pub fn schema_property() -> Value {
         "description": if required() {
             "Required on the first edit of a task, optional after: one line — what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Checked against every symptom the request names."
         } else {
-            "Optional, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked."
+            "On the first edit of a task, one line: what is wrong (the code path that produces the wrong value, and why) and what change fixes it. Recorded beside the task and shown by changes; not checked — state it anyway, before the edit."
         }
     })
 }

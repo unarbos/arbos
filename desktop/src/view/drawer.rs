@@ -14,7 +14,7 @@
 
 use crate::{
     model::{
-        panel::PanelTab,
+        panel::{DOCUMENTS_EDITABLE, PanelTab},
         surface::{Surface, SurfaceId},
     },
     view::{
@@ -77,9 +77,13 @@ impl Card {
     fn detail(self) -> &'static str {
         match self {
             Self::Project => "Agents, processes and the project page",
-            Self::Terminal => "Ask the agent for a shell here",
+            Self::Terminal => "A shell of your own, in this folder",
             Self::Browser => "Ask the agent to open a page",
-            Self::File => "Open a file from this folder",
+            // Says what it does rather than what we mean to do: until the
+            // kernel can refuse the agent's write to a file he has open,
+            // opening one is a view (`DOCUMENTS_EDITABLE`).
+            Self::File if DOCUMENTS_EDITABLE => "Open a file from this folder to edit",
+            Self::File => "Read a file from this folder",
         }
     }
 
@@ -479,11 +483,16 @@ impl Arbos {
                     .update(cx, |workspace, cx| workspace.select_panel_tab(0, cx));
             }
             Card::File => self.open_file_in_panel(cx),
-            // The kernel owns the shell and the page: it has no frame yet for
-            // a client to ask for either, so the honest thing a card can do
-            // is put the words in the composer for him to send. When the
-            // kernel opens it, it arrives as a tab here.
-            Card::Terminal => self.ask_in_composer("Open a terminal in this folder.", window, cx),
+            // A shell of his own, straight from the kernel (#461): it answers
+            // with a row marked `by: user`, so the tab fills and the drawer
+            // stays on it. No composer detour any more.
+            Card::Terminal => {
+                self.workspace
+                    .update(cx, |workspace, cx| workspace.open_shell(cx));
+            }
+            // A page is still the agent's to open — the kernel has one browser
+            // per agent and no frame for a client to drive it — so this asks,
+            // in his words, and the row arrives when the agent obliges.
             Card::Browser => self.ask_in_composer("Open a browser page.", window, cx),
         }
     }
