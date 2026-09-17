@@ -5714,6 +5714,17 @@ fn heartbeat_label(chat: &ChatSession, turn: &Turn) -> Option<String> {
         return Some(step);
     }
     let last = chat.items.get(turn.range.start..turn.range.end)?.last()?;
+    // The Project chat hides a thought that has no headline over it
+    // (F-117), and this line stood down for the same thought as "live":
+    // between the kernel's "Thinking" heartbeat and the answer's first
+    // words the pane went blank, and Jacob read it as something broken
+    // (report 2026-09-17-27). A streaming thought nobody can see is a
+    // reason to say "Thinking", not to say nothing.
+    if chat.parent.is_none()
+        && matches!(last, ChatItem::Thinking { done: false, .. })
+    {
+        return Some("Thinking".to_string());
+    }
     let tool_running = matches!(
         last,
         ChatItem::Tool {

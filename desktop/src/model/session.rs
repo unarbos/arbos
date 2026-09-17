@@ -616,6 +616,9 @@ pub struct ChatSession {
     /// the numbering starts again below. Runtime only; primed from the
     /// cards' own `seq` at load.
     record_seq: u64,
+    /// Models the kernel has said are "not available to this key" in this
+    /// chat: dropped from the picker until the key changes. Runtime only.
+    pub unavailable_models: HashSet<String>,
     /// The attached command this chat has running as a job, by title —
     /// set by the workspace before a draw, like `children`. Runtime only.
     pub running_job: Option<String>,
@@ -759,6 +762,7 @@ impl ChatSession {
             waiting: None,
             status_over_workers: false,
             record_seq: 0,
+            unavailable_models: HashSet::new(),
             running_job: None,
             turn_open: false,
             turn_ended: None,
@@ -856,6 +860,7 @@ impl ChatSession {
             waiting: None,
             status_over_workers: false,
             record_seq: 0,
+            unavailable_models: HashSet::new(),
             running_job: None,
             turn_open: false,
             turn_ended: None,
@@ -953,6 +958,7 @@ impl ChatSession {
             waiting: None,
             status_over_workers: false,
             record_seq: 0,
+            unavailable_models: HashSet::new(),
             running_job: None,
             turn_open: false,
             turn_ended: None,
@@ -4090,6 +4096,11 @@ impl ChatSession {
     }
 
     pub(crate) fn notice(&mut self, failed: bool, text: &str) {
+        // "openai/gpt-6-astra-pro is not available to this key, so … answers
+        // this turn": the model named first is one this key cannot use.
+        if let Some(model) = unavailable_model_in(text) {
+            self.unavailable_models.insert(model);
+        }
         // The kernel's parked-ask line after the question is already
         // answered (a replay, a late frame) says nothing true.
         if !failed && is_waiting_line(text) && self.questions.is_none() {
@@ -4597,6 +4608,14 @@ fn pump(
 /// after a worker started or reported.
 pub fn is_page_nudge(text: &str) -> bool {
     text.trim_start().starts_with("project page not updated")
+}
+
+/// The model a kernel notice says this key cannot use: the id before
+/// " is not available to this key".
+pub fn unavailable_model_in(text: &str) -> Option<String> {
+    let (head, _) = text.split_once(" is not available to this key")?;
+    let model = head.trim().rsplit(' ').next()?.trim_matches(|c| c == '`' || c == '"');
+    (!model.is_empty() && model.contains('/')).then(|| model.to_string())
 }
 
 /// The kernel's "… — retrying in 2.4s (attempt 4/5)" line.

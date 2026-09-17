@@ -108,6 +108,14 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                 options: catalog
                     .models
                     .iter()
+                    // A model the kernel has said is not available to
+                    // this key stays off the picker for this chat — it
+                    // kept offering `gpt-6-astra-pro` after the kernel
+                    // had fallen past it twice (Jacob, report
+                    // 2026-09-17-26). The kernel's notice is the source.
+                    .filter(|model| {
+                        !chat.is_some_and(|chat| chat.unavailable_models.contains(&model.id))
+                    })
                     .map(|model| composer::SwitchOption {
                         id: model.id.clone().into(),
                         name: model.name.clone().into(),
