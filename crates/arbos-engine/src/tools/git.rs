@@ -55,8 +55,33 @@ pub struct Checkpoint {
     pub line: u64,
     pub ts: i64,
     pub head: String,
+    /// The working tree as it stood, as a commit (see `work_commit`).
+    /// None with `clean: true`: the tree equalled HEAD's, nothing to save.
+    /// None with `work_error`: it could not be saved, and the record says
+    /// why. None with neither: a line from before this distinction, whose
+    /// tree is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<String>,
+    /// The tree equalled HEAD's when the turn started: a restore to
+    /// `head` alone is the whole truth.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clean: bool,
+    /// Why no working-tree commit could be made. A checkpoint that could
+    /// not be written is never silently empty (qal-j08: `commit-tree`
+    /// failed for want of a git identity, every checkpoint carried HEAD
+    /// alone, and a restore `clean`ed the kept turns' files away).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_error: Option<String>,
+}
+
+impl Checkpoint {
+    /// Whether a `files: true` restore may reset and clean the tree: it
+    /// knows the tree (a work commit), or knows there was nothing beyond
+    /// HEAD. A checkpoint that knows its record is missing, or predates
+    /// the record, must not delete on the strength of it.
+    pub fn knows_tree(&self) -> bool {
+        self.work.is_some() || self.clean
+    }
 }
 
 /// Record where a turn starts: the plain HEAD mark `undo` uses, plus a
@@ -70,7 +95,14 @@ pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Re
     if head.is_empty() {
         return Ok(());
     }
-    let work = work_commit(cwd, &head);
+    let (work, clean, work_error) = match work_commit(cwd, &head) {
+        Ok(Some(w)) => (Some(w), false, None),
+        Ok(None) => (None, true, None),
+        Err(why) => {
+            eprintln!("checkpoint {agent}:{line}: working tree not saved: {why}");
+            (None, false, Some(why))
+        }
+    };
     if let Some(w) = &work {
         let safe: String = agent
             .chars()
@@ -87,11 +119,23 @@ pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Re
             .current_dir(cwd)
             .status();
     }
+    // The `undo` mark carries the same knowledge: HEAD, then the work
+    // commit, `clean`, or `error:<why>`, so `undo` too never cleans on a
+    // tree it does not know.
+    let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
+    let second = match (&work, clean, &work_error) {
+        (Some(w), _, _) => w.clone(),
+        (None, true, _) => "clean".to_string(),
+        (None, false, why) => format!("error:{}", why.as_deref().unwrap_or("unknown")),
+    };
+    let _ = std::fs::write(&mark, format!("{head}\n{second}\n"));
     let cp = Checkpoint {
         line,
         ts: arbos_core::now_ms(),
         head,
         work,
+        clean,
+        work_error,
     };
     let path = agent_dir.join("checkpoints.jsonl");
     let mut text = serde_json::to_string(&cp)?;
@@ -105,32 +149,52 @@ pub fn snapshot_turn(cwd: &Path, agent_dir: &Path, agent: &str, line: u64) -> Re
     Ok(())
 }
 
+/// The identity an internal checkpoint commit is written under. It is
+/// the kernel's own ref, never on a branch, never pushed; it needs no
+/// real name, and must not depend on the user having set one — a fresh
+/// machine has none, and that is exactly when rewind is reached for.
+const CHECKPOINT_IDENTITY: &[(&str, &str)] = &[
+    ("GIT_AUTHOR_NAME", "arbos"),
+    ("GIT_AUTHOR_EMAIL", "arbos@kernel"),
+    ("GIT_COMMITTER_NAME", "arbos"),
+    ("GIT_COMMITTER_EMAIL", "arbos@kernel"),
+];
+
 /// A commit whose tree is the working tree as it stands — tracked
 /// changes and untracked files alike, ignored files and `.arbos/` left
 /// out — parented on HEAD so `read-tree` can bring it all back. Built
 /// through a scratch index copied from the real one (so the add is
-/// incremental) and never touching the real index or the branch. `None`
-/// when the tree equals HEAD's.
-fn work_commit(cwd: &Path, head: &str) -> Option<String> {
-    let index = git_out(cwd, &["rev-parse", "--git-path", "index"])?;
+/// incremental) and never touching the real index or the branch.
+/// `Ok(None)` when the tree equals HEAD's; `Err(why)` when it could not
+/// be made, which the checkpoint records rather than swallows.
+fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
+    let index = git_out(cwd, &["rev-parse", "--git-path", "index"])
+        .ok_or_else(|| "git rev-parse --git-path index failed".to_string())?;
     let index = cwd.join(index);
     let scratch = cwd
         .join(".arbos")
         .join(format!("index-scratch-{}", std::process::id()));
     let _ = std::fs::create_dir_all(cwd.join(".arbos"));
     if index.exists() {
-        std::fs::copy(&index, &scratch).ok()?;
+        std::fs::copy(&index, &scratch).map_err(|e| format!("copy the index: {e}"))?;
     }
-    let run = |args: &[&str]| -> Option<String> {
+    let run = |args: &[&str]| -> Result<String, String> {
         let out = Command::new("git")
             .args(args)
             .env("GIT_INDEX_FILE", &scratch)
+            .envs(CHECKPOINT_IDENTITY.iter().copied())
             .current_dir(cwd)
             .output()
-            .ok()?;
-        out.status
-            .success()
-            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+            .map_err(|e| format!("git {}: {e}", args.first().unwrap_or(&"")))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
     };
     let result = (|| {
         run(&["add", "-A", "--", "."])?;
@@ -146,14 +210,12 @@ fn work_commit(cwd: &Path, head: &str) -> Option<String> {
             ".arbos",
         ]);
         let tree = run(&["write-tree"])?;
-        let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")])?;
+        let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")])
+            .ok_or_else(|| format!("git rev-parse {head}^{{tree}} failed"))?;
         if tree == head_tree {
-            return None;
+            return Ok(None);
         }
-        git_out(
-            cwd,
-            &["commit-tree", &tree, "-p", head, "-m", "arbos checkpoint"],
-        )
+        run(&["commit-tree", &tree, "-p", head, "-m", "arbos checkpoint"]).map(Some)
     })();
     let _ = std::fs::remove_file(&scratch);
     result
@@ -192,6 +254,18 @@ pub fn restore(cwd: &Path, cp: &Checkpoint) -> Result<String> {
     if git_out(cwd, &["ls-files", "--", ".arbos"]).is_some_and(|l| !l.is_empty()) {
         anyhow::bail!(
             ".arbos/ is tracked by the project repository; run `git rm -r --cached .arbos` (and add .arbos to .gitignore) before rewinding files"
+        );
+    }
+    // A restore deletes on the strength of the checkpoint's record of the
+    // tree. A checkpoint that knows its record is missing — or predates
+    // the record — gets no `reset --hard`, no `clean`: the transcript is
+    // rewound, the files are left as they are, and the reason is said.
+    if !cp.knows_tree() {
+        anyhow::bail!(
+            "no checkpoint of the working tree for this turn ({}); files left as they are — the transcript is rewound",
+            cp.work_error
+                .as_deref()
+                .unwrap_or("recorded before the kernel kept the tree, or whether it was clean")
         );
     }
     // Order matters: HEAD back first, then everything untracked that the
@@ -630,22 +704,64 @@ fn base_branch(cwd: &Path, git: &dyn Fn(&[&str]) -> Option<String>) -> String {
 
 pub fn undo(cwd: &Path) -> Result<ToolOut> {
     let mark = cwd.join(".arbos").join("runtime").join("checkpoint");
-    if let Ok(sha) = std::fs::read_to_string(&mark) {
-        let sha = sha.trim();
+    if let Ok(text) = std::fs::read_to_string(&mark) {
+        let mut lines = text.lines().map(str::trim);
+        let sha = lines.next().unwrap_or("");
+        // The second line, from `snapshot_turn`: the work commit, `clean`,
+        // or `error:<why>`. A mark from before it carries HEAD alone.
+        let tree = lines.next().unwrap_or("");
         if !sha.is_empty() {
-            let st = Command::new("git")
-                .args(["reset", "--hard", sha])
-                .current_dir(cwd)
-                .status()?;
-            if st.success() {
-                // `.arbos/` holds the agent's own state (transcripts, lock,
-                // kernel.json) and is often untracked; it is never the
-                // turn's work, so it must survive the clean.
-                let _ = Command::new("git")
-                    .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
+            let knows_tree = tree == "clean" || (!tree.is_empty() && !tree.starts_with("error:"));
+            if !knows_tree {
+                // `reset --hard` puts tracked files back; `clean` would
+                // delete every untracked file in the project on the
+                // strength of a record this mark knows it lacks (qal-j08).
+                let st = Command::new("git")
+                    .args(["reset", "--hard", sha])
                     .current_dir(cwd)
-                    .status();
-                return Ok(ToolOut::text(format!("restored {sha}")));
+                    .status()?;
+                if st.success() {
+                    let why = tree
+                        .strip_prefix("error:")
+                        .unwrap_or("the mark predates the record of the tree");
+                    return Ok(ToolOut::text(format!(
+                        "restored tracked files to {sha}; untracked files left as they are (no checkpoint of the working tree: {why})"
+                    )));
+                }
+            } else {
+                let st = Command::new("git")
+                    .args(["reset", "--hard", sha])
+                    .current_dir(cwd)
+                    .status()?;
+                if st.success() {
+                    // `.arbos/` holds the agent's own state (transcripts,
+                    // lock, kernel.json) and is often untracked; it is
+                    // never the turn's work, so it must survive the clean.
+                    let _ = Command::new("git")
+                        .args(["clean", "-fd", "-e", ".arbos", "-e", ".arbos/**"])
+                        .current_dir(cwd)
+                        .status();
+                    if tree != "clean" {
+                        // The untracked files and tracked changes of the
+                        // turn's start come back from the work commit.
+                        let st = Command::new("git")
+                            .args(["read-tree", "-u", "--reset", tree])
+                            .current_dir(cwd)
+                            .status()?;
+                        if !st.success() {
+                            anyhow::bail!("git read-tree {tree} failed after reset to {sha}");
+                        }
+                        let _ = Command::new("git")
+                            .args(["reset", "-q"])
+                            .current_dir(cwd)
+                            .status();
+                        return Ok(ToolOut::text(format!(
+                            "restored {sha} + working tree {}",
+                            &tree[..tree.len().min(12)]
+                        )));
+                    }
+                    return Ok(ToolOut::text(format!("restored {sha}")));
+                }
             }
         }
     }
@@ -777,5 +893,176 @@ mod tests {
         assert!(note.contains("tests/test_csv.py") && note.contains("pkg/foo_test.go"));
         assert!(!note.contains("test_new.py") && !note.contains("test_added.py"));
         assert!(test_files_note(" M src/lib.rs\n").is_none());
+    }
+
+    /// qal-j08. A repository with no identity to be found (the fresh-machine
+    /// shape): the checkpoint's work commit is still made, because an
+    /// internal ref needs no real name.
+    fn identityless_repo(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "arbos-noid-{tag}-{}-{}",
+            std::process::id(),
+            arbos_core::now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let st = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&[
+            "-c",
+            "user.name=setup",
+            "-c",
+            "user.email=setup@t",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ]);
+        // No name to be found: the repo's own config says empty, which
+        // beats whatever the machine's global config holds (this box has
+        // one), and git refuses an empty ident.
+        git(&["config", "user.name", ""]);
+        git(&["config", "user.email", ""]);
+        git(&["config", "user.useConfigOnly", "true"]);
+        // The control: git itself refuses a commit here for want of a name.
+        let raw = Command::new("git")
+            .args(["commit-tree", "HEAD^{tree}", "-m", "x"])
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            !raw.status.success(),
+            "the repo must have no identity for this test to mean anything"
+        );
+        dir
+    }
+
+    #[test]
+    fn a_checkpoint_needs_no_git_identity_and_rewind_brings_the_files_back() {
+        let dir = identityless_repo("cp");
+        std::fs::write(dir.join("f1.txt"), "first\n").unwrap();
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        let work = work_commit(&dir, &head)
+            .expect("the work commit is made without a user identity")
+            .expect("the tree differs from HEAD");
+        assert_eq!(work.len(), 40);
+        // The checkpoint as snapshot_turn writes it, then a later file, then
+        // a restore: the kept file is back, the later one gone.
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        snapshot_turn(&dir, &agent_dir, "root", 7).unwrap();
+        let cps = checkpoints(&agent_dir);
+        assert_eq!(cps.len(), 1);
+        assert!(
+            cps[0].work.is_some() && cps[0].work_error.is_none(),
+            "{:?}",
+            cps[0]
+        );
+        assert!(cps[0].knows_tree());
+        let mark = std::fs::read_to_string(dir.join(".arbos/runtime/checkpoint")).unwrap();
+        assert_eq!(mark.lines().nth(1), cps[0].work.as_deref(), "{mark}");
+        std::fs::write(dir.join("f2.txt"), "later\n").unwrap();
+        let what = restore(&dir, &cps[0]).unwrap();
+        assert!(what.contains("working tree"), "{what}");
+        assert!(dir.join("f1.txt").exists(), "the kept turn's file is back");
+        assert!(
+            !dir.join("f2.txt").exists(),
+            "the later turn's file is gone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_checkpoint_that_could_not_save_the_tree_says_so_and_restore_will_not_clean_on_it() {
+        let dir = identityless_repo("nocp");
+        std::fs::write(dir.join("f1.txt"), "first\n").unwrap();
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        // As the old kernels recorded it, and as a failed save records it now.
+        for cp in [
+            Checkpoint {
+                line: 1,
+                ts: 0,
+                head: head.clone(),
+                work: None,
+                clean: false,
+                work_error: None,
+            },
+            Checkpoint {
+                line: 2,
+                ts: 0,
+                head: head.clone(),
+                work: None,
+                clean: false,
+                work_error: Some("git commit-tree failed: no name".into()),
+            },
+        ] {
+            assert!(!cp.knows_tree());
+            let err = restore(&dir, &cp).unwrap_err().to_string();
+            assert!(err.contains("no checkpoint of the working tree"), "{err}");
+            assert!(err.contains("files left as they are"), "{err}");
+            assert!(dir.join("f1.txt").exists(), "nothing untracked was removed");
+        }
+        // A clean checkpoint knows its tree: HEAD alone is the whole truth.
+        let clean = Checkpoint {
+            line: 3,
+            ts: 0,
+            head,
+            work: None,
+            clean: true,
+            work_error: None,
+        };
+        assert!(clean.knows_tree());
+        restore(&dir, &clean).unwrap();
+        assert!(
+            !dir.join("f1.txt").exists(),
+            "a clean tree restored is a clean tree"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_without_a_known_tree_resets_tracked_files_and_leaves_untracked_ones() {
+        let dir = identityless_repo("undo");
+        let head = git_out(&dir, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::create_dir_all(dir.join(".arbos/runtime")).unwrap();
+        // A mark from before the tree was recorded: HEAD alone.
+        std::fs::write(dir.join(".arbos/runtime/checkpoint"), format!("{head}\n")).unwrap();
+        std::fs::write(dir.join("a.txt"), "changed\n").unwrap();
+        std::fs::write(dir.join("mine.txt"), "the user's own untracked file\n").unwrap();
+        let out = undo(&dir).unwrap();
+        assert!(
+            out.body.contains("untracked files left as they are"),
+            "{}",
+            out.body
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "a\n");
+        assert!(
+            dir.join("mine.txt").exists(),
+            "undo must not delete what it never recorded"
+        );
+        // With the tree known (clean), the clean is right.
+        std::fs::write(
+            dir.join(".arbos/runtime/checkpoint"),
+            format!("{head}\nclean\n"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("new.txt"), "this turn's\n").unwrap();
+        let out = undo(&dir).unwrap();
+        assert!(out.body.starts_with("restored "), "{}", out.body);
+        assert!(!dir.join("new.txt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
