@@ -657,13 +657,22 @@ class Pass:
         # nothing to click. Only a real fold is exercised here.
         work = next((w for w in self.ids("work-*") if "work-bare-" not in w), None)
         if work:
-            def below_y():
-                foot = self.ids("copy-turn-*")
-                return self.app.find(foot[-1])["y"] if foot else self.app.find(work)["h"]
-            y0 = below_y()
-            self.check("work", sc, "click 'Worked' fold", "fold toggles: the footer under it moves (summary line shown/hidden)",
-                       lambda: self.app.click(work), lambda a, b: (below_y() != y0) and f"footer y {y0:.0f} -> {below_y():.0f}; tool={len(self.ids('tool-*'))} thought={len(self.ids('thought-*'))} diff={len(self.ids('diff-card-*'))} term={len(self.ids('term-card-*'))}")
-            self.check("work", sc, "click 'Worked' fold again", "fold toggles back", lambda: self.app.click(work), lambda a, b: below_y() == y0)
+            # What a fold shows or hides is the rows under it — `run-*`,
+            # `tool-*`, `thought-*`, a card. The footer's y is not a proxy:
+            # the transcript is bottom-anchored, so a fold opening above the
+            # viewport's bottom shifts content up and leaves the footer where
+            # it was — "no state change" on this row, cycles 23–25 (F-123),
+            # while the fold had in fact opened.
+            def rows():
+                # Everything a Project-chat fold can hold: runs, tools,
+                # thoughts, cards — and the checklist card, which is all a
+                # delegating turn's fold holds.
+                kinds = ("run-*", "tool-*", "thought-*", "diff-card-*", "term-card-*", "todo-card-*", "worker-line-*")
+                return set().union(*(set(self.ids(k)) for k in kinds))
+            r0 = rows()
+            self.check("work", sc, "click 'Worked' fold", "fold toggles: rows under it appear or disappear",
+                       lambda: self.app.click(work), lambda a, b: (rows() != r0) and f"rows {len(r0)} -> {len(rows())}")
+            self.check("work", sc, "click 'Worked' fold again", "fold toggles back", lambda: self.app.click(work), lambda a, b: rows() == r0 and f"rows back to {len(r0)}")
         else:
             bare = self.first("work-bare-*")
             self.gap("work", sc, "click", "no work-* fold after an edit turn" + (" (a bare 'Worked' headline over a delegating turn — nothing to fold, F-104)" if bare else ""))
@@ -1207,8 +1216,9 @@ class Pass:
 
     def phase_settings(self) -> None:
         # Settings closes from the keyboard and the chat gets the keyboard back.
-        if not self.state().get("settings_open") and self.app.exists("settings"):
-            self.app.click("settings"); time.sleep(1.0)
+        gear = "settings" if self.app.exists("settings") else "status-bar-settings"
+        if not self.state().get("settings_open") and self.app.exists(gear):
+            self.app.click(gear); time.sleep(1.0)
         if self.state().get("settings_open"):
             def close_settings():
                 self.app.use_window("settings")
@@ -1219,10 +1229,10 @@ class Pass:
             self.check("settings-cmd-w", "settings", "⌘W in the Settings window", "window closes; composer focused",
                        close_settings, lambda a, b: b.get("settings_open") is False and b["composer"]["focused"], settle=1.2)
         sc = "settings"
-        if not self.app.exists("settings"):
+        if not self.app.exists(gear):
             self.gap("settings", sc, "click gear", "no settings element on screen")
             return
-        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click("settings"), lambda a, b: b.get("settings_open") is True, settle=1.5)
+        self.check("settings", sc, "click gear", "settings_open true", lambda: self.app.click(gear), lambda a, b: b.get("settings_open") is True, settle=1.5)
         if not self.state().get("settings_open"):
             return
         try:
