@@ -363,7 +363,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
     );
-    let _lock = match acquire_or_wait(&place) {
+    let lock = match acquire_or_wait(&place) {
         Held::Taken(lock) => lock,
         Held::StillHeld(code) => return Ok(code),
     };
@@ -877,7 +877,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                 // Not one byte of it lands at a path that is not the store
                 // this kernel opened.
                 if place.store_state(store_id) != arbos_core::StoreState::Intact {
-                    say_store_moved(&place, store_id);
+                    say_store_moved(&place, store_id, &lock);
                     crate::remote::stop_all(&hooks).await;
                     exit_code = 4;
                     break;
@@ -990,7 +990,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                     // usual maker. One look decides: an inode does not
                     // change and change back. Stop before more lands there.
                     arbos_core::StoreState::Moved => {
-                        say_store_moved(&place, store_id);
+                        say_store_moved(&place, store_id, &lock);
                         crate::remote::stop_all(&hooks).await;
                         exit_code = 4;
                         break;
@@ -2100,8 +2100,14 @@ fn say_if_git_missing(place: &Place) -> bool {
 /// kernel can tell (its cwd followed the folder), so the person opening
 /// the moved project reads why its kernel stopped. Nothing is written at
 /// the old path: that would be the ghost.
-fn say_store_moved(place: &Place, opened: arbos_core::StoreId) {
+fn say_store_moved(place: &Place, opened: arbos_core::StoreId, lock: &arbos_core::PlaceLock) {
     let now_at = arbos_core::store_now_at(opened);
+    // The lock files went with the folder; `Drop` would look for them at
+    // the old path. Take ours away where they are, so the moved store is
+    // not left with a lock that names a kernel that is gone.
+    if let Some(p) = &now_at {
+        lock.release_at(&Place::new(p.clone()));
+    }
     let where_ = match &now_at {
         Some(p) => format!("it is now at {}", p.display()),
         None => "where it went, this kernel cannot tell".to_string(),
