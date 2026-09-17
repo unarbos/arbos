@@ -835,12 +835,23 @@ fn end_jobs_for_stop(place: &Place) {
             if !job.running() {
                 continue;
             }
-            if root.kill(&job) {
-                let _ = std::fs::write(
-                    job.dir.join("killed"),
-                    "killed: the kernel was stopped and ended its jobs with it\n",
-                );
-                ended += 1;
+            // #407: `kill` says whether the signal was delivered; a refusal
+            // is `Err` and has already withdrawn the `killed` marker, so the
+            // folder keeps reading `running` and the leash stays with it.
+            match root.kill(&job) {
+                Ok(true) => {
+                    let _ = std::fs::write(
+                        job.dir.join("killed"),
+                        "killed: the kernel was stopped and ended its jobs with it\n",
+                    );
+                    ended += 1;
+                }
+                Ok(false) => {}
+                Err(e) => klog::warn(
+                    "kernel_stop_jobs",
+                    None,
+                    format!("could not end job {} (pid {}): {e:#}", job.id, job.meta.pid),
+                ),
             }
         }
     }
