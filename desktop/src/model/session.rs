@@ -1633,6 +1633,14 @@ impl ChatSession {
             .unwrap_or(false)
     }
 
+    pub fn has_agent_gone_notice(&self) -> bool {
+        self.items
+            .iter()
+            .rev()
+            .take_while(|item| !matches!(item, ChatItem::Agent(_)))
+            .any(|item| matches!(item, ChatItem::Notice { text, .. } if text.starts_with(AGENT_GONE)))
+    }
+
     /// A local agent whose folder is no longer on disk while its place is:
     /// the kernel archived it (or someone removed it). A place that is gone
     /// takes every agent with it and is [`Self::place_gone`], not this.
@@ -4792,6 +4800,8 @@ pub const STOPPED_BY_YOU: &str = "Stopped by you";
 /// The head of the notice for a place whose folder moved under the window
 /// (QA `af-03`); the path it expected follows.
 pub const PLACE_GONE: &str = "This project's folder is gone or was moved";
+/// The agent's folder is missing while its place is (F-165).
+pub const AGENT_GONE: &str = "this agent's folder is gone";
 
 /// The kernel's line for a turn that ended at the user's own per-turn
 /// spend cap ("Stopped at the per-turn cap: this turn spent $… over the $…

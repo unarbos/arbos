@@ -1836,16 +1836,32 @@ impl Workspace {
                 .join("agents")
                 .join(&sid)
                 .is_dir();
-            let text = if archived {
-                "this agent is archived: its history stays, but it takes no more messages"
-                    .to_owned()
-            } else {
-                format!(
-                    "this agent's folder is gone: expected {}. Your line was not sent.",
-                    chat.cwd.join(".arbos").join("agents").join(&sid).display()
-                )
-            };
-            chat.notice(true, &text);
+            if archived {
+                chat.notice(
+                    true,
+                    "this agent is archived: its history stays, but it takes no more messages",
+                );
+                chat.flush();
+                cx.notify();
+                return;
+            }
+            // Missing, not archived: the same treatment as a place that is
+            // gone. The kernel's own late writes can recreate a moved
+            // place's folder at the old path (F-165), so the window sees
+            // the place present and the agent missing — and dropped the
+            // line with "not sent", the fifth swallowed-message path.
+            let expected = chat.cwd.join(".arbos").join("agents").join(&sid);
+            chat.hold_offline(content);
+            if !chat.has_agent_gone_notice() {
+                chat.notice(
+                    true,
+                    &format!(
+                        "{}: expected {}. Your line is kept and goes when the agent is back or the project is reopened.",
+                        session::AGENT_GONE,
+                        expected.display()
+                    ),
+                );
+            }
             chat.flush();
             cx.notify();
             return;
