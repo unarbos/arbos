@@ -452,3 +452,49 @@ fn the_models_kill_through_its_own_shell_still_ends_the_whole_job() {
     );
     let _ = k.child.kill();
 }
+
+#[test]
+fn a_subscription_command_that_backgrounds_a_child_still_delivers_at_once() {
+    // qal-j07 (QA's `sb-01`): on this branch before it took #371's
+    // exit-file wait in `subs::run_job`, a shell subscription whose
+    // command backgrounded a child was held for the child's life and its
+    // reading never arrived. The run must end with the command; the
+    // child stays leashed and capped behind it.
+    let now = arbos_core::now_ms() - 1_000;
+    let due = arbos_core::inbox::rfc3339(now);
+    let mut k = common::start_kernel_replay_prepared(
+        "sub-backgrounds",
+        "{\"agent\":\"root\",\"content\":\"hi\"}\n",
+        "",
+        |place| {
+            let dir = place.join(".arbos/agents/root/subscriptions");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("0001-bg.toml"),
+                format!(
+                    "kind = \"shell\"\nevery = \"30s\"\ncmd = \"nohup sleep 300 >/dev/null 2>&1 & echo started-bg\"\ndeliver_to = \"user\"\nnotify = \"bg: {{output}}\"\nnext_due = \"{due}\"\n"
+                ),
+            )
+            .unwrap();
+        },
+    );
+    let mut a = Attach::connect(&k.url);
+    let asked = Instant::now();
+    let _ = a
+        .wait(Duration::from_secs(20), |f| {
+            f["type"] != "snapshot" && f.to_string().contains("bg: started-bg")
+        })
+        .expect("the reading reached the window");
+    assert!(asked.elapsed() < Duration::from_secs(20));
+    let pid = job_pid(&k.place);
+    assert!(
+        group_alive(pid),
+        "the backgrounded child is still there, leashed, after the reading was delivered"
+    );
+    let _ = k.child.kill();
+    let _ = k.child.wait();
+    assert!(
+        wait_group_gone(pid, Duration::from_secs(3)),
+        "and dies with the kernel"
+    );
+}
