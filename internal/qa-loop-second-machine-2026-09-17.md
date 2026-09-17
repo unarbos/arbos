@@ -258,6 +258,54 @@ than written there yet, because that document is the outgoing machine's while it
 `store_put`'s sound-store path has no content check — the hazard this report's table describes. It goes
 into the review list at the handover boundary.
 
+## A control the loop destroyed, and the guard that now catches it
+
+At 14:34 the `uw-01` control passed — and reported behaviour only #392 has, on a build that predates it.
+The cause: the control binary was `repo/target/release/arbos-kernel`, which is where the cycle's **own
+step 1** builds the day's head. The clean cycle had rebuilt it to `42cb9751ace8` while the label I passed
+still read `main-cbbe9922d6a2-control`. Nothing was wrong with the probe; the measurement was of a
+different kernel from the one it was labelled with.
+
+The inherited rule was "a fix and its control never share a `CARGO_TARGET_DIR`", which this obeyed. The
+sharper rule is: **a control binary must live where nothing else builds — including the loop itself.**
+The outgoing machine already did this (`kernel=/home/ubuntu/arbos-qa/kernel-pr441` in its rollouts); it
+was not written down. Now: `~/arbos-qa/kernels/arbos-kernel-<sha12>`, one immutable copy per build, named
+by the sha the binary reports itself.
+
+And because the label is hand-typed while the version is not, `run.py` now compares them: any 8–12 hex
+sha in `--kernel-branch` that the kernel's own `--version` does not carry prints
+
+```
+!! KERNEL LABEL MISMATCH: --kernel-branch says ['cbbe9922d6a2'] but the binary is `arbos-kernel 0.2.0
+   42cb9751ace8 protocol 1` (…); this run measured a different build from the one it is labelled with
+```
+
+and records `kernel_label_mismatch` in `result.json`. Driven against the exact case that fooled me. It is
+an alarm rather than a break, because the fault is the operator's and not the product's — but it lands in
+the cycle's ALARMS block, so a run that measured the wrong build cannot read as a clean pass. This is the
+"name the commit and the kernel's own `--version`" rule moving from a habit to a check a machine runs,
+which is the order of preference the project settled on this morning.
+
+The `qal-j22` table was re-measured from the pinned binaries afterwards and is unchanged:
+`cbbe9922d6a2` destroys in arms (b) and (c); `f80f0b663bac` destroys in (c) only; `80e6994280f8` refuses
+in (c) and no longer stages (a) or (b). Zero label alarms on all three.
+
+## Waits: `idle` is the later, looser frame
+
+Learned from the kernel side at 14:32 and applied here the same hour. The `turn` frame's `idle` state
+arrives only after the notes nudge that follows a turn, so it can trail the fact by seconds, and a
+scenario that waits for `idle` and then reads the transcript can read before the turn's end has landed.
+Three of this module's waits were that pattern. They now wait on the `turn_complete` **event frame** —
+the fact the assertion reads — through one `wait_turn_complete` helper.
+
+`uw-03` deliberately keeps `idle`, and it is the only one: its whole point is a turn whose end cannot
+reach the transcript, so there is no `turn_complete` event to broadcast, and the wait's timing out is data
+rather than a failure. The reason is written at the call.
+
+Re-checked after the change, because a change to a wait can make a break disappear: the control still
+fails the same way, and `uw-02` got measurably quicker (1.0 s to 0.7 s) since the event lands before the
+nudge that `idle` waits for.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j21-publish-mirrors-a-smaller-bug-set-and-deletes-the-branchs-drafts.md`

@@ -209,9 +209,17 @@ This is the state you meet after something has already gone wrong, which is wher
 - **What ended still reports how.** An exit code on disk is a fact that outlives the socket, so `done`, `failed` and `stopped` keep their words with the link down.
 - **A state is not a property of a row.** It is the row *and* the link, which is why the word is decided in one place that takes both. A row that could read `running` while nothing can hear from it is the 164 GB shape in miniature.
 
-**And one thing found by doing it, which changes the order of the work.** When a kernel dies, the desktop starts a new one for that place — and the new kernel has no record of the old job or the old pty. So the link comes back, and the rows it comes back to are not rows it knows anything about. Watched live, both tabs went from `link lost` back to `running` and `agent's` the moment the replacement kernel answered, which is exactly the class of lie this design exists to prevent.
+**And the case that ends it: a replacement kernel.** When a kernel dies the desktop starts a new one for that place, and the new kernel has no record of the old pty — while inheriting the old job from disk. Watched live, both tabs went from `link lost` back to `running` and `agent's` the moment the replacement answered: a job ticking that nothing runs, a terminal with no shell behind it.
 
-The window cannot fix that on its own: it has no way to ask a kernel what it is holding. That is **kernel handover 1**, and this is why it is first. Until it lands, a returning link can restore a live-looking label on a row nothing is behind, and that limit belongs written down rather than in a comment.
+**Closed by asking** ([#468](https://github.com/unarbos/arbos/pull/468) gave the kernel a `surfaces` frame; [#476](https://github.com/unarbos/arbos/pull/476) wires it, [still 11](../media/desktop/side-panel/11-reconciled-after-a-replacement-kernel.png)). On every attach — not only a reconnect, since after a relaunch the kernel answering is certainly not the one that opened these rows — the window asks what the kernel holds, and reconciles:
+
+- **listed and running**: nothing to say.
+- **listed and not running**: take the kernel's own words, and for a job its exit. The job above now reads `stopped`, with *killed: the kernel was stopped and ended its jobs with it after 26s* under its still-readable log.
+- **not listed**: the kernel does not hold it. The row stays, because its output is worth reading, and says `gone` — the absence is the fact. That is the terminal above.
+
+`gone` outranks every other word, because an answered question has to outlast a link going down and coming back; that flip is exactly how the lie got in. And the kernel's words are used **only** for an end: a live job's *running for 41s (pid 4812)* would go stale between asks, and a stale clock is a smaller lie of the same kind.
+
+The attach snapshot carrying the same list is now an optimisation over the same function rather than a second path, so handover 1 as written is done.
 
 **Not built yet, and stated as intended behaviour:**
 
@@ -281,8 +289,9 @@ Also waiting, and deliberately not in the first PR: drag-to-resize (no resize ha
 
 Each of these is a client-visible gap, not an internal refactor.
 
-1. **Open surfaces in the attach snapshot** — the kernel's own list of live jobs, pty pages and browser pages, so a reconnecting or relaunching window rebuilds rows from the kernel's record instead of its memory. This is the F-137 fix at the protocol level, and it is what makes a *live* job's tab survive a relaunch: today only a finished one does, because its journal and `exit` file are a record on disk the window can read for itself.
-2. **`by: user | agent` on `Frame::Board`, and a client frame that asks for a shell.** Together these are what make "open the terminal" open it: the window would know the route, and `PtyHub::spawn_shell` would be reachable from a click. Without them the Terminal card can only put the words in the composer.
+1. ~~**Open surfaces in the attach snapshot**~~ — **done**, and as a frame rather than a snapshot field: `surfaces` / `surface_list` ([#468](https://github.com/unarbos/arbos/pull/468)), wired in [#476](https://github.com/unarbos/arbos/pull/476). A window now rebuilds its rows from the kernel's record instead of its memory, which is the F-137 fix at the protocol level. What is still open under it: a *live* job's tab does not yet come back after a relaunch, because only a finished job's journal and `exit` file are read from disk — the list could seed those rows too.
+2. ~~**Job metadata on the frame**~~ — **done** in the same pair: command line, cwd, owning agent, started-at, `journal: present | gone`, `pid`, `status`.
+3. **`by: user | agent` on `Frame::Board`, and a client frame that asks for a shell.** Together these are what make "open the terminal" open it: the window would know the route, and `PtyHub::spawn_shell` would be reachable from a click. Without them the Terminal card can only put the words in the composer.
 3. **Job metadata on the frame** — the command line, cwd, owning agent, started-at, and `journal: present | gone`. Today a `Job` frame carries deltas but not enough to title a row honestly.
 4. **Stop a job from a client**, routed through the kernel's own group kill, with the reason written by a single writer. There is already a known race between two writers on the killed reason; do not add a third.
 5. **Per-turn changed paths** — expose the rewind checkpoint's diff as a frame (`turn N`, paths, `+`/`−`), plus the paths each edit tool call touched. The data exists for rewind and is not readable by a client.

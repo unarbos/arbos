@@ -88,6 +88,21 @@ def user_repo(place):
     subprocess.run(["git", "checkout", "-q", "-b", "work"], cwd=str(place), capture_output=True)
 
 
+def wait_turn_complete(c, agent, timeout):
+    """The turn's own end, not `idle`. The `turn` frame's `idle` state arrives only after the notes nudge
+    that follows a turn, so it can trail the fact by seconds — and a scenario that waits for `idle` and
+    then reads the transcript can read before the turn's end has landed on disk. Learned on the kernel
+    side 2026-09-17: two frames that both seem to mean "the turn is over" differ by seconds, and the one
+    that sounds definitive is the later, looser one. Wait on the fact the assertion reads."""
+    return c.wait(
+        lambda f: f.get("type") == "event"
+        and f.get("agent") == agent
+        and (f.get("event") or {}).get("kind") == "turn_complete",
+        timeout,
+        f"turn_complete event for {agent}",
+    )
+
+
 def register(scenario, registry, transcript, now_ms, branch):
     def reg(name, needs_model=False, tags=()):
         def deco(fn):
@@ -150,7 +165,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 c = k.attach()
                 c.wait(lambda f: f.get("type") == "snapshot", 5)
                 c.user("root", "Commit B, then undo this turn.")
-                ended = c.wait_turn("root", "idle", 90) is not None
+                ended = wait_turn_complete(c, "root", 90) is not None
                 evs, _ = transcript(place, "root")
                 head = git_out(place, "rev-parse", "HEAD")
                 return {
@@ -180,7 +195,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 c = k.attach()
                 c.wait(lambda f: f.get("type") == "snapshot", 5)
                 c.user("root", "Commit A.")
-                one = c.wait_turn("root", "idle", 90) is not None
+                one = wait_turn_complete(c, "root", 90) is not None
                 head_a = git_out(place, "rev-parse", "HEAD")
                 mark_before = mark.read_text().strip().splitlines()[0] if mark.exists() else None
                 # The injector: turn two's start cannot record HEAD=A. A full disk and an unwritable
@@ -190,7 +205,7 @@ def register(scenario, registry, transcript, now_ms, branch):
                 if folder_ro:
                     runtime.chmod(0o555)
                 c.user("root", "Commit B, then undo this turn.")
-                two = c.wait_turn("root", "idle", 90) is not None
+                two = wait_turn_complete(c, "root", 90) is not None
                 if folder_ro:
                     runtime.chmod(0o755)
                 if mark.exists():
@@ -249,7 +264,31 @@ def register(scenario, registry, transcript, now_ms, branch):
             "arbos-engine tools/git.rs — remove a mark that could not be written, and refuse with a reason (#444)",
         )
 
+        # Did the injection actually stop this turn's mark being written? Since #392 the mark is written
+        # with `write_atomic` (temp file + rename), which replaces an unwritable *file* without needing to
+        # write it — so arms (a) and (b) no longer stage the fault on a build that has #392, and a pass
+        # there says nothing about the unwritten-mark path. Only an unwritable *folder* (arm c) defeats a
+        # rename as well. Each arm says which of the two it did.
+        # Staged means: after turn two's start the mark does NOT name that turn's starting HEAD, which is
+        # turn one's commit. Comparing with the mark's *previous* value instead would read #444's removal
+        # (mark gone, so the value changed) as a successful write, and call a staged arm unstaged.
         for tag, r in (("b", b), ("c", c3)):
+            r["staged_the_fault"] = r["mark_after_turn_two"] != r["head_after_turn_one"]
+        # Arm (a) has no earlier mark to compare against, so it is read from what `undo` found: a refusal
+        # means no usable mark was there, which is what the injection was for.
+        a["staged_the_fault"] = "no checkpoint" in " ".join(a["undo_said"]).lower()
+        staged_arms = [t for t, r in (("a", a), ("b", b), ("c", c3)) if r.get("staged_the_fault")]
+        cx.rec.notes["arms_that_staged_the_fault"] = staged_arms
+        cx.rec.expect(
+            bool(staged_arms),
+            "probe-no-arm-staged-an-unwritten-mark",
+            f"no arm stopped the mark being written for its turn (marks before/after: a={a['mark_exists_after']}, b={b['mark_before_turn_two']}->{b['mark_after_turn_two']}, c={c3['mark_before_turn_two']}->{c3['mark_after_turn_two']}); on this build the injections are defeated and the run proves nothing about an unwritten mark",
+        )
+
+        for tag, r in (("b", b), ("c", c3)):
+            if not r["staged_the_fault"]:
+                r["outcome"] = "arm-did-not-stage-the-fault: the mark was written for this turn anyway (atomic rename over an unwritable file, #392)"
+                continue
             refused = any(("no checkpoint" in s.lower() or "nothing reset" in s.lower() or "refus" in s.lower() or "could not" in s.lower()) for s in r["undo_said"])
             r["refused"] = refused
             r["outcome"] = (
@@ -297,10 +336,9 @@ def register(scenario, registry, transcript, now_ms, branch):
             c = k.attach()
             c.wait(lambda f: f.get("type") == "snapshot", 5)
             c.user("root", "Say one.")
-            c.wait_turn("root", "idle", 60)
+            wait_turn_complete(c, "root", 60)
             c.user("root", "Say two.")
-            c.wait_turn("root", "idle", 60)
-            time.sleep(0.5)
+            wait_turn_complete(c, "root", 60)
             evs, _ = transcript(place, "root")
             said = [e for e in notices(evs) if "exclude" in e.get("text", "").lower() or ".gitignore" in e.get("text", "").lower()]
             excluded = "arbos" in (exclude.read_text(errors="replace") if exclude.exists() else "")
@@ -363,7 +401,9 @@ def register(scenario, registry, transcript, now_ms, branch):
             c = k.attach()
             c.wait(lambda f: f.get("type") == "snapshot", 5)
             c.user("root", "This turn will panic before it can write anything.")
-            # The turn cannot end in the file, so the wait is bounded and its timing out is data, not a failure.
+            # `idle` on purpose here, and the only case in this module: the turn's end cannot reach the
+            # transcript, so no `turn_complete` event can be broadcast to wait on. The wait is bounded and
+            # its timing out is data, not a failure.
             idle = c.wait_turn("root", "idle", 45)
             time.sleep(1.0)
             rows = kernel_rows(place)

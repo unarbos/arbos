@@ -1722,6 +1722,21 @@ def scenario_spend(rollout_dir, scenario):
     return usd
 
 
+def kernel_version(binary):
+    """`arbos-kernel --version` — "arbos-kernel 0.2.0 <sha12> protocol 1". Cached: it is the same string for
+    every scenario in a run and a binary that cannot say is worth recording as such, not as an exception."""
+    if binary not in _KERNEL_VERSIONS:
+        try:
+            out = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            _KERNEL_VERSIONS[binary] = (out.stdout or out.stderr).strip().splitlines()[0][:120] or "no output"
+        except (OSError, subprocess.SubprocessError, IndexError) as e:
+            _KERNEL_VERSIONS[binary] = f"unknown: {type(e).__name__}"
+    return _KERNEL_VERSIONS[binary]
+
+
+_KERNEL_VERSIONS = {}
+
+
 def spent_today():
     """USD recorded in spend.jsonl since 00:00 UTC today."""
     if not SPEND.exists():
@@ -1920,7 +1935,20 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
         "place": str(cx.place),
         "with_model": bool(cx.key),
         "kernel": binary,
+        # The build the measurement was taken on, from the kernel's own mouth rather than from the path or
+        # from whatever string --kernel-branch was given: "a number without one is not a measurement", and
+        # until 2026-09-17 a rollout named neither. `kernel.json` carries `git_sha` too, for the same reason.
+        "kernel_version": kernel_version(binary),
     }
+    # A label that names a commit the binary does not carry is a measurement of the wrong build, and the
+    # label is hand-typed while the version is not. 2026-09-17 14:34: a control was run from
+    # repo/target/release, which the cycle's own step 1 had rebuilt to the day's head — the label still
+    # said the old sha and the run "passed", reporting behaviour only a later PR has. Loud, and recorded.
+    label_sha = re.findall(r"\b[0-9a-f]{8,12}\b", str(KERNEL_BRANCH or ""))
+    mislabelled = [h for h in label_sha if h not in result["kernel_version"]]
+    if mislabelled:
+        result["kernel_label_mismatch"] = {"label": KERNEL_BRANCH, "version": result["kernel_version"], "not_in_version": mislabelled}
+        print(f"!! KERNEL LABEL MISMATCH: --kernel-branch says {mislabelled} but the binary is `{result['kernel_version']}` ({binary}); this run measured a different build from the one it is labelled with")
     result["rollout"] = str(rec.final_dir)
     result["branch"] = KERNEL_BRANCH or "rust"
     if cx.key:
@@ -1938,7 +1966,7 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     rec.log("bugs: " + (", ".join(drafted) or "none"))
     final = rec.finalize()
     with open(ROLLOUTS / "index.jsonl", "a") as f:
-        f.write(json.dumps({"ts": now_ms(), "rollout": final.name, "scenario": name, "branch": KERNEL_BRANCH or "rust", "status": result["status"], "breaks": [b["rule"] for b in rec.breaks]}) + "\n")
+        f.write(json.dumps({"ts": now_ms(), "rollout": final.name, "scenario": name, "branch": KERNEL_BRANCH or "rust", "kernel_version": result["kernel_version"], "status": result["status"], "breaks": [b["rule"] for b in rec.breaks]}) + "\n")
     REAPED.clear()
     leaked = reap_scratch(scratch)
     if leaked:

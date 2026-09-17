@@ -156,3 +156,27 @@ The `demo` journey with the kernel commit recorded — run 31, the first since t
 - Not reached this cycle: background minutes-to-hours (cycle 27), the network drop (cycle 23) and the #417 refusal wording on the phone. The journey took 22 minutes and the scorer fix took precedence. They lead cycle 49.
 - PR: **#447**. #433 still open. Feedback poll hourly, nothing new.
 - Media: `media/mobile/cycle-48/01-launch.png`, `02-journey-seeded.png`, `recording-journey-challenge-45s.mp4`; the run at `media/mobile/journey/0917-120912/`.
+
+## Cycle 49 report (14:00 UTC, 09-17)
+
+The mesh survey's two phone asks, folded into the network-drop rotation row where they belonged.
+
+- **The app treated a refusal and a transport failure the same, and got both backwards** (M-163, #465). A refusal was retried for ever — `reconnect()` cleared `refusal` at the top, so the countdown restarted each round — which gets the same answer and implies waiting helps. A transport failure, the case that usually clears by itself, showed URLSession's sentence about a socket. Now `KernelFailure` carries which, on the rule the hub guarantees: a reason means a verdict, no reason means the path. A refusal says the hub's words and stops; the path names the status or the host and keeps trying.
+- **Verified for the transport half from the app's log**: a hub that is not there classifies as `transport("127.0.0.1 could not be reached — retrying")`. That is the half the survey called most wrong.
+- **The refusal half is not verified on the device and I am not claiming it** (M-165). Both attempts opened `pod` — the direct kernel, which does not use the fixture hub — because the row finder missed the fixture's project and the fallback is `pod`. Fifth instrument this week whose failure mode is carrying on and measuring something else. Leads cycle 50 along with a reliable way to open a named project.
+- **`has no kernel serving "x"` now reads as a sentence** (M-164): "demo's kernel on arboslife isn't running. Retrying in 4s." It stays on the retrying path, because a kernel that is not running can start — but the wording no longer says "Link lost" about a live link. That needed a third state the app did not have: `refusal` stops the countdown, `standing` only replaces the wording.
+- Not reached: background minutes-to-hours (cycle 27). It has now slipped two cycles and goes first in 50.
+- PR: **#465**. #433 and #447 still open. Feedback poll hourly, nothing new.
+- Media: `media/mobile/cycle-49/01-project-open.png`, `02-hub-gone.png`, `classification-log.txt`.
+
+## Cycle 50 report (14:30 UTC, 09-17)
+
+The rig's row targeting, which had cost three cycles, and two rotation rows behind it.
+
+- **Fixed properly rather than patched again** (M-166, #472). `find_row.py` knew four project names by glyph colour, raised on any other, and divided by 3 for a screenshot that is 1.2× the point size — and callers fell back to a default row, so a run continued and reported on whatever it opened. `ui.py` drives the simulator from `idb ui describe-all`, which gives labels and frames in points already. An exact label match wins; a name that is not there exits 1 and prints nothing. It proved itself the same hour by stopping when a project turned out to be listed under a different label.
+- **Background seven minutes, then resume** (M-167, the cycle-27 row that had slipped twice): 16 elements before and after, the last three text lines byte-identical by md5, no offline line on return, and a line sent straight after resume landed in the kernel. Cycle 27 checked this by eye; this is the same shape measured.
+- **The refusal path still cannot be reached, and that is the finding** (M-168). Stopping a kernel removes the project's row, so there is no chat to show a refusal — sampled four times over 32 s, nothing either time, because the app is on the projects list. That reframes #465: its transport half is what Jacob sees, its refusal half is close to unreachable until a project he has opened keeps its row. M-151 is now worth doing rather than noting.
+- Purpose check: the list and chat are unchanged this cycle; the work was in the rig.
+- PR: **#472**. #433, #465 still open; #447 merged. Feedback poll hourly, nothing new.
+- Media: `media/mobile/cycle-50/01-fixture-project-open.png`, `02-before-background.png`, `03-after-seven-minutes.png`, `04-sent-after-resume.png`, `evidence.txt`.
+- Next: M-151 — a project keeps its row when its machine goes, drawn Off and naming what it waits on. That unblocks the refusal wording and fixes the "my project vanished" reading at the same time. Then the journey with `type_send` fixed (M-162).

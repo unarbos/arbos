@@ -113,7 +113,10 @@ for branch in ${ARBOS_QA_TRACK_BRANCHES:-main}; do
     git -C "$ROOT/repo" worktree add -q --detach "$wt" "$sha" || { echo "-- track $branch: worktree failed"; continue; }
   fi
   echo "-- track $branch: building ($(git -C "$wt" rev-parse --short=12 HEAD))"
-  if ! (cd "$wt" && CARGO_TARGET_DIR="$ROOT/target-track-$slug" nice -n 19 cargo build --release -p arbos-kernel -j "$JOBS" 2>&1 | tail -2); then
+  # The hub comes with the kernel: `fs-01`, `xp-03` and `sv-01` set themselves aside when there is no
+  # arbos-hub beside it, and a cycle that skips the federated-store and roster checks for want of a
+  # binary it could have built is measuring less than it could for no reason.
+  if ! (cd "$wt" && CARGO_TARGET_DIR="$ROOT/target-track-$slug" nice -n 19 cargo build --release -p arbos-kernel -p arbos-hub -j "$JOBS" 2>&1 | tail -2); then
     echo "-- track $branch: build failed"; continue
   fi
   # fp-* (subscriptions/ engine, PR #104/#106) run only where the kernel source has it.
@@ -188,8 +191,15 @@ if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
     if ! (cd "$wt" && CARGO_TARGET_DIR="$ROOT/target-desktop-$slug" nice -n 19 cargo build --release -p arbos-kernel -j "$JOBS" 2>&1 | tail -1); then
       echo "-- desktop $branch: kernel build failed"; continue
     fi
-    if ! (cd "$wt/desktop" && CARGO_TARGET_DIR="$ROOT/target-desktop-$slug/desktop" nice -n 19 cargo build -j "$JOBS" 2>&1 | tail -1); then
-      echo "-- desktop $branch: app build failed"; continue
+    # The app failing to build takes the desktop scenarios AND the acceptance journey with it, so this
+    # step says what stopped it rather than "app build failed" (2026-09-17: one line, fifteen scenarios
+    # and the headline gone, and the cause — a missing fontconfig, then `-lstdc++` in a directory
+    # rust-lld does not search — needed a rebuild by hand to see). An alarm, so it cannot read as green.
+    applog="$ROOT/logs/desktop-app-$slug-$(date -u +%Y%m%dT%H%M%SZ).log"
+    if ! (cd "$wt/desktop" && CARGO_TARGET_DIR="$ROOT/target-desktop-$slug/desktop" nice -n 19 cargo build -j "$JOBS" > "$applog" 2>&1); then
+      echo "!! DESKTOP APP BUILD FAILED ($branch): the desktop scenarios and the acceptance journey did not run"
+      grep -E 'unable to find library|^error(\[|:)|was not found in the pkg-config|No such file' "$applog" | sort -u | head -6 | sed 's/^/   /'
+      echo "   full output: $applog"; continue
     fi
     app=""
     for cand in "$ROOT/target-desktop-$slug/desktop/debug/arbos-desktop" "$ROOT/target-desktop-$slug/desktop/debug/cydonia"; do
