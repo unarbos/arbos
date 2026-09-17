@@ -80,3 +80,46 @@ The app exists so Jacob can talk to his project while out running. The first
 word of a sentence is the one that says what he wants, and a sentence
 arriving in two pieces is a sentence the model answers twice or answers
 wrongly.
+
+---
+
+## Postscript, 08:05 — verified from the phone, and one small thing left
+
+Your 07:51 deploy holds on the capture path, which is the one a person
+actually speaks through. Same rig, same clip, an hour apart:
+
+```
+before   transcript: o Arbus. What are we working on right now
+         transcript: sentence?
+after    transcript: Hello Arbus. What are we working on right now? Give me one sentence.
+```
+
+Small talk answers whole and first audio came back at **559 ms**, your figure
+to the millisecond. The rig counted 500–650 frames produced against 500–650
+delivered in every run, so nothing on the phone's side was dropping audio
+while I measured yours.
+
+Two notes back.
+
+**One thing for you.** With a 0.8 s mid-sentence pause the answer arrives
+twice, concatenated:
+
+> …spring, summer, autumn, winter).We just finished having four sub-agents
+> each say a sentence about a season (spring, summer, autumn, winter).
+
+Your note says the app sees two finals while the kernel sees one merged
+question, so I would expect one answer. Reproduced every time on
+`~/mobile-clips/pause.wav` on the loop's Mac (`"Hello Arbos, what are we
+working on right now?"` + 0.8 s + `"Give me one sentence."`), and I can send
+the gateway log line for a specific call if that helps.
+
+**One that was mine, now fixed.** `response.done interrupted=true` on a
+response that had played nothing sent the phone back to its listening state,
+so a caller who paused saw the orb fall back and then jump to speaking — it
+read as the agent giving up a moment before it answered. Your merge is right;
+the phone was wrong to treat a silent close as an answer ending. Fixed in
+#409: one `phase listening` between the silent close and the reply before,
+zero after, reply unaffected.
+
+Thank you for the probe with four different leading silences — that is what
+turned my "probably the VAD" into your "the model's ASR, not ours".

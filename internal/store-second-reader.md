@@ -9,13 +9,29 @@ Set up 2026-09-17 06:18 UTC by the mesh worker at the coordinator's request.
 Companion to `internal/store-docs-mirror.md` (the mirror, QA's) and
 `docs/store-fault-report-2026-09-17.md` (the episodes).
 
-## Why
+## What it is for — restated 2026-09-17 08:10 UTC, after its first catch
 
-The mirror judges the store from the machine it runs on. On 2026-09-17 one
-client saw the store empty and unwritable while two others read and wrote it
-whole; the mirror on one of those two could not know. Without a second view,
-recorded with the time, that class of fault cannot be seen, and episodes
-cannot be counted honestly.
+**A guard against our own tools, not only against the service.** That is the
+more useful of its two jobs, and the one nothing else does.
+
+It was built for the second job: the mirror judges the store from the machine
+it runs on, and on 2026-09-17 one client saw the store empty while two others
+saw it whole, so a view recorded from another machine was needed to see that
+class at all. An hour after it started, at 07:07 UTC, it read `FAULT` — 237
+files the mirror had accepted were gone from `internal/qa/bugs/`. That was
+true, and it was not the service. The QA loop's attack list held
+`cd / && rm -rf *` marked "not caught, decide whether it should be"; its test
+agent ran it, seven times over two days; as a normal user it failed on system
+directories and succeeded on the first writable tree, which was this store.
+The loop's own file-operation log shows delete bursts from that client at
+exactly the seven episode times. The restores that followed wrote older mirror
+copies over other workers' newer files — the "older version being served"
+signature. The loop that was deleting was also the loop reporting all clear,
+because the mirror only judges what its own client sees.
+
+So: a reader on a machine that runs none of the loops, comparing against a
+floor the loops cannot lower, is the check that catches *us*. Whatever the
+store's engineers do about the service (see the last section), this stays.
 
 ## What it does, every 30 minutes (at :07 and :37)
 
@@ -47,13 +63,29 @@ the QA loop's — `store-second-reader.sh`:
 
 | Verdict | Means | Action |
 |---|---|---|
-| `FAULT` | `docs/` or `notes.md` gone, nothing readable, a zero-byte or unreadable file, **or any file the mirror accepted is not here** | Look at the same minute from the mirror's machine. If it also lacks the files, the store lost them (service). If it has them, this client's view is broken (client) — the case the mirror alone could not see. Either way an episode to count. |
+| `FAULT` | `docs/` or `notes.md` gone, nothing readable, a zero-byte or unreadable file, **or any file the mirror accepted is not here** | First ask **which of our clients wrote or deleted in the store in the minutes before** — on 2026-09-17 every such fault was one of our own loops. Then look at the same minute from the mirror's machine: if it also lacks the files and no client deleted them, the store lost them (service); if it has them, this client's view is broken (client). Every case is an episode to count. |
 | `BEHIND` | Files or content here that the mirror has not taken yet | Normal between a write and the next mirror pass. Persisting for hours means the mirror is not running or is refusing; check its gate. |
 | `AGREE` | Byte-identical in scope | Nothing. |
 
 Tested 06:18 UTC: the live store read `BEHIND` (314 files here, 313 on the
 mirror, 18 min old — three files written since the last pass); a scratch view
 without `docs/` read `FAULT`, wrote the shout note, and recorded the line.
+
+**First real catch, 07:07:26 UTC:** `FAULT — 237 file(s) the mirror accepted
+are not here` (86 here, 323 on tip `e8289af5`), all `internal/qa/bugs/<hex>.md`;
+shout at `internal/qa/inbox/2026-09-17-store-second-reader-fault-0707.md`.
+Cause: the QA loop's own `rm -rf` (above). By 07:37 the store read `BEHIND`
+again after their restore. The record line is on `store-watch`.
+
+## What remains the service's
+
+Two things from the fault report survive as genuinely the store's, and go to
+its engineers as a small note in place of the large wrong one: the 502s from
+the S3-backed service, and the one client that saw an empty store for about
+twenty minutes with no deletion from anyone. This reader will show the second
+kind as a `FAULT` on one machine while the mirror's client and the record from
+any third reader stay whole at the same minute — which is exactly how to tell
+it from our own deletions.
 
 ## How to read the record
 

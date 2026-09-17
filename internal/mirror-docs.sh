@@ -68,11 +68,36 @@ for f in "${docs[@]}" "$STORE/notes.md"; do
     [ -s "$f" ] || die "$f reads as empty. The store view looks broken. Not touching the mirror."
 done
 
+# ---- Deliberate shrinks, written down --------------------------------------
+# The gates below already demand a reason. This keeps it.
+#
+# A shrink that was decided and a shrink that was an accident leave the same
+# trace — a smaller tree — and the readers compare trees. So the reason goes
+# into the branch beside the view, not only into the terminal of whoever
+# typed it: a reader can then tell "somebody meant this" from "something ate
+# it", which is the distinction this whole guard exists to make and the one
+# thing it could not record.
+SHRINKS="$(mktemp /tmp/mirror-shrinks.XXXXXX)"
+: > "$SHRINKS"
+shrink_reason=""
+
+# shrink_note <what> <from> <to>
+shrink_note() {
+    shrink_reason="${MIRROR_ALLOW_SHRINK:-}"
+    printf '{"ts":"%s","by":"%s","what":"%s","from":%s,"to":%s,"reason":%s}\n' \
+        "$(date -u +%FT%TZ)" "${MIRROR_BY:-$(hostname)}" "$1" "$2" "$3" \
+        "$(printf '%s' "$shrink_reason" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')" \
+        >> "$SHRINKS"
+}
+
 # Never let the mirror shrink by accident. A deliberate deletion needs the flag.
 if [ -n "$parent" ]; then
     n_last="$(git ls-tree --name-only "$parent" docs/ | grep -c '\.md$' || true)"
     if [ "$n_now" -lt "$n_last" ] && [ -z "${MIRROR_ALLOW_SHRINK:-}" ]; then
         die "docs/ has $n_now files but the mirror holds $n_last. Refusing to shrink the mirror. If the removal is intended, say why: MIRROR_ALLOW_SHRINK='<reason>' bash mirror-docs.sh"
+    fi
+    if [ "$n_now" -lt "$n_last" ]; then
+        shrink_note "docs" "$n_last" "$n_now"
     fi
 fi
 
@@ -176,11 +201,26 @@ if [ -n "$parent" ]; then
             gone_files="$(comm -23 <(git ls-tree -r --name-only "$parent" internal/ 2>/dev/null | sort) <(GIT_INDEX_FILE="$GIT_INDEX_FILE" git ls-files internal/ | sort) | head -8 | tr '\n' ' ')"
             die "internal/ has $n_internal mirrorable files but the mirror holds $n_internal_last (first missing: $gone_files). Refusing to shrink the mirror by any amount without a reason. If the removal is intended, say why: MIRROR_ALLOW_SHRINK='<reason>' bash mirror-docs.sh"
         fi
+        if [ "$n_internal" -lt "$n_internal_last" ]; then
+            shrink_note "internal" "$n_internal_last" "$n_internal"
+        fi
     fi
 fi
 
 # The branch carries the tool that reads it.
 stage mirror-docs.sh "$SELF" 100755
+
+# The log of every shrink anybody allowed, appended rather than replaced, so a
+# reader sees all of them and not only the last.
+if [ -n "$parent" ] && git cat-file -e "$parent:shrinks.jsonl" 2>/dev/null; then
+    shrinks_prev="$(mktemp /tmp/mirror-shrinks-prev.XXXXXX)"
+    git cat-file -p "$parent:shrinks.jsonl" > "$shrinks_prev"
+    cat "$SHRINKS" >> "$shrinks_prev"
+    mv "$shrinks_prev" "$SHRINKS"
+fi
+if [ -s "$SHRINKS" ]; then
+    stage shrinks.jsonl "$SHRINKS" 100644
+fi
 
 # ...and a note telling whoever lands here what this branch is. Static text only:
 # anything that changed per run (a date, a count) would make every run a new commit.
@@ -263,7 +303,9 @@ fi
 total="$(du -sh --exclude=.git "$STORE/docs" 2>/dev/null | cut -f1 || echo '?')"
 msg="store docs mirror: $n_now documents, $total, notes.md $(stat -c%s "$STORE/notes.md") B, internal/ $n_internal files, feedback $n_feedback files
 
-Mirrored from $STORE by ${MIRROR_BY:-$(hostname)} at $(date -u +%FT%TZ)."
+Mirrored from $STORE by ${MIRROR_BY:-$(hostname)} at $(date -u +%FT%TZ).${shrink_reason:+
+
+Deliberate shrink, allowed by whoever ran this: $shrink_reason}"
 
 commit="$(printf '%s' "$msg" | git commit-tree "$tree" ${parent:+-p "$parent"})"
 
