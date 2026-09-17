@@ -57,6 +57,28 @@ impl Swap {
     ///
     /// `staged` must be beside `target`: both renames have to be within one
     /// filesystem or neither is atomic.
+    ///
+    /// **This moves the old tree aside; it does not unlink it.** That matters
+    /// to anything watching a running program's own file, and it has blinded
+    /// two detectors already:
+    ///
+    /// A process executing the old binary keeps an inode that is still
+    /// linked — it travels with the rename — so on Linux `/proc/self/exe` and
+    /// on macOS `current_exe()` report the *backup* path, which exists and is
+    /// a real file. Nothing reads `(deleted)`, and comparing the file at
+    /// `current_exe()` against the one seen at start compares a file with
+    /// itself and finds no change. The process looks healthy and is serving
+    /// code that was replaced.
+    ///
+    /// So "has my binary been replaced" has to be asked about **the path the
+    /// process was started from**, not about wherever its inode now lives:
+    /// what is at that path now, against what was there at start. Unlink and
+    /// write, this rename, and a file moved away all answer yes to that
+    /// question, and only that question.
+    ///
+    /// The backup is removed on [`Self::commit`], so the window is short —
+    /// but it is a window, and a detector that only works because a race is
+    /// usually won is not one to rely on.
     pub fn begin(target: &Path, staged: &Path) -> Result<Self> {
         if !target.exists() {
             bail!("nothing at {} to replace", target.display());
