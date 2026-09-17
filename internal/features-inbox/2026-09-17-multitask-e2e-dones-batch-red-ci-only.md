@@ -38,6 +38,12 @@ error: test failed, to rerun pass `-p arbos-kernel --test multitask_e2e`
 - `main`'s own current reds are a different test
   (`history_by_the_workers_name_…`, the one #436 is being reverted for), so this
   is not simply "main is red too".
+- The rotation is visible **on this branch alone**: the previous commit,
+  `5e94504e`, failed the same job on
+  [run 35224637786](https://github.com/unarbos/arbos/actions/runs/35224637786) —
+  but on `history_by_the_workers_name_finds_its_archived_record_and_an_unknown_name_says_so`,
+  a different test again. Two commits of the same desktop-only branch, two
+  different kernel tests. A regression fails the same test twice.
 
 ## What I ran, and what it proved
 
@@ -52,38 +58,47 @@ I ran the file as well as the test on purpose: CI runs four tests in one binary
 and I had filtered to one, so a green single-test run would have proved less than
 it looked. Sixteen green runs and no reproduction locally; CI-only.
 
-## The one lead in the dump
+## Which assertion, and what I think it means
 
-The transcript CI printed ends with the script exhausted and then **one more
-turn**:
+The failing line is a **bound on how tightly the `done` reports batch**:
 
+```rust
+// multitask_e2e.rs:118
+// Batched: the spawn turn plus at most two turns for three dones (one
+// when they all land while root is still on its first turn).
+let turns = count(&root, "turn_complete");
+assert!((2..=3).contains(&turns), "root turns: {turns}\n{root:#?}");
 ```
-{"kind":"say","from":"w3","text":"Turn ended. Last words: one word…"}
-{"kind":"wake","wake":"done","text":"Report from w3 above — the last of your workers…"}
-{"kind":"assistant","step":1,"text":"(replay: no more scripted replies)"}
-{"kind":"turn_complete"}
-```
 
-So the run consumed its scripted replies and took a further turn the script did
-not anticipate. That is the same shape as the four flakes catalogued on 09-16 —
-a check that takes one event as proof of the next — rather than a broken
-assertion.
+CI reported `root turns: 4`. Everything the test asserts about the *reports*
+passed above it — three `say` lines, one per child, none doubled. Only the turn
+count was out: the three `done` files landed far enough apart that root woke once
+per report (spawn + 3) instead of absorbing two or three of them in one turn.
 
-Two places I would look, offered as leads and not as findings, because this is
-your file and I did not measure either:
+That reframes the batching as opportunistic rather than enforced: it happens when
+the children finish close enough together, and on a loaded CI runner they do not.
+The assertion is a bound on a race, so it can go red without anything it names
+being wrong.
 
-1. **`arbos-engine/src/replay.rs:209`** — `LOADED` is a process-wide `OnceLock`
-   filled from `$ARBOS_REPLIES` at *first use*. Per kernel process that is
-   right, and #425 made it so deliberately. It stops being right for any kernel
-   process that outlives the test that started it, or any run that points the
-   same process at a second script: the second script is silently ignored and
-   the run gets `(replay: no more scripted replies)` — this exact line — with
-   nothing saying a script was dropped. Worth a check that a reload with a
-   different path is refused loudly rather than ignored.
-2. **The `dones` batch's own wait.** If the assertion is reached after the
-   batched `done` wake rather than after the frame it actually reads, CI's
-   slower clock is enough to let one extra turn in. One `wait_for(pred)` per
-   fact, on the frame the assertion reads.
+**Correction to an earlier read of mine.** The
+`(replay: no more scripted replies)` line at the end of the dump had me pointing
+at `arbos-engine/src/replay.rs:209` (`LOADED`, the process-wide `OnceLock`).
+That was wrong and I would not want it to cost anybody an hour: the script ran
+short *because* of the fourth turn, so the line is a symptom of the extra turn,
+not its cause. The `OnceLock` is not implicated here.
+
+Two options, yours to choose, and I have measured neither:
+
+1. **Assert what batching is for, not the turn count.** The claim behind this
+   line is that no report is lost and none is relayed twice, which the three
+   `say` assertions above already carry. If the point is genuinely "root does
+   not wake once per child", that wants a kernel that debounces the `done` wake
+   over a window, so the bound is enforced rather than hoped for — and then the
+   test can assert it without a range.
+2. **If the range stays, place the actions in time rather than the waits.** The
+   test's `settle(2s, 40s)` decides how close together three children land; a
+   run where they arrive 200 ms apart and one where they arrive 2 s apart are
+   different experiments with the same assertion.
 
 ## What I would like
 

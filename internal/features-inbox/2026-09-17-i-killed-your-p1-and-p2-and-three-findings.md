@@ -185,3 +185,46 @@ kernel to detect anything — so the two are independent.
 
 `binary_gone_e2e.rs` reads `.arbos/runtime/kernel.json` directly rather
 than through `kernel_json_read()`, so finding 3's change cannot reach it.
+
+## Correction to finding 4 — the flake was mine, and it was not a flake
+
+Written 2026-09-17 13:5x UTC, after [#453] identified the mechanism.
+
+I got finding 4 wrong in the way that matters. I established that
+`a_kernel_whose_directory_was_renamed_restarts_onto_the_start_path_not_the_backup`
+failed on `main` without my change, concluded it was therefore not mine,
+and stopped there. Both halves of what I then wrote were wrong:
+
+- I called it a flake. It is a real fault.
+- I said the kernel "does not notice its binary has gone within 30
+  seconds", and put it in #403's area. The kernel was noticing perfectly
+  well. **There was genuinely no file to find**, and the reason was in my
+  code.
+
+The app's install replaced a tree with two renames — the old one aside,
+then the new one in — and between them the installed path resolved to
+nothing. A kernel's update tick landing in that interval did not read
+"this is being replaced"; it read "the binary is gone", and waited its
+full minute. That is the 30.9-second signature, and the test reproduces
+it faithfully because it models the install the same way: rename aside,
+then create the directory and copy the binary in, which is the same shape
+with a much wider window.
+
+So "it fails on main without my change" was true and told me nothing
+useful, because the cause was already on main — in a part of it I wrote.
+Ruling out *this branch* is not the same as ruling out *me*, and I
+treated them as the same question.
+
+Closed in [#455]: the swap is now one step where the system offers one
+(`renamex_np(RENAME_SWAP)`, `renameat2(RENAME_EXCHANGE)`), with a hard
+link and a rename for a single file, and the old aside-then-in only for a
+directory on a filesystem with neither. Proved by an observer thread that
+watches the path across forty swaps: with the exchange forced off it
+catches the window in 9598 looks, and with it on it never does.
+
+[#453] stands on its own merits — a reader should be patient about a file
+that is being written whatever the writer does — but it should no longer
+have this particular gap to be patient about.
+
+[#453]: https://github.com/unarbos/arbos/pull/453
+[#455]: https://github.com/unarbos/arbos/pull/455
