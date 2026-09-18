@@ -2585,3 +2585,78 @@ positive one, and after tonight this loop has the tally to say so rather
 than just the instinct.
 
 **PR:** [#612](https://github.com/unarbos/arbos/pull/612), updated.
+
+## Cycle 100 report (09:45 UTC, 09-18)
+
+**Implemented the returning-user behaviour** (M-338). Cycle 75 measured that
+after iOS reclaims the app the phone came back to the **list**, not the chat
+the person left, and filed the question rather than choosing. The features
+agent answered it from the desktop's own code: `state.toml` keeps the open
+projects *and* which was `active`, and `Workspace::new` makes that one front
+again.
+
+The phone matches now, and the scenario that found the problem confirms it:
+
+```
+left it at:        chat:phone
+reclaimed, relaunched:
+came back to:      chat:phone
+VERDICT: put back in the chat he left, even though the app had been killed
+```
+
+`kernelTarget` could not answer "which was in front" on its own — it names
+the last project opened and stays set while the list shows, because the
+list's composer talks to it. `frontProject` is set while a chat is on the
+stack and cleared when it is not: the same distinction the desktop draws
+between its open tabs and its active one. Restored once at launch, so
+leaving the chat does not put you straight back in.
+
+**Two checks had to follow the feature** (M-339). The scenario read the
+restored chat's title at 9 s, before the identity arrived, and reported a
+*different project*; then on the next run it could not find the `phone` row
+at all, because the app now opens into a chat rather than the list.
+
+That is the ordinary cost of shipping behaviour, and worth naming: a change
+to where the app lands invalidates every scenario that assumed the old
+landing. The first symptom was a confident false verdict — `somewhere else
+entirely` — from a check that was correct yesterday.
+
+**One hundred cycles.** The thing I would tell the next worker is the tally
+from M-337: four rig faults on one row, none of them the app. Tonight's
+findings were far more often about the instrument than the phone, and the
+instrument always failed in the same direction.
+
+**PR:** [#615](https://github.com/unarbos/arbos/pull/615).
+**Stills:** `media/mobile/cycle-100/`.
+
+## Cycle 101 report (09:50 UTC, 09-18)
+
+**Looked at:** the list's search, filter and refresh, oldest row at 71.
+
+**It holds** (M-340), with the same numbers as thirty cycles ago: five rows
+at rest, `beta` → 2, `zzzz` → 0 with the no-match line, Live only → 3, and
+the pull taking `/list` from two calls to three with `arrived-late` arriving
+on screen.
+
+**A trigger file outlived the run that made it** (M-341). The fixture serves
+its "new" project when `/tmp/fixture-add-late` exists, and cycle 71 left one
+behind. It served that project from the **first** call, so `arrived-late`
+was on screen before the pull and the verdict congratulated itself on a row
+that had always been there. The refetch count was real; the "new project
+appeared" half was not.
+
+Same family as M-274, where a worker left running by the previous run made
+its evidence look like this one's. State on the machine outliving the run is
+its own class of fault — and worth separating from the rest of tonight's,
+because **both of these produced a pass**. Every other rig fault today made
+the app look broken; these two made it look fine, which nobody goes looking
+for.
+
+**On the kernel CI red** on cycle 98's branch: shell-only diff, the kernel
+compile job passed, and the failed log was gone again — the job was already
+`in_progress` on a re-run before I could read it. That is five attempts. The
+automatic re-run means the log cannot be captured this way at all; whoever
+owns the flake needs the Actions UI, or the retry turned off.
+
+**PR:** [#617](https://github.com/unarbos/arbos/pull/617).
+**Stills:** `media/mobile/cycle-101/`.

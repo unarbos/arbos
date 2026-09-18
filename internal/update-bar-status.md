@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 09:26 UTC.
+Last checked 2026-09-18 09:47 UTC.
 
-## Click Update. You will get build 1930.
+## Click Update. You will get build 1936.
 
-**1930** — signed, notarised, stapled, on the feed since 09:23 UTC.
+**1936** — signed, notarised, stapled, on the feed since 09:45 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1930 (builds 1931–1936):
+
+- **#609** — the headless BUILDING list names `libnotify-bin` and
+  `python3-pil`, with the one apt line
+- **#610** — iOS: the chip's × reads "Remove <file>", and the attachments
+  row's other half is measured
+
+## Before that: 1930
 
 New since 1916 (builds 1917–1930):
 
