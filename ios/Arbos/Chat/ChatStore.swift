@@ -283,7 +283,40 @@ final class ChatStore: ObservableObject {
             let machine = text.split(separator: " ").first.map(String.init) ?? "its machine"
             return "\(project)'s kernel on \(machine) isn't running."
         }
+        // The hub calls this its commonest refusal, and it is the one it says
+        // most about: a timestamp, the project the machine used to serve, and
+        // the remedy. That is the hub's record of itself. A person needs the
+        // machine's name and how long it has been gone.
+        if text.contains("is offline: nothing of it has been connected since") {
+            let machine = text.split(separator: " ").first.map(String.init) ?? "That machine"
+            let stamp = text.components(separatedBy: "connected since ").last?
+                .components(separatedBy: ";").first?
+                .trimmingCharacters(in: .whitespaces)
+            if let stamp, let howLong = sinceStamp(stamp) {
+                return "\(machine) has been off for \(howLong). It comes back when a kernel starts on it."
+            }
+            return "\(machine) is off. It comes back when a kernel starts on it."
+        }
         return text
+    }
+
+    /// How long ago an RFC3339 stamp was, spelled out. The list says `2h`
+    /// because it has one column; a sentence has room to say it properly.
+    /// Nil when the stamp will not parse, so the caller can drop the clause
+    /// rather than print a stamp nobody can read at a glance.
+    private static func sinceStamp(_ stamp: String) -> String? {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime]
+        guard let at = parser.date(from: stamp) else { return nil }
+        let seconds = Int(Date().timeIntervalSince(at))
+        guard seconds >= 0 else { return nil }
+        func plural(_ n: Int, _ unit: String) -> String { "\(n) \(unit)\(n == 1 ? "" : "s")" }
+        switch seconds {
+        case ..<60: return "under a minute"
+        case ..<3600: return plural(seconds / 60, "minute")
+        case ..<86_400: return plural(seconds / 3600, "hour")
+        default: return plural(seconds / 86_400, "day")
+        }
     }
 
     /// The first `"…"` in a hub message: the name it is talking about.
@@ -774,8 +807,15 @@ final class ChatStore: ObservableObject {
             // not running can start; it just says which thing is not there
             // when the hub told us. "Link lost" is wrong for a live link and
             // a stopped kernel, and the two want different things of Jacob.
+            //
+            // The reason and the close are two drops, in that order: the hub
+            // says why, then the socket goes. Only the first carries a reason,
+            // so a nameless second one must not erase it — it used to, which
+            // is why a stopped kernel read "Link lost" a second later despite
+            // the hub having said exactly which thing was not there. Cleared
+            // on connect instead, where it is known to be stale.
             let named = Self.inPlainWords(why)
-            standing = named == why ? nil : named
+            if named != why { standing = named }
             guard mode != .offline || reconnectTask == nil else { return }
             mode = .offline
             busy = false
