@@ -2109,8 +2109,8 @@ impl Composer {
             .usage
             .and_then(|usage| Some((usage, usage.fraction()?)))
         else {
-            let window = self.model_window();
-            let tip = window.map(|window| format!("{window} tokens; none counted yet"));
+            let size = self.model_window();
+            let tip = size.map(|size| format!("{size} tokens; none counted yet"));
             return row
                 .when_some(tip, |row, tip| {
                     row.tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
@@ -2119,8 +2119,8 @@ impl Composer {
                     div()
                         .text_style(TextStyle::Caption)
                         .text_color(theme.text_faint)
-                        .child(match window {
-                            Some(window) => tokens_short(window),
+                        .child(match size {
+                            Some(size) => tokens_short(size),
                             None => "—".to_string(),
                         }),
                 )
