@@ -337,6 +337,10 @@ struct TurnHooks {
 }
 
 impl arbos_engine::Hooks for TurnHooks {
+    fn claimed(&self, path: &std::path::Path) -> Option<arbos_engine::Claim> {
+        self.inner.claim_on(path)
+    }
+
     fn store_read(
         &self,
         address: &str,

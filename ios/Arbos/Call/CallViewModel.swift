@@ -197,8 +197,14 @@ final class CallViewModel: ObservableObject {
         // wired to the sink after `connect()` returned — so a person who
         // taps call and starts talking loses their first word. Hold the
         // frames instead and send them the moment there is somewhere to send
-        // them; the newest two seconds are worth keeping, and anyone silent
-        // for longer than that has said nothing to lose.
+        // them.
+        //
+        // The window used to be two seconds, on the reasoning that anyone
+        // silent for longer had said nothing to lose. That reasoning assumed
+        // the wait was the hold's; it is the connect's, and what gets thrown
+        // away is the opening of the sentence somebody has already spoken.
+        // Measured on 09-18: a 2633 ms connect dropped the first 13 frames,
+        // while 1514 ms and 1936 ms dropped none.
         var held: [Data] = []
         var heldBytes = 0
         audio.onCapture = { frame in
@@ -604,9 +610,18 @@ final class CallViewModel: ObservableObject {
         if lines.count > 12 { lines.removeFirst(lines.count - 12) }
     }
 
-    /// Two seconds of captured audio, at the wire format (24 kHz, mono,
-    /// 16-bit): what is held while the socket is still connecting.
-    private static let heldCaptureLimit = Int(AudioEngine.sampleRate) * 2 * MemoryLayout<Int16>.size
+    /// What is held while the socket is still connecting, at the wire format
+    /// (24 kHz, mono, 16-bit).
+    ///
+    /// Six seconds, not two. A connect of 2633 ms was measured throwing away
+    /// the first 13 frames of what had already been said, and a cold first
+    /// call reached 5773 ms. The window has to outlast the connect or the
+    /// hold does not do its job, and the cost of being generous is
+    /// `24000 × 6 × 2` = 288 KB — nothing against losing a person's opening
+    /// words. Audio held this long is not stale: they said it, and it has
+    /// still not been sent anywhere.
+    private static let heldCaptureSeconds = 6
+    private static let heldCaptureLimit = Int(AudioEngine.sampleRate) * heldCaptureSeconds * MemoryLayout<Int16>.size
 
     #if DEBUG
     /// `-micWav <file>`: play a clip down the **capture** path, starting the

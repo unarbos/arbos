@@ -14,7 +14,7 @@ use arbos_engine::TurnControl;
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -273,9 +273,137 @@ pub struct KernelHooks {
     /// notification and a `seen` go there too, so the hub can push to a
     /// phone that is asleep with no client attached.
     pub hub_out: Mutex<Option<(String, mpsc::UnboundedSender<arbos_core::hub::HubFrame>)>>,
+    /// Paths a person holds open with unsaved edits, by absolute path
+    /// (normalised, no `.` or `..`): who, since when, and the connection
+    /// that said so — released with it. See `claim` on the wire.
+    pub claims: Mutex<HashMap<PathBuf, PathClaim>>,
+}
+
+/// One held path.
+#[derive(Debug, Clone)]
+pub struct PathClaim {
+    pub who: String,
+    pub since_ms: i64,
+    pub conn: u64,
 }
 
 impl KernelHooks {
+    /// `path` as the claims table keys it: absolute under the place,
+    /// `.` and `..` folded away without touching the disk (the file may
+    /// not exist yet). None for a path that leaves the place.
+    pub fn claim_key(&self, path: &Path) -> Option<PathBuf> {
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.place.path.join(path)
+        };
+        let mut out = PathBuf::new();
+        for c in abs.components() {
+            match c {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        out.starts_with(&self.place.path).then_some(out)
+    }
+
+    /// A window says a path is held (or released) on connection `conn`.
+    /// Returns the frame to tell every client, or None when nothing
+    /// changed (a release of a path nobody held, or held by another
+    /// connection — a window releases only its own claim).
+    pub fn set_claim(&self, path: &Path, held: bool, who: &str, conn: u64) -> Option<Frame> {
+        let key = self.claim_key(path)?;
+        let mut claims = self.claims.lock().unwrap();
+        if held {
+            let since_ms = match claims.get(&key) {
+                Some(c) if c.conn == conn => c.since_ms,
+                _ => arbos_core::now_ms(),
+            };
+            claims.insert(
+                key.clone(),
+                PathClaim {
+                    who: who.to_string(),
+                    since_ms,
+                    conn,
+                },
+            );
+            Some(Frame::Claimed {
+                path: key.display().to_string(),
+                held: true,
+                by: who.to_string(),
+                since_ms,
+            })
+        } else {
+            let mine = claims.get(&key).is_some_and(|c| c.conn == conn);
+            if !mine {
+                return None;
+            }
+            claims.remove(&key);
+            Some(Frame::Claimed {
+                path: key.display().to_string(),
+                held: false,
+                by: who.to_string(),
+                since_ms: 0,
+            })
+        }
+    }
+
+    /// The connection closed: everything it held is released and said.
+    pub fn release_claims_of(&self, conn: u64) -> Vec<Frame> {
+        let mut claims = self.claims.lock().unwrap();
+        let gone: Vec<(PathBuf, PathClaim)> = claims
+            .iter()
+            .filter(|(_, c)| c.conn == conn)
+            .map(|(p, c)| (p.clone(), c.clone()))
+            .collect();
+        for (p, _) in &gone {
+            claims.remove(p);
+        }
+        gone.into_iter()
+            .map(|(p, c)| Frame::Claimed {
+                path: p.display().to_string(),
+                held: false,
+                by: c.who,
+                since_ms: 0,
+            })
+            .collect()
+    }
+
+    /// Every path held now, for a client that just attached.
+    pub fn claims_held(&self) -> Vec<Frame> {
+        let claims = self.claims.lock().unwrap();
+        let mut out: Vec<Frame> = claims
+            .iter()
+            .map(|(p, c)| Frame::Claimed {
+                path: p.display().to_string(),
+                held: true,
+                by: c.who.clone(),
+                since_ms: c.since_ms,
+            })
+            .collect();
+        out.sort_by(|a, b| match (a, b) {
+            (Frame::Claimed { path: x, .. }, Frame::Claimed { path: y, .. }) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        });
+        out
+    }
+
+    /// Who holds `path`, for the engine's write refusal.
+    pub fn claim_on(&self, path: &Path) -> Option<arbos_engine::Claim> {
+        let key = self.claim_key(path)?;
+        self.claims
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map(|c| arbos_engine::Claim {
+                who: c.who.clone(),
+                since_ms: c.since_ms,
+            })
+    }
+
     pub fn new(
         place: Place,
         wakes: mpsc::UnboundedSender<Wake>,
@@ -321,6 +449,7 @@ impl KernelHooks {
             remotes: crate::remote::RemoteHub::default(),
             screen_pending: Arc::new(Mutex::new(HashSet::new())),
             hub_out: Mutex::new(None),
+            claims: Mutex::new(HashMap::new()),
         })
     }
 

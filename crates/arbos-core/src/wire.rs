@@ -677,6 +677,32 @@ pub enum Frame {
         agent: String,
         id: String,
     },
+    /// Client → kernel: a person holds `path` open in an editor with
+    /// unsaved edits (`held: true`), or has saved or closed it (`held:
+    /// false`). While held, the agents' file tools refuse to write there
+    /// and say who holds it, so the agent says in its own turn what it
+    /// wanted to change — never a silent overwrite of an unsaved buffer,
+    /// never a lost edit (Jacob's co-editing ruling; side-panels handover
+    /// 6). `path` is relative to the place or absolute within it; a path
+    /// outside the place is an `error`. A claim belongs to the connection
+    /// that made it and is released when that connection closes: a window
+    /// that crashes holds nothing. Answered to every attached client as
+    /// `claimed`, so a second window sees the file is held.
+    Claim {
+        path: String,
+        held: bool,
+    },
+    /// Kernel → clients: the state of one path's claim after a `claim`
+    /// frame, or, on attach, each path held at that moment (`held: true`
+    /// only). `by` is the connection's user name.
+    Claimed {
+        path: String,
+        held: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        by: String,
+        #[serde(default, skip_serializing_if = "is_zero_i64")]
+        since_ms: i64,
+    },
     /// A client asks for a shell of its own — the person's `$SHELL`,
     /// interactive, in `cwd` (absolute, or relative to the place; the place
     /// itself when absent). The kernel answers with a `board` frame for
@@ -906,6 +932,10 @@ pub struct Entry {
 
 fn root_agent() -> String {
     crate::ROOT_ID.to_string()
+}
+
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
 }
 
 fn is_zero_u32(n: &u32) -> bool {

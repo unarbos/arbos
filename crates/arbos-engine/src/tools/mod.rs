@@ -3,6 +3,7 @@
 use anyhow::Result;
 use arbos_core::AgentId;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 
 mod apply_patch;
@@ -40,6 +41,28 @@ pub trait Grep: Send + Sync {
 /// What the engine needs from whoever runs it. Agents, the user, and the
 /// browser are tools the host registers; this is only what a built-in tool
 /// cannot do alone.
+/// Who holds a path open in an editor with unsaved edits, since when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Claim {
+    pub who: String,
+    pub since_ms: i64,
+}
+
+/// The tool result an agent reads when its write met a claim.
+pub fn claim_refusal(path: &Path, claim: &Claim) -> String {
+    let held = arbos_core::now_ms().saturating_sub(claim.since_ms) / 1000;
+    let held = if held < 60 {
+        format!("{held}s")
+    } else {
+        format!("{}m", held / 60)
+    };
+    format!(
+        "refused: {} is open in {}'s editor with unsaved changes (held for {held}). Nothing was written. Say in your reply what you wanted to change there and why, and ask them to save or close the file; then make the change.",
+        path.display(),
+        claim.who
+    )
+}
+
 pub trait Hooks: Send + Sync {
     /// Ask the user to allow a command. Resolves when they answer; the
     /// caller races it against the turn's cancel token.
@@ -68,6 +91,15 @@ pub trait Hooks: Send + Sync {
     /// never overwrites what the agent said this turn, and the tool's
     /// own line replaces it when the tool starts.
     fn kernel_step(&self, _step: &str) {}
+
+    /// Whether a person holds `path` open with unsaved edits (a window's
+    /// `claim` frame). A write there is refused before it runs, and the
+    /// refusal is the tool's result, so the agent says in its own turn
+    /// what it wanted to change (Jacob's co-editing ruling; side-panels
+    /// handover 6). `path` is absolute. Default: nobody holds anything.
+    fn claimed(&self, _path: &Path) -> Option<Claim> {
+        None
+    }
 
     /// A file in another node's store, by address (`arbos://…`). The host
     /// reaches it through the hub; a host with no hub says so. Failure is
@@ -296,6 +328,18 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     }
     if cx.agent.readonly && writes {
         anyhow::bail!("readonly agent: {} would write", decided.tool);
+    }
+    // A path a person is editing right now: the write does not run, and
+    // the agent hears who holds it. File tools declare their write
+    // paths; a `bash` that edits the same file is not caught here.
+    if writes {
+        for r in &plan.access.writes {
+            if let crate::access::Resource::Path(p) = r
+                && let Some(claim) = cx.hooks.claimed(p)
+            {
+                anyhow::bail!("{}", claim_refusal(p, &claim));
+            }
+        }
     }
     // Ask mode: a write waits for the user. Interactive, so writes are
     // asked one at a time and never race a read of the same file.
