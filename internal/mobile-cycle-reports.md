@@ -2060,3 +2060,33 @@ upstream, the checks written before it are the first thing to re-read.
 
 **PR:** [#592](https://github.com/unarbos/arbos/pull/592), harness only, and the re-check is
 committed this time so the next ask is one command.
+
+### Cycle 85, continued (07:20 UTC) — the breath turns out not to matter
+
+**Staying on the re-check produced the useful part** (M-300). The same
+counter, pointed at a clip with no pause in it:
+
+| clip | what it asks | transcripts | answers with audio |
+| --- | --- | --- | --- |
+| `pause.wav` | 1 question, one breath | **1**, every run (8) | **2–4**, every run |
+| `acceptance.wav` | 2 utterances, no pause | **2**, every run (3) | **3–5**, every run |
+
+Transcription is right in both. Answers are over in both, by roughly one per
+question, breath or no breath. So the pause is a red herring for the half
+that remains: the gateway answers *any* question more than once, and the
+replies are distinct answers rather than one reply in parts.
+
+The item is filed under a pause because that is how it was met at cycle 43,
+and the transcript half genuinely was a pause fault — #562 fixed it. The
+inbox item is re-scoped rather than left under a name that would send the
+next reader looking at segmentation.
+
+**And the counter had "one question" baked into it** (M-301). Pointed at the
+two-utterance clip it reported "the transcript split, 3 of 3" for runs whose
+two transcripts were exactly right. `SAYS` now says how many things a clip
+asks.
+
+Worth noticing what that nearly cost. Without the fix the control run would
+have been called broken, and the comparison that re-scoped M-146 could not
+have been made — the tool would have agreed with the old theory by refusing
+to measure the thing that disproved it.
