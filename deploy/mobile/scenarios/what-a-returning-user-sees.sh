@@ -63,7 +63,10 @@ echo
 echo "--- reclaimed: the process is gone, as it would be after a night ---"
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 2
 xcrun simctl launch "$UDID" $B >/dev/null 2>&1
-sleep 9
+# Long enough for the project's identity to arrive. Read at 9 s the restored
+# chat still carried its fallback title and the run called it a different
+# project; the header settles to the right name a few seconds later.
+sleep 15
 shot 03-back-after-being-reclaimed
 COLD_WHERE=$(where)
 echo "came back to:      $COLD_WHERE"
