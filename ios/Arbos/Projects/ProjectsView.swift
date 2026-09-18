@@ -36,6 +36,18 @@ struct ProjectsView: View {
                         .padding(.top, 0)
                         .padding(.bottom, 22)
                     if searching { searchField }
+                    // Whatever the hub said, said — not only when the list
+                    // ends up empty. The pod's own kernel is a row without
+                    // the hub, so "Hub token refused." used to be set and
+                    // never drawn: the screen lost six projects and offered
+                    // no account of it.
+                    if let problem = projects.problem, !projects.entries.isEmpty {
+                        Text(problem)
+                            .font(ArbosTheme.callout)
+                            .foregroundStyle(ArbosTheme.textFaint)
+                            .padding(.horizontal, ArbosTheme.gutter)
+                            .padding(.bottom, 10)
+                    }
                     if !working.isEmpty {
                         section("Working", open: $workingOpen, rows: working)
                     }
