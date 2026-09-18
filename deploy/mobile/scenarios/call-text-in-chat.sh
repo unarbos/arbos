@@ -56,4 +56,39 @@ echo "--- what the call did ---"
 grep -E "^metric|^event response.done|^phase" "$OUT/console.log" | tail -12
 echo "--- what the kernel wrote for the same turns ---"
 python3 "$HERE/../kernel.py" pod history 8 2>&1 | tail -8
+
+# The rule, checked rather than photographed. The two answers to a delegated
+# turn are written independently — the kernel's text and the voice's own
+# words — so they differ, and that difference is what makes this testable:
+# take a distinctive run of words from the kernel's answer and require it to
+# be absent from the screen, while a Spoken row is present.
+echo
+echo "--- the rule: one wording, the spoken one ---"
+KERNEL_SAID=$(python3 "$HERE/../kernel.py" pod history 8 2>/dev/null \
+              | awk '$2=="assistant"' | tail -1 | cut -d' ' -f3- | sed 's/^ *//')
+if [ -z "$KERNEL_SAID" ]; then
+  echo "  no assistant line to compare against — inconclusive"
+else
+  # Six consecutive words is long enough not to collide by chance and short
+  # enough to survive the chat truncating a long answer.
+  PHRASE=$(echo "$KERNEL_SAID" | tr -s ' ' | cut -d' ' -f2-7)
+  echo "  the kernel's words:  ...$PHRASE..."
+  # Only this turn. The kernel's wording is legitimately elsewhere on screen:
+  # spoken rows do not survive a restart, so older turns replay as the
+  # kernel's text (M-179). Searching the whole screen found it there and
+  # called the rule broken — the answer to a different question.
+  DUMP=$(ui dump)
+  LAST_SPOKEN_Y=$(echo "$DUMP" | awk '$4=="Spoken" {y=$2} END {print y+0}')
+  SPOKEN=$(echo "$DUMP" | grep -c " StaticText   Spoken$" | tr -d ' ')
+  THIS_TURN=$(echo "$DUMP" | awk -v y="$LAST_SPOKEN_Y" '$3=="StaticText" && $2+0 > y+0 { $1=""; $2=""; $3=""; print }')
+  echo "  rows marked Spoken: $SPOKEN; reading the $(echo "$THIS_TURN" | grep -c .) row(s) after the last of them"
+  if [ "$SPOKEN" = 0 ]; then
+    echo "  VERDICT: nothing on screen is marked Spoken — inconclusive, the chat may not be at the tail"
+  elif echo "$THIS_TURN" | grep -qF "$PHRASE"; then
+    echo "  VERDICT: this turn shows the kernel's wording too — both wordings are showing"
+  else
+    echo "  VERDICT: this turn's reply is not the kernel's wording — the rule holds"
+    echo "  what it shows instead: $(echo "$THIS_TURN" | grep . | head -1 | cut -c1-90)"
+  fi
+fi
 echo "stills in $OUT"
