@@ -755,6 +755,9 @@ struct ChatRow: View {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 12)
+                // The text beside it says the same thing; unhidden, VoiceOver
+                // reads "Arrow Turning Down Then Right" before every line.
+                .accessibilityHidden(true)
             Text(text)
                 .lineLimit(2)
                 .truncationMode(truncation)
