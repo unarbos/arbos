@@ -109,7 +109,12 @@ elif cmd == "total":
     # asked reported 0 for the root, which is the opposite mistake.
     want = {agent, "root"} if agent == "main" else {agent}
     for f in frames(25):
-        if f.get("type") == "history_end" and f.get("agent", agent) in want:
+        # The frame must *say* which agent it is for. Defaulting a missing
+        # field to the one asked about made any unlabelled `history_end`
+        # match, so the root's frame could win the race and print the root's
+        # count under a worker's name. It did: `count-slowly-one-to-forty`
+        # read 2350, the root's total, where its own is 11.
+        if f.get("type") == "history_end" and f.get("agent") in want:
             print(f.get("total", 0)); break
     else:
         print("-1"); sys.exit(3)
