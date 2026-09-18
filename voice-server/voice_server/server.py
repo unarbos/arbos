@@ -118,6 +118,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     turn = parser.add_argument_group("turn taking (ms)")
     turn.add_argument("--end-silence-ms", type=int, default=600, help="silence that ends an utterance")
+    turn.add_argument("--join-ms", type=int, default=1200,
+                      help="quiet after an utterance before it is answered; speech resuming within it continues the same utterance")
     turn.add_argument("--min-speech-ms", type=int, default=96, help="speech before speech.started")
     turn.add_argument("--barge-in-min-ms", type=int, default=256, help="speech before barge-in while the server is talking")
     turn.add_argument("--partial-interval-ms", type=int, default=700, help="how often transcript.delta is attempted")
@@ -191,6 +193,7 @@ async def serve_forever(args: argparse.Namespace) -> None:
         min_speech_ms=args.min_speech_ms,
         barge_in_min_ms=args.barge_in_min_ms,
         end_silence_ms=args.end_silence_ms,
+        join_ms=args.join_ms,
         partial_interval_ms=args.partial_interval_ms,
         max_lead_ms=args.max_lead_ms,
         echo_gate=not args.no_echo_gate,

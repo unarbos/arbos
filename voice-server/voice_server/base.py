@@ -33,6 +33,12 @@ class Tuning:
     min_speech_ms: int = 96  # 3 windows of confident speech before speech.started
     barge_in_min_ms: int = 256  # stricter while we are talking, so our own echo does not cut us off
     end_silence_ms: int = 600
+    # A pause inside a question — a breath, a "hmm" — is longer than end_silence_ms and shorter
+    # than this. A segment that ends is transcribed at once but not answered until this much
+    # more quiet has passed; speech that resumes within it continues the same utterance, and the
+    # caller hears one answer to one question (M-146: "Hello Arbos, what are we working on right
+    # now? … Give me one sentence." was two transcripts and two spoken replies).
+    join_ms: int = 1200
     preroll_ms: int = 320
     partial_interval_ms: int = 700
     partial_window_s: int = 20
