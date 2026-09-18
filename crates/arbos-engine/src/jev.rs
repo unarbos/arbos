@@ -1,8 +1,10 @@
 //! Jev: a cheap structured router that picks the next mechanical move.
 //!
 //! The configured LLM still writes, plans, and talks. Jev answers one JSON
-//! object per step. Any failure — error, timeout, or junk — falls through
-//! to the LLM. Jev does not speak; a tool step it picks looks like any other.
+//! object per step. `act=llm` is a valid pick and runs the chat model. Any
+//! failure — error, timeout, or junk — ends the turn. There is no
+//! chat-model fallback. Jev does not speak; a tool step it picks looks
+//! like any other.
 
 use anyhow::Result;
 use arbos_core::{Event, EventKind, Usage, Wake, text};
@@ -26,10 +28,9 @@ pub const DEFAULT_MODEL: &str = arbos_core::host::DEFAULT_JEV_MODEL;
 pub const WINDOW_TOKENS: u64 = 32_000;
 /// Leave room in the 32k window for the system instruction.
 const CARD_TOKEN_BUDGET: u64 = 24_000;
-/// Longest wait for Jev's first byte before the turn falls through.
-/// Jev is System One: a healthy call is a few hundred milliseconds.
-/// Fifteen seconds was the chat-model cap and left "Choosing the next
-/// step" on the desktop for the whole stall, then the LLM still ran.
+/// Longest wait for Jev's first byte. After this the turn fails in the
+/// open. Jev is System One: a healthy call is a few hundred milliseconds.
+/// There is no chat-model fallback.
 pub const FIRST_BYTE: Duration = Duration::from_millis(1_500);
 /// JSON is short; cap the completion so a stall cannot run on.
 const MAX_OUTPUT: u64 = 256;
@@ -60,7 +61,7 @@ pub struct Decision {
     pub fold: Option<bool>,
     pub no_change: bool,
     /// Which chat model the next LLM invoke should use. Ignored on a
-    /// pure tool step. Unknown values fall through to the configured model.
+    /// pure tool step. Unknown values keep the configured chat model.
     pub model: Option<String>,
     /// Slice ids that stay as text in the standing brief.
     pub keep: Vec<String>,
@@ -86,6 +87,12 @@ impl std::fmt::Display for AskError {
 }
 
 impl std::error::Error for AskError {}
+
+/// What the person reads when Jev fails, times out, or returns junk.
+/// `act=llm` never reaches this: that pick is a success.
+pub fn fail_notice(e: &AskError) -> String {
+    format!("Jev did not choose the next step: {e}. The turn stopped. The chat model did not run.")
+}
 
 /// What the turn should do after asking Jev — or without asking.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,7 +137,7 @@ pub fn should_ask(cfg: &arbos_core::HostConfig, has_key: bool, replay: bool) -> 
 }
 
 /// Parse one Jev reply into a decision. Junk (no JSON, unknown `act`) is
-/// an error so the turn falls through to the LLM.
+/// an error so the turn fails in the open.
 pub fn parse_decision(text: &str) -> Result<Decision, AskError> {
     let value = extract_json(text).ok_or_else(|| AskError::Junk("not a JSON object".into()))?;
     let act_raw = value
@@ -215,7 +222,8 @@ fn string_list(value: &Value, key: &str) -> Vec<String> {
 }
 
 /// Turn a decision into a route. Unknown tools, language tools, and a
-/// `tool` act with no name fall through to the LLM.
+/// `tool` act with no name become an `llm` step. That is a valid pick,
+/// not a fail.
 pub fn route(decision: Decision, view: &View, spoke: bool) -> Route {
     match decision.act {
         Act::Llm => Route::Llm,
@@ -325,7 +333,9 @@ pub fn card_under_window(card: &str) -> bool {
     evict::estimate_tokens(card) <= WINDOW_TOKENS
 }
 
-/// Ask Jev for one decision. The caller maps any error to the LLM.
+/// Ask Jev for one decision. The caller ends the turn on Failed or Junk.
+/// Interrupted is barge-in. The slug without `~` is remapped so a saved
+/// old default does not 400.
 pub async fn ask(
     src: &Provider,
     model: &str,
@@ -337,6 +347,12 @@ pub async fn ask(
     // (the desktop showed "Working jev" on every ordinary turn).
     hooks.kernel_step("Choosing the next step");
     let card = situation_card(sit);
+    let model = arbos_core::host::normalize_jev_slug(model);
+    let model = if model.is_empty() {
+        DEFAULT_MODEL
+    } else {
+        model
+    };
     let jev = Provider {
         base: src.base.clone(),
         key: src.key.clone(),
@@ -616,19 +632,23 @@ mod tests {
     }
 
     #[test]
-    fn junk_falls_through() {
+    fn junk_is_rejected() {
         assert!(parse_decision("not json").is_err());
         assert!(parse_decision(r#"{"act":"dance"}"#).is_err());
         assert!(parse_decision("[]").is_err());
         assert!(parse_decision("").is_err());
         match parse_decision("hello") {
-            Err(AskError::Junk(_)) => {}
+            Err(e @ AskError::Junk(_)) => {
+                let notice = fail_notice(&e);
+                assert!(notice.contains("not a JSON object"), "{notice}");
+                assert!(notice.contains("The chat model did not run"), "{notice}");
+            }
             other => panic!("expected junk, got {other:?}"),
         }
     }
 
     #[test]
-    fn language_tools_and_unknown_tools_fall_through_to_llm() {
+    fn language_tools_and_unknown_tools_become_llm() {
         let view = tool_view();
         let say = parse_decision(r#"{"act":"tool","tool":"say","args":{"text":"hi"}}"#).unwrap();
         assert_eq!(route(say, &view, false), Route::Llm);
