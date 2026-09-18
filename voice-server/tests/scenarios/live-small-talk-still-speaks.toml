@@ -1,0 +1,22 @@
+# The other half of choice B: small talk is released and the model's own reply plays whole,
+# about a transcript later than before. The kernel is not asked.
+title = "GPT-Live: small talk releases the held reply and the model speaks it; the kernel is not asked"
+engine = "openai"
+path = "own"
+asr_script = ["Hey, thanks a lot!"]
+
+[[steps]]
+say = "Hey, thanks a lot!"
+live = { say = "You are very welcome, happy to help.", after = 0.5 }
+
+[[steps]]
+wait_spoken = "very welcome"
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+response_dones = 1
+spoken_contains = ["very welcome"]
+live_commentaries = 0
+user_frames = 0

@@ -37,7 +37,7 @@ from tests.client import Caller
 from tests.mock_duplex import MockDuplex, Response, Utterance
 from tests.mock_hub import MockHub
 from tests.mock_kernel import Behaviour, Child, MockKernel
-from tests.mock_openai import MockOpenAILive
+from tests.mock_openai import MockOpenAILive, Reply
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -220,9 +220,15 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             extra += ["--asr", "mock"]
         if sc.get("engine") == "openai":
             live = MockOpenAILive()
+            # `live = { say, after, delegate }` on a say step: what the model does with that utterance
+            # on its own (speaks after `after` s; raises a delegation first when `delegate`).
+            for step in steps:
+                if "say" in step:
+                    m = step.get("live") or {}
+                    live.script.append(Reply(say=str(m.get("say", "")), after=float(m.get("after", 0.5)), delegate=bool(m.get("delegate", False))))
             live_url = await live.start()
             extra += ["--engine", "openai"]
-            live_env = {"OPENAI_API_KEY": "test-key", "VOICE_OPENAI_URL": live_url}
+            live_env.update({"OPENAI_API_KEY": "test-key", "VOICE_OPENAI_URL": live_url})
         if path_mode in ("local", "missing"):
             own_place = out / "own-place"
             own_place.mkdir()
@@ -526,6 +532,17 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
     if "audio_bytes_min" in exp:
         total = sum(a.size for a in rec.audio if a.speaking)
         add(total >= int(exp["audio_bytes_min"]), f"at least {exp['audio_bytes_min']} bytes of reply audio ({total})")
+    if live is not None:
+        said = "\n".join(live.spoken).lower()
+        for needle in exp.get("live_spoke", []):
+            add(needle.lower() in said, f"the model spoke {needle!r} (said: {[t[:50] for t in live.spoken]})")
+        for needle in exp.get("live_not_spoke", []):
+            add(needle.lower() not in said, f"the model never spoke {needle!r}")
+        commentary = [str(a.get("content") or "") for a in live.appends if a.get("type") == "session.commentary.append"]
+        for needle in exp.get("live_commentary", []):
+            add(any(needle.lower() in c.lower() for c in commentary), f"the kernel's answer reached the model as commentary: {needle!r} ({[c[:50] for c in commentary]})")
+        if "live_commentaries" in exp:
+            add(len(commentary) == int(exp["live_commentaries"]), f"{exp['live_commentaries']} commentary append(s) ({len(commentary)})")
     if live is not None and (exp.get("live_sees") or exp.get("live_not_sees") or exp.get("live_started")):
         blob = (live.instructions + "\n" + live.input_text()).lower()
         add(live.started >= 1, f"GPT-Live received session.start ({live.started})")
