@@ -281,6 +281,39 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Client → kernel: a person saves a project file from an editor in a
+    /// window, whole, with compare-and-swap (the second half of Jacob's
+    /// co-editing ruling; side-panels handover 6). `path` is relative to
+    /// the place or absolute within it. `base_hash` is the sha-256 the
+    /// editor read the file at (`read`/`saved` say it), or `""` for a file
+    /// that must not exist yet; the save happens only if the file still
+    /// hashes to it, so an agent's write in between is never overwritten
+    /// unseen — the reply says conflict, and the editor re-reads. Files
+    /// under `.arbos/` take `put`; `.git/` is never written; a protected
+    /// file (`AGENTS.md`, hooks, rules) is the owner's alone. Answered as
+    /// `saved`: to the asker on a refusal, to every client on success, so
+    /// a second window reloads.
+    Save {
+        path: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        base_hash: String,
+    },
+    /// Kernel → clients: the outcome of a `save`. `hash` is the file's
+    /// sha-256 now — the next save's `base_hash`. `by` is the saver's user
+    /// name. With `error`, nothing was written and only the asker hears.
+    Saved {
+        path: String,
+        #[serde(default)]
+        size: u64,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        hash: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Client → kernel: the entries of a folder under `.arbos/`.
     List {
         #[serde(default)]

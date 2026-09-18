@@ -2877,9 +2877,49 @@ pub async fn serve_client(
             let out_for_history = out_tx.clone();
             let out_for_read = out_tx;
             let who_name = who.name.clone();
+            let who_owns = who.role == access::Role::Owner;
+            let hooks_for_save = Arc::clone(&accept_hooks);
             tokio::spawn(async move {
                 while let Some(frame) = local_rx.recv().await {
                     match frame {
+                        // A person's save from an editor in a window:
+                        // compare-and-swap, whole; every window hears a
+                        // save that landed, the asker alone a refusal.
+                        Frame::Save {
+                            path,
+                            text,
+                            base_hash,
+                        } => {
+                            let reply = crate::files::save(
+                                &place_for_history,
+                                &path,
+                                &text,
+                                &base_hash,
+                                who_owns,
+                                &who_name,
+                            );
+                            match &reply {
+                                Frame::Saved {
+                                    error: None, size, ..
+                                } => {
+                                    klog::info(
+                                        "save",
+                                        None,
+                                        format!("who={who_name} path={path} bytes={size}"),
+                                    );
+                                    hooks_for_save.broadcast(reply);
+                                }
+                                Frame::Saved { error: Some(e), .. } => {
+                                    klog::info(
+                                        "save_refused",
+                                        None,
+                                        format!("who={who_name} path={path}: {e}"),
+                                    );
+                                    let _ = out_for_history.send(reply);
+                                }
+                                _ => {}
+                            }
+                        }
                         Frame::History {
                             agent,
                             since,
