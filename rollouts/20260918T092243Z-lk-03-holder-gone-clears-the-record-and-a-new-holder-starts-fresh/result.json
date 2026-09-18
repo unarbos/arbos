@@ -1,0 +1,43 @@
+{
+  "scenario": "lk-03-holder-gone-clears-the-record-and-a-new-holder-starts-fresh",
+  "doc": "When the holder goes, the first start that serves must clear runtime/place-held.json rather than inherit a\n        permanently-refusing state; and a new holder afterwards gets its own first full line (keyed on its pid), not\n        the old holder's heartbeat cadence.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "new-holder-inherits-old-record",
+      "detail": "after a new holder the record is None; expected holder_pid 608742, refusals 1",
+      "where": ""
+    },
+    {
+      "rule": "second-holder-not-said-in-full",
+      "detail": "the full line appeared 0 time(s); expected twice, once per holder",
+      "where": ""
+    },
+    {
+      "rule": "freed-not-said",
+      "detail": "no `place_freed` line when the start after the holder died served the place",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "record_before_holder_died": null,
+    "served_after_holder_died": true,
+    "record_cleared_by_serving_start": true,
+    "record_for_new_holder": null,
+    "classes": {
+      "full": 0,
+      "heartbeat": 0,
+      "escalation": 0,
+      "freed": 0
+    },
+    "freed_lines": []
+  },
+  "duration_s": 3.6,
+  "place": "/tmp/arbos-qa-lk-03-holder-gone-clears-the-record-and-a-new-holder-starts-fresh-efxpllwb/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f80f0b663bac/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f80f0b663bac protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T092243Z-lk-03-holder-gone-clears-the-record-and-a-new-holder-starts-fresh",
+  "branch": "main"
+}

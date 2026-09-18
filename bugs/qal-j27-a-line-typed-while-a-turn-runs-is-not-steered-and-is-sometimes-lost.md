@@ -106,3 +106,33 @@ The drafts were written each time (`8772c1e26f`, `edcfddb4ae`, `3969d1570d`, `11
 selector and reading as `driver-exception`. Nobody could see three real findings inside that noise. The
 lesson belongs with `qal-j24`: a rig fault that fails early does not cost you the scenarios it breaks, it
 costs you the ones it hides.
+
+## The question the features read left open, and how it is answered
+
+The same note observed that in the `SLOW_WORKER` shape the chat's own turn **ends once the spawn
+returns** — the worker's turn belongs to another agent — so `mt-01-follow-up-after-turn`, which
+required the typed line to land before the first `turn_complete`, "cannot hold in that shape", and
+asked what the scenario means to assert there.
+
+It is review rule 6: the assertion was right about the intention and wrong about the mechanism. It
+passed or failed on whether the spawn returned inside the scenario's 8-second sleep. The features
+agent measured the line landing *after* the first `turn_complete` (`follow_up_index=7`); cycle 6
+measured the other side and passed. `mt-01`'s recent history is exactly that coin: pass, break,
+break, break, skipped.
+
+Repaired 2026-09-18 by making the assertion follow an observation rather than an assumption.
+`mt-01` now reads, from the driver's state at the moment of typing, whether *this chat's own* turn
+is open, and records it as `own_turn_open_when_typed`:
+
+- always asserted, because it is the property a person cares about: the typed line reaches the
+  chat's transcript (`mt-01-typed-line-lost`) and something answers it
+  (`mt-01-typed-line-unanswered`)
+- asserted only when the chat's own turn was open: the steer file, and the boundary ordering
+  (`mt-01-follow-up-after-turn`) — the cases where the mechanism can hold
+- otherwise a note says why the boundary was not asserted, so a reader is not left guessing
+  whether the check was skipped or forgotten
+
+`mt-02` makes the same ordering claim from the kernel side, where `wait=true` should hold the turn
+open for up to `wait_secs`, so the mechanism looks sound there — but it sits in library half B and
+has produced no verdict in the logs I have, so it is left alone until cycle 9 measures it rather
+than changed on an argument.

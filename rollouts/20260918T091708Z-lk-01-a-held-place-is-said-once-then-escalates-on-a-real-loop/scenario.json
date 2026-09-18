@@ -1,0 +1,9 @@
+{
+  "name": "lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop",
+  "doc": "#441, on a real relaunch loop rather than a moved clock: a kernel holds the place; a supervisor relaunches\n        every 2 s for 5.5 minutes (~160 starts). Expected in the place's kernel.log: one full `place_held` line naming\n        the holder's pid, build and url; one heartbeat a minute; one error-level escalation after five minutes, not\n        repeated within ten; every relaunch exits 3 with `place already served` on stderr.",
+  "tags": [
+    "landing",
+    "lock",
+    "slow"
+  ]
+}

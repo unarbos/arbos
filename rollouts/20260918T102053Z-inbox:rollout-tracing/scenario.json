@@ -1,0 +1,8 @@
+{
+  "name": "inbox:rollout-tracing",
+  "doc": "From inbox note 2026-09-13-rollout-tracing.md: exercise feature 'rollout-tracing' and run every detector. Needs a kernel built from branch cursor/rollout-tracing-b027.",
+  "tags": [
+    "inbox",
+    "rollout-tracing"
+  ]
+}

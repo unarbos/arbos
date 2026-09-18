@@ -1,0 +1,11 @@
+{
+  "name": "fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone",
+  "doc": "`mcp::load_servers` (crates/arbos-kernel/src/mcp.rs:116) walks four locations in order \u2014\n        `.arbos/mcp.toml`, `.cursor/mcp.json`, `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` \u2014 and the\n        first file to define a server name keeps it. A file that does not parse is skipped with an\n        `eprintln!` and the walk goes on, so a typo in the place's own config quietly hands that server's\n        name to whatever the next location says. Nothing carries that to the person: the desktop sends\n        the kernel's stderr to `.arbos/runtime/kernel.out.log`, which its own comment calls \"process\n        facts, never part of the .arbos/ record\" (desktop/src/kernel.rs:2789).\n\n        Staged as the world does it: a place config with one wrong character and a global config naming\n        the same server differently. The assertion is about the transcript, because that is what a person\n        reads. The kernel's stderr is used only to prove the parse really failed \u2014 and note that under\n        this harness stderr lands in the rollout, not in `runtime/`; the product path is the desktop's.",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "first-match",
+    "mcp",
+    "config"
+  ]
+}

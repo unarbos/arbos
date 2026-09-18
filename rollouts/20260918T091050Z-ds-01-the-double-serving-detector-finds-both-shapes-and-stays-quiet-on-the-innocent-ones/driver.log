@@ -1,0 +1,3 @@
+1789722650029 BREAK ds-01-missed-a_wake_while_the_previous_turn_is_open: `check` says nothing about wake while the previous turn is open, so a place served by two kernels reads as sound. This is the shape #450 added the detector for
+1789722650029 BREAK ds-01-missed-b_two_checkpoints_one_line_different_times: `check` says nothing about two checkpoints one line different times, so a place served by two kernels reads as sound. This is the shape #450 added the detector for
+1789722650043 bugs: seen 0cc94cde03.md, seen 65f0eaa0a1.md

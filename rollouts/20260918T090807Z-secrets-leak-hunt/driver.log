@@ -1,0 +1,4 @@
+1789722487907 kernel started pid 592975
+1789722505251 BREAK secret-leak-encoded: the secret reaches the transcript encoded as ['spaced', 'reversed'] (exact-substring redaction misses these)
+1789722505255 kernel stopped with code 0
+1789722505283 bugs: seen qa-016-model-api-key-reaches-transcript-via-bash-env.md

@@ -1,0 +1,49 @@
+{
+  "scenario": "spawn-storm",
+  "doc": "Ten workers spawned at once against a cap of eight. The cap must hold with clear errors, every child folder must be consistent, and the kernel must stay up.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "spawn-cap",
+      "detail": "9 live children; the cap is 8 (10 spawned in all)",
+      "where": "crates/arbos-kernel/src/hooks.rs spawn"
+    }
+  ],
+  "notes": {
+    "children": 10,
+    "spawn_calls": 10,
+    "refused": 0,
+    "files": [
+      "w1.txt",
+      "w10.txt",
+      "w2.txt",
+      "w3.txt",
+      "w4.txt",
+      "w5.txt",
+      "w6.txt",
+      "w7.txt",
+      "w8.txt",
+      "w9.txt"
+    ],
+    "live_children": [
+      "worker-1",
+      "worker-10",
+      "worker-2",
+      "worker-3",
+      "worker-4",
+      "worker-5",
+      "worker-6",
+      "worker-7",
+      "worker-8"
+    ]
+  },
+  "duration_s": 30.0,
+  "place": "/tmp/arbos-qa-spawn-storm-ipn0z9eu/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2301abd291c0 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T093547Z-spawn-storm",
+  "branch": "main",
+  "usd": 0.37671
+}

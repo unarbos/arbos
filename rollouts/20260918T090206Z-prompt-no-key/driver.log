@@ -1,0 +1,13 @@
+1789722126065 kernel started pid 588412
+1789722136442 timeout waiting for turn root running after 10s
+1789722136442 BREAK turn-never-started: no running turn frame
+1789722156443 timeout waiting for turn root idle after 20s
+1789722156443 BREAK turn-never-ended: no idle turn frame
+1789722157444 BREAK turn-contract: turn ended without turn_complete; transcript kinds: ['notice']
+1789722157447 kernel stopped with code 0
+1789722157448 kernel-restart1 started pid 588490
+1789722160001 kernel-restart1 stopped with code 0
+1789722160002 kernel-restart2 started pid 588523
+1789722162556 kernel-restart2 stopped with code 0
+1789722162556 BREAK restart-replays-wake: two idle restarts grew the transcript 1 -> 3 lines (each start replays the unended wake)
+1789722162575 bugs: seen 61e5773c9c.md, seen 9955cfb70e.md, seen qa-001-no-key-turn-left-unended.md, seen qa-001-no-key-turn-left-unended.md

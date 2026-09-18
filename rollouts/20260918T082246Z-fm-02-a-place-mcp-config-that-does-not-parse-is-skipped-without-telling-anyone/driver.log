@@ -1,0 +1,4 @@
+1789719766305 kernel started pid 574173
+1789719766808 BREAK fm-02-broken-place-config-is-silent-to-the-user: `.arbos/mcp.toml` does not parse and root's transcript says nothing about it (2 line(s) went to the kernel's stderr instead: ['mcp: /tmp/arbos-qa-fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone-17mmc60g/place/.arbos/mcp.toml: TOML parse error at line 2, column 11']). The place's `notes` server is skipped and the name falls through to the next location, so the person gets a different server — or none — with the only record in a log the window never shows
+1789719766811 kernel stopped with code 0
+1789719766837 bugs: new e76d631847.md

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:turn-feedback",
+  "doc": "From inbox note 2026-09-13-turn-feedback.md: exercise feature 'turn-feedback' and run every detector. Needs a kernel built from branch cursor/turn-feedback-b027.",
+  "tags": [
+    "inbox",
+    "turn-feedback"
+  ]
+}

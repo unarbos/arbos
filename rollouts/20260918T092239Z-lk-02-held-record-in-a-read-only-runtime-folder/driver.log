@@ -1,0 +1,8 @@
+1789723359827 holder started pid 608159
+1789723363838 BREAK exit-code-not-3: relaunches exited [1] with folders read-only
+1789723363838 BREAK runtime-ro-temp-rw-not-once: runtime/ read-only with a writable temp: full line 0 of 6, escalation 0 — the temp fallback did not give 'once': Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)
+
+1789723363838 BREAK nowhere-to-keep-it-not-short: runtime/ and temp both read-only: full 0, escalation 0, lines saying the record could not be kept 0 of 6 — expected six short lines that say so: Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)
+
+1789723363842 holder stopped with code 0
+1789723363864 bugs: new f28ba2d4c6.md, seen 9e094b99a6.md, seen c011fbfcf4.md

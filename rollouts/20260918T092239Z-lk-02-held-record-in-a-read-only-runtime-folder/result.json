@@ -1,0 +1,58 @@
+{
+  "scenario": "lk-02-held-record-in-a-read-only-runtime-folder",
+  "doc": "The record that makes 'once' possible (runtime/place-held.json, or the machine's temp folder since #441 at\n        46477c88). Three shapes, six relaunches each, folders made read-only before any record exists: runtime/ read-only\n        with temp writable (one long line expected); a stale runtime/ record that cannot be updated beside a writable temp\n        (which copy is read?); both read-only (six short lines that say the record could not be kept, never the long line,\n        never the escalation). qal-j19.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "exit-code-not-3",
+      "detail": "relaunches exited [1] with folders read-only",
+      "where": ""
+    },
+    {
+      "rule": "runtime-ro-temp-rw-not-once",
+      "detail": "runtime/ read-only with a writable temp: full line 0 of 6, escalation 0 \u2014 the temp fallback did not give 'once': Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)\n",
+      "where": "arbos-kernel serve.rs HeldRecord::save/paths (#441)"
+    },
+    {
+      "rule": "nowhere-to-keep-it-not-short",
+      "detail": "runtime/ and temp both read-only: full 0, escalation 0, lines saying the record could not be kept 0 of 6 \u2014 expected six short lines that say so: Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)\n",
+      "where": "arbos-kernel serve.rs say_held \u2014 a record kept nowhere means the short form, every time, saying why"
+    }
+  ],
+  "notes": {
+    "exit_codes": [
+      1
+    ],
+    "results": {
+      "a_runtime_ro_temp_rw": {
+        "full": 0,
+        "escalation": 0,
+        "short": 6,
+        "says_record_unkept": 0,
+        "sample": "Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)\n"
+      },
+      "b_stale_runtime_record_ro_temp_rw": {
+        "full": 0,
+        "escalation": 0,
+        "short": 6,
+        "says_record_unkept": 0,
+        "sample": "Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)\n"
+      },
+      "c_runtime_ro_temp_ro": {
+        "full": 0,
+        "escalation": 0,
+        "short": 6,
+        "says_record_unkept": 0,
+        "sample": "Error: place already served (/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place/.arbos/runtime/lock)\n"
+      }
+    }
+  },
+  "duration_s": 4.0,
+  "place": "/tmp/arbos-qa-lk-02-held-record-in-a-read-only-runtime-folder-sjuubfxs/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f80f0b663bac/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f80f0b663bac protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T092239Z-lk-02-held-record-in-a-read-only-runtime-folder",
+  "branch": "main"
+}

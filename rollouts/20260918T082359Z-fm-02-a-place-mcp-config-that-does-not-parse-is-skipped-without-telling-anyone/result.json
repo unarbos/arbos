@@ -1,0 +1,31 @@
+{
+  "scenario": "fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone",
+  "doc": "`mcp::load_servers` (crates/arbos-kernel/src/mcp.rs:116) walks four locations in order \u2014\n        `.arbos/mcp.toml`, `.cursor/mcp.json`, `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` \u2014 and the\n        first file to define a server name keeps it. A file that does not parse is skipped with an\n        `eprintln!` and the walk goes on, so a typo in the place's own config quietly hands that server's\n        name to whatever the next location says. Nothing carries that to the person: the desktop sends\n        the kernel's stderr to `.arbos/runtime/kernel.out.log`, which its own comment calls \"process\n        facts, never part of the .arbos/ record\" (desktop/src/kernel.rs:2789).\n\n        Staged as the world does it: a place config with one wrong character and a global config naming\n        the same server differently. The assertion is about the transcript, because that is what a person\n        reads. The kernel's stderr is used only to prove the parse really failed \u2014 and note that under\n        this harness stderr lands in the rollout, not in `runtime/`; the product path is the desktop's.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "fm-02-broken-place-config-is-silent-to-the-user",
+      "detail": "`.arbos/mcp.toml` does not parse and root's transcript says nothing about it (2 line(s) went to the kernel's stderr instead: ['mcp: /tmp/arbos-qa-fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone-lb7e6gg2/place/.arbos/mcp.toml: TOML parse error at line 2, column 11']). The place's `notes` server is skipped and the name falls through to the next location \u2014 and the global one took it here, so the person gets a different server \u2014 or none \u2014 with the only record in a log the window never shows",
+      "where": "arbos-kernel mcp.rs load_servers \u2014 a config that does not parse is a thing its author needs told, on the transcript, not on stderr"
+    }
+  ],
+  "notes": {
+    "stderr_lines_about_mcp": [
+      "mcp: /tmp/arbos-qa-fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone-lb7e6gg2/place/.arbos/mcp.toml: TOML parse error at line 2, column 11",
+      "mcp: notes: Broken pipe (os error 32)"
+    ],
+    "notices_about_mcp": [],
+    "place_config_still_unparseable": "[servers.notes]\ncommand = this-is-not-quoted\nargs = [\"--from-the-place\"]\n",
+    "kernel_still_answering": true,
+    "global_server_took_the_name": true,
+    "takeover_line": "mcp: notes: Broken pipe (os error 32)"
+  },
+  "duration_s": 0.5,
+  "place": "/tmp/arbos-qa-fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone-lb7e6gg2/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f80f0b663bac/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f80f0b663bac protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T082359Z-fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone",
+  "branch": "main"
+}

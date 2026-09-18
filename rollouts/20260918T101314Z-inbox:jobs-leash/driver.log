@@ -1,0 +1,9 @@
+1789726394802 kernel started pid 622705
+1789726400167 timeout waiting for turn root idle after 5s
+1789726405179 timeout waiting for turn root idle after 5s
+1789726410192 timeout waiting for turn root idle after 5s
+1789726415206 timeout waiting for turn root idle after 5s
+1789726419416 BREAK turn-never-ended: feature jobs-leash: turn never ended — no frame for 45 s, so it had already stopped
+1789726419418 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789726419418 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789726419439 bugs: seen f72deab15f.md, seen 285c9098a5.md, seen 83223aad69.md

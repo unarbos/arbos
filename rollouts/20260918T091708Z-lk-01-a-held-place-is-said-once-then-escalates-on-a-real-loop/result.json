@@ -1,0 +1,56 @@
+{
+  "scenario": "lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop",
+  "doc": "#441, on a real relaunch loop rather than a moved clock: a kernel holds the place; a supervisor relaunches\n        every 2 s for 5.5 minutes (~160 starts). Expected in the place's kernel.log: one full `place_held` line naming\n        the holder's pid, build and url; one heartbeat a minute; one error-level escalation after five minutes, not\n        repeated within ten; every relaunch exits 3 with `place already served` on stderr.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "exit-code-not-3",
+      "detail": "relaunches exited [1]; a held place must exit 3 (EXIT_PLACE_HELD) every time",
+      "where": ""
+    },
+    {
+      "rule": "full-line-not-once",
+      "detail": "the full line appeared 0 times over 164 relaunches (kernel.log place_held lines: 0)",
+      "where": "arbos-kernel serve.rs HeldRecord (#441)"
+    },
+    {
+      "rule": "heartbeat-cadence",
+      "detail": "0 heartbeats over 5.5 min; expected about one a minute",
+      "where": ""
+    },
+    {
+      "rule": "escalation-did-not-escalate",
+      "detail": "0 escalation line(s) after 5.5 min held; expected exactly one after five minutes",
+      "where": ""
+    },
+    {
+      "rule": "first-line-lacks-the-facts",
+      "detail": "the first line does not name pid 602942, build and url: ",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "relaunches": 164,
+    "exit_codes": [
+      1
+    ],
+    "stderr_phrase_every_time": true,
+    "kernel_log_place_held_lines": 0,
+    "classes": {
+      "full": 0,
+      "heartbeat": 0,
+      "escalation": 0,
+      "freed": 0
+    },
+    "first_line": null,
+    "escalation_line": null
+  },
+  "duration_s": 331.3,
+  "place": "/tmp/arbos-qa-lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop-3whp_b46/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f80f0b663bac/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f80f0b663bac protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T091708Z-lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop",
+  "branch": "main"
+}

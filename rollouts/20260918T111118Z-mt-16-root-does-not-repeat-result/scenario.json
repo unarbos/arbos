@@ -1,0 +1,7 @@
+{
+  "name": "mt-16-root-does-not-repeat-result",
+  "doc": "Item 16. The haiku a worker wrote is read to the user once.",
+  "tags": [
+    "multitasking"
+  ]
+}

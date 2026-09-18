@@ -1,0 +1,8 @@
+{
+  "name": "lk-03-holder-gone-clears-the-record-and-a-new-holder-starts-fresh",
+  "doc": "When the holder goes, the first start that serves must clear runtime/place-held.json rather than inherit a\n        permanently-refusing state; and a new holder afterwards gets its own first full line (keyed on its pid), not\n        the old holder's heartbeat cadence.",
+  "tags": [
+    "landing",
+    "lock"
+  ]
+}

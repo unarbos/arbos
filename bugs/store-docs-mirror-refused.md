@@ -63,3 +63,15 @@
 - seen again 20260918T063436Z: exit 2; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
 
 - seen again 20260918T065057Z: exit 1; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
+
+- seen again 20260918T073816Z: exit 129; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
+
+- seen again 20260918T075500Z: exit 1; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
+
+- seen again 20260918T081118Z: exit 1; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
+
+- seen again 20260918T082756Z: exit 1; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
+
+- seen again 20260918T090123Z: exit 1; store docs/: 29 files; branch: 29 files; missing in store: []; notes.md present: True
+
+- seen again 20260918T101537Z: exit 2; store docs/: 30 files; branch: 30 files; missing in store: []; notes.md present: True

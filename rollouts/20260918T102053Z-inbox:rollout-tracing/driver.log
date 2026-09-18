@@ -1,0 +1,52 @@
+1789726853645 kernel started pid 626999
+1789726859010 timeout waiting for turn root idle after 5s
+1789726864023 timeout waiting for turn root idle after 5s
+1789726869036 timeout waiting for turn root idle after 5s
+1789726874049 timeout waiting for turn root idle after 5s
+1789726879063 timeout waiting for turn root idle after 5s
+1789726884075 timeout waiting for turn root idle after 5s
+1789726889087 timeout waiting for turn root idle after 5s
+1789726894100 timeout waiting for turn root idle after 5s
+1789726899114 timeout waiting for turn root idle after 5s
+1789726904126 timeout waiting for turn root idle after 5s
+1789726909139 timeout waiting for turn root idle after 5s
+1789726914152 timeout waiting for turn root idle after 5s
+1789726919165 timeout waiting for turn root idle after 5s
+1789726924178 timeout waiting for turn root idle after 5s
+1789726929190 timeout waiting for turn root idle after 5s
+1789726934203 timeout waiting for turn root idle after 5s
+1789726939216 timeout waiting for turn root idle after 5s
+1789726944229 timeout waiting for turn root idle after 5s
+1789726949242 timeout waiting for turn root idle after 5s
+1789726954253 timeout waiting for turn root idle after 5s
+1789726959265 timeout waiting for turn root idle after 5s
+1789726964277 timeout waiting for turn root idle after 5s
+1789726969290 timeout waiting for turn root idle after 5s
+1789726974301 timeout waiting for turn root idle after 5s
+1789726979313 timeout waiting for turn root idle after 5s
+1789726984327 timeout waiting for turn root idle after 5s
+1789726989339 timeout waiting for turn root idle after 5s
+1789726994351 timeout waiting for turn root idle after 5s
+1789726999365 timeout waiting for turn root idle after 5s
+1789727004378 timeout waiting for turn root idle after 5s
+1789727009391 timeout waiting for turn root idle after 5s
+1789727014404 timeout waiting for turn root idle after 5s
+1789727019417 timeout waiting for turn root idle after 5s
+1789727024430 timeout waiting for turn root idle after 5s
+1789727029443 timeout waiting for turn root idle after 5s
+1789727034456 timeout waiting for turn root idle after 5s
+1789727039469 timeout waiting for turn root idle after 5s
+1789727044483 timeout waiting for turn root idle after 5s
+1789727049496 timeout waiting for turn root idle after 5s
+1789727054510 timeout waiting for turn root idle after 5s
+1789727059523 timeout waiting for turn root idle after 5s
+1789727064536 timeout waiting for turn root idle after 5s
+1789727069548 timeout waiting for turn root idle after 5s
+1789727074562 timeout waiting for turn root idle after 5s
+1789727079576 timeout waiting for turn root idle after 5s
+1789727084590 timeout waiting for turn root idle after 5s
+1789727089603 timeout waiting for turn root idle after 5s
+1789727685694 timeout waiting for turn root idle after 5s
+1789727685779 BREAK turn-never-ended: feature rollout-tracing: turn never ended — still producing frames at the 300 s ceiling
+1789727685968 kernel stopped with code 0
+1789727686216 bugs: new e5323c175f.md

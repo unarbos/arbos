@@ -1,0 +1,45 @@
+{
+  "scenario": "ds-01-the-double-serving-detector-finds-both-shapes-and-stays-quiet-on-the-innocent-ones",
+  "doc": "#450 (`a9b12f118650`) says two kernels on one place leave two marks: a turn's wake written while\n        another turn of the same agent was still open with no cut line between, and two checkpoints at one\n        transcript line with different times. Its worth is not the warning but the reading \u2014 the question\n        it answers is whether a person's places were served twice while the lock was split, so its\n        precision matters as much as its recall. A detector that also fires on an interrupted kernel or an\n        ordinary place sends everyone hunting for a fault they never had.\n\n        Four places, built by hand and read through `arbos-kernel check` as a person reads it: the two\n        shapes it must find, and two innocent states it must stay quiet on \u2014 a kernel that died mid-turn\n        with the restart notice that documents the clearing, and a plain place with two clean turns.\n\n        Measured 2026-09-18: on `arbos-kernel 0.2.0 d373422662bd protocol 1` all four arms behave, and on\n        `f80f0b663bac`, which predates #450, all four are silent \u2014 so the warnings come from the detector\n        and not from the staging.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "ds-01-missed-a_wake_while_the_previous_turn_is_open",
+      "detail": "`check` says nothing about a wake while the previous turn is open, so a place served by two kernels reads as sound. This is the shape #450 added the detector for",
+      "where": "arbos-kernel check.rs check_two_writers"
+    },
+    {
+      "rule": "ds-01-missed-b_two_checkpoints_one_line_different_times",
+      "detail": "`check` says nothing about b two checkpoints one line different times, so a place served by two kernels reads as sound. This is the shape #450 added the detector for",
+      "where": "arbos-kernel check.rs check_two_writers"
+    }
+  ],
+  "notes": {
+    "arms": {
+      "a_wake_while_the_previous_turn_is_open": {
+        "expected": "warn",
+        "warnings": []
+      },
+      "b_two_checkpoints_one_line_different_times": {
+        "expected": "warn",
+        "warnings": []
+      },
+      "c_died_mid_turn_with_the_restart_notice": {
+        "expected": "quiet",
+        "warnings": []
+      },
+      "d_an_ordinary_place_two_clean_turns": {
+        "expected": "quiet",
+        "warnings": []
+      }
+    }
+  },
+  "duration_s": 0.0,
+  "place": "/tmp/arbos-qa-ds-01-the-double-serving-detector-finds-both-shapes-and-stays-quiet-on-the-innocent-ones-reuhrudv/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f80f0b663bac/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f80f0b663bac protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T091027Z-ds-01-the-double-serving-detector-finds-both-shapes-and-stays-quiet-on-the-innocent-ones",
+  "branch": "main"
+}

@@ -1,0 +1,8 @@
+1789723028440 holder started pid 602942
+1789723359764 BREAK exit-code-not-3: relaunches exited [1]; a held place must exit 3 (EXIT_PLACE_HELD) every time
+1789723359764 BREAK full-line-not-once: the full line appeared 0 times over 164 relaunches (kernel.log place_held lines: 0)
+1789723359764 BREAK heartbeat-cadence: 0 heartbeats over 5.5 min; expected about one a minute
+1789723359764 BREAK escalation-did-not-escalate: 0 escalation line(s) after 5.5 min held; expected exactly one after five minutes
+1789723359764 BREAK first-line-lacks-the-facts: the first line does not name pid 602942, build and url: 
+1789723359767 holder stopped with code 0
+1789723359809 bugs: new bfc47376c9.md, new 3d423d71cf.md, new c110f0d9df.md, new a4c992a73c.md, new f8b8b933b5.md

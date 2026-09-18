@@ -1,0 +1,64 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-yfkn1znj/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8137 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-yfkn1znj/home/.cache/arbos/tgrep/c21897c8d4702f37
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 3ms, sum 0ms, speedup 0.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 277ms, sum 269ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 24ms, sum 20ms, speedup 0.8x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 266ms, sum 267ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 270ms, sum 266ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 271ms, sum 267ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 273ms, sum 268ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 275ms, sum 270ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 281ms, sum 269ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 275ms, sum 269ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 268ms, sum 267ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 277ms, sum 270ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 267ms, sum 267ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 276ms, sum 269ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 278ms, sum 273ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 277ms, sum 269ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 276ms, sum 271ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 277ms, sum 272ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 277ms, sum 271ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 279ms, sum 272ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 272ms, sum 272ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 269ms, sum 269ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 276ms, sum 272ms, speedup 1.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 2 calls, wall 9ms, sum 3ms, speedup 0.3x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-broken-toy-repo: 4 calls, wall 1ms, sum 0ms, speedup 0.0x
+turn fix-broken-toy-repo: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)

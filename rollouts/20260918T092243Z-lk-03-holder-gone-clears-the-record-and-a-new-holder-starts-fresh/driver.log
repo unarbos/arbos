@@ -1,0 +1,10 @@
+1789723363883 holder started pid 608607
+1789723364892 holder SIGKILLed
+1789723365894 served started pid 608710
+1789723366948 served stopped with code 0
+1789723367449 holder2 started pid 608742
+1789723367516 BREAK new-holder-inherits-old-record: after a new holder the record is None; expected holder_pid 608742, refusals 1
+1789723367516 BREAK second-holder-not-said-in-full: the full line appeared 0 time(s); expected twice, once per holder
+1789723367516 BREAK freed-not-said: no `place_freed` line when the start after the holder died served the place
+1789723367517 holder2 stopped with code 0
+1789723367546 bugs: new b9280a41f5.md, new dc0168126a.md, new 857accc9fb.md

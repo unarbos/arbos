@@ -1,0 +1,70 @@
+{
+  "scenario": "fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line",
+  "doc": "settle_tree reads checkpoints.d/<line>.json when a checkpoint's tree is still pending, and accepts it if its\n        HEAD matches. Line numbers are transcript lines: after a rewind, new turns reuse the cut turns' lines, and the\n        cut turns' sidecars are not removed. Stage it: five turns, rewind to 3 (f3..f5 gone), new turns 3' and 4' with\n        the tree delayed so 4' is still pending, rewind to 4'. The right tree is {f1, f2, g3}; the stale sidecar says\n        {f1, f2, f3} \u2014 and HEAD never moved, so the guard passes it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "probe-no-stale-sidecar",
+      "detail": "no cut turn's sidecar at line 20 (old lines [2, 8, 14, 20, 26], sidecars ['2.json', '8.json']); the collision did not happen, this run proves nothing",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "old_checkpoint_lines": [
+      2,
+      8,
+      14,
+      20,
+      26
+    ],
+    "first_rewind": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 14,
+      "dropped": 18,
+      "restored": "fbb6a8737a18 + working tree aeb7600e3469"
+    },
+    "files_after_first_rewind": [
+      "f1.txt",
+      "f2.txt"
+    ],
+    "sidecars_left_after_rewind": [
+      "2.json",
+      "8.json"
+    ],
+    "new_turn4_record": {
+      "line": "20",
+      "ts": "1789730570084",
+      "head": "fbb6a8737a186e21996153c243f51564d2e5ef45",
+      "work_error": "the working tree for this turn is still "
+    },
+    "stale_sidecar_for_that_line": null,
+    "files_before_second_rewind": [
+      ".gitignore",
+      "f1.txt",
+      "f2.txt",
+      "g3.txt"
+    ],
+    "second_rewind": {
+      "type": "rewound",
+      "agent": "root",
+      "line": 20,
+      "dropped": 4,
+      "restored": "fbb6a8737a18 + working tree 6a9ba3d92e7e"
+    },
+    "files_after_second_rewind": [
+      "f1.txt",
+      "f2.txt",
+      "g3.txt"
+    ]
+  },
+  "duration_s": 19.9,
+  "place": "/tmp/arbos-qa-fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line-jmw9pu7y/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2301abd291c0 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T112238Z-fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line",
+  "branch": "main",
+  "usd": 0.0
+}
