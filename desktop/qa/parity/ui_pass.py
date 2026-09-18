@@ -407,8 +407,33 @@ class Pass:
         # kernel holds Stop until the child returns; filed 2026-09-17) reads
         # differently from a worker that ignored Stop.
         who = [(c.get("title") or c.get("name") or c.get("id"), c.get("live_status") or c.get("status")) for c in sessions(self.state()) if c.get("streaming") or c.get("turn_open")]
+        # The kernel's side of the same moment, from its files: each busy
+        # session's agent folder — last transcript record and status.toml.
+        # A turn the kernel has ended (`turn_complete`, no status) while the
+        # window still holds `turn_open` is the window's; one the kernel is
+        # still in is the kernel's (F-179, cycle 39).
+        kernel_side = []
+        for c in sessions(self.state()):
+            if not (c.get("streaming") or c.get("turn_open")):
+                continue
+            sid = c.get("agent_session") or ""
+            d = PROJ / ".arbos" / "agents" / sid
+            last = ""
+            try:
+                lines = (d / "transcript.jsonl").read_text().strip().splitlines()
+                if lines:
+                    last = json.loads(lines[-1]).get("kind", "")
+            except Exception:
+                last = "?"
+            st = ""
+            try:
+                st = (d / "status.toml").read_text().splitlines()[0][:50]
+            except Exception:
+                pass
+            kernel_side.append((sid, last, st))
+        who = f"window={who!r} kernel={kernel_side!r}"
         self.stop_failures = getattr(self, "stop_failures", 0) + 1
-        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", f"turn still busy after Stop ({self.stop_failures}x this run); busy={who!r}; opening a new chat", "fail", self.still("recover-stuck"))
+        self.record("recover", "turn-running", "Stop after a hung turn", "turn ends", f"turn still busy after Stop ({self.stop_failures}x this run); {who}; opening a new chat", "fail", self.still("recover-stuck"))
         self.context_lost = getattr(self, "current_screen", None)
         # Twice in one run is the kernel holding Stop, not a row's fault:
         # every phase after this would fail the same way and bury the
