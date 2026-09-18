@@ -47,15 +47,30 @@ def row_pitch(path):
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
+    rules_seen = []
     for name, path in (("arbos", sys.argv[1]), ("cursor", sys.argv[2])):
         img = Image.open(path).convert("RGB")
         h, rules, pitch = row_pitch(path)
+        rules_seen.append(rules)
         share = f"{pitch / h * 100:.1f}% of the screen" if pitch else "no usable pitch"
         print(f"{name:7} {img.size[0]}x{img.size[1]}  ground {ground(img, 0.45)}  "
               f"{rules} rules  row pitch {pitch or '-'}px = {share}")
     print()
     print("Ground is printed, not compared: the references are light and this app is")
     print("dark by decision (M-202). Row pitch is the comparable number.")
+
+    # Row pitch means something on a list, where rows are a repeating unit of
+    # one height. A chat has no such unit: the "rules" it finds are paragraph
+    # edges on one side and message bubbles on the other, and the numbers come
+    # out wildly apart while saying nothing. Pointed at a chat this printed
+    # 5.3% against 24.3% as though that were a style difference.
+    a_rules, b_rules = rules_seen[0], rules_seen[1]
+    if min(a_rules, b_rules) < 4 or max(a_rules, b_rules) > 3 * max(min(a_rules, b_rules), 1):
+        print()
+        print(f"CAUTION: {a_rules} rules against {b_rules}. These do not look like the same")
+        print("kind of screen. Row pitch compares a repeating unit, which a list has and")
+        print("a chat does not — on a chat these numbers measure paragraph gaps against")
+        print("message bubbles and mean nothing. Pair chats by their parts, not their pitch.")
 
 
 if __name__ == "__main__":
