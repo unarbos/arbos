@@ -185,6 +185,9 @@ struct ProjectChatView: View {
                 } label: {
                     RoundButton(symbol: "ellipsis", label: "More") {}.allowsHitTesting(false)
                 }
+                // A Menu presents itself, so the label of the button inside
+                // it never reaches the tree; it needs its own.
+                .accessibilityLabel("More")
             }
         }
         .padding(.horizontal, ArbosTheme.gutter)

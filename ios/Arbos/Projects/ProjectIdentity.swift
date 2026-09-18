@@ -153,6 +153,10 @@ struct ProjectGlyph: View {
             }
         }
         .frame(width: size, height: size)
+        // Decorative: the project's name is always beside it. Left visible
+        // to the tree it announced its SF Symbol's name — the chat header
+        // read "Move" next to the word "pod".
+        .accessibilityHidden(true)
     }
 }
 
