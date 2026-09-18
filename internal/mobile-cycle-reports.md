@@ -528,3 +528,42 @@ the desktop's source rather than assumed.
 That closes the style pair. #535 (merged) and #537 carry the two defects it
 found; everything else on the surface agrees with the reference or differs
 for a reason that is now written down.
+
+## Cycle 60 report (00:45 UTC, 09-18)
+
+**Looked at:** the four rows that had gone longest unchecked — cold start,
+away-and-back, long history, attachments — all sitting at cycle 37, which is
+twenty-three cycles.
+
+**Nothing has slipped, and one thing improved.** Each row had a figure from
+cycle 37; each now has one for next time.
+
+| | cycle 37 | now |
+|---|---|---|
+| cold start to a list with rows | 3.1 s | **3.0 s** (seven rows) |
+| tap to a chat with a composer | 1.1 s | **0.9 s**, on **2220** lines where cycle 37 had 1265 |
+| away 8 s and back | "chat as it was" | 26 text rows before, 26 after |
+| `Show 200 earlier lines` | "pages 200 back" | **3.6 s**, older content arrives, position holds |
+| photo chip | "chip in the field, send arrow replaces the mic" | chip with its `×`; right-hand button is `Up` |
+
+The chat opens faster on nearly twice the history. Stills in
+`media/mobile/cycle-60/`.
+
+**No defect in the app this cycle.** Which is worth saying plainly, because
+the rotation exists to find drift and finding none is a result.
+
+**One in the rig, caught before it became a bug report** (M-204). The first
+version flung six times to reach the top of the window and reported
+`pager: not found`. The pager is real — it sits at the top of a
+two-hundred-line window of long replies, which thirty flings reach and six do
+not, and six had no way to know they had fallen short. It now flings until
+the pager appears **or the transcript stops moving**, and says which. #539.
+
+That is the tenth instance this week of the rig reporting about something
+other than what it touched, and the first where I doubted the rig before the
+app. The earlier fixes are paying for themselves.
+
+**Next:** with these four done, the oldest rows left that can move here are
+the notifications follow-ups and the worker-chat surfaces. AirPods, CallKit
+and the TestFlight build still need Jacob's phone. The build there is the
+steward's **1725** (`74b49b4c`).
