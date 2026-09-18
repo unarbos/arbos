@@ -25,6 +25,13 @@ MODE="${1:-push}"
 log() { printf '[mirror-docs %s] %s\n' "$(date -u +%H:%M:%SZ)" "$*" >&2; }
 die() { log "REFUSED: $*"; exit 2; }
 
+# `set -e` above means any unhandled failure ends the script with that command's status and no word
+# about it. Six passes on 2026-09-18 exited 1 that way and the timer recorded only the number, so a
+# crash and a deliberate refusal were indistinguishable from outside. `exit` does not raise ERR, so
+# this never fires for `die`. The store mount returns EAGAIN under traversal — 3 writes in 100 on
+# this machine that day — which is the likeliest thing to end a pass here.
+trap 'rc=$?; log "FAILED at line $LINENO: [$BASH_COMMAND] exited $rc. This is a crash, not a refusal; a refusal says REFUSED."; exit $rc' ERR
+
 # Resolve before any cd, or a relative invocation resolves against the repo.
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 

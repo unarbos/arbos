@@ -576,8 +576,74 @@ The bug files `qal-j21` through `qal-j27` carry the reasoning for each, and ever
 which is what `vm-loop.sh` copies from at the start of a cycle — the machine's copy is a working tree,
 not a home.
 
+## Cycle 6's cap, and what the truncation actually cost
+
+The tracked step was killed by its 100-minute cap at 06:55 on `inbox:worktree-cleanup`, number
+**152 of 291**, and the alarm added for exactly this printed. Measured rather than estimated:
+
+| | count |
+|---|---|
+| never ran | 139 |
+| of those, run by a later step | 23 (desktop tag; plus `uw-*`/`af-04` from cycle 7's step 3a2) |
+| measured by no step at all | 116 |
+| of those, deterministic | **93** |
+
+The step's time went almost entirely to one place: `inbox:*` is **135 of 291** scenarios and took
+**87.2 of the 98 measured minutes** (mean 47.2 s against 22.4 s for everything else). The
+`swebench-loop-cycle-*` notes are *not* the cost — the five that ran took 5.9 minutes — but they
+are the clearest illustration of the shape: 24 notes, one per benchmark cycle, each minting a
+permanent paid scenario from a status report. Filed as `qal-j28`, with a falsifiable prediction
+that cycle 7's half split brings the step in under the cap.
+
+Two of the 93 matter more than the rest: `sw-02-stale-undo-mark-resets-past-committed-work` is
+`qal-j22`'s own subject and has not run on `main` today, and `fm-01` is the first-match property
+the `fm-*` family was to be built on.
+
+## A red that meant nothing for four cycles
+
+`af-03` ended with `f"… {wrong[0]!r} …"` inside an `expect` whose passing case is `wrong` empty.
+Python builds the message before the condition is examined, so the scenario raised `IndexError`
+**exactly when it succeeded** and printed `driver-exception` in four consecutive cycles. The notes
+survived in every rollout and say the product is fine: no ghost `.arbos/` at the old path, and an
+honest "This project's folder is gone or was moved" notice. Filed as `qal-j29`, fixed, and swept —
+three other sites index inside a message and all three already guard with `… if evs else None`.
+
+Added to the design doc as review rule 8: **a failure message must be computable when the
+assertion passes**, and a `driver-exception` is more urgent than a product break because it hides
+its own scenario's finding.
+
+## The mirror dropped 168 feedback reports, and the store faults in the open
+
+Reading `store-docs` history at the boundary: commit `68801ff4` (04:52Z) holds **0** entries under
+`media/desktop-feedback` where its parent holds **168**. The shrink guard covers `docs/` and
+`internal/` and not feedback, so a transient empty listing became a commit; the next pass restored
+it. For roughly seventy minutes the mirror that exists *because the store dropped `docs/` once
+with no event* held none of the reports.
+
+The mechanism was then caught in the act rather than inferred. At **08:03:59Z** a `check` run
+printed `REFUSED: docs/ lists no .md files` — 29 files listing as zero — and twenty samples taken
+immediately after all returned 29. Writes to the store return `EAGAIN` about 3 times in 100; two
+of my own edits failed that way and succeeded on retry, and a recursive read of `internal/` left a
+`cp` wedged in uninterruptible sleep.
+
+Three fixes, all in `qal-j30`: the feedback shrink guard (argued, **control outstanding**), the
+timer keeping the `REFUSED` reason it had been discarding, and an `ERR` trap separating the two
+things the timer had been calling by one name — **exit 2 is a refusal with a reason, exit 1 is the
+script crashing under `set -e` in silence**, and six passes today were the second kind.
+
+## Cycle 7
+
+Started 08:01:44Z on kernel `c9e035c9f062`, running the store's `cycle.sh` with both changes in
+place: the A/B half split (each cycle says which half it ran) and step 3a2, which gives
+`uw-01`..`uw-04` and `af-04` the main-built kernel and the `--kernel-branch main` label they need.
+In cycle 6 that family ran only in the untracked `rust` step and **skipped itself** by gate, which
+is why `af-04` has still not had a real run.
+
 ## Cross-references
 
+- `internal/qa/bugs/qal-j28-the-inbox-grows-without-bound-and-crowds-the-library-out-of-the-cap.md`
+- `internal/qa/bugs/qal-j29-af-03-reported-a-break-for-four-cycles-because-its-failure-message-crashed.md`
+- `internal/qa/bugs/qal-j30-the-docs-mirror-dropped-168-feedback-reports-because-only-docs-and-internal-are-guarded.md`
 - `internal/qa/bugs/qal-j21-publish-mirrors-a-smaller-bug-set-and-deletes-the-branchs-drafts.md`
 - `internal/qa/bugs/qal-j22-undo-marks-removal-needs-the-folder-whose-permission-just-failed-the-write.md`
 - `internal/unchecked-writes-and-orderings-audit.md` (the features agent's audit, which #444 answers)

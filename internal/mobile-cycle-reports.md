@@ -2214,3 +2214,84 @@ re-basing when the parent lands is the honest way through, and the old
 branch is deleted rather than left to rot.
 
 **PR:** [#598](https://github.com/unarbos/arbos/pull/598), harness only.
+
+## Cycle 89 report (08:10 UTC, 09-18)
+
+**Looked at:** the call pulled down, oldest row at 61.
+
+**All four claims measured** (M-312): the row reads `Add`, `Type to phone`,
+`Mute`, `End call`; a line typed on the call reaches the kernel (seq 2745,
+`heard`); tapping `Mute` turns the disc to **`Unmute`**; and closing returns
+to the chat the call came from.
+
+The mute half had never been exercised. The scenario was tapping the
+*composer's* microphone — which is on a different screen — and reporting
+"no mic button to mute" from the one screen that has a mute.
+
+**The labels kept breaking the scripts, so this time I swept** (M-313). #571
+broke the settings scenario last cycle and #590 broke this one. Instead of
+patching one more file I compared every name the scripts tap against the
+labels the app defines.
+
+Four scripts still tapped `Close` for a button now called `End call` —
+including **`mac-journey.sh`**, where the fallback is a coordinate tap that
+lands on **Back**. The acceptance journey has been closing calls by hitting
+the wrong control, and passing while doing it.
+
+Four `Close` taps, ten `Up` taps and two new app labels moved in one commit.
+
+**And the rule underneath, which I had been missing** (M-314). The harness
+was tapping `Up`, `Microphone`, `Gear Shape`, `Close` — none of which the
+app ever said. Those are SwiftUI's readings of unlabelled symbols. Every one
+was a defect the scripts depended on, which is exactly why each
+accessibility fix broke something:
+
+> A name a script taps should be one the app states in
+> `accessibilityLabel`. If it is not, the script is coupled to a *missing*
+> label and will break when somebody supplies one.
+
+That reframes the last three cycles. I had been treating the breakages as
+collateral damage from good work; they were the good work finding places
+where two things had grown into each other.
+
+**PR:** [#599](https://github.com/unarbos/arbos/pull/599).
+**Stills:** `media/mobile/cycle-89/`.
+
+## Cycle 90 report (08:20 UTC, 09-18)
+
+**Looked at:** the worker chat — open from the sheet, open from a worker's
+line, and back. Oldest row at 61.
+
+**The sheet path holds** (M-315): the pill opens the sheet, the first row
+opens that worker's chat with its name in the header, the chat carries its
+content and **no composer**, and `Back` returns to the project chat rather
+than the sheet or the list.
+
+**A claim that needed narrowing rather than a bug filed** (M-316). The row
+has promised two ways in since cycle 32. Tapping
+`w074832 mountains · Turn ended. Last words: …` does nothing, and I was one
+line from reporting that. `workerLines` draws a `Button` **per running
+worker and nothing for the rest**; the `Turn ended` line is kernel
+transcript text, not a control, by design. The second way in exists only
+while a worker runs, and the row had been implying every worker line is a
+door.
+
+**The running-worker half is still untested, and I would rather say so**
+(M-317). With the target corrected the scenario starts a sleeper and waits
+for its line; none appeared in 80 seconds. The likely reason is the
+scenario's own — it types and sends without the read-back every other typed
+line in this harness uses, so a composer that was not focused sends nothing
+and the run cannot tell. Two of the row's three claims are measured; the
+third is committed with the right target for the next cycle to finish.
+
+**And a scroll in the wrong direction is indistinguishable from an absence**
+(M-318). The first search used `page_up`, which walks towards the newest
+line, for something older. It reported "no Done line in view" and would have
+said that for ever.
+
+That belongs beside M-287 as a pair: a gesture that does nothing, and a
+gesture that goes the wrong way, both read as *the thing is not there*. The
+tell in each case was a negative result arriving too cleanly.
+
+**PR:** [#600](https://github.com/unarbos/arbos/pull/600).
+**Stills:** `media/mobile/cycle-90/`.

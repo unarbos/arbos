@@ -41,10 +41,23 @@ The `internal/` guard carries a comment dated 2026-09-17 describing the same eve
 recording 454 files where the tip held 492 — and was hardened then. Feedback was staged by the
 same script, on the same pass, and was not.
 
-## The cause of the partial listing
+## The cause of the partial listing, caught in the act
 
-The store mount returns `EAGAIN` ("Resource temporarily unavailable") under traversal. Measured
-today from this machine:
+At **08:03:59Z**, running `mirror-docs.sh check` against the real store, the mirror printed:
+
+```
+REFUSED: docs/ lists no .md files. The store view looks broken. Not touching the mirror.
+```
+
+`docs/` holds 29 files and listed **zero**. Twenty samples taken immediately afterwards all
+returned 29. So the store presents an empty directory listing transiently, the guard catches it,
+and the refusal is correct — the same event as 04:52, on a directory that happened to be guarded.
+
+That is the whole mechanism, observed rather than inferred: a transient empty listing on a
+**guarded** directory becomes a refusal, and on an **unguarded** one becomes a commit.
+
+The store mount also returns `EAGAIN` ("Resource temporarily unavailable") under traversal.
+Measured today from this machine:
 
 - writing a 512-byte file to the store: **3 of 100 attempts** returned `EAGAIN`
 - two of my own edits to store files failed with `EAGAIN` and succeeded on retry
@@ -84,7 +97,7 @@ empty, and building one means copying `internal/` off the mount — which is wha
 uninterruptible sleep and was abandoned rather than hammer the mount while a cycle was starting.
 Until that control runs, this fix is **argued, not demonstrated**, and should be read that way.
 
-## Also fixed, and the reason this took twenty minutes to find
+## Two more fixes: the refusals were unreadable, and half of them were not refusals
 
 `deploy/mirror-timer.sh` recorded only the exit code:
 
@@ -92,10 +105,30 @@ Until that control runs, this fix is **argued, not demonstrated**, and should be
 [2026-09-18T04:19:24Z] mirror-docs exit 2 (a refusal is an alarm)
 ```
 
-Every `die` in `mirror-docs.sh` logs `REFUSED: <reason>` naming the guard that tripped, and the
-timer discarded it. Twelve refusals over three hours said nothing about why, and the only surviving
-trace of the fault was the words `feedback 0 files` inside a commit message. The timer now keeps
-the script's output and repeats the `REFUSED`/`STALE` line beside the code.
+Every `die` logs `REFUSED: <reason>` naming the guard that tripped, and the timer discarded it.
+The timer now keeps the script's output and repeats the `REFUSED`/`STALE` line beside the code.
 
-A guard nobody can read is a guard nobody trusts. That belongs with the review rule about who
-reads a message when it changes — here the message existed and was thrown away one layer up.
+With that in place the next pass printed `mirror-docs exit 1 — ` with **nothing after the dash**,
+which is the more serious finding. `mirror-docs.sh` sets `set -euo pipefail`, and `exit` does not
+raise `ERR`, so:
+
+- **exit 2** is `die` — a deliberate refusal, with a reason.
+- **exit 1** is the script **crashing** on an unhandled command failure, silently.
+
+Six passes today exited 1. Those were not the safety net refusing; they were the safety net
+falling over without a word, and the timer's label — "a refusal is an alarm" — said the
+comforting one of the two. An `ERR` trap now names them:
+
+```bash
+trap 'rc=$?; log "FAILED at line $LINENO: [$BASH_COMMAND] exited $rc. This is a crash, not a refusal; a refusal says REFUSED."; exit $rc' ERR
+```
+
+**Control, run before installing:** a forced failure prints
+`FAILED at line 5: [grep -q nothing /nonexistent-file-xyz] exited 2`, and `die "a staged reason"`
+still prints `REFUSED: a staged reason` without firing the trap. Both checked against the exact
+line as it appears in the file, after a first attempt whose quoting mangled the message — the
+retyped approximation passed while the real line emitted a stray quote, which is its own small
+lesson about testing the artifact rather than a copy of it.
+
+A guard nobody can read is a guard nobody trusts, and a crash wearing a refusal's label is worse
+than either.
