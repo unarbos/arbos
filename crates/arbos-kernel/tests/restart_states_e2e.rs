@@ -251,6 +251,11 @@ fn a_parent_waiting_on_a_worker_picks_up_after_a_restart_and_hears_the_report_on
     // Both mid-flight: root inside spawn wait, slow inside its bash.
     let after = concat!(
         "{\"agent\":\"root\",\"content\":\"Restarted while waiting on slow; it is still building.\"}\n",
+        // Pause after the restart so this report lands after root's
+        // serve-wake turn has ended. An instant "built" reports while
+        // root is still on that turn; the report folds in as a say and
+        // no done wake comes (the same red as #523).
+        "{\"agent\":\"slow\",\"content\":\"building\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 2; echo built\",\"description\":\"Finish after the restart\"}}]}\n",
         "{\"agent\":\"slow\",\"content\":\"built\"}\n",
         "{\"agent\":\"root\",\"content\":\"slow reports: built.\"}\n",
     );
@@ -299,7 +304,11 @@ fn a_parent_waiting_on_a_worker_picks_up_after_a_restart_and_hears_the_report_on
     );
     assert_eq!(
         slow.iter()
-            .filter(|e| e["kind"] == "tool" && e["name"] == "bash")
+            .filter(|e| e["kind"] == "tool"
+                && e["name"] == "bash"
+                && e["args"]["command"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("sleep 8; echo built")))
             .count(),
         1,
         "the build ran once: {slow:?}"
