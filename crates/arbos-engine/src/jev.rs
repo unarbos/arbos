@@ -27,7 +27,10 @@ pub const WINDOW_TOKENS: u64 = 32_000;
 /// Leave room in the 32k window for the system instruction.
 const CARD_TOKEN_BUDGET: u64 = 24_000;
 /// Longest wait for Jev's first byte before the turn falls through.
-const FIRST_BYTE: Duration = Duration::from_secs(15);
+/// Jev is System One: a healthy call is a few hundred milliseconds.
+/// Fifteen seconds was the chat-model cap and left "Choosing the next
+/// step" on the desktop for the whole stall, then the LLM still ran.
+pub const FIRST_BYTE: Duration = Duration::from_millis(1_500);
 /// JSON is short; cap the completion so a stall cannot run on.
 const MAX_OUTPUT: u64 = 256;
 /// Glance size for one tool result in the card.
@@ -720,6 +723,15 @@ mod tests {
         let mut openai = HostConfig::default();
         openai.set_provider(ProviderKind::OpenAi);
         assert!(!should_ask(&openai, true, false));
+    }
+
+    #[test]
+    fn first_byte_is_a_router_wait_not_a_chat_wait() {
+        assert_eq!(FIRST_BYTE, Duration::from_millis(1_500));
+        assert!(
+            FIRST_BYTE < Duration::from_secs(3),
+            "a 15s cap leaves Choosing the next step on the window"
+        );
     }
 
     #[test]
