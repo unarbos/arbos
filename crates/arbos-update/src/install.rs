@@ -134,7 +134,26 @@ impl Swap {
         // unhidden second `.app` is one Launch Services will register and
         // ⌘Space may open. The swap has already happened by then, so a
         // failure here costs the tidier name and nothing else.
-        if exchange(target, staged).is_ok() {
+        // Only "this system has no exchange" walks on. An attempt that
+        // failed for its own reasons has already been retried, and taking
+        // the windowed rung because of one would give up atomicity on a
+        // machine that has it.
+        let offered = match exchange(target, staged) {
+            Ok(()) => Ok(()),
+            Err(e) if exchange_unsupported(&e) => Err(e),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "exchanging {} with {} — the system offers an exchange and this one \
+                         would not complete, so the swap was not made rather than made \
+                         with a gap in it",
+                        staged.display(),
+                        target.display()
+                    )
+                });
+            }
+        };
+        if offered.is_ok() {
             let backup = match std::fs::rename(staged, &backup) {
                 Ok(()) => backup,
                 Err(_) => staged.to_path_buf(),
@@ -228,7 +247,57 @@ impl Drop for Swap {
 /// system's error where it has one and it failed — an old kernel, or a
 /// filesystem that does not implement the flag. Callers fall down the
 /// ladder rather than treating it as fatal.
+/// Whether a failed exchange means *this system cannot do one*, as against
+/// *this attempt did not work*.
+///
+/// The difference decides whether to walk down the ladder, and getting it
+/// wrong is how a swap silently loses its atomicity: a one-off `EBUSY` read
+/// as "no exchange here" drops to the rung that has a window, on a machine
+/// that could have done it properly. One swap in forty took that path on a
+/// CI runner on 2026-09-18 — the exchange was available, the rung-1
+/// assertion passed in the same run — and a reader saw the installed path
+/// missing once in 4190 looks.
+///
+/// So only the errors that describe the *system* count: the call is not
+/// there, the filesystem does not implement the flag. Everything else is
+/// this attempt's problem and is retried.
+fn exchange_unsupported(e: &std::io::Error) -> bool {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if let Some(code) = e.raw_os_error() {
+            // ENOTSUP and EOPNOTSUPP are the same number on Linux, so one
+            // arm covers both.
+            return code == libc::ENOSYS
+                || code == libc::EINVAL
+                || code == libc::ENOTSUP
+                || code == libc::EXDEV;
+        }
+    }
+    e.kind() == std::io::ErrorKind::Unsupported
+}
+
+/// Put `a` and `b` in each other's place, waiting out an attempt that
+/// failed for a reason of the moment.
+///
+/// Retried for the same reason `--version` is: the alternative is not "try
+/// again later" but "quietly do something weaker", and the weaker thing
+/// here is the one interval this file exists to remove.
 fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match exchange_once(a, b) {
+            Ok(()) => return Ok(()),
+            Err(e)
+                if !exchange_unsupported(&e) && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn exchange_once(a: &Path, b: &Path) -> std::io::Result<()> {
     // A machine with an exchange never walks down the ladder, so without
     // this the rungs below would be written and never run. Thread-local
     // and test-only: tests share a process, and a switch that could turn
@@ -237,6 +306,13 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
     if no_exchange::is_set() {
         let _ = (a, b);
         return Err(std::io::ErrorKind::Unsupported.into());
+    }
+    // A failure of the moment, as the runner produced one: EBUSY says
+    // nothing about whether the system can exchange.
+    #[cfg(test)]
+    if no_exchange::take_transient() {
+        let _ = (a, b);
+        return Err(std::io::Error::from_raw_os_error(libc::EBUSY));
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -511,6 +587,24 @@ mod no_exchange {
     }
     /// Restores itself when it goes out of scope, so a failing assertion
     /// cannot leave the rest of the thread's tests on a lower rung.
+    /// How many of the next attempts should fail with a reason of the
+    /// moment rather than a reason about the system. Lets a test produce
+    /// the exact thing that cost the swap its atomicity on CI.
+    thread_local! {
+        pub(super) static TRANSIENT: Cell<u32> = const { Cell::new(0) };
+    }
+    pub(super) fn take_transient() -> bool {
+        TRANSIENT.with(|n| {
+            let left = n.get();
+            if left > 0 {
+                n.set(left - 1);
+                true
+            } else {
+                false
+            }
+        })
+    }
+
     pub(super) struct Off;
     impl Off {
         pub(super) fn new() -> Self {
@@ -703,6 +797,51 @@ mod tests {
         assert_eq!(marker_of(&swap.backup), "app old", "the old tree is kept");
         swap.commit().unwrap();
         assert_eq!(marker_of(&target), "app new");
+    }
+
+    /// The failure the CI runner actually produced, made to happen.
+    ///
+    /// One swap in forty took the windowed rung on a machine that had an
+    /// exchange — the rung-1 assertion passed in the same run — and a
+    /// reader saw the installed path missing once in 4190 looks. The cause
+    /// was `is_ok()`: any error at all read as "no exchange here".
+    ///
+    /// A transient must be waited out, not answered by quietly doing the
+    /// weaker thing.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_failure_of_the_moment_does_not_cost_the_swap_its_atomicity() {
+        let home = tempfile::tempdir().unwrap();
+        let target = tree(&home.path().join("Arbos.app"), "old");
+        let staged = tree(&home.path().join(".Arbos.app.arbos-new"), "new");
+
+        // The first three attempts fail with EBUSY, as the runner's did.
+        no_exchange::TRANSIENT.with(|n| n.set(3));
+        let swap = Swap::begin(&target, &staged).unwrap();
+        assert_eq!(
+            swap.how,
+            How::Exchanged,
+            "a transient sent the swap down to a rung with a window"
+        );
+        assert_eq!(marker_of(&target), "app new");
+        swap.commit().unwrap();
+        no_exchange::TRANSIENT.with(|n| n.set(0));
+    }
+
+    /// And a transient that never clears is a refusal, not a quiet
+    /// downgrade: better no swap than a swap with a gap in it.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn an_exchange_that_keeps_failing_refuses_rather_than_widening() {
+        let home = tempfile::tempdir().unwrap();
+        let target = tree(&home.path().join("Arbos.app"), "old");
+        let staged = tree(&home.path().join(".Arbos.app.arbos-new"), "new");
+
+        no_exchange::TRANSIENT.with(|n| n.set(u32::MAX));
+        let err = Swap::begin(&target, &staged).unwrap_err().to_string();
+        no_exchange::TRANSIENT.with(|n| n.set(0));
+        assert!(err.contains("gap in it"), "{err}");
+        assert_eq!(marker_of(&target), "app old", "the old app is untouched");
     }
 
     /// The property itself, watched rather than reasoned about.
