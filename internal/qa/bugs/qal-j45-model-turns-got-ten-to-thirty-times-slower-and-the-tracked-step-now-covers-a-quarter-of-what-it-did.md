@@ -1,6 +1,6 @@
 # qal-j45 — model turns got ten to thirty times slower, and the cycle's first step now covers a quarter of what it did
 
-- **status**: open; the slowdown is measured and reproducible, the cause is **not yet isolated** — the first attempt to isolate it was invalid (see "The first alternating run was invalid")
+- **status**: open. The slowdown is real and measured. **The Jev commits are ruled out** — a kernel from before them is equally slow right now. The cause is time-varying and outside the build (see "Answered: not the kernel").
 - **found**: 2026-09-18 19:05, checking whether cycle 11 would finish inside its cap
 - **kernel**: slow on `arbos-kernel 0.2.0 fba8688d92d2`; fast on `cea8b902eecf` and everything before
 - **cost so far**: cycle 11's first step stopped at **25 scenarios**; cycle 10's reached **62**
@@ -100,3 +100,47 @@ Nothing that fixes the slowdown — these are containment:
 Neither touches the cause. If the alternating test finds candidate 1, this is a product performance
 regression and the cap conversation is a distraction; if it finds candidate 2, the loop needs to
 decide whether to slow its own request rate rather than lose coverage to a throttle.
+
+## Answered: not the kernel
+
+The valid alternating run, against a **pre-change kernel I built into my own directory** so the
+loop could not overwrite it:
+
+```
+new = arbos-kernel 0.2.0 1b4ef7a93fe6      (current main, has a47c5104 and 2d5cad97)
+old = arbos-kernel 0.2.0 232518c26c1f      (14:59, the commit a47c5104 sits on top of)
+
+round 1  new  >600s     round 1  old  >600s
+round 2  new  >600s     round 2  old  >600s
+round 3  new  >600s     round 3  old  >600s
+```
+
+**Both arms exceed ten minutes, every round.** The pre-change kernel is just as slow as the current
+one, so candidate 1 is dead: the Jev controller commits did not cause this. The correlation was an
+accident of when the builds happened.
+
+The same `232518c2` code ran `ordinary-task` in 21–29 s earlier today. The code did not change
+between then and now; the hour did. So the cause is **time-varying and outside the build** —
+provider-side on the evidence available, which matches the 429s seen in `bench-fix-commit-branch`
+and `bench-research-links` (*"Jev did not choose the next step: 429 rate limited"*).
+
+I am not claiming a specific provider mechanism beyond that. What is established:
+
+- the slowdown is real, large (10–30×) and reproducible on demand;
+- it is **not** a regression in the kernel, and nobody should go looking for one;
+- it costs coverage directly — cycle 11's first step reached 25 scenarios where cycle 10 reached 62.
+
+### What follows for the loop
+
+This is the loop's throughput problem, not the product's. Worth someone's decision rather than my
+guess: when turns cost ten times more, a fixed 100-minute cap converts a provider's bad hour into
+permanently unasked questions, and always the same tail, because the library's order is fixed. The
+containment already in place (`env:provider-rate-limited`, the bounded `spawn-storm` teardown) stops
+the noise and returns a few minutes; it does not address that.
+
+### And a second rig lesson
+
+The current-build arm was `fba8688d92d2` when this test began and `1b4ef7a93fe6` by the time it
+finished — the loop rebuilt it twice underneath me, exactly as it had overwritten my first "old"
+binary. Any measurement that spans more than one cycle must hold its own copies of **both** sides.
+The `old` arm did this time; that is the only reason the answer is trustworthy.

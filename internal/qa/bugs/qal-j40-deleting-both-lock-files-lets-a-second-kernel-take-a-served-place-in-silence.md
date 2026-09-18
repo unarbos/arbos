@@ -82,6 +82,10 @@ The lock's identity should not be the path alone. Two candidates, either enough:
 - `#446` — the same harm by a stale record outranking a live one; `fm-03`.
 - `ds-01` — the detector for a double-serving that has already happened.
 - `af-02` — two windows on one place, the supported concurrent case.
+- `internal/qa-after-failure-probes-that-found-nothing-2026-09-18.md` — the complement of this bug,
+  measured: a record that **lies** about its pid is harmless, because the lock is the gate and the
+  lock still tells the truth. Here the lock was moved out from under itself and a second kernel got
+  in. One mechanism, two directions.
 
 ## Now guarded by the library
 

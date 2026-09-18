@@ -199,3 +199,15 @@ kept diagnosing the product against a red my own harness was manufacturing. Each
 made real progress and my rig hid it. Two agents wrote code against those reds. The full account is
 in `qal-j44`; the note to them is
 `internal/qa/inbox/2026-09-18-qal-j35-closed-by-679-my-rig-was-erasing-the-fix.md`.
+
+### Confirmed on the loop's own build
+
+Not just on a probe build: the loop rebuilt its desktop app from `1b4ef7a93fe6` at 19:40, which
+carries #679 (`d253c610`). `mt-24` against that binary, the one the cycle itself uses:
+
+```
+pass (7.2s)   pass (7.2s)   pass (7.2s)
+```
+
+So the fix is confirmed on the build the loop actually runs, and cycle 12's desktop step should
+show `mt-24` green without any intervention.
