@@ -50,6 +50,16 @@ pub enum Event {
         who: String,
         text: String,
     },
+    /// The newest transcript line the kernel replayed at attach
+    /// (`history_end`): every recorded line at or below it is history, not
+    /// news, whatever the pane's cards say about their own lines.
+    RecordEnd(u64),
+    /// The events that follow, up to `RecordLineEnd`, are one transcript
+    /// line's, at this `seq`. The session drops the lot when it holds that
+    /// line already — a tail cursor that started at line one, a replay
+    /// reaching a live pane (F-135, F-180).
+    RecordLine(u64),
+    RecordLineEnd,
     /// A person's words the kernel recorded that this window did not send:
     /// spoken through the voice gateway during a call, or typed on the
     /// phone. The transcript's `user` line, with its time.
@@ -89,9 +99,6 @@ pub enum Event {
     AssistantFinal {
         text: String,
         step: u64,
-        /// The record's line number, so a line the pane already holds is
-        /// not appended a second time (F-135).
-        seq: u64,
     },
     /// Streamed text of model step `step` (1-based within the turn), from
     /// a kernel that numbers its steps; the settled line of the same step
@@ -138,7 +145,6 @@ pub enum Event {
         kind: String,
         text: Option<String>,
         at: Option<i64>,
-        seq: u64,
     },
     /// The model call is alive and has been silent for this many seconds
     /// (`working` frame). Live only.
@@ -767,7 +773,13 @@ impl Drop for Session {
 fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
     match frame {
         Frame::Event { agent: id, event } if id == agent || agent.is_empty() => {
-            kernel_event(&id, event)
+            let seq = event.seq;
+            let mut out = kernel_event(&id, event);
+            if seq > 0 {
+                out.insert(0, Event::RecordLine(seq));
+                out.push(Event::RecordLineEnd);
+            }
+            out
         }
         // Streamed text, one chunk per frame (the kernel's live path); the
         // whole step arrives later as an `event` with a seq, which
@@ -867,6 +879,9 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
                 allow_multiple: false,
             }],
         }],
+        // The replay's close names the newest line on the record at attach:
+        // the pane's high-water mark for "already held" starts there.
+        Frame::HistoryEnd { agent: id, to, .. } if id == agent => vec![Event::RecordEnd(to)],
         // The desktop reads transcripts from the files; the replay that a
         // file-less client needs is not for it. Skipped here so a replayed
         // line is never appended a second time.
@@ -1085,17 +1100,12 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             kind: wake,
             text,
             at: (ts > 0).then_some(ts),
-            seq: event.seq,
         }],
         // A transcript line (tailed or replayed) is the step's final text;
         // a live emit without a seq is a delta (older kernels send those
         // as events too).
         EventKind::Assistant { text, step, .. } if recorded => {
-            vec![Event::AssistantFinal {
-                text,
-                step,
-                seq: event.seq,
-            }]
+            vec![Event::AssistantFinal { text, step }]
         }
         EventKind::Assistant { text, .. } => {
             vec![Event::Update(SessionUpdate::AgentMessageChunk(text_chunk(
