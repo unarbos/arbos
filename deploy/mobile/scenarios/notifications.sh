@@ -61,7 +61,12 @@ say "away we go"
 pkill -INT -f "simctl io.*recordVideo" 2>/dev/null; sleep 2
 xcrun simctl io "$UDID" recordVideo --codec h264 --force "$OUT/away-raw.mp4" > "$OUT/record.log" 2>&1 & REC=$!
 idb ui button HOME --udid "$UDID"
-sleep 4; shot 03-home-waiting
+# Taken at once, not after a wait: the banner arrives about two seconds in,
+# so a "before" shot four seconds later already has the banner in it, and
+# 03 and 04 came out byte-identical. Just long enough for the Home Screen to
+# settle.
+sleep 0.6; shot 03-home-before-the-banner
+sleep 3.4
 mkdir -p "$OUT/burst"
 BANNER=""
 for t in $(seq 1 60); do
