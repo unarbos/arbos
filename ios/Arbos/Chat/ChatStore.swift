@@ -497,12 +497,17 @@ final class ChatStore: ObservableObject {
         await reconnect()
     }
 
-    /// What the header calls the chat: the machine/project, then the
-    /// root agent's name when the kernel gave it one.
+    /// What to call this chat: the project's own name from its
+    /// `project.toml`, then the folder, and only then the raw target — the
+    /// same order the chat's own header uses. The banner is drawn from this
+    /// and used to say `arboslife/phone` where every other surface said
+    /// `phone`, because it went straight to the target's label.
+    ///
+    /// The root agent's name is appended when the kernel gave it one.
     var title: String {
-        let target = settings.kernelTarget.label
+        let name = identity?.name ?? settings.kernelTarget.folder ?? settings.kernelTarget.label
         let agent = agentName
-        return agent == "main" ? target : "\(target) · \(agent)"
+        return agent == "main" ? name : "\(name) · \(agent)"
     }
 
     /// The open question, if the kernel is waiting on one.
