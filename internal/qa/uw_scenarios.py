@@ -704,4 +704,97 @@ def register(scenario, registry, transcript, now_ms, branch):
             k.stop()
         cx.check(place=place if place.exists() else moved)
 
+    # ── first-match readers: the first location fails and the next one takes the name ──
+    # fm-01 (the checkpoint sidecar) is in landing_scenarios.py; this is the same family, found by
+    # walking the kernel's first-match readers rather than by a break. The audit listed six — the
+    # history lookup, the checkpoint sidecar, the roster files, the leash pointer, the legacy
+    # kernel.json and the held-record loader. `mcp::load_servers` is a seventh nobody had checked.
+    @reg("fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone", needs_model=False, tags=("first-match", "mcp", "config"))
+    def fm02(cx):
+        """`mcp::load_servers` (crates/arbos-kernel/src/mcp.rs:116) walks four locations in order —
+        `.arbos/mcp.toml`, `.cursor/mcp.json`, `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` — and the
+        first file to define a server name keeps it. A file that does not parse is skipped with an
+        `eprintln!` and the walk goes on, so a typo in the place's own config quietly hands that server's
+        name to whatever the next location says. Nothing carries that to the person: the desktop sends
+        the kernel's stderr to `.arbos/runtime/kernel.out.log`, which its own comment calls "process
+        facts, never part of the .arbos/ record" (desktop/src/kernel.rs:2789).
+
+        Staged as the world does it: a place config with one wrong character and a global config naming
+        the same server differently. The assertion is about the transcript, because that is what a person
+        reads. The kernel's stderr is used only to prove the parse really failed — and note that under
+        this harness stderr lands in the rollout, not in `runtime/`; the product path is the desktop's."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        plain_agent(place)
+
+        # The place's own config, with one wrong character: a bare word where a string belongs.
+        arbos = place / ".arbos"
+        arbos.mkdir(parents=True, exist_ok=True)
+        broken = arbos / "mcp.toml"
+        broken.write_text('[servers.notes]\ncommand = this-is-not-quoted\nargs = ["--from-the-place"]\n')
+
+        # The global one, valid, naming the same server.
+        cfg = cx.scratch / "xdg"
+        (cfg / "arbos").mkdir(parents=True, exist_ok=True)
+        (cfg / "arbos" / "mcp.toml").write_text('[servers.notes]\ncommand = "/bin/true"\nargs = ["--from-the-global-config"]\n')
+        cx.env["XDG_CONFIG_HOME"] = str(cfg)
+
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "Up."}]))])
+        try:
+            started = k.start()
+            cx.rec.expect(started, "fm-02-kernel-did-not-start", "the kernel did not come up with an unparseable .arbos/mcp.toml; a broken config must not stop it serving")
+            if not started:
+                return
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            c.user("root", "Say up.")
+            wait_turn_complete(c, "root", 60)
+
+            err = (k.err.name if hasattr(k, "err") else None)
+            stderr_text = ""
+            for p in (cx.rec.dir / "kernel.stderr.log", Path(err) if err else None):
+                if p and Path(p).exists():
+                    stderr_text = Path(p).read_text(errors="replace")
+                    break
+            complained = [l for l in stderr_text.splitlines() if l.lower().startswith("mcp:") or "mcp.toml" in l]
+
+            evs, _ = transcript(place, "root")
+            said = [
+                e for e in notices(evs)
+                if "mcp" in e.get("text", "").lower() or "mcp.toml" in e.get("text", "").lower()
+            ]
+            cx.rec.notes.update({
+                "stderr_lines_about_mcp": [l[:200] for l in complained][:4],
+                "notices_about_mcp": [e.get("text", "")[:240] for e in said],
+                "place_config_still_unparseable": broken.read_text(errors="replace")[:80],
+                "kernel_still_answering": not c.closed,
+            })
+
+            # Probe validity first: if the config parsed, this run stands for nothing.
+            cx.rec.expect(
+                bool(complained),
+                "probe-config-was-not-rejected",
+                f"nothing on the kernel's stderr names the broken config, so the parse may have succeeded and this run does not stage the fault it claims: {stderr_text[-200:]!r}",
+            )
+            if not complained:
+                return
+            # And show the takeover rather than asserting it from the code: the `notes` server the
+            # kernel goes on to start can only have come from the global config, because the place's
+            # file never parsed. Proved by the absence of that line when no global config exists —
+            # measured 2026-09-18 on `arbos-kernel 0.2.0 f80f0b663bac protocol 1`, two arms, the
+            # second identical but for the global file.
+            took_over = [l for l in complained if "notes:" in l]
+            cx.rec.notes["global_server_took_the_name"] = bool(took_over)
+            cx.rec.notes["takeover_line"] = (took_over[0][:200] if took_over else None)
+            cx.rec.expect(
+                bool(said),
+                "fm-02-broken-place-config-is-silent-to-the-user",
+                f"`.arbos/mcp.toml` does not parse and root's transcript says nothing about it ({len(complained)} line(s) went to the kernel's stderr instead: {complained[:1]}). The place's `notes` server is skipped and the name falls through to the next location{' — and the global one took it here' if took_over else ''}, so the person gets a different server — or none — with the only record in a log the window never shows",
+                "arbos-kernel mcp.rs load_servers — a config that does not parse is a thing its author needs told, on the transcript, not on stderr",
+            )
+        finally:
+            cx.env.pop("XDG_CONFIG_HOME", None)
+            k.stop()
+        cx.check()
+
     return reg

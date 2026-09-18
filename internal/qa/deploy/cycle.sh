@@ -103,7 +103,13 @@ rm -rf "$ROOT/loop/__pycache__"
 # scenario name (stable when one is added) and both carry the two headlines. The half is remembered in
 # state/ and flipped each cycle, and every cycle says which it ran.
 HALF_FILE="$ROOT/state/library-half"
-LIB_HALF=$(cat "$HALF_FILE" 2>/dev/null)
+mkdir -p "$ROOT/state"
+# `|| true` is load-bearing under `set -e`: a command substitution takes the command's status, so on
+# the first cycle — when the file does not exist yet — `cat` exits 1 and the assignment ends the
+# script. That is exactly what happened to cycle 7 on 2026-09-18 at 08:33: it died here, between the
+# untracked step and the tracked one, and lost the tracked step, step 3a2, the desktop step and the
+# journey. The `2>/dev/null` hid the message; it did not stop the status.
+LIB_HALF=$(cat "$HALF_FILE" 2>/dev/null || true)
 case "$LIB_HALF" in A) LIB_HALF=B;; B) LIB_HALF=A;; *) LIB_HALF=A;; esac
 echo "$LIB_HALF" > "$HALF_FILE"
 echo "== library half this cycle: $LIB_HALF (the other half runs next cycle; both halves carry the kickoff replay and the acceptance journey)"

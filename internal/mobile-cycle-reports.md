@@ -2295,3 +2295,72 @@ tell in each case was a negative result arriving too cleanly.
 
 **PR:** [#600](https://github.com/unarbos/arbos/pull/600).
 **Stills:** `media/mobile/cycle-90/`.
+
+## Cycle 91 report (08:30 UTC, 09-18)
+
+**Looked at:** finishing the half I left open at 90 — a running worker's
+line in the chat.
+
+**It is still untested, and now the run says why it cannot say** (M-320,
+M-321). Three things came out of chasing it, in order:
+
+The read-back was missing from my own new file (M-319). Cycle 90 typed and
+tapped Send without confirming the line landed, so when no worker started
+the run could not tell a failed app from keystrokes that went nowhere. That
+is the fault M-180 fixed everywhere else in this harness. I wrote a rule
+about exactly this class at cycle 89 and broke it at cycle 90 — a rule in a
+ledger is not a rule in a file.
+
+With the read-back passing and the line provably sent, **still no worker**.
+Watched for 64 seconds: the chat held nothing but the sent message.
+`Through one worker: …` has the root run the sleep itself; the proven
+wording is `Through one worker **you wait for**: …`, and even that did not
+delegate in this project tonight. The kernel confirms no child for the
+request. Whether a worker runs at all is the model's decision, not the
+phone's.
+
+And the check could not tell those apart (M-321). "No running-worker line
+appeared" covered two different worlds — the app failing to draw a line, and
+there being no line to draw — and only the first is the phone's to answer.
+It asks the kernel now, and reports *no worker ran, so there was no line to
+draw. Untested, and not the app's doing.*
+
+**What this cycle actually produced** is not a verified row; it is a check
+that can no longer blame the app for something the model decided. Given how
+many of tonight's findings began as instruments misreading themselves, I
+would rather have that than a green tick.
+
+**PR:** [#602](https://github.com/unarbos/arbos/pull/602), harness only.
+
+## Cycle 92 report (08:40 UTC, 09-18)
+
+**Looked at:** the pill-versus-sheet thread from cycle 74 and #576, which
+had been stuck behind an instrument that could not measure it.
+
+**They agree, and the thread closes** (M-322). Run on `qa-cycle-11-demo`, a
+project whose goals are distinct:
+
+```
+the pill says:  Agents 12
+the sheet lists: 12 rows (paging converged)
+labels sharing a name on one screen (each would hide a row): 0
+VERDICT: the two agree on 12.
+```
+
+Two clean readings now agree — 19 = 19 at cycle 80 and 12 = 12 here — and
+every apparent disagreement between them was the instrument: an off-screen
+swipe, a fixed page count mistaken for the end of a list, and a count by
+label on a list whose labels repeat. **The app was never wrong about its own
+agents.**
+
+That is worth stating plainly because cycle 74 filed the opposite, and the
+correction took four cycles and three separate rig fixes to reach. The
+original finding was wrong in a way that looked thoroughly evidenced.
+
+**A refusal should name its way out** (M-323). The comparison rightly
+declines where goals collide, then left the reader to go hunting for a
+project where it would work. It names `qa-cycle-11-demo` now. A tool that
+declines to answer is only useful if the next step is obvious; otherwise the
+refusal is simply where the investigation stops.
+
+**PR:** [#603](https://github.com/unarbos/arbos/pull/603).

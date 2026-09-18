@@ -705,8 +705,24 @@ Every failure read against the account: 15022 ×5 C (semantics preserved, as in 
 
 Spend $16.81.
 
-## Next (cycle 27)
+## Cycle 27 (2026-09-18) — the producer rule's step landed; it moves the case where the producer fix is obvious once read, not the case where it takes a judgement
 
-1. Nothing is owed on the five rules or on #541; cycle 24 is the statement about the rules, and this cycle is the statement about #541: correct where it applies, unable to show itself in ten rollouts because the behaviour it targets is rare, and not reaching the override shape.
-2. Reading continues on whatever new failures arrive. If the features agent lands the "read the function you named" step for the producer rule, the read is five rollouts on xarray-6938 and sympy-17318 again, first question the same.
-3. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
+**Conditions.** c8c62b68 on `main` gave the producer rule the step cycle 25 asked for: *read the function your root-cause line names before the first edit — the read call is the record.* Kernel **`arbos-kernel 0.2.0 17c5232e2189 protocol 1`** = `main` head, built in the worktree, label proved. Network cut, egress 0.0, no stall. Pre-registered as a read ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-27-preregistration.md)): five rollouts each on xarray-6938 and sympy-17318. $5.80; six of ten solved — a count.
+
+| Instance | Root named in the reply | Producer opened *before the first edit* | Fix at the producer | Solved | Before (c22 → c25) |
+|---|---|---|---|---|---|
+| xarray-6938 (`to_index_variable` returns `self`) | 5/5 | **5/5** (2–8 reads of `variable.py` / the method) | **5/5** (`variable.py`) | 5/5 | 0/3 → 2/5 |
+| sympy-17318 (`_sqrt_match`'s condition) | 5/5 | 4/5 | **1/5** (`is_real` added to the condition; solved) | 1/5 | 0/4 → 1/5 |
+
+**xarray-6938 changed.** Every rollout opened the producer before editing, every one fixed it there, every one solved — on an instance that had solved 2 of 8 clean rollouts before and never once in cycle 22. Five is five; but it is the same instance, the same choice, and the choice went the other way five times out of five with the step in the transcript each time. This is what a rule landing looks like at the resolution the loop can read.
+
+**sympy-17318 did not.** Four of five opened `_sqrt_match` before editing — the step was taken — named its condition as the fault, and then guarded downstream anyway: two in `_split_gcd` (`if not a: return`), two in `split_surds` (`if not surds: return`). All four failed the hidden test (`_sqrt_match(4 + I) == []`). The one that fixed the condition (`and x.is_real`) solved. The difference between the two instances is what the producer fix asks of the agent: in 6938 the fix is *obvious once the method is read* (return a copy instead of `self`); in 17318 it takes a judgement (which predicate excludes `I` — `is_real`, `is_positive`, `is_extended_real`?) and the agent, unsure, hedges with a guard it can defend as "safe". Reading the producer is the step that separates the two fixes when the producer's fix is plain; it does not decide a judgement the agent would rather not make. That is a boundary of the producer rule worth stating: **the step works where the fault is visible in the producer's code; where the producer fix is a semantic choice, the agent still prefers the guard.** No "producer:" reply line in any of the ten — the line remains the part the agent skips.
+
+Every failure read: sympy-17318 ×4, B (the guard), evident — the fourth cycle this instance has shown it, now with the producer read in the transcript. Cumulative read: 272.
+
+Spend $5.80.
+
+## Next (cycle 28)
+
+1. To the features agent: the 6938 result as the step working; the 17318 result as its boundary — a guard chosen over a judgement, with the producer already read. If anything is to be said to the agent about that, it is not "read the function" (done) but "when you can name the wrong predicate, change the predicate; a guard that lets the wrong value through to a different caller is not the conservative choice."
+2. Reading continues on whatever new failures arrive. No measured comparison without its ceiling stated first.

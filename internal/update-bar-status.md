@@ -5,13 +5,35 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 07:48 UTC.
+Last checked 2026-09-18 08:38 UTC.
 
-## Click Update. You will get build 1886.
+## Click Update. You will get build 1904.
 
-**1886** — signed, notarised, stapled, on the feed since 07:44 UTC.
+**1904** — signed, notarised, stapled, on the feed since 08:33 UTC.
 
-New since 1875 (builds 1876–1886):
+Checked, not assumed: Apple's notary said Accepted, the ticket is stapled
+into the bundle, Gatekeeper reads it as a Notarized Developer ID, the zip's
+own Ed25519 signature verifies against the key in the app, and its size and
+hash are the ones the feed states. All four payloads (Mac app and kernel,
+Linux app and kernel) are on the release.
+
+New since 1886 (builds 1887–1904):
+
+- **#594** — voice: one question, one answer. The model's first word waits
+  for our transcript; a work question is the kernel's, small talk the
+  model's
+- **#593** — the loop pages a list until it stops growing, and refuses to
+  count one whose labels repeat
+- **#595** — the loop reads the settings sheet where its contents actually
+  are
+- **#596** — dev channel: a newer commit holds the channel only while it
+  looks like finishing
+- **#598** — the loop tags this run's workers so the sheet can be asked
+  about them
+- **#599** — iOS: the composer's send and microphone say their own names,
+  and no script taps a symbol name any more
+
+And new since 1875 (builds 1876–1886):
 
 - **#589** — the checkpoint_refs test says what the record and the repo
   held when it goes red

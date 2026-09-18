@@ -1,6 +1,6 @@
 # qal-j30 — the docs mirror dropped 168 feedback reports because only `docs/` and `internal/` are guarded
 
-- **status**: fixed in `internal/mirror-docs.sh`; the guard's firing is **not yet proven by a control** (see below)
+- **status**: fixed in `internal/mirror-docs.sh`, both arms of the control run (08:13–08:18)
 - **found**: 2026-09-18 07:40, reading `store-docs` history at a cycle boundary
 - **commit that lost them**: `68801ff444a114f2d2e2043b52192e4aaad86419`, pushed 04:52Z
 - **restored by**: the next successful pass at 06:03Z
@@ -87,15 +87,40 @@ if [ -n "$parent" ]; then
 fi
 ```
 
-**What is proven:** the edited script parses (`bash -n`), and run in `check` mode against the real
-store it executes past the new block to reach the `STALE` exit, so the insertion does not break
-the mirror's normal path.
+### The control (run 08:13–08:18, both arms)
 
-**What is not proven:** that the guard *fires* on an empty feedback listing. The honest control
-needs a store view whose `docs/` and `internal/` are complete and whose feedback directory is
-empty, and building one means copying `internal/` off the mount — which is what wedged a `cp` in
-uninterruptible sleep and was abandoned rather than hammer the mount while a cycle was starting.
-Until that control runs, this fix is **argued, not demonstrated**, and should be read that way.
+Staging an empty feedback directory needs a store view whose `docs/` and `internal/` are otherwise
+complete, and copying `internal/` off the mount is what wedged a `cp` in uninterruptible sleep.
+The cheap way round is to move the *other* side of the comparison: `BRANCH` is overridable and the
+parent is read from `refs/remotes/origin/$BRANCH`, which can be set locally with `git update-ref`
+and never pushed. So the control branch is the `store-docs` tip plus one extra feedback entry —
+the parent claims **169** where the store lists **168**.
+
+| arm | result |
+|---|---|
+| with the guard (installed script) | `REFUSED: media/desktop-feedback lists 168 mirrorable files but the mirror holds 169` — exit 2 |
+| same script, guard removed | `STALE: the store differs from the mirror (29 docs)` — exit 1, straight past the shortfall and on toward a push |
+
+So the fix refuses where the unfixed script proceeds. The control ref was deleted afterwards and
+nothing was pushed.
+
+### What the control turned up on its own
+
+The unguarded arm had to be run four times to get that clean result. Three of the runs died like
+this:
+
+```
+FAILED at line 180: [sort > "$list"] exited 1. This is a crash, not a refusal; a refusal says REFUSED.
+```
+
+Line 180 is the feedback listing itself — `find "$fb" … -print 2>/dev/null | sort > "$list"` —
+identical in both arms. Under `pipefail` a failing `find` fails the pipeline, and `set -e` then
+kills the mirror with exit 1 and, before the trap, no word at all.
+
+**That is the six silent exit-1 crashes, reproduced and located**, and it completes the picture:
+one flaky traversal of the store gives two different failures. When `find` fails outright the
+mirror crashes silently; when it merely returns short the mirror undercounts, and on an unguarded
+directory that undercount becomes a commit. 04:52 was the second kind.
 
 ## Two more fixes: the refusals were unreadable, and half of them were not refusals
 
