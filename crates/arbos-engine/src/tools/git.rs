@@ -444,8 +444,26 @@ const CHECKPOINT_IDENTITY: &[(&str, &str)] = &[
 /// be made, which the checkpoint records rather than swallows.
 fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
     let tree = work_tree(cwd)?;
-    let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")])
-        .ok_or_else(|| format!("git rev-parse {head}^{{tree}} failed"))?;
+    let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")]).ok_or_else(|| {
+        // The head the record took a moment ago is not a commit here now:
+        // the one CI flake this path has (#527's test, ~once a day) and
+        // nothing reproduces it. What the next red needs to say: what
+        // HEAD is now, whether the object file is on disk, and which
+        // repository this is.
+        let now = git_out(cwd, &["rev-parse", "HEAD"]).unwrap_or_else(|| "(no HEAD)".into());
+        let loose = cwd
+            .join(".git")
+            .join("objects")
+            .join(head.get(..2).unwrap_or(""))
+            .join(head.get(2..).unwrap_or(""));
+        let git_dir = git_out(cwd, &["rev-parse", "--git-dir"]).unwrap_or_else(|| "(none)".into());
+        format!(
+            "git rev-parse {head}^{{tree}} failed (HEAD is now {now}; loose object {}: {}; git dir {git_dir}; cwd {})",
+            loose.display(),
+            if loose.exists() { "present" } else { "absent" },
+            cwd.display()
+        )
+    })?;
     if tree == head_tree {
         return Ok(None);
     }
