@@ -22,6 +22,7 @@ CYCLE=${1:?cycle}
 OUT="$HOME/mobile-out/$CYCLE/list-composer"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 placeholder() { ui dump | grep -E " TextField " | grep -oE "(Message [^ ]+…|Plan, ask, build…)" | head -1; }
@@ -30,6 +31,11 @@ rows_on_screen() { ui dump | grep -oE "Button +[a-z][a-z0-9-]*," | awk '{print $
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 9
+# Every step below reads the projects list. A cold start comes back to the
+# chat that was in front, so run second in the sweep and all four steps read
+# a chat instead: "rows left:" empty, "composer: nothing", and step 4 gave
+# "could not read both numbers — inconclusive" in every sweep for a week.
+reach_the_list "$UDID" || exit 1
 shot 01-at-rest
 
 echo "--- 1. at rest ---"

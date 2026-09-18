@@ -42,15 +42,30 @@ echo
 # unrelated helper, and it had been unable to open its project for a week.
 # A file mentioning a thing is not a file doing it, so this asks whether
 # the step happens before the tap, in line order.
-echo "scenarios that tap a project row after launch:"
+echo "scenarios that need the projects list after launch:"
 LIST_FAULTS=$(for f in "$HERE"/scenarios/*.sh; do
   awk -v name="$(basename "$f")" '
     /simctl launch/ { launched = NR }
     /reach_the_list/ { reached = NR }
-    /ui tap "\$ROW"/ { if (!tapped) tapped = NR }
+    # Tapping a row needs the list. So does reading one, which is how
+    # list-composer slipped past the first version of this: it never taps,
+    # it only counts rows and reads the placeholder, and it was
+    # inconclusive in every sweep for a week.
+    #
+    # Only lines in the main flow count. A helper that greps for rows is a
+    # definition, not a use, and counting those flagged four files that were
+    # already correct — the same mistake as the first version, from the
+    # other side.
+    # A scenario whose subject *is* the landing must not be sent to the
+    # list first. It says so in a line of its own, and is then its own
+    # business — one declared exception beats a rule nobody can satisfy.
+    /# reaches-the-list: not before the landing is measured/ { exempt = 1 }
+    /^[a-zA-Z_][a-zA-Z0-9_]*\(\) *\{/ { infn = 1 }
+    infn && /^\}/ { infn = 0; next }
+    !infn && /ui tap "\$ROW"|Button \+\[a-z|, \(Idle\|Working\)/ { if (!used) used = NR }
     END {
-      if (launched && tapped && (!reached || reached > tapped))
-        printf "  %-34s taps at line %d with no reach_the_list before it\n", name, tapped
+      if (!exempt && launched && used && (!reached || reached > used))
+        printf "  %-34s needs the list at line %d, with no reach_the_list before it\n", name, used
     }' "$f"
 done)
 if [ -z "$LIST_FAULTS" ]; then

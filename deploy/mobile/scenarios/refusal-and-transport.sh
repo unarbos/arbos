@@ -33,6 +33,7 @@ UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(n
 B=com.unarbos.arbos.ios
 PORT=8792
 LOG=/tmp/fixture-attach.log
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 
@@ -169,7 +170,7 @@ sleep 9
 # tapped names that were not on screen, each said "no <row> row", and the
 # run still printed its closing paragraph as though it had measured the
 # pair. Reach the list deliberately.
-ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
+reach_the_list "$UDID" || exit 1
 shot 01-the-fixture-list
 echo "the list:"
 ui dump | grep -E "Button +[a-z-]+," | sed 's/^/  /'

@@ -33,6 +33,9 @@ fresh() {
   xcrun simctl install "$UDID" "$APP"
   xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
   sleep 8
+  # Every number below is a count of list rows. A reinstall clears the front
+  # project so this is usually a no-op — usually is not a reason to omit it.
+  reach_the_list "$UDID" || exit 1
 }
 
 # A reinstall does NOT undo a saved token: it is in the Keychain, which
