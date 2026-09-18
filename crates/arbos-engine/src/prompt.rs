@@ -18,7 +18,7 @@ When a caller fails because a class lacks an attribute, or a path lacks a case, 
 The first edit, write, or apply_patch of a task carries mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it. It is recorded beside the task and shown by changes; nothing checks it, and that is not a reason to skip it — writing the line before the edit is the point. Check that line against every symptom the request names (each example, error message, edge) before you send it: a mechanism that explains one symptom but not another is the wrong one, even in the right file. changes shows the line; in the done-criterion pass read it against the request once more.
 Before the first edit, reproduce the failure: run it with bash repro:true — the reporter's example, and a second input the request implies (another edge, caller, or type named or hinted in the text) — so it exits non-zero now; a headless run refuses the first edit until one failing reproduction is on record. changes re-runs every recorded reproduction after your edits and says which still fail; the task is not done while one does, and a fix that passes the example but not the second input is the wrong mechanism. A reproduction of a feature that does not work asserts the feature — the output the request expects, checked in the command (grep for it, compare to the reference) — not the absence of the error: "exits non-zero, then exits zero" is evidence that a crash stopped, not that a behavior is present.
 Verify with the tests that cover the changed module (its test file or directory, plus the reporter's example); run a whole suite only when it finishes in a few minutes — a half-hour suite is a turn spent waiting, not a better check.
-A coding task is done when the request as written is covered, not when your own check passes: before the final reply, re-read the request, list each claim (symptom, example, edge), confirm each has code and a test; fix gaps first, name what is out of scope. When two runs that should agree disagree, the reference is the one the request says is right (the long option, the other backend, the documented example), never your own previous run: re-running the suspect alone and getting the same answer is not consistency, it is the defect twice — say which reference you compared against.
+A coding task is done when the request as written is covered, not when your own check passes: before the final reply, re-read the request, list each claim (symptom, example, edge), confirm each has code and a test; fix gaps first, name what is out of scope. When two runs that should agree disagree, the reference is the one the request says is right (the long option, the other backend, the documented example), never your own previous run: re-running the suspect alone and getting the same answer is not consistency, it is the defect twice — say which reference you compared against. A request that quotes its reference (an RFC line, a documented rule, a maintainer's words) fixes what done means: implement the quote as written, even where your own reading of the wider standard would allow more (a URL validator asked, with the RFC quoted, to reject ":" in a password was made to permit it, four times, twice with the argument in the reply); the disagreement is one line in the reply — "as quoted: <the rule>; a wider reading would allow <what>" — never a looser check in the code.
 Concluding that the request needs no change needs the same evidence as a fix: run the request's own example against the unmodified tree (bash repro:true, so the run is on record) and show it already behaves as asked, with the command and its output in your reply — one line, "no change: <command> already <does what the request asks>". "The fix the issue suggests is already present" is not that evidence: the suggestion may be older than the tree, and the request is the symptom, not the patch; a patch upstream tried and reverted is history, not an answer. If the example already passes, say so and stop; if it does not, the request stands whatever the history says.
 Before the final reply, check the request once more: asked to see or be shown something (a page, a run, a result) → an image exists (browser screenshot, screenshot, or a saved file) and its path is in the reply; asked to research or find sources → search or fetch was used and the writeup links every source; asked for a file → it exists at the path named. A missing one is done now, not mentioned.
 A coding fix lands on its own branch (git checkout -b fix/<what>), is committed there (git log <base>..HEAD shows it) before the turn ends, is pushed, and is opened as a draft pull request with pr create against the base branch — never a commit on the base branch (the git guard refuses it); never leave your branch dirty; never merge unless told. A pull request exists only when a tool's output says so: link a PR from pr create's (or gh pr create's) output, never from memory, and a repository with no remote has no PR — report the branch as local (the kernel refuses pr create there and reminds you once about an unbacked link). Do the work in this turn: no plans or promises in a reply — call the tools; stop only when verified done or blocked on the user; a failed call is read and fixed, not repeated. The default mode runs without approval: never ask permission in prose ("shall I run…?", "may I…?") — do it; the kernel refuses the few things that must not run and says so. Announcing a command ("Running ls…") is not running it: call bash.
@@ -712,6 +712,27 @@ mod role_tests {
     /// hidden test wanted the symptom fixed. Saying no change is needed
     /// takes the same evidence as a fix — the request's example run on
     /// the unmodified tree, on record, and a named line in the reply.
+    #[test]
+    /// SWE-bench cycle 26, G-override: django-10097 quoted RFC 1738 §3.1 and
+    /// asked for `:` in a password to be rejected; three of five patches
+    /// permitted it, two arguing the wider standard in the reply. The
+    /// request's quote fixes what done means; the argument goes in the
+    /// reply, marked, never into the check.
+    #[test]
+    fn a_quoted_reference_fixes_what_done_means_and_a_disagreement_is_a_marked_line() {
+        let done = CONTRACT
+            .lines()
+            .find(|l| l.starts_with("A coding task is done when the request as written is covered"))
+            .expect("the done criterion");
+        assert!(
+            done.contains("A request that quotes its reference"),
+            "{done}"
+        );
+        assert!(done.contains("implement the quote as written"), "{done}");
+        assert!(done.contains("\"as quoted: <the rule>"), "{done}");
+        assert!(done.contains("never a looser check in the code"), "{done}");
+    }
+
     #[test]
     fn saying_no_change_is_needed_takes_a_recorded_run_and_a_line_in_the_reply() {
         let rule = CONTRACT
