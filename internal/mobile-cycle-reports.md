@@ -3444,3 +3444,51 @@ That is the whole lesson of the last four cycles in one line: a number is
 only a measurement if the sentence around it says what was counted.
 
 **PR:** [#674](https://github.com/unarbos/arbos/pull/674), harness only.
+
+## Cycle 124 — barge-in, committed at last, and what the orb says afterwards
+
+**The row was a memory.** Barge-in was measured at cycle 77 with ad-hoc
+commands and never written down — the exact trap M-270 named when the mic
+rig had to be rebuilt from scratch for the same reason. It is
+`barge-in.sh` now, reading the two metrics the app already emits rather
+than timing anything itself (M-404):
+
+```
+run 2: it stopped talking after 192 ms, the gateway confirmed at 237 ms
+run 4: it stopped talking after 335 ms, the gateway confirmed at 381 ms
+VERDICT: speaking over it stops it, every run that could — 263 ms on average
+         (cycle 77 measured 181 ms)
+```
+
+**Its first version reported `1 of 3`** and called that worse than never.
+The app had written the reason for both other runs — `barge_in_skipped reply
+already over`, `barge_in_not_armed clip already used` — and I had not read
+them. Neither is barge-in failing (M-405). Runs that never had a chance are
+counted apart now.
+
+**The recording said the orb never changes.** It does: measured off the
+stills, the orb region reads **(127,127,126)** listening, **(94,94,93)**
+thinking, **(71,88,111)** speaking — dimmer and blue. The review was right
+about that recording and wrong about the orb, because that call spent most
+of its length in one phase (M-406).
+
+**Which is the finding worth keeping.** Sampling the phase every two seconds
+against the console:
+
+```
+10s speaking      barge at 202 ms, gateway confirmed at 247 ms
+12s listening     response.done reason=completed playing=false
+14s thinking
+...
+28s thinking      — no further events at all
+```
+
+After a barge-in, the call says **thinking** about a reply that will never
+arrive, until the caller speaks again. `settle()` runs only when a reply
+reached the caller, and the code says why: "a reply that reached nobody must
+not take the screen back to listening". That is true, and it swaps one wrong
+statement for another (M-407). A third thing to say is a design call, so it
+is filed rather than changed.
+
+**Recording:** `media/mobile/cycle-124/recording_demo.mp4`.
+**PR:** [#677](https://github.com/unarbos/arbos/pull/677), harness only.

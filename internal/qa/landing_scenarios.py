@@ -1902,6 +1902,65 @@ def register(scenario, registry, transcript, now_ms, branch):
         holder2.stop()
         cx.check()
 
+    @reg("lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in", tags=("lock", "after-failure"))
+    def lk04(cx):
+        """`qal-j40`: one place, one kernel — including after someone deletes the lock files.
+
+        The place lock is `flock` on two files, `.arbos/lock` and `.arbos/runtime/lock`
+        (`place.rs:132-148`). A lock lives on the open descriptor's **inode**, not on the path, so
+        deleting both files leaves the holder's locks on unlinked inodes, held and unreachable. The
+        arriving kernel creates fresh files at the same paths, locks those — different inodes — and
+        succeeds. Two kernels then serve one place and neither says anything.
+
+        `#450` stops the ordinary shapes: removing only `runtime/` is refused, because the lock
+        takes both files and the other one still holds. It takes removing **both**, which is what
+        someone resetting a place they believe is stuck would reach for, having read that the lock
+        lives in two places.
+
+        Staged from `deploy/af05c-runtime-and-lock-removed-probe.sh`, which reproduced this on every
+        attempt against `arbos-kernel 0.2.0 cecd48e1bd76`. The probe is a script anyone can run; this
+        is the check that runs every cycle, so a fix is noticed rather than waited for."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        a = cx.kernel(tag="holder-a")
+        cx.rec.expect(a.start(), "lk-04-holder-did-not-serve", "the first kernel never came up, so nothing was held to take")
+        a_pid = a.proc.pid if a.proc else None
+
+        shutil.rmtree(place / ".arbos" / "runtime", ignore_errors=True)
+        (place / ".arbos" / "lock").unlink(missing_ok=True)
+        time.sleep(2)
+        cx.rec.notes["holder_alive_after_removal"] = a.alive()
+
+        b = cx.kernel(tag="arriving-b")
+        b_served = b.start()
+        time.sleep(1)
+        both_live = bool(a.alive() and b.alive())
+        said = b.stderr_text()
+        refused = any(phrase in said.lower() for phrase in ("already served", "place is held", "held by"))
+        cx.rec.notes.update({
+            "holder_pid": a_pid,
+            "arriving_pid": b.proc.pid if b.proc else None,
+            "arriving_wrote_its_own_kernel_json": b_served,
+            "both_alive": both_live,
+            "arriving_refused_out_loud": refused,
+            "arriving_said": said[-300:],
+        })
+
+        # The contract, stated so a pass means something: while the holder is alive, a second kernel
+        # must not end up serving the same place. Refusing out loud is the good outcome; failing to
+        # start for any other reason is acceptable here too — what must not happen is two servers.
+        cx.rec.expect(
+            not (b_served and both_live),
+            "lk-04-two-kernels-serve-one-place",
+            f"the holder (pid {a_pid}) is still alive and the arriving kernel (pid "
+            f"{b.proc.pid if b.proc else '?'}) took the place anyway after both lock files were "
+            f"removed; it {'said nothing about the place being held' if not refused else 'did warn, yet served'}"
+            f" (qal-j40)",
+        )
+        b.stop()
+        a.stop()
+        cx.check()
+
     # ── first-match readers: a stale copy in the first place, a live one in the second ──
     @reg("fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line", tags=("first-match", "rewind", "destructive-order"))
     def fm01(cx):
