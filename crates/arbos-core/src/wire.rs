@@ -631,6 +631,19 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         by: String,
     },
+    /// Client → kernel: stop a job (a detached or still-attached `bash`)
+    /// from a window's Stop button. Routed through the kernel's own kill —
+    /// the whole process group, the `killed` marker written before the
+    /// signal by its one writer, reading `killed: stopped by the user from
+    /// the window`. The job's end then travels the paths every end does:
+    /// the `board` close with the status line, the agent's wake, the
+    /// `surfaces` row. A job that had already ended is answered with its
+    /// final `job` frame so the row settles; an unknown job or agent is an
+    /// `error` frame.
+    JobStop {
+        agent: String,
+        id: String,
+    },
     /// A client asks for a shell of its own — the person's `$SHELL`,
     /// interactive, in `cwd` (absolute, or relative to the place; the place
     /// itself when absent). The kernel answers with a `board` frame for

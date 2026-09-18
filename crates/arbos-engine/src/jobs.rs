@@ -431,13 +431,21 @@ impl JobsRoot {
     /// `Err`: the system refused it, and the job runs on — the folder does
     /// not say "killed", and the caller says so to whoever asked.
     pub fn kill(&self, job: &Job) -> Result<bool> {
+        self.kill_saying(job, &kill_reason())
+    }
+
+    /// `kill` with the marker's own line: `killed: <who and why>`. The one
+    /// writer of the `killed` marker — a stop from a window says who
+    /// pressed it here, not by changing the process-wide reason under
+    /// every other kill in flight.
+    pub fn kill_saying(&self, job: &Job, line: &str) -> Result<bool> {
         if !job.running() {
             return Ok(false);
         }
         // Said before the signal, so a reader that comes between never
         // sees "no exit recorded" (qa-024).
         let marker = job.dir.join("killed");
-        let _ = fs::write(&marker, format!("{}\n", kill_reason()));
+        let _ = fs::write(&marker, format!("{line}\n"));
         if let Err(e) = crate::tools::kill_job(job.meta.pid) {
             // The claim is withdrawn: a job the kernel could not signal is
             // still running, and must read as such.

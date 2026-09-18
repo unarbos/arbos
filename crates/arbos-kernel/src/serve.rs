@@ -1331,6 +1331,7 @@ fn handle_frame(
         | Frame::Kickoff { agent }
         | Frame::Undo { agent }
         | Frame::SetModel { agent, .. }
+        | Frame::JobStop { agent, .. }
         | Frame::PlanOp { agent, .. } => Some(agent.clone()),
         _ => None,
     };
@@ -1933,9 +1934,46 @@ fn handle_frame(
                 Err(e) => refuse(hooks, Some(&owner), format!("shell: {e:#}")),
             }
         }
+        Frame::JobStop { agent, id } => {
+            let root = arbos_engine::JobsRoot::for_agent(place, &arbos_core::AgentId::new(&agent));
+            let Some(job) = root.list().into_iter().find(|j| j.id == id) else {
+                refuse(
+                    hooks,
+                    Some(&agent),
+                    format!("job_stop: {agent} has no job {id:?}"),
+                );
+                return;
+            };
+            match root.kill_saying(&job, USER_STOP_LINE) {
+                Ok(true) => klog::info(
+                    "job_stopped_by_user",
+                    Some(&agent),
+                    format!(
+                        "{id} pid {} — `{}`",
+                        job.meta.pid,
+                        job.meta.command.replace('\n', " ")
+                    ),
+                ),
+                // Already over: the row that asked gets the last word again.
+                Ok(false) => hooks.broadcast(Frame::Job {
+                    agent,
+                    id,
+                    delta: String::new(),
+                    running: false,
+                    exit: match job.status {
+                        arbos_engine::JobStatus::Exited(code) => Some(code),
+                        _ => None,
+                    },
+                }),
+                Err(e) => refuse(hooks, Some(&agent), format!("job_stop: {e:#}")),
+            }
+        }
         _ => {}
     }
 }
+
+/// What a job's `killed` marker says when a window's Stop ended it.
+pub const USER_STOP_LINE: &str = "killed: stopped by the user from the window";
 
 /// Ctrl-C must end the process even when the serve loop is busy. The loop
 /// handles the signal itself and exits cleanly; this task is the backstop:
