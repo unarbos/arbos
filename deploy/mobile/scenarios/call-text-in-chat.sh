@@ -56,4 +56,31 @@ echo "--- what the call did ---"
 grep -E "^metric|^event response.done|^phase" "$OUT/console.log" | tail -12
 echo "--- what the kernel wrote for the same turns ---"
 python3 "$HERE/../kernel.py" pod history 8 2>&1 | tail -8
+
+# The rule, checked rather than photographed. The two answers to a delegated
+# turn are written independently — the kernel's text and the voice's own
+# words — so they differ, and that difference is what makes this testable:
+# take a distinctive run of words from the kernel's answer and require it to
+# be absent from the screen, while a Spoken row is present.
+echo
+echo "--- the rule: one wording, the spoken one ---"
+KERNEL_SAID=$(python3 "$HERE/../kernel.py" pod history 8 2>/dev/null \
+              | awk '$2=="assistant"' | tail -1 | cut -d' ' -f3- | sed 's/^ *//')
+if [ -z "$KERNEL_SAID" ]; then
+  echo "  no assistant line to compare against — inconclusive"
+else
+  # Six consecutive words is long enough not to collide by chance and short
+  # enough to survive the chat truncating a long answer.
+  PHRASE=$(echo "$KERNEL_SAID" | tr -s ' ' | cut -d' ' -f2-7)
+  echo "  the kernel's words:  ...$PHRASE..."
+  SCREEN=$(ui dump | grep " StaticText " | cut -d' ' -f4-)
+  SPOKEN=$(echo "$SCREEN" | grep -c "^Spoken$" | tr -d ' ')
+  if echo "$SCREEN" | grep -qF "$PHRASE"; then
+    echo "  VERDICT: the kernel's wording is on screen for this turn — both wordings are showing"
+  elif [ "$SPOKEN" -gt 0 ]; then
+    echo "  VERDICT: the kernel's wording is absent and $SPOKEN rows are marked Spoken — the rule holds"
+  else
+    echo "  VERDICT: neither wording found — inconclusive, the chat may not be at the tail"
+  fi
+fi
 echo "stills in $OUT"
