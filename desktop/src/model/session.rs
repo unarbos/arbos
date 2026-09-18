@@ -635,6 +635,10 @@ pub struct ChatSession {
     /// When the poll last read the transcript tail to learn whether a
     /// turn is over — the relaunch case, where no `Turn idle` will come.
     probed_at: Option<Instant>,
+    /// When this window last asked the kernel to compact (`/compact`): the
+    /// kernel's "nothing to compact yet" is an answer to that, and to
+    /// nothing else. Runtime only.
+    compact_asked: Option<Instant>,
     /// Which attach attempt owns `_pump`. A newer resume must not let an
     /// older socket's EOF mark this chat lost.
     pub(crate) attach_gen: u64,
@@ -766,6 +770,7 @@ impl ChatSession {
             turn_open: false,
             turn_ended: None,
             probed_at: None,
+            compact_asked: None,
             attach_gen,
             _pump: pump,
         }
@@ -867,6 +872,7 @@ impl ChatSession {
             turn_open: false,
             turn_ended: None,
             probed_at: None,
+            compact_asked: None,
             attach_gen: 0,
             _pump: Task::ready(()),
         }
@@ -968,6 +974,7 @@ impl ChatSession {
             turn_open: false,
             turn_ended: None,
             probed_at: None,
+            compact_asked: None,
             attach_gen: 0,
             _pump: Task::ready(()),
         }
@@ -2606,6 +2613,7 @@ impl ChatSession {
     /// Summarise the oldest turns now.
     pub fn compact(&mut self) {
         if let Connection::Live(session) = &self.connection {
+            self.compact_asked = Some(Instant::now());
             session.compact();
         }
     }
@@ -4160,6 +4168,20 @@ impl ChatSession {
         // The kernel's parked-ask line after the question is already
         // answered (a replay, a late frame) says nothing true.
         if !failed && is_waiting_line(text) && self.questions.is_none() {
+            return;
+        }
+        // "nothing to compact yet: the whole working set is recent" answers
+        // a `/compact` this window typed. The kernel on main writes it
+        // after tool calls of its own accord — five times in one journey
+        // run, the kickoff included — and Cursor's pane never carries a
+        // compaction status (F-199, cycle 46). Without a recent ask it is
+        // the kernel's housekeeping, not the person's line.
+        if !failed
+            && text.trim_start().starts_with("nothing to compact yet")
+            && !self
+                .compact_asked
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
             return;
         }
         // The kernel's page nudge is a standing state, not news each turn:
