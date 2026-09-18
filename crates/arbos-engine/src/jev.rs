@@ -20,7 +20,7 @@ use crate::{
     tools::Hooks,
 };
 
-/// OpenRouter family alias: always the newest Jev.
+/// OpenRouter family alias (`~typesafe/jev-latest`): always the newest Jev.
 pub const DEFAULT_MODEL: &str = arbos_core::host::DEFAULT_JEV_MODEL;
 /// Jev's context window. The situation card never exceeds this.
 pub const WINDOW_TOKENS: u64 = 32_000;
