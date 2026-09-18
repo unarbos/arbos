@@ -42,8 +42,8 @@ BAD_EXACT = {
 # Two or more capitalised words with no lower-case connective reads like a
 # symbol spelled out ("Arrow Turning Down Then Right"), not like a label.
 SYMBOLISH = re.compile(r"^(?:[A-Z][a-z0-9]*)(?: [A-Z0-9][a-z0-9]*){1,5}$")
-for line in sys.stdin:
-    parts = line.rstrip("\n").split(None, 3)
+for line in sys.stdin.read().splitlines():
+    parts = line.split(None, 3)
     if len(parts) < 4:
         continue
     kind, label = parts[2], parts[3].strip()
@@ -66,6 +66,23 @@ screen() {
     FOUND=$((FOUND + 1))
   fi
 }
+
+# Prove the detector can fail before trusting it to pass. Today's lesson,
+# eight times over, is that a check reports "fine" just as confidently when
+# it has stopped looking — so feed it names this app really did ship and
+# require it to object to them.
+SELFTEST=$(printf '%s\n' \
+  "  42   85  Button       Gear Shape" \
+  " 351   85  PopUpButton  PopUpButton" \
+  "  26  196  Image        Arrow Turning Down Then Right" \
+  " 299   85  Button       Search" | suspect | grep -c .)
+if [ "$SELFTEST" != 3 ]; then
+  echo "the detector failed its own self-test ($SELFTEST of 3 known-bad names caught)."
+  echo "Not running: a check that cannot fail cannot pass either."
+  exit 1
+fi
+echo "detector self-test: caught 3 of 3 known-bad names, and let 'Search' through"
+echo
 
 FOUND=0
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
