@@ -1671,17 +1671,6 @@ class Pass:
             self.record("world-moved-line-kept", sc, "the typed line's fate", "its card is on the pane and the composer is empty; not 'archived'",
                         f"users={len(users(c))} composer={self.state()['composer']['text']!r} archived-word={any('archived' in t for t in n)}",
                         "pass" if users(c) and users(c)[-1].endswith("after the move.") and not self.state()["composer"]["text"] and not any("archived" in t for t in n) else "fail")
-            # F-209: the scratch place has no `.git`; the kernel takes no
-            # checkpoint there, so no prompt card offers a rewind.
-            turns = [i for i, it in enumerate((c or {}).get("items", [])) if it.get("kind") == "user"]
-            if c and turns and not (place / ".git").exists():
-                card = f"prompt-{c['id']}-{turns[-1]}"
-                if self.app.exists(card):
-                    f = self.app.find(card); self.app.hover(x=f["x"] + f["w"] / 2, y=f["y"] + f["h"] / 2); time.sleep(0.6)
-                has_rewind = self.app.exists(f"rewind-turn-{c['id']}-{turns[-1]}")
-                has_fork = self.app.exists(f"fork-turn-{c['id']}-{turns[-1]}")
-                self.record("no-rewind-off-repo", sc, "hover a prompt card in a place with no .git", "fork offered, rewind not (the kernel takes no checkpoint there)",
-                            f"rewind={has_rewind} fork={has_fork}", "pass" if not has_rewind and has_fork else "fail")
             self.send("And this one too.")
             time.sleep(2)
             c = root_of(place)
@@ -1698,6 +1687,18 @@ class Pass:
             order = [o for o in order if o is not None]
             self.record("world-back-in-order", sc, "rename back, type a third line", "three answers, in the order typed, no duplicate prompt cards",
                         f"settled={bool(settled)} answers={order} users={len(users(c))}", "pass" if settled and order == [0, 1, 2] and len(users(c)) == 3 else "fail", self.still("world-back"))
+            # F-209: the scratch place has no `.git`; the kernel takes no
+            # checkpoint there, so no answered turn's footer offers a rewind
+            # (the footer, fork included, is drawn under an answer only).
+            turns = [i for i, it in enumerate((c or {}).get("items", [])) if it.get("kind") == "user"]
+            if c and turns and not (place / ".git").exists():
+                card = f"prompt-{c['id']}-{turns[-1]}"
+                if self.app.exists(card):
+                    f = self.app.find(card); self.app.hover(x=f["x"] + f["w"] / 2, y=f["y"] + f["h"] / 2); time.sleep(0.6)
+                has_rewind = self.app.exists(f"rewind-turn-{c['id']}-{turns[-1]}")
+                has_fork = self.app.exists(f"fork-turn-{c['id']}-{turns[-1]}")
+                self.record("no-rewind-off-repo", sc, "hover an answered turn in a place with no .git", "fork offered, rewind not (the kernel takes no checkpoint there)",
+                            f"rewind={has_rewind} fork={has_fork}", "pass" if not has_rewind and has_fork else ("not-reachable" if not has_fork else "fail"))
             # --- the kernel's file is replaced under a running turn ---
             copy_dir = Path("/tmp/parity-world-kernel"); shutil.rmtree(copy_dir, ignore_errors=True); copy_dir.mkdir()
             copy = copy_dir / "arbos-kernel"; shutil.copy(kernel, copy)
