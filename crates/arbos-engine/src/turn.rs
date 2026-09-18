@@ -1202,7 +1202,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             sit.model_menu = crate::brief::menu_line(models.all());
             let spoke = sit.spoke;
             let model = host.config.jev_model().unwrap_or(crate::jev::DEFAULT_MODEL);
-            match crate::jev::ask(&provider, model, &sit, control.cancel(), hooks.as_ref()).await {
+            match crate::jev::ask(&provider, model, &sit, control.cancel()).await {
                 Ok((decision, usage)) => {
                     if let Some(c) = usage.and_then(|u| u.cost) {
                         turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
@@ -1275,8 +1275,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     return end(spent(last_usage, turn_cost, turn_cached), None);
                 }
             }
-            // Choosing is over. An empty derived step lets Thinking / the
-            // tool name take the headline. A fail already cleared it.
+            // The hop itself is never on the window. An empty derived
+            // step clears whatever the last one left there, so Thinking /
+            // the tool name takes the headline. A fail already cleared it.
             hooks.kernel_step("");
         }
         if jev_no_change {

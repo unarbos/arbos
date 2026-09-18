@@ -20,7 +20,6 @@ use crate::{
     evict,
     provider::{Interrupted, Provider, ProviderError},
     tool::{RunCx, View},
-    tools::Hooks,
 };
 
 /// OpenRouter family alias (`~typesafe/jev-latest`): always the newest Jev.
@@ -494,16 +493,16 @@ fn usage_from_decisions(value: &Value) -> Option<Usage> {
 /// Ask Jev for one decision. The caller ends the turn on Failed or Junk.
 /// Interrupted is barge-in. The slug without `~` is remapped so a saved
 /// old default does not 400. The call is Decisions, not chat completions.
+///
+/// The hop draws nothing: no status line, no waiting banner. Jacob read
+/// "Choosing the next step" as the kernel narrating its own plumbing on
+/// every ordinary turn. Jev still runs; the chat shows the work it picks.
 pub async fn ask(
     src: &Provider,
     model: &str,
     sit: &Situation,
     cancel: &CancellationToken,
-    hooks: &dyn Hooks,
 ) -> Result<(Decision, Option<Usage>), AskError> {
-    // A step a person reads under the shimmer — not the router's name
-    // (the desktop showed "Working jev" on every ordinary turn).
-    hooks.kernel_step("Choosing the next step");
     let model = arbos_core::host::normalize_jev_slug(model);
     let model = if model.is_empty() {
         DEFAULT_MODEL
@@ -528,9 +527,7 @@ pub async fn ask(
     };
     let url = decisions_url(&jev.base);
     let body = decisions_body(model, sit);
-    let replied = jev
-        .post_json(url, body, cancel, |for_| hooks.working(for_.as_secs()))
-        .await;
+    let replied = jev.post_json(url, body, cancel, |_| {}).await;
     let value = match replied {
         Ok(v) => v,
         Err(e) if e.is::<Interrupted>() => return Err(AskError::Interrupted),
@@ -878,8 +875,8 @@ mod tests {
     fn first_byte_is_a_router_wait_not_a_chat_wait() {
         assert_eq!(FIRST_BYTE, Duration::from_millis(1_500));
         assert!(
-            FIRST_BYTE < Duration::from_secs(3),
-            "a 15s cap leaves Choosing the next step on the window"
+            FIRST_BYTE < crate::provider::HEARTBEAT,
+            "a wait longer than one heartbeat puts a waiting banner on the window"
         );
     }
 
