@@ -8,7 +8,19 @@ export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.9/bin:$HOME/.local/bin:$PA
 CYCLE=${1:?cycle}; BRANCH=${2:?branch}; shift 2
 OUT="$HOME/mobile-out/$CYCLE"; mkdir -p "$OUT"
 REPO="$HOME/arbos"
-cd "$REPO" && git fetch -q origin "$BRANCH" && git checkout -q -B "$BRANCH" "origin/$BRANCH" && git log --oneline -1 | tee "$OUT/build-sha.txt"
+# A failed checkout used to be survivable. Scratch edits left in the tree
+# made `git checkout` refuse, the `&&` chain stopped, and the script carried
+# on to build, launch and report — naming a branch it was not on. Two cycles
+# in a row built the previous tree and said BUILD SUCCEEDED. The tree the
+# loop measures must be the branch the loop names, so make it so and stop
+# if it cannot.
+cd "$REPO" || exit 1
+git fetch -q origin "$BRANCH" || { echo "cannot fetch $BRANCH"; exit 1; }
+git reset -q --hard && git clean -qfd
+git checkout -q -B "$BRANCH" "origin/$BRANCH" || { echo "cannot check out $BRANCH"; exit 1; }
+HEAD_SHA=$(git rev-parse HEAD)
+[ "$HEAD_SHA" = "$(git rev-parse "origin/$BRANCH")" ] || { echo "not on origin/$BRANCH after checkout"; exit 1; }
+git log --oneline -1 | tee "$OUT/build-sha.txt"
 
 # Simulator: iPhone 15 Pro on the newest iOS runtime.
 RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; rs=[r for r in json.load(sys.stdin)["runtimes"] if r["platform"]=="iOS" and r["isAvailable"]]; rs.sort(key=lambda r:[int(x) for x in r["version"].split(".")]); print(rs[-1]["identifier"])')
