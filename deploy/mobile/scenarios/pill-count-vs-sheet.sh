@@ -37,6 +37,17 @@ PILL=$(ui dump | grep -oE "(Agents|Working) [0-9]+" | head -1)
 COUNT=$(echo "$PILL" | grep -oE "[0-9]+")
 [ -n "$COUNT" ] || { echo "no pill in this chat — nothing to compare"; exit 1; }
 echo "the pill says:  $PILL"
+# The pill counts two different things: `Agents N` is every agent, `Working
+# N` is only the ones running. The sheet always lists them all, so comparing
+# against the Working form is comparing a subset with a whole — it reported
+# "pill 2, sheet 3, and no shared labels to explain it" on a project behaving
+# exactly as designed.
+case "$PILL" in
+  Working*) echo "VERDICT: cannot say. The pill is counting only what is running, and the"
+            echo "         sheet lists every agent, so the two are not the same quantity."
+            echo "         Wait until the project is idle and the pill reads 'Agents N'."
+            exit 0;;
+esac
 
 # Tapped by frame: the pill's label is one the sheet's rows carry too.
 AT=$(ui dump | grep -E "Button +(Agents|Working) [0-9]+" | head -1 | awk '{print $1, $2}')
