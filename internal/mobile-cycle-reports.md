@@ -3583,3 +3583,40 @@ than "that is not what I take". I fell into it on the first run (M-415). A
 bare number that is not a directory is now named for what it is.
 
 **PR:** [#685](https://github.com/unarbos/arbos/pull/685), harness only.
+
+## Cycle 128 — the last eye-judged row, counted
+
+`style pair vs Cursor stills — worker chat` has been judged by eye since
+cycle 37. Its claims are all statements about the accessibility tree —
+"plain header, no composer, the header reads Back" — so none of them needed
+an eye (M-416):
+
+```
+  the header names                   count slowly one to forty
+  back control reads                 1
+  composers (M-154: none)            0
+  send buttons                       0
+  microphone buttons                 0
+  controls in the header             1
+
+VERDICT: the shape holds
+```
+
+`style-pair.py` is not the tool for it. It measures row pitch and ground
+colour, which are properties of a **list**, and it refuses this pairing
+(M-353) — which is honest and left the row unmeasured. This is the part of
+it that can be measured.
+
+**And I ran the same counts on the neighbouring screen**, because a shape
+check that would pass on the project's chat measures nothing. One Back away:
+**1 composer and 3 header controls**, against the worker chat's 0 and 1
+(M-417). The absent composer is M-154's deliberate choice, so a `TextField`
+appearing here is a regression, not an improvement — the check treats it
+that way.
+
+**One smaller thing**: `pod` left the roster between two runs an hour apart,
+and the scenario said `no pod row` — which reads as the taps having failed
+rather than a project having gone. It prints the list it did see now
+(M-418).
+
+**PR:** [#689](https://github.com/unarbos/arbos/pull/689), harness only.

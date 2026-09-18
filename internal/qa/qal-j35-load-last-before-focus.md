@@ -5,9 +5,11 @@ cursor:
 
 # qal-j35: load last from disk before focusing
 
-PR: https://github.com/unarbos/arbos/pull/682
+PR: https://github.com/unarbos/arbos/pull/682 (closed — not needed)
 Branch: `cursor/load-last-before-focus-147b`
 Repo: `unarbos/arbos`
+
+QA correction: `mt-24` passes 3/3 on #679 (`d253c610` / `957b4d47`) once the harness stops reseeding `state.toml` on relaunch. The empty map was `seed_state` wiping `[last]` before the second window started (`qal-j44`). #682 is not needed for this bug.
 
 #679 (`d253c610`) kept startup from rewriting `last`, then `focus_last_session` ran against an empty map. The file on disk still named the sub-chat. Encoding matched. Home had 0 keys too.
 

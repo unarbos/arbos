@@ -284,7 +284,7 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
         finally:
             d.close()
         time.sleep(2)
-        d2 = ds.Desktop(cx, tag="desktop-relaunch", seed=False)
+        d2 = ds.Desktop(cx, tag="desktop-relaunch", reseed=False)
         try:
             end = time.time() + 150
             found = False
@@ -786,7 +786,7 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
         finally:
             d.close()
         time.sleep(2)
-        d2 = ds.Desktop(cx, tag="desktop-relaunch", seed=False)
+        d2 = ds.Desktop(cx, tag="desktop-relaunch", reseed=False)
         try:
             # Wait for the restore rather than sleeping past it. A fixed `time.sleep(3)` and one read
             # asserts that the window finishes restoring inside three seconds, which nothing promises;

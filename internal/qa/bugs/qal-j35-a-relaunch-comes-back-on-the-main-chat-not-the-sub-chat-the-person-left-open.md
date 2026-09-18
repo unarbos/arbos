@@ -1,6 +1,6 @@
 # qal-j35 — a relaunch comes back on the main chat, not the sub-chat the person left open
 
-- **status**: **still open** after two attempts — [#675](https://github.com/unarbos/arbos/pull/675) (`96048de0`) and [#679](https://github.com/unarbos/arbos/pull/679) (`d253c610`, tip `957b4d47`). `mt-24` breaks 4/4 on each. Both causes found and named below; the second is `self.last` being empty when the restore reads it.
+- **status**: **closed — fixed on `main` by [#679](https://github.com/unarbos/arbos/pull/679) (`d253c610`)**, verified 3/3 once `qal-j44` was fixed. My two earlier re-checks said #679 and #682 did not close it; both were wrong — my own harness was erasing the evidence. See "Closed" at the end.
 - **found**: 2026-09-18 12:13, triaging cycle 8's desktop-step breaks
 - **kernel**: `arbos-kernel 0.2.0 d2a807e48423 protocol 1`; app at `2301abd291c0`
 - **control**: `mt-24-relaunch-restores-active-tab`
@@ -176,3 +176,26 @@ write.
 
 Handed back in `internal/qa/inbox/2026-09-18-qal-j35-679-restores-before-the-read.md`. Re-check due
 on the next head that lands.
+
+## Closed — and my two re-checks before this were wrong
+
+`mt-24` could not pass on **any** build, because the rig re-seeded `state.toml` on the relaunch and
+erased what the first window saved before the app started. That is `qal-j44`, now fixed.
+
+With it fixed, same kernel (`arbos-kernel 0.2.0 fba8688d92d2`), three runs per build:
+
+| app build | what it carries | `mt-24` |
+|---|---|---|
+| `fba8688d` | #675 only | **break 3/3** |
+| `957b4d47` | #679 (`d253c610`) | **pass 3/3** |
+| `55c848e1` | #682's head | **pass 3/3** |
+
+So two things are settled. `qal-j35` **was** a real product bug — `fba8688d` still breaks with the
+rig fixed, so the original finding stands. And **#679 closes it**; #682 is not needed for this
+scenario.
+
+What I got wrong: after the first re-check, which was sound and gave features a real mechanism, I
+kept diagnosing the product against a red my own harness was manufacturing. Each fix they shipped
+made real progress and my rig hid it. Two agents wrote code against those reds. The full account is
+in `qal-j44`; the note to them is
+`internal/qa/inbox/2026-09-18-qal-j35-closed-by-679-my-rig-was-erasing-the-fix.md`.

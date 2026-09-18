@@ -74,8 +74,8 @@ def available():
 class Desktop:
     """Xvfb + the app + the driver, all scoped to one scenario."""
 
-    def __init__(self, cx, tag="desktop", seed=True):
-        """`seed=False` for a **relaunch**: keep the state the last window wrote.
+    def __init__(self, cx, tag="desktop", reseed=True):
+        """`reseed=False` for a **relaunch**: keep the state the last window wrote.
 
         `arbosdriver.Arbos.launch()` calls `seed_state()` whenever it is given an `xdg`, and
         `seed_state` **overwrites** `<xdg>/arbos-desktop/state.toml` with a minimal file holding
@@ -88,7 +88,7 @@ class Desktop:
         difference was `seed_state`. So `mt-24-relaunch-restores-active-tab` could not pass on any
         build, and three product fixes (#675, #679, #682) were written against a red it produced.
 
-        With `seed=False` the driver is given no `xdg`, so it skips the re-seed, and this sets the
+        With `reseed=False` the driver is given no `xdg`, so it skips the re-seed, and this sets the
         two variables `launch()` would have set — `XDG_CONFIG_HOME` is already on `cx.env`, so only
         `XDG_DATA_HOME` needs adding — leaving the state file exactly as the last window left it.
         """
@@ -109,7 +109,7 @@ class Desktop:
         # mints another and sets it.
         self.agent = "root"
         self.log = self.rec.dir / f"{tag}.app.log"
-        if seed:
+        if reseed:
             self.app = arbosdriver.Arbos.launch(binary=hidden_store_binary(cx.scratch), env=env, log=self.log, xdg=cx.scratch / "xdg", projects=[str(cx.place)], timeout=90)
         else:
             env["XDG_CONFIG_HOME"] = str(cx.scratch / "xdg")
