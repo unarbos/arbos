@@ -73,6 +73,14 @@ do the same before it trusts a result.
 
 The rig runs the app on an Xvfb/TigerVNC display (`DISPLAY=:1`) with
 `mesa-vulkan-drivers` for a software Vulkan device, `xdotool` and `wmctrl`
-for window placement, `scrot` for stills, and `dunst` so OS notifications can
-be read back with `dunstctl history`. Set `ARBOS_DRIVER_SOCKET` to a path to
-turn on the driver socket the rig speaks JSON over (`qa/parity/arbosdriver.py`).
+for window placement, `scrot` for stills, `python3-pil` for the rig's
+still-to-still compares, and `dunst` so OS notifications can be read back
+with `dunstctl history`. The app itself posts those notifications through
+`notify-send`, which is `libnotify-bin` — without it the `notify-os-posted`
+gate row fails on a fresh box with *could not start notify-send* (the reset
+box of 2026-09-18). Set `ARBOS_DRIVER_SOCKET` to a path to turn on the driver
+socket the rig speaks JSON over (`qa/parity/arbosdriver.py`).
+
+```sh
+sudo apt install mesa-vulkan-drivers xdotool wmctrl scrot python3-pil dunst libnotify-bin
+```
