@@ -105,10 +105,10 @@ impl Project {
             StoreView::read(&place.path)
         };
         let store = root(&place.store());
-        let saved = Identity::load(&store);
-        let identity_saved = saved.is_some();
         let home =
             dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
+        let saved = Identity::load_for(&store, &place, home);
+        let identity_saved = saved.is_some();
         let identity = saved.unwrap_or_else(|| Identity::defaults(&place, home));
         Self {
             boards: Vec::new(),
@@ -150,7 +150,9 @@ impl Project {
         if !self.is_remote() {
             self.store_view = StoreView::read(&self.path);
         }
-        if let Some(identity) = Identity::load(&root(&self.store())) {
+        let place = self.place();
+        let home = dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
+        if let Some(identity) = Identity::load_for(&root(&self.store()), &place, home) {
             self.identity = identity;
             self.identity_saved = true;
         }
