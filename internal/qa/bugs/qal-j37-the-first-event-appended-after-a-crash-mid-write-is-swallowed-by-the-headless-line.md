@@ -1,6 +1,6 @@
 # qal-j37 — the first event appended after a crash mid-write is swallowed by the headless line
 
-- **status**: open (product)
+- **status**: **closed — fixed on `main` by [#646](https://github.com/unarbos/arbos/pull/646) (`cecd48e1`), verified 2026-09-18 13:38 with both arms.**
 - **found**: 2026-09-18 12:55, taking after-failure states nobody had staged
 - **kernel**: `arbos-kernel 0.2.0 a8678ac16636 protocol 1` (today's `main`)
 - **control**: `pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line`
@@ -125,3 +125,80 @@ this module were checked: `fm-02`'s sits inside an `if said:`, and `uw-04`'s com
 nothing on an empty list, though it is now also guarded against a blank line.
 
 Writing the rule is not the same as having it.
+
+## Both causes now staged, and what the second one cannot tell you
+
+`drop_partial_line` names two causes; `en-01` reached the arm by `RLIMIT_FSIZE` and
+`deploy/en02-enospc-probe.sh` reaches it by a genuinely full filesystem — a 512 KiB tmpfs mounted in
+a user namespace, the place on it, the transcript padded to the ceiling, then a turn. On
+`arbos-kernel 0.2.0 f97bb3487540 protocol 1`:
+
+| | |
+|---|---|
+| filesystem | 512 KiB, 0 bytes free before the turn |
+| readable events before / after | 766 / **766** |
+| unparseable lines before / after | 0 / **0** |
+| kernel said no space | yes |
+| kernel alive afterwards | no — it exited |
+
+So a full disk leaves the transcript exactly as it was, says why, and corrupts nothing. The property
+holds on this cause too.
+
+**What it cannot distinguish, and I would rather say so than imply otherwise.** With zero bytes free
+the write can fail at byte 0, in which case there is no headless line for the guard to cut — the
+easy case, not the guard working. I tried to leave a sliver smaller than one event and could not:
+tmpfs allocates by page, so "200 bytes remaining" is zero *available blocks* and `statvfs` reports 0
+either way. From outside the process, "the write never started" and "the write was cut back" look
+identical: the file length is unchanged in both.
+
+`en-01` is therefore the load-bearing evidence that the guard actually cuts — there the ceiling fell
+inside the buffer, three events landed whole afterwards, and no unparseable line remained. `en-02`
+adds that the other cause reaches the same place without damage, and that a kernel which cannot
+write says so before it goes.
+
+One thing worth a second look by someone who owns that area: **the kernel exits when the filesystem
+is full.** It reports the reason, so it is not silent, and a kernel that cannot record anything
+arguably should stop. But it is a place stopping on a condition a person can fix, and whether the
+window says so usefully is a question this probe does not reach.
+
+## Closed: #646 verified, both halves
+
+`#646` (`cecd48e1`) added exactly the missing call site — `drop_headless_tail` in `files.rs`, swept
+by `repair_headless_tails` at kernel start "before anything appends" — and made the cut speak.
+Verified with `pl-01` on `cecd48e1bd76` against `f97bb3487540`, which is the commit line just before
+it:
+
+| | `f97bb3487540` (before) | `cecd48e1bd76` (with #646) |
+|---|---|---|
+| readable events, before → after the turn | 3 → 6 | 3 → **8** |
+| unparseable lines afterwards | **1** | **0** |
+| the turn's event swallowed | **yes** | no |
+| the cut said on the transcript | no | **yes** |
+
+The notice is worth quoting, because the last clause is the part that makes the record accountable:
+
+> The kernel that wrote this record before ended in the middle of a line (55 bytes, the head of one
+> event). That half line was dropped so everything from here on reads whole; the event it began was
+> lost with that kernel, not now.
+
+It names the byte count, says what was dropped and why, and puts the loss on the crash rather than
+on the repair. `pl-01` now asserts both halves — nothing swallowed, and the cut said — so it breaks
+twice on the build before and passes on the build after.
+
+## Two mistakes of mine in this control, for the record
+
+Adding that second assertion took two tries, and both failures were mine rather than the product's:
+
+- the first referenced `evs`, which this scenario does not define — it reads through `read_lines()`
+  into `good1`. `NameError`, caught on the first run. Reading the surrounding code before naming a
+  variable would have cost nothing;
+- the break message then read *"a half-written line was cut back at start and root's transcript does
+  not say so"*, which is untrue on the build before #646, where **no cut happens at all**. A message
+  that asserts the wrong thing about the build it fired on is `qal-j34`'s and `qal-j36`'s fault in
+  miniature, and it was in a file I wrote after filing both. It now says which of the two states it
+  cannot tell apart and points at the break above for the answer.
+
+Earlier in the day this same scenario's failure message indexed `swallowed[0]` while asserting
+`not swallowed` — it would have raised `IndexError` on this very run, the moment the fix landed, and
+the green would have arrived disguised as a `driver-exception`. That was guarded a few hours before
+#646 merged, by luck of ordering rather than by discipline.

@@ -23,3 +23,15 @@ A click on **Project** (or any other right-panel item) must **not** open a page 
 ## Fullscreen
 
 Native fullscreen must make the chat fill the Space. #542 was not enough. No leftover title bar, extra top inset, or fake maximize.
+
+## PR
+
+[#649](https://github.com/unarbos/arbos/pull/649) on `cursor/desktop-chrome-2019-0690`. Ready for review; CI green. `v0.2.0` stays unpublished.
+
+## Stills
+
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/01-tab-strip-closed.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/01-tab-strip-closed.png) — panel toggle on the project tab row, drawer closed
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/02-one-row-open.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/02-one-row-open.png) — panel tabs and toggle on that same row; chat stays
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/03-project-stays-in-panel.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/03-project-stays-in-panel.png) — Project click keeps the chat
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/04-no-extra-controls.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/04-no-extra-controls.png) — no bottom +, no expand grid, no header X
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/05-tab-strip-closeup.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-chrome-2019/05-tab-strip-closeup.png) — one row: Home / Place / + / Project / + / toggle

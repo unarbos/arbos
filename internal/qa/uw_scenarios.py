@@ -1180,6 +1180,23 @@ def register(scenario, registry, transcript, now_ms, branch):
                 f"`drop_partial_line` repairs only the process whose own write failed (files.rs:581, its one caller); after a crash nobody runs it",
                 "arbos-core files.rs append_events — cut a headless last line before appending, not only when this process's write failed",
             )
+            # #646 (`cecd48e1`) added the second call site *and* says what it cut. The saying is half
+            # the contract: a record that silently loses 55 bytes is still a record someone has to
+            # trust. Measured on `cecd48e1bd76`: "ended in the middle of a line (55 bytes, the head of
+            # one event). That half line was dropped so everything from here on reads whole; the event
+            # it began was lost with that kernel, not now." The last clause is the one that matters —
+            # it puts the loss on the crash rather than on the repair.
+            cut_said = [
+                str(e.get("text") or "")[:260] for e in good1
+                if e.get("kind") == "notice" and "middle of a line" in str(e.get("text") or "").lower()
+            ]
+            cx.rec.notes["cut_said_on_the_transcript"] = cut_said
+            cx.rec.expect(
+                bool(cut_said),
+                "pl-01-the-cut-is-not-said",
+                f"root's transcript does not say that a half-written line was cut at start ({len([e for e in good1 if e.get('kind') == 'notice'])} notice(s)). Either the cut did not happen — and the break above says whether an event was swallowed — or it happened and took bytes out of the record with nothing said, which is a record nobody can account for",
+                "arbos-kernel serve.rs repair_headless_tails — say what was dropped (#646)",
+            )
         finally:
             k.stop()
         # No `cx.check()`: the partial line is this scenario's fixture, so the place checker's
