@@ -28,8 +28,11 @@ ui() { python3 "$HERE/ui.py" "$UDID" "$@"; }
 # A name is suspect when it is the element's own type, or Title Case words
 # that spell an SF Symbol. The list is what this app has actually shipped,
 # plus the shapes those take, rather than a guess at Apple's catalogue.
-suspect() {
-  python3 - <<'PY'
+# The detector lives in a file, not a heredoc. `python3 - <<EOF` takes its
+# *program* from stdin, so piping a dump into it fed the data nowhere and
+# the check silently passed everything. Its own self-test caught that.
+SUSPECT_PY=$(mktemp -t suspect)
+cat > "$SUSPECT_PY" <<'DETECTOR'
 import re, sys
 BAD_EXACT = {
     "PopUpButton", "Button", "Image", "StaticText", "TextField",
@@ -51,8 +54,9 @@ for line in sys.stdin.read().splitlines():
         continue
     if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in ("Back", "Send", "Mute", "Unmute", "Filter", "Search", "Settings", "More", "Call")):
         print(f"  {kind:12} {label}")
-PY
-}
+DETECTOR
+trap 'rm -f "$SUSPECT_PY"' EXIT
+suspect() { python3 "$SUSPECT_PY"; }
 
 screen() {
   local what=$1
