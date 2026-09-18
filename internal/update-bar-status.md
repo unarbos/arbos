@@ -5,11 +5,11 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 08:38 UTC.
+Last checked 2026-09-18 08:46 UTC.
 
-## Click Update. You will get build 1904.
+## Click Update. You will get build 1910.
 
-**1904** — signed, notarised, stapled, on the feed since 08:33 UTC.
+**1910** — signed, notarised, stapled, on the feed since 08:44 UTC.
 
 Checked, not assumed: Apple's notary said Accepted, the ticket is stapled
 into the bundle, Gatekeeper reads it as a Notarized Developer ID, the zip's
@@ -17,7 +17,14 @@ own Ed25519 signature verifies against the key in the app, and its size and
 hash are the ones the feed states. All four payloads (Mac app and kernel,
 Linux app and kernel) are on the release.
 
-New since 1886 (builds 1887–1904):
+New since 1904 (builds 1905–1910):
+
+- **#600** — the loop reaches a worker's chat from the sheet, and
+  `page_back` walks toward older lines
+- **#601** — a request that quotes its reference fixes what done means:
+  the as-quoted line in the reply, never a looser check
+
+And new since 1886 (builds 1887–1904, which 1910 also carries):
 
 - **#594** — voice: one question, one answer. The model's first word waits
   for our transcript; a work question is the kernel's, small talk the
