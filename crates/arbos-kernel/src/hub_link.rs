@@ -186,6 +186,15 @@ pub async fn register(
 /// hub reads a second `Register` on a link as a revision of that
 /// registrant's `builds` entry, so the roster says what the socket's
 /// `hello` already says — the state is made *by* a replacement while the
+/// When the project's top-level transcript was last written, as Unix
+/// millis; `None` for a project with no transcript yet.
+fn last_transcript_write_ms(place: &Place) -> Option<i64> {
+    let path = arbos_core::Layout::new(place, "root").transcript();
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let since = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_millis()).ok()
+}
+
 /// process runs, so a fact from connection time is wrong for exactly the
 /// runs it was added to explain (iPhone loop, cycle 41).
 pub fn build_revision(cfg: &HubConfig, kind: RegistrantKind, project: Option<String>) -> HubFrame {
@@ -335,6 +344,14 @@ async fn session(
     // Notifications and seen marks ride the same socket, so the hub can
     // push to a phone with no client attached.
     *hooks.hub_out.lock().unwrap() = Some((project.to_string(), to_hub.clone()));
+    // The roster's `last_activity_ms` starts from what the disk knows:
+    // the top-level transcript's last write. Turns move it from here.
+    if let Some(at_ms) = last_transcript_write_ms(place) {
+        let _ = to_hub.send(HubFrame::Activity {
+            project: project.to_string(),
+            at_ms,
+        });
+    }
     let mut chans: HashMap<u64, (mpsc::UnboundedSender<String>, Arc<AtomicBool>)> = HashMap::new();
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
@@ -401,6 +418,7 @@ async fn session(
                     | HubFrame::Claimed { .. }
                     | HubFrame::Notify { .. }
                     | HubFrame::Seen { .. }
+                    | HubFrame::Activity { .. }
                     | HubFrame::Unknown => {}
                 }
             }

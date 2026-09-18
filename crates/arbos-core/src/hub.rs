@@ -184,6 +184,16 @@ pub enum HubFrame {
         #[serde(default)]
         unseen: u64,
     },
+    /// Kernel → hub: the project's transcript gained a line at `at_ms` (a
+    /// turn began or ended). The hub keeps the newest per project and
+    /// puts it on the roster as `last_activity_ms`, so a phone's list can
+    /// read `4m` beside a row and sort by what is warm, as Cursor's does;
+    /// seven rows all reading Idle in alphabetical order told a person
+    /// nothing (iPhone loop, cycle 59).
+    Activity {
+        project: String,
+        at_ms: i64,
+    },
     /// A frame this build does not know. Skipped, never fatal.
     #[serde(other)]
     Unknown,
@@ -230,6 +240,16 @@ pub struct ProjectInfo {
     /// `demo--c616190-1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// When the project's transcript last gained a line, as Unix millis:
+    /// the newest `Activity` the hub heard, or the value the kernel sent
+    /// at registration (its transcript's last line). Absent when the hub
+    /// has heard nothing yet; a client subtracts it from now.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub last_activity_ms: i64,
+}
+
+fn is_zero_i64(n: &i64) -> bool {
+    *n == 0
 }
 
 /// One machine as the hub sees it.
@@ -1062,6 +1082,7 @@ Report: link [the audit](arbos://cloud/demo/docs/echo.md); read arbos://cloud/de
                 access: "owner".into(),
                 kind: String::new(),
                 parent: None,
+                last_activity_ms: 0,
             }],
             since: 1,
         };

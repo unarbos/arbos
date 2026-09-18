@@ -119,9 +119,27 @@ struct MachineEntry {
     /// kernel registers under → the project they were cut from. A phone
     /// saw `demo--c616190-1` beside `demo` as a second project (M-12).
     worktrees: HashMap<String, String>,
+    /// When each project's transcript last gained a line (Unix millis),
+    /// by name: the newest `Activity` its kernel sent. Absent until one
+    /// arrives; the roster then carries it as `last_activity_ms`.
+    activity: HashMap<String, i64>,
 }
 
 impl MachineEntry {
+    /// A project's transcript gained a line. True when the roster's word
+    /// moves forward (an older or repeated time changes nothing).
+    fn note_activity(&mut self, project: &str, at_ms: i64) -> bool {
+        if at_ms <= 0 {
+            return false;
+        }
+        let cur = self.activity.entry(project.to_string()).or_insert(0);
+        if at_ms <= *cur {
+            return false;
+        }
+        *cur = at_ms;
+        true
+    }
+
     /// A registrant's build said again on its open link (`binary_gone`
     /// flipped, or a re-exec onto a new build). Empty strings keep the
     /// old word. True when anything changed.
@@ -220,6 +238,7 @@ impl MachineEntry {
                         self.kinds.get(p).cloned().unwrap_or_default()
                     },
                     parent,
+                    last_activity_ms: self.activity.get(p).copied().unwrap_or(0),
                 }
             })
             .collect();
@@ -236,6 +255,7 @@ impl MachineEntry {
                     identity: self.identities.get(p).cloned(),
                     kind: self.kinds.get(p).cloned().unwrap_or_default(),
                     parent: None,
+                    last_activity_ms: self.activity.get(p).copied().unwrap_or(0),
                 });
             }
         }
@@ -363,6 +383,20 @@ impl Hub {
             return false;
         };
         if !entry.revise_build(build_key, version, git_sha, built_at, binary_gone) {
+            return false;
+        }
+        g.generation += 1;
+        true
+    }
+
+    /// A kernel said its project's transcript gained a line. True when
+    /// the roster changed (the time moved forward).
+    fn note_activity(&self, machine: &str, project: &str, at_ms: i64) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        let Some(entry) = g.machines.get_mut(machine) else {
+            return false;
+        };
+        if !entry.note_activity(project, at_ms) {
             return false;
         }
         g.generation += 1;
@@ -784,6 +818,11 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                                     }
                                 }
                             });
+                        }
+                    }
+                    HubFrame::Activity { project: p, at_ms } => {
+                        if hub.note_activity(&machine, &p, at_ms) {
+                            hub.broadcast_roster();
                         }
                     }
                     // A second `Register` on the link revises this
@@ -1422,6 +1461,58 @@ mod roster_face_tests {
             json["projects"][0].get("kind").is_none()
                 && json["projects"][0].get("parent").is_none(),
             "a project carries no kind or parent: {json}"
+        );
+    }
+
+    /// iPhone loop, cycle 59: seven rows all `Idle` in alphabetical order.
+    /// A kernel's `Activity` gives the roster `last_activity_ms` for its
+    /// project; the newest wins, an older word changes nothing, and a
+    /// project no kernel has spoken for carries no field at all.
+    #[test]
+    fn the_roster_says_when_each_project_last_moved() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reg = Arc::new(Registrant {
+            id: 1,
+            machine: "mac".into(),
+            user: "owner".into(),
+            project: Some("arbos".into()),
+            place: Some("/x/arbos".into()),
+            to_socket: tx,
+            chans: Mutex::new(HashMap::new()),
+            next_chan: AtomicU64::new(1),
+        });
+        let mut entry = MachineEntry::default();
+        entry.kernels.insert("arbos".into(), reg);
+        entry.worker_projects = vec!["arbos".into(), "notes".into()];
+        assert!(entry.note_activity("arbos", 1_000));
+        assert!(entry.note_activity("arbos", 5_000), "a newer line moves it");
+        assert!(
+            !entry.note_activity("arbos", 3_000),
+            "an older line does not"
+        );
+        assert!(
+            !entry.note_activity("arbos", 5_000),
+            "the same line does not"
+        );
+        assert!(!entry.note_activity("notes", 0), "zero is not a time");
+        let info = entry.info("mac", None, "mesh");
+        let by_name = |n: &str| info.projects.iter().find(|p| p.name == n).unwrap().clone();
+        assert_eq!(by_name("arbos").last_activity_ms, 5_000);
+        assert_eq!(by_name("notes").last_activity_ms, 0);
+        let json = serde_json::to_value(&info).unwrap();
+        let row = |n: &str| {
+            json["projects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"] == n)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(row("arbos")["last_activity_ms"], 5_000);
+        assert!(
+            row("notes").get("last_activity_ms").is_none(),
+            "a project nobody spoke for carries no time: {json}"
         );
     }
 

@@ -427,6 +427,7 @@ impl KernelHooks {
                 told: false,
             },
         );
+        self.tell_activity();
         self.status_said.lock().unwrap().remove(agent);
         self.sent.lock().unwrap().remove(agent);
         if let Some(parent) = self.parent_of(agent) {
@@ -443,6 +444,7 @@ impl KernelHooks {
     pub fn turn_ended(&self, agent: &str) {
         self.running.lock().unwrap().remove(agent);
         self.progress.lock().unwrap().remove(agent);
+        self.tell_activity();
         // Nothing is being done now: the live line goes.
         self.status_said.lock().unwrap().remove(agent);
         self.status_pending.lock().unwrap().remove(agent);
@@ -1990,6 +1992,14 @@ impl KernelHooks {
     }
 
     /// A frame for the hub, when this kernel is registered with one.
+    /// The project's transcript gained a line now: a turn began or ended.
+    /// The hub keeps the newest and the roster carries it, so a phone's
+    /// list can say `4m` beside the row.
+    pub fn tell_activity(&self) {
+        let at_ms = arbos_core::now_ms();
+        self.tell_hub(|project| arbos_core::hub::HubFrame::Activity { project, at_ms });
+    }
+
     pub fn tell_hub(&self, make: impl FnOnce(String) -> arbos_core::hub::HubFrame) {
         let guard = self.hub_out.lock().unwrap();
         if let Some((project, tx)) = guard.as_ref() {

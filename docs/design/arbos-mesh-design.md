@@ -141,6 +141,7 @@ The roster already lists machines and projects. Each `ProjectInfo` gains:
 - `store`: the project's address root, `arbos://<machine>/<project>/`, filled by the hub.
 - `share`: the project's sharing mode from its `project.toml` `[share] mode` (`private`, `mesh` = default, `open`), sent by the registering kernel or worker like the face is.
 - `access`: what the *recipient* of this roster may do there: `owner`, `writer`, `reader`, or `none`. The hub computes it per recipient when it pushes the roster (rosters were already sent per registrant), and per requester on `GET /list`.
+- `last_activity_ms`: when the project's transcript last gained a line, Unix millis. The kernel sends `activity {project, at_ms}` on the hub link when a turn begins or ends (and once at registration, from the transcript file's last write); the hub keeps the newest per project and broadcasts the roster when it moves. Absent until a kernel has spoken for the project. A phone subtracts it from now for the `4m` beside a row and sorts by it, most recent first (iPhone loop, cycle 59).
 
 On disk, `.arbos/machines/<name>.toml` therefore shows every peer store and the node's rights on it, and `machines.md` renders `- arboslife — arbos://arboslife/demo/ (owner)`. `ls .arbos/machines/` answers "what stores exist on my peers and which may I touch".
 
