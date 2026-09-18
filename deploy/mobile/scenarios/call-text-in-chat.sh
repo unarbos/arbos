@@ -73,14 +73,22 @@ else
   # enough to survive the chat truncating a long answer.
   PHRASE=$(echo "$KERNEL_SAID" | tr -s ' ' | cut -d' ' -f2-7)
   echo "  the kernel's words:  ...$PHRASE..."
-  SCREEN=$(ui dump | grep " StaticText " | cut -d' ' -f4-)
-  SPOKEN=$(echo "$SCREEN" | grep -c "^Spoken$" | tr -d ' ')
-  if echo "$SCREEN" | grep -qF "$PHRASE"; then
-    echo "  VERDICT: the kernel's wording is on screen for this turn — both wordings are showing"
-  elif [ "$SPOKEN" -gt 0 ]; then
-    echo "  VERDICT: the kernel's wording is absent and $SPOKEN rows are marked Spoken — the rule holds"
+  # Only this turn. The kernel's wording is legitimately elsewhere on screen:
+  # spoken rows do not survive a restart, so older turns replay as the
+  # kernel's text (M-179). Searching the whole screen found it there and
+  # called the rule broken — the answer to a different question.
+  DUMP=$(ui dump)
+  LAST_SPOKEN_Y=$(echo "$DUMP" | awk '$4=="Spoken" {y=$2} END {print y+0}')
+  SPOKEN=$(echo "$DUMP" | grep -c " StaticText   Spoken$" | tr -d ' ')
+  THIS_TURN=$(echo "$DUMP" | awk -v y="$LAST_SPOKEN_Y" '$3=="StaticText" && $2+0 > y+0 { $1=""; $2=""; $3=""; print }')
+  echo "  rows marked Spoken: $SPOKEN; reading the $(echo "$THIS_TURN" | grep -c .) row(s) after the last of them"
+  if [ "$SPOKEN" = 0 ]; then
+    echo "  VERDICT: nothing on screen is marked Spoken — inconclusive, the chat may not be at the tail"
+  elif echo "$THIS_TURN" | grep -qF "$PHRASE"; then
+    echo "  VERDICT: this turn shows the kernel's wording too — both wordings are showing"
   else
-    echo "  VERDICT: neither wording found — inconclusive, the chat may not be at the tail"
+    echo "  VERDICT: this turn's reply is not the kernel's wording — the rule holds"
+    echo "  what it shows instead: $(echo "$THIS_TURN" | grep . | head -1 | cut -c1-90)"
   fi
 fi
 echo "stills in $OUT"
