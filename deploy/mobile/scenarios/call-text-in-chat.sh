@@ -78,17 +78,22 @@ else
   # kernel's text (M-179). Searching the whole screen found it there and
   # called the rule broken — the answer to a different question.
   DUMP=$(ui dump)
-  LAST_SPOKEN_Y=$(echo "$DUMP" | awk '$4=="Spoken" {y=$2} END {print y+0}')
   SPOKEN=$(echo "$DUMP" | grep -c " StaticText   Spoken$" | tr -d ' ')
-  THIS_TURN=$(echo "$DUMP" | awk -v y="$LAST_SPOKEN_Y" '$3=="StaticText" && $2+0 > y+0 { $1=""; $2=""; $3=""; print }')
-  echo "  rows marked Spoken: $SPOKEN; reading the $(echo "$THIS_TURN" | grep -c .) row(s) after the last of them"
+  # Count, do not compare. The old check asked whether this turn's reply was
+  # *different from* the kernel's wording, which only works while the two
+  # differ — and since the gateway changed today it often says exactly what
+  # the kernel said. On a run where the chat showed the answer once, that
+  # check called it "both wordings are showing".
+  #
+  # The rule is about how many rows a turn gets, so count the rows.
+  TIMES=$(echo "$DUMP" | grep -cF "$PHRASE" | tr -d ' ')
+  echo "  rows marked Spoken: $SPOKEN; the answer appears $TIMES time(s) on screen"
   if [ "$SPOKEN" = 0 ]; then
     echo "  VERDICT: nothing on screen is marked Spoken — inconclusive, the chat may not be at the tail"
-  elif echo "$THIS_TURN" | grep -qF "$PHRASE"; then
-    echo "  VERDICT: this turn shows the kernel's wording too — both wordings are showing"
+  elif [ "$TIMES" -le 1 ]; then
+    echo "  VERDICT: one wording on screen for this turn — the rule holds"
   else
-    echo "  VERDICT: this turn's reply is not the kernel's wording — the rule holds"
-    echo "  what it shows instead: $(echo "$THIS_TURN" | grep . | head -1 | cut -c1-90)"
+    echo "  VERDICT: the answer is on screen $TIMES times — both wordings are showing"
   fi
 fi
 echo "stills in $OUT"
