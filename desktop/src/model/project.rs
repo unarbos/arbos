@@ -89,6 +89,9 @@ pub struct Project {
     /// Kernel session ids the user deleted. The activity poll must not mint
     /// them again — that is why trash on a delegate used to do nothing.
     pub dismissed: HashSet<String>,
+    /// Folders the Files tree has opened. The listing is the disk; this
+    /// is only which branches are shown.
+    pub file_expanded: HashSet<PathBuf>,
 }
 
 impl Project {
@@ -132,6 +135,7 @@ impl Project {
             identity,
             identity_saved,
             dismissed: HashSet::new(),
+            file_expanded: HashSet::new(),
         }
     }
 
@@ -151,7 +155,8 @@ impl Project {
             self.store_view = StoreView::read(&self.path);
         }
         let place = self.place();
-        let home = dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
+        let home =
+            dirs::home_dir().is_some_and(|h| place.host.is_none() && h.join(STORE) == place.path);
         if let Some(identity) = Identity::load_for(&root(&self.store()), &place, home) {
             self.identity = identity;
             self.identity_saved = true;

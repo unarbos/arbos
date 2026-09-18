@@ -20,13 +20,13 @@ use crate::{
     view::{
         component::{menu, menu::Menu, surface as board},
         panel::{PANEL_MIN_WINDOW, PANEL_WIDTH},
-        root::{self, Arbos, Pane, TogglePanel, ZoomPanel},
+        root::{self, Arbos, TogglePanel, ZoomPanel},
     },
 };
 use bezel::{
     gpui::{
-        AnyElement, ClickEvent, Context, DragMoveEvent, Empty, MouseButton, PathPromptOptions,
-        SharedString, Window, div, prelude::*, px,
+        AnyElement, ClickEvent, Context, DragMoveEvent, Empty, MouseButton, SharedString, Window,
+        div, prelude::*, px,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{
@@ -83,12 +83,9 @@ impl Card {
         match self {
             Self::Project => "Agents, processes and the project page",
             Self::Terminal => "A shell of your own, in this folder",
-            Self::Browser => "Ask the agent to open a page",
-            // Says what it does rather than what we mean to do: until the
-            // kernel can refuse the agent's write to a file he has open,
-            // opening one is a view (`DOCUMENTS_EDITABLE`).
-            Self::File if DOCUMENTS_EDITABLE => "Open a file from this folder to edit",
-            Self::File => "Read a file from this folder",
+            Self::Browser => "A browser page of your own",
+            Self::File if DOCUMENTS_EDITABLE => "The project's folder; a file opens to edit",
+            Self::File => "The project's folder as a tree",
         }
     }
 
@@ -430,7 +427,32 @@ impl Arbos {
                 .min_w_0()
                 .child(terminal.clone())
                 .into_any_element(),
-            None => board::render(&shown, Some(&place), link, window, cx),
+            None => {
+                if let Some(path) = shown.path() {
+                    let resolved = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        place.path.join(path)
+                    };
+                    if shown.board_kind == "files" || shown.board_kind == "dir" || resolved.is_dir()
+                    {
+                        return Some(self.file_tree_body(&resolved, window, cx));
+                    }
+                    if crate::view::file_editor::is_editable(&resolved) {
+                        if let Some(editor) = self.file_editors.get(&resolved) {
+                            return Some(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .child(editor.clone())
+                                    .into_any_element(),
+                            );
+                        }
+                    }
+                }
+                board::render(&shown, Some(&place), link, window, cx)
+            }
         };
         Some(
             div()
@@ -520,13 +542,16 @@ impl Arbos {
     }
 
     /// What a card does when it is pressed.
-    fn take_card(&mut self, card: Card, window: &mut Window, cx: &mut Context<Self>) {
+    fn take_card(&mut self, card: Card, _window: &mut Window, cx: &mut Context<Self>) {
         match card {
             Card::Project => {
                 self.workspace
                     .update(cx, |workspace, cx| workspace.select_panel_tab(0, cx));
             }
-            Card::File => self.open_file_in_panel(cx),
+            Card::File => {
+                self.workspace
+                    .update(cx, |workspace, cx| workspace.open_files_tree(cx));
+            }
             // A shell of his own, straight from the kernel (#461): it answers
             // with a row marked `by: user`, so the tab fills and the drawer
             // stays on it. No composer detour any more.
@@ -534,21 +559,12 @@ impl Arbos {
                 self.workspace
                     .update(cx, |workspace, cx| workspace.open_shell(cx));
             }
-            // A page is still the agent's to open — the kernel has one browser
-            // per agent and no frame for a client to drive it — so this asks,
-            // in his words, and the row arrives when the agent obliges.
-            Card::Browser => self.ask_in_composer("Open a browser page.", window, cx),
+            Card::Browser => {
+                self.workspace.update(cx, |workspace, cx| {
+                    workspace.open_browser(None, cx);
+                });
+            }
         }
-    }
-
-    /// Put a request in the composer and leave sending it to him — the same
-    /// path the chat's pencil uses.
-    fn ask_in_composer(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_pane(Pane::Chat, cx);
-        self.workspace.update(cx, |workspace, cx| {
-            workspace.edit_in_composer(text.to_string(), cx);
-        });
-        self.focus_composer(window, cx);
     }
 
     /// The divider on the drawer's left edge: a 9 px grab strip over the
@@ -607,8 +623,11 @@ impl Arbos {
             menu::row(
                 Item::action("Browse files…")
                     .with_icon(icons::files::FOLDER_WITH_FILES)
-                    .with_description("Open a file from this folder"),
-                |this, _, cx| this.open_file_in_panel(cx),
+                    .with_description("The project's folder as a tree"),
+                |this, _, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.open_files_tree(cx));
+                },
             ),
             menu::row(
                 Item::action("Terminal")
@@ -622,8 +641,11 @@ impl Arbos {
             menu::row(
                 Item::action("Browser")
                     .with_icon(icons::devices::GLOBAL)
-                    .with_description("Ask the agent to open a page"),
-                |this, window, cx| this.ask_in_composer("Open a browser page.", window, cx),
+                    .with_description("A browser page of your own"),
+                |this, _, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.open_browser(None, cx));
+                },
             ),
             menu::row(
                 Item::action("Project")
@@ -650,32 +672,5 @@ impl Arbos {
             self.menu_card("panel-new-menu", rows, cx),
             None,
         ))
-    }
-
-    /// Cursor's Open File, into the tab in front: the system picker, then the
-    /// file as a document.
-    fn open_file_in_panel(&mut self, cx: &mut Context<Self>) {
-        let paths = cx.prompt_for_paths(PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: false,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                let title = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                this.open_store_file(path, &title, cx);
-            });
-        })
-        .detach();
     }
 }

@@ -7,6 +7,7 @@ pub mod attachment;
 pub mod board;
 pub mod changes;
 pub mod cover;
+pub mod file_tree;
 pub mod history;
 pub mod identity;
 pub mod panel;

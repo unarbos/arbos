@@ -7,9 +7,9 @@ use crate::{
         panel::{Panel, PanelTab},
         permission_center::{PermissionCenter, Permissions},
         session::ChatSession,
-        surface::SurfaceId,
         settings::Settings,
         state::{self, State},
+        surface::SurfaceId,
         workspace::{PaneRequest, Reloaded, Workspace},
     },
     view::{
@@ -258,6 +258,7 @@ pub fn init(cx: &mut App) {
         );
         markdown::set_code_band(cx, false);
     }
+    bezel::ui::tree::init(cx);
     cx.bind_keys([
         // A sub-chat under the project's main chat. The project has one
         // main chat, so this never makes a second root.
@@ -721,6 +722,10 @@ pub struct Arbos {
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
     active_terminal: Option<String>,
+    /// Text files open in the drawer. Keyed by the resolved path so a
+    /// second open of the same file keeps the buffer.
+    pub(crate) file_editors:
+        std::collections::HashMap<std::path::PathBuf, Entity<crate::view::file_editor::FileDoc>>,
     /// The side panel's own focus. Two rows of tabs are on screen and one
     /// pair of chords drives both — `⌘T`, `⌘⇧{`, `⌘⇧}` act on the panel's
     /// tabs while this holds the focus and on the window's projects
@@ -859,6 +864,47 @@ impl Arbos {
             }
         }
         self.active_terminal = active_id;
+        self.sync_file_editors(cx);
+    }
+
+    fn sync_file_editors(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        let needed: Vec<std::path::PathBuf> = workspace
+            .projects
+            .iter()
+            .flat_map(|project| {
+                project.surfaces.iter().filter_map(|surface| {
+                    let path = surface.path()?;
+                    let resolved = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        project.path.join(path)
+                    };
+                    crate::view::file_editor::is_editable(&resolved).then_some(resolved)
+                })
+            })
+            .collect();
+        let dropping: Vec<_> = self
+            .file_editors
+            .keys()
+            .filter(|path| !needed.iter().any(|held| held == *path))
+            .cloned()
+            .collect();
+        if !dropping.is_empty() {
+            let workspace = self.workspace.read(cx);
+            for path in &dropping {
+                workspace.claim_path(path, false);
+            }
+        }
+        self.file_editors
+            .retain(|path, _| needed.iter().any(|held| held == path));
+        let workspace = self.workspace.clone();
+        for path in needed {
+            self.file_editors.entry(path.clone()).or_insert_with(|| {
+                let workspace = workspace.clone();
+                cx.new(|cx| crate::view::file_editor::FileDoc::new(path, workspace, cx))
+            });
+        }
     }
 
     pub fn new(
@@ -1070,6 +1116,7 @@ impl Arbos {
             updater,
             workspace,
             terminals: Default::default(),
+            file_editors: Default::default(),
             active_terminal: None,
             window_active: true,
             notifications_posted: Vec::new(),
@@ -1242,11 +1289,11 @@ impl Arbos {
         // has its own widening delay, so a machine that is away is not
         // hammered.
         cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(Duration::from_secs(3))
-                .await;
+            cx.background_executor().timer(Duration::from_secs(3)).await;
             loop {
-                let alive = this.update(cx, |this, cx| this.drain_feedback(false, cx)).is_ok();
+                let alive = this
+                    .update(cx, |this, cx| this.drain_feedback(false, cx))
+                    .is_ok();
                 if !alive {
                     break;
                 }
@@ -2315,7 +2362,10 @@ impl Arbos {
             self.workspace.update(cx, |workspace, cx| {
                 workspace.with_session(session, cx, |chat| chat.notice(true, &why));
             });
-            self.voice_error(&format!("call refused: {}", crate::voice_ws::NOT_ON_HUB), cx);
+            self.voice_error(
+                &format!("call refused: {}", crate::voice_ws::NOT_ON_HUB),
+                cx,
+            );
             return;
         }
         // Dictation, if a take is open, ends: the call owns the mic.
@@ -2645,8 +2695,7 @@ impl Arbos {
                 .map(|project| {
                     // The store, not the path: a remote place's records live in
                     // its local sidecar, and its path is the far machine's.
-                    workspace
-                        .desktop_state(&project.store(), crate::feedback::DESKTOP_STATE_BUDGET)
+                    workspace.desktop_state(&project.store(), crate::feedback::DESKTOP_STATE_BUDGET)
                 })
                 .unwrap_or(serde_json::Value::Null);
             if let Some(obj) = view.as_object_mut()
@@ -2704,12 +2753,7 @@ impl Arbos {
     /// that folder, so there is nothing to attach — a different fact from "the
     /// kernel would not answer", pointing at a different thing to do. Jacob's
     /// `ArbosLife:~` tab had no store there until this afternoon.
-    fn collect_over_ssh(
-        &mut self,
-        host: String,
-        path: std::path::PathBuf,
-        cx: &mut Context<Self>,
-    ) {
+    fn collect_over_ssh(&mut self, host: String, path: std::path::PathBuf, cx: &mut Context<Self>) {
         let sheet = self.feedback_sheet.clone();
         cx.spawn(async move |_, cx| {
             let got = cx
@@ -2825,24 +2869,20 @@ impl Arbos {
         };
         crate::feedback::save_parts(&place, &draft.parts);
         let id = crate::feedback::new_id(arbos_core::now_ms());
-        let written = match crate::feedback::write(
-            &place,
-            host.as_deref(),
-            draft,
-            &id,
-            arbos_core::now_ms(),
-        ) {
-            Ok(written) => written,
-            Err(e) => {
-                // Every outbox refused it. His words are still in the field and
-                // must not die there, so the sheet offers to put them on the
-                // clipboard rather than a button that repeats the failure.
-                sheet.update(cx, |sheet, cx| {
-                    sheet.nowhere_to_save(format!("{e:#}"), cx);
-                });
-                return;
-            }
-        };
+        let written =
+            match crate::feedback::write(&place, host.as_deref(), draft, &id, arbos_core::now_ms())
+            {
+                Ok(written) => written,
+                Err(e) => {
+                    // Every outbox refused it. His words are still in the field and
+                    // must not die there, so the sheet offers to put them on the
+                    // clipboard rather than a button that repeats the failure.
+                    sheet.update(cx, |sheet, cx| {
+                        sheet.nowhere_to_save(format!("{e:#}"), cx);
+                    });
+                    return;
+                }
+            };
         // The thumbs-down he pressed now reads as reported.
         if let Some((chat_id, seq)) = self.report_anchor.take() {
             self.workspace.update(cx, |workspace, cx| {
@@ -3309,32 +3349,49 @@ fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::C
         .iter()
         .rev()
         .filter_map(|item| match item {
-            ChatItem::User(m) if !m.text.trim().is_empty() => Some(ContextLine { role: "user".into(), text: clip(&m.text) }),
-            ChatItem::Agent(text) if !text.trim().is_empty() => Some(ContextLine { role: "assistant".into(), text: clip(text) }),
-            ChatItem::From { who, text, .. } if !text.trim().is_empty() => {
-                Some(ContextLine { role: "worker".into(), text: clip(&format!("{who}: {text}")) })
-            }
+            ChatItem::User(m) if !m.text.trim().is_empty() => Some(ContextLine {
+                role: "user".into(),
+                text: clip(&m.text),
+            }),
+            ChatItem::Agent(text) if !text.trim().is_empty() => Some(ContextLine {
+                role: "assistant".into(),
+                text: clip(text),
+            }),
+            ChatItem::From { who, text, .. } if !text.trim().is_empty() => Some(ContextLine {
+                role: "worker".into(),
+                text: clip(&format!("{who}: {text}")),
+            }),
             ChatItem::Tool { label, status, .. } => {
                 let state = match status {
                     ToolStatus::Running => "running",
                     ToolStatus::Success => "done",
                     ToolStatus::Failure => "failed",
                 };
-                Some(ContextLine { role: "tool".into(), text: clip(&format!("{label} ({state})")) })
+                Some(ContextLine {
+                    role: "tool".into(),
+                    text: clip(&format!("{label} ({state})")),
+                })
             }
-            ChatItem::Notice { text, .. } if !text.trim().is_empty() => {
-                Some(ContextLine { role: "notice".into(), text: clip(text) })
-            }
+            ChatItem::Notice { text, .. } if !text.trim().is_empty() => Some(ContextLine {
+                role: "notice".into(),
+                text: clip(text),
+            }),
             ChatItem::Asked { question, answer } => {
                 let line = if answer.trim().is_empty() {
                     format!("asked: {question}")
                 } else {
                     format!("asked: {question} → {answer}")
                 };
-                Some(ContextLine { role: "asked".into(), text: clip(&line) })
+                Some(ContextLine {
+                    role: "asked".into(),
+                    text: clip(&line),
+                })
             }
             ChatItem::Thinking { text, done, .. } if !done && !text.trim().is_empty() => {
-                Some(ContextLine { role: "thinking".into(), text: clip(text) })
+                Some(ContextLine {
+                    role: "thinking".into(),
+                    text: clip(text),
+                })
             }
             _ => None,
         })
@@ -3356,7 +3413,11 @@ fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::C
             step: c.step.clone(),
         })
         .collect();
-    CallContext { recent, agents, running: chat.busy() }
+    CallContext {
+        recent,
+        agents,
+        running: chat.busy(),
+    }
 }
 
 /// One notice line for a mirrored speech-server event: who, what, words.

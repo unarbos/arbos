@@ -2011,6 +2011,55 @@ fn handle_frame(
                 Err(e) => refuse(hooks, Some(&owner), format!("shell: {e:#}")),
             }
         }
+        Frame::Browse { owner, url } => {
+            // A person's own browser tab, asked for from a window: the
+            // same Chromium page the `browser` tool uses, announced with
+            // `by: user` so the drawer opens on it.
+            let owner = owner.unwrap_or_else(|| "root".to_string());
+            if !arbos_core::agent_exists(place, &owner) {
+                refuse(
+                    hooks,
+                    Some(&owner),
+                    format!("browse: no agent {owner:?} in this place"),
+                );
+                return;
+            }
+            let url = url
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| !u.is_empty())
+                .unwrap_or("about:blank")
+                .to_string();
+            hooks.browsers.touch(&owner);
+            hooks.broadcast(Frame::Board {
+                owner: owner.clone(),
+                action: "open".into(),
+                panel: "browser".into(),
+                terminal_ids: vec!["b1".into()],
+                cwd: None,
+                title: None,
+                url: Some(url.clone()),
+                by: "user".into(),
+            });
+            let args = serde_json::json!({ "url": url });
+            let out = hooks.browsers.act(&owner, "navigate", &args);
+            let png = match &out {
+                Ok(done) => done.png.clone().or_else(|| hooks.browsers.preview()),
+                Err(e) => {
+                    klog::warn("browse", Some(&owner), format!("{e:#}"));
+                    hooks.browsers.preview()
+                }
+            };
+            let at = hooks.browsers.url(&owner);
+            hooks.broadcast(Frame::Browser {
+                agent: owner,
+                page: "b1".into(),
+                url: if at.is_empty() { url } else { at },
+                screenshot: png.as_deref().map(|png| {
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png)
+                }),
+            });
+        }
         Frame::JobStop { agent, id } => {
             let root = arbos_engine::JobsRoot::for_agent(place, &arbos_core::AgentId::new(&agent));
             let Some(job) = root.list().into_iter().find(|j| j.id == id) else {

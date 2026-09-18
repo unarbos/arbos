@@ -779,6 +779,17 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+    /// Client → kernel: open the agent's Chromium page for the person.
+    /// Same shape as `shell`: `owner` is who the row docks under (`root`
+    /// when absent); `url` is where to go (`about:blank` when absent).
+    /// The kernel answers with a `board` frame for panel `browser` with
+    /// `by: user`, then a `browser` frame with the URL and a picture.
+    Browse {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+    },
     /// Client → kernel: what surfaces does this kernel hold — its jobs, its
     /// terminals, its browser pages, with their states — so a window that
     /// reattaches after a kernel died (and a replacement answered) can

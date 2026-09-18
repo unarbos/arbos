@@ -18,8 +18,8 @@ use arbos_core::wire::Frame;
 use cacp::{
     Error,
     schema::{
-        ContentBlock, Cost, Diff, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus,
-        ToolKind, UsageUpdate,
+        ContentBlock, Cost, Diff, SessionUpdate, StopReason, TextContent, ToolCall,
+        ToolCallContent, ToolCallStatus, ToolKind, UsageUpdate,
     },
 };
 use serde_json::Value;
@@ -708,6 +708,39 @@ impl Session {
         let _ = self.send_frame(&Frame::Shell { owner: None, cwd });
     }
 
+    /// Ask for a browser page of this person's own. The kernel answers
+    /// with a `board` frame carrying `by: user`.
+    pub fn browse(&self, url: Option<String>) {
+        let _ = self.send_frame(&Frame::Browse { owner: None, url });
+    }
+
+    /// Stream the agent's page to this window, or stop.
+    pub fn watch_browser(&self, on: bool) {
+        let _ = self.send_frame(&Frame::BrowserWatch {
+            agent: self.session_id.clone(),
+            on,
+        });
+    }
+
+    /// Hold or release a path the person is editing.
+    pub fn claim(&self, path: String, held: bool) {
+        let _ = self.send_frame(&Frame::Claim { path, held });
+    }
+
+    /// Compare-and-swap save of a project file. The window already wrote
+    /// locally; this tells other clients. `base_hash` is the hash after
+    /// the write, so a second save from here is a no-op conflict unless
+    /// the kernel still has the old bytes — we send the new hash as both
+    /// content identity. The kernel's `save` is the other window's path;
+    /// this call is best-effort.
+    pub fn save_file(&self, path: String, text: String, hash: String) {
+        let _ = self.send_frame(&Frame::Save {
+            path,
+            text,
+            base_hash: hash,
+        });
+    }
+
     /// Ask the kernel what it holds — its jobs, shells and pages, with their
     /// states. Sent when a connection comes back, because the kernel that
     /// answers may not be the one that opened those rows: a kernel that died
@@ -994,6 +1027,16 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
             page,
             url,
             screenshot,
+        }],
+        Frame::BrowserFrame {
+            agent: id,
+            page,
+            data,
+            ..
+        } if id == agent => vec![Event::Browser {
+            page,
+            url: String::new(),
+            screenshot: Some(data),
         }],
         Frame::FeedbackBundle {
             agent: id,
@@ -1487,12 +1530,14 @@ pub(crate) fn tool_hint(name: &str, paths: &[String], args: Option<&Value>) -> O
         }
     }
     obj.and_then(|obj| {
-        ["path", "file", "target", "pattern", "query", "command", "url"]
-            .iter()
-            .find_map(|key| obj.get(*key).and_then(Value::as_str))
-            .map(str::trim)
-            .filter(|hint| !hint.is_empty())
-            .map(str::to_owned)
+        [
+            "path", "file", "target", "pattern", "query", "command", "url",
+        ]
+        .iter()
+        .find_map(|key| obj.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_owned)
     })
 }
 

@@ -156,8 +156,7 @@ pub struct Workspace {
 }
 
 /// Under a fork's trailing prompt when the original was still answering it.
-pub const FORKED_MID_TURN: &str =
-    "Forked while the original chat was still answering this — it keeps that work. Send a message to continue here.";
+pub const FORKED_MID_TURN: &str = "Forked while the original chat was still answering this — it keeps that work. Send a message to continue here.";
 
 impl Workspace {
     pub fn new(settings: Settings, state: State, cx: &mut Context<Self>) -> Self {
@@ -2473,7 +2472,13 @@ impl Workspace {
             .iter()
             .find(|project| project.store() == store);
         let rows: Vec<serde_json::Value> = project
-            .map(|project| project.sessions.iter().map(ChatSession::row_facts).collect())
+            .map(|project| {
+                project
+                    .sessions
+                    .iter()
+                    .map(ChatSession::row_facts)
+                    .collect()
+            })
             .unwrap_or_default();
 
         // The records are what the window will draw again after a relaunch, so
@@ -2754,6 +2759,70 @@ impl Workspace {
         });
     }
 
+    /// The Browser tile: ask this place's kernel for a page. It answers
+    /// with a row marked `by: user`, which opens the drawer on it.
+    pub fn open_browser(&mut self, url: Option<String>, cx: &mut Context<Self>) {
+        let Some(chat) = self.active_id() else {
+            return;
+        };
+        if let Some(Connection::Live(session)) = self.session(chat).map(|c| &c.connection) {
+            session.browse(url);
+            session.watch_browser(true);
+            return;
+        }
+        self.with_session(chat, cx, |chat| {
+            chat.notice(
+                true,
+                "no kernel is attached, so there is no browser to open",
+            );
+        });
+    }
+
+    /// Browse files: the project's folder as a tree in the drawer.
+    pub fn open_files_tree(&mut self, cx: &mut Context<Self>) {
+        let Some(project) = self.active_project() else {
+            return;
+        };
+        let path = project.path.clone();
+        let Some(main) = project.main_session() else {
+            return;
+        };
+        self.open_shown(
+            main,
+            path.display().to_string(),
+            "Files".into(),
+            "files".into(),
+            None,
+            None,
+            OpenedBy::User,
+            cx,
+        );
+    }
+
+    /// A person is editing `path` (`held`) or has saved or closed it.
+    pub fn claim_path(&self, path: &std::path::Path, held: bool) {
+        let Some(chat) = self.active_id() else {
+            return;
+        };
+        if let Some(Connection::Live(session)) = self.session(chat).map(|c| &c.connection) {
+            session.claim(path.display().to_string(), held);
+        }
+    }
+
+    /// Tell the kernel a save landed, so other windows can reload.
+    pub fn save_file(&self, path: &std::path::Path, text: &str, hash: &str) {
+        let Some(chat) = self.active_id() else {
+            return;
+        };
+        if let Some(Connection::Live(session)) = self.session(chat).map(|c| &c.connection) {
+            session.save_file(
+                path.display().to_string(),
+                text.to_string(),
+                hash.to_string(),
+            );
+        }
+    }
+
     // ── reconciling rows against the kernel ──────────────────────────
 
     /// Ask the kernel of `chat`'s place what it holds. Sent when a connection
@@ -2804,9 +2873,7 @@ impl Workspace {
                 SurfaceKind::Browser => "browser",
                 SurfaceKind::Panel => continue,
             };
-            let found = listed
-                .iter()
-                .find(|row| row.id == id && row.panel == panel);
+            let found = listed.iter().find(|row| row.id == id && row.panel == panel);
             match found {
                 Some(row) => {
                     if surface.gone {
@@ -3364,10 +3431,15 @@ impl Workspace {
         let Some(ix) = self.project_of(owner) else {
             return;
         };
-        let shot = screenshot
-            .as_deref()
-            .and_then(|b64| STANDARD.decode(b64).ok())
-            .map(|bytes| Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
+        let shot = screenshot.as_deref().and_then(|b64| {
+            let bytes = STANDARD.decode(b64).ok()?;
+            let format = if bytes.starts_with(&[0xFF, 0xD8]) {
+                ImageFormat::Jpeg
+            } else {
+                ImageFormat::Png
+            };
+            Some(Arc::new(Image::from_bytes(format, bytes)))
+        });
         let title = surface::host_of(&url).unwrap_or("Browser").to_owned();
         let held = self.projects[ix]
             .surfaces
@@ -3380,12 +3452,16 @@ impl Workspace {
                 ..
             } = &mut surface.bind
             {
-                *at = url;
+                if !url.is_empty() {
+                    *at = url;
+                }
                 if shot.is_some() {
                     *last = shot;
                 }
             }
-            surface.title = title;
+            if !title.is_empty() && title != "Browser" {
+                surface.title = title;
+            }
             surface.touched = crate::model::project::stamp();
         } else {
             self.upsert_surface(
@@ -4680,10 +4756,7 @@ fn decode_query(s: &str) -> String {
 fn transcript_paths(workspace: &Path, sid: &str) -> [PathBuf; 2] {
     let store = workspace.join(".arbos");
     [
-        store
-            .join("agents")
-            .join(sid)
-            .join("transcript.jsonl"),
+        store.join("agents").join(sid).join("transcript.jsonl"),
         store
             .join("archive")
             .join("agents")
