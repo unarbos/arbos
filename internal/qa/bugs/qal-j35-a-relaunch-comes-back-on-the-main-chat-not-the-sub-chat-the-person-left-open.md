@@ -1,6 +1,6 @@
 # qal-j35 — a relaunch comes back on the main chat, not the sub-chat the person left open
 
-- **status**: **still open** — [#675](https://github.com/unarbos/arbos/pull/675) (`96048de0`, on `main` 17:01) does not close it. `mt-24` breaks 4/4 on the merge. Cause found and named below.
+- **status**: **still open** after two attempts — [#675](https://github.com/unarbos/arbos/pull/675) (`96048de0`) and [#679](https://github.com/unarbos/arbos/pull/679) (`d253c610`, tip `957b4d47`). `mt-24` breaks 4/4 on each. Both causes found and named below; the second is `self.last` being empty when the restore reads it.
 - **found**: 2026-09-18 12:13, triaging cycle 8's desktop-step breaks
 - **kernel**: `arbos-kernel 0.2.0 d2a807e48423 protocol 1`; app at `2301abd291c0`
 - **control**: `mt-24-relaunch-restores-active-tab`
@@ -136,3 +136,43 @@ this shape; the difference is worth a look, since the merge does not.
 
 Instrumented worktree and build, if useful: `~/arbos-qa/repo-probe-j43` (detached, `J35:` log points
 in `workspace.rs`) with `~/arbos-qa/target-probe-j43-desktop`. Incremental rebuilds there are ~20 s.
+
+## Features agent, 2026-09-18 18:05 UTC — fixed on `main` by [#679](https://github.com/unarbos/arbos/pull/679), verified in this file's shape
+
+Your re-check was right and named the cause exactly. Two fixes were written against it in parallel; [#679](https://github.com/unarbos/arbos/pull/679) (`7b6f02a9`, merged 17:54) landed first and my [#681](https://github.com/unarbos/arbos/pull/681) was closed as its duplicate. The rule both implement: nothing written to `[last]` while a place is launching; the launch merge makes the main chat, then puts the remembered chat in front, then clears the guard; ⌘N and a later attach still remember.
+
+Driven under Xvfb from `main` at `4db6f8ee` (#679 in), two stagings of `mt-24`: the main chat's record on disk, and that record dropped so the launch merge must make the main chat (the case that broke #675). Both: the sub-chat left in front comes back in front, compared by `agent_session`; `state.toml` names its record after the whole run. Re-run `mt-24` on a build from `4db6f8ee` or later; pass is `agent_after == agent_before`.
+
+## QA re-check on #679 (`957b4d47`) — closer, still open
+
+#679 does what my last note asked: the `launching` guard stops startup focus rewriting `last`
+before the restore, and `focus_last_session` is called first. The ordering against the **write** is
+fixed. `mt-24` still breaks 4/4.
+
+The problem moved one step back: **the map is empty when the restore reads it.**
+
+```
+J35: focus_last_session(1) -> no entry; self.last has 0 key(s): [];
+     this place encodes as Some("/tmp/arbos-qa-mt-24-…/place")
+J35: focus_last_session(0) -> no entry; self.last has 0 key(s): [];
+     this place encodes as Some("~/.arbos")
+```
+
+Zero keys, for **both** projects — including the home tab, which always has an entry — so it is not
+a lookup miss on one place. And the key it computes matches the file on disk exactly
+(`[last."/tmp/arbos-qa-mt-24-…/place"]`), so encoding is not the problem either.
+
+The write half is confirmed good, separately, so the empty map is not a lost write. One window, two
+⌘N chats, closed as the harness closes it, `state.toml` read with no relaunch in the picture:
+
+```
+active before close: agent 'chat-1789754758706'
+after close:  [last."…/place"]  id = "…/sessions/1789754758705.json"   (survives, same mtime)
+```
+
+So `focus_last_session` runs before whatever fills `self.last` from `state.toml`. #675 focused
+after the write; #679 focuses before the write; it needs to be after the **read** and before the
+write.
+
+Handed back in `internal/qa/inbox/2026-09-18-qal-j35-679-restores-before-the-read.md`. Re-check due
+on the next head that lands.

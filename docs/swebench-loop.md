@@ -774,8 +774,19 @@ Thirty fresh instances across cycles 29–31, sixteen failures, none outside the
 
 Spend $19.94.
 
-## Next (cycle 32)
+## Cycle 32 (2026-09-18) — ten more fresh instances; Jev is not in the loop's kernel
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 a8678ac16636 protocol 1`** (cycles 30–31's). `main` moved (fba8688d) but every new commit is Jev — the router model that picks the next mechanical step and, since a47c5104, ends the turn when it fails — and **Jev is off under this harness**: it is on by default only when the provider is OpenRouter, and the harness sets `provider = custom` (the interception endpoint). Checked in cycle 31's traces: 772 provider calls, all `purpose: turn`, none `jev`. So the loop has measured, since Jev landed at 01:23 today (dcd8dba6, in the cycle-28 kernel onward), the one-model loop — which is no longer what a desktop user on OpenRouter runs. A rebuild for the Jev commits would change nothing here; the kernel stays. Stated so nobody reads the loop's counts as counts of the shipped desktop agent. Network cut, no stall, no cap. Ten never-run instances (`fresh10d.txt`) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-32-preregistration.md)). $11.14; **16 of 20** solved (a count).
+
+**Four failures, all inside the account.** django-14034 ×2 — C: the issue describes validation (`MultiValueField` ignoring a sub-field's `required`), both rollouts fix `MultiValueField.clean()` in `fields.py`; the gold and the one hidden test (`test_render_required_attributes`) are about *rendering* the `required` attribute in `boundfield.py` — a thing the issue does not determine. sympy-21596 ×2 — C, consistent: right file, right handler, a different construction (restrict the base set to the roots) than the gold's (`_solution_union` with a `ConditionSet` for the unsolvable case); the hidden test pins the form.
+
+Forty fresh instances across cycles 29–32, twenty failures, none outside the account. Cumulative read: **305**.
+
+Spend $11.14.
+
+## Next (cycle 33)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
-3. For the features agent, from read 1: the quoted-reference mark is read as "test the example", not "test the quote"; the rule could name the difference (an input the quote forbids that the example does not show). Not a kernel change the loop can grade — no gradeable instance exists.
+3. Open question for the coordinator, not the loop: whether the loop should run with Jev on (`jev = true` in the harness config, so the kernel it reads is the one desktop users run), which would be a new instrument with its own baseline; or stay on the one-model loop, which is what every number since cycle 12 is.
+4. For the features agent (from cycle 31): the quoted-reference mark is read as "test the example", not "test the quote".

@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 17:59 UTC.
+Last checked 2026-09-18 18:12 UTC.
 
-## Click Update. You will get build 2083. Jev is in it.
+## Click Update. You will get build 2091. Jev is in it.
 
-**2083** — signed, notarised, stapled, on the feed since 17:53 UTC.
+**2091** — signed, notarised, stapled, on the feed since 18:10 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2083 (builds 2084–2091):
+
+- **#679** — the last chat is restored before startup can rewrite it,
+  which is the path an Update click takes on the way back up
+- **#678** — the rig's fork-turn and new-project-kickoff wait for the
+  kernel's effect
+- **#680** — type-send-measured checks the precondition it only stated
+
+## Before that: 2083
 
 New since 2080 (builds 2081–2083):
 
