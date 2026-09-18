@@ -1,4 +1,9 @@
 #!/bin/bash
+# Tools come from the checkout beside this file, never from a copy in
+# $HOME. M-238 fixed the journey this way and left every other script
+# calling ~/: the two drift, and a fix that lands in the repository
+# never reaches the run.
+HERE=$(cd "$(dirname "$0")" && pwd)
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 source ~/.op-env
@@ -11,7 +16,7 @@ xcrun simctl terminate $U com.unarbos.arbos.ios 2>/dev/null; sleep 1; xcrun simc
 idb ui tap 200 788 --udid $U; sleep 0.8
 idb ui text "RESTART-ASK3 $(date -u +%H%M%S): use your ask tool to ask me which animal I like best, with the options Cat, Dog, Owl. Then reply with exactly the animal I chose." --udid $U; idb ui key 40 --udid $U
 export KERNEL_HUB=ws://127.0.0.1:7780 KERNEL_TOKEN=${LOCAL_HUB_CLIENT_TOKEN:?the loopback hub fixture client token}
-t=0; while [ $t -lt 90 ]; do python3 ~/kernel.py awsmac/askproj history 6 2>/dev/null | grep -qE "^ *[0-9]+ ask " && break; sleep 3; t=$((t+3)); done; sleep 4; shot r-02-question-open
+t=0; while [ $t -lt 90 ]; do python3 "$HERE/../kernel.py" awsmac/askproj history 6 2>/dev/null | grep -qE "^ *[0-9]+ ask " && break; sleep 3; t=$((t+3)); done; sleep 4; shot r-02-question-open
 echo "$(date -u +%H:%M:%S) killing the kernel with the question open"; tmux kill-session -t kask 2>/dev/null; pkill -9 -f "kernel-ask" 2>/dev/null; sleep 8; shot r-03-kernel-dead
 echo "$(date -u +%H:%M:%S) new kernel on the same place"; start_k; sleep 40; shot r-04-reattached; sleep 15; shot r-05-reattached-later
 grep -c "asks_replayed" ~/kask.log; grep "asks_replayed" ~/kask.log | tail -1
