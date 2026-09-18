@@ -18,6 +18,7 @@ OUT="$HOME/mobile-out/$CYCLE/sleeping-machine"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
 PORT=8791
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 
 cat > /tmp/fixture-hub.py <<'PY'
@@ -50,6 +51,9 @@ echo "fixture hub up: one machine awake, one asleep for an hour"
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 -hubURL "http://127.0.0.1:$PORT" >/dev/null 2>&1
 sleep 9
+# Every line below reads the projects list, and a cold start comes back to
+# the chat that was in front.
+reach_the_list "$UDID" || exit 1
 xcrun simctl io "$UDID" screenshot "$OUT/01-sleeping-machine.png" >/dev/null 2>&1
 echo "what the list says:"
 ui dump | grep -E "Button +[a-z0-9-]+," | sed 's/^/  /'

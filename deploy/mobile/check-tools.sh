@@ -43,10 +43,16 @@ echo
 # A file mentioning a thing is not a file doing it, so this asks whether
 # the step happens before the tap, in line order.
 echo "scenarios that need the projects list after launch:"
-LIST_FAULTS=$(for f in "$HERE"/scenarios/*.sh; do
+# The journey is a scenario in everything but its folder, and it had the
+# same fault: J1, "open the project from the list", tapped the chat's own
+# header at y=85 and passed because the chat it woke in was the target.
+LIST_FAULTS=$(for f in "$HERE"/scenarios/*.sh "$HERE"/mac-journey.sh; do
   awk -v name="$(basename "$f")" '
     /simctl launch/ { launched = NR }
-    /reach_the_list/ { reached = NR }
+    # The first one, not the last. mac-journey reaches the list twice — at
+    # J1 and again after J6k relaunch — and taking the later one made
+    # "reached after used" true for a file that reaches it first.
+    /reach_the_list/ { if (!reached) reached = NR }
     # Tapping a row needs the list. So does reading one, which is how
     # list-composer slipped past the first version of this: it never taps,
     # it only counts rows and reads the placeholder, and it was
@@ -60,7 +66,18 @@ LIST_FAULTS=$(for f in "$HERE"/scenarios/*.sh; do
     # list first. It says so in a line of its own, and is then its own
     # business — one declared exception beats a rule nobody can satisfy.
     /# reaches-the-list: not before the landing is measured/ { exempt = 1 }
-    /^[a-zA-Z_][a-zA-Z0-9_]*\(\) *\{/ { infn = 1 }
+    # A one-line helper — `score() { ...; }` — opens a brace and closes it on
+    # the same line. Treating that as entering a function left `infn` set for
+    # the rest of the file, so every use after the first helper was ignored:
+    # the check passed `mac-journey.sh` with its reach-the-list step deleted.
+    # Proven by deleting it and watching the check stay silent.
+    # A function definition is a definition whether or not it fits on one
+    # line. Skip the line either way; only a multi-line one puts us inside a
+    # body. Getting this wrong in both directions is how the check first
+    # passed `mac-journey.sh` with its step deleted (one-line helper left
+    # `infn` set for the whole file) and then flagged four files that were
+    # already correct: a grep inside a helper counted as a use.
+    /^[a-zA-Z_][a-zA-Z0-9_]*\(\) *\{/ { if (!/\}/) infn = 1; next }
     infn && /^\}/ { infn = 0; next }
     !infn && /ui tap "\$ROW"|Button \+\[a-z|, \(Idle\|Working\)/ { if (!used) used = NR }
     END {
