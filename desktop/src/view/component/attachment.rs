@@ -1,5 +1,5 @@
-//! The composer attachment chip — reused in the transcript so a sent
-//! file looks the same as it did on the card.
+//! The composer's attachment tokens and thumbnails — reused in the
+//! transcript so a sent file looks the same as it did on the card.
 
 use bezel::{
     gpui::{Div, Image, ObjectFit, SharedString, Stateful, div, img, prelude::*, px},
@@ -8,12 +8,16 @@ use bezel::{
 };
 use std::sync::Arc;
 
-/// One file or image chip: thumbnail or document glyph, then the name.
-/// The composer adds an ✕; history does not.
-pub(crate) fn chip(
+/// A file attachment as Cursor sets it: `≡ name` in the link colour, in
+/// the text row itself, no plate — a reference in the sentence rather than
+/// a chip above it (`cursor-reference/composer-attachments/`, cycle 21;
+/// closed cycle 39, F-109). The same token leads the sent bubble's text.
+/// `line` is the height of the text line it sits on — the field's own,
+/// or the prose's wider lead — so the name centres on the words beside it.
+pub(crate) fn token(
     id: impl Into<bezel::gpui::ElementId>,
     name: impl Into<SharedString>,
-    preview: Option<Arc<Image>>,
+    line: f32,
     theme: &Theme,
 ) -> Stateful<Div> {
     div()
@@ -21,27 +25,19 @@ pub(crate) fn chip(
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(5.))
-        .h(px(if preview.is_some() { 54. } else { 22. }))
-        .px(px(7.))
-        .rounded(px(Theme::control_radius()))
-        .bg(theme.element_hover)
-        .child(match preview {
-            Some(preview) => img(preview)
-                .size(px(44.))
-                .with_fallback(|| div().size(px(44.)).into_any_element())
-                .into_any_element(),
-            None => icons::icon(icons::files::DOCUMENT)
-                .size(px(11.))
-                .text_color(theme.text_faint)
-                .into_any_element(),
-        })
+        .gap(px(3.))
+        .h(px(line))
+        .child(
+            icons::icon(icons::editing::LIST)
+                .size(px(12.))
+                .text_color(theme.accent),
+        )
         .child(
             div()
-                .max_w(px(140.))
+                .max_w(px(200.))
                 .truncate()
-                .text_style(TextStyle::Caption)
-                .text_color(theme.text_muted)
+                .text_style(TextStyle::Body)
+                .text_color(theme.accent)
                 .child(name.into()),
         )
 }
