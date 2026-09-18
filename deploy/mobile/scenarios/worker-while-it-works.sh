@@ -50,6 +50,18 @@ ui field >/dev/null 2>&1 || { echo "no composer after opening $ROW"; exit 1; }
 # worker left over from the run before it — the sheet said `sleep 150
 # seconds` while this run had asked for 300 — which is M-160's fault again:
 # evidence belonging to an earlier run, read as this one's.
+# Start from a project with nothing running. Otherwise a leftover worker
+# lights the pill within seconds, the wait below is satisfied by somebody
+# else's work, and the sheet is read before this run's worker exists.
+for t in $(seq 1 60); do
+  ui dump | grep -qE "Working [0-9]+" || break
+  [ "$t" = 1 ] && echo "  waiting for an earlier worker to finish before starting"
+  sleep 10
+done
+if ui dump | grep -qE "Working [0-9]+"; then
+  echo "a worker is still running after 10 minutes; not starting another"; exit 1
+fi
+
 NAP=$(( 280 + RANDOM % 40 ))
 LINE="Through one worker you wait for: run the bash command sleep $NAP and nothing else, then reply done."
 ui focus >/dev/null; sleep 0.7
