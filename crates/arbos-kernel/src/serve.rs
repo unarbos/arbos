@@ -682,6 +682,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
     plan::reclaim(&hooks);
     warn_if_window_pinned_small(&place, &host, &registry);
+    warn_if_model_window_small(&place, &host, &registry).await;
     for agent in list_agents(&place)? {
         if !agent.paused && needs_serve(&place, agent.id.as_str()) {
             let _ = wake_tx.send(Wake::serve(agent.id.as_str()));
@@ -3195,6 +3196,78 @@ fn say_stalls(hooks: &Arc<KernelHooks>) {
         let _ = arbos_core::append_event(
             &hooks.layout(&agent).transcript(),
             &arbos_core::Event::new(arbos_core::EventKind::Notice {
+                text,
+                failed: false,
+            }),
+        );
+    }
+}
+
+/// The sibling of the pin: the *model's* own context, as the provider
+/// lists it, smaller than the place's standing prompt. A first install
+/// on an 8k model (a small local model behind a compatible endpoint, a
+/// cheap tier) met "over budget … nothing old enough to compact" on
+/// every turn, naming a window and not the model. Said once per model,
+/// at start, on the top-level agents' transcripts and in the log; no
+/// network when there is no key or the provider is the replay script.
+async fn warn_if_model_window_small(
+    place: &Place,
+    host: &Host,
+    registry: &Arc<arbos_engine::Registry>,
+) {
+    if host.config.window_tokens != 0 || keyless(place).is_some() {
+        return;
+    }
+    if arbos_engine::replay::current().ok().flatten().is_some() {
+        return;
+    }
+    let (Some(key), Ok(base)) = (host.api_key(), host.config.api_base()) else {
+        return;
+    };
+    let model = host.config.model();
+    let Some(listed) = arbos_engine::context_window(&base, &key, &model).await else {
+        return;
+    };
+    for agent in list_agents(place).unwrap_or_default() {
+        if agent.parent.is_some() {
+            continue;
+        }
+        let standing = arbos_engine::standing_tokens(place, &agent, registry);
+        if listed >= standing.needed_window() {
+            continue;
+        }
+        let text = format!(
+            "model {model} has a {}k context, but this place's standing prompt is ~{}k tokens (system ~{}k, tools ~{}k) and needs about {}k: every turn would run over budget with nothing to compact. Choose a model with a larger context in Settings › Model (or `model` in config.toml).",
+            listed / 1000,
+            standing.total() / 1000,
+            standing.system / 1000,
+            standing.tools / 1000,
+            standing.needed_window() / 1000
+        );
+        klog::warn("model_window_small", Some(agent.id.as_str()), &text);
+        let transcript = Layout::new(place, agent.id.as_str()).transcript();
+        let already = load_transcript(&transcript)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .find_map(|e| match &e.kind {
+                EventKind::Notice { text: t, .. }
+                    if t.starts_with("model ")
+                        && t.contains("context, but this place's standing prompt") =>
+                {
+                    Some(t == &text)
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if already {
+            continue;
+        }
+        // A warning about the configuration, not a failed turn: `failed`
+        // is for what went wrong, and nothing has yet.
+        let _ = arbos_core::append_event(
+            &transcript,
+            &arbos_core::Event::new(EventKind::Notice {
                 text,
                 failed: false,
             }),

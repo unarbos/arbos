@@ -42,7 +42,8 @@ pub use jobs::{
     sweep_leash_pointers,
 };
 pub use provider::{
-    ChatMessage, Interrupted, Provider, ProviderError, check_key, list_model_ids, warm,
+    ChatMessage, Interrupted, Provider, ProviderError, check_key, context_window, list_model_ids,
+    warm,
 };
 pub use tool::{
     BoxFuture, Param, Plan, PlanCx, Registry, RunCx, Tool, ToolOut, opt_bool, opt_strings,
