@@ -96,6 +96,18 @@ if [ "$DUPES" -gt 0 ]; then
   echo "         qa-cycle-11-demo was one at cycle 92, where the two agreed on 12."
 elif [ "$ROWS" = "$COUNT" ]; then
   echo "VERDICT: the two agree on $COUNT."
+elif [ "$ROWS" -lt "$COUNT" ]; then
+  # The app cannot disagree with itself here. The pill is `chat.workers.count`
+  # and the sheet is a `ForEach` over that same array, and `workers` is a
+  # dictionary keyed by the agent's id, so no row can be lost to a collision.
+  # A shortfall is this scenario failing to reach the end of the sheet, and
+  # `collect_rows` cannot tell "I reached the end" from "my swipe did
+  # nothing" — both look like a page that added no labels.
+  echo "VERDICT: cannot say. The sheet's paging found $ROWS of the pill's $COUNT."
+  echo "         Both come from one array in the app — the pill counts it, the"
+  echo "         sheet draws it — so this is the paging stopping short, not the"
+  echo "         two disagreeing. Raise the page ceiling or check the swipe is"
+  echo "         inside the sheet before reading anything into the numbers."
 else
   echo "VERDICT: they disagree — pill $COUNT, sheet $ROWS, and no shared labels to explain it."
   echo "         Rows are in $LABELS if you want to see which are present."
