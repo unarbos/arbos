@@ -99,7 +99,16 @@ RUNNING=""
   [ -n "$RUNNING" ] && break
 done
 if [ -z "$RUNNING" ]; then
-  echo "  VERDICT: no running-worker line appeared, so this half is untested again"
+  # Before blaming the app for not drawing a line, ask whether there was
+  # anything to draw. Whether the root delegates at all is the model's
+  # decision, not the phone's, and it has declined more than once tonight.
+  KIDS=$(python3 "$HERE/../kernel.py" pod frames 6 2>/dev/null | grep -c "sleep $NAP" || true)
+  if [ "${KIDS:-0}" = 0 ]; then
+    echo "  the kernel has no child for this request: the root answered it itself."
+    echo "  VERDICT: no worker ran, so there was no line to draw. Untested, and not the app's doing."
+  else
+    echo "  VERDICT: a worker ran and no line appeared — that is the app's to answer"
+  fi
 else
   echo "  the line: $RUNNING"
   shot 04-the-running-line
