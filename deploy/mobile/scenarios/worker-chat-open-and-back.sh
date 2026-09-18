@@ -39,7 +39,11 @@ sleep 5
 shot 01-the-project-chat
 
 echo "== in by the sheet =="
-PILL=$(ui dump | grep -E "Button +(Agents|Working) [0-9]+" | head -1)
+# Idle the pill reads `Agents 19`; while anything runs it reads
+# `⠇, Working 2` — the same animated spinner that prefixes the worker lines.
+# A pattern anchored to the word alone finds it only half the time, and
+# reported "no pill in this chat" on a chat that plainly had one.
+PILL=$(ui dump | grep -E "Button +([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], )?(Agents|Working) [0-9]+" | head -1)
 [ -n "$PILL" ] || { echo "  no pill in this chat"; exit 1; }
 idb ui tap "$(echo "$PILL" | awk '{print $1}')" "$(echo "$PILL" | awk '{print $2}')" --udid "$UDID"
 sleep 3
@@ -67,16 +71,13 @@ echo "== in by the worker's own line =="
 # transcript, which is kernel text and not a tap target — by design, not by
 # omission. A first version of this tapped that text, stayed where it was,
 # and was one line away from reporting an app fault.
+# A single trivial request is not reliably delegated — cycles 90 and 91 both
+# watched the root do the sleep itself. The plural form is what worked at
+# cycle 88, so ask for two and take whichever line appears. Reusing a proven
+# wording rather than inventing a third.
 NAP=$(( 90 + RANDOM % 20 ))
-# Read back before sending. Cycle 90 typed and tapped Send without it, no
-# worker started, and the run could not tell whether the app had failed or
-# the keystrokes had gone nowhere — the fault M-180 fixed everywhere else in
-# this harness and I left out of a new file.
-# "you wait for" is load-bearing. Without it the root runs the sleep itself
-# and no worker is ever spawned, so the run reports no running-worker line
-# and looks like the app failing to draw one. Watched for 64 s with the
-# shorter phrasing: no worker, no line, nothing wrong with the app.
-WLINE="Through one worker you wait for: run the bash command sleep $NAP and nothing else, then reply done."
+TAG=r$(date -u +%H%M%S)
+WLINE="Start two workers at once, each waiting for none of the other. Their goals are exactly $TAG one and $TAG two. Each runs the bash command sleep $NAP and nothing else, then replies done."
 ui focus >/dev/null 2>&1
 sleep 0.7
 idb ui text "$WLINE" --udid "$UDID"
@@ -90,19 +91,24 @@ if [ "$LANDED" = no ]; then
   echo "  the box holds: $(ui field plain 2>/dev/null | cut -c1-60)"
 else
   ui tap "Send" >/dev/null 2>&1 || ui tap "Up" >/dev/null 2>&1
+  echo "  asked for two workers sleeping ${NAP}s ($TAG); waiting for a running line"
 fi
-[ "$LANDED" = yes ] && echo "  started a worker that sleeps ${NAP}s; waiting for its line"
 RUNNING=""
 [ "$LANDED" = yes ] && for _ in $(seq 1 20); do
   sleep 4
-  RUNNING=$(ui dump | grep -E "Button +[0-9]+ Working" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  # The label begins with the braille spinner, then an optional count, then
+  # "Working": `⠙, 2 Working p091543 one · Running sleep 80`. Requiring a
+  # digit straight after "Button" matched none of them, and three cycles
+  # reported the app drawing no line while it drew one every second.
+  RAWLINE=$(ui dump | grep -E "Button +[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], ([0-9]+ )?Working " | head -1)
+  RUNNING=$(echo "$RAWLINE" | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
   [ -n "$RUNNING" ] && break
 done
 if [ -z "$RUNNING" ]; then
   # Before blaming the app for not drawing a line, ask whether there was
   # anything to draw. Whether the root delegates at all is the model's
   # decision, not the phone's, and it has declined more than once tonight.
-  KIDS=$(python3 "$HERE/../kernel.py" pod frames 6 2>/dev/null | grep -c "sleep $NAP" || true)
+  KIDS=$(python3 "$HERE/../kernel.py" pod history 12 2>/dev/null | grep -c "$TAG" || true)
   if [ "${KIDS:-0}" = 0 ]; then
     echo "  the kernel has no child for this request: the root answered it itself."
     echo "  VERDICT: no worker ran, so there was no line to draw. Untested, and not the app's doing."
@@ -112,7 +118,15 @@ if [ -z "$RUNNING" ]; then
 else
   echo "  the line: $RUNNING"
   shot 04-the-running-line
-  ui tap "$RUNNING" >/dev/null 2>&1
+  # Tap the frame the dump gave, not a label. Two reasons: the spinner at
+  # the front is animated, so an exact label read a moment ago is already
+  # stale; and the worker's name appears on more than one element, so
+  # matching by name can land somewhere that is not the button. Tapping by
+  # label failed here for a whole cycle and read as the line refusing to
+  # open — by frame it opens first time.
+  LX=$(echo "$RAWLINE" | awk '{print $1}'); LY=$(echo "$RAWLINE" | awk '{print $2}')
+  echo "  tapping its frame at $LX,$LY"
+  idb ui tap "$LX" "$LY" --udid "$UDID" >/dev/null 2>&1
   sleep 4
   shot 05-worker-chat-from-its-line
   WHERE=$(where)
