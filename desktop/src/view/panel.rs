@@ -90,7 +90,7 @@ impl PageScale {
         match (self, level >= 3) {
             (Self::Panel, _) => TextStyle::Caption,
             (Self::Page, false) => TextStyle::Title3,
-            (Self::Page, true) => TextStyle::Body,
+            (Self::Page, true) => TextStyle::Callout,
         }
     }
 
@@ -105,7 +105,7 @@ impl PageScale {
     fn row_py(self) -> f32 {
         match self {
             Self::Panel => 3.,
-            Self::Page => 6.,
+            Self::Page => 8.,
         }
     }
 
@@ -1401,12 +1401,12 @@ pub(crate) fn page_heading(
         .pl(px(scale.inset() + if sub && !page { TREE_STEP } else { 0. }))
         .pr(px(scale.inset()))
         .pt(px(match (page, gap_above) {
-            (true, true) => 22.,
-            (true, false) => 6.,
+            (true, true) => 28.,
+            (true, false) => 8.,
             (false, true) => 8.,
             (false, false) => 2.,
         }))
-        .pb(px(if page { 6. } else { 2. }))
+        .pb(px(if page { 10. } else { 2. }))
         .text_style(scale.heading(level))
         .when(page, |el| el.font_weight(FontWeight::SEMIBOLD))
         .text_color(match (page, sub) {

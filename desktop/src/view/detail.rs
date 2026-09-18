@@ -236,7 +236,7 @@ impl Arbos {
         let Some(id) = self.workspace.read(cx).active_id() else {
             return;
         };
-        if self.builtin_command(id, &text.text, cx) {
+        if text.attachments.is_empty() && self.builtin_command(id, &text.text, cx) {
             return;
         }
         if text.text.trim().is_empty() && text.attachments.is_empty() {
@@ -297,16 +297,28 @@ impl Arbos {
 
     /// `/compact`, `/undo`, `/stop`, `/model <id>`, `/mode <id>`, `/pause`,
     /// `/resume`, `/fork`: the kernel's own verbs, sent as frames rather
-    /// than as a prompt; `/voice <words>` goes to the speech server. True
-    /// when the text was one of them.
+    /// than as a prompt; `/voice <words>` goes to the speech server.
+    /// `clear` and `/clear` hide the transcript in this window only.
+    /// True when the text was one of them.
     fn builtin_command(&mut self, id: u64, text: &str, cx: &mut Context<Self>) -> bool {
-        let Some(rest) = text.trim().strip_prefix('/') else {
+        let trimmed = text.trim();
+        let (name, arg) = if let Some(rest) = trimmed.strip_prefix('/') {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            (
+                parts.next().unwrap_or("").to_ascii_lowercase(),
+                parts.next().map(str::trim).unwrap_or(""),
+            )
+        } else if trimmed.eq_ignore_ascii_case("clear") {
+            ("clear".to_string(), "")
+        } else {
             return false;
         };
-        let mut parts = rest.splitn(2, char::is_whitespace);
-        let name = parts.next().unwrap_or("").to_ascii_lowercase();
-        let arg = parts.next().map(str::trim).unwrap_or("");
         match name.as_str() {
+            // Hide the chat view. Same project, same file on disk.
+            "clear" if arg.is_empty() => {
+                self.hide_chat_view(id, cx);
+                true
+            }
             "compact" => {
                 self.workspace.update(cx, |workspace, cx| {
                     workspace.with_session(id, cx, |chat| chat.compact())
@@ -412,8 +424,20 @@ impl Arbos {
         let Some(id) = self.workspace.read(cx).active_id() else {
             return;
         };
+        if text.attachments.is_empty() && self.builtin_command(id, &text.text, cx) {
+            return;
+        }
         self.workspace
             .update(cx, |workspace, cx| workspace.queue_next(id, text, cx));
+    }
+
+    /// Hide this chat's transcript in the window. The file on disk does
+    /// not change. Used by `clear` in the composer and by the header
+    /// Clear control.
+    pub(crate) fn hide_chat_view(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.with_session(id, cx, |chat| chat.clear_view())
+        });
     }
 
     /// Leftover handler. The composer chip is a model picker and never
@@ -505,7 +529,10 @@ impl Arbos {
                 "Send follow-up"
             }
             // Cursor: a fresh chat invites; one with a turn asks for the next.
-            _ if chat.is_some_and(|chat| chat.items.is_empty()) => "Plan, search, build anything",
+            // `clear` hides the transcript and returns to that invite.
+            _ if chat.is_some_and(|chat| chat.items.is_empty() || chat.view_cleared()) => {
+                "Plan, search, build anything"
+            }
             _ => "Send follow-up",
         }
         .to_owned();
@@ -622,11 +649,9 @@ impl Arbos {
         // column. An empty root is Cursor's new-Project view — the header
         // block and a greeting at the top, the composer at the foot.
         let empty_chat = show_composer
-            && self
-                .workspace
-                .read(cx)
-                .active_session()
-                .is_some_and(|chat| chat.items.is_empty() && chat.parent.is_some());
+            && self.workspace.read(cx).active_session().is_some_and(|chat| {
+                chat.view_cleared() || (chat.items.is_empty() && chat.parent.is_some())
+            });
         let content = div()
             // An empty chat gives the composer the middle of the column:
             // the body shrinks to the top half and the composer follows.
@@ -741,6 +766,7 @@ impl Arbos {
         // thing twice, so only a sub-agent's title is drawn here, after
         // the crumbs that lead back to it.
         let titled = !crumbs.is_empty();
+        let show_clear = !chat.view_cleared() && !chat.items.is_empty();
         let name_field = (naming && titled).then(|| self.header_name_field(window, cx));
         div()
             .id("chat-header")
@@ -806,13 +832,38 @@ impl Arbos {
                 )
             })
             .child(div().flex_1())
+            .children(show_clear.then(|| {
+                theme
+                    .ghost("chat-clear")
+                    .flex_none()
+                    .h(px(26.))
+                    .px(px(8.))
+                    .items_center()
+                    .justify_center()
+                    .tooltip(|window, cx| {
+                        Tooltip::text(
+                            "Hide the chat. Same project, same transcript on disk.",
+                            window,
+                            cx,
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_style(TextStyle::Callout)
+                            .text_color(theme.text_muted)
+                            .child("Clear"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.hide_chat_view(id, cx);
+                    }))
+            }))
             .child(self.panel_toggle(cx))
             .into_any_element()
     }
 
-    /// The line under the pill: where the agent runs on the left (Cursor's
-    /// "Cloud" label; here `Local` or the remote place's ssh alias), a
-    /// spinner on the right while a turn runs.
+    /// The line under the composer: the project's branch, a reconnect
+    /// status when the link is down, voice or call, and a spinner while
+    /// a turn runs. Projects open from the tabs; there is no machine pill.
     fn context_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let workspace = self.workspace.read(cx);
         // Cursor keeps a small ring at the row's end; ours turns while any
@@ -825,27 +876,16 @@ impl Arbos {
                 .map(|chat| chat.elapsed().unwrap_or_else(transcript::live_phase))
                 .max()
         });
-        let host = workspace
-            .active_project()
-            .and_then(|project| project.host.clone());
-        // Cursor's two pills under the composer: the branch checked out in the
-        // project, and where the agent runs — "This Mac" on a Mac, "This
-        // Computer" elsewhere, the remote's alias when it is one.
+        // The branch checked out in this project. The machine picker that
+        // used to sit here ("This Mac") is gone: projects open from the
+        // tabs at the top.
         let branch = workspace
             .active_project()
             .filter(|project| !project.is_remote())
             .and_then(|project| self.branch_of(&project.path));
-        let here = if cfg!(target_os = "macos") {
-            "This Mac"
-        } else {
-            "This Computer"
-        };
-        let (glyph, mut machine) = match host {
-            Some(alias) => (icons::devices::CLOUD, alias),
-            None => (icons::devices::LAPTOP, here.to_owned()),
-        };
         // A kernel that dropped, or a start still being tried: say what the
-        // window is doing about it.
+        // window is doing about it. Plain text, not a picker.
+        let mut link_status: Option<String> = None;
         let mut full_fault: Option<String> = None;
         if let Some(chat) = workspace.active_session() {
             // The reason the last try failed stays on the line for as
@@ -868,30 +908,29 @@ impl Arbos {
                     let left = at
                         .saturating_duration_since(std::time::Instant::now())
                         .as_secs();
-                    machine = match &fault {
-                        Some(why) => format!("{machine} · {why} — retry in {left}s"),
-                        None => format!(
-                            "{machine} · reconnecting, try {} in {left}s",
-                            chat.reconnect_attempt
-                        ),
-                    };
+                    link_status = Some(match &fault {
+                        Some(why) => format!("{why} — retry in {left}s"),
+                        None => format!("reconnecting, try {} in {left}s", chat.reconnect_attempt),
+                    });
                     Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
                 }
                 (Connection::Lost, None) if fault.is_some() || chat.reconnect_attempt > 0 => {
-                    machine = match &fault {
-                        Some(why) => format!("{machine} · {why} — press Reconnect"),
-                        None => format!("{machine} · connection lost"),
-                    };
+                    link_status = Some(match &fault {
+                        Some(why) => format!("{why} — press Reconnect"),
+                        None => "connection lost".to_string(),
+                    });
                 }
                 (Connection::Connecting, _) if step.is_some() => {
-                    machine = format!(
-                        "{machine} · {}",
-                        step.as_deref().unwrap_or_default().trim_end_matches('…')
+                    link_status = Some(
+                        step.as_deref()
+                            .unwrap_or_default()
+                            .trim_end_matches('…')
+                            .to_string(),
                     );
                     Painter::of(cx).lease(1.0, Duration::from_millis(1100), cx);
                 }
                 (Connection::Connecting, _) if chat.reconnect_attempt > 0 => {
-                    machine = format!("{machine} · reconnecting, try {}…", chat.reconnect_attempt);
+                    link_status = Some(format!("reconnecting, try {}…", chat.reconnect_attempt));
                 }
                 _ => {}
             }
@@ -905,9 +944,6 @@ impl Arbos {
             .ml(px(-root::COMPOSER_PAD_X + 2.))
             .mr(px(-root::COMPOSER_PAD_X))
             .h(px(24.))
-            // Cursor's pills: `⑂ master ⌄` then `▭ This Mac ⌄`. The branch is
-            // the project's to change (a terminal, a tool call); the machine
-            // is the tab's — the pill opens the picker for a new one.
             .children(branch.map(|branch| {
                 div()
                     .id("composer-branch")
@@ -937,53 +973,29 @@ impl Arbos {
                             .text_color(theme.text_faint),
                     )
             }))
-            .child(
+            .children(link_status.map(|status| {
+                let fault = full_fault.clone();
                 div()
-                    .id("composer-machine")
+                    .id("composer-link-status")
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(4.))
                     .pl(px(8.))
-                    .pr(px(4.))
-                    // A reason on the line needs the room; the pill is
-                    // short again once the connection is back.
-                    .max_w(px(if full_fault.is_some() { 560. } else { 260. }))
-                    .rounded(px(Theme::control_radius()))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
+                    .pr(px(8.))
+                    .max_w(px(if fault.is_some() { 560. } else { 320. }))
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
-                    .tooltip(move |window, cx| match &full_fault {
+                    .tooltip(move |window, cx| match &fault {
                         Some(why) => Tooltip::text(
-                            format!("{why}. Send a message or press Reconnect to try now."),
+                            format!("{why}. Send a message to try now."),
                             window,
                             cx,
                         ),
-                        None => Tooltip::with_keystroke(
-                            "Where the agent runs. Open another machine or folder",
-                            "⌘T",
-                            window,
-                            cx,
-                        ),
+                        None => Tooltip::text("Connection status", window, cx),
                     })
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.new_tab_action(&crate::view::root::NewTab, window, cx)
-                    }))
-                    .child(
-                        icons::icon(glyph)
-                            .size(px(11.))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    )
-                    .child(div().truncate().child(SharedString::from(machine)))
-                    .child(
-                        icons::icon(icons::arrows::ALT_ARROW_DOWN)
-                            .size(px(9.))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    ),
-            )
+                    .child(div().truncate().child(SharedString::from(status)))
+            }))
             .children(self.try_live_button(theme, cx))
             .children(if self.call.is_some() {
                 self.call_strip(theme, cx)
@@ -1791,65 +1803,14 @@ impl Arbos {
             return div().flex_1().into_any_element();
         };
         // Nothing has been said yet, so what the session has to show for
-        // itself is the directory the agent was started in.
-        let inner = if chat.items.is_empty() && chat.parent.is_none() {
+        // itself is the directory the agent was started in. `clear` hides
+        // a full transcript and returns to the centered empty chat.
+        let inner = if chat.view_cleared() {
+            self.empty_chat_heading(chat.id, &theme, window, cx)
+        } else if chat.items.is_empty() && chat.parent.is_none() {
             self.kickoff(&theme, window, cx)
         } else if chat.items.is_empty() {
-            let id = chat.id;
-            let title = workspace.display_label(id);
-            let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_heading;
-            let heading = if naming {
-                div()
-                    .id(("chat-title-name", id))
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .text_style(TextStyle::Title3)
-                    .text_color(theme.text)
-                    .child(self.heading_name_field(window, cx))
-                    .into_any_element()
-            } else {
-                div()
-                    .id(("chat-title", id))
-                    .w_full()
-                    .text_center()
-                    .text_style(TextStyle::Title3)
-                    .text_color(theme.text)
-                    .child(title)
-                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                        if event.click_count() >= 2 {
-                            cx.stop_propagation();
-                            this.rename_empty_title(id, window, cx);
-                        }
-                    }))
-                    .into_any_element()
-            };
-            // Same column as the composer: max width + gutter, centred in
-            // the pane. Title sits in the leftover height above the bar —
-            // not the full window, and not a different inset.
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .relative()
-                .child(
-                    // Cursor's new-chat page: the title alone, just above
-                    // the composer, both in the middle of the column.
-                    div().absolute().inset_0().flex().justify_center().child(
-                        div()
-                            .w_full()
-                            .max_w(px(root::CHAT_MAX_WIDTH))
-                            .px(px(root::CHAT_GUTTER))
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_end()
-                            .pb(px(18.))
-                            .child(heading),
-                    ),
-                )
-                .into_any_element()
+            self.empty_chat_heading(chat.id, &theme, window, cx)
         } else {
             let id = chat.id;
             // What the agent is asking of the user right now goes at the end
@@ -1910,6 +1871,67 @@ impl Arbos {
             .into_any_element()
     }
 
+    /// Cursor's new-chat page: the title alone, just above the composer,
+    /// both in the middle of the column. Used for a fresh sub-chat and
+    /// after `clear`.
+    fn empty_chat_heading(
+        &self,
+        id: u64,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = self.workspace.read(cx).display_label(id);
+        let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_heading;
+        let heading = if naming {
+            div()
+                .id(("chat-title-name", id))
+                .w_full()
+                .flex()
+                .justify_center()
+                .text_style(TextStyle::Title3)
+                .text_color(theme.text)
+                .child(self.heading_name_field(window, cx))
+                .into_any_element()
+        } else {
+            div()
+                .id(("chat-title", id))
+                .w_full()
+                .text_center()
+                .text_style(TextStyle::Title3)
+                .text_color(theme.text)
+                .child(title)
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        cx.stop_propagation();
+                        this.rename_empty_title(id, window, cx);
+                    }
+                }))
+                .into_any_element()
+        };
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .child(
+                div().absolute().inset_0().flex().justify_center().child(
+                    div()
+                        .w_full()
+                        .max_w(px(root::CHAT_MAX_WIDTH))
+                        .px(px(root::CHAT_GUTTER))
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_end()
+                        .pb(px(18.))
+                        .child(heading),
+                ),
+            )
+            .into_any_element()
+    }
+
     /// Cursor's chips above the composer: "Working N" for the sub-agents
     /// with a turn running, "PRs N" for the pull requests this chat and its
     /// children have opened. Both derived from the sessions on hand;
@@ -1921,7 +1943,8 @@ impl Arbos {
         let chat = workspace.active_session()?;
         let project = workspace.active_project()?;
         // A subagent's chat in Cursor carries no pills; they are the project's.
-        if chat.parent.is_some() {
+        // A cleared view is the empty chat: no chips above the composer.
+        if chat.parent.is_some() || chat.view_cleared() {
             return None;
         }
         let (working, prs) = pill_counts(project, chat);

@@ -409,6 +409,10 @@ pub struct ChatSession {
     /// connection rather than this field.
     pub kernel_build: Option<crate::kernel::KernelBuild>,
     pub items: Vec<ChatItem>,
+    /// Hide every transcript item before this index. Runtime only: typing
+    /// `clear` in the composer empties the view. The file on disk is
+    /// unchanged, so the agent keeps the same context.
+    pub hide_before: usize,
     /// The agent's plan as the kernel last sent it: every node, inbox
     /// rows included. The strip above the composer draws the open ones.
     pub plan: Vec<PlanNode>,
@@ -685,6 +689,7 @@ impl ChatSession {
             connection: Connection::Connecting,
             kernel_build: None,
             items: Vec::new(),
+            hide_before: 0,
             plan: Vec::new(),
             answering: None,
             questions: None,
@@ -785,6 +790,7 @@ impl ChatSession {
             connection: Connection::Idle,
             kernel_build: None,
             items: record.items,
+            hide_before: 0,
             plan: Vec::new(),
             answering: None,
             questions: None,
@@ -885,6 +891,7 @@ impl ChatSession {
             connection: Connection::Idle,
             kernel_build: None,
             items,
+            hide_before: 0,
             plan: Vec::new(),
             answering: None,
             questions: None,
@@ -1448,6 +1455,7 @@ impl ChatSession {
     pub fn adopt_history(&mut self, items: Vec<ChatItem>) {
         if history_beats(&items, &self.items) {
             self.items = items;
+            self.hide_before = self.hide_before.min(self.items.len());
             self.transcript = transcript::State::default();
             self.take_title_from_first_prompt();
             self.flush();
@@ -1906,6 +1914,18 @@ impl ChatSession {
 }
 
 impl ChatSession {
+    /// Hide the transcript that is already on screen. The file is not
+    /// touched. A later send shows only the new lines.
+    pub fn clear_view(&mut self) {
+        self.hide_before = self.items.len();
+    }
+
+    /// The composer `clear` hid every line that is on this chat so far.
+    /// A chat that never had a line is empty, not cleared.
+    pub fn view_cleared(&self) -> bool {
+        self.hide_before > 0 && self.hide_before >= self.items.len()
+    }
+
     /// Explicit names override the delegate identity or the agent's title.
     pub fn label(&self) -> String {
         if let Some(name) = self
