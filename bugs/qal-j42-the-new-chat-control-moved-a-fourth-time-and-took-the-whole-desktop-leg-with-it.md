@@ -1,6 +1,6 @@
 # qal-j42 — the new-chat control moved a fourth time and took the whole desktop leg with it
 
-- **status**: `new_chat` fixed and verified; `mt-01`/`mt-04`'s residual **found** — a chat minted during a place's kickoff turn is inert (see "Found: the kickoff race")
+- **status**: ⌘N fix stands and is verified. The `mt-01`/`mt-04` residual turned out to be a separate product bug, now split out, bisected and **closed** as `qal-j43` (fixed by `1768ec83`). See "Correction, 17:00" — the kickoff-wait I added here was not the fix and has been removed.
 - **found**: 2026-09-18 14:48, reading cycle 9's desktop step
 - **app**: `1beec0a1fd98` (the break), `d2a807e48423` (the last one that worked)
 - **kernel**: `arbos-kernel 0.2.0 cecd48e1bd76 protocol 1`
@@ -244,9 +244,20 @@ during-kickoff arms it is often **True**, because `root`'s own kickoff turn sati
 new chat is dead. `mt-01`'s `timed out waiting for root running` fires only when the kickoff turn
 finishes before the 40 s budget does. The honest signal was always the chat's empty transcript.
 
-### Measured on the fix
+### Correction, 17:00 — the wait was not the fix, and it is gone
 
-`new_chat` now calls `wait_kickoff_done()` first. Same app and kernel:
+Everything below this line about `wait_kickoff_done()` restoring `mt-01`, `mt-04` and `dg-01` is
+**wrong**, and the helper has been removed again. Those three pass on current `main` with no wait at
+all; what fixed them was `1768ec83` on the product side, which landed in the same window and took
+the credit for my change. The full bisect is in `qal-j43`, which is now **closed**.
+
+What stands from this draft: the ⌘N change to `new_chat` (that one is real and still needed — the
+`new-subchat` leaf is still absent), and the elimination table, which is what eventually made the
+bisect possible.
+
+### Measured at the time (reading now superseded by qal-j43)
+
+`new_chat` called `wait_kickoff_done()` first. Same app and kernel:
 
 | scenario | before | on the fix |
 |---|---|---|

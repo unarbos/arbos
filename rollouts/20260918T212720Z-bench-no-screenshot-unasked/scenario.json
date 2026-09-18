@@ -1,0 +1,8 @@
+{
+  "name": "bench-no-screenshot-unasked",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser.",
+  "tags": [
+    "benchmark",
+    "item-3"
+  ]
+}

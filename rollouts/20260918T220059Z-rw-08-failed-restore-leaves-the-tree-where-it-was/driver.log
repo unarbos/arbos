@@ -1,0 +1,4 @@
+1789768859667 kernel started pid 1245300
+1789768876095 BREAK no-work-checkpoint: expected a work tree on turn 3's checkpoint, got []
+1789768876098 kernel stopped with code 0
+1789768876122 bugs: seen 496e7b1e76.md

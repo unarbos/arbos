@@ -4,6 +4,7 @@
 - **found**: 2026-09-18 13:58, taking after-failure states nobody had staged
 - **kernel**: `arbos-kernel 0.2.0 cecd48e1bd76 protocol 1` (today's `main`)
 - **probe**: `deploy/af05c-runtime-and-lock-removed-probe.sh`
+- **control**: `lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in` (added 2026-09-18 17:21; breaks in 3.1 s on `fba8688d92d2`)
 
 ## What happens
 
@@ -81,3 +82,16 @@ The lock's identity should not be the path alone. Two candidates, either enough:
 - `#446` — the same harm by a stale record outranking a live one; `fm-03`.
 - `ds-01` — the detector for a double-serving that has already happened.
 - `af-02` — two windows on one place, the supported concurrent case.
+- `internal/qa-after-failure-probes-that-found-nothing-2026-09-18.md` — the complement of this bug,
+  measured: a record that **lies** about its pid is harmless, because the lock is the gate and the
+  lock still tells the truth. Here the lock was moved out from under itself and a second kernel got
+  in. One mechanism, two directions.
+
+## Now guarded by the library
+
+The probe reproduced this on demand but only when someone ran it. `lk-04` stages the same shape as
+a scenario, so every cycle asks the question and a fix is noticed rather than waited for. It holds
+one line: while the holder is alive, a second kernel must not end up serving the same place.
+Refusing out loud is the good outcome; what must not happen is two servers.
+
+Measured on `arbos-kernel 0.2.0 fba8688d92d2`: breaks in **3.1 s**, auto-draft `06c30e0315`.

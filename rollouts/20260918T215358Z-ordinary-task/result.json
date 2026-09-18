@@ -1,0 +1,48 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "final reply did not report FizzBuzz: 'the point of creating the file. I will restart the worker and ensure it completes the task. I\\'ve restarted the worker. I\\'ll let you know when it\\'s done.   The last line printed by `fizz.py` is \"Buzz\".'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "spawn",
+      "plan",
+      "read",
+      "transcript",
+      "spawn",
+      "plan",
+      "read",
+      "status",
+      "plan",
+      "status",
+      "write",
+      "plan",
+      "status",
+      "bash",
+      "plan",
+      "status",
+      "bash",
+      "status",
+      "plan"
+    ],
+    "tool_errors": [
+      "/tmp/arbos-qa-ordinary-task-nnjuvjrx/place/fizz.py.output does not exist (ls /tmp/arbos-qa-ordinary-task-nnjuvjrx/place to see what is there)"
+    ],
+    "trace_files": 10
+  },
+  "duration_s": 50.1,
+  "place": "/tmp/arbos-qa-ordinary-task-nnjuvjrx/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 fc3f59a46d7a protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T215358Z-ordinary-task",
+  "branch": "main",
+  "usd": 0.11683
+}

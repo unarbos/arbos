@@ -1,0 +1,8 @@
+1789768049038 kernel started pid 1237009
+1789768109456 BREAK side-effect-never-ran: the command's first run left no side effect within 60 s
+1789768112460 kernel SIGKILLed
+1789768112961 kernel-restart started pid 1239620
+1789768263346 timeout waiting for turn root idle after 150s
+1789768265346 BREAK side-effect-missing: side-effects.log holds the tag 0 time(s) across the kernel restart (expected once; qal-j02)
+1789768265350 kernel-restart SIGKILLed
+1789768265375 bugs: seen 434690a856.md, seen 46e1523431.md

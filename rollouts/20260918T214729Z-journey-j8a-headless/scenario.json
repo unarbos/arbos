@@ -1,0 +1,8 @@
+{
+  "name": "journey-j8a-headless",
+  "doc": "J8a without the desktop: a bash command with a side effect (`echo ran-<tag> >> side-effects.log; sleep 30`), SIGKILL the kernel during the sleep, restart it. The continued turn must not run the command again \u2014 side-effects.log holds the tag once (qal-j02 / #316).",
+  "tags": [
+    "journey",
+    "adversarial"
+  ]
+}

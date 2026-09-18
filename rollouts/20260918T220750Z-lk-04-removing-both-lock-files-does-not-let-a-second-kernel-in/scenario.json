@@ -1,0 +1,9 @@
+{
+  "name": "lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in",
+  "doc": "`qal-j40`: one place, one kernel \u2014 including after someone deletes the lock files.\n\n        The place lock is `flock` on two files, `.arbos/lock` and `.arbos/runtime/lock`\n        (`place.rs:132-148`). A lock lives on the open descriptor's **inode**, not on the path, so\n        deleting both files leaves the holder's locks on unlinked inodes, held and unreachable. The\n        arriving kernel creates fresh files at the same paths, locks those \u2014 different inodes \u2014 and\n        succeeds. Two kernels then serve one place and neither says anything.\n\n        `#450` stops the ordinary shapes: removing only `runtime/` is refused, because the lock\n        takes both files and the other one still holds. It takes removing **both**, which is what\n        someone resetting a place they believe is stuck would reach for, having read that the lock\n        lives in two places.\n\n        Staged from `deploy/af05c-runtime-and-lock-removed-probe.sh`, which reproduced this on every\n        attempt against `arbos-kernel 0.2.0 cecd48e1bd76`. The probe is a script anyone can run; this\n        is the check that runs every cycle, so a fix is noticed rather than waited for.",
+  "tags": [
+    "landing",
+    "lock",
+    "after-failure"
+  ]
+}
