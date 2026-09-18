@@ -18,6 +18,7 @@ CYCLE=${1:?cycle}; ROW=${2:-phone}
 OUT="$HOME/mobile-out/$CYCLE/cold-start"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 now() { python3 -c 'import time;print(time.time())'; }
@@ -97,7 +98,6 @@ ui dump | head -5 | sed 's/^/  /'
 echo
 echo "== 4. attachments =="
 ui tap "Add" >/dev/null 2>&1 && sleep 1.5 && ui tap "Photo Library" >/dev/null 2>&1 && sleep 4 || echo "  could not open the picker"
-. "$HERE/../sim-lib.sh"
 tap_shot 78 470 "$UDID"; sleep 1
 tap_shot 426 157 "$UDID"; sleep 3
 shot 06-photo-chip
