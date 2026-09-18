@@ -28,12 +28,36 @@ pub struct Spend {
     /// RFC 3339: when the count began (the first turn, or the last reset).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub since: String,
+    /// The UTC day (`YYYY-MM-DD`) `today_usd` and `today_turns` count; a
+    /// turn on a later day starts them over. Absent before the first turn.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub today: String,
+    /// US dollars and turns on `today` (M-03's follow-up: a day's total
+    /// beside the running one).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub today_usd: f64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub today_turns: u64,
     /// The user has been told the 80 % mark was passed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub warned: bool,
     /// The user has been told the cap was reached.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
+}
+
+fn is_zero_f64(n: &f64) -> bool {
+    *n == 0.0
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// The UTC day of `ms`, `YYYY-MM-DD`: the first ten characters of its
+/// RFC 3339 form.
+pub fn day_of(ms: i64) -> String {
+    crate::inbox::rfc3339(ms).chars().take(10).collect()
 }
 
 pub fn path(place: &Place) -> PathBuf {
@@ -136,12 +160,25 @@ pub fn money(usd: f64) -> String {
 /// turn crossed for the first time: `Some(true)` the cap, `Some(false)`
 /// the warning mark, `None` neither.
 pub fn add_turn(place: &Place, cost_usd: f64) -> Result<(Spend, Option<bool>)> {
+    add_turn_at(place, cost_usd, crate::now_ms())
+}
+
+/// `add_turn` at a given moment (the day the turn counts toward).
+pub fn add_turn_at(place: &Place, cost_usd: f64, now_ms: i64) -> Result<(Spend, Option<bool>)> {
     let mut s = load(place);
     if s.since.is_empty() {
-        s.since = crate::inbox::rfc3339(crate::now_ms());
+        s.since = crate::inbox::rfc3339(now_ms);
+    }
+    let day = day_of(now_ms);
+    if s.today != day {
+        s.today = day;
+        s.today_usd = 0.0;
+        s.today_turns = 0;
     }
     s.spent_usd += cost_usd.max(0.0);
     s.turns += 1;
+    s.today_usd += cost_usd.max(0.0);
+    s.today_turns += 1;
     let mut crossed = None;
     if let Some(cap) = cap_usd(place) {
         if s.spent_usd >= cap && !s.capped {
@@ -169,9 +206,15 @@ pub fn over_cap(place: &Place) -> bool {
 /// no cap is set.
 pub fn prompt_line(place: &Place) -> String {
     let s = load(place);
+    // Today's share, when the count spans more than today.
+    let today = if s.today_turns > 0 && s.today_turns < s.turns {
+        format!(", ${:.2} today", s.today_usd)
+    } else {
+        String::new()
+    };
     let line = match cap_usd(place) {
         Some(cap) => format!(
-            "Spend: ${:.2} of the ${cap:.2} cap ({} turns){}\n",
+            "Spend: ${:.2} of the ${cap:.2} cap ({} turns{today}){}\n",
             s.spent_usd,
             s.turns,
             if s.spent_usd >= cap {
@@ -181,7 +224,7 @@ pub fn prompt_line(place: &Place) -> String {
             }
         ),
         None if s.spent_usd > 0.0 => format!(
-            "Spend: ${:.2} so far ({} turns); no cap set\n",
+            "Spend: ${:.2} so far ({} turns{today}); no cap set\n",
             s.spent_usd, s.turns
         ),
         None => String::new(),
@@ -225,6 +268,42 @@ mod tests {
         assert!(
             !n.to_ascii_lowercase().contains("error") && !n.to_ascii_lowercase().contains("fail"),
             "{n}"
+        );
+    }
+
+    /// M-03's follow-up: a day's total beside the running one. Turns on
+    /// one UTC day add up under it; the first turn of the next day starts
+    /// it over while the running total goes on; the file and the prompt
+    /// say both.
+    #[test]
+    fn a_days_total_stands_beside_the_running_one_and_starts_over_at_midnight() {
+        let p = place("days");
+        let day1 = 1_789_646_400_000i64; // 2026-09-17 12:00 UTC
+        let (s, _) = add_turn_at(&p, 0.10, day1).unwrap();
+        assert_eq!((s.today.as_str(), s.today_turns), ("2026-09-17", 1));
+        let (s, _) = add_turn_at(&p, 0.20, day1 + 3_600_000).unwrap();
+        assert!(
+            (s.today_usd - 0.30).abs() < 1e-9 && s.today_turns == 2,
+            "{s:?}"
+        );
+        assert!((s.spent_usd - 0.30).abs() < 1e-9);
+        let day2 = day1 + 86_400_000;
+        let (s, _) = add_turn_at(&p, 0.05, day2).unwrap();
+        assert_eq!((s.today.as_str(), s.today_turns), ("2026-09-18", 1));
+        assert!((s.today_usd - 0.05).abs() < 1e-9, "{s:?}");
+        assert!(
+            (s.spent_usd - 0.35).abs() < 1e-9 && s.turns == 3,
+            "the running total goes on"
+        );
+        let line = prompt_line(&p);
+        assert!(
+            line.contains("$0.35 so far (3 turns, $0.05 today)"),
+            "{line}"
+        );
+        let text = std::fs::read_to_string(path(&p)).unwrap();
+        assert!(
+            text.contains("today = \"2026-09-18\"") && text.contains("today_usd = 0.05"),
+            "{text}"
         );
     }
 
