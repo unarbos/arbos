@@ -43,11 +43,16 @@ xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
 # to the chat that was in front. This waited only for list rows, so what it
 # measured depended on whether it ran on a fresh install — which, in the
 # sweep, it always does. Wait for either landing, and say which one it was.
-FIRST=$(wait_for "Button +[a-z0-9-]+, (Idle|Working)|TextField" 40 "$T0")
+# A row is a project row whatever its status says. Waiting for, and counting,
+# only the ones reading `Idle` or `Working` is the M-400 fault: a list whose
+# machines are asleep would have timed out here, and a list of twelve with
+# five asleep was reported as "a list of 7 rows".
+FIRST=$(wait_for "Button +[a-z0-9-]+, |TextField" 40 "$T0")
 shot 01-cold-start
-ROWS=$(ui dump | grep -cE 'Button +[a-z0-9-]+, (Idle|Working)')
+ROWS=$(ui dump | grep -cE 'Button +[a-z0-9-]+, ')
+LIVE=$(ui dump | grep -cE 'Button +[a-z0-9-]+, (Idle|Working)')
 if [ "$ROWS" -gt 0 ]; then
-  LANDED="a list of $ROWS rows"
+  LANDED="a list of $ROWS rows ($LIVE live)"
 else
   LANDED="the chat it was left in ($(ui dump | awk '$2 < 100 && $3 == "StaticText" { print $4; exit }'))"
 fi
