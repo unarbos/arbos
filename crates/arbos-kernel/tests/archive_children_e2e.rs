@@ -140,7 +140,11 @@ fn archiving_a_worker_retires_its_row_on_the_project_page() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"plan\",\"arguments\":{\"op\":\"add\",\"section\":\"Work\",\"text\":\"[Codeword](agents/code-word) — worker running\"}},{\"name\":\"spawn\",\"arguments\":{\"name\":\"code-word\",\"task\":\"say the codeword\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
-        "{\"content\":\"the codeword is xylophone\"}\n",
+        // The worker takes a moment: a report landing while root's
+        // dispatch turn still runs folds in and opens no done turn, and
+        // the row is never retired (red on main, 2026-09-18 06:10; the
+        // fold-race family of #514, #528 and page_algorithm_e2e).
+        "{\"agent\":\"code-word\",\"content\":\"the codeword is xylophone\",\"delay_ms\":2500}\n",
         "{\"agent\":\"root\",\"content\":\"noted\"}\n",
     );
     let mut k = start_kernel_replay("archive-page-row", replies);
