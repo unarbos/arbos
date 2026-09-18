@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 15:28 UTC.
+Last checked 2026-09-18 15:33 UTC.
 
-## Click Update. You will get build 2054. This one has Jev.
+## Click Update. You will get build 2056. This one has Jev.
 
-**2054** — signed, notarised, stapled, on the feed since 15:25 UTC.
+**2056** — signed, notarised, stapled, on the feed since 15:31 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2054 (builds 2055–2056):
+
+- **#664** — a Jev failure, timeout, or junk reply ends the turn in the
+  open with a fault, rather than leaving it hanging
+
+## Before that: 2054
 
 New since 2049 (builds 2050–2054):
 
