@@ -18,14 +18,16 @@ UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(n
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 
 # "Run it with the app on a project chat" was a line in the header and
-# nothing more. Run from the projects list there is no composer to focus,
-# every line goes nowhere, and the run reports `0/4 arrived` — which reads
-# as the app losing typed lines, the very fault this file exists to rule in
-# or out. A precondition worth stating is worth checking.
+# nothing more, so this checks it. What the check must not do is guess what
+# happens otherwise: I wrote that a run from the projects list would report
+# `0 of N arrived`, and then measured it — the list has its own composer
+# (`Message phone…`) and the lines arrive whole, **2 of 2**. The precondition
+# is a composer, not a chat, and the screens without one are the call and
+# settings.
 if ! ui dump | grep -qE " TextField "; then
-  echo "no composer on screen — this must run with a project chat open."
-  echo "Nothing typed, nothing counted: a run from the list would report"
-  echo "0 of $N arrived and look exactly like the fault it is testing for."
+  echo "no composer on screen — open a project chat, or the projects list,"
+  echo "whose composer sends to the project it names. Nothing typed, nothing"
+  echo "counted, and a run that typed nowhere must not report a number."
   exit 1
 fi
 len() { local v; v=$(ui field 2>/dev/null); echo ${#v}; }
