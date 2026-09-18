@@ -255,7 +255,7 @@ pub struct HostConfig {
     pub jev: Option<bool>,
     /// Router model. Default `~typesafe/jev-latest` (OpenRouter family
     /// alias). Empty string turns Jev off. The slug without `~` is not a
-    /// model id: OpenRouter answers 400 and every step falls through.
+    /// model id: OpenRouter answers 400 and the turn fails.
     #[serde(default = "default_jev_model")]
     pub jev_model: String,
 }
@@ -415,18 +415,11 @@ impl HostConfig {
     }
 
     /// The Jev slug in force, or None when `jev_model` is empty (off).
-    /// A saved `typesafe/jev-latest` (the old default, no tilde) is the
-    /// family alias: without `~` OpenRouter returns 400 in tens of
-    /// milliseconds and the turn falls through.
+    /// A saved slug without `~` is remapped: OpenRouter 400s the bare id
+    /// and the turn fails in the open. There is no chat-model fallback.
     pub fn jev_model(&self) -> Option<&str> {
-        let m = self.jev_model.trim();
-        if m.is_empty() {
-            return None;
-        }
-        if m == "typesafe/jev-latest" {
-            return Some(DEFAULT_JEV_MODEL);
-        }
-        Some(m)
+        let m = normalize_jev_slug(&self.jev_model);
+        if m.is_empty() { None } else { Some(m) }
     }
 
     /// Whether this host should ask Jev before each mechanical step.
@@ -639,6 +632,15 @@ fn default_first_byte_ms() -> u64 {
 /// OpenRouter family alias: always the newest Jev. The `~` is required.
 pub const DEFAULT_JEV_MODEL: &str = "~typesafe/jev-latest";
 
+/// The slug OpenRouter will accept. A saved `typesafe/jev-latest` (no
+/// tilde) or `openrouter/typesafe/jev-latest` is the family alias.
+pub fn normalize_jev_slug(slug: &str) -> &str {
+    match slug.trim() {
+        "typesafe/jev-latest" | "openrouter/typesafe/jev-latest" => DEFAULT_JEV_MODEL,
+        m => m,
+    }
+}
+
 fn default_jev_model() -> String {
     DEFAULT_JEV_MODEL.into()
 }
@@ -702,13 +704,22 @@ mod jev_config_tests {
         assert_eq!(DEFAULT_JEV_MODEL, "~typesafe/jev-latest");
         assert!(
             DEFAULT_JEV_MODEL.starts_with('~'),
-            "without the tilde OpenRouter returns 400 and every step falls through"
+            "without the tilde OpenRouter returns 400 and the turn fails"
         );
         let saved = HostConfig {
             jev_model: "typesafe/jev-latest".into(),
             ..HostConfig::default()
         };
         assert_eq!(saved.jev_model(), Some(DEFAULT_JEV_MODEL));
+        assert_eq!(
+            normalize_jev_slug("openrouter/typesafe/jev-latest"),
+            DEFAULT_JEV_MODEL
+        );
+        assert_eq!(
+            normalize_jev_slug("  typesafe/jev-latest  "),
+            DEFAULT_JEV_MODEL
+        );
+        assert_eq!(normalize_jev_slug(DEFAULT_JEV_MODEL), DEFAULT_JEV_MODEL);
     }
 }
 

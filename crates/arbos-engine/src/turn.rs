@@ -1169,13 +1169,19 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // One model call = one step; every event this step writes carries
         // the number, so a window pairs streamed text with the settled line.
         cx.step += 1;
-        // Jev picks the next mechanical move when it is on. Any failure
-        // falls through to the configured LLM. Barge-in, cancel, and
-        // spend caps stay on this loop; Jev cannot override them.
+        // Jev picks the next mechanical move when it is on. A fail,
+        // timeout, or junk ends the turn in the open. `act=llm` is a
+        // valid pick and runs the chat model. There is no fall-through.
+        // Barge-in, cancel, and spend caps stay on this loop.
         let mut jev_step: Option<Step> = None;
         let mut jev_end = false;
         let mut jev_no_change = false;
-        if crate::jev::should_ask(&host.config, true, provider.replay.is_some()) && !skip {
+        if crate::jev::should_ask(
+            &host.config,
+            !provider.key.is_empty(),
+            provider.replay.is_some(),
+        ) && !skip
+        {
             let names: Vec<String> = registry
                 .names()
                 .into_iter()
@@ -1255,14 +1261,22 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         Some(&format!("{} during jev", control.stop_reason())),
                     );
                 }
-                Err(e) => {
-                    eprintln!("turn {}: jev fell through ({e})", agent.id);
+                Err(e @ (crate::jev::AskError::Failed(_) | crate::jev::AskError::Junk(_))) => {
+                    hooks.kernel_step("");
+                    let message = crate::jev::fail_notice(&e);
+                    eprintln!("turn {}: {message}", agent.id);
+                    append_event(
+                        &transcript,
+                        &Event::new(EventKind::Notice {
+                            text: message,
+                            failed: true,
+                        }),
+                    )?;
+                    return end(spent(last_usage, turn_cost, turn_cached), None);
                 }
             }
-            // Choosing is over. Leave the line up and the LLM inherit it
-            // for the next eight seconds (Jacob's "what files are in this
-            // folder?" shot). An empty derived step lets Thinking / the
-            // tool name take the headline.
+            // Choosing is over. An empty derived step lets Thinking / the
+            // tool name take the headline. A fail already cleared it.
             hooks.kernel_step("");
         }
         if jev_no_change {
