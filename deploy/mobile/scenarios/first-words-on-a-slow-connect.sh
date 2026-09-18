@@ -31,7 +31,7 @@ CLIP=${CLIP:-$HOME/mobile-clips/acceptance.wav}
 [ -f "$CLIP" ] || { echo "no clip at $CLIP"; exit 1; }
 
 echo "run  connect     clip    sent    lost"
-SLOW_AND_CLEAN=0; SLOW=0
+SLOW_AND_CLEAN=0; SLOW=0; LIKE_M246=0
 for i in $(seq 1 "$RUNS"); do
   LOG="$OUT/run-$i.log"
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
@@ -59,17 +59,27 @@ for i in $(seq 1 "$RUNS"); do
   if [ "$MS" -gt 2000 ]; then
     SLOW=$((SLOW + 1))
     [ "$LOST" -eq 0 ] && SLOW_AND_CLEAN=$((SLOW_AND_CLEAN + 1))
+    # M-246's own reading was 2633 ms. A run a little over two seconds is
+    # past the old window and so would have lost something, but it is not
+    # the same size of failure, and the two must not be reported as if they
+    # were.
+    [ "$MS" -gt 2500 ] && LIKE_M246=$((LIKE_M246 + 1))
   fi
 done
 
 echo
 echo "runs above the old two-second window: $SLOW, of which lost nothing: $SLOW_AND_CLEAN"
+echo "runs at M-246's own size (over 2500 ms):  $LIKE_M246"
 if [ "$SLOW" -eq 0 ]; then
   echo "VERDICT: no slow connect occurred, so this run says nothing about the case in question."
   echo "         Run it again — connect time is not something the rig controls."
-elif [ "$SLOW_AND_CLEAN" -eq "$SLOW" ]; then
-  echo "VERDICT: every slow connect kept all its frames — the case M-246 caught is seen passing."
-else
+elif [ "$SLOW_AND_CLEAN" -ne "$SLOW" ]; then
   echo "VERDICT: a slow connect still lost frames. The hold is not covering it."
+elif [ "$LIKE_M246" -gt 0 ]; then
+  echo "VERDICT: a connect of M-246's own size kept every frame. That is the reading"
+  echo "         cycle 67 could not obtain."
+else
+  echo "VERDICT: every connect past the old window kept its frames, but none reached"
+  echo "         M-246's 2633 ms. Good evidence, short of the exact case."
 fi
 echo "logs in $OUT"
