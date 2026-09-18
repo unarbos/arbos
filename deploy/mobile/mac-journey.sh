@@ -200,7 +200,12 @@ if [ -z "$heard" ]; then score P1 FAIL "dictation put nothing in the composer"; 
   echo "P1 heard: $heard" | tee -a $O/run.txt
   ui tap "Up" || score P1 FAIL "dictated words in the box but no send button: $(ui dump | awk '$2 > 740 && $2 < 830')"
 fi
-wait_hist P1 "user +please summarize what the workers did" 30
+# Matched on the words the recogniser does not get to choose. The clip says
+# "summarise" and iOS hears "summaries"; the check wanted "summarize", so P1
+# failed for months on a spelling while its line was reaching the kernel
+# every time (run 33, seq 2326). What the step is testing is that dictation
+# reaches the kernel at all, not how iOS renders one word.
+wait_hist P1 "user +.*what the workers did" 30
 # P2/P3 recorded when RECORD_P=1 (the every-third-cycle recording)
 if [ "${RECORD_P:-0}" = "1" ]; then xcrun simctl io "$U" recordVideo --codec h264 --force "$O/p-raw.mp4" >/dev/null 2>&1 & PREC=$!; fi
 # P2 — attach a photo.
