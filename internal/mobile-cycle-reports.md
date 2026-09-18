@@ -3412,3 +3412,35 @@ is not "how many rows are there", and a still cannot show where a scroll
 comes to rest. Neither would ever have failed on its own.
 
 **PR:** [#673](https://github.com/unarbos/arbos/pull/673), harness only.
+
+## Cycle 123 — the same fault, one file over
+
+M-400's shape was "a count of rows filtered by their status word, described
+as a count of rows". That is a shape you can grep for, so I did, across every
+scenario.
+
+Three counts carry a status word in their pattern. **One was the same fault**
+(M-402): `cold-start-and-history` waited for a row reading `Idle` or
+`Working`, counted those, and called the result "a list of N rows".
+
+On the tree this loop captured at cycle 112:
+
+| | |
+|---|---|
+| rows, any status | **12** |
+| rows reading Idle or Working | **7** |
+| what the other five said | `mac is asleep` |
+
+So "a list of 7 rows" for a list of twelve — and a list whose machines were
+all asleep would have waited the full 40 seconds and reported `never`.
+
+**The other two were already honest** (M-403). `worker-while-it-works` says
+`sheet rows after scrolling to the end: N   of them live: M`, naming both
+quantities. `settings-and-a-bad-token`'s `live_rows` is deliberately
+status-based and is called that. The difference is not care — it is that
+they say which quantity they are reporting.
+
+That is the whole lesson of the last four cycles in one line: a number is
+only a measurement if the sentence around it says what was counted.
+
+**PR:** [#674](https://github.com/unarbos/arbos/pull/674), harness only.
