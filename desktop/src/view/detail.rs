@@ -658,11 +658,21 @@ impl Arbos {
         let header = show_composer
             .then(|| self.chat_header(&theme, window, cx))
             .flatten();
-        // The chat fills the column. Composer stays at the foot. No empty
-        // band above or below — that is what put messages in the middle
-        // and cut the transcript short.
+        // A chat with a transcript fills the column, composer at the foot:
+        // the band above and below is what cut a conversation short (#654).
+        // A chat with nothing on screen — a fresh sub-chat, or one `clear`
+        // has just hidden — has nothing to cut, and Cursor's empty chat
+        // puts its title and the composer in the middle of the column
+        // (#629, which #654 took with the rest of the spacer).
+        let empty_chat = show_composer
+            && self.workspace.read(cx).active_session().is_some_and(|chat| {
+                chat.view_cleared() || (chat.items.is_empty() && chat.parent.is_some())
+            });
         let content = div()
-            .flex_1()
+            .when(!empty_chat, |el| el.flex_1())
+            .when(empty_chat, |el| {
+                el.h(px(0.)).flex_grow(1.).flex_basis(px(0.))
+            })
             .min_h_0()
             .flex()
             .flex_col()
@@ -720,6 +730,11 @@ impl Arbos {
                                         .children(context_row),
                                 ),
                         )
+                    })
+                    // The empty chat's other half, so the composer sits on
+                    // the column's middle line rather than at its foot.
+                    .when(empty_chat, |column| {
+                        column.child(div().flex_grow(1.).flex_basis(px(0.)))
                     }),
             )
     }
