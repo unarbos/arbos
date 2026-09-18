@@ -1346,12 +1346,14 @@ class Pass:
             else:
                 self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid in the panel",
                             "close and expand gone from the panel", "pass", self.still("removed-panel-chrome"))
+            # #688 (Jacob's chrome list): the four-box that widened the panel
+            # is off the strip; ⌘\ still does it (R33).
             if self.app.exists("window-expand"):
-                self.record("window-expand-pinned", sc, "read the tab strip", "one expand control at the window's top-right",
-                            "window-expand on the strip", "pass", self.still("window-expand-pinned"))
+                self.record("window-expand-gone", sc, "read the tab strip", "no four-box expand control on the strip (#688)",
+                            "window-expand still on the strip", "fail", self.still("window-expand-gone"))
             else:
-                self.record("window-expand-pinned", sc, "read the tab strip", "one expand control at the window's top-right",
-                            "missing", "fail", self.still("window-expand-pinned"))
+                self.record("window-expand-gone", sc, "read the tab strip", "no four-box expand control on the strip (#688)",
+                            "gone", "pass", self.still("window-expand-gone"))
             if self.app.exists("chat-clear"):
                 self.record("chat-clear-gone", sc, "read the chat header", "no Clear button; typed clear / /clear still work",
                             "chat-clear still drawn", "fail", self.still("chat-clear-gone"))
@@ -1884,26 +1886,43 @@ class Pass:
         """Second launch: the kernel has no key but the desktop does."""
         sc = "provider-offer"
         cfg = xdg / "arbos" / "config.toml"
-        cfg.write_text(cfg.read_text().replace('api_key_env = "OPENROUTER_API_KEY"', 'api_key_env = "QA_NO_SUCH_KEY"'))
         # F-201: the key goes away under a connection that shook hands with
         # one. The kernel keeps the typed line and sends no Provider frame;
         # the pending row must still say what the words wait for (a key,
-        # not "this turn"), and the offer bar must show.
+        # not "this turn"), and the offer bar must show. The earlier phases
+        # leave no window behind (X relaunches), so this is its own launch
+        # on the keyed config, and the swap comes once the handshake is in.
+        old = self.app
         try:
-            self.go_project()
-            self.app.wait_element("composer-field", timeout=8, reachable=True)
-            self.send("Reply with one word: pong.")
-            s = self.wait(lambda s: (active(s) or {}).get("provider_missing") or (not busy(s) and any(i.get("kind") == "notice" and i.get("failed") for i in (active(s) or {}).get("items", []))), 40, what="keyless line")
-            a = active(s) or {}
-            kept = any("kept and runs once a key" in (i.get("text") or "") for i in a.get("items", []) if i.get("kind") == "notice")
-            if kept:
-                self.record("keyless-mid-session", sc, "key removed after the handshake, then a prompt", "provider_missing set; provider-offer bar on screen; pending row waits on a key",
-                            f"provider_missing={a.get('provider_missing')!r} offer={self.app.exists('provider-offer')} followups={self.app.exists('followups-head')}",
-                            "pass" if a.get("provider_missing") and self.app.exists("provider-offer") else "fail", self.still("keyless-mid-session"))
-            else:
-                self.gap("keyless-mid-session", sc, "trigger", "the kernel did not keep the line for a key: " + str([(i.get("text") or "")[:80] for i in a.get("items", []) if i.get("kind") == "notice"][-2:]))
+            app = self.drv.Arbos.launch(binary=binary, env={"ARBOS_KERNEL_BIN": kernel, "DISPLAY": DISPLAY, "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(xdg / "data")},
+                                        log=str(self.outdir / "app-keyless.log"), timeout=90)
+            self.app = app
+            try:
+                place_window(); time.sleep(1)
+                self.tabs = self.app.exists("tab-bar"); self.go_project()
+                self.app.wait_element("composer-field", timeout=8, reachable=True)
+                self.wait(lambda s: (active(s) or {}).get("connection") == "live" and not busy(s), 60, what="live connection")
+                cfg.write_text(cfg.read_text().replace('api_key_env = "OPENROUTER_API_KEY"', 'api_key_env = "QA_NO_SUCH_KEY"'))
+                self.send("Reply with one word: pong.")
+                s = self.wait(lambda s: (active(s) or {}).get("provider_missing") or (not busy(s) and any(i.get("kind") == "notice" and i.get("failed") for i in (active(s) or {}).get("items", []))), 40, what="keyless line")
+                a = active(s) or {}
+                kept = any("kept and runs once a key" in (i.get("text") or "") for i in a.get("items", []) if i.get("kind") == "notice")
+                if kept:
+                    self.record("keyless-mid-session", sc, "key removed after the handshake, then a prompt", "provider_missing set; provider-offer bar on screen; pending row waits on a key",
+                                f"provider_missing={a.get('provider_missing')!r} offer={self.app.exists('provider-offer')} followups={self.app.exists('followups-head')}",
+                                "pass" if a.get("provider_missing") and self.app.exists("provider-offer") else "fail", self.still("keyless-mid-session"))
+                else:
+                    self.gap("keyless-mid-session", sc, "trigger", "the kernel did not keep the line for a key: " + str([(i.get("text") or "")[:80] for i in a.get("items", []) if i.get("kind") == "notice"][-2:]))
+            finally:
+                try:
+                    app.close()
+                except Exception:
+                    pass
         except Exception as err:
             self.gap("keyless-mid-session", sc, "drive", f"{type(err).__name__}: {err}")
+        finally:
+            self.app = old
+        cfg.write_text(cfg.read_text().replace('api_key_env = "OPENROUTER_API_KEY"', 'api_key_env = "QA_NO_SUCH_KEY"'))
         # The place as the run left it, before this phase wipes it: the
         # evidence for anything the earlier phases found (F-105's lost
         # follow-up was undiagnosable twice because this reset ran first).
@@ -1956,7 +1975,12 @@ class Pass:
                 self.store_dir.mkdir(parents=True, exist_ok=True)
                 for f in self.outdir.iterdir():
                     dst = self.store_dir / f.name
-                    if not dst.exists() or dst.stat().st_size != f.stat().st_size or f.suffix == ".json":
+                    # A kept place (`arbos-before-nokey`) is a folder: copyfile
+                    # on it failed every save after phase O began, and the
+                    # store's results.json stopped at phase X (R32).
+                    if f.is_dir():
+                        shutil.copytree(f, dst, dirs_exist_ok=True)
+                    elif not dst.exists() or dst.stat().st_size != f.stat().st_size or f.suffix == ".json":
                         shutil.copyfile(f, dst)
                 break
             except OSError as err:
