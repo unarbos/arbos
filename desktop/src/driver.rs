@@ -1348,6 +1348,7 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
         "quiet_secs": chat.quiet_for().as_secs(),
         "turn_open": chat.turn_open,
         "closed": chat.closed,
+        "provider_missing": chat.provider_missing,
         "pills": project.map(|project| {
             let (working, prs) = crate::view::detail::pill_counts(project, chat);
             json!({ "working": working.len(), "prs": prs.len(), "pr_urls": prs })

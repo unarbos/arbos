@@ -1885,6 +1885,25 @@ class Pass:
         sc = "provider-offer"
         cfg = xdg / "arbos" / "config.toml"
         cfg.write_text(cfg.read_text().replace('api_key_env = "OPENROUTER_API_KEY"', 'api_key_env = "QA_NO_SUCH_KEY"'))
+        # F-201: the key goes away under a connection that shook hands with
+        # one. The kernel keeps the typed line and sends no Provider frame;
+        # the pending row must still say what the words wait for (a key,
+        # not "this turn"), and the offer bar must show.
+        try:
+            self.go_project()
+            self.app.wait_element("composer-field", timeout=8, reachable=True)
+            self.send("Reply with one word: pong.")
+            s = self.wait(lambda s: (active(s) or {}).get("provider_missing") or (not busy(s) and any(i.get("kind") == "notice" and i.get("failed") for i in (active(s) or {}).get("items", []))), 40, what="keyless line")
+            a = active(s) or {}
+            kept = any("kept and runs once a key" in (i.get("text") or "") for i in a.get("items", []) if i.get("kind") == "notice")
+            if kept:
+                self.record("keyless-mid-session", sc, "key removed after the handshake, then a prompt", "provider_missing set; provider-offer bar on screen; pending row waits on a key",
+                            f"provider_missing={a.get('provider_missing')!r} offer={self.app.exists('provider-offer')} followups={self.app.exists('followups-head')}",
+                            "pass" if a.get("provider_missing") and self.app.exists("provider-offer") else "fail", self.still("keyless-mid-session"))
+            else:
+                self.gap("keyless-mid-session", sc, "trigger", "the kernel did not keep the line for a key: " + str([(i.get("text") or "")[:80] for i in a.get("items", []) if i.get("kind") == "notice"][-2:]))
+        except Exception as err:
+            self.gap("keyless-mid-session", sc, "drive", f"{type(err).__name__}: {err}")
         # The place as the run left it, before this phase wipes it: the
         # evidence for anything the earlier phases found (F-105's lost
         # follow-up was undiagnosable twice because this reset ran first).

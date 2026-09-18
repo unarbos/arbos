@@ -3516,6 +3516,21 @@ impl ChatSession {
                     self.flight = None;
                     self.streaming = false;
                     self.turn_open = false;
+                    // A key that went away after the handshake sends no
+                    // `Provider` frame: the kept line is the word that the
+                    // kernel is keyless, so the pending row says "once a
+                    // model key is in place" and the offer bar shows
+                    // (F-201), not "when this turn ends" over no turn.
+                    if self.provider_missing.is_none() {
+                        let provider = self
+                            .kernel_provider
+                            .as_ref()
+                            .map(|p| p.provider.clone())
+                            .or_else(|| keyless_provider(&detail));
+                        if let Some(provider) = provider {
+                            self.provider_missing = Some(provider);
+                        }
+                    }
                     self.notice(true, &detail);
                     self.flush();
                     return;
@@ -5027,6 +5042,18 @@ const KICKOFF_NOT_STARTED: &str = "kickoff not started:";
 /// of a key (#312): "… Your message is kept and runs once a key is in
 /// place: <the words>".
 pub(crate) const LINE_KEPT_FOR_KEY: &str = "Your message is kept and runs once a key is in place";
+
+/// The provider id in the kernel's keyless line ("No API key for
+/// OpenRouter. Run …"), in the form the `Provider` frame uses
+/// ("openrouter"); `None` when the line names none.
+fn keyless_provider(detail: &str) -> Option<String> {
+    let rest = detail.split("No API key for ").nth(1)?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!name.is_empty()).then(|| name.to_lowercase())
+}
 
 /// The kernel's notice while an `ask` is parked with the user.
 fn is_waiting_line(text: &str) -> bool {
