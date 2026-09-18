@@ -589,6 +589,11 @@ pub struct ChatSession {
     pub kickoff_secs: Option<u32>,
     /// The kickoff is due as soon as the kernel reports a provider key.
     pub kickoff_wanted: bool,
+    /// Opened by a person in this window's run (⌘N, a new chat) rather
+    /// than read back from a record or listed by the kernel. Only such a
+    /// chat is remembered as the front chat when it attaches; a restored
+    /// one already is or is not, and a startup focus is not a choice.
+    pub fresh: bool,
     /// What the agent says it is doing right now (the kernel's `status`
     /// event); cleared when the turn ends.
     pub status: Option<String>,
@@ -756,6 +761,7 @@ impl ChatSession {
             seen_through: 0,
             to_notify: Vec::new(),
             kickoff_wanted: false,
+            fresh: true,
             status: None,
             waiting: None,
             status_over_workers: false,
@@ -857,6 +863,7 @@ impl ChatSession {
             seen_through: 0,
             to_notify: Vec::new(),
             kickoff_wanted: false,
+            fresh: false,
             status: None,
             waiting: None,
             status_over_workers: false,
@@ -958,6 +965,7 @@ impl ChatSession {
             seen_through: 0,
             to_notify: Vec::new(),
             kickoff_wanted: false,
+            fresh: false,
             status: None,
             waiting: None,
             status_over_workers: false,

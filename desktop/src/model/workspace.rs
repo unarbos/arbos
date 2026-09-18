@@ -123,6 +123,10 @@ pub struct Workspace {
     /// What each project was last showing, by place string — where a launch
     /// puts you back.
     last: BTreeMap<String, state::Entry>,
+    /// True from the window's construction until its projects have been
+    /// restored and their kernels merged: no focus taken in that time is
+    /// a person's, so none is remembered.
+    restoring: bool,
     /// Recently opened places, newest first. The opener lists these.
     pub recents: Vec<Place>,
     /// Skills and slash templates for the active place. Refreshed from
@@ -210,6 +214,7 @@ impl Workspace {
             next_id: 0,
             agent_icons: HashMap::new(),
             last: state.last,
+            restoring: true,
             recents,
             slash_commands: Vec::new(),
             slash_place: None,
@@ -249,6 +254,7 @@ impl Workspace {
         for ix in 0..this.projects.len() {
             this.sync_kernel_sessions(ix, true, cx);
         }
+        this.restoring = false;
         // Names typed under the old sidebar lived in state.toml. A folder
         // that has no project.toml yet takes its name from there, once, and
         // the file is the record from then on.
@@ -763,12 +769,15 @@ impl Workspace {
         self.remember_recent(&place);
         self.projects.push(Project::open(place));
         let ix = self.projects.len() - 1;
+        let was = self.restoring;
+        self.restoring = true;
         self.restore_sessions(ix);
         self.apply_dismissed(ix);
         self.watch_project(ix, cx);
         self.watch_board(ix, cx);
         self.select_project(ix, cx);
         self.sync_kernel_sessions(ix, true, cx);
+        self.restoring = was;
     }
 
     fn apply_dismissed(&mut self, ix: usize) {
@@ -958,6 +967,13 @@ impl Workspace {
     /// Remember the entry a project is now showing, so the next launch lands on
     /// it. Every way of opening one arrives here.
     fn remember(&mut self, project: usize, kind: state::Kind, id: String) {
+        // Only a person's choice is remembered. While the window restores
+        // itself — sessions read back, the kernel's list merged, chats
+        // attaching — every focus is the window's own, and one written
+        // here would replace the entry the restore is about to read.
+        if self.restoring {
+            return;
+        }
         let Some(open) = self.projects.get(project) else {
             return;
         };
@@ -1104,7 +1120,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let ix = self.active_ix()?;
-        self.new_session_in(ix, entry, seed, cx)
+        let id = self.new_session_in(ix, entry, seed, cx)?;
+        // A person asked for this chat: it is in front, and remembered.
+        self.projects[ix].focus_on(id);
+        self.remember_session(ix, id);
+        Some(id)
     }
 
     /// Open a root chat in the project at `ix`, whichever is in front. The
@@ -1123,8 +1143,15 @@ impl Workspace {
         let project = &mut self.projects[ix];
         chat.rank = project.front_rank(None);
         project.sessions.push(chat);
-        project.focus_on(id);
-        self.remember_session(ix, id);
+        // The launch merge makes a project's main chat this way, after the
+        // remembered chat has been put in front. It must not take the
+        // front from that chat, and it must not be remembered — only a
+        // person's choice is (qal-j35: #675 remembered it here, and the
+        // relaunch overwrote the sub-chat's entry with the main chat
+        // before anything read it).
+        if project.focus.is_none() {
+            project.focus_on(id);
+        }
         self.push_snapshot(ix);
         cx.notify();
         Some(id)
@@ -1136,7 +1163,10 @@ impl Workspace {
     pub fn new_child_session(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         let ix = self.active_ix()?;
         let Some(parent) = self.projects[ix].main_session() else {
-            return self.new_session_in(ix, settings::kernel_agent(), None, cx);
+            let id = self.new_session_in(ix, settings::kernel_agent(), None, cx)?;
+            self.projects[ix].focus_on(id);
+            self.remember_session(ix, id);
+            return Some(id);
         };
         let parent_kernel = self.projects[ix]
             .session(parent)
@@ -2721,11 +2751,12 @@ impl Workspace {
             // it was put in front; now it has its kernel id (and soon its
             // file). If it is still the front chat, remember it by that,
             // so a relaunch lands on it and not on the main chat (qal-j35).
-            if self.projects[ix]
+            let fresh_in_front = self.projects[ix]
                 .focus
                 .as_ref()
                 .is_some_and(|f| f.agent == id)
-            {
+                && self.projects[ix].session(id).is_some_and(|chat| chat.fresh);
+            if fresh_in_front {
                 self.remember_session(ix, id);
                 self.save();
             }
