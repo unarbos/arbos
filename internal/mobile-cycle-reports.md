@@ -3022,3 +3022,37 @@ The core chat path still holds on the fixed build: card 1.0 s, reply 2.0 s,
 `Worked` at 11.1 s, composer cleared (M-367 re-run).
 
 **PR:** [#638](https://github.com/unarbos/arbos/pull/638), the `ios/` batch.
+
+## Cycle 112 — what a recording sees that a still cannot
+
+**The oldest row is a check now.** `projects list — faces, rows, sections`
+had been carried as prose in the coverage ledger since cycle 69. It is
+`list-rows.sh` now: 12 rows, all naming a state, 8 carrying an age, none
+claiming "now" (M-371). Writing it immediately found one fault — the `phone`
+row read `phone, Idle,  · , home, 17m`, because the " · " drawn between the
+state and the machine is a `Text` of its own and SwiftUI hands it to
+VoiceOver as an element (M-370).
+
+**Then the recording earned its place.** A recording was overdue, so I made
+one of the list and a chat opening, and asked for a review of what was
+actually on screen. It confirmed the opening position #638 fixed — and found
+what four stills across three cycles had not:
+
+> scrolling back down rests with the last message **partially hidden** behind
+> the pill, and the user has to perform an additional upward swipe to pull
+> the rest of the message into view.
+
+Opening a chat was right. Scrolling to the bottom **by hand** was not. A
+still shows where a scroll *landed*; it cannot show where a scroll *rests*,
+and I had been proving this surface with stills for three cycles (M-372).
+
+Fixed with a bottom content margin the height of the pill. The opening
+position is untouched: last line at y **581** both as opened and at the true
+end.
+
+The review also suggested the list's composer overlaps the last row. It does
+not — scrolled to its end the list clears it, and what the video caught was
+an ordinary mid-list position (M-373). Worth a line, because a plausible
+fault that is not one costs the next reader the minute it cost me.
+
+**Recording:** `media/mobile/cycle-112/recording_demo.mp4`.

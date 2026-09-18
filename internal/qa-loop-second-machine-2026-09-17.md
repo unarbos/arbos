@@ -794,8 +794,46 @@ This extends `qal-j26` rather than repeating it: that file established that a pa
 wall-clock durations. This adds that it also corrupts `ps lstart`/`etime`, which is the tool one
 naturally reaches for to check whether a long step is stuck.
 
+## Cycle 8's four unexplained reds: three were ours, one is real
+
+Cycle 8's desktop step left four breaks nobody had looked at, each standing in all five cycles
+since 2026-09-17 18:18. Taken in order:
+
+| red | verdict | mechanism |
+|---|---|---|
+| `xp-01-first-line-lost` | **ours** — `qal-j33` | one click on a window not yet taking input; `composer.focused` was false and the composer was *also* empty, so the keystrokes were never delivered. Two clicks work. It had been claiming **data loss**. |
+| `mt-18-page-fills-column` | **ours** — `qal-j34` | read `bounds.height` and `height`; the key is `h` (`driver.rs:969`). `tr_h` was 0 on every build, so the assertion could never pass. Corrected, the transcript keeps **571 of 1000** px with 21 open items. |
+| `mt-14-raw-done-card` | **ours** — `qal-j36` | searched the item *data* for a line and concluded about the *view*, which strips the prefix and the file pointer before drawing it. |
+| `mt-24-active-tab-not-restored` | **real** — `qal-j35` | a relaunch comes back on the project's main chat, not the sub-chat left active. |
+
+Three of four. That ratio is the argument for triaging a red before believing it, and it is also
+why the fourth is worth believing.
+
+`mt-24` took two passes to become evidence. It had asserted on the **session id**, and a relaunch
+renumbers sessions — the chat that was id 3 comes back as id 1 — so `active_after != active_before`
+was true whatever the app did, and a *correct* restore would have gone red too. It also slept three
+seconds and read once. Compared by `agent_session`, which survives the relaunch, and polled to a
+20-second bound, the finding stands: `chat-1789733586900` before, `root` after, never restored.
+
+Two of the repairs left the library better than a straight fix would:
+
+- `xp-01` now separates three failures that had shared one name — the click never focused (ours), the
+  line sits in the composer after Enter (visible refusal), focused-and-emptied yet on no transcript
+  (silent loss). Only the last is the rule that was firing.
+- `mt-14`'s unverifiable "a raw line is shown" became a check on the **wording coupling**:
+  `done_report` knows exactly three prefixes, and if the kernel's phrasing drifts the view stops
+  recognising it and the raw line does reach the person. That fails *before* anything is visible,
+  which the original could not do.
+
+The shared helper `desktop_scenarios.focus_composer` now backs every send in the library, and
+review rules 10, 11 and 12 come from this pass.
+
 ## Cross-references
 
+- `internal/qa/bugs/qal-j33-five-cycles-of-first-line-lost-were-one-click-on-a-window-not-yet-taking-input.md`
+- `internal/qa/bugs/qal-j34-mt-18-read-a-height-key-that-does-not-exist-so-its-assertion-could-never-pass.md`
+- `internal/qa/bugs/qal-j35-a-relaunch-comes-back-on-the-main-chat-not-the-sub-chat-the-person-left-open.md`
+- `internal/qa/bugs/qal-j36-mt-14-read-the-item-data-to-decide-what-the-view-draws.md`
 - `internal/qa/bugs/qal-j31-a-place-mcp-config-that-does-not-parse-hands-its-server-name-to-the-global-one-in-silence.md`
 - `internal/qa/bugs/qal-j32-the-half-split-killed-the-cycle-on-the-first-run-because-a-missing-file-is-a-failing-command.md`
 - `internal/qa/bugs/qal-j28-the-inbox-grows-without-bound-and-crowds-the-library-out-of-the-cap.md`

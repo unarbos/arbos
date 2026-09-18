@@ -496,7 +496,25 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
                 "raw_done_items": [{"kind": i.get("kind"), "text": str(i.get("text") or "")[:160]} for i in raw][:3],
             })
             cx.rec.expect(comp.get("text") == "half a thought, not sent", "mt-14-composer-clobbered", f"composer text after a child finished: {comp.get('text')!r}")
-            cx.rec.expect(not raw, "mt-14-raw-done-card", "a raw 'Turn ended. Last words: …' line is shown for a finished child")
+            # Not "is a raw line in the items" — the kernel's done file *is* the item text, and that is
+            # right: it is the transcript record. The view strips it. `done_report`
+            # (desktop/src/view/component/transcript.rs:1455) matches one of three exact prefixes,
+            # cuts everything from "(transcript:", and `worker_card` draws the remaining words as one
+            # dim line. So the old assertion read the data and drew a conclusion about the view, and
+            # broke in all five cycles from 2026-09-17 18:18 while the app was rendering correctly.
+            #
+            # What *is* checkable from here, and is the regression this scenario was afraid of: the
+            # wording coupling. If the kernel's phrasing drifts, `done_report` returns None and the
+            # view falls back to showing the text as it stands — raw prefix, file pointer and all.
+            KNOWN = ("Turn ended. Last words:", "Turn ended badly. Last words:", "Turn stopped by the user.")
+            drifted = [i for i in raw if not str(i.get("text") or "").strip().startswith(KNOWN)]
+            cx.rec.notes["done_report_prefixes"] = [str(i.get("text") or "")[:46] for i in raw][:3]
+            cx.rec.expect(
+                not drifted,
+                "mt-14-done-wording-the-view-cannot-strip",
+                f"a finished worker's line does not begin with any prefix `done_report` knows {KNOWN}: {[str(i.get('text') or '')[:80] for i in drifted][:2]}. The view cannot recognise it, so it draws the kernel's raw line — prefix, ellipsis and `.arbos/...` path — in the person's chat",
+                "kernel remote.rs:1327 and desktop view/component/transcript.rs done_report must agree on the wording",
+            )
         finally:
             d.close()
         cx.check()

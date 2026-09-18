@@ -296,7 +296,7 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 | the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
 | the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
 
-### Six additions to the review list, earned overnight
+### Seven additions to the review list, earned overnight
 
 6. **An assertion must not bound a race.** Batching, timing and ordering that the product does not
    guarantee must not be asserted; assert the property the optimisation exists for, or make the kernel
@@ -333,6 +333,14 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
     same breath as the local one, and when a script is *running*, write only the store copy — a file
     bash is executing must not change under it (the cycle 2 syntax death).
 
+12. **Assert on the layer your claim is about.** `mt-14` searched the chat's item data for a raw
+    `Turn ended. Last words: …` line and reported that one was *shown*; the view strips that prefix
+    and the file pointer before drawing it (`done_report`,
+    `desktop/src/view/component/transcript.rs:1455`), so the data legitimately holds what the view
+    never renders, and the scenario broke for five cycles on correct behaviour (`qal-j36`). When the
+    layer you can see is not the layer you mean, either reach the right one or assert the contract
+    that protects it — `mt-14` now checks that the kernel's wording still matches a prefix the view
+    knows, which fails *before* a person could see anything wrong.
 ### And the hardest lesson of the night, which belongs with step 2 of the list
 
 **Ask the boundary question of the reading side too.** `qal-j27` was filed as data loss on the strength of
