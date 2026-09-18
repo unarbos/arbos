@@ -46,7 +46,7 @@ ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
 sleep 4
 ui field >/dev/null 2>&1 || { echo "no composer after opening $ROW"; exit 1; }
 
-LINE="Through one worker you wait for: run the bash command sleep 150 and nothing else, then reply done."
+LINE="Through one worker you wait for: run the bash command sleep 300 and nothing else, then reply done."
 ui focus >/dev/null; sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 80); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
@@ -70,11 +70,30 @@ shot 02-sheet-while-working
 # "<spinner>, <goal>, <step>" — no literal "Working" anywhere, because the
 # spinner glyph carries that. Counting on the word printed "the sheet marks
 # none of them working" with the live row plainly on screen.
-ROWS=$(ui dump | grep -cE "Button +.*, Done$|Button +[^,]*, .*, .*$")
-LIVE=$(ui dump | grep -cE "Button +[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], ")
-echo "  sheet rows: $ROWS   of them Working: $LIVE"
-ui dump | grep -E "Button +[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], " | sed 's/^/    /'
+# The sheet scrolls, and only rendered rows are in the tree — the same trap
+# that made cycle 71 read four projects as missing when they were under the
+# keyboard. So collect the rows by scrolling to the end of the list before
+# saying anything about what it does or does not contain.
+COLLECT=$OUT/sheet-rows.txt; : > "$COLLECT"
+for page in $(seq 1 8); do
+  ui dump | grep -E "Button +.+, " >> "$COLLECT"
+  idb ui swipe 236 900 236 560 --duration 0.4 --udid "$UDID" >/dev/null 2>&1
+  sleep 1.2
+done
+sort -u -k4 "$COLLECT" -o "$COLLECT"
+ROWS=$(wc -l < "$COLLECT" | tr -d ' ')
+LIVE=$(grep -cE "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|, running |Working" "$COLLECT" | tr -d ' ')
+echo "  sheet rows after scrolling to the end: $ROWS   of them live: $LIVE"
+grep -E "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|, running |Working" "$COLLECT" | sed 's/^/    live: /'
+# Where the live one sits matters as much as whether it is there: a worker
+# that is working, listed below a dozen finished ones, is the hardest row to
+# find on the sheet that exists to show it.
+if grep -q "sleep" "$COLLECT"; then
+  echo "  the sleep worker's row: $(grep sleep "$COLLECT" | head -1 | sed 's/^ *//')"
+else
+  echo "  the sleep worker has no row on the sheet at all"
+fi
 if [ "$ROWS" = 0 ]; then echo "  the sheet did not open"
 elif [ "$LIVE" -gt 0 ]; then echo "  VERDICT: the sheet marks the live worker"
-else echo "  VERDICT: the sheet lists $ROWS workers and shows no spinner on any of them"; fi
+else echo "  VERDICT: the sheet lists $ROWS workers and marks none of them live"; fi
 echo "  kernel, same moment: $(python3 "$HERE/../kernel.py" pod history 2 2>/dev/null | tail -1 | cut -c1-80)"
