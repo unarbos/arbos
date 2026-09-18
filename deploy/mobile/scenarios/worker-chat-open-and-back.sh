@@ -72,7 +72,11 @@ NAP=$(( 90 + RANDOM % 20 ))
 # worker started, and the run could not tell whether the app had failed or
 # the keystrokes had gone nowhere — the fault M-180 fixed everywhere else in
 # this harness and I left out of a new file.
-WLINE="Through one worker: run the bash command sleep $NAP and nothing else, then reply done."
+# "you wait for" is load-bearing. Without it the root runs the sleep itself
+# and no worker is ever spawned, so the run reports no running-worker line
+# and looks like the app failing to draw one. Watched for 64 s with the
+# shorter phrasing: no worker, no line, nothing wrong with the app.
+WLINE="Through one worker you wait for: run the bash command sleep $NAP and nothing else, then reply done."
 ui focus >/dev/null 2>&1
 sleep 0.7
 idb ui text "$WLINE" --udid "$UDID"
