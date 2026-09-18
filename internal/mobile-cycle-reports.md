@@ -3021,4 +3021,4 @@ move the last line by one point.
 The core chat path still holds on the fixed build: card 1.0 s, reply 2.0 s,
 `Worked` at 11.1 s, composer cleared (M-367 re-run).
 
-**PR:** [#635](https://github.com/unarbos/arbos/pull/635), the `ios/` batch.
+**PR:** [#638](https://github.com/unarbos/arbos/pull/638), the `ios/` batch.
