@@ -603,6 +603,9 @@ pub struct ChatSession {
     /// the numbering starts again below. Runtime only; primed from the
     /// cards' own `seq` at load.
     record_seq: u64,
+    /// Inside a recorded line the pane already holds: its events are
+    /// dropped until `RecordLineEnd`. Runtime only.
+    holding_line: bool,
     /// Models the kernel has said are "not available to this key" in this
     /// chat: dropped from the picker until the key changes. Runtime only.
     pub unavailable_models: HashSet<String>,
@@ -750,6 +753,7 @@ impl ChatSession {
             waiting: None,
             status_over_workers: false,
             record_seq: 0,
+            holding_line: false,
             unavailable_models: HashSet::new(),
             running_job: None,
             turn_open: false,
@@ -849,6 +853,7 @@ impl ChatSession {
             waiting: None,
             status_over_workers: false,
             record_seq: 0,
+            holding_line: false,
             unavailable_models: HashSet::new(),
             running_job: None,
             turn_open: false,
@@ -948,6 +953,7 @@ impl ChatSession {
             waiting: None,
             status_over_workers: false,
             record_seq: 0,
+            holding_line: false,
             unavailable_models: HashSet::new(),
             running_job: None,
             turn_open: false,
@@ -1574,6 +1580,16 @@ impl ChatSession {
         self.queue.push_back(content);
         self.held_cards += 1;
         self.flush();
+    }
+
+    /// The record's newest line at attach, from the kernel's replay or the
+    /// file: history the pane holds, not news. Only for a pane with a
+    /// record of its own — a worker's fresh tab has nothing yet and draws
+    /// its first lines from the live frames.
+    fn hold_record_through(&mut self, seq: u64) {
+        if !self.items.is_empty() {
+            self.record_seq = self.record_seq.max(seq);
+        }
     }
 
     /// Whether a recorded line at `seq` is one this pane already holds. A
@@ -2928,6 +2944,20 @@ impl ChatSession {
     fn apply(&mut self, event: Event) {
         self.updated = SystemTime::now();
         self.last_frame_at = Instant::now();
+        // One transcript line's events, bracketed: held when the pane has
+        // that line already, whatever kind it is.
+        match event {
+            Event::RecordLine(seq) => {
+                self.holding_line = self.record_held(seq);
+                return;
+            }
+            Event::RecordLineEnd => {
+                self.holding_line = false;
+                return;
+            }
+            _ if self.holding_line => return,
+            _ => {}
+        }
         // Progress the person could see. Not `Alive`, not a probe's answer,
         // not the roster, provider or store bookkeeping the kernel sends
         // between real frames — those would keep the stall hint away from
@@ -2976,9 +3006,6 @@ impl ChatSession {
                 seq,
                 channel,
             } => {
-                if self.record_held(seq) {
-                    return;
-                }
                 self.foreign_prompt(text, attachments, ts, seq, channel)
             }
             Event::Provider {
@@ -3058,9 +3085,26 @@ impl ChatSession {
                 self.notice(false, &what);
                 self.flush();
             }
+            Event::RecordEnd(to) => self.hold_record_through(to),
+            // Taken above, before anything else reads the event.
+            Event::RecordLine(_) | Event::RecordLineEnd => {}
             Event::Handshake { protocol, build } => {
                 let ok = protocol.is_some_and(|p| p >= crate::kernel::PROTOCOL);
                 let kernel = build.version.clone();
+                // Everything on the record at this moment is history: the
+                // pane holds it (its cards, and `adopt_kernel_tail` for what
+                // was written while it was away). A kernel whose tail
+                // cursors start at line one broadcasts the whole file as
+                // live frames to a window that attaches during its first
+                // tick, and a record from before cards kept their `seq`
+                // took every line as news — 167 cards became 266 on one
+                // launch (F-180, cycle 39).
+                if self.host.is_none()
+                    && let Some(sid) = self.agent_session.as_deref()
+                {
+                    let lines = crate::kernel::transcript_lines(&self.place(), sid);
+                    self.hold_record_through(lines);
+                }
                 // Which kernel is on the other end of this socket, in its own
                 // words. Kept only while the socket is: `forget_socket` drops
                 // it, so the field cannot outlive the connection it describes.
@@ -3112,10 +3156,7 @@ impl ChatSession {
                     self.flush();
                 }
             }
-            Event::Woke { kind, text, at, seq } => {
-                if self.record_held(seq) {
-                    return;
-                }
+            Event::Woke { kind, text, at } => {
                 self.new_turn_steps();
                 self.turn_ended = None;
                 // The kernel writes `wake` then `user` for a prompt: the
@@ -3242,10 +3283,7 @@ impl ChatSession {
                 }
                 self.flush();
             }
-            Event::AssistantFinal { text, step, seq } => {
-                if self.record_held(seq) {
-                    return;
-                }
+            Event::AssistantFinal { text, step } => {
                 self.finish_thinking();
                 // The kernel cuts tool markup from the settled line (#278);
                 // the same cut here covers a kernel from before it.
