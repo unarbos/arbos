@@ -88,6 +88,7 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                     name: mode.name.clone().into(),
                     vision: None,
                     free: false,
+                    context: None,
                 })
                 .collect(),
         });
@@ -122,6 +123,7 @@ fn switches(chat: Option<&ChatSession>, catalog: &kernel::ModelsCatalog) -> Vec<
                         name: model.name.clone().into(),
                         vision: Some(model.sees_images()),
                         free: model.free,
+                        context: model.context,
                     })
                     .collect(),
             },
@@ -178,6 +180,7 @@ fn select_options(options: &SessionConfigSelectOptions) -> Vec<composer::SwitchO
             name: option.name.clone().into(),
             vision: None,
             free: false,
+            context: None,
         }
     }
     match options {
@@ -549,6 +552,7 @@ impl Arbos {
         let live = chat.filter(|chat| chat.live());
         let switches = switches(chat, &workspace.models);
         let model_note = workspace.models.error.clone();
+        let controller = workspace.models.controller.clone();
         // The pinned mode, from agent.md (local places), and the skills on
         // offer for the chip's list.
         let (mode_skill, skills) = match live.filter(|chat| chat.host.is_none()) {
@@ -603,6 +607,12 @@ impl Arbos {
                 composer.bind_session(next_id, &next_draft, cx);
             });
         }
+        // The handset on the composer: what the window's own call is doing.
+        let call = composer::CallFace {
+            live: self.call.is_some(),
+            connecting: self.call.as_ref().is_some_and(|call| call.connecting),
+            ready: self.can_call(cx),
+        };
         self.composer.update(cx, |composer, cx| {
             composer.set_placeholder(&placeholder, cx);
             composer.set_commands(&commands, cx);
@@ -610,9 +620,11 @@ impl Arbos {
             composer.set_reconnect(reconnect, cx);
             composer.set_agents(&agents, current, cx);
             composer.set_model_note(&model_note, cx);
+            composer.set_controller(controller.clone(), cx);
             composer.set_switches(&switches, cx);
             composer.set_mode_skill(mode_skill.clone(), skills.clone(), cx);
             composer.set_usage(usage, cx);
+            composer.set_call(call, cx);
         });
         let fill = self
             .workspace
@@ -646,11 +658,21 @@ impl Arbos {
         let header = show_composer
             .then(|| self.chat_header(&theme, window, cx))
             .flatten();
-        // The chat fills the column. Composer stays at the foot. No empty
-        // band above or below — that is what put messages in the middle
-        // and cut the transcript short.
+        // A chat with a transcript fills the column, composer at the foot:
+        // the band above and below is what cut a conversation short (#654).
+        // A chat with nothing on screen — a fresh sub-chat, or one `clear`
+        // has just hidden — has nothing to cut, and Cursor's empty chat
+        // puts its title and the composer in the middle of the column
+        // (#629, which #654 took with the rest of the spacer).
+        let empty_chat = show_composer
+            && self.workspace.read(cx).active_session().is_some_and(|chat| {
+                chat.view_cleared() || (chat.items.is_empty() && chat.parent.is_some())
+            });
         let content = div()
-            .flex_1()
+            .when(!empty_chat, |el| el.flex_1())
+            .when(empty_chat, |el| {
+                el.h(px(0.)).flex_grow(1.).flex_basis(px(0.))
+            })
             .min_h_0()
             .flex()
             .flex_col()
@@ -708,18 +730,14 @@ impl Arbos {
                                         .children(context_row),
                                 ),
                         )
+                    })
+                    // The empty chat's other half, so the composer sits on
+                    // the column's middle line rather than at its foot.
+                    .when(empty_chat, |column| {
+                        column.child(div().flex_grow(1.).flex_basis(px(0.)))
                     }),
             )
     }
-}
-
-/// Frame rate of the voice status bars while listening or speaking.
-const VOICE_FPS: f32 = 20.0;
-
-/// A clock for the speaking wave, so every repaint advances it.
-fn voice_phase() -> Duration {
-    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    START.get_or_init(std::time::Instant::now).elapsed()
 }
 
 impl Arbos {
@@ -829,22 +847,13 @@ impl Arbos {
     }
 
     /// The line under the composer: a reconnect status when the link is
-    /// down, voice or call, and a spinner while a turn runs. Projects open
-    /// from the tabs. There is no machine pill and no git-branch chip.
-    /// Nothing here means the row itself is omitted, so an idle composer
-    /// does not keep an empty strip.
+    /// down, and Try Live. Projects open from the tabs. There is no machine
+    /// pill, no git-branch chip, no call or listening strip, and no spinner
+    /// — a row that grew when a turn started pushed the whole chat up
+    /// (Jacob, 09-18). Nothing here means the row itself is omitted, so an
+    /// idle composer does not keep an empty strip.
     fn context_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.workspace.read(cx);
-        // Cursor keeps a small ring at the row's end; ours turns while any
-        // agent of the project works — the root, or only its workers.
-        let since = workspace.active_project().and_then(|project| {
-            project
-                .sessions
-                .iter()
-                .filter(|chat| chat.busy())
-                .map(|chat| chat.elapsed().unwrap_or_else(transcript::live_phase))
-                .max()
-        });
         // A kernel that dropped, or a start still being tried: say what the
         // window is doing about it. Plain text, not a picker.
         let mut link_status: Option<String> = None;
@@ -898,12 +907,7 @@ impl Arbos {
             }
         }
         let live = self.try_live_button(theme, cx);
-        let voice_or_call = if self.call.is_some() {
-            self.call_strip(theme, cx)
-        } else {
-            self.voice_status(theme, cx)
-        };
-        if link_status.is_none() && live.is_none() && voice_or_call.is_none() && since.is_none() {
+        if link_status.is_none() && live.is_none() {
             return None;
         }
         Some(
@@ -940,216 +944,7 @@ impl Arbos {
                         .child(div().truncate().child(SharedString::from(status)))
                 }))
                 .children(live)
-                .children(voice_or_call)
                 .child(div().flex_1())
-                .children(since.map(|since| {
-                    div()
-                        .pr(px(8.))
-                        .child(transcript::spinner(since, theme.text_faint, cx))
-                }))
-                .into_any_element(),
-        )
-    }
-
-    /// The call, in the row under the composer: an orb that breathes with
-    /// the mic while the caller talks and waves while Arbos speaks, the live
-    /// words (the caller's partial line, then the narrator's last line),
-    /// Mute, End. The composer above stays usable: typed words go to the
-    /// same agent as `text`.
-    fn call_strip(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::voice_ws::Phase;
-        let call = self.call.as_ref()?;
-        let status = crate::voice_ws::status();
-        Painter::of(cx).lease(VOICE_FPS, Duration::from_millis(300), cx);
-        let t = voice_phase().as_secs_f32();
-        let reduce = cx.reduce_motion();
-        let speaking = status.phase == Some(Phase::Speaking);
-        let listening = matches!(status.phase, Some(Phase::Listening | Phase::Ready));
-        // The orb: 14 px at rest; the mic level swells it while the caller
-        // talks, a slow wave while Arbos does. Muted: hollow.
-        let swell = if reduce {
-            0.0
-        } else if speaking {
-            0.25 * (t * 5.0).sin().abs()
-        } else if listening && !status.muted {
-            (status.level * 0.6).min(0.5)
-        } else {
-            0.0
-        };
-        let size = 12.0 + 8.0 * swell;
-        let orb_color = if call.connecting {
-            theme.text_faint
-        } else if speaking {
-            theme.accent
-        } else {
-            theme.success
-        };
-        // The devices — `speaker · mic · level` — are the orb's tooltip, so
-        // a silent call is never a mystery and the strip stays one line of
-        // words. Only the mic's failure shows inline, in red.
-        let mic_error = status.mic_error.clone();
-        let mut parts: Vec<String> = Vec::new();
-        if !status.speaker_device.is_empty() {
-            parts.push(format!("speaker: {}", status.speaker_device));
-        }
-        if !status.mic_device.is_empty() {
-            parts.push(format!("mic: {}", status.mic_device));
-            parts.push(format!("level {}%", (status.level * 100.0).round() as u32));
-        }
-        let devices = parts.join(" · ");
-        let mic_line = match &mic_error {
-            Some(e) => {
-                let e: String = e.split_whitespace().collect::<Vec<_>>().join(" ");
-                let e: String = if e.chars().count() > 70 {
-                    e.chars().take(70).collect::<String>() + "…"
-                } else {
-                    e
-                };
-                format!("mic: {e}")
-            }
-            None => String::new(),
-        };
-        let orb = div()
-            .id("call-orb")
-            .flex_none()
-            .w(px(20.))
-            .h(px(20.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(!devices.is_empty(), |el| {
-                let devices = devices.clone();
-                el.tooltip(move |window, cx| Tooltip::text(devices.clone(), window, cx))
-            })
-            .child(
-                div()
-                    .size(px(size))
-                    .rounded_full()
-                    .when(!status.muted, |el| el.bg(orb_color))
-                    .when(status.muted, |el| {
-                        el.border_2().border_color(theme.text_faint)
-                    }),
-            );
-        let label = if call.connecting {
-            "Calling…".to_string()
-        } else if speaking {
-            "Arbos".to_string()
-        } else if status.muted {
-            "Muted".to_string()
-        } else {
-            "Listening".to_string()
-        };
-        // One line of live words: what the caller is saying now, else the
-        // last thing the narrator said.
-        let words = if !status.text.trim().is_empty() && !speaking {
-            format!("You · {}", status.text.trim())
-        } else if !status.reply.trim().is_empty() && speaking {
-            format!("Arbos · {}", status.reply.trim())
-        } else if !status.last_said.is_empty() {
-            format!("Arbos · {}", status.last_said)
-        } else {
-            String::new()
-        };
-        let words: String = words.split_whitespace().collect::<Vec<_>>().join(" ");
-        let words: String = if words.chars().count() > 90 {
-            words.chars().take(90).collect::<String>() + "…"
-        } else {
-            words
-        };
-        let muted = status.muted;
-        let mute = theme
-            .ghost("call-mute")
-            .flex_none()
-            .h(px(20.))
-            .px(px(6.))
-            .rounded(px(4.))
-            .items_center()
-            .gap(px(4.))
-            .text_style(TextStyle::Caption)
-            .text_color(if muted {
-                theme.danger
-            } else {
-                theme.text_muted
-            })
-            .when(muted, |el| el.bg(theme.danger.opacity(0.12)))
-            .tooltip(move |window, cx| {
-                Tooltip::with_keystroke(if muted { "Unmute" } else { "Mute" }, "⇧⌘M", window, cx)
-            })
-            .child(
-                icons::icon(if muted {
-                    icons::media::VOLUME_MUTE
-                } else {
-                    icons::media::MICROPHONE
-                })
-                .size(px(11.))
-                .text_color(if muted {
-                    theme.danger
-                } else {
-                    theme.text_muted
-                }),
-            )
-            .child(if muted { "Unmute" } else { "Mute" })
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_mute(cx)));
-        let end = theme
-            .ghost("call-end")
-            .flex_none()
-            .h(px(20.))
-            .px(px(6.))
-            .rounded(px(4.))
-            .items_center()
-            .gap(px(4.))
-            .text_style(TextStyle::Caption)
-            .text_color(theme.danger)
-            .bg(theme.danger.opacity(0.12))
-            .tooltip(|window, cx| Tooltip::with_keystroke("End call", "⇧⌘C", window, cx))
-            .child(
-                svg()
-                    .path(crate::assets::PHONE_OFF_ICON)
-                    .size(px(11.))
-                    .text_color(theme.danger),
-            )
-            .child("End")
-            .on_click(cx.listener(|this, _, _, cx| this.end_call(cx)));
-        Some(
-            div()
-                .id("composer-call-strip")
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .pl(px(8.))
-                .min_w_0()
-                .text_style(TextStyle::Caption)
-                .text_color(theme.text_muted)
-                .child(orb)
-                .child(SharedString::from(label))
-                .when(!words.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .id("call-words")
-                            .max_w(px(420.))
-                            .truncate()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(words)),
-                    )
-                })
-                .when(!mic_line.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .id("call-mic")
-                            .flex_none()
-                            .max_w(px(260.))
-                            .truncate()
-                            .text_color(if mic_error.is_some() {
-                                theme.danger
-                            } else {
-                                theme.text_faint
-                            })
-                            .child(SharedString::from(mic_line)),
-                    )
-                })
-                .child(mute)
-                .child(end)
                 .into_any_element(),
         )
     }
@@ -1310,86 +1105,6 @@ impl Arbos {
                         ),
                 )
                 .child(body),
-        )
-    }
-
-    /// "Listening" with a level meter while the mic is open, "Speaking"
-    /// with a moving wave while a reply plays, in the row under the
-    /// composer. Nothing when the speech server is idle or not set up.
-    fn voice_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        use crate::voice_ws::Phase;
-        let status = crate::voice_ws::status();
-        let (label, level) = match status.phase? {
-            Phase::Listening => ("Listening", Some(status.level)),
-            Phase::Speaking => ("Speaking", None),
-            Phase::Connecting => ("Connecting to voice…", None),
-            Phase::Ready | Phase::Off => return None,
-        };
-        Painter::of(cx).lease(VOICE_FPS, Duration::from_millis(300), cx);
-        let t = voice_phase().as_secs_f32();
-        let reduce = cx.reduce_motion();
-        // Three bars: mic loudness when listening; a slow wave when
-        // speaking (the level of a reply is not ours to know).
-        let heights: [f32; 3] = match level {
-            Some(l) => {
-                let l = l.clamp(0.05, 1.0);
-                [l * 0.7, l, l * 0.85]
-            }
-            None if reduce => [0.5, 0.8, 0.5],
-            None => [
-                0.35 + 0.35 * (t * 6.0).sin().abs(),
-                0.35 + 0.55 * (t * 6.0 + 1.0).sin().abs(),
-                0.35 + 0.35 * (t * 6.0 + 2.0).sin().abs(),
-            ],
-        };
-        let reply = (!status.reply.is_empty()).then(|| {
-            // One line: the reply is markdown with breaks; the row is a strip.
-            let mut r = status
-                .reply
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if r.chars().count() > 60 {
-                r = r.chars().take(60).collect::<String>() + "…";
-            }
-            r
-        });
-        Some(
-            div()
-                .id("composer-voice-status")
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(6.))
-                .pl(px(8.))
-                .text_style(TextStyle::Caption)
-                .text_color(theme.accent)
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_end()
-                        .gap(px(2.))
-                        .h(px(12.))
-                        .children(heights.into_iter().map(|h| {
-                            div()
-                                .w(px(3.))
-                                .h(px((12.0 * h).max(2.0)))
-                                .rounded(px(1.5))
-                                .bg(theme.accent)
-                        })),
-                )
-                .child(SharedString::from(label))
-                .when_some(reply, |row, reply| {
-                    row.child(
-                        div()
-                            .max_w(px(360.))
-                            .truncate()
-                            .text_color(theme.text_faint)
-                            .child(SharedString::from(reply)),
-                    )
-                })
-                .into_any_element(),
         )
     }
 
@@ -1889,13 +1604,12 @@ impl Arbos {
             return None;
         }
         let (working, prs) = pill_counts(project, chat);
-        // Cursor's Changes pill: the working tree's uncommitted lines, and
-        // beside it Commit & Push. Only for a local repository with changes.
+        // No Changes chip and no Commit & Push here: the diff is git's, and
+        // both read as the window doing the agent's job (Jacob, 09-18).
         let tree = (!project.is_remote())
             .then(|| workspace.changes.get(&project.path))
             .flatten()
             .cloned();
-        let changes = tree.clone().filter(|changes| !changes.is_empty());
         // A clean tree with commits the upstream lacks: Cursor's "Push".
         let ahead = tree
             .as_ref()
@@ -1910,16 +1624,9 @@ impl Arbos {
                 .take_while(|item| !matches!(item, crate::model::session::ChatItem::User(_)))
                 .any(|item| matches!(item, crate::model::session::ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text)));
         let has_agents = project.sessions.iter().any(|c| c.parent == Some(chat.id));
-        if working.is_empty()
-            && !has_agents
-            && prs.is_empty()
-            && changes.is_none()
-            && ahead.is_none()
-            && !stopped
-        {
+        if working.is_empty() && !has_agents && prs.is_empty() && ahead.is_none() && !stopped {
             return None;
         }
-        let root = project.path.clone();
         let main_id = chat.id;
         let newest_pr = prs.last().cloned();
         let pr_list = prs.join("\n");
@@ -2018,64 +1725,6 @@ impl Arbos {
                                 Some(main_id)
                             };
                             cx.notify();
-                        })),
-                    )
-                })
-                .when_some(changes, |row, changes| {
-                    let (add, del) = (changes.add(), changes.del());
-                    let root_review = root.clone();
-                    let root_commit = root.clone();
-                    let files = changes.files.len();
-                    row.child(
-                        pill(
-                            "pill-changes",
-                            icons::icon(icons::editing::GIT_BRANCH)
-                                .size(px(12.))
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element(),
-                            "Changes".to_string(),
-                        )
-                        .child(diff_marks(&theme, add, del))
-                        .tooltip(move |window, cx| {
-                            Tooltip::text(
-                                format!("{files} file{} changed and not committed. Click to review the diff", if files == 1 { "" } else { "s" }),
-                                window,
-                                cx,
-                            )
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.review_changes(&root_review, None, cx);
-                        })),
-                    )
-                    .child(
-                        pill(
-                            "pill-commit",
-                            icons::icon(icons::status::CHECK)
-                                .size(px(12.))
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element(),
-                            "Commit & Push".to_string(),
-                        )
-                        .child(
-                            icons::icon(icons::arrows::ALT_ARROW_DOWN)
-                                .size(px(9.))
-                                .flex_none()
-                                .text_color(theme.text_faint),
-                        )
-                        .tooltip(|window, cx| {
-                            Tooltip::text("Ask the agent to commit every change with a clear message and push", window, cx)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let _ = &root_commit;
-                            this.workspace.update(cx, |workspace, cx| {
-                                workspace.send(
-                                    main_id,
-                                    "Commit all current changes with a clear, conventional commit message and push the branch.".to_string(),
-                                    cx,
-                                );
-                            });
                         })),
                     )
                 })
@@ -2476,18 +2125,6 @@ impl Arbos {
                 )
                 .into_any_element(),
         )
-    }
-
-    /// Open the working tree's diff (one file, or all of it) in the column
-    /// as a code view — Cursor's Review.
-    pub(crate) fn review_changes(
-        &mut self,
-        root: &std::path::Path,
-        file: Option<&str>,
-        cx: &mut Context<Self>,
-    ) {
-        self.workspace
-            .update(cx, |workspace, cx| workspace.review_changes(root, file, cx));
     }
 
     /// The kernel behind this chat has no model key, and this window has

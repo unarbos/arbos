@@ -1463,8 +1463,19 @@ impl ChatSession {
     /// same count with thoughts / write diffs the local cache dropped.
     pub fn adopt_history(&mut self, items: Vec<ChatItem>) {
         if history_beats(&items, &self.items) {
+            // A view the person cleared stays cleared. The kernel's copy
+            // of the same conversation is longer than the window's (it
+            // keeps the thoughts and tool rows the cache drops), and a
+            // mark left at the old count then sat in the middle of it and
+            // put the hidden lines back on screen — `clear` undone by the
+            // next merge (#629's regression, Jacob 09-18).
+            let cleared = self.view_cleared();
             self.items = items;
-            self.hide_before = self.hide_before.min(self.items.len());
+            self.hide_before = if cleared {
+                self.items.len()
+            } else {
+                self.hide_before.min(self.items.len())
+            };
             self.transcript = transcript::State::default();
             self.take_title_from_first_prompt();
             self.flush();
@@ -1817,6 +1828,15 @@ impl ChatSession {
 /// A tool's title as a step: "Reading main.py", "Running python3 main.py",
 /// "Searching for foo" — the verb Cursor's status lines use, from the tool
 /// name the label starts with.
+/// The router's own step, which the window does not repeat. The kernel
+/// sends "Choosing the next step" before every routed turn; on the chat
+/// face it is the router announcing itself over and over, which is the
+/// noise Jacob asked to be rid of (09-18). Who is choosing is on the
+/// model card instead, as one quiet line that does not move.
+fn is_router_step(text: &str) -> bool {
+    text.eq_ignore_ascii_case("Choosing the next step")
+}
+
 /// The kernel's notice for a line typed again while its first copy still
 /// waits (#362): `Already queued: "run it" waits for the running step …`.
 pub fn is_already_queued(text: &str) -> bool {
@@ -3567,7 +3587,7 @@ impl ChatSession {
                         .children
                         .iter()
                         .any(|child| matches!(child.state, ChildState::Working));
-                self.status = (!text.is_empty()).then_some(text);
+                self.status = (!text.is_empty() && !is_router_step(&text)).then_some(text);
             }
             Event::Waiting(line) => {
                 // The kernel clears its waiting line the moment no worker
@@ -5047,6 +5067,62 @@ pub(crate) fn status_line(text: &str) -> Option<String> {
         .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '*' | '`' | '_'))
         .trim();
     (!step.is_empty()).then(|| step.to_string())
+}
+
+#[cfg(test)]
+mod clear_tests {
+    use super::{ChatItem, ChatSession, is_router_step};
+    use crate::model::testing::Scratch;
+    use std::time::SystemTime;
+
+    fn chat(scratch: &Scratch, items: Vec<ChatItem>) -> ChatSession {
+        ChatSession::from_kernel(
+            1,
+            crate::model::place::Place::local(scratch.path()),
+            crate::model::settings::kernel_agent(),
+            "root".into(),
+            "Sorting out the panel".into(),
+            None,
+            items,
+            SystemTime::now(),
+        )
+    }
+
+    fn said(lines: &[&str]) -> Vec<ChatItem> {
+        lines
+            .iter()
+            .map(|line| ChatItem::Agent((*line).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_cleared_view_survives_the_kernels_longer_copy() {
+        let scratch = Scratch::new("clear-adopt");
+        let mut chat = chat(&scratch, said(&["one", "two"]));
+        chat.clear_view();
+        assert!(chat.view_cleared());
+        // The kernel keeps more of the same conversation than the window
+        // cached. Before the fix the mark stayed at 2 and the hidden
+        // lines came back.
+        chat.adopt_history(said(&["one", "two", "three", "four"]));
+        assert!(chat.view_cleared(), "clear was undone by the merge");
+    }
+
+    #[test]
+    fn a_view_that_was_not_cleared_keeps_its_place() {
+        let scratch = Scratch::new("clear-untouched");
+        let mut chat = chat(&scratch, said(&["one", "two"]));
+        chat.adopt_history(said(&["one", "two", "three"]));
+        assert_eq!(chat.hide_before, 0);
+        assert!(!chat.view_cleared());
+    }
+
+    #[test]
+    fn the_routers_own_step_is_not_the_chats() {
+        assert!(is_router_step("Choosing the next step"));
+        assert!(!is_router_step("Reading main.py"));
+        assert!(!is_router_step("Saving a checkpoint of the working tree"));
+    }
 }
 
 #[cfg(test)]

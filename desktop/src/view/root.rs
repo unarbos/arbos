@@ -349,8 +349,9 @@ pub fn init(cx: &mut App) {
     crate::view::bind_field_editing(cx, RENAME_CONTEXT, false);
 }
 
-/// Resting chat window. macOS can restore a last-used frame that is
-/// smaller than `window_min_size`; clamp those so the pane is usable.
+/// The window's resting size: what an un-maximized window comes back to,
+/// and the floor a restored frame is clamped to — macOS can hand back a
+/// last-used frame smaller than `window_min_size`.
 const WINDOW_WIDTH: f32 = 1100.;
 const WINDOW_HEIGHT: f32 = 761.;
 /// The title the macOS window-restore check matches; only that check
@@ -464,6 +465,42 @@ fn force_usable_ns_frame() {
             };
             let _: () = msg_send![ns_window, setFrame: next display: YES];
         }
+    }
+}
+
+/// Fill the screen the window came up on, unless it already fills it.
+///
+/// Opening with [`WindowBounds::Maximized`] is an ask, and a window
+/// manager may drop it: an X11 one ignores the `_NET_WM_STATE` message
+/// sent before the window is mapped, and the window then stands at its
+/// resting size. Asking again once it is on screen is what makes the
+/// first launch filled on every platform. A window that is already filled
+/// — or in a fullscreen of its own — is left alone, because the ask is a
+/// toggle and would shrink it.
+fn fill_screen(window: &mut Window, cx: &App) {
+    if window.is_fullscreen() || window.is_simple_fullscreen() {
+        return;
+    }
+    let frame = window.bounds();
+    let centre = point(
+        frame.origin.x + frame.size.width / 2.,
+        frame.origin.y + frame.size.height / 2.,
+    );
+    let Some(screen) = cx
+        .displays()
+        .into_iter()
+        .map(|display| display.bounds())
+        .find(|screen| screen.contains(&centre))
+    else {
+        return;
+    };
+    // Not "the same size": a maximized window stops short of the menu
+    // bar, the dock, or a desktop panel, so a filled one is merely most
+    // of the screen.
+    let filled = f32::from(frame.size.width) >= 0.9 * f32::from(screen.size.width)
+        && f32::from(frame.size.height) >= 0.8 * f32::from(screen.size.height);
+    if !filled {
+        window.zoom_window();
     }
 }
 
@@ -583,7 +620,12 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
         .unwrap_or_else(|| Bounds::centered(None, size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), cx));
     let handle = cx.open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // Filled screen on open (Jacob, 09-18). `bounds` is what the
+            // window goes back to when it is un-maximized: the frame it
+            // was left at, else the resting size. A maximized window is
+            // never written back as that frame (see `observe_window_bounds`),
+            // so every launch starts filled.
+            window_bounds: Some(WindowBounds::Maximized(bounds)),
             // No strip of its own: the traffic lights sit in the nav, so the
             // window owes no titlebar above it.
             titlebar: Some(TitlebarOptions {
@@ -604,23 +646,20 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
         },
         |window, cx| {
             appearance::observe_window(window, cx).detach();
-            window.resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
             cx.new(|cx| Arbos::new(settings, state, window, cx))
         },
     )?;
     // macOS can apply a saved frame after the first paint — a 100×131
-    // leftover from a prior session. Push the usable size again once.
+    // leftover from a prior session. Repair that once, and fill the screen
+    // if the ask above did not take.
     let again = handle.clone();
     cx.spawn(async move |cx| {
         cx.background_executor()
             .timer(Duration::from_millis(300))
             .await;
-        let _ = again.update(cx, |_, window, _| {
-            window.resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
-            // gpui's resize can no-op against a saved AppKit frame (a
-            // 100x114 leftover has been seen after a relaunch); set the
-            // NSWindow frame directly when it is still unusable.
-            force_usable_ns_frame();
+        let _ = again.update(cx, |_, window, cx| {
+            restore_usable_bounds(window);
+            fill_screen(window, cx);
         });
     })
     .detach();
@@ -1072,6 +1111,8 @@ impl Arbos {
                     this.submit(crate::model::attachment::Prompt::from(line), cx)
                 }
                 ComposerEvent::Voice => this.toggle_voice(cx),
+                // The handset beside the mic: the same toggle ⇧⌘C is.
+                ComposerEvent::Call => this.start_call_action(&StartCall, window, cx),
                 ComposerEvent::Attach => {}
                 ComposerEvent::Step(step) => this.cycle_entry(*step, window, cx),
                 ComposerEvent::Delete => this.delete_highlighted(cx),
@@ -3242,12 +3283,14 @@ pub(crate) struct Dictation {
 }
 
 /// Put the transparent titlebar back — macOS 15.3+ clears it on a
-/// style-mask change — and keep the window a native Space so the
-/// green button and View › Enter Full Screen hide the menu bar.
+/// style-mask change — and keep the window off native Spaces, so the green
+/// button and View › Enter Full Screen fill the screen on this Space with
+/// the three traffic lights still in the content (Jacob, 09-18) and the
+/// wallpaper still behind the glass.
 ///
-/// #542 turned Full Screen Primary on. That was not enough: AppKit still
-/// painted a titled band and inset the content. Hide the title, let the
-/// view fill the window, and zero the extra safe-area inset a Space adds.
+/// The title stays hidden and the view fills the window; a window that is
+/// in a Space anyway (one AppKit restored) still gets its safe-area inset
+/// zeroed, so no band is left across the top.
 #[cfg(target_os = "macos")]
 fn keep_macos_glass(window: &Window) {
     use objc::{
@@ -3294,7 +3337,7 @@ fn keep_macos_glass(window: &Window) {
                     setStyleMask: style_mask | STYLE_MASK_FULL_SIZE_CONTENT
                 ];
             }
-            let behavior = (behavior & !FULL_SCREEN_NONE) | FULL_SCREEN_PRIMARY;
+            let behavior = (behavior & !FULL_SCREEN_PRIMARY) | FULL_SCREEN_NONE;
             let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
             if in_space || style_mask & STYLE_MASK_FULL_SCREEN != 0 {
                 let content: *mut Object = msg_send![ns_window, contentView];

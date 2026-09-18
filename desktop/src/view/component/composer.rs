@@ -2,6 +2,7 @@
 //! of app actions plus whatever the live agent advertises.
 
 use crate::{
+    kernel::Controller,
     model::{
         attachment::{Attachment, AttachmentDrafts, Prompt},
         session::{Command, Usage},
@@ -121,6 +122,9 @@ pub struct SwitchOption {
     pub vision: Option<bool>,
     /// For a model: a free endpoint, whose provider may train on prompts.
     pub free: bool,
+    /// For a model: its context window in tokens, when the host lists
+    /// one. The card's Context row shows it until a turn has counted.
+    pub context: Option<u64>,
 }
 
 /// One switchable thing the session offers: the agent's mode, or a config
@@ -152,6 +156,9 @@ pub enum ComposerEvent {
     /// (`/mode off`). The kernel does the work; this is the chip's pick.
     Mode(Option<String>),
     Voice,
+    /// The handset beside the mic: start a call to this project, or hang
+    /// up the one that is live. The window owns the call itself.
+    Call,
     Attach,
     /// No slash or model menu: the arrow keys step the sidebar.
     Step(isize),
@@ -392,6 +399,16 @@ pub enum VoiceState {
     Busy,
 }
 
+/// The call the handset draws. The window holds the call itself; this is
+/// the face of it — live, still dialing, and whether a call can be placed
+/// at all (a speech server is configured).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct CallFace {
+    pub live: bool,
+    pub connecting: bool,
+    pub ready: bool,
+}
+
 pub struct Composer {
     field: Entity<TextField>,
     /// Byte offset of the `/` being typed, or `None` when no picker is open.
@@ -428,6 +445,9 @@ pub struct Composer {
     switches: Vec<Switch>,
     /// Empty-state line when the catalog did not arrive (e.g. gateway down).
     model_note: String,
+    /// The router in front of the chat model, when one is on. Drawn on
+    /// the model card and nowhere else.
+    controller: Option<Controller>,
     /// Context spent, when the agent counts it.
     usage: Option<Usage>,
     /// Whether the agent mark's menu is up.
@@ -450,6 +470,9 @@ pub struct Composer {
     /// the markdown. The raw string goes back on send.
     chat_links: Vec<ChatChip>,
     voice: VoiceState,
+    /// The project call, as the handset beside the mic draws it. The
+    /// window owns the call; this is what it looks like.
+    call: CallFace,
     /// Partial transcript shown muted after the caret while the mic is down.
     voice_preview: String,
     /// What went wrong with the microphone or the speech server, said
@@ -542,6 +565,7 @@ impl Composer {
             agent: None,
             switches: Vec::new(),
             model_note: String::new(),
+            controller: None,
             usage: None,
             menu: false,
             cursor: Cursor::default(),
@@ -555,6 +579,7 @@ impl Composer {
             attachments: AttachmentDrafts::default(),
             chat_links: Vec::new(),
             voice: VoiceState::Idle,
+            call: CallFace::default(),
             voice_preview: String::new(),
             voice_note: None,
             dictated: false,
@@ -698,6 +723,15 @@ impl Composer {
         cx.notify();
     }
 
+    /// The router in front of the chat model, when this place has one on.
+    pub fn set_controller(&mut self, controller: Option<Controller>, cx: &mut Context<Self>) {
+        if self.controller == controller {
+            return;
+        }
+        self.controller = controller;
+        cx.notify();
+    }
+
     /// What the session can be switched between, and how much context it has
     /// spent. Both belong to a live connection, so both go empty with one.
     /// The pinned mode and the skills on offer, from the session.
@@ -757,6 +791,16 @@ impl Composer {
                 .get(self.bound)
                 .is_none_or(|tray| tray.items.is_empty() && tray.loading == 0)
             && self.chat_links.is_empty()
+    }
+
+    /// What the handset beside the mic shows, from the window that owns
+    /// the call.
+    pub fn set_call(&mut self, call: CallFace, cx: &mut Context<Self>) {
+        if self.call == call {
+            return;
+        }
+        self.call = call;
+        cx.notify();
     }
 
     pub fn is_recording(&self) -> bool {
@@ -1915,6 +1959,7 @@ impl Composer {
             .children(self.provider_chips(theme, cx))
             .child(list)
             .child(popover::divider())
+            .children(self.controller_row(theme))
             .child(self.usage_row(theme))
             .child(self.cost_row(theme));
         // `anchored_menu_above` puts 6px between the card and the 4-box.
@@ -1988,13 +2033,62 @@ impl Composer {
             .into_any_element()
     }
 
+    /// Who decides the next step, when it is not the chat model alone:
+    /// "Controller  Jev" while the router is on, and nothing at all while
+    /// it is off. It sits on the card, above the context the same model
+    /// spends, because that is the one place a person already looks to
+    /// find out what is answering — and it stays there, rather than
+    /// flashing through the chat mid-turn (Jacob, 09-18).
+    fn controller_row(&self, theme: &Theme) -> Option<AnyElement> {
+        let controller = self.controller.clone()?;
+        let tip = format!(
+            "{} picks each mechanical step ({}). The model above still writes, plans and talks.",
+            controller.name, controller.model
+        );
+        Some(
+            div()
+                .id("composer-controller")
+                .px(px(8.))
+                .py(px(6.))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(10.))
+                .text_style(TextStyle::Body)
+                .text_color(theme.text_muted)
+                .tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+                .child(div().flex_1().min_w_0().child("Controller"))
+                .child(
+                    div()
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .child(controller.name),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The window of the model the picker is on, when the host lists one.
+    fn model_window(&self) -> Option<u64> {
+        let switch = self.model_switch()?;
+        let current = switch.current.as_ref()?;
+        switch
+            .options
+            .iter()
+            .find(|option| &option.id == current)?
+            .context
+    }
+
     /// Context spent, as the menu carries it: a name, and whatever the agent
     /// has counted. The number carries the warning rather than the track,
     /// because bezel's bar paints its fill from the theme and recolouring it
     /// would mean reimplementing it.
     ///
-    /// A dash until it counts, and for an agent that never does — the two are
-    /// one state here, since nothing in ACP asks and only an update tells. Not
+    /// Before a turn has counted anything the row is the model's own
+    /// window — `200k` — which is the size the person came to read; it
+    /// used to sit at "—" through every chat that had not spent a token
+    /// yet, and for a host that never counts it never moved (Jacob,
+    /// 09-18). Only a model whose host lists no window is a dash now. Not
     /// a 0%: a session with nothing said is not empty, its prompt and its
     /// tools being in the window before you type.
     fn usage_row(&self, theme: &Theme) -> AnyElement {
@@ -2015,12 +2109,20 @@ impl Composer {
             .usage
             .and_then(|usage| Some((usage, usage.fraction()?)))
         else {
+            let size = self.model_window();
+            let tip = size.map(|size| format!("{size} tokens; none counted yet"));
             return row
+                .when_some(tip, |row, tip| {
+                    row.tooltip(move |window, cx| Tooltip::text(tip.clone(), window, cx))
+                })
                 .child(
                     div()
                         .text_style(TextStyle::Caption)
                         .text_color(theme.text_faint)
-                        .child("—"),
+                        .child(match size {
+                            Some(size) => tokens_short(size),
+                            None => "—".to_string(),
+                        }),
                 )
                 .into_any_element();
         };
@@ -2398,6 +2500,55 @@ impl Composer {
             .into_any_element()
     }
 
+    /// The handset, beside the mic: a call to this project's main agent
+    /// through the speech server. Red while a call is live, when it means
+    /// hang up; faint with a tooltip that says why when no speech server
+    /// is set up. It is here rather than in the side panel because this is
+    /// where speaking to the agent already happens (Jacob, 09-18).
+    fn call_btn(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let CallFace {
+            live,
+            connecting,
+            ready,
+        } = self.call;
+        let (path, tip, tint) = match (live, ready) {
+            (true, _) => (crate::assets::PHONE_OFF_ICON, "End call", theme.danger),
+            (false, true) => (
+                crate::assets::PHONE_ICON,
+                "Call this project",
+                theme.text_muted,
+            ),
+            (false, false) => (
+                crate::assets::PHONE_ICON,
+                "Call needs a speech server: set voice_url in config.toml",
+                theme.text_faint,
+            ),
+        };
+        div()
+            .id("composer-call")
+            .flex_none()
+            .size(px(root::COMPOSER_HIT))
+            .rounded_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .when(live, |el| el.bg(theme.danger.opacity(0.12)))
+            .when(live || ready, |el| {
+                el.cursor_pointer().hover(|el| el.bg(theme.element_hover))
+            })
+            // Dialing: the handset dims rather than spinning, so the row
+            // keeps one shape and nothing under the chat moves.
+            .when(connecting, |el| el.opacity(0.6))
+            .tooltip(move |window, cx| Tooltip::with_keystroke(tip, "⇧⌘C", window, cx))
+            .child(gpui::svg().path(path).size(px(14.)).text_color(tint))
+            .on_click(cx.listener(move |_, _, _, cx| {
+                if live || ready {
+                    cx.emit(ComposerEvent::Call);
+                }
+            }))
+            .into_any_element()
+    }
+
     /// Mic: ghost when idle, filled disc while the kernel is listening, faint
     /// while a transcript is coming back.
     fn voice_btn(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -2762,6 +2913,9 @@ impl Composer {
                                             .children(self.menu_card(&theme, window, cx))
                                             .child(self.chip(&theme, cx)),
                                     )
+                                    // The handset sits beside the mic: one
+                                    // place for talking to the agent.
+                                    .child(self.call_btn(&theme, cx))
                                     // One round button: mic while the field
                                     // is empty, send once there is text,
                                     // stop while a turn streams.
@@ -2811,6 +2965,23 @@ impl Render for Composer {
         }
         self.paint_placeholder(window, cx);
         self.body(window, cx)
+    }
+}
+
+/// A token count as a person says it: `8k`, `200k`, `1M`. Exact counts are
+/// the row's tooltip; the row itself is one glance.
+fn tokens_short(tokens: u64) -> String {
+    match tokens {
+        n if n >= 1_000_000 => {
+            let millions = n as f64 / 1_000_000.;
+            if (millions - millions.round()).abs() < 0.05 {
+                format!("{}M", millions.round() as u64)
+            } else {
+                format!("{millions:.1}M")
+            }
+        }
+        n if n >= 1_000 => format!("{}k", n / 1_000),
+        n => n.to_string(),
     }
 }
 
