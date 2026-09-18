@@ -597,8 +597,56 @@ No new score was cut. The material is the remaining unread failures from the cyc
 
 Spend $0.00.
 
-## Next (cycle 22)
+## Cycle 22 (2026-09-17/18) — the measured door: the five rules against the pre-rule kernel, 40 instances × 2, both arms
 
-1. The read pool is exhausted; every honest failure the loop holds has been read once. New reads need new rollouts. The loop's own prescription says the old regression 20 runs once per kernel base when the base moves for a reason other than these rules — the base has moved *because of* these rules, and a per-base check with the band stated first (≥ 8 of 40) would say whether the honest baseline of 24/40 on `864d6b00` has moved by 20 points on a kernel carrying all five. That is a score, so it waits for Jacob's word.
-2. To the features agent: the twin rule's one missing clause (the generated file beside its source), with astropy-14369 as the case.
-3. For the harness: an edit made through `bash sed` is invisible to the mechanism line, the coverage hook, the twin read and this loop; three of 65 here, one of ten in cycle 19. Either the kernel records file changes from `git status` after each bash call, or reads treat "no edit call" as unreadable rather than as no edit.
+**The band, stated first** ([pre-registration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-22-preregistration.md), 21:15 UTC, before the runs): on the six-run estimate a difference between two 80-rollout arms has a standard deviation near 7; the loop's band of 8 in 40 is **16 in 80**. Below 16 on the shared instances the result is *not distinguishable from no effect*, never "+n" or "−n" as a finding.
+
+**Arms.** Control: kernel `4b833de9860f` = `main` `7017eb75` (pre-#440, none of the five rules, the mechanism gate removed) plus #477's build plumbing, pushed as `cursor/swebench-c22-control-7c9c` so the sha is public. Treatment: kernel `aaf3dbe98de7` = `main` head at 21:10 UTC, all five rules in. Both built in the loop's worktree, named by sha, read-only; both runs passed `kernel-sha` and every artifact carries the identity. **Measured `--version`: control `arbos-kernel 0.2.0 4b833de9860f protocol 1`; treatment `arbos-kernel 0.2.0 aaf3dbe98de7 protocol 1`.** Same harness, one reproduction, $8 cap, network cut with the sweep, concurrency 3, interleaved in time. Set: `reg40` = regression 20b v2 plus the next 20 never-run instances in the loop's order (10 "<15 min", 10 "15 min–1 hour"). Both arms ran all 80 rollouts under their caps.
+
+| Arm | Solved / 80 | Cost | Per rollout | Capped | Egress open | Fetches | Sweep survivors |
+|---|---|---|---|---|---|---|---|
+| Control `4b833de9860f` | **56** | $55.64 | $0.70 | 0 | 0 | 0 | 0 |
+| Treatment `aaf3dbe98de7` | **53** | $50.25 | $0.63 | 0 | 0 | 0 | 0 |
+
+**Treatment − control on the 40 shared instances: −3 of 80. Not distinguishable from no effect.** Split: on the 20b half, control 24/40, treatment 22/40; on the fresh 20, control 32/40, treatment 31/40 — the fresh draw was easy (half of it "<15 min") and both arms solved 15 of those 20 instances 2/2.
+
+**What this does and does not say.** It does not say the rules do nothing: cycle 20 saw the choice they ask for made in 24 of 25 transcripts, and on the six instances that carry the patterns the treatment solved 9 of 12 against the control's 7 (astropy-13236 went 0/2 → 2/2, the stage rule's own instance; scikit-learn-14629 and matplotlib-24870 1/2 → 2/2). It says that whatever they do is smaller than 20 points on this set, and that the loop was right in cycle 16 to stop measuring anything smaller. The paired per-instance picture is mixed at the noise scale: the treatment gained on 13236, 24870, 14629, 16454, 18698 and lost on 15017, 8898, 14182, 11728, 6386, 6197, 15022, 15252, xarray-6938 — one rollout each way, the kind of flips the six repeated runs of cycle 16 produce with no change at all.
+
+**The design fault, said plainly.** The pre-registration set the band from the noise and the plausibility from cycle 18's ceiling — 41 of 79 failures addressable, 54% → 78% *if every rule worked on every failure*. That ceiling was computed on the failure corpus, not on the set being measured. On `reg40` the control already solved most of the carrying instances (11728 2/2, 14182 2/2, 24870 1/2, 14629 1/2, 6386 1/2), so the most the five rules could have gained here was about eight rollouts — half the band — before a single loss elsewhere. The door was opened on a set where the lever's ceiling was below the band; the result was foreseeable from the control arm's per-instance table, which did not exist until the run was over. The lesson joins the standing findings: **state the lever's ceiling on the measured set, not on the corpus, and if it is below the band do not run.** A cheaper design would have been the six carrying instances at `-r 6` per arm (72 rollouts, ~$60), where the ceiling is the whole set.
+
+**Two things from the per-instance table.** sympy-15017 went 2/2 → 0/2: both treatment rollouts changed the constructors (the root fix), then also edited the *existing* test files and changed indexing to keep `a[0]` raising, both citing numpy — the cycle-19 retreat again, now with the test edited too, on a kernel carrying E1. Two rollouts, noise-sized, and the third time this instance has shown the agent choosing numpy's semantics over the maintainers'. django-15022 and django-15252 each solved once in the control arm — the first clean solves of 15022 in 14 rollouts and of 15252 in 9; recorded, not explained.
+
+Spend $105.89. Soundness held on all 160 rollouts: egress 0.0, no fetch, no live survivor, both kernels proving their labels.
+
+## Cycle 23 (2026-09-18) — cycle 22's 51 failures read; "the agent decides no change is needed" becomes a pattern
+
+No new score. Material: the 24 control and 27 treatment failures of cycle 22 (`c23-fails.txt`), the first failures from a kernel carrying all five rules, on 40 instances of which 20 had never been read. Kernels: control `arbos-kernel 0.2.0 4b833de9860f protocol 1`, treatment `arbos-kernel 0.2.0 aaf3dbe98de7 protocol 1`, from the artifacts' `kernel-identity.json`.
+
+| Pattern | Rollouts | Control / treatment | Instances |
+|---|---|---|---|
+| **G** the agent decides no change is needed | **5** | 2 / 3 | django-13513 ×4 — all four rollouts, both arms, "no code change was needed: the fix described in the issue is already present (commit f36862b69c)"; django-15022 ×1 (treatment) — "concluded no code change should be made" after finding the historic patch reverted upstream |
+| **B** producer, not consumer | 12 | 5 / 7 | xarray-6938 ×3 (the agent's own root-cause line: "`IndexVariable.to_index_variable()` returns `self`" — then fixes the caller in `swap_dims`), sympy-17318 ×4 (guard at the crash site, root named), django-16877 ×4 (below), scikit-learn-14629 ×1 (control) |
+| **E2** reproduce the behaviour | 2 | 1 / 1 | pylint-6386 (`_DoNothingAction` takes no argument; verbose still off) |
+| **E1** a test encodes the bug | 2 | 0 / 2 | sympy-15017 (root fix kept, then the existing tests edited and indexing changed to keep `a[0]` raising, citing numpy) |
+| **A** the twin | 3 | 1 / 2 | matplotlib-24870 (control, `contour.py` only), django-11728 (treatment, 17 tool calls, named groups only), astropy-14182 (treatment, writer only) |
+| **F** the checkout decides the stage | 2 | 2 / 0 | astropy-13236 — the treatment had none |
+| C, the issue does not determine the fix | 24 | 13 / 11 | django-15503 ×4, django-15732 ×4, django-16454 ×3, pylint-8898 ×3, django-15252 ×3, sympy-18698 ×3, django-14771 ×2, django-15022 ×2 |
+| provider stall | 1 | 0 / 1 | pytest-6197 (treatment): the model returned nothing for 13 minutes, the kernel ended the turn (exit 2), no patch. Not the agent. Treatment is 53 of 79 without it; still inside the band. |
+
+**G is a pattern.** Two cases before this cycle (django-15022 declining on upstream history; django-10097 overriding the issue's RFC quote), five now — seven across four instances. Two shapes: *"it is already fixed"* (django-13513, four of four: the agent found the code the issue *suggested* already in the tree, ran a test that covers the suggestion, and stopped; the hidden test wants the innermost exception handled when it has no traceback, which the suggested code does not do) and *"it should not be fixed"* (15022, 10097). Both rest on the same fault as E1 and E2 — a check against the wrong reference: the issue's suggested patch instead of the issue's symptom; upstream history instead of the request in front of it. Proposed rule, for the features agent:
+
+> Concluding that the request needs no change needs the same evidence as a fix: run the request's own example against the tree and show it already behaves as asked. "The fix the issue suggests is already present" is not that evidence — the suggestion may be older than the tree and the request is the symptom, not the patch. If the example already passes, say so with the command; if it does not, the request stands whatever the history says.
+
+**The rules' marks under the rules.** In the treatment's 27 failures the old choices the rules target were still made: the producer fallback in xarray-6938 ×2 and sympy-17318 ×2, the crash-only fix in pylint-6386, the twin missed in django-11728 and astropy-14182, the retreat in sympy-15017 ×2. None of those transcripts carries a rule's reply line. Two of them show the B rule's *scope* rather than its failure: "a class lacks an attribute, or a path lacks a case, that its siblings have" does not describe a method that returns `self` where a copy is needed (6938) or a guard placed at the crash site with the root named one line above (17318). The pattern is producer-not-consumer; the rule's examples are narrower than the pattern.
+
+**A fresh instance that fails the same way in both arms, four of four:** django-16877, the new `escapeseq` filter. Every rollout implemented it with `escape()`; the gold uses `conditional_escape()`, which is what the `escape` *filter* — the sibling the issue names ("what `safeseq` is to `safe`") — uses internally. Mirroring the sibling's implementation rather than its name would have passed; the producer rule says "made the way the sibling does it" and no rollout opened the `escape` filter to see how. Classed B.
+
+**Everything fits, again.** 50 of 51 in the patterns or C; one provider stall. With cycles 18, 19 and 21: **219 honest failures read**, ranking A 44, B 40, G 7, F 14, E2 9, E1 4, C 94, other 7. G enters the ranking above E2.
+
+Spend $0.00.
+
+## Next (cycle 24)
+
+1. To the features agent: the G rule above, and the B rule's scope (a method returning `self` where a copy is needed; a guard at the crash site with the root named) — with 6938 and 17318 as the cases.
+2. No measured comparison is owed. If one is wanted: the six carrying instances at `-r 6` per arm, ceiling stated on that set first, band ≥ 8 of 36.
+3. Standing: every new failure the loop produces for any reason is read against the account before anything else is done with it.

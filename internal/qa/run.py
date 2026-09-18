@@ -1903,7 +1903,9 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     scratch = tempfile.mkdtemp(prefix=f"arbos-qa-{name}-")
     cx = Cx(binary, rec, key if meta["needs_model"] or key else None, scratch)
     rec.snapshot(cx.place, "state-before")
-    t0 = time.time()
+    # Monotonic: a paused VM inflates wall-clock durations and this machine is paused while the agent
+    # is idle (qal-j26). A scenario's reported time must be the work, not the pause.
+    t0 = time.monotonic()
     try:
         meta["fn"](cx)
     except Exception as e:  # a scenario crash is itself a finding
@@ -1931,7 +1933,7 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
         "reason": ("self: " + str(rec.notes.get("skipped"))[:120]) if (not rec.breaks and rec.notes.get("skipped")) else None,
         "breaks": rec.breaks,
         "notes": rec.notes,
-        "duration_s": round(time.time() - t0, 1),
+        "duration_s": round(time.monotonic() - t0, 1),
         "place": str(cx.place),
         "with_model": bool(cx.key),
         "kernel": binary,

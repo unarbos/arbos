@@ -88,9 +88,15 @@ class Desktop:
         return self.app.process is not None and self.app.process.poll() is None
 
     def timed(self, what, fn, limit=5.0):
-        t = time.time()
+        # `time.monotonic()`, never the wall clock: this VM is **paused** while the agent driving it is
+        # idle, and only the wall clock absorbs the pause. Measured 2026-09-18: one click reported
+        # `ui-stall: switch to panel-agent-7 took 1528.7s (limit 3.0s)` and the stall ended at the exact
+        # second the agent resumed, while the guest's own uptime advanced 3.65 h across 6.28 h of wall
+        # time. A monotonic clock stops with the machine, so it measures the work and not the pause
+        # (qal-j26).
+        t = time.monotonic()
         out = fn()
-        dt = time.time() - t
+        dt = time.monotonic() - t
         if dt > limit:
             self.rec.broke("ui-stall", f"{what} took {dt:.1f}s (limit {limit}s)", "desktop")
         return out, dt
@@ -442,9 +448,9 @@ def register(scenario, transcript, kinds, now_ms):
             lines.append(json.dumps({"ts": t + 1, "kind": "assistant", "text": f"{i} squared is {i * i}. " + "detail " * 30}))
             lines.append(json.dumps({"ts": t + 2, "kind": "turn_complete"}))
         (root / "transcript.jsonl").write_text("\n".join(lines) + "\n")
-        t0 = time.time()
+        t0 = time.monotonic()
         d = Desktop(cx)
-        cx.rec.notes["launch_s"] = round(time.time() - t0, 1)
+        cx.rec.notes["launch_s"] = round(time.monotonic() - t0, 1)
         try:
             state, dt = d.timed("first state() with a 4000-line transcript", d.app.state, limit=10.0)
             d.shot("opened")

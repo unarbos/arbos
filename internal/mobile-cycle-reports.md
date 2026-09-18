@@ -433,3 +433,98 @@ branch within the minute. #529 is back to its single commit.
 row, so it goes next. The rows that cannot move from here — AirPods, CallKit,
 the TestFlight build on Jacob's phone — are still waiting on him. TestFlight
 was written as **1657** here and corrected afterwards to the steward's **1716** (`2eae41c7`), which already carries #529.
+
+## Cycle 59 report (00:20 UTC, 09-18)
+
+**Looked at:** the style pair against the Cursor reference stills, the row
+the repaired ledger showed as genuinely oldest.
+
+**The chat was showing the model's markdown markers** (M-196). The kernel
+writes markdown and the phone parsed only the inline kind, so a heading
+arrived as `## Shapes` and a bulleted list as `- Note one`. Bold and `code`
+were fine. Numbered lists were the only kind that looked right, and only
+because `1.` reads as a number whether anything parses it or not.
+
+The parser stays as it was — the full one reflows the text and throws away
+the model's own line breaks, which is worse than a visible hyphen. Instead
+the markers that start a line become the typography they stand for before
+the inline parse, and lines inside a fence are left alone. #535.
+
+The kernel's text was identical across the before and after runs (seq 2210
+and 2214), so the difference on screen is the rendering and nothing else:
+`media/mobile/cycle-59/01-` against `02-` and `03-`.
+
+**One difference I could not close** (M-197). Cursor times every row on the
+right — `1m`, `4m`, `3m`. Arbos shows seven rows all reading `Idle`, in
+alphabetical order, indistinguishable, with nothing to say what moved
+recently. The app cannot invent it: `GET /list` carries no per-project
+timestamp, and the only time on the payload is `since` on the machine, the
+same for every project on it. Filed for the hub's owner as
+`internal/features-inbox/2026-09-18-hub-last-activity-per-project.md`.
+
+**Otherwise the two lists agree**: same top bar, same collapsible Working and
+Read sections, same row shape, same composer pill. Arbos's placeholder names
+the project where Cursor's is generic, which is the better of the two and
+deliberate.
+
+**A process fault of mine, now twice** (M-198). I committed cycle 58's fix
+onto the cycle-57 branch and cycle 59's onto the cycle-58 branch, both being
+watched by a steward. Caught inside a minute each time and moved, and both
+PRs are back at exactly the commit they were reviewed at — #529 at
+`46a53ba2`, #533 at `7dd74f4d` — but the branch a commit lands on should not
+be something I discover afterwards. Checking `git branch --show-current`
+before committing, not after pushing.
+
+**Corrected in the record:** the build on Jacob's phone is the steward's,
+and it has moved twice while this cycle ran — **1657** was wrong in two of
+my earlier reports, **1716** (`2eae41c7`, carrying #529) replaced it, and
+the steward has since written **1725** (`74b49b4c`, carrying #533). That
+number is the steward's to set and this loop's only to record.
+
+### Cycle 59, second half (00:25 UTC) — the rest of the chat pairing
+
+**Links are already right** (M-199). A markdown link and a bare URL both draw
+in the accent colour and are tappable, as Cursor's `#231` does. Checked
+rather than assumed, because neither is something this app maintains — one
+comes from `AttributedString(markdown:)` and the other from iOS's own
+detection, and either could stop working without anybody touching this code.
+
+**A long list item wraps to the margin where Cursor hangs it** (M-200), so
+after the first line the list's shape is gone. Left as it is, on purpose: a
+hanging indent costs about twenty points of width on every line of every
+item, and this is a phone. Arbos buys text per line where Cursor buys
+structure, and the item boundary still reads because `2.` starts a line.
+Recorded as a considered difference in the same class as the mic-versus-send
+-arrow one from cycle 37, not as a fault. It is also a renderer restructure
+rather than a setting — the agent bubble is one `Text` with the streaming
+caret on its baseline — which is not worth the regression risk on a
+judgement call.
+
+### Cycle 59, third pass (00:35 UTC) — the surface nobody had sampled
+
+**Settings was standing on iOS's ground, not the app's** (M-201). Sampled,
+because the difference is small enough to argue about: the sheet was
+**45.4% `#2c2c2e`** — iOS's grouped-cell grey, a colour in no part of this
+palette — against a projects list that is **92.3% `#161514`**. Nearly half of
+one screen on a colour the app never chose.
+
+The view already hid the page behind the `Form` and painted it
+`ArbosTheme.bg`; what it could not reach was the fill behind each **row**,
+and the same modifier on the `Form` does not get there either. It goes on
+each section now. Measured after: `#2c2c2e` gone, `#212121` in its place at
+the same 45.4% — the raised colour the composer and the Agents pill already
+use. #537, with `media/mobile/cycle-59/07-` and `08-`.
+
+The eye barely registers it. That is why it survived fifty-nine cycles, and
+why a pixel sample found it where five cycles of looking at stills had not.
+
+**Dark-only is deliberate on both sides** (M-202). The reference stills being
+light raised the question of what the phone does there. It forces dark with
+a fixed palette; the desktop's `palette.rs` uses `cursor_dark` with
+`t.bg = grey(0x161514)` — the same literal value as `ArbosTheme.bg` — and
+says outright that Cursor's light theme was never sampled. Checked against
+the desktop's source rather than assumed.
+
+That closes the style pair. #535 (merged) and #537 carry the two defects it
+found; everything else on the surface agrees with the reference or differs
+for a reason that is now written down.
