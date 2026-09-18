@@ -29,6 +29,13 @@ UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(n
 B=com.unarbos.arbos.ios
 CLIP=${CLIP:-$HOME/mobile-clips/pause.wav}
 [ -f "$CLIP" ] || { echo "no clip at $CLIP"; exit 1; }
+# How many separate things the clip actually asks. `pause.wav` is one
+# question with a breath in it; `acceptance.wav` is two utterances, and
+# against that a count of two transcripts is right rather than a split.
+# Without this the scenario read a correct two-utterance run as "the
+# transcript split, 3 of 3".
+SAYS=${SAYS:-1}
+echo "clip: $(basename "$CLIP") — expecting $SAYS utterance(s) and $SAYS answer(s) per run"
 
 SPLIT=0; WHOLE=0
 for i in $(seq 1 "$RUNS"); do
@@ -54,13 +61,13 @@ for i in $(seq 1 "$RUNS"); do
   fi
   # Two separate faults, and after #562 they no longer travel together: the
   # transcript can be whole while the question is still answered twice.
-  [ "$TRANSCRIPTS" -gt 1 ] && SPLIT=$((SPLIT + 1))
-  [ "$ANSWERS" -gt 1 ] && WHOLE=$((WHOLE + 1))
+  [ "$TRANSCRIPTS" -gt "$SAYS" ] && SPLIT=$((SPLIT + 1))
+  [ "$ANSWERS" -gt "$SAYS" ] && WHOLE=$((WHOLE + 1))
 done
 
 echo
-echo "runs whose transcript split:      $SPLIT of $RUNS"
-echo "runs answered more than once:     $WHOLE of $RUNS"
+echo "runs with more than $SAYS transcript(s): $SPLIT of $RUNS"
+echo "runs with more than $SAYS answer(s):    $WHOLE of $RUNS"
 if [ "$SPLIT" = 0 ] && [ "$WHOLE" = 0 ]; then
   echo "VERDICT: one breath, one transcript, one answer. M-146 does not reproduce."
 elif [ "$SPLIT" = 0 ]; then
