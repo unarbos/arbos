@@ -3761,3 +3761,40 @@ Proven by planting the probe and watching it caught, then wrongly cleared,
 then caught again.
 
 **PR:** [#695](https://github.com/unarbos/arbos/pull/695), harness only.
+
+## Cycle 133 — running the edits I had not run
+
+Between cycles 116 and 120 the reach-the-list step went into about ten
+scenarios. Four of them were never exercised afterwards, and the sweep does
+not cover those four. So this cycle ran them (M-430).
+
+Three pass: `sleeping-machine`, `photo-reaches-the-model` — "the model named
+the picture — the photo DID get through" — and `worker-while-it-works`.
+**One was broken**, and fixing it uncovered two faults in the helper itself.
+
+**`several-workers` taps its project twice.** Cycle 116 gave the first tap
+the step and not the one after "back and reopen", where the run died:
+`nothing matching 'phone' on screen`. One Back from the sheet lands on the
+chat, not the list (M-431).
+
+**Then `reach_the_list` said it had succeeded while the sheet was still
+up.** It tested for the *absence of a Back button*, and the workers sheet is
+a modal with no Back — so "no Back" read as "already on the list". It
+succeeds on *seeing* the list now (M-432). That is the third time this one
+function has had the blind-success fault, and each time the same mistake:
+testing for the absence of the wrong thing.
+
+**And then it gave up one look too early.** The loop checks, acts, sleeps —
+so the last action is never verified. It printed `cannot see the projects
+list after four tries` while the list was on screen a second later, because
+the fourth swipe had worked (M-433).
+
+With all three fixed: `4 of 4 named in the sheet, and the pill reads Agents
+47 after going back and reopening — the workers are kept`.
+
+**The check that found none of this now says what it does not cover.** It
+reads the first use in a file, so a scenario returning to the list halfway
+through can fail exactly the way it guards against. That boundary is printed
+with every pass.
+
+**PR:** [#697](https://github.com/unarbos/arbos/pull/697), harness only.

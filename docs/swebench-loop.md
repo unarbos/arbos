@@ -796,9 +796,21 @@ Fifty fresh instances across cycles 29–33, twenty-two failures, none outside t
 
 Spend $11.14.
 
-## Next (cycle 34)
+## Cycle 34 (2026-09-18) — ten more fresh instances; astropy-7606 is a fourth grader artefact
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 a8678ac16636 protocol 1`** (cycles 30–33's; `main` at 1b4ef7a9, the two engine commits since Jev-only). Jev off. Network cut, no stall, no cap. Ten never-run instances (`fresh10f.txt`) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-34-preregistration.md)). $6.58; **18 of 20** solved (a count).
+
+**Two failures, both astropy-7606, both a grader artefact.** Both rollouts wrap `UnrecognizedUnit.__eq__` in the same `try/except` its base class already uses, in 7 and 12 tool calls — the second names `UnitBase.__eq__` as "the twin implementation" in its reply, the twin rule visibly at work. The agent's patch passes the hidden test (`test_unknown_unit3`) when run directly: 1 passed. Under the task's own `tests/test.sh` the log shows **242 passed** — all 241 PASS_TO_PASS and the one FAIL_TO_PASS — and the parser prints FAILED. The gold patch, same script: 242 passed, FAILED. The swebench 4.0.3 log parser does not read this image's pytest-3 `-v` output, so no patch passes here. astropy-7606 joins requests-2317, django-10097 and requests-1766. On the eighteen gradeable rollouts: 18 of 18.
+
+A difference worth recording but not a cause: the gold returns `NotImplemented` where the agent returns `False`, and also changes `UnitBase.__eq__` the same way. The hidden test does not distinguish them.
+
+Sixty fresh instances across cycles 29–34, twenty-four failures, none outside the account; four of the sixty instances are ungradeable in this environment. Cumulative read: **309**.
+
+Spend $6.58.
+
+## Next (cycle 35)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32).
-4. For the features agent: (a) the quoted-reference mark is read as "test the example", not "test the quote" (cycle 31); (b) a generated artefact recreated by the final test run rides into the patch after the agent removed it (cycle 33).
+4. Observations recorded here, not filed anywhere (coordinator, cycle 33: leave Features alone): the quoted-reference mark is read as "test the example", not "test the quote" (cycle 31); a generated artefact recreated by the final test run rode into a patch after the agent removed it (cycle 33).
