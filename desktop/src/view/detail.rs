@@ -657,7 +657,9 @@ impl Arbos {
             .overflow_hidden()
             .children(header)
             .child(body);
-        let context_row = show_composer.then(|| self.context_row(&theme, cx));
+        let context_row = show_composer
+            .then(|| self.context_row(&theme, cx))
+            .flatten();
 
         div()
             .flex_1()
@@ -826,10 +828,12 @@ impl Arbos {
         )
     }
 
-    /// The line under the composer: the project's branch, a reconnect
-    /// status when the link is down, voice or call, and a spinner while
-    /// a turn runs. Projects open from the tabs; there is no machine pill.
-    fn context_row(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The line under the composer: a reconnect status when the link is
+    /// down, voice or call, and a spinner while a turn runs. Projects open
+    /// from the tabs. There is no machine pill and no git-branch chip.
+    /// Nothing here means the row itself is omitted, so an idle composer
+    /// does not keep an empty strip.
+    fn context_row(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.workspace.read(cx);
         // Cursor keeps a small ring at the row's end; ours turns while any
         // agent of the project works — the root, or only its workers.
@@ -841,13 +845,6 @@ impl Arbos {
                 .map(|chat| chat.elapsed().unwrap_or_else(transcript::live_phase))
                 .max()
         });
-        // The branch checked out in this project. The machine picker that
-        // used to sit here ("This Mac") is gone: projects open from the
-        // tabs at the top.
-        let branch = workspace
-            .active_project()
-            .filter(|project| !project.is_remote())
-            .and_then(|project| self.branch_of(&project.path));
         // A kernel that dropped, or a start still being tried: say what the
         // window is doing about it. Plain text, not a picker.
         let mut link_status: Option<String> = None;
@@ -900,80 +897,58 @@ impl Arbos {
                 _ => {}
             }
         }
-        div()
-            .id("composer-context")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(2.))
-            .ml(px(-root::COMPOSER_PAD_X + 2.))
-            .mr(px(-root::COMPOSER_PAD_X))
-            .h(px(24.))
-            .children(branch.map(|branch| {
-                div()
-                    .id("composer-branch")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .pl(px(8.))
-                    .pr(px(4.))
-                    .max_w(px(220.))
-                    .text_style(TextStyle::Caption)
-                    .text_color(theme.text_faint)
-                    .tooltip(|window, cx| {
-                        Tooltip::text("Branch checked out in this project", window, cx)
-                    })
-                    .child(
-                        icons::icon(icons::editing::GIT_BRANCH)
-                            .size(px(11.))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    )
-                    .child(div().truncate().child(SharedString::from(branch)))
-                    .child(
-                        icons::icon(icons::arrows::ALT_ARROW_DOWN)
-                            .size(px(9.))
-                            .flex_none()
-                            .text_color(theme.text_faint),
-                    )
-            }))
-            .children(link_status.map(|status| {
-                let fault = full_fault.clone();
-                div()
-                    .id("composer-link-status")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .pl(px(8.))
-                    .pr(px(8.))
-                    .max_w(px(if fault.is_some() { 560. } else { 320. }))
-                    .text_style(TextStyle::Caption)
-                    .text_color(theme.text_faint)
-                    .tooltip(move |window, cx| match &fault {
-                        Some(why) => Tooltip::text(
-                            format!("{why}. Send a message to try now."),
-                            window,
-                            cx,
-                        ),
-                        None => Tooltip::text("Connection status", window, cx),
-                    })
-                    .child(div().truncate().child(SharedString::from(status)))
-            }))
-            .children(self.try_live_button(theme, cx))
-            .children(if self.call.is_some() {
-                self.call_strip(theme, cx)
-            } else {
-                self.voice_status(theme, cx)
-            })
-            .child(div().flex_1())
-            .children(since.map(|since| {
-                div()
-                    .pr(px(8.))
-                    .child(transcript::spinner(since, theme.text_faint, cx))
-            }))
-            .into_any_element()
+        let live = self.try_live_button(theme, cx);
+        let voice_or_call = if self.call.is_some() {
+            self.call_strip(theme, cx)
+        } else {
+            self.voice_status(theme, cx)
+        };
+        if link_status.is_none() && live.is_none() && voice_or_call.is_none() && since.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .id("composer-context")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(2.))
+                .ml(px(-root::COMPOSER_PAD_X + 2.))
+                .mr(px(-root::COMPOSER_PAD_X))
+                .h(px(24.))
+                .children(link_status.map(|status| {
+                    let fault = full_fault.clone();
+                    div()
+                        .id("composer-link-status")
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.))
+                        .pl(px(8.))
+                        .pr(px(8.))
+                        .max_w(px(if fault.is_some() { 560. } else { 320. }))
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .tooltip(move |window, cx| match &fault {
+                            Some(why) => Tooltip::text(
+                                format!("{why}. Send a message to try now."),
+                                window,
+                                cx,
+                            ),
+                            None => Tooltip::text("Connection status", window, cx),
+                        })
+                        .child(div().truncate().child(SharedString::from(status)))
+                }))
+                .children(live)
+                .children(voice_or_call)
+                .child(div().flex_1())
+                .children(since.map(|since| {
+                    div()
+                        .pr(px(8.))
+                        .child(transcript::spinner(since, theme.text_faint, cx))
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The call, in the row under the composer: an orb that breathes with
