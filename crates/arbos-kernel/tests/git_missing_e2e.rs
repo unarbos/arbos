@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{scratch_dir, spawn_with_env};
+use common::{Attach, scratch_dir, spawn_with_env};
 use std::time::Duration;
 
 fn notices(place: &std::path::Path) -> Vec<String> {
@@ -56,6 +56,14 @@ fn a_kernel_without_git_says_so_once_and_says_when_git_is_back() {
     )
     .unwrap();
     assert_eq!(kernel_json["git_missing"], true, "{kernel_json}");
+    // The hello frame says it too, for a client that cannot read
+    // kernel.json (a phone over the hub).
+    let mut a = Attach::connect(&k.url);
+    let hello = a
+        .wait(Duration::from_secs(5), |f| f["type"] == "hello")
+        .expect("hello");
+    assert_eq!(hello["git_missing"], true, "{hello}");
+    drop(a);
     assert!(
         common::wait_for(Duration::from_secs(5), || {
             notices(&k.place)
@@ -108,5 +116,10 @@ fn a_kernel_without_git_says_so_once_and_says_when_git_is_back() {
     )
     .unwrap();
     assert!(kernel_json.get("git_missing").is_none(), "{kernel_json}");
+    let mut c = Attach::connect(&k3.url);
+    let hello = c
+        .wait(Duration::from_secs(5), |f| f["type"] == "hello")
+        .expect("hello");
+    assert!(hello.get("git_missing").is_none(), "{hello}");
     let _ = k3.child.kill();
 }
