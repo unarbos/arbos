@@ -37,7 +37,7 @@ done
 echo "asking with $(basename "$ASK"), barging with $(basename "$BARGE")"
 echo
 
-STARTED=0; DONE=0; NEITHER=0
+STARTED=0; DONE=0; NEITHER=0; NOCHANCE=0
 for i in $(seq 1 "$RUNS"); do
   LOG="$OUT/run-$i.log"
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
@@ -54,31 +54,40 @@ for i in $(seq 1 "$RUNS"); do
     STARTED=$((STARTED + 1))
     echo "run $i: it stopped talking after ${S} ms${D:+, the gateway confirmed at ${D} ms}"
     [ -n "$D" ] && DONE=$((DONE + 1))
+  elif grep -q "barge_in_skipped reply already over" "$LOG"; then
+    # The app says why, and it is worth reading before blaming it. A reply
+    # that finished before the clip fired cannot be interrupted; the first
+    # draft of this called that "barge-in did not fire" and reported 1 of 3.
+    NOCHANCE=$((NOCHANCE + 1))
+    echo "run $i: the reply was over before the clip fired — nothing to barge into"
+  elif grep -q "barge_in_not_armed clip already used" "$LOG"; then
+    NOCHANCE=$((NOCHANCE + 1))
+    echo "run $i: the barge clip was spent on an earlier reply — nothing left to fire"
   else
     NEITHER=$((NEITHER + 1))
-    # Say which of the two failures it was. A reply that never played cannot
-    # be interrupted, and calling that "barge-in is broken" is a fault filed
-    # against the wrong thing.
     if grep -q "response.done .*playing=true" "$LOG"; then
-      echo "run $i: a reply played and nothing interrupted it — barge-in did not fire"
+      echo "run $i: a reply played, the clip was armed, and nothing interrupted it"
     else
-      echo "run $i: no reply played, so there was nothing to barge into — this run says nothing"
+      echo "run $i: no reply played at all — this run says nothing"
+      NOCHANCE=$((NOCHANCE + 1)); NEITHER=$((NEITHER - 1))
     fi
   fi
 done
 
+CHANCES=$((RUNS - NOCHANCE))
 echo
-echo "runs that stopped the reply:      $STARTED of $RUNS"
-echo "runs the gateway confirmed:       $DONE of $RUNS"
-if [ "$STARTED" = "$RUNS" ]; then
+echo "runs that could barge in at all:  $CHANCES of $RUNS"
+echo "runs that stopped the reply:      $STARTED of $CHANCES"
+echo "runs the gateway confirmed:       $DONE of $CHANCES"
+if [ "$CHANCES" = 0 ]; then
+  echo "VERDICT: none — no run had a reply playing with the clip still armed,"
+  echo "         so this says nothing about barge-in either way"
+elif [ "$STARTED" = "$CHANCES" ]; then
   MS=$(grep -hoE "metric barge_in_speech_started [0-9]+" "$OUT"/run-*.log | awk '{s+=$3; n++} END {if (n) printf "%d", s/n}')
-  echo "VERDICT: speaking over it stops it, every run — ${MS} ms on average"
+  echo "VERDICT: speaking over it stops it, every run that could — ${MS} ms on average"
   echo "         (cycle 77 measured 181 ms)"
-elif [ "$STARTED" = 0 ] && [ "$NEITHER" = "$RUNS" ]; then
-  echo "VERDICT: none — no run got a reply to interrupt, so this says nothing"
-  echo "         about barge-in either way"
 else
-  echo "VERDICT: it stopped the reply in $STARTED of $RUNS — not every time, which is"
+  echo "VERDICT: it stopped the reply in $STARTED of $CHANCES — not every time, which is"
   echo "         worse than never, because the caller cannot learn what to expect"
 fi
 echo "logs in $OUT"
