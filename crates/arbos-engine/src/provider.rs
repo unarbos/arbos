@@ -642,6 +642,71 @@ impl Provider {
         result
     }
 
+    /// One JSON POST with the same key and first-byte cap as a chat call.
+    /// Jev's Decisions door uses this. It is not a chat completion.
+    pub async fn post_json(
+        &self,
+        url: String,
+        body: Value,
+        cancel: &CancellationToken,
+        mut on_waiting: impl FnMut(Duration),
+    ) -> Result<Value> {
+        let call_start = std::time::Instant::now();
+        let request = authed(http().post(&url), &self.base, &self.key)
+            .json(&body)
+            .send();
+        let mut request = std::pin::pin!(request);
+        let resp = loop {
+            let left = self.first_byte.saturating_sub(call_start.elapsed());
+            if left.is_zero() {
+                return Err(ProviderError {
+                    kind: FailKind::Silent,
+                    status: None,
+                    message: format!("no response headers for {}s", self.first_byte.as_secs()),
+                    retry_after: None,
+                    should_retry: None,
+                    visible: false,
+                    partial: String::new(),
+                }
+                .into());
+            }
+            tokio::select! {
+                r = tokio::time::timeout(left.min(HEARTBEAT), &mut request) => match r {
+                    Ok(Ok(r)) => break r,
+                    Ok(Err(e)) => {
+                        return Err(ProviderError {
+                            kind: FailKind::Transport,
+                            status: None,
+                            message: e.to_string(),
+                            retry_after: None,
+                            should_retry: None,
+                            visible: false,
+                            partial: String::new(),
+                        }
+                        .into());
+                    }
+                    Err(_) => on_waiting(call_start.elapsed()),
+                },
+                _ = cancel.cancelled() => return Err(Interrupted.into()),
+            }
+        };
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ProviderError {
+                kind: FailKind::Status,
+                status: Some(status.as_u16()),
+                message: error_message(&text),
+                retry_after: None,
+                should_retry: None,
+                visible: false,
+                partial: String::new(),
+            }
+            .into());
+        }
+        serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("decisions body: {e}"))
+    }
+
     /// The scripted answer, delivered like a streamed one (one text delta,
     /// one delta per call) and traced like one, with `replay:<file>` as
     /// the URL.

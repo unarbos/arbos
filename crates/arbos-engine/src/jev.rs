@@ -1,10 +1,11 @@
 //! Jev: a cheap structured router that picks the next mechanical move.
 //!
-//! The configured LLM still writes, plans, and talks. Jev answers one JSON
-//! object per step. `act=llm` is a valid pick and runs the chat model. Any
-//! failure — error, timeout, or junk — ends the turn. There is no
-//! chat-model fallback. Jev does not speak; a tool step it picks looks
-//! like any other.
+//! The configured LLM still writes, plans, and talks. Jev is a decisions
+//! model: one `POST /api/alpha/decisions` with `state` + typed questions.
+//! It is not a chat-completions model. `act=llm` is a valid pick and runs
+//! the chat model. Any failure — error, timeout, or junk — ends the turn.
+//! There is no chat-model fallback. Jev does not speak; a tool step it
+//! picks looks like any other.
 
 use anyhow::Result;
 use arbos_core::{Event, EventKind, Usage, Wake, text};
@@ -17,7 +18,7 @@ use crate::{
     batch::{self, BatchCfg, Msg, Outcome},
     control::TurnControl,
     evict,
-    provider::{ChatMessage, Completion, Delta, Interrupted, Provider, ProviderError},
+    provider::{Interrupted, Provider, ProviderError},
     tool::{RunCx, View},
     tools::Hooks,
 };
@@ -333,9 +334,166 @@ pub fn card_under_window(card: &str) -> bool {
     evict::estimate_tokens(card) <= WINDOW_TOKENS
 }
 
+/// OpenRouter Decisions door. `{api}/v1` → `{api}/alpha/decisions`.
+/// Chat completions is the wrong door: Jev 400s there.
+pub fn decisions_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if let Some(root) = base.strip_suffix("/v1") {
+        format!("{root}/alpha/decisions")
+    } else {
+        format!("{base}/alpha/decisions")
+    }
+}
+
+/// The official Decisions body: `model` + `state` + typed `questions`.
+/// No `messages`. That field is chat-completions and is the 400.
+pub fn decisions_body(model: &str, sit: &Situation) -> Value {
+    json!({
+        "model": model,
+        "state": situation_card(sit),
+        "questions": controller_questions(sit),
+    })
+}
+
+fn controller_questions(sit: &Situation) -> Value {
+    let mut tools = serde_json::Map::new();
+    tools.insert(
+        "none".into(),
+        json!("No mechanical tool this step; the language model writes."),
+    );
+    for name in &sit.tools {
+        if LLM_TOOLS.contains(&name.as_str()) {
+            continue;
+        }
+        if tools.len() >= 32 {
+            break;
+        }
+        tools.insert(name.clone(), json!(format!("Run the {name} tool.")));
+    }
+    json!({
+        "act": {
+            "type": "choice",
+            "instructions": "What should the kernel do next? tool = run one listed tool. llm = invoke the language model to write, plan, or talk. done = the turn is finished.",
+            "criteria": {
+                "tool": "A mechanical read, list, grep, test, or status step.",
+                "llm": "Needs language: write, plan, talk, or a step you cannot parse.",
+                "done": "The turn is finished."
+            }
+        },
+        "tool": {
+            "type": "choice",
+            "instructions": "If act is tool, which tool? none if act is llm or done.",
+            "criteria": Value::Object(tools)
+        },
+        "model": {
+            "type": "choice",
+            "instructions": "If the language model runs, which one?",
+            "criteria": {
+                "fast": "Cheap and short.",
+                "powerful": "Hard coding.",
+                "default": "The configured chat model."
+            }
+        },
+        "need_llm": {
+            "type": "noul",
+            "instructions": "Does this step need the language model regardless of act?",
+            "criteria": {
+                "true": "Language, planning, or a step no tool can finish.",
+                "false": "A listed tool is enough."
+            }
+        },
+        "no_change": {
+            "type": "noul",
+            "instructions": "Is the tree already what the request asks?",
+            "criteria": {
+                "true": "A recorded repro now passes and the tree matches.",
+                "false": "Work remains."
+            }
+        },
+        "compact": {
+            "type": "noul",
+            "instructions": "Should the kernel compact context after this step?",
+            "criteria": { "true": "Yes, compact.", "false": "No." }
+        },
+        "fold": {
+            "type": "noul",
+            "instructions": "Should the kernel fold old tool results after this step?",
+            "criteria": { "true": "Yes, fold.", "false": "No." }
+        }
+    })
+}
+
+/// Read a Decisions `answers` map into the same Decision the turn already
+/// routes. Missing `act` is junk. `need_llm` ≥ 0.5 is `act=llm`.
+pub fn parse_answers(value: &Value) -> Result<Decision, AskError> {
+    let answers = value
+        .get("answers")
+        .and_then(Value::as_object)
+        .ok_or_else(|| AskError::Junk("decisions reply has no answers".into()))?;
+    let need_llm = noul_of(answers.get("need_llm")).unwrap_or(0.0) >= 0.5;
+    let act_raw = choice_of(answers.get("act")).unwrap_or("");
+    let act = if need_llm {
+        Act::Llm
+    } else {
+        match act_raw {
+            "tool" => Act::Tool,
+            "llm" => Act::Llm,
+            "done" => Act::Done,
+            other => {
+                return Err(AskError::Junk(format!(
+                    "unknown act {other:?}; want tool, llm, or done"
+                )));
+            }
+        }
+    };
+    let tool = choice_of(answers.get("tool"))
+        .filter(|s| !s.is_empty() && *s != "none")
+        .map(str::to_string);
+    Ok(Decision {
+        act,
+        tool,
+        args: json!({}),
+        why: String::new(),
+        compact: noul_flag(answers.get("compact")),
+        fold: noul_flag(answers.get("fold")),
+        no_change: noul_of(answers.get("no_change")).unwrap_or(0.0) >= 0.5,
+        model: choice_of(answers.get("model"))
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        keep: Vec::new(),
+        pointers: Vec::new(),
+    })
+}
+
+fn choice_of(v: Option<&Value>) -> Option<&str> {
+    v.and_then(|a| a.get("choice")).and_then(Value::as_str)
+}
+
+fn noul_of(v: Option<&Value>) -> Option<f64> {
+    v.and_then(|a| a.get("noul")).and_then(Value::as_f64)
+}
+
+fn noul_flag(v: Option<&Value>) -> Option<bool> {
+    noul_of(v).map(|p| p >= 0.5)
+}
+
+fn usage_from_decisions(value: &Value) -> Option<Usage> {
+    let u = value.get("usage")?;
+    let used = u
+        .get("input_tokens")
+        .or_else(|| u.get("prompt_tokens"))
+        .and_then(Value::as_u64)?;
+    Some(Usage {
+        used,
+        size: WINDOW_TOKENS,
+        cost: u.get("cost").and_then(Value::as_f64),
+        cached: None,
+    })
+}
+
 /// Ask Jev for one decision. The caller ends the turn on Failed or Junk.
 /// Interrupted is barge-in. The slug without `~` is remapped so a saved
-/// old default does not 400.
+/// old default does not 400. The call is Decisions, not chat completions.
 pub async fn ask(
     src: &Provider,
     model: &str,
@@ -346,7 +504,6 @@ pub async fn ask(
     // A step a person reads under the shimmer — not the router's name
     // (the desktop showed "Working jev" on every ordinary turn).
     hooks.kernel_step("Choosing the next step");
-    let card = situation_card(sit);
     let model = arbos_core::host::normalize_jev_slug(model);
     let model = if model.is_empty() {
         DEFAULT_MODEL
@@ -369,18 +526,13 @@ pub async fn ask(
         trace_line: src.trace_line,
         replay: None,
     };
-    let messages = [
-        ChatMessage::plain("system", Some(SYSTEM.into())),
-        ChatMessage::plain("user", Some(card)),
-    ];
-    let streamed = jev
-        .complete_stream(&messages, &[], cancel, |delta| match delta {
-            Delta::Waiting(for_) => hooks.working(for_.as_secs()),
-            Delta::Text(_) | Delta::Thinking(_) | Delta::Call(_) => {}
-        })
+    let url = decisions_url(&jev.base);
+    let body = decisions_body(model, sit);
+    let replied = jev
+        .post_json(url, body, cancel, |for_| hooks.working(for_.as_secs()))
         .await;
-    let done = match streamed {
-        Ok(c) => c,
+    let value = match replied {
+        Ok(v) => v,
         Err(e) if e.is::<Interrupted>() => return Err(AskError::Interrupted),
         Err(e) => {
             let why = e
@@ -390,8 +542,8 @@ pub async fn ask(
             return Err(AskError::Failed(why));
         }
     };
-    let decision = parse_decision(&done.content)?;
-    Ok((decision, usage_of(&done, WINDOW_TOKENS)))
+    let decision = parse_answers(&value)?;
+    Ok((decision, usage_from_decisions(&value)))
 }
 
 /// Run one Jev-chosen tool through the same batch path a model step uses.
@@ -427,20 +579,6 @@ pub async fn run_tool(
         .map_err(|e| anyhow::anyhow!("jev tool batch: {e}"))?;
     Ok((vec![call], outcomes))
 }
-
-const SYSTEM: &str = r#"You are the controller. Reply with one JSON object only:
-{"act":"tool"|"llm"|"done","tool":"grep","args":{},"why":"short","model":"fast"|"powerful"|"default","keep":["tldr","working"],"pointers":["ask"]}
-
-act=tool — run that tool this step. Use for read, grep, find, ls, bash (tests, git status), jobs, await, fetch, search, changes, spawn (short title in args), status, agents, transcript. Not for say, ask, or writing prose the user will read.
-act=llm — invoke the language model to write, plan, talk, or do a step you cannot parse. Set model to fast (cheap, short), powerful (hard coding), or default.
-act=done — the turn is finished.
-
-keep — slice ids that stay as text in the standing brief. pointers — ids that become addresses only.
-On a new open-ended ask (plan, design, what should we do) with no tools yet this turn, act=llm.
-If you cannot parse the situation, refuse, or need language, act=llm (or set need_llm:true).
-After a recorded repro:true run that now passes and the tree already matches the request, act=done and "no_change":true.
-Optional yes/no only: "compact":true or "fold":true.
-Never send secrets or file bodies. Never speak to the user."#;
 
 fn extract_json(text: &str) -> Option<Value> {
     let trimmed = text.trim();
@@ -578,15 +716,6 @@ fn fit_window(card: String) -> String {
 
 fn clip_chars(s: &str, n: usize) -> String {
     text::clip(s, n)
-}
-
-fn usage_of(done: &Completion, window: u64) -> Option<Usage> {
-    done.usage.map(|(used, _)| Usage {
-        used,
-        size: window,
-        cost: done.cost,
-        cached: done.cached,
-    })
 }
 
 #[cfg(test)]
@@ -752,6 +881,68 @@ mod tests {
             FIRST_BYTE < Duration::from_secs(3),
             "a 15s cap leaves Choosing the next step on the window"
         );
+    }
+
+    #[test]
+    fn decisions_url_is_the_official_door() {
+        assert_eq!(
+            decisions_url("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai/api/alpha/decisions"
+        );
+        assert!(!decisions_url("https://openrouter.ai/api/v1").contains("chat/completions"));
+    }
+
+    #[test]
+    fn decisions_body_is_state_and_questions() {
+        let sit = Situation {
+            last_user: "what files are in this folder?".into(),
+            tools: vec!["ls".into(), "grep".into(), "say".into()],
+            first_step: true,
+            ..Situation::default()
+        };
+        let body = decisions_body("~typesafe/jev-latest", &sit);
+        assert_eq!(body["model"], "~typesafe/jev-latest");
+        assert!(body.get("messages").is_none(), "{body}");
+        assert!(
+            body["state"]
+                .as_str()
+                .unwrap_or("")
+                .contains("what files are in this folder?"),
+            "{body}"
+        );
+        assert_eq!(body["questions"]["act"]["type"], "choice");
+        assert!(body["questions"]["tool"]["criteria"].get("ls").is_some());
+        assert!(
+            body["questions"]["tool"]["criteria"].get("say").is_none(),
+            "say is an LLM tool"
+        );
+    }
+
+    #[test]
+    fn parse_answers_reads_choice_and_noul() {
+        let v = json!({
+            "answers": {
+                "act": {"type": "choice", "choice": "tool"},
+                "tool": {"type": "choice", "choice": "ls"},
+                "model": {"type": "choice", "choice": "fast"},
+                "need_llm": {"type": "noul", "noul": 0.1},
+                "no_change": {"type": "noul", "noul": 0.0}
+            }
+        });
+        let d = parse_answers(&v).unwrap();
+        assert_eq!(d.act, Act::Tool);
+        assert_eq!(d.tool.as_deref(), Some("ls"));
+        assert_eq!(d.model.as_deref(), Some("fast"));
+        assert!(!d.no_change);
+
+        let llm = parse_answers(&json!({
+            "answers": {
+                "act": {"type": "choice", "choice": "tool"},
+                "need_llm": {"type": "noul", "noul": 0.9}
+            }
+        }))
+        .unwrap();
+        assert_eq!(llm.act, Act::Llm);
     }
 
     #[test]
