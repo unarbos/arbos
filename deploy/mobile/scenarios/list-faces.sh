@@ -9,16 +9,21 @@
 # colour its folder is. So this reads pixels, which is the one thing in this
 # harness that has to.
 #
-# `ProjectIdentity.defaults` picks a colour from the project's name:
-# FNV-1a over the name's UTF-8, modulo an eight-colour palette. The same
-# project therefore wears the same face on every device, which is the point
-# of it — the desktop hashes the same way. That rule can be computed here
-# and held against what is on screen.
+# `ProjectIdentity.defaults` picks a colour by FNV-1a over a key, modulo an
+# eight-colour palette, so the same project wears the same face on every
+# device — the desktop hashes the same way.
 #
-# A project whose roster entry carries an explicit colour overrides the
-# default, so a row that does not match the rule is not a fault. It is a
-# face somebody chose, and this says which is which rather than counting
-# the second kind against the first.
+# The first draft of this computed that rule here and reported **0 of 8**
+# matching, which would have read as every project wearing a chosen face.
+# It was the check that was wrong: the key is the *target* —
+# `hub:<machine>/<project>` — and the list shows a machine for almost no
+# row, so the key cannot be built from what is on screen. Zero of eight
+# should have been the giveaway; with eight colours, chance alone gives
+# about one.
+#
+# So the rule is not checked here. What is checked is what the screen can
+# answer: the face holds across two cold launches, and how many distinct
+# faces the list is wearing.
 #
 # Reading pixels is what `find_row.py` did when it identified rows by glyph
 # colour and opened the wrong project twice (M-...; cycle 49). The
@@ -106,43 +111,40 @@ common = [n for n, _ in first if n in dict(second)]
 print(f"rows read: {len(first)} then {len(second)}, {len(common)} in both")
 print()
 
-moved, default, chosen, faint = [], 0, [], 0
+moved, faint = [], 0
 seen = {}
 for name in common:
-    y1 = dict(first)[name]; y2 = dict(second)[name]
-    rgb1, s1 = face("first", y1)
-    rgb2, _ = face("second", y2)
-    got, want = nearest(rgb1), expected(name)
-    if s1 < 30:
+    rgb1, s1 = face("first", dict(first)[name])
+    rgb2, s2 = face("second", dict(second)[name])
+    if s1 < 30 or s2 < 30:
         faint += 1
         print(f"  {name:34} too faint to read a colour at the glyph")
         continue
-    same = nearest(rgb1) == nearest(rgb2)
-    if not same:
-        moved.append(name)
-    if got == want:
-        default += 1
-    else:
-        chosen.append(f"{name} wears {got}, the name gives {want}")
-    seen.setdefault(got, []).append(name)
-    print(f"  {name:34} {got:7} {'=' if got == want else '≠'} name-derived {want:7} {'same both launches' if same else 'CHANGED BETWEEN LAUNCHES'}")
+    a, b = nearest(rgb1), nearest(rgb2)
+    if a != b:
+        moved.append(f"{name}: {a} then {b}")
+    seen.setdefault(a, []).append(name)
+    print(f"  {name:34} {a:7} {'held' if a == b else 'CHANGED to ' + b}")
 
 print()
-print(f"faces matching the name-derived rule: {default} of {len(common) - faint}")
-print(f"faces differing (a chosen face, not a fault): {len(chosen)}")
-for c in chosen:
-    print(f"    {c}")
-print(f"distinct colours in use: {len(seen)} of 8 — {', '.join(sorted(seen))}")
-if faint:
-    print(f"unreadable: {faint}")
+shared = {c: ns for c, ns in seen.items() if len(ns) > 1}
+print(f"distinct faces: {len(seen)} across {len(common) - faint} rows"
+      f" — {', '.join(sorted(seen))}")
+for c, ns in sorted(shared.items()):
+    print(f"  {c} is worn by {len(ns)}: {', '.join(ns)}")
+print("the name-derived rule is not checked here: it hashes the target"
+      " (hub:<machine>/<project>),")
+print("and the list shows a machine for almost no row, so the key cannot be"
+      " built from the screen.")
 print()
-if moved:
-    print(f"VERDICT: {len(moved)} face(s) changed between two cold launches — {', '.join(moved)}.")
-    print("         A face is derived from the name and must not move.")
-elif not common:
-    print("VERDICT: none — no project appeared in both launches, so nothing was compared")
+if faint == len(common):
+    print("VERDICT: none — no glyph was readable, so nothing was compared")
+elif moved:
+    print(f"VERDICT: {len(moved)} face(s) changed between two cold launches — "
+          + "; ".join(moved) + ".")
+    print("         A face is derived, not stored, and must not move.")
 else:
-    print(f"VERDICT: every face held across two cold launches, and {default} of")
-    print(f"         {len(common) - faint} are the colour the project's own name gives")
+    print(f"VERDICT: every face held across two cold launches"
+          f" ({len(common) - faint} rows, {len(seen)} distinct colours)")
 PY
 echo "stills in $OUT"
