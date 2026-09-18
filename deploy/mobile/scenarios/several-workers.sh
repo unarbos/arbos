@@ -57,14 +57,9 @@ sleep 2; shot 03-workers-sheet
 # said 22 — the fault M-287 withdrew a finding over. That fix went into the
 # two scenarios written the same hour and not into this one, which had it
 # already.
-SHEET=$OUT/sheet-rows.txt; : > "$SHEET"
-for _ in 1 2 3 4 5 6 7 8; do
-  ui dump | grep -E ', (Done|Working)$' >> "$SHEET"
-  page_up "$UDID" >/dev/null 2>&1
-  sleep 1.2
-done
-awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$SHEET" | sort -u > "$SHEET.names"
-echo "  rows in the sheet, paged to the end: $(wc -l < "$SHEET.names" | tr -d ' ')"
+SHEET=$OUT/sheet-rows.txt
+HOW=$(collect_rows "$UDID" ', (Done|Working)$' "$SHEET")
+echo "  rows in the sheet: $(wc -l < "$SHEET" | tr -d ' ')  (paging $HOW)"
 ui dump | grep -E ', (Done|Working)$' | head -8 | sed 's/^/    /'
 
 echo

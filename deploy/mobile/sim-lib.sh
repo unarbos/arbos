@@ -47,3 +47,33 @@ page_up() {
   local to=$(( SIM_PT_H * 40 / 100 ))     # 341
   idb ui swipe "$(( SIM_PT_W / 2 ))" "$from" "$(( SIM_PT_W / 2 ))" "$to" --duration 0.5 --udid "$1"
 }
+
+# collect_rows <udid> <grep-pattern> <outfile> [ui-script]
+#
+# Page a scrolling list to its end and write the distinct row labels found.
+# Stops when two pages in a row add nothing, and says whether it stopped
+# because it converged or because it hit the ceiling — which is the whole
+# point. A fixed number of pages is an assumption about how long the list
+# is, and cycle 86 counted 17 rows of a list of 25 that way, which is the
+# same shape of error as not scrolling at all (M-287).
+collect_rows() {
+  local udid=$1 pattern=$2 out=$3 ui=${4:-python3 "$(dirname "${BASH_SOURCE[0]}")/ui.py"}
+  local raw="$out.raw" before after still=0 page
+  : > "$raw"
+  for page in $(seq 1 20); do
+    $ui "$udid" dump | grep -E "$pattern" >> "$raw"
+    before=$(awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$raw" | sort -u | wc -l)
+    page_up "$udid" >/dev/null 2>&1
+    sleep 1.2
+    $ui "$udid" dump | grep -E "$pattern" >> "$raw"
+    after=$(awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$raw" | sort -u | wc -l)
+    if [ "$after" -eq "$before" ]; then
+      still=$(( still + 1 ))
+      [ "$still" -ge 2 ] && { awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$raw" | sort -u > "$out"; echo converged; return 0; }
+    else
+      still=0
+    fi
+  done
+  awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$raw" | sort -u > "$out"
+  echo "hit the 20-page ceiling"
+}
