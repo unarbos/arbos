@@ -13,7 +13,7 @@ use crate::{
     view::{
         component::{composer, composer::SessionDrag, surface as board, transcript},
         naming::Renaming,
-        root::{self, Arbos, NewSession, Pane},
+        root::{self, Arbos, NewSession, Pane, ShowProject},
     },
 };
 use bezel::{
@@ -640,8 +640,8 @@ impl Arbos {
         let body = match showing {
             None => self.launch(cx),
             Some(Pane::Chat) => self.conversation(window, cx),
-            Some(Pane::Surface) => self.surface_pane(window, cx),
-            Some(Pane::Project) => self.project_view(window, cx),
+            // Surfaces and the Project page stay in the right panel.
+            Some(Pane::Surface) | Some(Pane::Project) => self.conversation(window, cx),
         };
 
         let header = show_composer.then(|| self.chat_header(&theme, window, cx));
@@ -733,10 +733,9 @@ fn voice_phase() -> Duration {
 
 impl Arbos {
     /// Cursor's chat header: the chat's place in the tree on the left — its
-    /// parents as crumbs, then its title — and the panel toggle on the
-    /// right, on one slim line the transcript scrolls under. Chat actions
-    /// stay on a right-click of the agent row; the header no longer
-    /// carries a three-dot.
+    /// parents as crumbs, then its title — on one slim line the transcript
+    /// scrolls under. The panel toggle sits on the window tab strip. Chat
+    /// actions stay on a right-click of the agent row.
     fn chat_header(
         &self,
         theme: &Theme,
@@ -857,7 +856,6 @@ impl Arbos {
                         this.hide_chat_view(id, cx);
                     }))
             }))
-            .child(self.panel_toggle(cx))
             .into_any_element()
     }
 
@@ -1719,6 +1717,7 @@ impl Arbos {
         }
     }
 
+    #[allow(dead_code)]
     fn surface_pane(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
@@ -2529,7 +2528,9 @@ impl Arbos {
                         .text_style(TextStyle::Callout)
                         .text_color(theme.accent)
                         .child("View Project Page")
-                        .on_click(cx.listener(|this, _, _, cx| this.show_pane(Pane::Project, cx))),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.show_project(&ShowProject, window, cx)
+                        })),
                 )
                 .into_any_element(),
         )

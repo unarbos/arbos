@@ -18,11 +18,12 @@ use crate::{
             menu::{self, Menu},
             transcript,
         },
+        panel::PANEL_MIN_WINDOW,
         root::{self, Arbos, Front, NewTab},
     },
 };
 use bezel::{
-    gpui::{AnyElement, ClickEvent, Hsla, SharedString, div, prelude::*, px},
+    gpui::{AnyElement, ClickEvent, Hsla, SharedString, Window, div, prelude::*, px},
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, menu::Item, popover, tooltip::Tooltip, widgets::Buttons},
 };
@@ -60,12 +61,17 @@ struct Tab {
 }
 
 impl Arbos {
-    /// The strip: tabs from the left, `+` after the last, and the rest of
-    /// the width free for the window to be dragged by.
-    pub(crate) fn tab_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The strip: project tabs from the left, `+` after the last, then the
+    /// right panel's own tabs and its toggle — one row, not a second band
+    /// under the window tabs.
+    pub(crate) fn tab_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
         let active = workspace.active;
+        let panel_shown = self.front() == Front::Project
+            && workspace.panel().is_some_and(|panel| panel.open)
+            && f32::from(window.viewport_size().width) >= PANEL_MIN_WINDOW;
+        let show_toggle = self.front() == Front::Project && workspace.active_project().is_some();
         let tabs: Vec<Tab> = workspace
             .projects
             .iter()
@@ -116,7 +122,7 @@ impl Arbos {
             .flex()
             .flex_row()
             .items_center()
-            .pl(px(root::TOOLBAR_INSET))
+            .pl(px(root::toolbar_inset(window)))
             .pr(px(root::HEADER_INSET))
             .gap(px(4.))
             .children(tabs.into_iter().map(|tab| {
@@ -143,6 +149,8 @@ impl Arbos {
                     })),
             )
             .child(div().flex_1().h_full())
+            .children(panel_shown.then(|| self.panel_tab_pills(window, cx)))
+            .children(show_toggle.then(|| self.panel_toggle(cx)))
             .into_any_element()
     }
 

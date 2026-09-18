@@ -15,7 +15,7 @@ use crate::{
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{Arbos, NewSession, Pane, SearchChats, ShowProject, TogglePanel},
+        root::{Arbos, SearchChats, TogglePanel},
     },
 };
 use bezel::{
@@ -419,12 +419,10 @@ impl Arbos {
                 )
                 .children(store_rows(&store.resources, &theme));
         }
-        // Cursor's Project tab, in the panel's measure: the header opens
-        // the page in the column; under it the status page, then the
-        // store's files — the context document first.
-        let on_page = self.showing(cx) == Some(Pane::Project);
+        // The project page stays in this panel. A click must not put it
+        // over the chat (#629).
         body = body
-            .child(self.project_head(on_page, &theme, cx))
+            .child(section_head("Project", None, &theme))
             .child(self.project_page(store.page.as_ref(), remote, PageScale::Panel, &theme, cx))
             .children(self.files_rows(&store.files, &theme, cx));
         if !standing.is_empty() {
@@ -813,54 +811,14 @@ impl Arbos {
         });
     }
 
-    /// The context document (`docs/project-context.md`): goals,
-    /// constraints, decisions. A click opens it in the column.
-    /// The Project section's head: a click puts the whole page in the
-    /// column, and a chevron says so. Lit while the page is showing.
-    fn project_head(&self, on_page: bool, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("panel-project-head")
-            .flex_none()
-            .h(px(22.))
-            .mt(px(SECTION_GAP))
-            .px(px(8.))
-            .rounded(px(5.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .cursor_pointer()
-            .text_style(TextStyle::Caption)
-            .text_color(if on_page {
-                theme.text
-            } else {
-                theme.text_faint
-            })
-            .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
-            .tooltip(|window, cx| {
-                Tooltip::with_keystroke("Open the project page", "⌘2", window, cx)
-            })
-            .child("Project")
-            .child(div().flex_1())
-            .child(
-                icons::icon(icons::arrows::ALT_ARROW_RIGHT)
-                    .size(px(12.))
-                    .text_color(theme.text_faint),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.show_project(&ShowProject, window, cx);
-            }))
-            .into_any_element()
-    }
-
-    /// The store's files under the page, a few at a time: the context
-    /// document first, then the newest. "N more" opens the page.
+    /// The store's files under the page: the context document first, then
+    /// the rest. They stay in this panel.
     fn files_rows(
         &self,
         files: &[StoreFile],
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
-        const SHOWN: usize = 6;
         if files.is_empty() {
             return Vec::new();
         }
@@ -868,33 +826,14 @@ impl Arbos {
         rows.extend(
             files
                 .iter()
-                .take(SHOWN)
                 .enumerate()
                 .map(|(n, file)| self.file_row(("panel-file", n as u64), file, theme, cx)),
         );
-        let more = files.len().saturating_sub(SHOWN);
-        if more > 0 {
-            rows.push(
-                div()
-                    .id("panel-files-more")
-                    .pl(px(8. + 12. + 8.))
-                    .py(px(3.))
-                    .text_style(TextStyle::Caption)
-                    .text_color(theme.text_faint)
-                    .cursor_pointer()
-                    .hover(|el| el.text_color(theme.text))
-                    .child(SharedString::from(format!("{more} more…")))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.show_project(&ShowProject, window, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
         rows
     }
 
     /// One file: its kind's glyph, its name, and how long ago it changed,
-    /// dim at the right. A click opens it in the column.
+    /// dim at the right. A click opens it as a tab of this panel.
     pub(crate) fn file_row(
         &self,
         id: (&'static str, u64),
@@ -1174,7 +1113,8 @@ impl Arbos {
         });
     }
 
-    /// The bottom strip: settings on the left, a sub-chat on the right.
+    /// The bottom strip: search only. The `+` that opened a sub-chat is
+    /// gone; ⌘N still does that.
     pub(crate) fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         // No gear here: the bar under the window carries it, bottom-left,
         // where Cursor's sidebar foot keeps its one (cycle 26, panel beside
@@ -1186,7 +1126,6 @@ impl Arbos {
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
             .child(
                 theme
                     .ghost("search-chats")
@@ -1202,26 +1141,11 @@ impl Arbos {
                         this.search_chats(&SearchChats, window, cx)
                     })),
             )
-            .child(
-                theme
-                    .ghost("new-subchat")
-                    .px(px(8.))
-                    .py(px(6.))
-                    .tooltip(|window, cx| Tooltip::with_keystroke("New sub-chat", "⌘N", window, cx))
-                    .child(
-                        icons::icon(icons::system::PLUS)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.new_session_action(&NewSession, window, cx)
-                    })),
-            )
             .into_any_element()
     }
 
-    /// The control that hides the panel and brings it back, for the chat
-    /// header's right edge.
+    /// The control that hides the panel and brings it back, on the window
+    /// tab strip's right edge.
     pub(crate) fn panel_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let open = self

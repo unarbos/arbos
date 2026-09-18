@@ -6,11 +6,12 @@
 //! tab in here, beside the permanent first tab that is the project's
 //! `.arbos/` view ([`crate::view::panel`]).
 //!
-//! Two rows of tabs are now on screen, and one pair of chords drives both:
-//! `⌘T`, `⌘⇧{` and `⌘⇧}` act on whichever row has the focus. So the row with
-//! the focus says so plainly — its tab in front is filled and lit, the other
-//! row's is flat — and [`crate::view::root::Arbos::panel_focused`] is what
-//! decides, not a guess about where the mouse last was.
+//! The panel's tabs sit on the window's own tab strip, not a second band
+//! under it. `⌘T`, `⌘⇧{` and `⌘⇧}` act on whichever row has the focus. The
+//! row with the focus says so plainly — its tab in front is filled and
+//! lit, the other row's is flat — and
+//! [`crate::view::root::Arbos::panel_focused`] is what decides, not a
+//! guess about where the mouse last was.
 
 use crate::{
     model::{
@@ -20,7 +21,7 @@ use crate::{
     view::{
         component::{menu, menu::Menu, surface as board},
         panel::{PANEL_MIN_WINDOW, PANEL_WIDTH},
-        root::{self, Arbos, TogglePanel, ZoomPanel},
+        root::{self, Arbos},
     },
 };
 use bezel::{
@@ -43,12 +44,12 @@ use bezel::{
 struct PanelSplit;
 
 /// The tab row's pills, measured off Cursor's side panel
-/// (`internal/cursor-side-panel-measured.md`): a 26 px pill in a 40 px row,
-/// radius 6, icon then a 6 px gap then the label, and no minimum width — a
-/// panel tab hugs its label rather than sitting in an equal cell the way the
-/// window's project tabs do.
-const TAB_ROW_HEIGHT: f32 = 40.;
-const TAB_HEIGHT: f32 = 26.;
+/// (`internal/cursor-side-panel-measured.md`): a 26 px pill, radius 6,
+/// icon then a 6 px gap then the label, and no minimum width — a panel tab
+/// hugs its label rather than sitting in an equal cell the way the window's
+/// project tabs do. They sit on the window's own tab strip now, so the
+/// height matches that row (24) rather than a second 40 px band.
+const TAB_HEIGHT: f32 = 24.;
 const TAB_RADIUS: f32 = 6.;
 const TAB_MAX_WIDTH: f32 = 180.;
 
@@ -153,69 +154,38 @@ impl Arbos {
                     }),
                 )
                 .child(self.panel_split(&theme, cx))
-                .child(self.panel_tab_row(&tabs, active, window, cx))
                 .children(body)
                 .children(on_project.then(|| self.panel_foot(&theme, cx)))
                 .into_any_element(),
         )
     }
 
-    /// The drawer's own tab row: the tabs, the `+` right after the last of
-    /// them (Cursor's, measured: 16 px after the last tab, never at the
-    /// far edge — `internal/cursor-side-panel-measured.md`; F-184), and the
-    /// controls that widen and close the drawer on the right.
-    fn panel_tab_row(
-        &self,
-        tabs: &[PanelTab],
-        active: usize,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The panel's own tabs and the `+` after them, for the window tab
+    /// strip. Close is the strip's panel toggle; the expand grid and the
+    /// header X are gone.
+    pub(crate) fn panel_tab_pills(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let focused = self.panel_focused(window, cx);
-        let expanded = self
-            .workspace
-            .read(cx)
-            .panel()
-            .is_some_and(|panel| panel.width() >= MAX_WIDTH - 8.0);
-        let expand_label = if expanded {
-            "Restore panel width"
-        } else {
-            "Expand panel"
+        let workspace = self.workspace.read(cx);
+        let Some(panel) = workspace.panel() else {
+            return div().into_any_element();
         };
-        // The strip scrolls when the tabs outgrow it; the `+` and the two
-        // controls keep their room, so the strip's ceiling is the row less
-        // the three buttons and their gaps.
-        let width = self
-            .workspace
-            .read(cx)
-            .panel()
-            .map(|panel| panel.width())
-            .unwrap_or(crate::model::panel::MIN_WIDTH);
-        let strip_max = (width - 2. * 6. - 3. * (TAB_HEIGHT + 4.) - 12.).max(TAB_HEIGHT);
+        let tabs: Vec<PanelTab> = panel.tabs().to_vec();
+        let active = panel.active();
+        let focused = self.panel_focused(window, cx);
         div()
             .id("panel-tabs")
             .flex_none()
-            .h(px(TAB_ROW_HEIGHT))
-            .w_full()
-            .px(px(6.))
+            .h_full()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(4.))
-            // The row that the tab chords will move carries the accent under
-            // it. The brighter label on its front tab says the same thing, but
-            // measured off a still that difference is 30 levels of grey on one
-            // word — not something anyone reads at a glance, which is what
-            // this has to be.
-            .border_b_1()
-            .border_color(if focused { theme.accent } else { theme.border })
             .child(
                 div()
                     .id("panel-tab-strip")
                     .flex_none()
                     .min_w_0()
-                    .max_w(px(strip_max))
+                    .max_w(px(360.))
                     .overflow_x_scroll()
                     .flex()
                     .flex_row()
@@ -231,7 +201,7 @@ impl Arbos {
                         .ghost("panel-new-tab")
                         .relative()
                         .flex_none()
-                        .ml(px(8.))
+                        .ml(px(4.))
                         .size(px(TAB_HEIGHT))
                         .rounded(px(TAB_RADIUS))
                         .items_center()
@@ -252,45 +222,6 @@ impl Arbos {
                     cx,
                 )
                 .children(self.panel_new_menu(cx)),
-            )
-            .child(div().flex_1())
-            .child(
-                theme
-                    .ghost("panel-expand")
-                    .flex_none()
-                    .size(px(TAB_HEIGHT))
-                    .rounded(px(TAB_RADIUS))
-                    .items_center()
-                    .justify_center()
-                    .tooltip(move |window, cx| {
-                        Tooltip::with_keystroke(expand_label, "⌘\\", window, cx)
-                    })
-                    .child(
-                        icons::icon(icons::system::WIDGET)
-                            .size(px(12.))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.zoom_panel_action(&ZoomPanel, window, cx);
-                    })),
-            )
-            .child(
-                theme
-                    .ghost("panel-close")
-                    .flex_none()
-                    .size(px(TAB_HEIGHT))
-                    .rounded(px(TAB_RADIUS))
-                    .items_center()
-                    .justify_center()
-                    .tooltip(|window, cx| Tooltip::with_keystroke("Close panel", "⌘B", window, cx))
-                    .child(
-                        icons::icon(icons::system::CLOSE)
-                            .size(px(12.))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_panel_action(&TogglePanel, window, cx);
-                    })),
             )
             .into_any_element()
     }
