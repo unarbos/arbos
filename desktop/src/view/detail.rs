@@ -766,6 +766,7 @@ impl Arbos {
         // thing twice, so only a sub-agent's title is drawn here, after
         // the crumbs that lead back to it.
         let titled = !crumbs.is_empty();
+        let show_clear = !chat.view_cleared() && !chat.items.is_empty();
         let name_field = (naming && titled).then(|| self.header_name_field(window, cx));
         div()
             .id("chat-header")
@@ -831,7 +832,7 @@ impl Arbos {
                 )
             })
             .child(div().flex_1())
-            .children((!chat.view_cleared() && !chat.items.is_empty()).then(|| {
+            .children(show_clear.then(|| {
                 theme
                     .ghost("chat-clear")
                     .flex_none()

@@ -152,7 +152,9 @@ impl Arbos {
                     recents
                         .into_iter()
                         .enumerate()
-                        .map(|(n, (id, title, at))| self.recent_row(n as u64, id, title, at, &theme)),
+                        .map(|(n, (id, title, at))| {
+                            self.recent_row(n as u64, id, title, at, &theme, cx)
+                        }),
                 )
         });
 
@@ -231,6 +233,7 @@ impl Arbos {
         title: String,
         at: SystemTime,
         theme: &Theme,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
             .id(("page-recent", n))
