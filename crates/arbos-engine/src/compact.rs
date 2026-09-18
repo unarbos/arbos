@@ -438,14 +438,25 @@ enum Move {
     Done(Option<String>),
 }
 
-/// Whether this exact notice is already on the transcript since the turn
-/// began (the last wake).
+/// Whether this notice is already on the transcript since the turn began
+/// (the last wake). Two notices are the same when they say the same
+/// thing, not when they carry the same numbers: the over-budget line
+/// names a token count that grows with every step of the turn, and
+/// compared whole it was said twice in one turn the moment the count
+/// crossed a thousand between steps (`~4k` then `~5k`; CI, #541).
 fn said_this_turn(events: &[Event], text: &str) -> bool {
+    let key = notice_key(text);
     events
         .iter()
         .rev()
         .take_while(|e| !e.is_wake())
-        .any(|e| matches!(&e.kind, EventKind::Notice { text: t, .. } if t == text))
+        .any(|e| matches!(&e.kind, EventKind::Notice { text: t, .. } if notice_key(t) == key))
+}
+
+/// The words of a notice before its first measurement (` (~`): what it
+/// says, without the number that changes as the turn goes on.
+fn notice_key(text: &str) -> &str {
+    text.split(" (~").next().unwrap_or(text)
 }
 
 /// One decision, no side effects.
@@ -627,5 +638,48 @@ pub async fn manage(
             }
         }
         *events = load_transcript(cx.transcript)?;
+    }
+}
+
+#[cfg(test)]
+mod said_once_tests {
+    use super::*;
+
+    fn notice(text: &str) -> Event {
+        Event::new(EventKind::Notice {
+            text: text.into(),
+            failed: false,
+        })
+    }
+
+    fn wake() -> Event {
+        Event::new(EventKind::Wake {
+            wake: "user".into(),
+            text: Some("go".into()),
+            brief: None,
+        })
+    }
+
+    /// The over-budget line carries the working set's size, which grows
+    /// between the steps of one turn. Said at ~4k, it is not said again
+    /// at ~5k; a different notice is; and a new turn starts the count
+    /// over.
+    #[test]
+    fn the_over_budget_line_is_one_notice_whatever_the_count_says() {
+        let four = "over budget (~4k tokens against a 4k window) with nothing old enough to compact. Said once per turn.";
+        let five = "over budget (~5k tokens against a 4k window) with nothing old enough to compact. Said once per turn.";
+        let other = "nothing to compact yet: the whole working set is recent";
+        let events = vec![wake(), notice(four)];
+        assert!(said_this_turn(&events, four));
+        assert!(
+            said_this_turn(&events, five),
+            "the count is not the message"
+        );
+        assert!(!said_this_turn(&events, other));
+        let events = vec![wake(), notice(four), wake()];
+        assert!(
+            !said_this_turn(&events, five),
+            "a new turn says it once more"
+        );
     }
 }
