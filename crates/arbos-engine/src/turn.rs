@@ -509,6 +509,26 @@ fn refuse(
     Ok(())
 }
 
+/// What a turn that ends before its last model step still spent: the
+/// dollars and cached tokens summed over the steps that did complete, on
+/// the last completed step's context count. A stopped turn used to close
+/// with no usage at all, and its cost never reached the spend total or the
+/// card (M-03's follow-up). None when no step completed.
+fn spent(last: Option<Usage>, cost: Option<f64>, cached: Option<u64>) -> Option<Usage> {
+    if cost.is_none() && cached.is_none() && last.is_none() {
+        return None;
+    }
+    let mut u = last.unwrap_or(Usage {
+        used: 0,
+        size: 0,
+        cost: None,
+        cached: None,
+    });
+    u.cost = cost;
+    u.cached = cached;
+    Some(u)
+}
+
 pub struct TurnOpts {
     pub place: Place,
     pub agent: Agent,
@@ -979,6 +999,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let mut turn_cost: Option<f64> = None;
     // Prompt tokens the provider served from cache, summed the same way.
     let mut turn_cached: Option<u64> = None;
+    // The last completed model step's context count, so a turn that ends
+    // early still says what it used.
+    let mut last_usage: Option<Usage> = None;
     // Same tool, same arguments, same failure, again and again: name it.
     let mut last_failure: Option<String> = None;
     let mut failure_streak = 0u32;
@@ -1021,7 +1044,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             return Ok(());
         }
         if control.is_stopped() {
-            return end(None, Some(&control.stop_reason()));
+            return end(
+                spent(last_usage, turn_cost, turn_cached),
+                Some(&control.stop_reason()),
+            );
         }
         // Every steer that arrived since the last boundary, in order, in
         // one write: the inbox files of kind `steer` (a user's words while
@@ -1080,7 +1106,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 Ok(m) => m,
                 Err(e) if e.is::<Interrupted>() || control.is_stopped() => {
                     return end(
-                        None,
+                        spent(last_usage, turn_cost, turn_cached),
                         Some(&format!("{} during compaction", control.stop_reason())),
                     );
                 }
@@ -1192,7 +1218,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     }
                 }
                 Err(crate::jev::AskError::Interrupted) => {
-                    return end(None, Some(&format!("{} during jev", control.stop_reason())));
+                    return end(
+                        spent(last_usage, turn_cost, turn_cached),
+                        Some(&format!("{} during jev", control.stop_reason())),
+                    );
                 }
                 Err(e) => {
                     eprintln!("turn {}: jev fell through ({e})", agent.id);
@@ -1260,7 +1289,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             } => (content, calls, usage, outcomes, reasoning_details),
             Step::Interrupted => {
                 return end(
-                    None,
+                    spent(last_usage, turn_cost, turn_cached),
                     Some(&format!("{} during model call", control.stop_reason())),
                 );
             }
@@ -1303,7 +1332,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         failed: true,
                     }),
                 )?;
-                return end(None, None);
+                return end(spent(last_usage, turn_cost, turn_cached), None);
             }
             Step::Failed { message } => {
                 // On the transcript, so the window shows it and the wake is
@@ -1316,7 +1345,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         failed: true,
                     }),
                 )?;
-                return end(None, None);
+                return end(spent(last_usage, turn_cost, turn_cached), None);
             }
         };
         // Tool-call markup written as prose (`<invoke name="bash">…`, a
@@ -1340,6 +1369,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // well, or a short prompt reads as 2–3× denser than it is.
         if let Some(c) = usage.and_then(|u| u.cost) {
             turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
+        }
+        if usage.is_some() {
+            last_usage = usage;
         }
         // A money cap on one turn: the place's `[spend] turn_cap_usd`, or
         // the host's knob for headless runs (one SWE-bench rollout ran to
@@ -1698,7 +1730,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 failed: false,
             }));
             append_events(&transcript, &results)?;
-            return end(None, None);
+            return end(spent(last_usage, turn_cost, turn_cached), None);
         }
         if let Some(now) = crate::repeat::words(&content) {
             // Steps with tool calls between them: told once at the second
@@ -1719,7 +1751,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     failed: false,
                 }));
                 append_events(&transcript, &results)?;
-                return end(None, Some("repeated itself three times"));
+                return end(
+                    spent(last_usage, turn_cost, turn_cached),
+                    Some("repeated itself three times"),
+                );
             }
         }
         append_events(&transcript, &results)?;
