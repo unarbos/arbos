@@ -1,6 +1,6 @@
 # qal-j31 — a place MCP config that does not parse hands its server name to the global one, in silence
 
-- **status**: **closed — fixed on `main` by [#613](https://github.com/unarbos/arbos/pull/613) (`23ef527c`), re-checked 2026-09-18 12:49. One residual tracked to [#644](https://github.com/unarbos/arbos/pull/644), open.
+- **status**: **closed — fixed on `main` by [#613](https://github.com/unarbos/arbos/pull/613) (`23ef527c`), re-checked 2026-09-18 12:49. The residual is closed too by [#644](https://github.com/unarbos/arbos/pull/644) (`f97bb348`), re-checked 2026-09-18 13:14.
 - **found**: 2026-09-18 08:22, by walking the kernel's first-match readers rather than by a break
 - **kernel**: `arbos-kernel 0.2.0 f80f0b663bac protocol 1`
 - **code**: `crates/arbos-kernel/src/mcp.rs:93` (`config_paths`) and `:116` (`load_servers`)
@@ -102,23 +102,36 @@ invalid array, expected `]`). Its servers are off, and the machine's own MCP fil
 its place…"* — the file, the fault, and what it cost, on the transcript rather than in a log the
 window never shows. That is the whole of what this file asked for, so it closes.
 
-## The residual, reproduced here: #644
+## The residual, and its close: #644
 
 #613 blocked the **machine's** file only. The place's own later files — `.cursor/mcp.json`,
 `.mcp.json` — were still read, and could hand the same name a different server while the notice
-said "its servers are off". The features note says so, and it reproduces on today's `main` in two
-arms differing only in that one file:
+said "its servers are off". Reproduced here on `a8678ac16636` in two arms differing only in that
+one file: with `.cursor/mcp.json` offering `notes` a server started; without it none did. So the
+machine's file was genuinely blocked, and the later place file was the remaining route.
 
-| arm | notice | a `notes` server started |
+[#644](https://github.com/unarbos/arbos/pull/644) landed as `f97bb348`. `load_from` now `break`s at
+the first place file that does not parse, so nothing after it is read, and `problem_notice` widened
+from *"the machine's own MCP file was not used in its place"* to *"no MCP file after it was read in
+its place — not the place's other files, not the machine's own"*.
+
+Re-checked, same staging, both arms:
+
+| | `a8678ac16636` (#613 only) | `f97bb3487540` (with #644) |
 |---|---|---|
-| with `.cursor/mcp.json` offering `notes` | yes | **yes** |
-| without it | yes | no |
+| a `notes` server started | **yes** — `mcp: notes: …` | **none** |
+| notice names the files after the broken one | no | yes |
 
-So the machine's file is genuinely blocked and #613 holds; the later place file is the remaining
-route. [#644](https://github.com/unarbos/arbos/pull/644) stops the walk at the first broken place
-file and makes the notice say that no later file was read. It was open at 12:45 UTC.
+`fm-02` passes on the #644 head and breaks twice on the one before it, so it fails on the unfixed
+build and passes on the fixed one in both halves of the contract. `qal-j31` is closed entire.
 
-`fm-02` does not stand a red for an open PR. It gates that third check on the product's own claim:
-once the notice says no later file was read, a started server contradicts it and is a break; until
-then the residual is recorded as `residual_644` in the rollout's notes. When #644 lands, the
-assertion arms itself with no edit.
+The self-gate is gone. While #644 was open, `fm-02` gated that third check on the product's own
+claim rather than standing a red for an unmerged fix; with the fix on `main` it is a plain
+assertion. Worth noting the gate would **not** have armed itself as written: it looked for the word
+"later" and #644's wording is "after it" — so the device was right in principle and wrong in its
+trigger, and a merged PR needed a human read either way. A self-gate on a product's wording is a
+guess about a sentence nobody had written yet.
+
+The second assertion above is new and came out of that: the notice must describe the whole block it
+performs, not less. On `a8678ac16636` it names only the machine's file, which would let a person
+believe a later place file might still have taken the name.

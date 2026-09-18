@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 12:49 UTC.
+Last checked 2026-09-18 13:16 UTC.
 
-## Click Update. You will get build 2019.
+## Click Update. You will get build 2023.
 
-**2019** — signed, notarised, stapled, on the feed since 12:47 UTC.
+**2023** — signed, notarised, stapled, on the feed since 13:13 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2019 (builds 2020–2023):
+
+- **#643** — one-breath-one-answer reads the kernel's own record, so one
+  spoken answer is proven to be one kernel answer
+- **#644** — a place file that does not parse stops the walk there
+
+## Before that: 2019
 
 New since 2010 (builds 2011–2019):
 

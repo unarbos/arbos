@@ -778,6 +778,88 @@ def register(scenario, registry, transcript, now_ms, branch):
                     "arbos-kernel check.rs check_two_writers — the cut line must clear the open wake",
                 )
 
+    # ── a scheduled command that fails: the other property #104 orphaned ──
+    @reg("sf-01-a-shell-subscription-whose-command-fails-tells-somebody", tags=("after-failure", "subscriptions"))
+    def sf01(cx):
+        """The second scenario `#104` retired. `plan-shell-verdicts` (run.py:900) read a kernel-run
+        shell node's exit status four ways — quiet success, loud success, exit 1, a missing command —
+        and then held the property that matters after one fails: `shell-failure-silent`, *"no kernel
+        wake node after failed shell nodes; the agent is never told"*.
+
+        It defers to `fp-shell-subscription`, whose commands all succeed: every assertion there is
+        cadence, no-model-turn, the reading delivered, a bare file honoured. Nothing runs a command
+        that fails, so nothing checks that anyone finds out — rule 13 applied to the same skip note
+        that produced `qal-j38`.
+
+        A scheduled command that stops working and says nothing is the ordinary shape of this: a
+        backup, a sync, a repository chore. The command here proves it ran and then fails."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        plain_agent(place)
+        k0 = cx.kernel(tag="kernel-bootstrap")
+        cx.rec.expect(k0.start(), "sf-01-kernel-did-not-bootstrap", "the kernel did not come up to make its folders")
+        k0.stop()
+
+        fileplan_scenarios.write_subscription(
+            place, "root", "failing", kind="shell",
+            cmd="echo ran >> ran.txt; echo boom >&2; exit 1",
+            every="30s", deliver_to="user", notify="chore: {output}",
+        )
+
+        k = cx.kernel(tag="kernel-failing-sub")
+        try:
+            started = k.start()
+            cx.rec.expect(started, "sf-01-kernel-did-not-start", "the kernel did not come up on a subscription whose command fails")
+            if not started:
+                return
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            time.sleep(34)
+
+            runs = len((place / "ran.txt").read_text().splitlines()) if (place / "ran.txt").exists() else 0
+            evs, _ = transcript(place, "root")
+            blob = json.dumps([e for e in evs]).lower()
+            frames = json.dumps([f for _, f in c.frames]).lower()
+            # The match has to be the *subscription's* failure and nothing else. A first pass looked
+            # for "fail" and matched an unrelated "No API key for OpenRouter" notice, which is how a
+            # probe passes for a reason that has nothing to do with its claim. `boom` is this
+            # command's own stderr and `chore:` is its own notify line; neither can come from
+            # anywhere else in this place.
+            mine = ("boom", "chore:")
+            told_on_transcript = [
+                str(e.get("text") or "")[:200] for e in evs
+                if e.get("kind") in ("notice", "say") and any(w in str(e.get("text") or "").lower() for w in mine)
+            ]
+            told_in_frames = any(w in frames for w in mine)
+            # Say which side carried it, so a pass can be read. Measured 2026-09-18 on
+            # `a8678ac16636`: the command's own stderr reaches the attached client in frames (14
+            # lines carrying `boom`), which is the property holding. Keeping the two apart matters
+            # because a first pass matched the word "fail" in an unrelated "No API key" notice.
+            cx.rec.notes.update({
+                "command_runs": runs,
+                "told_by": [s for s, ok in (("transcript", bool(told_on_transcript)), ("frames", told_in_frames)) if ok] or ["nobody"],
+                "told_on_transcript": told_on_transcript,
+                "told_in_a_frame": told_in_frames,
+            })
+
+            # Probe validity: the command has to have run and failed, or there is nothing to report.
+            cx.rec.expect(
+                runs > 0,
+                "probe-subscription-never-ran",
+                f"the failing command never ran in 34 s, so this run says nothing about how a failure is reported: {cx.rec.notes}",
+            )
+            if not runs:
+                return
+            cx.rec.expect(
+                bool(told_on_transcript) or told_in_frames,
+                "sf-01-a-failing-scheduled-command-is-silent",
+                f"the subscription's command ran {runs} time(s) and exited 1 with `boom` on stderr, and nothing reached the person: no notice or say line on root's transcript naming it, no frame carrying it. A chore that has stopped working looks exactly like one that is working",
+                "arbos-kernel subscriptions: a non-zero exit must reach the user the way the plan engine's failed nodes woke the agent (plan-shell-verdicts' shell-failure-silent)",
+            )
+        finally:
+            k.stop()
+        cx.check()
+
     # ── a clock that jumped: the two properties that lost their engine ──
     @reg("ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded", tags=("after-failure", "subscriptions", "environment"))
     def ck01(cx):
@@ -1234,11 +1316,14 @@ def register(scenario, registry, transcript, now_ms, branch):
 
             evs, _ = transcript(place, "root")
             said = [e for e in notices(evs) if str(e.get("text") or "").strip().startswith("MCP:")]
-            claims_no_later_file = any("later" in str(e.get("text") or "").lower() for e in said)
+            # What the notice claims about files after the broken one. #644's wording is "no MCP
+            # file after it was read … not the place's other files, not the machine's own"; the
+            # sentence before it named only the machine's file.
+            names_the_later_files = any(w in str(e.get("text") or "").lower() for e in said for w in ("after it", "other files"))
             cx.rec.notes.update({
                 "mcp_notices": [str(e.get("text") or "")[:260] for e in said],
                 "server_of_that_name_started": [l[:160] for l in took_the_name][:2],
-                "notice_claims_no_later_file_read": claims_no_later_file,
+                "notice_names_the_files_after_it": names_the_later_files,
                 "kernel_still_answering": not c.closed,
             })
 
@@ -1267,21 +1352,29 @@ def register(scenario, registry, transcript, now_ms, branch):
                     f"the notice does not name the file and what is wrong with it: {text[:200]!r}",
                 )
 
-            # 2. #613's blocking of the machine's file, and 3. #644's residual, self-gated.
-            if claims_no_later_file:
+            # 2. The walk stops at the first broken place file: no file after it is read, neither the
+            # place's own later ones nor the machine's. #613 blocked the machine's file; #644
+            # (`f97bb348`, on `main`) stops the walk there. Both are merged, so this is a plain
+            # assertion — it was gated on the notice's wording only while #644 was open.
+            cx.rec.expect(
+                not took_the_name,
+                "fm-02-a-file-after-the-broken-one-handed-the-name-away",
+                f"`.arbos/mcp.toml` does not parse and a `notes` server was started anyway: {took_the_name[:1]}. "
+                f"A file after the broken one — `.cursor/mcp.json` here, or the machine's own — gave that name a different server, so the person is told its servers are off while something else answers to it",
+                "arbos-kernel mcp.rs load_from — a place file that does not parse stops the walk there (#613, #644)",
+            )
+            # And the notice must describe what it did, not less. #644 widened it from "the machine's
+            # own MCP file was not used" to "no MCP file after it was read … not the place's other
+            # files, not the machine's own" — a person who reads the narrower sentence can still
+            # believe a later place file took over.
+            if said:
+                text = str(said[-1].get("text") or "").lower()
                 cx.rec.expect(
-                    not took_the_name,
-                    "fm-02-a-later-file-still-handed-the-name-away",
-                    f"the notice says no later file was read, and a `notes` server was started anyway: {took_the_name[:1]}. The person is told its servers are off while a different server answers to the name",
-                    "arbos-kernel mcp.rs load — the walk must stop at the first broken place file (#644)",
+                    "after it" in text or "other files" in text,
+                    "fm-02-notice-describes-less-than-it-did",
+                    f"the notice names only the machine's file, so it under-describes the block it actually performs: {str(said[-1].get('text') or '')[:200]!r}",
+                    "arbos-kernel mcp.rs problem_notice (#644)",
                 )
-            else:
-                cx.rec.notes["residual_644"] = (
-                    "a `notes` server started from a later place file while the notice said its servers are off; "
-                    "#644 (open at 2026-09-18 12:45 UTC) stops the walk at the first broken place file. "
-                    "Measured here: with `.cursor/mcp.json` present a server starts; without it none does, "
-                    "so the machine's file is genuinely blocked and #613 holds."
-                ) if took_the_name else "no later place file took the name on this build"
         finally:
             cx.env.pop("XDG_CONFIG_HOME", None)
             k.stop()
