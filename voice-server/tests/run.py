@@ -210,6 +210,14 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
                 for event in sc["history"]:
                     fh.write(json.dumps(event) + "\n")
         live_env: dict[str, str] = {}
+        if sc.get("asr_script"):
+            # The gateway transcribes for itself (`--asr mock`, scripted lines), so its own VAD
+            # segments the caller's speech — the production shape, which `--asr none` (the
+            # speech model's endpointing) does not exercise.
+            script = out / "asr-script.txt"
+            script.write_text("\n".join(sc["asr_script"]) + "\n")
+            live_env["VOICE_MOCK_ASR_SCRIPT"] = str(script)
+            extra += ["--asr", "mock"]
         if sc.get("engine") == "openai":
             live = MockOpenAILive()
             live_url = await live.start()
@@ -347,7 +355,13 @@ async def run_steps(steps: list[dict], caller: Caller, duplex: MockDuplex, kerne
     for step in steps:
         if "say" in step:
             pcm = speech.utterance(step["say"], prefer=prefer)
-            await caller.say(pcm, step["say"])
+            text = step["say"]
+            if "then" in step:
+                # One utterance with a breath in it: `say`, `gap` seconds of silence, `then`.
+                gap = bytes(int(float(step.get("gap", 1.0)) * speech.RATE) * 2)
+                pcm = pcm + gap + speech.utterance(step["then"], prefer=prefer)
+                text = f"{text} {step['then']}"
+            await caller.say(pcm, text)
             await asyncio.sleep(float(step.get("pause_after", 0.8)))
         elif "barge_in" in step:
             since = caller.now()
@@ -467,6 +481,14 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
             report_at = caller.t0 + reports[0].at
             ok = report_at >= max(s for s in stops if s <= report_at) if any(s <= report_at for s in stops) else False
         add(ok, "the sub-agent report was spoken after the caller finished talking")
+    if "transcript_finals" in exp:
+        finals = [f.msg.get("text", "") for f in rec.of("transcript.final")]
+        add(len(finals) == int(exp["transcript_finals"]), f"{exp['transcript_finals']} transcript.final (got {finals})")
+    if "response_dones" in exp:
+        dones = [f for f in rec.of("response.done") if not f.msg.get("interrupted")]
+        add(len(dones) == int(exp["response_dones"]), f"{exp['response_dones']} completed reply(ies) (got {len(dones)})")
+    for needle in exp.get("kernel_user", []):
+        add(any(needle.lower() in str(u.get("text", "")).lower() for u in kernel.users), f"the main agent was asked {needle!r} ({[str(u.get('text', ''))[:60] for u in kernel.users]})")
     if "mock_seen" in exp:
         add(duplex.seen == list(exp["mock_seen"]), f"speech model heard {exp['mock_seen']} (got {duplex.seen})")
     if "barge_ins" in exp:
