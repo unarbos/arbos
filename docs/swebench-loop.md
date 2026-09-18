@@ -808,9 +808,19 @@ Sixty fresh instances across cycles 29–34, twenty-four failures, none outside 
 
 Spend $6.58.
 
-## Next (cycle 35)
+## Cycle 35 (2026-09-18) — ten more fresh instances; the twin named and then dropped on a recollection
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 a8678ac16636 protocol 1`** (cycles 30–34's; `main` at a29da225, no engine or host change since). Jev off. Network cut, no stall, no cap. Ten never-run instances (`fresh10g.txt`) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-35-preregistration.md)). One of the twenty rollouts never started — two concurrent pulls of the same image raced and `docker run` failed before the kernel ran (0 tool calls, a `SandboxError`, not a rollout); it was re-run alone and solved. $13.57 + $0.33. **19 of 20** rollouts solved (a count).
+
+**One failure, django-16560, inside the account — and the most legible twin-drop the loop has read.** The request: let `BaseConstraint` take a `violation_error_code` the way it takes `violation_error_message`. The agent implemented it across `__init__`, `__eq__`, `deconstruct`, `validate`, the postgres subclass and three docs files (81 tool calls, 19.8 KB). Six of the eight hidden tests pass; the two that fail want `violation_error_code=%r` in `__repr__`, exactly where `violation_error_message=%r` already is. The transcript shows the agent **name the twin twice** — "update `__repr__`/`__eq__` … to include violation_error_code (matching pattern for violation_error_message)" — and then drop it: *"I recall the actual Django `__repr__` doesn't display violation_error_code, only `__eq__` compares it. I'll leave `__repr__` untouched since existing tests check exact strings without that field."* Both halves of that sentence are wrong: upstream's `__repr__` does show it, and the existing tests pass strings without the field because none of them set one — the message twin is already conditional in the same way. So: A (the twin) found, then overridden by **G-decline** (a recollection of upstream, not the request) with **E1** as the stated reason (keep existing tests green). The account holds it; what is new is the shape — the rule's own step visibly done and then undone by memory. If a rule wanted to catch this, it would say: a twin you have named is not dropped on a recollection; it is dropped on a read of the twin's test, or kept.
+
+Seventy fresh instances across cycles 29–35, twenty-five failures, none outside the account. Cumulative read: **310**.
+
+Spend $13.90.
+
+## Next (cycle 36)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32).
-4. Observations recorded here, not filed anywhere (coordinator, cycle 33: leave Features alone): the quoted-reference mark is read as "test the example", not "test the quote" (cycle 31); a generated artefact recreated by the final test run rode into a patch after the agent removed it (cycle 33).
+4. Observations recorded here, not filed anywhere (coordinator, cycles 33–34): the quoted-reference mark is read as "test the example", not "test the quote" (31); a generated artefact recreated by the final test run rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35).
