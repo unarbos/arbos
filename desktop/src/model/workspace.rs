@@ -4961,9 +4961,28 @@ fn transcript_ended(paths: &[PathBuf]) -> bool {
     else {
         return false;
     };
-    text.lines()
-        .rev()
-        .find(|line| !line.trim().is_empty())
-        .and_then(|line| serde_json::from_str::<arbos_core::Event>(line).ok())
-        .is_some_and(|event| event.ends_turn())
+    // The kernel writes lines after a turn's end that are no turn's body —
+    // its compaction answer ("nothing to compact yet", F-199), a fold, a
+    // nudge, a window reset. Read past them: a fork whose file ended on
+    // one drew as a hollow ring with no summary for as long as the window
+    // lived (F-206). A failed notice is the kernel's word that the turn
+    // stopped; the kernel is idle there too.
+    for line in text.lines().rev().filter(|line| !line.trim().is_empty()) {
+        let Ok(event) = serde_json::from_str::<arbos_core::Event>(line) else {
+            return false;
+        };
+        match event.kind {
+            arbos_core::EventKind::TurnComplete { .. }
+            | arbos_core::EventKind::Interrupted { .. }
+            | arbos_core::EventKind::Notice { failed: true, .. } => return true,
+            arbos_core::EventKind::Notice { failed: false, .. }
+            | arbos_core::EventKind::Compaction { .. }
+            | arbos_core::EventKind::Fold { .. }
+            | arbos_core::EventKind::Nudge { .. }
+            | arbos_core::EventKind::ImageDescribed { .. }
+            | arbos_core::EventKind::WindowReset {} => continue,
+            _ => return false,
+        }
+    }
+    false
 }

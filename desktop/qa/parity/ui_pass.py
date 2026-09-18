@@ -1846,6 +1846,31 @@ class Pass:
                     "the follow-up ran (its user card is on the transcript) or is still held by the kernel",
                     f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}{' (turn still running at 120 s; Stop pressed after the read — F-105)' if stopped_by_gate else ''}",
                     "pass" if ran or (active(self.state()) or {}).get("held", 0) > 0 else ("not-reachable" if held_before == 0 else "fail"), self.still("relaunch"))
+        # F-206: after a relaunch, a nested chat whose transcript ends on a
+        # turn's end (with the kernel's after-lines behind it) reads done,
+        # not a hollow ring for as long as the window lives.
+        time.sleep(12)
+        st = self.state()
+        nested = [c for c in sessions(st) if c.get("parent") is not None and not c.get("closed") and c.get("connection") == "live" and not (c.get("streaming") or c.get("turn_open"))]
+        ended = []
+        for c in nested:
+            sid = c.get("agent_session")
+            if not sid:
+                continue
+            path = PROJ / ".arbos" / "agents" / sid / "transcript.jsonl"
+            if not path.exists():
+                continue
+            kinds = [json.loads(l).get("kind") for l in path.read_text().splitlines() if l.strip()]
+            while kinds and kinds[-1] in ("notice", "compaction", "fold", "nudge", "window_reset", "image_described"):
+                kinds.pop()
+            if kinds and kinds[-1] in ("turn_complete", "interrupted"):
+                ended.append((c["id"], c.get("child_state")))
+        if ended:
+            self.record("relaunch-ended-reads-done", sc, "relaunch, wait 12 s, read nested chats whose file ends a turn",
+                        "each reads done (or asking), none waiting", f"{ended}",
+                        "pass" if all(state in ("done", "asking") for _, state in ended) else "fail")
+        else:
+            self.gap("relaunch-ended-reads-done", sc, "read", "no nested chat with an ended transcript to read")
         # Scenario 21: typed words while a question stands are never a skip.
         self.send(P_ASK)
         s = self.wait(lambda s: (active(s) or {}).get("questions"), 90, what="question card")
