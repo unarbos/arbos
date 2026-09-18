@@ -1,6 +1,6 @@
 # qal-j45 — model turns got ten to thirty times slower, and the cycle's first step now covers a quarter of what it did
 
-- **status**: open; the slowdown is measured, the cause is under test (see "Which of the two")
+- **status**: open; the slowdown is measured and reproducible, the cause is **not yet isolated** — the first attempt to isolate it was invalid (see "The first alternating run was invalid")
 - **found**: 2026-09-18 19:05, checking whether cycle 11 would finish inside its cap
 - **kernel**: slow on `arbos-kernel 0.2.0 fba8688d92d2`; fast on `cea8b902eecf` and everything before
 - **cost so far**: cycle 11's first step stopped at **25 scenarios**; cycle 10's reached **62**
@@ -55,11 +55,37 @@ These are not exclusive, and they interact: the controller doubles the calls per
 doubles the exposure to a throttle.
 
 **Running all of one build and then all of the other cannot separate them**, because the provider's
-mood changes across the hour that takes — which is exactly how my first attempt at this went
-(`fba8688d` 221 s and 361 s, then `cea8b902` 30 s and 91 s, with the older build's own failure text
-naming rate limiting). Alternating the two builds run for run does separate them: both meet the
-same conditions. That test is `deploy/ab-kernel-speed.sh`, four rounds of new/old on
-`ordinary-task`, and its result belongs in this file before anyone acts on candidate 1.
+mood changes across the hour that takes — which is exactly how my first attempt went (`fba8688d`
+221 s and 361 s, then `cea8b902` 30 s and 91 s, with the older build's own failure text naming rate
+limiting). Alternating the builds run for run does separate them: both meet the same conditions.
+That is `deploy/ab-kernel-speed.sh`.
+
+### The first alternating run was invalid, and why
+
+It compared `fba8688d92d2` against `00cc5ba89968` — and **both carry the Jev commits**
+(`git merge-base --is-ancestor` says yes for `a47c5104` and `2d5cad97` on each). The loop rebuilt
+`target-track-main` partway through cycle 11, overwriting the older binary I had aimed at while the
+test was running. So the test compared two post-change builds and can say nothing about candidate 1.
+
+Two things are still worth taking from it:
+
+- the `old` arm — itself a current build — ran `ordinary-task` in **193 s, 362 s, 186 s**, against
+  21–29 s for the four cycles before today's change. Both current builds are slow.
+- the `new` arm produced no verdict in any of four rounds, because each exceeded the probe's
+  12-minute ceiling. That is a stronger statement than any number in the table.
+
+The lesson for the rig: **a probe must not point at a binary the loop owns.** `target-track-main`
+and `target-desktop-main` are rebuilt every cycle; a comparison against "the old build" has to hold
+its own copy.
+
+### The valid test, set up
+
+The fast 15:01 cycle built its kernel before `a47c5104` (15:05) and was quick; the slow 17:01 cycle
+built after and was not. So the before-build is `232518c2` (14:59), the commit `a47c5104` sits on
+top of. That is building now into `~/arbos-qa/target-probe-prejev` from its own worktree
+`~/arbos-qa/repo-probe-kernel` — **directories the loop does not touch** — and the alternating run
+against it is what decides candidate 1. Nobody should act on candidate 1 before that number is in
+this file.
 
 ## What is already done about it
 

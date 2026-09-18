@@ -3650,3 +3650,39 @@ The transcript's label counts them when there are several — three photos
 each announcing "Photo you sent" is the same fault one step along.
 
 **PR:** [#691](https://github.com/unarbos/arbos/pull/691), the `ios/` batch.
+
+## Cycle 130 — the photo flow, watched rather than counted
+
+A recording was due, and the photo path is the one surface with a history of
+silently doing nothing — the journey's P2 passed for months while attaching
+no photo at all, because it scored on the reply not sounding like a refusal.
+
+Recorded end to end and reviewed. **It is whole** (M-421): `+` →
+`Photo Library` → pick → the chip appears instantly with its remove `x` →
+type → send → the photo drawn in the outgoing bubble above the words → the
+reply. Nothing clipped, overlapping or stuck. And the sentence the model
+gave — "A dense bed of magenta ice plant flowers with scattered purple and
+yellow blooms" — is in the kernel's own record, so the photo that was
+described is the photo that was picked.
+
+**The review found a wording fault the tree would never flag.** The live
+line under the sent photo read:
+
+> Working Thinking · 5s
+
+The chat prefixes `Working` to whatever step the kernel sends. `Starting`
+and `waiting on …` had each been special-cased when they turned up;
+`Thinking · 5s` had not (M-422). The kernel sends two kinds of step and they
+need opposite treatment — a state it has named is already a sentence, an
+activity needs a word in front — and it capitalises the first kind and not
+the second. Two exceptions of one shape were a rule nobody had written down.
+Now written, and verified live: `Working` with no step, `Thinking · 5s` with
+one.
+
+**One thing checked and left alone**: the three-second "Loading…" before the
+system picker. No such string exists anywhere in the app — it is `PHPicker`
+loading the library in the simulator (M-423). Recorded so the next person
+watching the recording does not go hunting for it in our code.
+
+**Recording:** `media/mobile/cycle-130/recording_demo.mp4`.
+**PR:** [#692](https://github.com/unarbos/arbos/pull/692), the `ios/` batch.
