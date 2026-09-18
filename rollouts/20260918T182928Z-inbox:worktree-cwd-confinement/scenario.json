@@ -1,0 +1,8 @@
+{
+  "name": "inbox:worktree-cwd-confinement",
+  "doc": "From inbox note 2026-09-12-worktree-cwd-confinement.md: exercise feature 'worktree-cwd-confinement' and run every detector. Needs a kernel built from branch cursor/worktree-cwd-confinement-b027.",
+  "tags": [
+    "inbox",
+    "worktree-cwd-confinement"
+  ]
+}

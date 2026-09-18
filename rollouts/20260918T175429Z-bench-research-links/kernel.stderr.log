@@ -1,0 +1,10 @@
+Walking /tmp/arbos-qa-bench-research-links-3got2s6t/place...
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Found 27 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8073 trigrams, 27 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-research-links-3got2s6t/home/.cache/arbos/tgrep/744d81e6dacc8625
+provider: google/gemini-2.5-flash: provider error mid-stream: google/gemini-2.5-flash is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations — google/gemini-2.5-flash is temporarily rate-limited upstream. Please retry shortly, or add your own key to accumulate your rate limits: https://openrouter.ai/settings/integrations
+turn full-duplex-research: Jev did not choose the next step: 429 rate limited: HTTP 429: {"detail":{"error_type":"api_usage_error","message":"Rate limit exceeded. Please retry shortly."}}. The turn stopped. The chat model did not run.
+tools full-duplex-research: 4 calls, wall 2ms, sum 2ms, speedup 1.0x
+child_archive_failed full-duplex-research: already archived

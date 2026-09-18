@@ -1,0 +1,7 @@
+{
+  "name": "restart-during-compaction",
+  "doc": "A near-full context forces compaction before the model step; the kernel is killed while the summariser runs, then restarted. The transcript must stay parseable and the turn must finish once.",
+  "tags": [
+    "adversarial"
+  ]
+}

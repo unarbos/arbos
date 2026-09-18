@@ -1,0 +1,8 @@
+{
+  "name": "inbox:machines-and-remote-spawn",
+  "doc": "From inbox note 2026-09-13-machines-and-remote-spawn.md: exercise feature 'machines-and-remote-spawn' and run every detector. Needs a kernel built from branch cursor/remote-spawn-b027.",
+  "tags": [
+    "inbox",
+    "machines-and-remote-spawn"
+  ]
+}

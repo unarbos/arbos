@@ -1,0 +1,8 @@
+{
+  "name": "inbox:child-model",
+  "doc": "From inbox note 2026-09-14-child-model.md: exercise feature 'child-model' and run every detector. Needs a kernel built from branch cursor/spawn-model-force-b027.",
+  "tags": [
+    "inbox",
+    "child-model"
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:headless-kernel-run",
+  "doc": "From inbox note 2026-09-12-headless-kernel-run.md: exercise feature 'headless-kernel-run' and run every detector. Needs a kernel built from branch cursor/headless-kernel-run-b027.",
+  "tags": [
+    "inbox",
+    "headless-kernel-run"
+  ]
+}

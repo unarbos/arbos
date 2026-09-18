@@ -1,0 +1,8 @@
+{
+  "name": "inbox:voice-mirror",
+  "doc": "From inbox note 2026-09-13-voice-mirror.md: exercise feature 'voice-mirror' and run every detector. Needs a kernel built from branch cursor/voice-mirror-b027.",
+  "tags": [
+    "inbox",
+    "voice-mirror"
+  ]
+}

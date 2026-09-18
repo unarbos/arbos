@@ -1,0 +1,6 @@
+1789753092408 kernel started pid 1035817
+1789753272806 timeout waiting for turn root idle after 180s
+1789753272806 BREAK turn-never-ended: turn never reached idle
+1789753453575 BREAK wrong-output: reply lacks the result: '                                                                                                                        '
+1789753453590 kernel stopped with code 0
+1789753453671 bugs: new 8c41586f49.md, seen 2c10227321.md

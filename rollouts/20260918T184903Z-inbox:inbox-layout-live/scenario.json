@@ -1,0 +1,8 @@
+{
+  "name": "inbox:inbox-layout-live",
+  "doc": "From inbox note 2026-09-13-inbox-layout-live.md: exercise feature 'inbox-layout-live' and run every detector. Needs a kernel built from branch cursor/inbox-steer-b027.",
+  "tags": [
+    "inbox",
+    "inbox-layout-live"
+  ]
+}

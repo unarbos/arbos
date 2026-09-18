@@ -1,0 +1,8 @@
+{
+  "name": "inbox:archive-children-default",
+  "doc": "From inbox note 2026-09-14-archive-children-default.md: exercise feature 'archive-children-default' and run every detector. Needs a kernel built from branch cursor/archive-children-default-b027.",
+  "tags": [
+    "inbox",
+    "archive-children-default"
+  ]
+}

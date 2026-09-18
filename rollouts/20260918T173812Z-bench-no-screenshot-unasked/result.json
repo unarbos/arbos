@@ -1,0 +1,29 @@
+{
+  "scenario": "bench-no-screenshot-unasked",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "turn never reached idle",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "reply lacks the result: '                                                                                                                        '",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "browser_calls": 0
+  },
+  "duration_s": 361.3,
+  "place": "/tmp/arbos-qa-bench-no-screenshot-unasked-re6ju2jc/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 97c1b89b6b43 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T173812Z-bench-no-screenshot-unasked",
+  "branch": "rust",
+  "usd": 0.07948
+}

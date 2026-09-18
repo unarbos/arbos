@@ -1,0 +1,8 @@
+{
+  "name": "bench-screenshot",
+  "doc": "Checklist item 3: run something and send back a screenshot the user can see (browser tool -> image file).",
+  "tags": [
+    "benchmark",
+    "item-3"
+  ]
+}
