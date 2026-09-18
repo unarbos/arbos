@@ -236,11 +236,19 @@ elif [ "$SWIPED" = 1 ]; then
   score P2 FAIL "no photo attached: the picker had to be dismissed by hand, so the tick was missed"
 fi
 shot P2-chip
-type_send "$ID photo: what is in this photo? One line."
+# Asking "what is in this photo" invites a plausible answer whether or not
+# one arrived, and P2 scored on the reply not sounding like a refusal — so
+# for the months the picker was silently attaching nothing, it passed. The
+# prompt now gives the model an exact sentence for the negative, and the
+# check below reads the subject.
+type_send "$ID photo: name the subject of the attached photo and its main colour, in one short sentence. If no image reached you, say exactly: no image reached me."
 wait_hist P2e "user +$ID photo" 30 >/dev/null; PA=$(seq_of "user +$ID photo")
 t=0; R=""; while [ $t -lt 90 ]; do R=$(hist | awk -v a="${PA:-0}" '$1+0 > a+0' | grep -E "^ *[0-9]+ assistant" | tail -1); [ -n "$R" ] && break; sleep 5; t=$((t+5)); done
 shot P2-photo-reply
-if [ -z "$R" ]; then score P2 FAIL "no reply within 90s"; elif echo "$R" | grep -qiE "didn.t (arrive|reach|come)|did not (arrive|reach|come)|no .?attachments|can.t see|cannot see|nothing at that path"; then score P2 FAIL "photo did not reach the model: $(echo "$R" | cut -c1-100)"; else score P2 PASS "$(echo "$R" | cut -c1-120)"; fi
+if [ -z "$R" ]; then score P2 FAIL "no reply within 90s"
+elif echo "$R" | grep -qiE "no image reached me|didn.t (arrive|reach|come)|did not (arrive|reach|come)|no .?attachments|can.t see|cannot see|nothing at that path"; then score P2 FAIL "photo did not reach the model: $(echo "$R" | cut -c1-100)"
+elif echo "$R" | grep -qiE "flower|blossom|petal|magenta|pink|bloom|waterfall|leaf|leaves|green"; then score P2 PASS "the model named the picture: $(echo "$R" | cut -c1-120)"
+else score P2 U "a reply that names neither the picture nor a refusal: $(echo "$R" | cut -c1-140)"; fi
 # P3 — call, ask the project a question (must land in THIS project's transcript)
 ui menu || score P3 FAIL "no overflow menu in the chat header"
 sleep 1.5
