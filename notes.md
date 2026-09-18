@@ -19,10 +19,10 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Project page and clear](https://github.com/unarbos/arbos/pull/629) — on `main` (`35fddd9e`)
-- [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — on `main` (`522ef479`)
-- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1973**; next zip should carry #628 and #629
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [timing pins](https://github.com/unarbos/arbos/pull/630) when green; TestFlight **1936**; Mac **1973**
+- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1978** has [files editor](https://github.com/unarbos/arbos/pull/628); next zip should carry [clear](https://github.com/unarbos/arbos/pull/629)
+- [Project page and clear](https://github.com/unarbos/arbos/pull/629) — on `main` (`35fddd9e`); next Mac zip
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [every screen](https://github.com/unarbos/arbos/pull/632) when green; TestFlight **1936**; Mac **1978**
+- [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — in **1978**
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
@@ -92,12 +92,12 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1973** on the feed; watching past it
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1978** on the feed; next zip should carry [clear](https://github.com/unarbos/arbos/pull/629)
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [timing pins](https://github.com/unarbos/arbos/pull/630) when green; hold #627; TestFlight **1936**; Mac **1973**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [every screen](https://github.com/unarbos/arbos/pull/632) when green; hold #631 until the gate; hold #627; TestFlight **1936**; Mac **1978**; `v0.2.0` stays a draft
+- [x] [Timing pins](https://github.com/unarbos/arbos/pull/630) — on `main` (`ee8fed3c`)
 - [x] [Project page and clear](https://github.com/unarbos/arbos/pull/629) — on `main` (`35fddd9e`)
 - [x] [Notice cut](https://github.com/unarbos/arbos/pull/623) — on `main` (`1af388a9`)
-- [x] [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — on `main` (`522ef479`)
 
 ## Running Arbos
 
