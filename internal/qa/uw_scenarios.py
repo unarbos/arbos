@@ -947,6 +947,94 @@ def register(scenario, registry, transcript, now_ms, branch):
         finally:
             d.close()
 
+    # ── the kickoff race itself, minted on purpose (qal-j43) ──
+    @reg("kf-01-a-chat-opened-during-kickoff-keeps-what-you-type", needs_model=True, tags=("desktop", "after-failure"))
+    def kf01(cx):
+        """`qal-j43`: a chat minted while its place is still serving the **kickoff turn** is inert.
+        The app mints it, activates it, reports its connection live, and the composer clears on
+        Enter — but the kernel never creates the agent's transcript and the line is lost silently.
+        Measured 4/4 on app `1beec0a1fd98` / `arbos-kernel 0.2.0 cecd48e1bd76`: minted during
+        kickoff the transcript stays empty, minted after it is `['wake', 'user']`.
+
+        `desktop_scenarios.new_chat` now waits for kickoff before minting, so `mt-01`, `mt-04` and
+        `dg-01` pass — which means **none of them can see this bug any more**. This scenario exists
+        so the loop still can: it presses ⌘N itself, deliberately inside the window, and holds the
+        contract that matters. A cleared composer means the line was accepted; an accepted line must
+        arrive.
+
+        It is expected to break until the app is fixed. When it passes, `qal-j43` is fixed for real
+        rather than merely stepped around."""
+        if not desktop_scenarios.available():
+            cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
+            return
+        line = "Reply with the single word KFOK and stop."
+        d = desktop_scenarios.Desktop(cx)
+        try:
+            root = cx.place / ".arbos" / "agents" / "root" / "transcript.jsonl"
+
+            def kickoff_state():
+                kinds = []
+                for raw in root.read_text(errors="replace").splitlines() if root.exists() else []:
+                    try:
+                        kinds.append(json.loads(raw).get("kind"))
+                    except ValueError:
+                        pass
+                return kinds
+
+            # Wait only until the kickoff turn has *started*, then mint inside it. Waiting for it to
+            # finish is exactly what this scenario must not do.
+            end = time.time() + 40
+            while time.time() < end and not kickoff_state():
+                time.sleep(0.2)
+            during = bool(kickoff_state()) and "turn_complete" not in kickoff_state()
+            cx.rec.notes["kickoff_running_when_minted"] = during
+            if not during:
+                # The window is real but short; a slow launch can miss it. Say so rather than
+                # reporting a pass that proved nothing.
+                cx.rec.notes["inconclusive"] = f"the kickoff turn was not in flight at mint time: {kickoff_state()}"
+                return
+
+            before = {c["id"] for c in d.sessions()}
+            d.app.key("cmd-n")
+            st = d.app.wait_state(
+                lambda s: {c["id"] for p in s["projects"] for c in p["sessions"]} - before,
+                timeout=20, what="a chat minted during kickoff",
+            )
+            sid = ({c["id"] for p in st["projects"] for c in p["sessions"]} - before).pop()
+            agent = next((c.get("agent_session") for p in st["projects"] for c in p["sessions"] if c["id"] == sid), None)
+            cx.rec.notes["agent"] = agent
+
+            desktop_scenarios.focus_composer(d.app)
+            d.app.type(line)
+            d.app.key("enter")
+            held = str((d.app.state().get("composer") or {}).get("text") or "")
+            accepted = line[:18] not in held
+            cx.rec.notes["composer_cleared_so_line_accepted"] = accepted
+
+            tpath = cx.place / ".arbos" / "agents" / str(agent) / "transcript.jsonl"
+            landed, end = False, time.time() + 45
+            while time.time() < end and not landed:
+                for raw in tpath.read_text(errors="replace").splitlines() if tpath.exists() else []:
+                    try:
+                        e = json.loads(raw)
+                    except ValueError:
+                        continue
+                    if e.get("kind") == "user" and line[:18] in (e.get("text") or ""):
+                        landed = True
+                        break
+                time.sleep(0.5)
+            cx.rec.notes.update({"transcript_exists": tpath.exists(), "line_landed": landed})
+
+            cx.rec.expect(
+                landed or not accepted,
+                "kf-01-accepted-line-never-arrived",
+                f"the composer cleared, so the app accepted the line, but {agent}'s transcript "
+                f"{'does not exist' if not tpath.exists() else 'never recorded it'} after 45 s "
+                f"(qal-j43). A cleared composer must mean a delivered line.",
+            )
+        finally:
+            d.close()
+
     # ── a scheduled command that fails: the other property #104 orphaned ──
     @reg("sf-01-a-shell-subscription-whose-command-fails-tells-somebody", tags=("after-failure", "subscriptions"))
     def sf01(cx):

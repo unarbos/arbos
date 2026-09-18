@@ -1,6 +1,6 @@
 # qal-j42 — the new-chat control moved a fourth time and took the whole desktop leg with it
 
-- **status**: `new_chat` fixed and verified; `mt-01` still failing for a reason I have not found
+- **status**: `new_chat` fixed and verified; `mt-01`/`mt-04`'s residual **found** — a chat minted during a place's kickoff turn is inert (see "Found: the kickoff race")
 - **found**: 2026-09-18 14:48, reading cycle 9's desktop step
 - **app**: `1beec0a1fd98` (the break), `d2a807e48423` (the last one that worked)
 - **kernel**: `arbos-kernel 0.2.0 cecd48e1bd76 protocol 1`
@@ -196,3 +196,68 @@ name, so it is the next thing to try.
 `dg-01` is kept rather than deleted. It is cheap, it is tagged `diagnostic`, and it turns this from
 "two scenarios time out" into a timeline anyone can read. If it goes green on a later build, that is
 the answer arriving without anyone chasing it.
+
+## Found: the kickoff race
+
+The config was not it either — the probe wrote the harness's exact `config.toml` and the line still
+arrived. What I had never controlled was **when** `new_chat` runs.
+
+Every scenario that fails calls `new_chat()` as its **first act**, milliseconds after launch. Every
+probe that worked happened to wait first — mine polled the driver for 12 s before minting a chat.
+A brand-new place spends its first ~10 s on its **kickoff turn**, so those two orderings are on
+opposite sides of it.
+
+Four runs, two per arm, same app and kernel, one fresh place each
+(`arbos-kernel 0.2.0 cecd48e1bd76`, app `1beec0a1fd98`):
+
+| arm | kickoff running when `new_chat` ran | the chat's transcript | line landed |
+|---|---|---|---|
+| during-kickoff | yes | `[]` — **never created** | **no** |
+| during-kickoff (repeat) | yes | `[]` | **no** |
+| after-kickoff | no | `['wake', 'user']` | yes |
+| after-kickoff (repeat) | no | `['wake', 'user']` | yes |
+
+So: **a chat minted while its place is serving the kickoff turn is inert.** The app mints it, makes
+it active, gives it an id (`chat-1789745785102`) and reports its connection live; the composer
+accepts the line and clears on Enter. But the kernel never creates the agent's transcript, so the
+line reaches nothing. That is exactly what `dg-01` measured — "0 transcript lines, 0 inbox files,
+composer clears, session live" — and the earlier parent-mismatch log line is the same fact from the
+app's side: it filed the chat under `root` and the kernel had no record to match.
+
+This also explains the intermittency across cycles. Whether a scenario's first send survives depends
+on a race between `new_chat` and the kickoff turn, which is why the same scenario passed by hand,
+passed in probes, and failed in the leg.
+
+### Two separate things come out of this
+
+1. **A product bug, and the real finding.** A chat the app presents as live, active and accepting
+   text should not silently drop it. Either minting should wait for the place to be ready, or the
+   composer should hold the line until the agent exists — the current behaviour loses user input
+   with no notice, which is the same class as `qal-j33` and `#441`, and it is not harness-only:
+   anyone who opens a new place and presses ⌘N inside the first ten seconds is in this window.
+2. **A library fix, so the leg stops being dark.** `new_chat` now waits for the place's kickoff turn
+   to complete before minting. This is a scenario-side workaround for (1), not a fix for it, and it
+   is marked as such in the helper so nobody reads a passing `mt-01` as evidence the bug is gone.
+
+The predicate (`streaming or turn_open`) is a red herring and should be read as one: in the
+during-kickoff arms it is often **True**, because `root`'s own kickoff turn satisfies it while the
+new chat is dead. `mt-01`'s `timed out waiting for root running` fires only when the kickoff turn
+finishes before the 40 s budget does. The honest signal was always the chat's empty transcript.
+
+### Measured on the fix
+
+`new_chat` now calls `wait_kickoff_done()` first. Same app and kernel:
+
+| scenario | before | on the fix |
+|---|---|---|
+| `mt-04-queue-survives-window-restart` | `timed out waiting for root running` | **pass** (30.2 s) |
+| `dg-01-a-sub-chats-turn-starts-under-the-harness` | 0 transcript lines, 0 inbox files | **pass** (15.6 s) |
+| `mt-01-typed-while-running-steers` | `timed out waiting for root running` | reaches its assertion and reports `mt-01-typed-not-a-steer` (79.9 s) |
+
+`dg-01` going green is the diagnostic doing its job: it was written to say when this answered
+itself, and it did. Both remaining `driver-exception`s in the desktop leg are gone.
+
+`mt-01` now reports a **product** finding instead of dying at the door — a line typed during a
+running turn is not filed as a `steer` and waits for `turn_complete`. That is the already-parked
+steer-ordering family (`edcfddb4ae`, first seen 2026-09-16), not new ground, and it stays with
+features. The point is that `mt-01` is now measuring the thing it was written to measure.

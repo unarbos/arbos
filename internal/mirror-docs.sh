@@ -141,14 +141,41 @@ n_internal=0
 skipped_big=0
 # Prune the excluded folders in find itself (the store is a slow network mount; descending
 # into rollouts/ costs minutes), then hash every kept file in one git call.
-list="$(mktemp /tmp/mirror-docs-list.XXXXXX)"
 prune='( -type d ( -name rollouts -o -name staging -o -name state -o -name node_modules -o -name .venv -o -name __pycache__ -o -name target -o -name .git ) -prune )'
+
+# The store is a network mount that returns EAGAIN ("Resource temporarily unavailable") when it is
+# under load, and `find` then exits nonzero part-way through its walk. Under `set -euo pipefail`
+# that killed the mirror at the `| sort` below and left no explanation but "exit 1" — the mechanism
+# behind qal-j30's three-hour lag, which only became visible once the ERR trap named the line.
+#
+# A short walk is more dangerous than a failed one: a partial listing looks like a store that has
+# lost files, and pushing it would shrink the tip. So retry the walk, and if it will not settle,
+# refuse the whole run and leave the tip where it is. A late mirror is recoverable; a mirror that
+# has overwritten good content with a partial listing is not.
+walk_or_refuse() {
+    local what="$1" root="$2" out="$3"
+    local attempt
+    for attempt in 1 2 3; do
+        # shellcheck disable=SC2086
+        if find "$root" $prune -o -type f -size -"$((MIRROR_MAX_BYTES / 1024 + 1))"k \
+            ! \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.wav' -o -iname '*.mp3' -o -iname '*.pdf' -o -iname '*.zip' -o -iname '*.tar' -o -iname '*.gz' \) \
+            -print 2>/dev/null | sort > "$out"; then
+            return 0
+        fi
+        echo "[mirror-docs $(date -u +%H:%M:%SZ)] the walk of $what failed (try $attempt of 3); the store is likely returning EAGAIN"
+        sleep "$((attempt * 5))"
+    done
+    echo "REFUSED: could not list $what in three tries — the store is not answering, and a partial listing would shrink the tip"
+    return 1
+}
+
+list="$(mktemp /tmp/mirror-docs-list.XXXXXX)"
+walk_or_refuse "internal/" "$STORE/internal" "$list" || exit 2
+# Reported only, so a short count is harmless — but it must not take the run down with it: the same
+# EAGAIN that breaks the walk above breaks this pipeline too, and `set -e` would end the mirror over
+# a number that appears in one log line.
 # shellcheck disable=SC2086
-find "$STORE/internal" $prune -o -type f -size -"$((MIRROR_MAX_BYTES / 1024 + 1))"k \
-    ! \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.wav' -o -iname '*.mp3' -o -iname '*.zip' -o -iname '*.tar' -o -iname '*.gz' -o -iname '*.tgz' -o -iname '*.pyc' -o -iname '*.so' -o -iname '*.o' -o -iname '*.bin' -o -iname '*.pdf' \) \
-    -print 2>/dev/null | sort > "$list"
-# shellcheck disable=SC2086
-skipped_big="$(find "$STORE/internal" $prune -o -type f -size +"$((MIRROR_MAX_BYTES / 1024))"k -print 2>/dev/null | wc -l)"
+skipped_big="$({ find "$STORE/internal" $prune -o -type f -size +"$((MIRROR_MAX_BYTES / 1024))"k -print 2>/dev/null || true; } | wc -l)"
 if [ -s "$list" ]; then
     # One hash-object call for all files; the blob ids come back in the same order.
     paste -d' ' <(git hash-object -w --stdin-paths < "$list") "$list" | while IFS=' ' read -r blob f; do
@@ -174,10 +201,7 @@ n_feedback=0
 fb="$STORE/media/desktop-feedback"
 if [ -d "$fb" ]; then
     list="$(mktemp /tmp/mirror-docs-fb.XXXXXX)"
-    # shellcheck disable=SC2086
-    find "$fb" $prune -o -type f -size -"$((MIRROR_MAX_BYTES / 1024 + 1))"k \
-        ! \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' -o -iname '*.webp' -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.wav' -o -iname '*.mp3' -o -iname '*.zip' -o -iname '*.b64' \) \
-        -print 2>/dev/null | sort > "$list"
+    walk_or_refuse "media/desktop-feedback" "$fb" "$list" || exit 2
     if [ -s "$list" ]; then
         paste -d' ' <(git hash-object -w --stdin-paths < "$list") "$list" | while IFS=' ' read -r blob f; do
             rel="${f#"$STORE/"}"

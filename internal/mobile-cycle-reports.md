@@ -3297,3 +3297,44 @@ than hunt a fifth green (M-393). The next occurrence will name which story
 it was, which is worth more than another pass today.
 
 **PR:** [#665](https://github.com/unarbos/arbos/pull/665), harness only.
+
+## Cycle 120 — "inconclusive" is a word an instrument hides behind
+
+`list-composer` has ended every sweep this week with `could not read both
+numbers — inconclusive`. Run on its own, it passes all four of its steps.
+
+Run second in the sweep, it reads a **chat**: no rows, no composer, no
+keyboard. It needs the projects list and never asks for it — and last
+cycle's check did not look at it, because it never *taps* a row. It counts
+them and reads the composer's placeholder (M-394).
+
+What kept this alive for a week is the word. "Inconclusive" sounds like the
+world being unclear. Here it meant the instrument was pointed at the wrong
+screen, which is not the same thing at all, and nothing in the sweep's table
+distinguished them.
+
+**The rule has now been wrong in both directions.** Cycle 116 matched a
+string and missed four scenarios. Cycle 118 matched a tap and missed this
+one. Widening it to "reads the list" then flagged four files that were
+already correct, by counting helper *definitions* as uses (M-395). It reads
+the main flow only now, and a scenario whose subject is the landing —
+`cold-start-and-history` — says so in a line of its own rather than being
+bent to a rule it cannot satisfy.
+
+Two more were quietly missing the step: `refusal-and-transport` kept its own
+inline copy of the idiom, and `settings-and-a-bad-token` had none.
+
+**The sweep, after:**
+
+```
+list-composer      the composer sits 88 pt above the keyboard
+...
+0 of 11 printed nothing at all.
+0 of 11 printed output but reached no verdict — read those first.
+```
+
+Eleven scenarios, eleven conclusions (M-396). The one decline left is
+`pill-count-vs-sheet`'s `cannot say`, which is a scenario refusing a
+comparison it cannot make — that one is by design.
+
+**PR:** [#668](https://github.com/unarbos/arbos/pull/668), harness only.

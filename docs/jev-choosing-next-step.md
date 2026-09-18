@@ -20,7 +20,7 @@ In order, on every kernel step while Jev is on:
 
 1. Build the situation card from the transcript (goal, last user line, last tool glances). Cheap. No vault. No file bodies.
 2. Set the live line to **Choosing the next step**.
-3. One OpenRouter chat-completions call to `~typesafe/jev-latest`. JSON in, JSON out. Cap below.
+3. One OpenRouter **Decisions** call (`POST /api/alpha/decisions`) to `~typesafe/jev-latest`. `state` + typed questions. Not chat completions.
 4. Then either run the named tool, invoke the chat model, or end the turn.
 
 The brief file (`.arbos/voice-brief.md`) is packed at **turn end**, not under this line. The gateway does not call Jev.
@@ -55,6 +55,48 @@ Mac update channel. Do not publish `v0.2.0`. Do not start slices A–G.
 
 ---
 
+## 400 vs 200 — the door
+
+Jacob on build **2049** (Mac live): **400** on `~typesafe/jev-latest`. Key present. Slug remap confirmed. Zero `jev-*` tools. No `fell through` after the kernel restart (that print is gone; a fail is a notice).
+
+Jev is a **decisions** model. It does not generate chat text. OpenRouter says so on [Jev Latest](https://openrouter.ai/~typesafe/jev-latest).
+
+### 400 — what 2049 posted
+
+```
+POST https://openrouter.ai/api/v1/chat/completions
+```
+
+Body had `model` + `messages` (system + user card). That is the chat door. Jev is not a chat model. OpenRouter returns **400**. The turn never gets a decision. No `jev-*` tool.
+
+### 200 — the official door
+
+```
+POST https://openrouter.ai/api/alpha/decisions
+```
+
+Body shape ([TypeSafe API](https://docs.typesafe.ai/api.md), same shape on OpenRouter):
+
+- `model`: `~typesafe/jev-latest`
+- `state`: the situation card (string)
+- `questions`: a map of `choice` / `noul` (act, tool, model, need_llm, …)
+
+No `messages`. That field is the 400.
+
+A 200 body has `answers` keyed the same as `questions`. Example:
+
+```
+{"answers":{"act":{"type":"choice","choice":"tool"},"tool":{"type":"choice","choice":"ls"}}}
+```
+
+Code maps that to the same `Decision` the turn already routes. `act=llm` still invokes the chat model. That pick is not a fail.
+
+The one request change that turns 400 into 200: **post Decisions (`/api/alpha/decisions` + `state`/`questions`), not chat completions (`/v1/chat/completions` + `messages`)**.
+
+Do not print keys.
+
+---
+
 ## Why Jev failed that turn
 
 Jacob already has the 15 s line. He asked which fail it was: a **400** on the old slug, a **timeout**, **parse junk**, or Jev **chose `act=llm`** on “what files are in this folder?”.
@@ -77,7 +119,7 @@ That print is only for `AskError::Failed` or `AskError::Junk`. A parsed `act=llm
 
 | What is in `(...)` | What happened |
 | --- | --- |
-| `400 bad request` and “not a valid model ID” (or the old id `typesafe/jev-latest` without `~`) | OpenRouter refused the slug. The old 400. |
+| `400 bad request` on `/v1/chat/completions` with `~typesafe/jev-latest` | Wrong door. Jev is Decisions, not chat. Build 2049. |
 | `no answer from provider: no response headers for 15s` | Timeout. First-byte cap was 15 s on #647. `as_secs()` prints whole seconds. |
 | `not a JSON object` | Junk. The body was not one JSON object. |
 | `unknown act "..."; want tool, llm, or done` | Junk. JSON parsed; `act` was not `tool`, `llm`, or `done`. |

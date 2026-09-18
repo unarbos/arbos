@@ -5,16 +5,28 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 15:33 UTC.
+Last checked 2026-09-18 16:05 UTC.
 
-## Click Update. You will get build 2056. This one has Jev.
+## Click Update. You will get build 2060. This is the Jev one to test.
 
-**2056** — signed, notarised, stapled, on the feed since 15:31 UTC.
+**2060** — signed, notarised, stapled, on the feed since 16:03 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
-on the release.
+on the release. #667's commit was checked to be an ancestor of the published
+one, not assumed from the build number.
+
+New since 2056 (builds 2057–2060):
+
+- **#667** — **Jev posts OpenRouter Decisions** (`/api/alpha/decisions`,
+  with state and typed questions) rather than chat completions
+- **#665** — `list-search-filter-refresh` logs what the fixture answered
+
+With #664 from 2056 behind it, a Jev failure, timeout or junk reply now
+ends the turn in the open with a fault rather than hanging.
+
+## Before that: 2056
 
 New since 2054 (builds 2055–2056):
 
