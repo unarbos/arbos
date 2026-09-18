@@ -90,6 +90,11 @@ struct AttachmentChips: View {
                                 .background(Circle().fill(ArbosTheme.text))
                         }
                         .buttonStyle(.plain)
+                        // Unlabelled it read as "Close" — the SF Symbol's own
+                        // name, and the same word the call's end button used
+                        // to answer to. Naming the file makes it clear which
+                        // of several chips is being removed (M-314).
+                        .accessibilityLabel("Remove \(file.name)")
                         .offset(x: 6, y: -6)
                     }
                 }
