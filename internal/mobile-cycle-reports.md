@@ -884,3 +884,42 @@ field. `media/mobile/cycle-61/09-`.
 
 **Noted for next time:** a fresh branch for the next PR rather than the
 previous cycle's.
+
+### Cycle 61, the live-worker check and a third correction (02:30 UTC)
+
+**What I set out to do:** with the sheet now listing the kernel's whole tree,
+see what a *running* worker looks like among thirteen finished ones.
+
+The pill flips to **`Working 1`** twelve seconds in, and the chat's worker
+line reads **`1 Working count slowly one to forty · Reading notes.md`** with
+a spinner — name and live step, which is the row's claim. Both confirmed.
+
+**The sheet's live row is not confirmed.** It showed zero Working rows and I
+took that for a fault for several minutes. The worker had finished
+(`2350 turn_complete`) before I opened the sheet, so `Done` was correct and
+my timing was wrong. Recorded as unmeasured, not as a defect. Wants a slower
+worker next cycle.
+
+**And the tool was wrong a third time** (M-230). Chasing the above, `total
+count-slowly-one-to-forty` returned **2350** — the root's count again.
+M-224's fix had filtered with `f.get("agent", agent)`, so a frame with **no**
+agent field defaults to the one asked about and matches; the root's
+unlabelled frame could win the race under any worker's name.
+
+What found it was running the command **three times per agent instead of
+once**:
+
+```
+main                         2350 2350 2350
+count-slowly-one-to-forty      11   11   11     (was 2350)
+say-sentence-about-mountains    8    8    8
+a name that does not exist      0    0    0
+```
+
+The earlier 8, 8 and 5 were right — but won by a race, not by the filter. A
+single passing run said nothing about whether the command worked.
+
+**The rule this loop should take from it:** a fix to a measuring tool is not
+shown by one green reading. Three corrections to eleven lines of Python in
+one night, two of them announced prematurely by me, and each time the
+announcement rested on exactly one run. #552.

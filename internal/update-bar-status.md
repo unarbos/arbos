@@ -5,7 +5,7 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 02:30 UTC.
+Last checked 2026-09-18 02:33 UTC.
 
 ## Click Update. You will get build 1765.
 
@@ -19,7 +19,11 @@ New since 1741, ten merges' worth:
 - **#543**, **#547** — iOS: the list says what the hub said when a token
   is refused; leaving a call you never started no longer kills the app
 - **#545** — a machine whose last registrant left stays on the roster
-- **#546** — Jev routes mechanical steps in the engine
+- **#546** — Jev routes mechanical steps in the engine. **It is on in this
+  build.** Absent from config it turns itself on when the provider is
+  OpenRouter and a key is present, which is your setup; `jev = false` in
+  `config.toml` keeps the old one-model loop, and an empty `jev_model`
+  does the same. `jev = true` forces it on for any provider with a key.
 - **#548** — a window stops a job through the kernel's `job_stop` frame
 
 Still in it: **#537**–**#540**, **#531**, **#469**, **#527**, **#530**,
