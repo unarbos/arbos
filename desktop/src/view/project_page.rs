@@ -1,8 +1,8 @@
-//! The project page, full width in the column: Cursor's Project tab. The
-//! project's face and name on top; the status page at reading size, every
-//! label a link; the store's files as a grid, each a click from view; the
-//! context document rendered under it. Everything on it is read off the
-//! model, which the watch and the kernel's `changed` frames keep current.
+//! The project page, full width in the column: Cursor's Project home.
+//! Large name, Recents, then the status page at reading size, then a
+//! simple file list. Agents, processes and resources stay in the right
+//! panel. Everything on the page is read off the model, which the watch
+//! and the kernel's `changed` frames keep current.
 
 use crate::{
     model::{store_view::StoreFile, workspace::Workspace},
@@ -16,18 +16,19 @@ use bezel::{
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, tooltip::Tooltip, widgets::Buttons},
 };
+use std::cmp::Reverse;
+use std::time::SystemTime;
 
-/// The page's reading column. Cursor's Project page runs a little wider
-/// than a chat: the grid wants the room.
-const PAGE_MAX_WIDTH: f32 = 760.;
+/// The page's reading column. Cursor's Project home is a document, not a
+/// card grid: a little wider than chat, with room to breathe.
+const PAGE_MAX_WIDTH: f32 = 720.;
 
 /// The page's own gutter, and the space between its parts.
-const PAGE_GUTTER: f32 = 36.;
-const PART_GAP: f32 = 28.;
+const PAGE_GUTTER: f32 = 48.;
+const PART_GAP: f32 = 40.;
 
-/// A file card's size in the grid.
-const CARD_WIDTH: f32 = 216.;
-const CARD_HEIGHT: f32 = 64.;
+/// How many recent chats the page lists.
+const RECENTS_CAP: usize = 8;
 
 impl Arbos {
     /// The page for the project in front.
@@ -44,22 +45,32 @@ impl Arbos {
         let store = project.store_view.clone();
         let notes_path = store.page.as_ref().map(|page| page.path.clone());
 
+        let mut recents: Vec<(u64, String, SystemTime)> = project
+            .sessions
+            .iter()
+            .filter(|chat| !chat.closed)
+            .map(|chat| (chat.id, workspace.display_label(chat.id), chat.updated))
+            .collect();
+        recents.sort_by_key(|row| Reverse(row.2));
+        recents.truncate(RECENTS_CAP);
+
         let head = div()
             .flex_none()
             .flex()
             .flex_row()
-            .items_center()
-            .gap(px(12.))
+            .items_start()
+            .gap(px(16.))
+            .pt(px(20.))
             .child(
                 div()
                     .flex_none()
-                    .size(px(28.))
-                    .rounded(px(7.))
+                    .size(px(36.))
+                    .rounded(px(9.))
                     .bg(theme.element_hover)
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icons::icon(glyph).size(px(16.)).text_color(tint)),
+                    .child(icons::icon(glyph).size(px(18.)).text_color(tint)),
             )
             .child(
                 div()
@@ -67,6 +78,7 @@ impl Arbos {
                     .min_w_0()
                     .flex()
                     .flex_col()
+                    .gap(px(4.))
                     .child(
                         div()
                             .truncate()
@@ -131,21 +143,32 @@ impl Arbos {
                     })),
             );
 
+        let recents_block = (!recents.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .child(page_heading(2, "Recents", false, PageScale::Page, &theme))
+                .children(
+                    recents
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, (id, title, at))| self.recent_row(n as u64, id, title, at, &theme)),
+                )
+        });
+
         let page = self.project_page(store.page.as_ref(), remote, PageScale::Page, &theme, cx);
 
         let files = (!store.files.is_empty()).then(|| {
             div()
                 .flex()
                 .flex_col()
-                .child(page_heading(2, "Files", false, PageScale::Page, &theme))
-                .child(
-                    div().flex().flex_row().flex_wrap().gap(px(10.)).children(
-                        store
-                            .files
-                            .iter()
-                            .enumerate()
-                            .map(|(n, file)| self.file_card(n as u64, file, &theme, cx)),
-                    ),
+                .child(page_heading(2, "Files", true, PageScale::Page, &theme))
+                .children(
+                    store
+                        .files
+                        .iter()
+                        .enumerate()
+                        .map(|(n, file)| self.page_file_row(n as u64, file, &theme, cx)),
                 )
         });
 
@@ -155,14 +178,16 @@ impl Arbos {
             div()
                 .flex()
                 .flex_col()
-                .child(page_heading(2, "Context", false, PageScale::Page, &theme))
+                .child(page_heading(2, "Context", true, PageScale::Page, &theme))
                 .child(match store.context_text.as_deref() {
                     Some(text) => div()
+                        .pt(px(4.))
                         .text_style(TextStyle::Body)
                         .text_color(theme.text)
                         .child(markdown::markdown(text, window, cx))
                         .into_any_element(),
                     None => div()
+                        .pt(px(4.))
                         .text_style(TextStyle::Body)
                         .text_color(theme.text_faint)
                         .child("Nothing in the context document yet.")
@@ -184,11 +209,12 @@ impl Arbos {
                     .max_w(px(PAGE_MAX_WIDTH))
                     .px(px(PAGE_GUTTER))
                     .pt(px(root::HEADER_HEIGHT))
-                    .pb(px(64.))
+                    .pb(px(80.))
                     .flex()
                     .flex_col()
                     .gap(px(PART_GAP))
                     .child(head)
+                    .children(recents_block)
                     .child(page)
                     .children(files)
                     .children(context),
@@ -196,9 +222,59 @@ impl Arbos {
             .into_any_element()
     }
 
-    /// One file of the store as a card: its glyph, its name, where it sits
-    /// and how long ago it changed, dim. The context document leads.
-    fn file_card(
+    /// One recent chat: its name, how long ago it last spoke. A click
+    /// opens that chat in the column.
+    fn recent_row(
+        &self,
+        n: u64,
+        id: u64,
+        title: String,
+        at: SystemTime,
+        theme: &Theme,
+    ) -> AnyElement {
+        div()
+            .id(("page-recent", n))
+            .flex_none()
+            .h(px(32.))
+            .px(px(4.))
+            .rounded(px(6.))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(10.))
+            .cursor_pointer()
+            .hover(|el| el.bg(theme.element_hover))
+            .child(
+                icons::icon(icons::system::CHAT_ROUND_LINE)
+                    .size(px(14.))
+                    .flex_none()
+                    .text_color(theme.text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_style(TextStyle::Body)
+                    .text_color(theme.text)
+                    .child(SharedString::from(title)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_style(TextStyle::Caption)
+                    .text_color(theme.text_faint)
+                    .child(SharedString::from(age(at))),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.select_session(id, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// One file of the store as a list row: its glyph, its name, where it
+    /// sits and how long ago it changed, dim. The context document leads.
+    fn page_file_row(
         &self,
         n: u64,
         file: &StoreFile,
@@ -217,21 +293,18 @@ impl Arbos {
         div()
             .id(("page-file", n))
             .flex_none()
-            .w(px(CARD_WIDTH))
-            .h(px(CARD_HEIGHT))
-            .px(px(12.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme.border)
+            .h(px(32.))
+            .px(px(4.))
+            .rounded(px(6.))
             .flex()
             .flex_row()
             .items_center()
             .gap(px(10.))
             .cursor_pointer()
-            .hover(|el| el.bg(theme.element_hover).border_color(theme.border_strong))
+            .hover(|el| el.bg(theme.element_hover))
             .child(
                 icons::icon(file_glyph(file.kind))
-                    .size(px(16.))
+                    .size(px(14.))
                     .flex_none()
                     .text_color(if file.pinned {
                         theme.accent
@@ -243,30 +316,25 @@ impl Arbos {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_style(TextStyle::Callout)
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(SharedString::from(if file.pinned {
-                                "Context".to_string()
-                            } else {
-                                file.name.clone()
-                            })),
-                    )
-                    .when(!sub.is_empty(), |el| {
-                        el.child(
-                            div()
-                                .truncate()
-                                .text_style(TextStyle::Caption)
-                                .text_color(theme.text_faint)
-                                .child(SharedString::from(sub)),
-                        )
-                    }),
+                    .truncate()
+                    .text_style(TextStyle::Body)
+                    .text_color(theme.text)
+                    .child(SharedString::from(if file.pinned {
+                        "Context".to_string()
+                    } else {
+                        file.name.clone()
+                    })),
             )
+            .when(!sub.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_none()
+                        .truncate()
+                        .text_style(TextStyle::Caption)
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(sub)),
+                )
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_store_file(path.clone(), &title, cx);
             }))

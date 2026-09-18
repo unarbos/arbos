@@ -3341,7 +3341,15 @@ pub fn render(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     let id = chat.id;
-    let turns = turns(&chat.items);
+    let hide = chat.hide_before.min(chat.items.len());
+    let mut turns = turns(&chat.items[hide..]);
+    if hide > 0 {
+        for turn in &mut turns {
+            turn.range.start += hide;
+            turn.range.end += hide;
+            turn.answer_from += hide;
+        }
+    }
     let last = turns.len().saturating_sub(1);
     let mut zones: Vec<AnyElement> = Vec::new();
     // Cursor's Project chat opens on the project itself: icon, name, one
