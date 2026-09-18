@@ -12,6 +12,13 @@
 # It is only reading a coordinate off a screenshot that needs converting,
 # which is exactly what anyone does when writing a new scenario.
 
+# What the dictation clip says. It lives here because two places need it and
+# they must agree: `mac-attach.sh` speaks this sentence to make `note.wav`,
+# and `voice-notes-wait.sh` checks the words that came back against it. With
+# the sentence written out twice, a scenario can "verify" dictation against
+# a sentence the clip no longer says.
+NOTE_SAYS=${NOTE_SAYS:-"Please summarise what the workers did today in two sentences."}
+
 # The simulator's screenshot size and the device's point size. Both are the
 # iPhone 15 Pro's; change them together if the loop's device changes.
 SIM_SHOT_W=${SIM_SHOT_W:-472}

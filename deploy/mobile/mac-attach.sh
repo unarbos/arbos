@@ -9,7 +9,8 @@ OUT="$HOME/mobile-out/$CYCLE"; mkdir -p "$OUT"
 UDID=$(cut -d' ' -f2 "$OUT/sim.txt")
 BUNDLE=com.unarbos.arbos.ios
 CLIPS="$HOME/mobile-clips"
-[ -f "$CLIPS/note.wav" ] || { say -v Samantha -o "$CLIPS/note.aiff" "Please summarise what the workers did today in two sentences." && ffmpeg -loglevel error -y -i "$CLIPS/note.aiff" -ar 24000 -ac 1 -sample_fmt s16 "$CLIPS/note.wav"; }
+. "$(cd "$(dirname "$0")" && pwd)/sim-lib.sh"
+[ -f "$CLIPS/note.wav" ] || { say -v Samantha -o "$CLIPS/note.aiff" "$NOTE_SAYS" && ffmpeg -loglevel error -y -i "$CLIPS/note.aiff" -ar 24000 -ac 1 -sample_fmt s16 "$CLIPS/note.wav"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
 idb connect "$UDID" >/dev/null 2>&1
 xcrun simctl privacy "$UDID" grant photos $BUNDLE >/dev/null 2>&1
