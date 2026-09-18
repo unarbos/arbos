@@ -2548,3 +2548,40 @@ previous cycles' careful reports were wrong in the same direction. The
 ledger now says so plainly, which is worth more than the row.
 
 **PR:** [#612](https://github.com/unarbos/arbos/pull/612).
+
+## Cycle 99 report (09:30 UTC, 09-18)
+
+**Looked at:** the one claim I left open at 98 — does tapping a running
+worker's line open its chat?
+
+**It does** (M-336). Tapped **by frame**, it lands in the worker's chat
+first time: `Back`, the spinner, and `q092440 one` in the header. The
+presentation is a `navigationDestination`, not a sheet, so my "the
+classifier is being fooled" theory was also wrong — the screen genuinely
+changes.
+
+Tapping by *label* cannot work here, for two reasons I had not put together:
+the spinner at the front is animated, so an exact label is stale the moment
+it is read; and the worker's name appears on more than one element, so a
+name match can land somewhere that is not the button.
+
+**The tally for this one row** (M-337). It took cycles 90, 91, 98 and 99:
+
+1. a send with no read-back;
+2. a scroll in the wrong direction;
+3. a pattern blind to the animated spinner — plus a sibling of it in the
+   pill, plus a child-check hunting for the sleep duration in a goal-derived
+   name;
+4. a tap by a label that cannot be matched.
+
+**Not one was the app.** The line, the pill, the naming and the navigation
+were right the whole time.
+
+That is the finding worth more than the row. Four independent mistakes in
+one small area all produced the same shape of output — *the app did not do
+the thing* — because that is simply what a rig failure looks like from
+outside. A negative result about the app deserves more scepticism than a
+positive one, and after tonight this loop has the tally to say so rather
+than just the instinct.
+
+**PR:** [#612](https://github.com/unarbos/arbos/pull/612), updated.

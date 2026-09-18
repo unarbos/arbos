@@ -20,9 +20,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 <tldr>
 - [Design full Jev integration](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — [full integration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-full-integration.md) written; waiting to implement
-- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1916** on the feed; watching past it
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — next [worker-line patterns](https://github.com/unarbos/arbos/pull/612); Mac **1916**
-- [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — [worker-line patterns](https://github.com/unarbos/arbos/pull/612) open; returning-user next; TestFlight **1904**
+- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1930**; [young-commit queue](https://github.com/unarbos/arbos/pull/614) open
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — next [worker-line patterns](https://github.com/unarbos/arbos/pull/612), [young-commit queue](https://github.com/unarbos/arbos/pull/614); Mac **1930**
+- [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — [worker-line patterns](https://github.com/unarbos/arbos/pull/612) updated; returning-user next; TestFlight **1904**
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
@@ -92,9 +92,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1916** on the feed; watching past it
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1930** on the feed; [young-commit queue](https://github.com/unarbos/arbos/pull/614) open
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — next [worker-line patterns](https://github.com/unarbos/arbos/pull/612); TestFlight **1904**; Mac **1916**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — next [worker-line patterns](https://github.com/unarbos/arbos/pull/612), [young-commit queue](https://github.com/unarbos/arbos/pull/614); TestFlight **1904**; Mac **1930**; `v0.2.0` stays a draft
 - [x] [Headless apt list](https://github.com/unarbos/arbos/pull/609) — on `main` (`ee2218da`)
 - [x] [Producer-guard](https://github.com/unarbos/arbos/pull/608) — on `main` (`7bf144ca`)
 - [x] [Orb phases](https://github.com/unarbos/arbos/pull/607) — on `main` (`4e59cb70`)
