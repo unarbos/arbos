@@ -663,11 +663,77 @@ pub enum Frame {
         surfaces: Vec<Surface>,
         at_ms: i64,
     },
+    /// Client → kernel: what each turn of `agent` changed in the working
+    /// tree — the rewind checkpoints' diff, readable at last (side-panels
+    /// handover 5). Turn N's files are the difference between the tree
+    /// saved at its start and the tree saved at the next turn's start; the
+    /// newest turn is measured against the working tree as it is now.
+    /// `limit` newest turns (0: the kernel's default). Answered on the
+    /// asking connection only, as `turn_change_list`; read now, never
+    /// from a cache.
+    TurnChanges {
+        agent: String,
+        #[serde(default)]
+        limit: u64,
+    },
+    /// Kernel → client: the answer to `turn_changes`, oldest turn first.
+    TurnChangeList {
+        agent: String,
+        turns: Vec<TurnChange>,
+        at_ms: i64,
+    },
     /// A frame type this build does not know. A kernel newer than the
     /// client (or the reverse) adds frames; an old reader must skip them,
     /// not drop the connection. Never sent on purpose.
     #[serde(other)]
     Unknown,
+}
+
+/// One turn's mark on the working tree, for a files panel.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnChange {
+    /// The transcript line the turn began on — the same number `rewind`
+    /// and the checkpoint carry, so a row can name the turn.
+    pub line: u64,
+    /// When the turn began, Unix millis.
+    pub ts: i64,
+    /// A later turn has begun: this one's files are final. False for the
+    /// newest turn, measured against the tree as it is now — a row that
+    /// may still grow.
+    pub ended: bool,
+    /// Files whose contents differ between the turn's start and its end.
+    /// Paths are relative to the place, as git prints them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileChange>,
+    /// Paths the turn's tool calls said they touched (`edit`, `write`,
+    /// `apply_patch`, a `bash` that dirtied tracked files), whether or not
+    /// the file differs at the end — an edit undone in the same turn is
+    /// here and not in `files`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched: Vec<String>,
+    /// Why `files` could not be measured: the turn's tree was not saved
+    /// (the record says why), or the place is not a git repository. Empty
+    /// when `files` is the truth (an empty `files` then means no change).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unmeasured: String,
+}
+
+/// One file between two trees, as `git diff --numstat` counts it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    /// `added` | `modified` | `deleted` | `renamed` (then `from` is set) |
+    /// `typechange`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
+    /// Lines added and removed; both zero with `binary: true`.
+    #[serde(default)]
+    pub added: u64,
+    #[serde(default)]
+    pub removed: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub binary: bool,
 }
 
 /// One surface a kernel holds, as `surface_list` reports it. The first
