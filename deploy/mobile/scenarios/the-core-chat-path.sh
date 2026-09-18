@@ -59,13 +59,24 @@ shot 01-card
 # then began sampling the reply's length — by which time a three-sentence
 # answer is already whole, so it could never see the growth it was looking
 # for. Watching from the send means the same loop gives both.
+#
+# Measured as the transcript's total text, not as "the last line matching a
+# word the reply might start with". That first attempt picked whichever line
+# matched last — including the *previous* turn's reply — and reported
+# lengths of 243 then 123. A length that goes **down** is not a reply
+# growing, and it is the only reason the flaw was visible at all.
+#
+# A total over every row only grows while a turn runs, whatever the model
+# happens to say, so it needs no guess about the reply's first word.
 FIRST=""
 LENGTHS=""
+BASE=""
+total_chars() { ui dump | grep -E "StaticText" | awk '{ n += length($0) } END { print n+0 }'; }
 for _ in $(seq 1 200); do
-  LINE=$(ui dump | grep -oiE "StaticText +(The |A |Sea|Wave|Ocean|Salt).*" | tail -1)
-  if [ -n "$LINE" ]; then
+  N=$(total_chars)
+  [ -n "$BASE" ] || BASE=$N
+  if [ "$N" -gt "$BASE" ]; then
     [ -n "$FIRST" ] || FIRST=$(since "$T0")
-    N=${#LINE}
     case " $LENGTHS " in *" $N "*) ;; *) LENGTHS="$LENGTHS $N";; esac
   fi
   # Stop when the turn ends rather than after a fixed count: a reply still
@@ -83,7 +94,7 @@ shot 02-streaming
 # the answer.
 STEPS=$(echo $LENGTHS | wc -w | tr -d ' ')
 SPAN=$(echo $LENGTHS | awk '{print $1 " → " $NF}')
-echo "  the reply grows in:      ${STEPS:-0} step(s)   ${SPAN:-—} characters"
+echo "  the transcript grows in: ${STEPS:-0} step(s)   ${SPAN:-—} characters on screen"
 
 # 2b. streaming — the row's third word, and this file has taken a still
 # called `02-streaming` for eighty cycles without ever measuring it. A reply
