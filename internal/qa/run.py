@@ -1025,11 +1025,22 @@ def s_spawn_storm(cx):
     for ch in children:
         evs_c, bad_c = transcript(cx.place, ch)
         cx.rec.expect(not bad_c, "transcript-corrupt", f"{ch}: bad lines {bad_c}")
-    # children may still be running; give them a moment, then stop
+    # Children may still be running; let them finish before the kernel goes — but bound the whole
+    # settle, not each child. `wait_turn(..., 60)` per child is 60 s *each*, and every assertion
+    # above is already made, so none of that time can change the verdict. On 2026-09-18 ten workers
+    # that never went idle cost this scenario **556.8 s** against a previous 30 s, all of it in this
+    # loop: nine minutes of a 100-minute cycle cap spent on courtesy after the answer was known
+    # (the qal-j28 lesson about what the cap is for). One deadline for the lot keeps the courtesy.
     settled = c.mark
+    settle_by = time.time() + 60
     for ch in children:
+        left = settle_by - time.time()
+        if left <= 0:
+            cx.rec.notes["settle_gave_up_at"] = ch
+            break
         c.mark = settled
-        c.wait_turn(ch, "idle", 60)
+        c.wait_turn(ch, "idle", max(1, int(left)))
+    cx.rec.notes["settle_seconds"] = round(60 - max(0.0, settle_by - time.time()), 1)
     k.stop()
     cx.check()
 
