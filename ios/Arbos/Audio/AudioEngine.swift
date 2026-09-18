@@ -113,7 +113,13 @@ final class AudioEngine {
     func stop() {
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
-        player.removeTap(onBus: 0)
+        // Only if the player was ever attached. Leaving the call screen
+        // without starting a call reaches here with `start()` never having
+        // run, and `removeTap` on an unattached node raises "required
+        // condition is false: NULL != engine" — an uncaught NSException, so
+        // the whole app goes and not just the call. Open a call by mistake,
+        // tap the cross, lose the app.
+        if player.engine != nil { player.removeTap(onBus: 0) }
         if converter != nil {
             engine.inputNode.removeTap(onBus: 0)
             converter = nil
