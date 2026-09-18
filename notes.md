@@ -21,8 +21,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 <tldr>
 - [Clean desktop chrome clutter](bc-1c45e4f0-9522-56f6-a7b6-f8a1aa864105) — [Jacob's chrome](https://github.com/unarbos/arbos/pull/688) on `main` (`27c77664`)
 - [Fix Jev folder-list face](bc-c1b06b11-d50d-5287-93cd-bffca4a7becc) — [quiet Jev hop](https://github.com/unarbos/arbos/pull/690) on `main` (`c873ca04`)
-- [Speed terminal and browser](bc-fddc4e9f-b8ac-5d93-a0fa-0cb3ec84a180) — [prompt opens](https://github.com/unarbos/arbos/pull/692) on `main`; next zip after 2110
-- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2110** on the feed; chrome and quiet Jev are in this zip
+- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2117** on the feed; Terminal and Browser fix is in this zip
+- [Speed terminal and browser](bc-fddc4e9f-b8ac-5d93-a0fa-0cb3ec84a180) — [prompt opens](https://github.com/unarbos/arbos/pull/692) in Mac **2117**
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
@@ -46,7 +46,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] Voice in the call — both faults fixed and live on the pod: every non-small-talk turn now goes to the kernel and its answer is spoken (the model had called the agent once in 101 turns, so it was made structural), and barge-in cuts a reply in 0.35–0.41 s instead of nearly two seconds; the phone must stop forwarding finals itself and re-measure over AirPods, and a loud speakerphone without echo cancellation is still the open limit
 
 - [x] [Clean desktop chrome clutter](bc-1c45e4f0-9522-56f6-a7b6-f8a1aa864105) — [Jacob's chrome](https://github.com/unarbos/arbos/pull/688) on `main` (`27c77664`)
-- [x] [Speed terminal and browser](bc-fddc4e9f-b8ac-5d93-a0fa-0cb3ec84a180) — [prompt opens](https://github.com/unarbos/arbos/pull/692) on `main` (`5b65c1cc`); next zip after 2110
+- [x] [Speed terminal and browser](bc-fddc4e9f-b8ac-5d93-a0fa-0cb3ec84a180) — [prompt opens](https://github.com/unarbos/arbos/pull/692) in Mac **2117**
 - [ ] [Fix top bar chrome](bc-85782d4e-78b3-55d7-80ba-a25615cd0690) — [top bar](https://github.com/unarbos/arbos/pull/654) in Mac **2056**
 - [ ] [Remove composer branch chip](bc-97ab6331-b8f3-5844-b20d-2004eb4e2b9d) — [branch chip](https://github.com/unarbos/arbos/pull/656) in Mac **2056**
 - [ ] [Fix Mac fullscreen chrome](bc-0df916de-0e66-5368-b418-08c4a8340ec4) — [#542](https://github.com/unarbos/arbos/pull/542) on `main`; still not a real Space; [chrome on 2019](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-chrome-2019.md) owns the next pass
@@ -104,9 +104,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2110** (`1b4ef7a`); builds 2098–2110 carry [Jacob's chrome](https://github.com/unarbos/arbos/pull/688) [quiet Jev hop](https://github.com/unarbos/arbos/pull/690) [worker-chat shape](https://github.com/unarbos/arbos/pull/689) [photo label](https://github.com/unarbos/arbos/pull/691)
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2117** (`9c00a38`); builds 2111–2117 carry [prompt opens](https://github.com/unarbos/arbos/pull/692) [Working Thinking](https://github.com/unarbos/arbos/pull/693)
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — TestFlight **2117**; Mac **2110**; next zip carries [prompt opens](https://github.com/unarbos/arbos/pull/692); hold [#640](https://github.com/unarbos/arbos/pull/640) [#661](https://github.com/unarbos/arbos/pull/661) [#663](https://github.com/unarbos/arbos/pull/663) [#666](https://github.com/unarbos/arbos/pull/666) [#676](https://github.com/unarbos/arbos/pull/676); leave [#650](https://github.com/unarbos/arbos/pull/650) [#652](https://github.com/unarbos/arbos/pull/652) [#653](https://github.com/unarbos/arbos/pull/653) [#655](https://github.com/unarbos/arbos/pull/655) [#660](https://github.com/unarbos/arbos/pull/660) [#684](https://github.com/unarbos/arbos/pull/684); `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — Mac **2117**; TestFlight **2117**; hold [#640](https://github.com/unarbos/arbos/pull/640) [#661](https://github.com/unarbos/arbos/pull/661) [#663](https://github.com/unarbos/arbos/pull/663) [#666](https://github.com/unarbos/arbos/pull/666) [#676](https://github.com/unarbos/arbos/pull/676); leave [#650](https://github.com/unarbos/arbos/pull/650) [#652](https://github.com/unarbos/arbos/pull/652) [#653](https://github.com/unarbos/arbos/pull/653) [#655](https://github.com/unarbos/arbos/pull/655) [#660](https://github.com/unarbos/arbos/pull/660) [#684](https://github.com/unarbos/arbos/pull/684); `v0.2.0` stays a draft
 - [x] [shorter-file override](https://github.com/unarbos/arbos/pull/694) — on `main` (`f7da9f06`)
 - [x] [Working Thinking](https://github.com/unarbos/arbos/pull/693) — on `main` (`9c00a389`)
 - [x] [prompt opens](https://github.com/unarbos/arbos/pull/692) — on `main` (`5b65c1cc`)
