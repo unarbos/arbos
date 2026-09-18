@@ -72,15 +72,10 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
     cx.on_action(|_: &Minimize, cx: &mut App| front(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx: &mut App| front(cx, |window| window.zoom_window()));
-    // Native Spaces fullscreen is a black desktop — the frost dies. Simple
-    // fullscreen stays on this Space so the wallpaper is still behind the glass.
+    // Native Spaces fullscreen: the menu bar hides until the pointer
+    // reaches the top edge, matching Cursor's green-button Space.
     cx.on_action(|_: &ToggleFullScreen, cx: &mut App| {
-        front(cx, |window| {
-            #[cfg(target_os = "macos")]
-            window.toggle_simple_fullscreen();
-            #[cfg(not(target_os = "macos"))]
-            window.toggle_fullscreen();
-        })
+        front(cx, |window| window.toggle_fullscreen())
     });
     // The workspace goes with its window. Transcripts are on disk and
     // resumable; tunnels this process opened are torn down on ⌘Q. The

@@ -349,6 +349,11 @@ const WINDOW_HEIGHT: f32 = 761.;
 const WINDOW_TITLE: &str = "Arbos";
 
 fn restore_usable_bounds(window: &mut Window) {
+    // Native fullscreen owns the frame. Pushing a saved size at it
+    // during the Space transition fights AppKit.
+    if window.is_fullscreen() || window.is_simple_fullscreen() {
+        return;
+    }
     let now = window.bounds().size;
     if now.width < px(600.) || now.height < px(320.) {
         window.resize(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)));
@@ -404,6 +409,13 @@ fn force_usable_ns_frame() {
                 !utf8.is_null() && std::ffi::CStr::from_ptr(utf8).to_string_lossy() == WINDOW_TITLE
             };
             if !visible || !titled {
+                continue;
+            }
+            // NSWindowStyleMaskFullScreen. A Space already owns this
+            // window; do not write a windowed frame over it.
+            const STYLE_MASK_FULL_SCREEN: usize = 1 << 14;
+            let style_mask: usize = msg_send![ns_window, styleMask];
+            if style_mask & STYLE_MASK_FULL_SCREEN != 0 {
                 continue;
             }
             let frame: NsRect = msg_send![ns_window, frame];
@@ -1142,9 +1154,9 @@ impl Arbos {
             }
         })
         .detach();
-        // Entering or leaving a size — zoom, simple fullscreen — can drop the
+        // Entering or leaving a size — zoom, native fullscreen — can drop the
         // blur view and the transparent titlebar. Put both back, and keep
-        // Spaces fullscreen off: a style-mask change resets that too.
+        // Spaces fullscreen on: a style-mask change resets that too.
         cx.observe_window_bounds(window, |this, window, cx| {
             appearance::reapply_window_background(cx);
             keep_macos_glass(window);
@@ -3151,9 +3163,9 @@ pub(crate) struct Dictation {
     pub release_to_send_ms: Option<u64>,
 }
 
-/// Native Spaces fullscreen is a black desktop, so the frost has nothing to
-/// blur. Stay on this Space; the green button zooms. Also put the transparent
-/// titlebar back — macOS 15.3+ clears it on the way into fullscreen.
+/// Put the transparent titlebar back — macOS 15.3+ clears it on a
+/// style-mask change — and keep the window a native Space so the
+/// green button and View › Enter Full Screen hide the menu bar.
 #[cfg(target_os = "macos")]
 fn keep_macos_glass(_window: &Window) {
     use objc::{
@@ -3180,7 +3192,7 @@ fn keep_macos_glass(_window: &Window) {
                 continue;
             }
             let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
-            let behavior = (behavior & !FULL_SCREEN_PRIMARY) | FULL_SCREEN_NONE;
+            let behavior = (behavior & !FULL_SCREEN_NONE) | FULL_SCREEN_PRIMARY;
             let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
         }
     }
