@@ -5,7 +5,7 @@ cursor:
 
 # qal-j35 follow-up: restore reads last-chat before remember can write
 
-PR: https://github.com/unarbos/arbos/pull/679
+PR: https://github.com/unarbos/arbos/pull/679 (ready, CI green)
 Branch: `cursor/restore-last-chat-before-remember-147b`
 Repo: `unarbos/arbos`
 
