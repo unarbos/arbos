@@ -108,7 +108,12 @@ fn a_reply_with_only_real_links_is_not_questioned_and_workers_are_not_checked() 
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"Note the design\",\"task\":\"note it\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"Started; the design is [here](docs/design.md).\"}\n",
-        "{\"agent\":\"note-the-design\",\"content\":\"done, see [shot](media/nothing/here.png)\"}\n",
+        // The worker's report lands after root's dispatch turn has closed,
+        // so it opens the done turn the test counts. An instant report
+        // folds into the running turn as a say, and the second
+        // turn_complete never comes (the fold-race family — #585, #606,
+        // #630; found by census, not yet red).
+        "{\"agent\":\"note-the-design\",\"content\":\"done, see [shot](media/nothing/here.png)\",\"delay_ms\":2500}\n",
         "{\"agent\":\"root\",\"content\":\"noted the done\"}\n",
         "{\"agent\":\"root\",\"content\":\"never reached\"}\n",
     );
