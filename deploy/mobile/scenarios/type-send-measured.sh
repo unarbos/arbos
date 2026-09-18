@@ -16,6 +16,18 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 WAY=${1:?old or new}; N=${2:-4}
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
+
+# "Run it with the app on a project chat" was a line in the header and
+# nothing more. Run from the projects list there is no composer to focus,
+# every line goes nowhere, and the run reports `0/4 arrived` — which reads
+# as the app losing typed lines, the very fault this file exists to rule in
+# or out. A precondition worth stating is worth checking.
+if ! ui dump | grep -qE " TextField "; then
+  echo "no composer on screen — this must run with a project chat open."
+  echo "Nothing typed, nothing counted: a run from the list would report"
+  echo "0 of $N arrived and look exactly like the fault it is testing for."
+  exit 1
+fi
 len() { local v; v=$(ui field 2>/dev/null); echo ${#v}; }
 hist() { python3 "$HERE/../kernel.py" pod history 200 2>/dev/null; }
 
@@ -80,4 +92,13 @@ for i in $(seq 1 "$N"); do
     echo "  $i MISSING"
   fi
 done
-echo "$WAY: $arrived/$N arrived, $(hist | grep -c "harness probe $STAMP-.*arrive whole\.")/$N whole"
+WHOLE=$(hist | grep -c "harness probe $STAMP-.*arrive whole\.")
+echo "$WAY: $arrived/$N arrived, $WHOLE/$N whole"
+echo
+if [ "$arrived" = "$N" ] && [ "$WHOLE" = "$N" ]; then
+  echo "VERDICT: every typed line reached the kernel whole — $arrived of $N, the $WAY way"
+elif [ "$arrived" = "$N" ]; then
+  echo "VERDICT: all $N lines reached the kernel but only $WHOLE arrived whole — the $WAY way"
+else
+  echo "VERDICT: $arrived of $N typed lines reached the kernel — the $WAY way, and M-162's shape"
+fi
