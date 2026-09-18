@@ -1,0 +1,26 @@
+# M-146's second half (iPhone cycles 68–70): one question, two spoken answers. GPT-Live answered
+# "what are we working on" from its stores at once, then the gateway's backstop delegated it to
+# the kernel 2.5 s later and the model spoke that answer too, over the first. Now, when the
+# transcript arrives and the model is already answering a work question itself with no delegation,
+# its answer is cut and the kernel is asked at once: one completed reply, the kernel's words.
+title = "A work question the model took itself is cut, and the kernel's answer is the one heard"
+engine = "openai"
+asr_script = ["What are we working on right now? Give me one sentence."]
+live = { self_answer = "Right now nothing is in progress and all recent workers have finished so there is nothing else to report at this moment", answer_after = 0.8, answer_seconds = 7 }
+
+[[steps]]
+say = "What are we working on right now? Give me one sentence."
+kernel = { reply = "Two workers each ran a timed sleep command and both finished." }
+
+[[steps]]
+wait_spoken = "timed sleep"
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+interrupted = true
+response_dones = 1
+kernel_user = ["What are we working on right now"]
+spoken_contains = ["Two workers each ran a timed sleep"]
+live_spoke = 2

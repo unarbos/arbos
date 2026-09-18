@@ -57,13 +57,15 @@ LIVE_INSTRUCTIONS = (
     "You are Arbos, the voice of a software engineer's agent system, on a call. Be brief, warm and "
     "direct: one or two sentences. You are given three stores and they are updated while you talk: "
     "which project this is, the chat the caller is looking at, and what the main agent and its "
-    "sub-agents (workers) are doing. Answer those from the stores. Never invent a folder, a status "
-    "or a result. Never quote diffs, file contents or a whole repository. Delegate to the backend "
-    "to do work (write, fix, run, send an agent) or when the stores do not have the answer. The "
-    "backend is the Arbos kernel; it does the work and returns the result for you to say. Say "
-    "'one sec, let me check' only when you have actually delegated; then wait for the result and "
-    "say it when it arrives, even if the conversation has moved on. Answer yourself greetings, "
-    "thanks, small talk, and anything the stores already cover."
+    "sub-agents (workers) are doing. Use the stores to understand what the caller means — names, "
+    "which project, what was said. Never invent a folder, a status or a result. Never quote diffs, "
+    "file contents or a whole repository. Delegate to the backend for anything about the work: "
+    "what is running or finished, what changed, results, and to do work (write, fix, run, send an "
+    "agent). The stores lag the kernel by minutes, so a status answered from them was wrong for the "
+    "caller; the backend is the Arbos kernel, it knows now and returns the result for you to say. "
+    "Say 'one sec, let me check' only when you have actually delegated; then wait for the result "
+    "and say it when it arrives, even if the conversation has moved on. Answer yourself greetings, "
+    "thanks, and small talk that needs no project knowledge."
 )
 
 # Recent project-chat lines seeded into the session at start (session.input): how many, and how
@@ -209,6 +211,8 @@ class OpenAILiveSession(DuplexSession):
         self.started_at = 0.0
         self.usage: dict = {}
         self.delegations_seen = 0  # session.delegation.created events so far
+        self.delegations_at_final = 0  # delegations_seen when the caller's last final was routed
+        self.speak_after_quiet = False  # a cut self-answer is still streaming; the kernel's answer waits for quiet
         self.live_output_since_final = ""  # the model's words since the caller last finished
         self.ack_watch: asyncio.Task | None = None
         self.brief_sent = ""  # the project brief GPT-Live has (instructions or a later append)
@@ -520,6 +524,9 @@ class OpenAILiveSession(DuplexSession):
         if self.live_input.strip():
             log.info("[%s] GPT-Live heard: %r", self.sid, self.live_input.strip()[-160:])
         self.live_input = ""
+        # What the model has said since the caller stopped, before this final resets the count.
+        spoke_first = self.live_output_since_final.strip() if self.delegations_seen == self.delegations_at_final else ""
+        self.delegations_at_final = self.delegations_seen
         self.live_output_since_final = ""
         log.info("[%s] user (%s): %r", self.sid, source, text)
         self._release_model()
@@ -531,7 +538,30 @@ class OpenAILiveSession(DuplexSession):
             return
         if self.ack_watch is not None and not self.ack_watch.done():
             self.ack_watch.cancel()
+        # The model is already answering a work question from its stores (words since the
+        # caller stopped, no delegation): one question was drawing two spoken answers — its own,
+        # then the kernel's a few seconds later over the top (M-146's second half, iPhone cycles
+        # 68–70). Its answer is cut here, where the transcript first lets us see what was asked,
+        # and the kernel is asked now; the caller hears one answer, the one that is true now.
+        if spoke_first and not is_small_talk(text):
+            log.warning("[%s] model answered a work question itself (%r…); cutting it and delegating %r",
+                        self.sid, spoke_first[:60], text)
+            asyncio.create_task(self._cut_and_delegate(text), name=f"cut-delegate-{self.sid}")
+            return
         self.ack_watch = asyncio.create_task(self._ensure_delegated(self.delegations_seen, text))
+
+    async def _cut_and_delegate(self, text: str) -> None:
+        await self.on_interrupt("model answered a work question itself")
+        # The model cannot be stopped from here; its answer keeps streaming and is swallowed
+        # (`muted`). The kernel's answer is handed to it once it has gone quiet, and the mute
+        # is lifted for that reply and nothing before it.
+        self.speak_after_quiet = True
+        await self._delegate(None, forced_question=text)
+
+    async def _model_quiet(self, gap: float = 0.6, limit: float = 20.0) -> None:
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline and time.monotonic() - self.last_loud_at < gap:
+            await asyncio.sleep(0.05)
 
     async def _ensure_delegated(self, seen_before: int, text: str) -> None:
         """The gateway's guarantee, whatever the model decides: anything that is not allowlisted
@@ -590,6 +620,10 @@ class OpenAILiveSession(DuplexSession):
         spoken = speakable(answer).replace("\n", " ").strip() or "Arbos had no answer."
         self._emit(P.TOOL_RESULT, name="delegate", output=spoken[:400])
         self.last_answer_at = time.monotonic()
+        if self.speak_after_quiet:
+            await self._model_quiet()
+            self.speak_after_quiet = False
+            self.muted = False
         await self._append("session.commentary.append", did, spoken[:MAX_APPEND_CHARS])
         log.info("[%s] delegation %s answered in %.1fs (%d chars)", self.sid, tag, time.monotonic() - t0, len(spoken))
 
@@ -678,6 +712,9 @@ class OpenAILiveSession(DuplexSession):
         # already in flight are dropped until it goes quiet, like the hosted engine.
         self.gen += 1
         self.muted = True
+        # The reply that was open ends here, once, as interrupted: `_close_response` after
+        # this line said `completed` for the same reply in the same instant (two
+        # `response.done` for one cut reply on the wire).
+        self.response_open = False
         self._emit(P.RESPONSE_DONE, interrupted=True, reason="interrupted")
         self.transcript_stash.clear()
-        self._close_response()

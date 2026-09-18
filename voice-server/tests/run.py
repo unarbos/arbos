@@ -219,10 +219,13 @@ async def run_scenario(sc: dict, opts: argparse.Namespace) -> Result:
             live_env["VOICE_MOCK_ASR_SCRIPT"] = str(script)
             extra += ["--asr", "mock"]
         if sc.get("engine") == "openai":
-            live = MockOpenAILive()
+            live_cfg = sc.get("live") or {}
+            live = MockOpenAILive(self_answer=str(live_cfg.get("self_answer", "")),
+                                  answer_after=float(live_cfg.get("answer_after", 1.0)),
+                                  answer_seconds=float(live_cfg.get("answer_seconds", 6.0)))
             live_url = await live.start()
             extra += ["--engine", "openai"]
-            live_env = {"OPENAI_API_KEY": "test-key", "VOICE_OPENAI_URL": live_url}
+            live_env.update({"OPENAI_API_KEY": "test-key", "VOICE_OPENAI_URL": live_url})
         if path_mode in ("local", "missing"):
             own_place = out / "own-place"
             own_place.mkdir()
@@ -489,6 +492,9 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
         add(len(dones) == int(exp["response_dones"]), f"{exp['response_dones']} completed reply(ies) (got {len(dones)})")
     for needle in exp.get("kernel_user", []):
         add(any(needle.lower() in str(u.get("text", "")).lower() for u in kernel.users), f"the main agent was asked {needle!r} ({[str(u.get('text', ''))[:60] for u in kernel.users]})")
+    if "live_spoke" in exp:
+        add(len(live.spoken) == int(exp["live_spoke"]) if live else False,
+            f"GPT-Live (mock) spoke {exp['live_spoke']} time(s) (got {live.spoken if live else None})")
     if "mock_seen" in exp:
         add(duplex.seen == list(exp["mock_seen"]), f"speech model heard {exp['mock_seen']} (got {duplex.seen})")
     if "barge_ins" in exp:

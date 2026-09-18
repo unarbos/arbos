@@ -1,0 +1,21 @@
+# The other side of live-work-question-one-answer: allowlisted small talk is the model's own to
+# answer, whole; nothing is cut and the kernel is not asked.
+title = "Small talk answered by GPT-Live plays whole and asks the kernel nothing"
+engine = "openai"
+asr_script = ["Hi Arbos, how are you?"]
+live = { self_answer = "Hello there I am doing well thank you", answer_after = 0.8, answer_seconds = 3 }
+
+[[steps]]
+say = "Hi Arbos, how are you?"
+
+[[steps]]
+wait_spoken = "doing well"
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+response_dones = 1
+kernel_user_not = ["how are you"]
+spoken_contains = ["doing well"]
+live_spoke = 1
