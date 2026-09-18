@@ -41,6 +41,10 @@ tail3() { ui dump | grep " StaticText " | tail -3 | md5; }
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 9
+# The app comes back to the chat that was in front now, so the list may not
+# be the first screen. Step back to it before starting, or the run cannot
+# find the row it means to open.
+ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
 ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
 sleep 5
 shot 01-where-he-left-it
