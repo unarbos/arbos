@@ -1,1 +1,0 @@
-{"command":"python3 -c \"import json;d=json.load(open('.arbos/internal/sort_dataset.json'));print(type(d).__name__, len(d) if isinstance(d,list) else list(d.keys())[:5]); print(str(d)[:200])\"","cwd":"/Users/const/.arbos","pid":51393,"started_ms":1789638180225}

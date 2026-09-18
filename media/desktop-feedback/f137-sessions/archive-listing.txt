@@ -1,4 +1,0 @@
-total 0
-drwxr-xr-x@  3 const  staff   96 Sep 15 11:59:07 2026 .
-drwxr-xr-x@ 20 const  staff  640 Sep 17 06:46:09 2026 ..
-drwxr-xr-x   6 const  staff  192 Sep 17 06:44:49 2026 agents

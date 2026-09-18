@@ -475,14 +475,13 @@ PRs are back at exactly the commit they were reviewed at — #529 at
 be something I discover afterwards. Checking `git branch --show-current`
 before committing, not after pushing.
 
-**Corrected in the record:** the build on Jacob's phone is the steward's,
-and it has moved twice while this cycle ran — **1657** was wrong in two of
-my earlier reports, **1716** (`2eae41c7`, carrying #529) replaced it, and
-the steward has since written **1725** (`74b49b4c`, carrying #533) and then
-**1731** (`3ef5f436`, #535), **1735**, and now **1748** (`53dffd33`, #543).
-That number is the steward's to set and this loop's only to record; it has
-moved six times while these cycles ran, which is why no report of mine
-should state it as a fact of its own.
+**The build on Jacob's phone is the steward's number, not this loop's.**
+The number itself is not written here, and no longer anywhere but
+`internal/mobile-mac-host-and-testflight.md`. Earlier reports of mine chased
+it through several values, one of which was simply wrong. A number restated
+in a dated report is read later as current, which is the mechanism that
+produced the mix-ups; the only facts worth keeping here are whose number it
+is and that this loop does not invent one.
 
 ### Cycle 59, second half (00:25 UTC) — the rest of the chat pairing
 
@@ -984,9 +983,10 @@ Fifth time tonight a count asserted a shape the screen never promised, and
 the closest to landing: the verdict was already written. The only habit that
 has ever caught these is reading the dump instead of the count.
 
-TestFlight is the steward's **1748** (`53dffd33`, #543) — the sixth number
-this session, which is why none of my reports state it as a fact of their
-own.
+TestFlight was, at this hour, the steward's **1748** (`53dffd33`, #543) —
+the sixth number this session, which is why none of my reports state it as a
+fact of their own. The current build lives in one place only:
+`internal/mobile-mac-host-and-testflight.md`.
 
 ## Cycle 62 report (02:50 UTC, 09-18)
 
@@ -1132,3 +1132,282 @@ Nobody would have met this on the trycloudflare hubs this loop uses, which
 are all `wss`. It waited for the first plain hub — which happened to be a
 test fixture rather than one of Jacob's machines, which is the good version
 of finding out.
+
+## Cycle 65 report (03:15 UTC, 09-18)
+
+**Looked at:** barge-in, oldest of the voice cluster at 42, with the
+recording that was due.
+
+**It is a third of what it was** (M-244). Three runs on the current build
+against the live gateway; two armed:
+
+| | cycle 42 | now |
+|---|---|---|
+| barge → `speech.started` | 500–522 ms (four runs) | **137 ms**, **185 ms** |
+| barge → `response.done` | — | 179 ms, 227 ms |
+
+Cycle 12 measured 401 ms, so this is the best it has been. The voice team's
+Silero/Whisper work reported 232–243 ms in their own numbers; the phone sees
+better than that now.
+
+**Reported as two of three, not averaged over three.** The third run
+produced no barge metric at all — its reply's first audio came at 754 ms and
+again at 1478 ms, so the clip that fires 1.5 s in probably landed in a gap
+rather than over a reply. A run where the thing never happened is not a slow
+reading of it, and folding it in as a zero or dropping it silently would
+both be wrong.
+
+**Connect wants one careful look** (M-245). The same three runs: 5773 ms,
+1849 ms, 1430 ms, against 1017 ms recorded at cycle 52. The shape is a cold
+first call after a fresh boot settling to 1.4–1.8 s. Whether the settled
+figure has drifted is a separate question that three runs cannot answer, and
+I am not reporting a regression I have not isolated.
+
+**Recording:** `media/mobile/cycle-65/recording-call-and-barge-in-38s.mp4`,
+with seven stills across the call.
+
+## Cycle 66 report (03:25 UTC, 09-18)
+
+**Looked at:** the microphone path, oldest of the voice cluster at 42, whose
+claim is a frame count at both ends through `-micWav`.
+
+**The first run was 13 frames short**, and stayed exactly 13 short the whole
+way — 800/787, 900/887, 1050/1037. A single loss at the start, not a leak.
+Cycle 42 measured no loss at all, so this looked like a regression in the
+capture path.
+
+**It is not.** Two more runs settled it:
+
+| connect | frames |
+|---|---|
+| 2633 ms | 1050 clip / 1037 sent — **13 lost** |
+| 1514 ms | 900 / 900 — none |
+| 1936 ms | 900 / 900 — none |
+
+The hold that covers the connect is **two seconds** of audio, oldest dropped
+first. Under two seconds nothing is lost; over it, the opening of what was
+said goes. The microphone path and the hold both work exactly as designed —
+what changed is connect (M-245).
+
+**And it retires a comment's premise** (M-247). The hold reads "anything
+held for longer than that has said nothing to lose". That is sound when the
+delay is the hold. The delay here is connect, and the audio being discarded
+is the user's first words, which have plenty to lose. The assumption was
+true when connect ran 600–770 ms at cycle 42; it is not at 2633 ms.
+
+The fix is one of two things and neither is mine to pick alone: widen the
+hold, which costs memory and keeps staler audio, or make connect reliably
+under two seconds. Named and cross-referenced from M-245, so whoever looks
+at connect sees what it costs — not a number, the first words of a sentence.
+
+This is the chain the loop exists to find: a timing drift in one component
+quietly eating the opening of every slow-connecting call, with no error
+anywhere and the transcript still arriving well enough to look fine.
+
+## Cycle 67 report (03:30 UTC, 09-18)
+
+**Did the thing M-247 named rather than leaving it named.** The hold that
+covers the connect goes from two seconds to six.
+
+The old window's reasoning — "anyone silent for longer has said nothing to
+lose" — assumed the wait belonged to the hold. It belongs to the connect,
+and what was being discarded is the opening of a sentence already spoken.
+
+| | connect | frames |
+|---|---|---|
+| before | 2633 ms | 1050 clip / 1037 sent, **13 lost** |
+| before | 1936 ms | 900 / 900 |
+| after | 2140 ms | 1000 / 1000 |
+| after | 2096 ms | 850 / 850 |
+| after | 1759 ms | 850 / 850 |
+| after | 1578 ms | 850 / 850 |
+
+Two of the four "after" runs sit above the old two-second boundary and would
+have lost frames. #557.
+
+**What is not claimed.** A connect in the 2.6 s range did not recur across
+those four runs, so the exact 2633 ms failure is covered by the window being
+three times wider rather than by re-observing that case pass. The mechanism
+is understood and the boundary has moved — but I did not see the failing
+reading turn green, and that distinction is the difference between a fix and
+a hope.
+
+Connect-time drift stays a named look, as instructed. Widening the hold
+means a slow connect no longer costs the user their first words, which was
+the part doing harm.
+
+**The mesh worker reached M-227's conclusion independently** (M-249), from
+the other end of the same roster:
+`internal/last-activity-ms-on-the-live-roster-2026-09-18.md`. Same finding —
+the field is kernel-fed, absent means the kernel predates `11a01d84` — with
+what I could not see from here: the hub's binary verified by md5, each
+kernel's build named, and `phone` deliberately left alone while Jacob was
+mid-turn, then moved when idle. The phone already renders absent as unknown,
+which is what that note asks for. Cross-referenced both ways.
+
+## Cycle 68 report (03:40 UTC, 09-18)
+
+**Looked at:** first word and transcription, oldest at 43 — and its open
+item, M-146.
+
+**The first word is fine.** Driven down the capture path, `Hey!` and the
+full status question both arrive whole, 900 of 900 frames sent. That half of
+the row holds, and the six-second hold that shipped in #557 protects it on a
+slow connect now too.
+
+**M-146 is still open, and today it is cleanly isolated** (M-251). One
+request cut in half by a pause comes back as **two transcripts and two
+spoken answers**, both `response.done reason=completed` with audio played.
+The caller hears two replies to one question.
+
+The phone is provably not the cause: 900 frames captured, 900 sent, no loss
+at the socket. The stream the gateway received was continuous and the split
+is its own segmentation of it. That mattered enough to establish before
+filing, because this family has been ours before — cycle 42's first-word
+loss was the phone's, and #557 landed today for a related reason.
+
+Re-filed for the gateway with a reproduction:
+`internal/features-inbox/2026-09-18-one-question-two-answers-across-a-pause.md`.
+Re-filing rather than pointing at the old ledger row because the original
+predates both the Silero/Whisper change and the new hold, and either could
+reasonably have been assumed to have closed it.
+
+A pause mid-question is how people talk. The failure is not a wrong answer;
+it is being answered twice, the second arriving over the first, with the orb
+settling and re-firing as though the app had lost track.
+
+## Cycle 69 report (03:55 UTC, 09-18)
+
+**Looked at:** voice notes in the composer, oldest at 44 — and the
+recording that was due at 68.
+
+**The dictation promise holds, and is now repeatable** (M-252, M-254). The
+claim inherited from cycle 44 is that dictated words sit in the field and
+nothing reaches the kernel until he sends. That is a claim about the socket,
+not about the screen, so it is counted on the kernel's own transcript at
+three moments. Two runs tonight, hours apart:
+
+| | before | words waiting, unsent | after his send |
+| --- | --- | --- | --- |
+| first run | 2411 | 2411 | 2415 |
+| second run, recorded | 2415 | 2415 | 2419 |
+
+Cycle 44 read 1526 → 1526 → 1531 on a different build. Three measurements,
+three builds, the same shape. The field held `Please summaries what the
+workers did today in two sentences.` with `Up` beside it, and the send was
+his.
+
+The second run exists because one before/after pair cannot tell a promise
+kept from a kernel that happened to be quiet for eight seconds.
+
+**A fault in my own rig, caught before it could lie** (M-255). The scenario
+took the project row as an argument and then counted `pod`'s transcript
+regardless. It agreed only because `phone` and `pod` are one kernel drawn
+twice (M-121) — so it would have gone on being right by luck until someone
+pointed it at another project, where it would have reported the promise kept
+while measuring a kernel the dictation never touched. The row and the
+counted kernel are separate arguments now, and an unreadable count stops the
+run rather than printing numbers. This is the same family as M-183, M-186
+and M-224, and it is the fault this loop pays for most often: not a wrong
+answer, but a right-looking answer to a question nobody asked.
+
+**The phone row draws its time** (M-253). The mesh side moved that kernel to
+`c3247332` and the row now reads `phone · home · 2m`, beside `demo 7h` and
+`subnet120 1h`. This is M-227's rule playing out for the fourth and last row
+the mesh side owns, exactly as predicted, so there is nothing to fix. The
+three still silent — `const`, `parity-proj…`, `qa-cycle-11-demo` — are
+Jacob's desktop's, the parity loop's and QA's kernels, and stay correct as
+unknown rather than as idle.
+
+**Recording** (due at 68, one cycle late): the dictation flow end to end,
+53 s —
+`media/mobile/cycle-69/recording-voice-note-waits-then-sends-53s.mp4`.
+The words arriving in the field, waiting there with the send arrow beside
+them, and going only on the tap. The recording is the illustration; the
+counts above are the evidence, and they disagree about nothing.
+
+**Stills:** `media/mobile/cycle-69/` — `01-the-words-wait-in-the-field.png`,
+`02-phone-draws-its-time.png`, `03-listening.png`,
+`04-the-words-wait-unsent.png`, `05-sent-on-his-tap.png`.
+
+**PR:** [#561](https://github.com/unarbos/arbos/pull/561) — harness only, no
+app change. Nothing in the app needed one this cycle.
+
+**Housekeeping.** The build on Jacob's phone is the steward's, and it now
+lives in exactly one place — `internal/mobile-mac-host-and-testflight.md` —
+rather than being restated in each report, because restating it is how this
+loop produced six different numbers in one session. That rule applies to
+this sentence too, so the number is not repeated here. The kernel CI flakes stay filed as evidence in
+`internal/kernel-ci-flakes-2026-09-18.md` and are not this loop's to fix.
+
+**One more, found by closing the cycle properly** (M-256). Mirroring the
+ledgers to the Mac reported the Mac's `mobile-findings.md` at **77976 b**
+against the store's 137631, and `mobile-coverage.md` at **12712 b** against
+21476. The rule since M-89 is to mirror after every write, and recent cycles
+wrote and did not. So for several cycles the only backup of about sixty
+kilobytes of findings did not exist, on a store that has reverted these
+files three times. Current again now. The lesson is not "mirror harder": it
+is that the mirror already prints both sizes, and reading that one line at
+each cycle close would have caught it the first time.
+
+## Cycle 70 report (04:40 UTC, 09-18)
+
+**Looked at:** the two oldest rows — hub refusals, last exercised at 45, and
+network drop at 49 — which share a fixture and a rule.
+
+**The rule from cycle 49 holds, and is finally measured on a device**
+(M-257). That rule is: a refusal is a verdict, so say the reason and stop; a
+transport failure is the path, so name it and keep trying. Its refusal half
+had never been driven on a device (M-165), because the live hub cannot be
+made to refuse to order. A fixture serving `Hub::kernel`'s three refusals
+verbatim, plus a 502 at the tunnel, settles it by counting attaches:
+
+| the hub says | the phone says | attaches in 25 s |
+| --- | --- | --- |
+| no machine named "ghost-box" | `ghost-box is not connected — its kernel isn't running, or the machine is off.` | **1 — stops** |
+| fixture-box is offline: … | `fixture-box has been off for 2 hours. It comes back when a kernel starts on it.` | 3 — retries |
+| has no kernel serving "no-kernel" | `no-kernel's kernel on fixture-box isn't running.` | 3 — retries |
+| 502 at the tunnel | `127.0.0.1 could not be reached — retrying` | 3 — retries |
+
+Counting is what makes this a measurement. Retrying and stopping are claims
+about behaviour over time, and no screenshot can tell a socket that has
+stopped from one that is about to come back.
+
+**Four things were wrong, and all four are in [#566](https://github.com/unarbos/arbos/pull/566).**
+
+The reason was erased a moment after it arrived (M-258). A refusal is two
+events — the hub's words, then the socket going — and only the first has
+any. The second overwrote it, so a sentence naming exactly which kernel was
+not running became `Link lost` before a person could read it.
+
+An offline machine matched no pattern (M-259), so it printed the hub's
+record of itself — prefix, RFC3339 timestamp, the project it used to serve
+and the remedy — in red, once per retry. The hub's own source calls this the
+commonest refusal there is.
+
+The app guessed about the path beside an answer (M-260). The hub sends its
+reason and then closes bare, so every refusal also looks like transport, and
+every refused chat carried `127.0.0.1 could not be reached` above the hub's
+explanation — on a host it had plainly reached and been answered by. This is
+#417's problem one layer on: #417 made the reason arrive, and the bare close
+still invents a second story about the same event.
+
+And an empty chat said it was ready one line above why it was not (M-261).
+
+**Two of my own faults, caught before they became reports** (M-262). The
+first fixture paraphrased the hub, putting the project where the machine
+goes, and the app's translation — correctly taking the first word as the
+machine — came out as `no-kernel's kernel on Project isn't running.` I was
+one step from filing that as an app bug. The second draft put the reason in
+the close frame, where the hub sends none, and its longest reason overflowed
+the 125 bytes a control frame allows, so the app saw a broken socket and was
+right to retry it. Both drafts read the app as losing reasons it had never
+been sent.
+
+Third time in this loop a rig has invented the fault it reported (M-162,
+M-183, M-224). The habit that works is cheap and I will keep it: copy the
+other end's strings out of its source, verbatim, and say in the fixture that
+they are verbatim so the next reader does not improve them.
+
+**Stills:** `media/mobile/cycle-70/` — the fixture list and one per case.
+**PR:** [#566](https://github.com/unarbos/arbos/pull/566), which also carries the scenario.

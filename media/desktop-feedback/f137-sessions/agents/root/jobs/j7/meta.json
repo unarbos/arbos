@@ -1,1 +1,0 @@
-{"command":"cd /Users/const/.arbos && mkdir -p .arbos/internal && python3 -c \"\nimport random, json\nrandom.seed(42)\ndata = [random.randint(0, 1_000_000) for _ in range(5000)]\njson.dump(data, open('.arbos/internal/sort_dataset.json','w'))\nprint('wrote', len(data), 'numbers; first 10:', data[:10])\n\"","cwd":"/Users/const/.arbos","pid":51282,"started_ms":1789638154219}

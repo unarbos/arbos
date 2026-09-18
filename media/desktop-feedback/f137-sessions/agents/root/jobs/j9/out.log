@@ -1,8 +1,0 @@
-/Users/const/.bash_profile: line 14: basilica: command not found
-total 104
-drwxr-xr-x@  6 const  staff    192 Sep 17 06:43 .
-drwxr-xr-x@ 20 const  staff    640 Sep 17 06:43 ..
--rw-r--r--   1 const  staff  39485 Sep 17 06:42 sort_dataset.json
--rw-r--r--   1 const  staff   1476 Sep 17 06:43 sort_heapsort.py
--rw-r--r--   1 const  staff   1311 Sep 17 06:43 sort_mergesort.py
--rw-r--r--   1 const  staff   2180 Sep 17 06:43 sort_quicksort.py

@@ -1,8 +1,0 @@
-started = "2026-09-17T09:42:49Z"
-from = "agent:root"
-kind = "brief"
-transcript_lo = 0
-ended = "2026-09-17T09:43:12Z"
-verdict = "success"
-outcome = "Done. Merge sort implemented in `.arbos/internal/sort_mergesort.py` (top-down recursive, own merge; no sorted()/list.sort() in the sort path).…"
-transcript_hi = 10

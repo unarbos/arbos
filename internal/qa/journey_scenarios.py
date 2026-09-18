@@ -638,7 +638,7 @@ def register(scenario, registry, transcript, now_ms, branch):
             st_open = rig.state()
             notif_open = st_open.get("notifications") or {}
             touched_before = notif_open.get("touched")  # #336: "looked at" needs a press, a key, or a return after the first 5 s
-            posted_on_relaunch = len(notif_open.get("posted", []))  # expected 0: no OS notification for a reply that landed while the app was closed; the badge carries it
+            posted_on_relaunch = len([n for n in notif_open.get("posted", []) if not n.get("error")])  # landed posts, not attempts; expected 0: no OS notification for a reply that landed while the app was closed; the badge carries it
             notify_before_click = notify_surface(p, rig.root_chat(folder))
             rig.focus(folder)
             time.sleep(1)
@@ -648,6 +648,16 @@ def register(scenario, registry, transcript, now_ms, branch):
             after_items = len((chat or {}).get("items", []))
             after_sessions = len((p or {}).get("sessions", [])) if p else 0
             leaves = rig.leaves()
+            # The worker rows live in the right-hand panel, and a relaunched window has the panel
+            # **closed**, so looking without opening it measures the panel's state and not the app's
+            # memory of its workers. Measured 2026-09-17 on the app at `b1c8e82a62b1`: a fresh window
+            # holds 33 leaves and no `panel-agent-*`; `toggle-panel` gives 42 with them. This check had
+            # no `toggle-panel` anywhere in it, so J6 failed in cycles 4 and 5 — twice in a row, which
+            # is the loop's threshold for a numbered bug — on a rig fault of qal-j24's family.
+            if not [l for l in leaves if l.startswith(("panel-agent", "panel-archived"))] and "toggle-panel" in leaves:
+                rig.app.click("toggle-panel")  # the Rig has no click() of its own; the driver is rig.app
+                time.sleep(1.0)
+                leaves = rig.leaves()
             worker_rows = [l for l in leaves if l.startswith(("panel-agent", "panel-archived"))]
             notes_after = (folder / ".arbos" / "notes.md").read_text(errors="replace") if (folder / ".arbos" / "notes.md").exists() else ""
             ev["J6"] = {"tab_back": p is not None, "landed_on": active, "landed_on_project": active == str(folder).rstrip("/"), "late_reply_landed_while_closed": late_reply_landed, "notify_before_click": notify_before_click, "notify_after_click": notify_after_click, "touched_before_click": touched_before, "touched_after_click": touched_after, "os_posts_on_relaunch": posted_on_relaunch, "items_before": before_items, "items_after": after_items, "sessions_before": before_sessions, "sessions_after": after_sessions, "worker_rows": len(worker_rows), "notes_unchanged": notes_before == notes_after, "notifications": "unverified: the driver exposes no unseen count"}
@@ -709,7 +719,16 @@ def register(scenario, registry, transcript, now_ms, branch):
                 st1 = rig.state()
                 pr = rig.project(folder) or {}
                 posted = (st1.get("notifications") or {}).get("posted", [])[posted_before:]
-                hit = next((n for n in posted if nonce in ((n.get("body") or "") + (n.get("title") or "")).lower()), None)
+                # `posted` is the window's record of *attempts*, and each entry carries its own
+                # `error` — the app is honest about a notifier it could not run (2026-09-18: `posted_new:
+                # 1` with `post_error: "No such file or directory (os error 2)"`, `notify-send` absent
+                # from the host). Counting attempts as posts made the app look like it claimed something
+                # it never claimed. A post is an attempt with no error; an attempt that failed because the
+                # notifier is missing is this machine's gap, not the app's fault.
+                landed = [n for n in posted if not n.get("error")]
+                failed_posts = [n for n in posted if n.get("error")]
+                hit = next((n for n in landed if nonce in ((n.get("body") or "") + (n.get("title") or "")).lower()), None)
+                notifier_missing = any("no such file" in str(n.get("error", "")).lower() for n in failed_posts)
                 history = rig.dunst_history()
                 daemon = None if history is None else any(nonce in e.lower() for e in history)
                 rig.focus(folder)
@@ -718,16 +737,21 @@ def register(scenario, registry, transcript, now_ms, branch):
                 j6b = {"nonce": nonce, "unseen_away": pr.get("unseen"), "tab_dot_away": pr.get("tab_dot"), "posted_new": len(posted), "posted_hit": bool(hit), "post_error": (hit or {}).get("error"), "daemon_has_it": daemon, "daemon_entries": None if history is None else len(history), "unseen_after_click": pr2.get("unseen"), "tab_dot_after_click": pr2.get("tab_dot"), "notifier": (st1.get("notifications") or {}).get("notifier")}
                 ev["J6"]["away"] = j6b
                 problems = []
+                unverified = []
                 if not (pr.get("unseen") or 0) >= 1 or not pr.get("tab_dot"):
                     problems.append(f"no badge while away (unseen={pr.get('unseen')}, tab_dot={pr.get('tab_dot')})")
-                if not hit:
-                    problems.append(f"the window posted no OS notification carrying the nonce ({len(posted)} new post(s))")
+                if not hit and notifier_missing:
+                    unverified.append(f"the OS notification could not be checked: the window tried and its own record says the notifier is not on this host ({failed_posts[0].get('error')}); install libnotify-bin")
+                elif not hit:
+                    problems.append(f"the window posted no OS notification carrying the nonce ({len(landed)} landed, {len(failed_posts)} failed of {len(posted)} attempt(s))")
                 elif daemon is False:
-                    problems.append("the window claims a post the notification daemon never received (dunstctl history)")
+                    problems.append("the window recorded a post with no error that the notification daemon never received (dunstctl history)")
                 if pr2.get("tab_dot") or (pr2.get("unseen") or 0) > 0:
                     problems.append("the badge did not clear on opening the tab")
                 if problems and steps["J6"][0] != "fail":
                     mark("J6", "fail", "away-tab notification: " + "; ".join(problems))
+                elif unverified and steps["J6"][0] != "fail":
+                    mark("J6", "unverified", "away-tab notification: " + "; ".join(unverified))
                 elif not problems and steps["J6"][0] == "pass":
                     mark("J6", "pass", steps["J6"][1] + "; away-tab reply: badge + unseen, OS notification posted" + (" and confirmed by the daemon" if daemon else " (no daemon record to check)") + ", cleared on click")
             else:

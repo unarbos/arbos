@@ -1,1 +1,0 @@
-{"command":"cd /Users/const/.arbos && for f in sort_quicksort sort_mergesort sort_heapsort; do python3 .arbos/internal/$f.py; done","cwd":"/Users/const/.arbos","pid":53141,"started_ms":1789638265008}

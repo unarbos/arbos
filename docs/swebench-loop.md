@@ -624,16 +624,16 @@ No new score. Material: the 24 control and 27 treatment failures of cycle 22 (`c
 
 | Pattern | Rollouts | Control / treatment | Instances |
 |---|---|---|---|
-| **G** the agent decides no change is needed | **5** | 2 / 3 | django-13513 ×4 — all four rollouts, both arms, "no code change was needed: the fix described in the issue is already present (commit f36862b69c)"; django-15022 ×1 (treatment) — "concluded no code change should be made" after finding the historic patch reverted upstream |
+| **G** the agent decides no change is needed | ~~**5**~~ **1** | ~~2 / 3~~ 0 / 1 | ~~django-13513 ×4~~ *(re-classed C in cycle 25: the issue's own example already passes on the base commit — `'my error' in html == False`, `'my new error' in html == True` — so "no change" was the correct answer to the request; the hidden test grades an innermost exception with no traceback, which the issue does not describe)*; django-15022 ×1 (treatment) — "concluded no code change should be made" after finding the historic patch reverted upstream |
 | **B** producer, not consumer | 12 | 5 / 7 | xarray-6938 ×3 (the agent's own root-cause line: "`IndexVariable.to_index_variable()` returns `self`" — then fixes the caller in `swap_dims`), sympy-17318 ×4 (guard at the crash site, root named), django-16877 ×4 (below), scikit-learn-14629 ×1 (control) |
 | **E2** reproduce the behaviour | 2 | 1 / 1 | pylint-6386 (`_DoNothingAction` takes no argument; verbose still off) |
 | **E1** a test encodes the bug | 2 | 0 / 2 | sympy-15017 (root fix kept, then the existing tests edited and indexing changed to keep `a[0]` raising, citing numpy) |
 | **A** the twin | 3 | 1 / 2 | matplotlib-24870 (control, `contour.py` only), django-11728 (treatment, 17 tool calls, named groups only), astropy-14182 (treatment, writer only) |
 | **F** the checkout decides the stage | 2 | 2 / 0 | astropy-13236 — the treatment had none |
-| C, the issue does not determine the fix | 24 | 13 / 11 | django-15503 ×4, django-15732 ×4, django-16454 ×3, pylint-8898 ×3, django-15252 ×3, sympy-18698 ×3, django-14771 ×2, django-15022 ×2 |
+| C, the issue does not determine the fix | ~~24~~ 28 | ~~13 / 11~~ 15 / 13 | django-15503 ×4, django-15732 ×4, django-16454 ×3, pylint-8898 ×3, django-15252 ×3, sympy-18698 ×3, django-14771 ×2, django-15022 ×2 |
 | provider stall | 1 | 0 / 1 | pytest-6197 (treatment): the model returned nothing for 13 minutes, the kernel ended the turn (exit 2), no patch. Not the agent. Treatment is 53 of 79 without it; still inside the band. |
 
-**G is a pattern.** Two cases before this cycle (django-15022 declining on upstream history; django-10097 overriding the issue's RFC quote), five now — seven across four instances. Two shapes: *"it is already fixed"* (django-13513, four of four: the agent found the code the issue *suggested* already in the tree, ran a test that covers the suggestion, and stopped; the hidden test wants the innermost exception handled when it has no traceback, which the suggested code does not do) and *"it should not be fixed"* (15022, 10097). Both rest on the same fault as E1 and E2 — a check against the wrong reference: the issue's suggested patch instead of the issue's symptom; upstream history instead of the request in front of it. Proposed rule, for the features agent:
+**~~G is a pattern.~~** *Corrected in cycle 25: with django-13513 re-classed, G has three cases on two instances (django-15022 ×2, django-10097), not seven on four; it goes back to a candidate. The rule proposed below was still landed in #541 and is read in cycle 25.* Two cases before this cycle (django-15022 declining on upstream history; django-10097 overriding the issue's RFC quote), ~~five now — seven across four instances~~ one more now. Two shapes: *"it is already fixed"* (django-13513, four of four: the agent found the code the issue *suggested* already in the tree, ran a test that covers the suggestion, and stopped; the hidden test wants the innermost exception handled when it has no traceback, which the suggested code does not do) and *"it should not be fixed"* (15022, 10097). Both rest on the same fault as E1 and E2 — a check against the wrong reference: the issue's suggested patch instead of the issue's symptom; upstream history instead of the request in front of it. Proposed rule, for the features agent:
 
 > Concluding that the request needs no change needs the same evidence as a fix: run the request's own example against the tree and show it already behaves as asked. "The fix the issue suggests is already present" is not that evidence — the suggestion may be older than the tree and the request is the symptom, not the patch. If the example already passes, say so with the command; if it does not, the request stands whatever the history says.
 
@@ -641,12 +641,60 @@ No new score. Material: the 24 control and 27 treatment failures of cycle 22 (`c
 
 **A fresh instance that fails the same way in both arms, four of four:** django-16877, the new `escapeseq` filter. Every rollout implemented it with `escape()`; the gold uses `conditional_escape()`, which is what the `escape` *filter* — the sibling the issue names ("what `safeseq` is to `safe`") — uses internally. Mirroring the sibling's implementation rather than its name would have passed; the producer rule says "made the way the sibling does it" and no rollout opened the `escape` filter to see how. Classed B.
 
-**Everything fits, again.** 50 of 51 in the patterns or C; one provider stall. With cycles 18, 19 and 21: **219 honest failures read**, ranking A 44, B 40, G 7, F 14, E2 9, E1 4, C 94, other 7. G enters the ranking above E2.
+**Everything fits, again.** 50 of 51 in the patterns or C; one provider stall. With cycles 18, 19 and 21: **219 honest failures read**, ranking A 44, B 40, ~~G 7~~ G 3, F 14, E2 9, E1 4, ~~C 94~~ C 98, other 7 *(corrected in cycle 25)*. ~~G enters the ranking above E2.~~
 
 Spend $0.00.
 
-## Next (cycle 24)
+## Cycle 24 (2026-09-18) — the six carrying instances at `-r 6`: the rules move the instances they were written for, at the edge of the band
 
-1. To the features agent: the G rule above, and the B rule's scope (a method returning `self` where a copy is needed; a guard at the crash site with the root named) — with 6938 and 17318 as the cases.
-2. No measured comparison is owed. If one is wanted: the six carrying instances at `-r 6` per arm, ceiling stated on that set first, band ≥ 8 of 36.
-3. Standing: every new failure the loop produces for any reason is read against the account before anything else is done with it.
+**Ceiling first, band second** ([pre-registration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-24-preregistration.md), 00:45 UTC, before the runs). Set: the six instances the five rules were written from — django-11728, matplotlib-24870, astropy-14182 (twin), astropy-13236 (stage), scikit-learn-14629 (producer), pylint-6386 (behaviour, not crash) — at `-r 6`, 36 rollouts per arm. Ceiling: pre-rule kernels solved 37 of 72 on these six across cycles 14–16, so the treatment could gain at most 15–18 of 36. Band: from the six-run estimate scaled to 36 rollouts, two standard deviations of the difference ≈ **10 of 36**. Ceiling above band; the run was allowed. Decision rule: ≥ 10 → moved by at least the band; < 10 → not distinguishable.
+
+**Arms.** The same two binaries as cycle 22, read-only, labels proved by the run: control **`arbos-kernel 0.2.0 4b833de9860f protocol 1`** (`main` `7017eb75`, pre-rule, plus #477's plumbing), treatment **`arbos-kernel 0.2.0 aaf3dbe98de7 protocol 1`** (`main` head 21:10 UTC 17 Sep, all five rules). Same harness, one reproduction, $8 cap, network cut with the sweep, concurrency 3, arms interleaved. Both ran 36 of 36; no rollout capped, no provider stall; egress 0.0, no fetch, no live survivor in either arm. $36.38.
+
+| Instance (rule) | Control `4b833de9860f` | Treatment `aaf3dbe98de7` | Δ |
+|---|---|---|---|
+| astropy-13236 (F, stage) | 2/6 | **6/6** | +4 |
+| matplotlib-24870 (A, twin) | 1/6 | **4/6** | +3 |
+| scikit-learn-14629 (B, producer) | 4/6 | **6/6** | +2 |
+| astropy-14182 (A, twin) | 3/6 | 4/6 | +1 |
+| django-11728 (A, twin) | 4/6 | 4/6 | 0 |
+| pylint-6386 (E2) | 5/6 | 5/6 | 0 |
+| **Total** | **19/36** | **29/36** | **+10** |
+
+**Treatment − control = +10 of 36: the pre-registered threshold, met at its edge.** By the rule written before the run, the five rules moved the instances they were written for by at least the band. Said with the precision it deserves: the difference is two standard deviations of the loop's own noise estimate, not more; the realised ceiling was 17, so the treatment took about ten of the seventeen rollouts that were there to take; and the gain sits where the pre-rule control was weakest (13236 and 24870 account for seven of the ten), which is what a rule that fixes a specific failure should look like. Read together with cycle 22 — the same two kernels, −3 of 80 on a general 40-instance set — the two results are one statement: **the rules do what they were written to do on the instances that carry their patterns, and those instances are a small share of the benchmark** (cycle 18's ranking: 41 of 79 failures addressable, about a tenth of rollouts). Neither number is 23/25 and neither is claimed as a rate.
+
+**Every failure read against the account** (24: 17 control, 7 treatment; `c24-fails.txt`):
+
+- Control 17: astropy-13236 ×4 — F, evident, every one wrote the `FutureWarning`; one read the version four times and wrote the warning anyway (the step without the rule that tells it what the step means). matplotlib-24870 ×5 — A, evident: `tri/_tricontour.py` untouched in all five. django-11728 ×2 — A, evident: `replace_unnamed_groups` untouched. scikit-learn-14629 ×2 — B, evident: the fallback in `_validation.py`; one of them opened the sibling three times and put the fallback in the caller anyway. pylint-6386 ×1 — E2, evident. astropy-14182 ×3 — consistent with C: the reader was handled, the failing detail is not visible.
+- Treatment 7: django-11728 ×2 — A, evident: 14 and 17 tool calls, no grep described as looking for the twin, `replace_unnamed_groups` untouched — the rule not followed, and the short trajectory again. matplotlib-24870 ×2 — the twin *was* fixed (one carries "Twin check: … twin found and fixed in the same change"), and the rollout failed on something else: the pattern removed, a different residue; consistent with C. astropy-14182 ×2 — as the control's, consistent with C. pylint-6386 ×1 — E2, evident: `_DoNothingAction` again, one `-v`/`--verbose` comparison in the transcript and still the crash fix.
+
+Everything fits; nothing new. Cumulative read: **243 honest failures.**
+
+Spend $36.38.
+
+## Cycle 25 (2026-09-18) — #541 read: the "no change" rule was tested on the wrong instance, and the widened producer rule's mark is the one thing the agent does not do
+
+**Conditions.** [#541](https://github.com/unarbos/arbos/pull/541) landed the G rule ("no change needed" takes a recorded run of the request's example against the unmodified tree and a line "no change: <command> already …") and widened the producer rule to the method that returns the same object and the guard placed where the error surfaces, with a new mark: *the line in your own reply that names the root cause names where the fix goes.* 77b1feaa made an edit through the shell an edit on the tool event and named the generated file in the twin rule. Kernel **`arbos-kernel 0.2.0 206d617e9a50 protocol 1`** = `main` head, all of it in, built in the worktree, label proved by the run. Network cut, egress 0.0 on all 15, no stall. Pre-registered as a read ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-25-preregistration.md)): five rollouts each on django-13513, xarray-6938, sympy-17318. $5.22. Three of fifteen solved — a count.
+
+**django-13513 was the wrong instance for G, and the read says so.** All five rollouts declined to change the code, as all four did in cycle 22. Two wrote the rule's line; one of them ran the issue's own example — `TestView.get` with `raise ... from None` — against the unmodified tree and showed `'my error' in html == False`, `'my new error' in html == True`: **the request is already satisfied on the base commit.** The hidden test grades an innermost exception that has no `__traceback__`, a case the issue never describes. By the G rule's own logic the correct answer here is "no change", and the agent gave it. So cycle 23 misfiled these four rollouts: they are C (the issue does not determine the fix), not G; the strike is above, and G returns to a candidate with three cases (django-15022 ×2, django-10097). What the read does show about the rule's marks: the "no change:" line 2 of 5; the recorded reproduction (`repro:true`) 0 of 5 — the example was run, when it was run, as an ordinary command. The rule's valid targets, 15022 and 10097, were not in this read.
+
+**The widened producer rule, on its two new cases.**
+
+| Instance | Root-cause line names the producer | Diff at the producer | Diff at the consumer / guard | "producer:" line | Cycle 22 |
+|---|---|---|---|---|---|
+| xarray-6938 | 4/5 name `to_index_variable` returning `self` | **2/5** (`variable.py`; both solved) | 3/5 (`swap_dims` in `dataset.py`; all failed) | 0/5 | 0/3 at the producer |
+| sympy-17318 | 5/5 name `_sqrt_match` | **1/5** (`sqrtdenest.py`'s condition; solved) | 4/5 (guard in `radsimp.py`) | 0/5 | 0/4 at the producer |
+
+The choice moved from 0 of 7 to 3 of 10; small numbers, a count. The rule's new mark — the root-cause line in the reply names where the fix goes — is present in 9 of 10 transcripts, and in 6 of those 9 the diff is somewhere else. The agent writes the sentence that locates the fault and then fixes the caller. That is the pattern the rule was written against, now observed *with the rule in force*, and it says the mark is a description of the failure rather than a lever on it: the agent already knew where the fault was in cycles 12–24 too. What separated the three producer fixes here is what separated them in cycle 17's pairs — the agent opened the producer's code (`IndexVariable`, `_sqrt_match`'s loop) and edited there, rather than reasoning about it from the call site.
+
+**Edits through the shell.** 77b1feaa's record works: one rollout (xarray-6938 `bebeff6b`) edited `variable.py` through `sed` and the bash event carries the path; nothing in this read was unreadable.
+
+**Cumulative:** 258 honest failures read (243 + 15); with the correction, G 3, C 98 + this cycle's.
+
+Spend $5.22.
+
+## Next (cycle 26)
+
+1. The G rule's real targets: five rollouts on django-15022 and, if it can be found in the taskset, django-10097 — read for the recorded run of the request's example before any "no change" conclusion. This is the read cycle 25 should have been; $10.
+2. The producer finding goes to the features agent: the mark that names the fault is already present in the failures; what the successes share is having opened the producer before editing. If the rule is to have a step, it is "read the function you named".
+3. Standing: every new failure read against the account; any measured comparison states the ceiling on its set first.

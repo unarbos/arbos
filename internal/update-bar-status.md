@@ -5,56 +5,62 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 02:42 UTC.
+Last checked 2026-09-18 04:36 UTC.
 
-## Click Update. You will get build 1768.
+## Click Update. You will get build 1799.
 
-**1768** — signed, notarised, stapled, on the feed since 02:38 UTC. It is
-the tip of `main`, so the channel is caught up.
+**1799** — signed, notarised, stapled, on the feed since 04:27 UTC.
 
-New since 1765:
+New since 1789:
 
-- **#551** — two measuring tools in the loop that were answering the wrong
-  question
+- **#558** — `save` frame: a person's editor saves a project file
+- **#559** — browser screencast to a window
+- **#560** — a recorded line the pane already holds is held whatever happens
+- **#562** — voice: a pause mid-question is one question (the join window)
 
-And from the ten merges 1765 brought in:
+And new since 1784:
 
-- **#541** — "no change needed" takes a recorded repro run and a note
-- **#542** — macOS Enter Full Screen is a native Space; **#544** — Project
-  panel matches Terminal's width, default closed
-- **#543**, **#547** — iOS: the list says what the hub said when a token
-  is refused; leaving a call you never started no longer kills the app
-- **#545** — a machine whose last registrant left stays on the roster
-- **#546** — Jev routes mechanical steps in the engine. **It is on in this
-  build.** Absent from config it turns itself on when the provider is
-  OpenRouter and a key is present, which is your setup; `jev = false` in
-  `config.toml` keeps the old one-model loop, and an empty `jev_model`
-  does the same. `jev = true` forces it on for any provider with a key.
-- **#548** — a window stops a job through the kernel's `job_stop` frame
+- **#555** — `claim` frame: a path a person is editing, held in a client
+- **#557** — iOS: a slow first connect keeps the words already spoken
 
-Still in it: **#537**–**#540**, **#531**, **#469**, **#527**, **#530**,
-and from earlier **#490** voice lines in the project chat, **#500**/**#501**
+And new since 1768:
+
+- **#549** — the desktop's turn-end probe reads archived transcripts
+- **#550** — `turn_changes` frame: each turn's files from the rewind
+  checkpoint
+- **#552**, **#553**, **#554** — loop and restart-state fixes
+- **#556** — iOS: a sleeping machine reads as asleep, not as Off
+
+**Jev is on in this build.** Absent from config it turns itself on when
+the provider is OpenRouter and a key is present, which is your setup;
+`jev = false` in `config.toml` keeps the old one-model loop. An empty
+`jev_model` does the same, and `jev = true` forces it on for any provider
+with a key.
+
+Also in it, from 1765 and 1768: **#551** loop measuring tools, **#541**–
+**#548**, **#537**–**#540**, **#531**, **#469**, **#527**, **#530**, and
+from earlier **#490** voice lines in the project chat, **#500**/**#501**
 GPT-Live and voice rows, **#499** a store is a folder, **#518**–**#522**.
 
 ## What was checked
 
 | | |
 |---|---|
-| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1768, 4d63352f692a) signed by` it |
+| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1799, 1e0e9cde8ca9) signed by` it |
 | Notarised | Apple returned `status: Accepted` |
 | Stapled | ticket present in the downloaded zip — 1674 bytes, signed by Apple System Integration CA for "Software Ticket Signing" |
 | Gatekeeper | `source=Notarized Developer ID` |
-| Bundle | `Info.plist` reads `0.2.0 build 1768` |
+| Bundle | `Info.plist` reads `0.2.0 build 1799` |
 | Feed | every download it names is really on the tag |
 
-The ticket was read out of `Arbos-0.2.0-1768-macos-arm64.zip` as
+The ticket was read out of `Arbos-0.2.0-1799-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
 ## How far behind the channel runs, and why
 
 The channel is a sawtooth, not a queue. Through the evening it published
-1616, 1624, 1657, 1662, 1674, 1688, 1718, 1733, 1741, 1765, 1768 — every
-few minutes to an hour,
+1616, 1624, 1657, 1662, 1674, 1688, 1718, 1733, 1741, 1765, 1768, 1784, 1789,
+1799 — every few minutes to an hour,
 catching up in a jump each time.
 
 The publisher declines to build a commit while a newer one is still being

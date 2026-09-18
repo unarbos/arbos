@@ -123,8 +123,17 @@ for branch in ${ARBOS_QA_TRACK_BRANCHES:-main}; do
   fileplan=off
   git -C "$wt" grep -q -e "subscriptions" -- crates/arbos-kernel/src/hooks.rs 2>/dev/null && fileplan=on
   set +e
-  nice -n 10 timeout 50m python3 run.py --kernel "$ROOT/target-track-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --with-model --budget-usd "$BUDGET_USD"
-  echo "-- track $branch: run.py exit $?"
+  # The tracked step runs the whole library with every branch gate lifted, so it is the longest step and
+  # the one that grows whenever a scenario is unblocked. 2026-09-18: it spent 48 minutes of measured work
+  # inside a 50-minute cap, was killed at `inbox:multitasking-audit` after 76 verdicts, and the cut fell
+  # on whatever registers last — which is exactly where new probes go (`af-04`, `uw-01`..`uw-04` never
+  # ran). A truncated step must not read as a step that ran, so the kill is an alarm naming what it cost.
+  nice -n 10 timeout "${ARBOS_QA_TRACK_TIMEOUT:-100m}" python3 run.py --kernel "$ROOT/target-track-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --with-model --budget-usd "$BUDGET_USD"
+  trc=$?
+  echo "-- track $branch: run.py exit $trc"
+  if [ "$trc" = 124 ]; then
+    echo "!! TRACK STEP TRUNCATED ($branch): run.py was killed by its ${ARBOS_QA_TRACK_TIMEOUT:-100m} timeout, so every scenario after the one it had reached never ran — the registration order decides what was lost, and new scenarios register last"
+  fi
   set -e
 done
 rm -rf "$ROOT/loop/__pycache__"
@@ -241,8 +250,10 @@ if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
     git -C "$wt" grep -q -e "subscriptions" -- crates/arbos-kernel/src/hooks.rs 2>/dev/null && fileplan=on
     set +e
     ARBOS_DESKTOP_BIN="$app" ARBOS_DESKTOP_DRIVER="${ARBOS_QA_DRIVER_DIR:-$wt/desktop/driver}" \
-      nice -n 10 timeout 60m python3 run.py --kernel "$ROOT/target-desktop-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --tag desktop --with-model --budget-usd "$BUDGET_USD"
-    echo "-- desktop $branch: run.py exit $?"
+      nice -n 10 timeout "${ARBOS_QA_DESKTOP_TIMEOUT:-80m}" python3 run.py --kernel "$ROOT/target-desktop-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --tag desktop --with-model --budget-usd "$BUDGET_USD"
+    drc=$?
+    echo "-- desktop $branch: run.py exit $drc"
+    [ "$drc" = 124 ] && echo "!! DESKTOP STEP TRUNCATED ($branch): killed by its ${ARBOS_QA_DESKTOP_TIMEOUT:-80m} timeout; the acceptance journey registers late in this set and is the first thing a cut loses"
     # The acceptance journey (docs/acceptance-journeys.md) ran inside the desktop-tagged set; say its score
     # here so every cycle log carries it, and the pass rate over the last ten runs.
     if [ -f journey-history.jsonl ]; then
