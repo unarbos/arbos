@@ -13,6 +13,7 @@ mod host;
 pub mod image;
 pub mod inflight;
 pub mod intent;
+mod jev;
 mod jobs;
 pub mod markup;
 pub mod mechanism;

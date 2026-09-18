@@ -1114,11 +1114,8 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // Housekeeping only: no model step, no turn on the log.
             return Ok(());
         }
-        let tools = if wake.text.as_deref().is_some_and(skip_tools) {
-            &[][..]
-        } else {
-            view.schemas()
-        };
+        let skip = wake.text.as_deref().is_some_and(skip_tools);
+        let mut tools = if skip { &[][..] } else { view.schemas() };
         // The answer gets what the context has left after this prompt.
         // Compaction aims to keep that at `output_cap`; the estimate can
         // still run under the provider's count, so the request itself is
@@ -1133,24 +1130,117 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         // One model call = one step; every event this step writes carries
         // the number, so a window pairs streamed text with the settled line.
         cx.step += 1;
-        let step = model_step(
-            StepCx {
-                provider: &mut provider,
-                models: &mut models,
-                policy: &policy,
-                view: &view,
-                cx: &cx,
-                control: &control,
-                batch_cfg,
-                transcript: &transcript,
-                window: limit,
-                vision_model: &host.config.vision_model,
-                sees_images,
-            },
-            &managed.messages,
-            tools,
-        )
-        .await?;
+        // Jev picks the next mechanical move when it is on. Any failure
+        // falls through to the configured LLM. Barge-in, cancel, and
+        // spend caps stay on this loop; Jev cannot override them.
+        let mut jev_step: Option<Step> = None;
+        let mut jev_end = false;
+        let mut jev_no_change = false;
+        if crate::jev::should_ask(&host.config, true, provider.replay.is_some()) && !skip {
+            let names: Vec<String> = registry
+                .names()
+                .into_iter()
+                .filter(|n| view.get(n).is_some())
+                .map(str::to_string)
+                .collect();
+            let repro = crate::repro::list(&place, &agent.id).last().map(|r| {
+                format!(
+                    "exit={} {}",
+                    r.exit.map(|e| e.to_string()).unwrap_or_else(|| "?".into()),
+                    r.command
+                )
+            });
+            let sit = crate::jev::situation_from_events(&events, &wake, &names, repro);
+            let spoke = sit.spoke;
+            let model = host.config.jev_model().unwrap_or(crate::jev::DEFAULT_MODEL);
+            match crate::jev::ask(&provider, model, &sit, control.cancel(), hooks.as_ref()).await {
+                Ok((decision, usage)) => {
+                    if let Some(c) = usage.and_then(|u| u.cost) {
+                        turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
+                    }
+                    if let Some(n) = usage.and_then(|u| u.cached) {
+                        turn_cached = Some(turn_cached.unwrap_or(0) + n);
+                    }
+                    if decision.compact == Some(true) || decision.fold == Some(true) {
+                        control.request_compact();
+                    }
+                    match crate::jev::route(decision, &view, spoke) {
+                        crate::jev::Route::Tool { name, args } => {
+                            let (calls, outcomes) =
+                                crate::jev::run_tool(&view, &cx, &control, batch_cfg, name, args)
+                                    .await?;
+                            jev_step = Some(Step::Done {
+                                content: String::new(),
+                                calls,
+                                usage: None,
+                                outcomes,
+                                reasoning_details: Vec::new(),
+                            });
+                        }
+                        crate::jev::Route::Done {
+                            need_say,
+                            no_change,
+                        } => {
+                            jev_no_change = no_change;
+                            if need_say {
+                                tools = &[];
+                            } else {
+                                jev_end = true;
+                            }
+                        }
+                        crate::jev::Route::Llm => {}
+                    }
+                }
+                Err(crate::jev::AskError::Interrupted) => {
+                    return end(None, Some(&format!("{} during jev", control.stop_reason())));
+                }
+                Err(e) => {
+                    eprintln!("turn {}: jev fell through ({e})", agent.id);
+                }
+            }
+        }
+        if jev_no_change {
+            append_event(
+                &transcript,
+                &Event::new(EventKind::Notice {
+                    text: "no change: the tree already does what the request asks.".into(),
+                    failed: false,
+                }),
+            )?;
+        }
+        if jev_end {
+            return end(
+                Some(Usage {
+                    used: 0,
+                    size: limit,
+                    cost: turn_cost,
+                    cached: turn_cached,
+                }),
+                None,
+            );
+        }
+        let step = if let Some(s) = jev_step {
+            s
+        } else {
+            model_step(
+                StepCx {
+                    provider: &mut provider,
+                    models: &mut models,
+                    policy: &policy,
+                    view: &view,
+                    cx: &cx,
+                    control: &control,
+                    batch_cfg,
+                    transcript: &transcript,
+                    window: limit,
+                    vision_model: &host.config.vision_model,
+                    sees_images,
+                },
+                &managed.messages,
+                tools,
+            )
+            .await?
+        };
         // The model call took seconds; the chat may have been deleted
         // meanwhile (qa-017). Its reply is not written anywhere.
         if gone() {
