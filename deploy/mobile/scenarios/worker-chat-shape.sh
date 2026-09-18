@@ -20,7 +20,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
-CYCLE=${1:?cycle}; ROW=${2:-pod}
+CYCLE=${1:?cycle}; ROW=${2:-phone}
 OUT="$HOME/mobile-out/$CYCLE/worker-chat-shape"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
@@ -31,7 +31,14 @@ xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
 sleep 10
 reach_the_list "$UDID" || exit 1
-ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
+# Name what was on screen when the row was not. The roster changes — `pod`
+# left the list between two runs of this an hour apart — and "no pod row"
+# alone reads as a navigation failure when it is a project that is gone.
+ui tap "$ROW" >/dev/null || {
+  echo "no '$ROW' row. The list holds:"
+  ui dump | grep -oE "Button +[a-z0-9.-]+," | sed -E 's/^Button +//; s/,$//' | sed 's/^/  /'
+  exit 1
+}
 sleep 5
 
 # In by the sheet, which is the way that has always worked.
