@@ -604,3 +604,116 @@ redeploys.
 unavailable`, the third succeeded. Checked first that the file was intact
 and matched the mirror, because the dangerous case is a half-written file
 copied over a good one. It was clean.
+
+### Cycle 60, fourth pass (01:20 UTC) — the question the row had never answered
+
+Re-reading the four rows for what they *left open* rather than repeating
+them, the attachments row said **"Not sent this cycle"** — and had said so
+since cycle 37. No cycle has ever shown that an attached photo reaches the
+model.
+
+The journey's P2 could not settle it either, and this is the part worth
+keeping: it asked *"what is in this photo?"* and scored on the reply not
+sounding like a refusal. So through every month the picker was silently
+attaching nothing (M-189), P2 **passed** — on a plausible answer about a
+photo the model could not see. A check that cannot distinguish "it worked"
+from "it answered anyway" is not a check.
+
+Asked instead to name the subject and its colour, and offered an exact
+sentence for the negative, the kernel replied:
+
+> Ice plant flowers, predominantly magenta/pink.
+
+That is the library's first photo, correctly. `media/mobile/cycle-60/33-photo-in-the-chat-and-named.png`
+shows the picture sitting in the chat above the question. M-214 closed, and
+both the scenario and P2 now ask the discriminating question — with P2
+scoring U rather than PASS on a reply that names neither the picture nor a
+refusal.
+
+## Cycle 61 report (01:35 UTC, 09-18)
+
+**Looked at:** the settings sheet and the several-workers chat, both of which
+cycle 60 had already covered — so the row bumps were owed rather than the
+work — and then the genuinely oldest row left, the pulled-down call at 38.
+
+**A crash, on a path anyone could take** (M-216). Open a project's call,
+change your mind, tap the cross: the app dies.
+
+```
+*** Terminating app due to uncaught exception 'com.apple.coreaudio.avfaudio',
+    reason: 'required condition is false: NULL != engine'
+```
+
+`start()` attaches the player to the engine and installs a tap on it;
+`stop()` removed that tap unconditionally, and `removeTap` on a node that was
+never attached raises. An uncaught `NSException`, so the process goes and not
+merely the call screen.
+
+Isolated to the step rather than guessed at: a script that enters the call
+from the chat, never taps the orb, then closes — **GONE, two uncaught
+exceptions**. The same script after the guard — **alive, none**. Muting was
+never involved; that button is correctly disabled until a call is up.
+
+It surfaced only because the scenario asked *where close landed* and got
+nothing back. A run that had merely tapped and moved on would have shown a
+green line.
+
+**Both old notes about close were right** (M-217). Cycle 38 said it returns
+to the chat; cycle 56 saw the projects list and I took that as a change.
+Neither was wrong — 56 entered by launch argument, with no chat behind it.
+Entered as a person does, from the chat's own menu, close lands back on the
+chat. One correction to the row: with no call started the orb reads `Tap to
+call`, not cycle 38's "No microphone input.", which belongs to a call that
+started without a microphone.
+
+The rest of the row holds: the pulled-down row shows `Add`, `Type to phone`,
+the mic and the cross; a line typed on the call reaches the kernel and is
+answered (seq 2278, `heard`).
+
+**A CI red that was not ours** (M-215). `#543` failed `kernel (build + test)`
+on `a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged`. The
+branch changes nothing under `crates/` — the diff there is empty — so its
+Rust tree is identical to main's, and the commit before passed the same job
+on the same tree. Recorded for that test's owner as a sighting, not chased.
+
+**The store is getting worse.** Five refusals this turn — `Resource
+temporarily unavailable` on reads, on an append, and on a `mkdir`. Each
+succeeded on retry and nothing was lost, but one read had to fall back to
+the Mac mirror. That is the fifth episode in two days and the first where a
+directory could not be created.
+
+### Cycle 61, second half (01:40 UTC) — what the two named rows still left open
+
+Both rows were already at 60–61, so I read them for what they had *not*
+reached rather than run them again.
+
+**The settings sheet's build line** (M-220) reads `Arbos, 0.2.0 (1)`. Build
+`1` is what a debug build carries; Jacob's number comes from CI. So the one
+screen that names the build is the one screen a simulator cannot check the
+content of — and its footer, "The TestFlight build on this phone", is
+literally untrue on a simulator while being right where it matters. Nothing
+to change; worth knowing that this row has a claim no run here can test.
+
+**The workers sheet is showing a fraction of what exists** (M-219). Asked
+directly, the kernel's `tree` frame lists twelve children including the four
+run an hour earlier. The sheet, reopened after a relaunch, shows **two**.
+
+The mechanism is `publishWorkers()`, which yields
+`workerOrder.filter { touched.contains($0) }` — and `touched` is what *this
+session* watched happen. `remember()` takes the tree's children into
+`workers` and `workerOrder` but never into `touched`, and none are running,
+so after a relaunch the sheet can only show whatever the replay happened to
+brush against.
+
+**Left for the next cycle deliberately.** The filter is not the question;
+the question is which of a kernel's children belong on that sheet — all of
+them for ever, the recent ones, or the ones this project actually ran. That
+is a product decision, and taking it alone at 01:40 is how a loop ships
+something nobody asked for. The diagnosis is written down so the next cycle
+starts from the answer rather than the search.
+
+This also reframes M-153 from cycle 46, which found worker chats reading
+"Nothing on record yet" and established the kernel answers `total: 0` for
+archived agents. That remains true and separate: one is about which workers
+are listed, the other about whether a listed worker's chat has anything in
+it.
