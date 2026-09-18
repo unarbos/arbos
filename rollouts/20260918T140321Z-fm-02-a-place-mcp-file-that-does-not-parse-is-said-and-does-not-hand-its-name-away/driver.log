@@ -1,0 +1,5 @@
+1789740201842 kernel started pid 814560
+1789740202294 BREAK fm-02-a-file-after-the-broken-one-handed-the-name-away: `.arbos/mcp.toml` does not parse and a `notes` server was started anyway: ['mcp: notes: MCP server notes sent no reply to tools/list']. A file after the broken one — `.cursor/mcp.json` here, or the machine's own — gave that name a different server, so the person is told its servers are off while something else answers to it
+1789740202294 BREAK fm-02-notice-describes-less-than-it-did: the notice names only the machine's file, so it under-describes the block it actually performs: "MCP: .arbos/mcp.toml does not parse (TOML parse error at line 3, column 10\n  |\n3 | args = [\n  |          ^\ninvalid array\nexpected `]`). Its servers are off, and the machine's own MCP file was not used"
+1789740202297 kernel stopped with code 0
+1789740202314 bugs: seen e774c9f9c9.md, seen 806bf95c0e.md

@@ -1,0 +1,10 @@
+{
+  "name": "steer-storm@steer-running-child",
+  "doc": "Twenty-five steer frames land during one running turn. Kernel alive, transcript parseable, steers recorded in order, turn ends. (against feature branch cursor/steer-running-child-b027)",
+  "tags": [
+    "inbox",
+    "steer-running-child",
+    "adversarial",
+    "multi-agent"
+  ]
+}

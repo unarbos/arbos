@@ -1,0 +1,5 @@
+1789738750586 kernel started pid 791192
+1789738751039 BREAK pl-01-typed-line-swallowed-by-the-partial-line: an event appended after the crash is inside an unparseable line, run onto the headless one: '{"ts": 1789738750585, "kind": "assistant", "text": "hal{"ts":1789738750939,"kind":"wake","wake":"user","text":"AFTER-CRASH-50938: reply with the singl'. `append_events` writes a batch in one O_APPEND call, so the headless line takes the batch's first event — here the `wake` — while the rest land whole; every reader skips the combined line, so that event is gone and nothing says so. `drop_partial_line` repairs only the process whose own write failed (files.rs:581, its one caller); after a crash nobody runs it
+1789738751039 BREAK pl-01-the-cut-is-not-said: root's transcript does not say that a half-written line was cut at start (0 notice(s)). Either the cut did not happen — and the break above says whether an event was swallowed — or it happened and took bytes out of the record with nothing said, which is a record nobody can account for
+1789738751042 kernel stopped with code 0
+1789738751060 bugs: seen ce6dd2a7a5.md, seen 6b45b7cd15.md

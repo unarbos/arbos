@@ -1,0 +1,30 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-mt-07-root-delegates-three-parts-sbahnoc_/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8144 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-mt-07-root-delegates-three-parts-sbahnoc_/home/.cache/arbos/tgrep/718e38fbb4317f5d
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 3 calls, wall 2ms, sum 2ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 3ms, sum 4ms, speedup 1.3x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-river-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-river-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-river-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-river-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+snapshot_failed: git add: fatal: unable to stat 'agents/write-river-poem/transcript.jsonl': No such file or directory
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn write-mountain-poem: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)

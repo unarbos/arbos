@@ -1,0 +1,4 @@
+1789738697666 kernel started pid 790474
+1789738698123 kernel stopped with code 0
+1789738698123 BREAK driver-exception: NameError: name 'evs' is not defined
+1789738698146 bugs: new d258c0dfcb.md

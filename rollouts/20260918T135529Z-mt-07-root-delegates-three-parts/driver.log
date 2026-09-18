@@ -1,0 +1,5 @@
+1789739729646 kernel started pid 806470
+1789739769085 BREAK mt-07-brief-fields: briefs missing fields: [['do', 'read_first', 'report', 'rules'], ['do', 'read_first', 'report', 'rules']]
+1789739769085 BREAK mt-07-read-first: read_first does not name project-context.md
+1789739769093 kernel stopped with code 0
+1789739769144 bugs: new ad95c6c351.md, new 4d8282305e.md

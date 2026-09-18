@@ -1,0 +1,3 @@
+1789741251561 desktop: app pid 832229 on :9628
+1789741262306 BREAK driver-exception: TimeoutError_: timed out waiting for element `new-subchat`
+1789741262327 bugs: seen 5be4120380.md

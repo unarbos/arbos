@@ -1,0 +1,11 @@
+{
+  "name": "fm-03-the-kernel-record-that-names-a-live-process-wins-whichever-path-it-is-in",
+  "doc": "#446 (`cb495a38e189`). A place has two kernel records \u2014 `.arbos/kernel.json` from before the\n        `runtime/` split and `.arbos/runtime/kernel.json` after it \u2014 and they can both exist and\n        disagree, because they have different writers. `runtime/` was read first, so a place that had\n        *ever* been served by a newer kernel kept a `runtime/` file for ever; if an older kernel then\n        served it, the reader took the stale record, found its pid gone, and reported **no kernel at\n        all**. An empty-looking place is precisely the state in which something starts a second\n        kernel on it, which is `#450`'s harm arriving by another route.\n\n        The fix asks \"which of these names a process that is still there\" instead of \"which path is\n        newer\", and falls back to the newer path when neither does. Three arms pin that whole table,\n        so a regression in either direction fails: the reader is observed through\n        `arbos-kernel feedback <place>`, whose `kernel.serving` block is built by\n        `place.kernel_json_read()` \u2014 the reader itself (`feedback_cmd.rs:78`).",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "first-match",
+    "place",
+    "lock"
+  ]
+}

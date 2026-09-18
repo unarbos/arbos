@@ -1,0 +1,8 @@
+{
+  "name": "rm-04-project-face-in-hello-and-roster",
+  "doc": "project.toml's top-level name/icon/color ride on `hello` and in the hub roster; a rewrite is announced (`changed project.toml`) and the next hello carries the new face.",
+  "tags": [
+    "batch-44-45",
+    "face"
+  ]
+}

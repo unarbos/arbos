@@ -1,0 +1,21 @@
+No API key for OpenRouter. Run `arbos-kernel setup`, or set OPENROUTER_API_KEY, or put api_key in /tmp/arbos-qa-fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away-_u2r_qay/xdg/arbos/config.toml. Keys: https://openrouter.ai/settings/keys
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away-_u2r_qay/place...
+mcp: /tmp/arbos-qa-fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away-_u2r_qay/place/.arbos/mcp.toml: TOML parse error at line 3, column 10
+  |
+3 | args = [
+  |          ^
+invalid array
+expected `]`
+
+mcp_config: MCP: .arbos/mcp.toml does not parse (TOML parse error at line 3, column 10
+  |
+3 | args = [
+  |          ^
+invalid array
+expected `]`). Its servers are off, and the machine's own MCP file was not used in its place — a server the file meant to define would otherwise have been the machine's of the same name, unnoticed. Fix the file and restart the kernel.
+Found 29 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8201 trigrams, 29 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away-_u2r_qay/home/.cache/arbos/tgrep/71360a0eda67fa20
+mcp: notes: MCP server notes sent no reply to tools/list

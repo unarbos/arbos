@@ -1,0 +1,4 @@
+1789739876596 kernel started pid 811567
+1789739898657 BREAK mt-26-context-read-twice: the child read project-context.md again although it was injected (one wasted tool call per worker)
+1789739898665 kernel stopped with code 0
+1789739898693 bugs: new 003d525374.md

@@ -1,0 +1,4 @@
+1789739983808 kernel started pid 812814
+1789739986527 BREAK rp-02-mask-not-reported: the kernel did not say on stderr that SIGCHLD was blocked and unblocked — on a build without #371 the mask stays and only Linux's pidfd hides it
+1789739986531 kernel SIGKILLed
+1789739986556 bugs: seen 90d8eeb51a.md

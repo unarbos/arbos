@@ -1,0 +1,7 @@
+{
+  "name": "mt-07-root-delegates-three-parts",
+  "doc": "Item 7. Coordinator root: two spawns in one response, the question answered inline, root idle within 10 s of the spawns, six-field briefs with read_first naming project-context.md.",
+  "tags": [
+    "multitasking"
+  ]
+}

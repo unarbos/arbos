@@ -1,0 +1,3 @@
+1789732439312 desktop: app pid 694151 on :9247
+1789732532912 BREAK probe-composer-never-focused: clicking `composer-field` did not focus it, so the first line was typed at nothing and this run says nothing about the app: {'focused_after_click': False, 'composer_left_holding': '', 'accepted': False}
+1789732536032 bugs: new 5a8679a224.md

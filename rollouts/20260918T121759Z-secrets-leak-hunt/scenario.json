@@ -1,0 +1,8 @@
+{
+  "name": "secrets-leak-hunt",
+  "doc": "A granted secret and the kernel's own API key must not appear in the transcript, plain or encoded. Records which encodings get through.",
+  "tags": [
+    "adversarial",
+    "security"
+  ]
+}

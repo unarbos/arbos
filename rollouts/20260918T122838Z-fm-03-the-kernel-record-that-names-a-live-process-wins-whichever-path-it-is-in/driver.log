@@ -1,0 +1,2 @@
+1789734518561 BREAK probe-feedback-unreadable: `arbos-kernel feedback` gave no readable JSON for ['a_runtime_dead_legacy_live', 'b_runtime_live_legacy_dead', 'c_neither_live'], so the reader was never asked: ['Error: unknown command feedback. Commands: serve, run, answer, attach, log, rollout, check, prompt, store, setup, rewind, update, worker, version, help. A kernel that answers this to `update` is older']
+1789734518584 bugs: new 97d2e33724.md

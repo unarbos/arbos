@@ -1,0 +1,22 @@
+{
+  "scenario": "desktop-rapid-session-switch",
+  "doc": "Create six chats and switch between them as fast as the driver allows. The app must stay up and responsive; each chat must keep its own folder.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "TimeoutError_: timed out waiting for element `new-subchat`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 12.0,
+  "place": "/tmp/arbos-qa-desktop-rapid-session-switch-qnsvnyp4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1beec0a1fd98 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T141157Z-desktop-rapid-session-switch",
+  "branch": "main",
+  "usd": 0.00568
+}

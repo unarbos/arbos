@@ -1,0 +1,4 @@
+1789736158007 kernel started pid 758396
+1789736158460 BREAK pl-01-typed-line-swallowed-by-the-partial-line: the line typed after the crash is on no readable event — it is inside an unparseable line, appended onto the partial one: '{"ts": 1789736158007, "kind": "assistant", "text": "hal{"ts":1789736158361,"kind":"wake","wake":"user","text":"AFTER-CRA'. `drop_partial_line` repairs only the process whose own write failed; after a crash nobody runs it, so the first append lands on a headless line and every reader skips both
+1789736158463 kernel stopped with code 0
+1789736158489 bugs: new ce6dd2a7a5.md

@@ -1,10 +1,10 @@
 # qal-j31 — a place MCP config that does not parse hands its server name to the global one, in silence
 
-- **status**: open
+- **status**: **closed — fixed on `main` by [#613](https://github.com/unarbos/arbos/pull/613) (`23ef527c`), re-checked 2026-09-18 12:49. The residual is closed too by [#644](https://github.com/unarbos/arbos/pull/644) (`f97bb348`), re-checked 2026-09-18 13:14.
 - **found**: 2026-09-18 08:22, by walking the kernel's first-match readers rather than by a break
 - **kernel**: `arbos-kernel 0.2.0 f80f0b663bac protocol 1`
 - **code**: `crates/arbos-kernel/src/mcp.rs:93` (`config_paths`) and `:116` (`load_servers`)
-- **control**: `fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone`
+- **control**: `fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away` (renamed with the contract)
 - **rollout**: `20260918T082246Z-fm-02-…`
 
 ## What happens
@@ -80,3 +80,58 @@ That is the argument for building the `fm-*` family as a standing property rathe
 one-off checks, which was the reasoning given when the family was proposed: *the reasons are
 today's, and the next reader added will not have been checked by anyone.* This one was already
 there and unchecked. `fm-02` now holds the property.
+
+## Closed: re-checked against #613
+
+The features agent's read is `internal/qa/inbox/2026-09-18-qal-j31-mcp-parse-said.md`. `mcp::load`
+now returns the servers **and the problems**: a place file that does not parse is said as a notice
+on root's transcript, and it blocks the machine's file, so the name cannot be served by the
+machine's server of the same name.
+
+Re-checked on `arbos-kernel 0.2.0 a8678ac16636 protocol 1` — today's `main`, which carries #613 —
+against `42cb9751ace8`, which does not. Same staging both times: one unclosed array in
+`.arbos/mcp.toml`, and a valid `notes` in `$XDG_CONFIG_HOME/arbos/mcp.toml`.
+
+| | `42cb9751ace8` (before) | `a8678ac16636` (with #613) |
+|---|---|---|
+| `MCP:` notice on root's transcript | **none** | the notice, naming the file and the parse error |
+| the machine's `notes` server started | — | **not** started |
+
+The notice reads: *"MCP: .arbos/mcp.toml does not parse (TOML parse error at line 3, column 10 …
+invalid array, expected `]`). Its servers are off, and the machine's own MCP file was not used in
+its place…"* — the file, the fault, and what it cost, on the transcript rather than in a log the
+window never shows. That is the whole of what this file asked for, so it closes.
+
+## The residual, and its close: #644
+
+#613 blocked the **machine's** file only. The place's own later files — `.cursor/mcp.json`,
+`.mcp.json` — were still read, and could hand the same name a different server while the notice
+said "its servers are off". Reproduced here on `a8678ac16636` in two arms differing only in that
+one file: with `.cursor/mcp.json` offering `notes` a server started; without it none did. So the
+machine's file was genuinely blocked, and the later place file was the remaining route.
+
+[#644](https://github.com/unarbos/arbos/pull/644) landed as `f97bb348`. `load_from` now `break`s at
+the first place file that does not parse, so nothing after it is read, and `problem_notice` widened
+from *"the machine's own MCP file was not used in its place"* to *"no MCP file after it was read in
+its place — not the place's other files, not the machine's own"*.
+
+Re-checked, same staging, both arms:
+
+| | `a8678ac16636` (#613 only) | `f97bb3487540` (with #644) |
+|---|---|---|
+| a `notes` server started | **yes** — `mcp: notes: …` | **none** |
+| notice names the files after the broken one | no | yes |
+
+`fm-02` passes on the #644 head and breaks twice on the one before it, so it fails on the unfixed
+build and passes on the fixed one in both halves of the contract. `qal-j31` is closed entire.
+
+The self-gate is gone. While #644 was open, `fm-02` gated that third check on the product's own
+claim rather than standing a red for an unmerged fix; with the fix on `main` it is a plain
+assertion. Worth noting the gate would **not** have armed itself as written: it looked for the word
+"later" and #644's wording is "after it" — so the device was right in principle and wrong in its
+trigger, and a merged PR needed a human read either way. A self-gate on a product's wording is a
+guess about a sentence nobody had written yet.
+
+The second assertion above is new and came out of that: the notice must describe the whole block it
+performs, not less. On `a8678ac16636` it names only the machine's file, which would let a person
+believe a later place file might still have taken the name.

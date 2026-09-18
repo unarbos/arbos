@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-17-plan-strip-empty-chat",
+  "doc": "Item 17. A new chat in a new place shows nothing above the composer: no plan strip, no kernel chore.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "TimeoutError_: timed out waiting for element `new-subchat`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 12.1,
+  "place": "/tmp/arbos-qa-mt-17-plan-strip-empty-chat-ssj8nj1h/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1beec0a1fd98 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T142050Z-mt-17-plan-strip-empty-chat",
+  "branch": "main",
+  "usd": 0.01749
+}

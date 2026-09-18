@@ -1,0 +1,11 @@
+1789741022054 J1: fail — no greeting from the kickoff turn (items 0)
+1789741036454 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789741075831 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789741080024 J4: pass — mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered
+1789741090584 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789741122905 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789741143029 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab; away-tab reply: badge + unseen, OS notification posted and confirmed by the daemon, cleared on click
+1789741143078 J7: pass — tests pass, CHANGELOG written, commit on ['fix/QA-J16394-geometry-area-calc']
+1789741210697 J8: unverified — restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)
+1789741213808 BREAK journey-J1: no greeting from the kickoff turn (items 0)
+1789741213823 bugs: seen 40ed2b971d.md

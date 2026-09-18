@@ -1,0 +1,29 @@
+{
+  "scenario": "fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away",
+  "doc": "`mcp::load` walks four locations in order \u2014 `.arbos/mcp.toml`, `.cursor/mcp.json`,\n        `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` \u2014 and the first file to define a server name\n        keeps it. `qal-j31`: a file that did not parse was skipped with an `eprintln` and the walk went\n        on, so one wrong character in the place's own config handed that server's name to whatever came\n        next, and the only record went to a log the window never shows.\n\n        Fixed in #613 (`23ef527c`, on `main` since 09:34 UTC): a place file that fails to parse is said\n        as a notice on root's transcript, and it **blocks the machine's file** so the name cannot be\n        served by the machine's server of the same name.\n\n        Two things are asserted, both #613's contract, both on `main`:\n          1. the notice is there, and names the file and the parse error;\n          2. no server of that name starts when only the machine's file offers one.\n\n        The third \u2014 a later *place* file (`.cursor/mcp.json`, `.mcp.json`) must not hand the name away\n        either \u2014 is #644, still open at 12:45 UTC and reproduced here. Rather than stand a red for an\n        open PR, the check gates itself on the product's own claim: #644 makes the notice say no later\n        file was read, so once it says that, a started server contradicts it and is a break. Until\n        then the residual is recorded as a note.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "fm-02-broken-place-config-is-silent-to-the-user",
+      "detail": "`.arbos/mcp.toml` does not parse and root's transcript carries no `MCP:` notice (1 line(s) went to the kernel's stderr instead). The desktop routes stderr to `.arbos/runtime/kernel.out.log`, which the window never shows, so its author is told nothing",
+      "where": "arbos-kernel mcp.rs load \u2014 say it on root's transcript (#613)"
+    }
+  ],
+  "notes": {
+    "mcp_notices": [],
+    "server_of_that_name_started": [
+      "mcp: notes: MCP server notes sent no reply to tools/list"
+    ],
+    "notice_claims_no_later_file_read": false,
+    "kernel_still_answering": true,
+    "residual_644": "a `notes` server started from a later place file while the notice said its servers are off; #644 (open at 2026-09-18 12:45 UTC) stops the walk at the first broken place file. Measured here: with `.cursor/mcp.json` present a server starts; without it none does, so the machine's file is genuinely blocked and #613 holds."
+  },
+  "duration_s": 0.5,
+  "place": "/tmp/arbos-qa-fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away-3sorv_yd/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/42cb9751ace8/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 42cb9751ace8 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T124957Z-fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away",
+  "branch": "main"
+}

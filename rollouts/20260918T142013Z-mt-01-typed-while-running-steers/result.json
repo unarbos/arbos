@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-01-typed-while-running-steers",
+  "doc": "Item 1. Typed in the desktop while root runs: a kind = steer inbox file within 1 s; the line is on the transcript before turn_complete.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "TimeoutError_: timed out waiting for element `new-subchat`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 12.1,
+  "place": "/tmp/arbos-qa-mt-01-typed-while-running-steers-nwis_w6r/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1beec0a1fd98 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T142013Z-mt-01-typed-while-running-steers",
+  "branch": "main",
+  "usd": 0.02342
+}

@@ -1,0 +1,31 @@
+{
+  "scenario": "pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line",
+  "doc": "`append_events` writes one `O_APPEND` call ending in a newline, and when that write fails\n        part-way it calls `drop_partial_line` to cut the headless line back off. Its own comment names\n        the hazard: *\"A write that failed part-way (disk full, size limit) leaves the head of a line\n        with no newline. Every reader skips it, but it also swallows\"* what comes next.\n\n        That guard runs in the process whose write failed. A **crash** \u2014 SIGKILL, a lost machine, a\n        power cut \u2014 leaves the same partial line with nobody to run it: `drop_partial_line` has\n        exactly one caller (`files.rs:581`, the failed-write path) and nothing repairs a transcript at\n        startup. So the next kernel appends its first event onto the partial line, `load_transcript`\n        skips the combined line as unparseable (`files.rs:629`, `if let Ok(...)` with no else), and\n        that event is gone with nothing said.\n\n        Staged as a crash leaves it: three whole events, then a fourth line cut off mid-string with no\n        trailing newline. Then a turn runs. The property is that a person's next words survive a crash\n        that happened before they typed them.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "NameError: name 'evs' is not defined",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "readable_before": 3,
+    "unparseable_before": 1,
+    "readable_after": 8,
+    "unparseable_after": 0,
+    "typed_line_readable": true,
+    "typed_line_inside_an_unparseable_line": false,
+    "unparseable_tail": [],
+    "bytes_before": 231,
+    "bytes_after": 851
+  },
+  "duration_s": 0.5,
+  "place": "/tmp/arbos-qa-pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line-3xrbusfx/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/target-646/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cecd48e1bd76 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T133817Z-pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line",
+  "branch": "main"
+}

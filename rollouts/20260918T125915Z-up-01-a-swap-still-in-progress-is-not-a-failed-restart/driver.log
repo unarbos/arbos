@@ -1,0 +1,4 @@
+1789736355357 kernel started pid 760764
+1789736387408 BREAK up-01-exec-attempted-onto-an-unusable-file: the kernel tried to exec onto the start path while it held nothing usable (['restarting onto /tmp/arbos-qa-up-01-a-swap-still-in-progress-is-not-a-failed-restart-lullgv1q/up01/bin/arbos-kernel (git']); an empty or half-written file must be waited for, not jumped onto
+1789736387408 BREAK up-01-waits-a-minute-on-a-swap-in-progress: only 0 `reexec_wait` line(s) in 30.0 s: the kernel is treating a swap still in progress as a failed restart and waiting REEXEC_RETRY_MS (60 s) rather than looking again in 2 s
+1789736387434 bugs: new 830bbf8cec.md, new dfc640c838.md

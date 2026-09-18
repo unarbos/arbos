@@ -1,0 +1,26 @@
+{
+  "scenario": "bench-screenshot",
+  "doc": "Checklist item 3: run something and send back a screenshot the user can see (browser tool -> image file).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no screenshot image produced; browser errors: []",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "images": [],
+    "tool_images": [],
+    "browser_errors": []
+  },
+  "duration_s": 39.2,
+  "place": "/tmp/arbos-qa-bench-screenshot-qngvatge/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 a8678ac16636 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T124537Z-bench-screenshot",
+  "branch": "main",
+  "usd": 0.01873
+}

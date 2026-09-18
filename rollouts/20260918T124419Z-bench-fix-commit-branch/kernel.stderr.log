@@ -1,0 +1,69 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-_6hc9j5n/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-_6hc9j5n/home/.cache/arbos/tgrep/cba60f4e698f12f8
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 3 calls, wall 4ms, sum 1ms, speedup 0.2x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 25ms, sum 20ms, speedup 0.8x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 276ms, sum 269ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 273ms, sum 267ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 273ms, sum 267ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 274ms, sum 268ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 275ms, sum 268ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 273ms, sum 266ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 273ms, sum 267ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 277ms, sum 270ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 273ms, sum 269ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 273ms, sum 269ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 268ms, sum 268ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 277ms, sum 269ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 9ms, sum 1ms, speedup 0.1x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 272ms, sum 272ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 292ms, sum 276ms, speedup 0.9x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 281ms, sum 275ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 274ms, sum 274ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 283ms, sum 273ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 286ms, sum 273ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 2 calls, wall 8ms, sum 3ms, speedup 0.4x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-hello-py: 5 calls, wall 2ms, sum 2ms, speedup 1.0x
+turn fix-hello-py: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+snapshot_failed: git add: fatal: unable to stat 'agents/fix-hello-py/jobs/j19/exit': No such file or directory
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)

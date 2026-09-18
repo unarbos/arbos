@@ -1,0 +1,11 @@
+{
+  "name": "pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line",
+  "doc": "`append_events` writes one `O_APPEND` call ending in a newline, and when that write fails\n        part-way it calls `drop_partial_line` to cut the headless line back off. Its own comment names\n        the hazard: *\"A write that failed part-way (disk full, size limit) leaves the head of a line\n        with no newline. Every reader skips it, but it also swallows\"* what comes next.\n\n        That guard runs in the process whose write failed. A **crash** \u2014 SIGKILL, a lost machine, a\n        power cut \u2014 leaves the same partial line with nobody to run it: `drop_partial_line` has\n        exactly one caller (`files.rs:581`, the failed-write path) and nothing repairs a transcript at\n        startup. So the next kernel appends its first event onto the partial line, `load_transcript`\n        skips the combined line as unparseable (`files.rs:629`, `if let Ok(...)` with no else), and\n        that event is gone with nothing said.\n\n        Staged as a crash leaves it: three whole events, then a fourth line cut off mid-string with no\n        trailing newline. Then a turn runs. The property is that a person's next words survive a crash\n        that happened before they typed them.",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "after-failure",
+    "transcript",
+    "destructive-order"
+  ]
+}

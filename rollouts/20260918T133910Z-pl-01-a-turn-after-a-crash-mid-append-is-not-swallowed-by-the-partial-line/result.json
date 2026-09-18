@@ -1,0 +1,39 @@
+{
+  "scenario": "pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line",
+  "doc": "`append_events` writes one `O_APPEND` call ending in a newline, and when that write fails\n        part-way it calls `drop_partial_line` to cut the headless line back off. Its own comment names\n        the hazard: *\"A write that failed part-way (disk full, size limit) leaves the head of a line\n        with no newline. Every reader skips it, but it also swallows\"* what comes next.\n\n        That guard runs in the process whose write failed. A **crash** \u2014 SIGKILL, a lost machine, a\n        power cut \u2014 leaves the same partial line with nobody to run it: `drop_partial_line` has\n        exactly one caller (`files.rs:581`, the failed-write path) and nothing repairs a transcript at\n        startup. So the next kernel appends its first event onto the partial line, `load_transcript`\n        skips the combined line as unparseable (`files.rs:629`, `if let Ok(...)` with no else), and\n        that event is gone with nothing said.\n\n        Staged as a crash leaves it: three whole events, then a fourth line cut off mid-string with no\n        trailing newline. Then a turn runs. The property is that a person's next words survive a crash\n        that happened before they typed them.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "pl-01-typed-line-swallowed-by-the-partial-line",
+      "detail": "an event appended after the crash is inside an unparseable line, run onto the headless one: '{\"ts\": 1789738750585, \"kind\": \"assistant\", \"text\": \"hal{\"ts\":1789738750939,\"kind\":\"wake\",\"wake\":\"user\",\"text\":\"AFTER-CRASH-50938: reply with the singl'. `append_events` writes a batch in one O_APPEND call, so the headless line takes the batch's first event \u2014 here the `wake` \u2014 while the rest land whole; every reader skips the combined line, so that event is gone and nothing says so. `drop_partial_line` repairs only the process whose own write failed (files.rs:581, its one caller); after a crash nobody runs it",
+      "where": "arbos-core files.rs append_events \u2014 cut a headless last line before appending, not only when this process's write failed"
+    },
+    {
+      "rule": "pl-01-the-cut-is-not-said",
+      "detail": "root's transcript does not say that a half-written line was cut at start (0 notice(s)). Either the cut did not happen \u2014 and the break above says whether an event was swallowed \u2014 or it happened and took bytes out of the record with nothing said, which is a record nobody can account for",
+      "where": "arbos-kernel serve.rs repair_headless_tails \u2014 say what was dropped (#646)"
+    }
+  ],
+  "notes": {
+    "readable_before": 3,
+    "unparseable_before": 1,
+    "readable_after": 6,
+    "unparseable_after": 1,
+    "typed_line_readable": true,
+    "typed_line_inside_an_unparseable_line": true,
+    "unparseable_tail": [
+      "{\"ts\": 1789738750585, \"kind\": \"assistant\", \"text\": \"hal{\"ts\":1789738750939,\"kind\":\"wake\",\"wake\":\"user\",\"text\":\"AFTER-CRASH-50938: reply with the single word SUR"
+    ],
+    "bytes_before": 231,
+    "bytes_after": 617,
+    "cut_said_on_the_transcript": []
+  },
+  "duration_s": 0.5,
+  "place": "/tmp/arbos-qa-pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line-vo61pwm9/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f97bb3487540/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f97bb3487540 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T133910Z-pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line",
+  "branch": "main"
+}

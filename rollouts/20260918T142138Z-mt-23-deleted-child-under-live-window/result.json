@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-23-deleted-child-under-live-window",
+  "doc": "Item 23. Delete a finished child's folder while the window shows it: the window drops it; no reconnect storm; no ghost transcript.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "TimeoutError_: timed out waiting for element `new-subchat`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 12.1,
+  "place": "/tmp/arbos-qa-mt-23-deleted-child-under-live-window-jcm890o4/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1beec0a1fd98 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T142138Z-mt-23-deleted-child-under-live-window",
+  "branch": "main",
+  "usd": 0.01737
+}

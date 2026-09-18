@@ -1,0 +1,8 @@
+{
+  "name": "mt-23-deleted-child-under-live-window",
+  "doc": "Item 23. Delete a finished child's folder while the window shows it: the window drops it; no reconnect storm; no ghost transcript.",
+  "tags": [
+    "multitasking",
+    "desktop"
+  ]
+}

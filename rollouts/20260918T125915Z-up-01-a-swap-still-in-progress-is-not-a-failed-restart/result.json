@@ -1,0 +1,34 @@
+{
+  "scenario": "up-01-a-swap-still-in-progress-is-not-a-failed-restart",
+  "doc": "#453 (`b0b3cf841c77`). The app's swap is a directory rename and then a copy into the start\n        path, so for a moment the path holds nothing usable. Before the fix the kernel read that as a\n        failed restart: measured here on `arbos-kernel 0.2.0 42cb9751ace8 protocol 1` (the commit\n        before it), the old build **attempts the exec onto a zero-byte file** \u2014 one `reexec` line,\n        \"restarting onto \u2026\" \u2014 and then waits `REEXEC_RETRY_MS`, a full minute, before looking again.\n        The PR describes the minute; the staged gap shows the attempt that earns it.\n\n        After the fix the file must be whole and at rest \u2014 same size and mtime across a 250 ms pause,\n        non-empty \u2014 and a file that is not is `NotReady`, worth `REEXEC_LOOK_AGAIN_MS` (2 s) rather\n        than sixty. The PR could not reproduce the original red (0/12 either way) and rests on a\n        reading of the code, so this stages the window deterministically instead.\n\n        Held open the way the app makes it: rename the running image aside \u2014 an in-place truncate is\n        impossible on a live binary (ETXTBSY), which is *why* the app renames and why the gap exists\n        \u2014 and leave an empty file at the start path.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "up-01-exec-attempted-onto-an-unusable-file",
+      "detail": "the kernel tried to exec onto the start path while it held nothing usable (['restarting onto /tmp/arbos-qa-up-01-a-swap-still-in-progress-is-not-a-failed-restart-lullgv1q/up01/bin/arbos-kernel (git']); an empty or half-written file must be waited for, not jumped onto",
+      "where": "arbos-kernel serve.rs reexec_onto_new_binary \u2014 the settled check (#453)"
+    },
+    {
+      "rule": "up-01-waits-a-minute-on-a-swap-in-progress",
+      "detail": "only 0 `reexec_wait` line(s) in 30.0 s: the kernel is treating a swap still in progress as a failed restart and waiting REEXEC_RETRY_MS (60 s) rather than looking again in 2 s",
+      "where": "arbos-kernel serve.rs: Reexec::NotReady must earn REEXEC_LOOK_AGAIN_MS, not REEXEC_RETRY_MS"
+    }
+  ],
+  "notes": {
+    "binary_gone_said": 1,
+    "reexec_wait_lines": 0,
+    "reexec_attempts": 1,
+    "watched_s": 30.0,
+    "attempt_detail": [
+      "restarting onto /tmp/arbos-qa-up-01-a-swap-still-in-progress-is-not-a-failed-restart-lullgv1q/up01/bin/arbos-kernel (git"
+    ]
+  },
+  "duration_s": 32.1,
+  "place": "/tmp/arbos-qa-up-01-a-swap-still-in-progress-is-not-a-failed-restart-lullgv1q/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/42cb9751ace8/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 42cb9751ace8 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T125915Z-up-01-a-swap-still-in-progress-is-not-a-failed-restart",
+  "branch": "main"
+}

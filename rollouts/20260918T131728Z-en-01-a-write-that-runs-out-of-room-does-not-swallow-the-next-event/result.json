@@ -1,0 +1,32 @@
+{
+  "scenario": "en-01-a-write-that-runs-out-of-room-does-not-swallow-the-next-event",
+  "doc": "The complement to `qal-j37`. `drop_partial_line` exists for a write that fails part-way and\n        names its causes: *\"disk full, size limit\"*. `qal-j37` showed the **crash** path has no repair\n        at all \u2014 nobody runs the guard when the process is gone. This asks whether the guard works on\n        the path it was written for, by the cheapest of its two causes: `RLIMIT_FSIZE`, set on the\n        kernel before exec, with the transcript padded to just under it so the next append crosses it\n        mid-write.\n\n        A size limit is reachable without anything exotic: a quota, a container limit, a filesystem's\n        own ceiling. Whether the process even *gets* an error is the first question \u2014 exceeding\n        `RLIMIT_FSIZE` raises `SIGXFSZ`, whose default action is to kill, so a guard on the `write_all`\n        error path only runs if that signal is handled or ignored. If the kernel dies instead, then\n        the comment's \"size limit\" reaches `qal-j37`'s territory rather than the guard's, which is\n        worth knowing either way.\n\n        Whatever happens, the property is the same as `qal-j37`'s: no event may end up inside an\n        unparseable line, and nothing already whole may be lost.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "IndexError: list index out of range",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "kernel_started_under_the_cap": true,
+    "readable_before": 145,
+    "readable_after": 148,
+    "unparseable_before": 0,
+    "unparseable_after": 0,
+    "bytes_before": 64936,
+    "bytes_after": 65453,
+    "kernel_alive_after": true,
+    "stderr_mentions_size_or_space": true,
+    "unparseable_tail": []
+  },
+  "duration_s": 61.5,
+  "place": "/tmp/arbos-qa-en-01-a-write-that-runs-out-of-room-does-not-swallow-the-next-event-iboqlf9a/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/f97bb3487540/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 f97bb3487540 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T131728Z-en-01-a-write-that-runs-out-of-room-does-not-swallow-the-next-event",
+  "branch": "main"
+}

@@ -1,0 +1,26 @@
+{
+  "scenario": "fp-waiting-ask",
+  "doc": "`ask` parks: the turn ends with a waiting/ask-*.toml; the answer arrives as an inbox file (kind = answer, reply_to) and starts a new turn that uses it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "waiting-not-cleared",
+      "detail": "the waiting/ file stayed after the answer",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "waiting_files": [
+      "ask-tool_ask_snwGEPi2EvkyiuavjqaZ.toml"
+    ]
+  },
+  "duration_s": 9.9,
+  "place": "/tmp/arbos-qa-fp-waiting-ask-nf16wk7a/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 a8678ac16636 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T135335Z-fp-waiting-ask",
+  "branch": "main",
+  "usd": 0.01667
+}

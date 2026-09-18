@@ -1,0 +1,22 @@
+{
+  "scenario": "desktop-fresh-place-no-notice",
+  "doc": "Open a fresh place (no .arbos yet). The chat, board and terminal all attach at once; exactly one kernel must be spawned and no failed notice (\"arbos-kernel exited\") may appear in the chat or the transcript (qa-030).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "TimeoutError_: timed out waiting for element `new-subchat`",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 12.0,
+  "place": "/tmp/arbos-qa-desktop-fresh-place-no-notice-_2iwgyuy/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1beec0a1fd98 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T141045Z-desktop-fresh-place-no-notice",
+  "branch": "main",
+  "usd": 0.01176
+}

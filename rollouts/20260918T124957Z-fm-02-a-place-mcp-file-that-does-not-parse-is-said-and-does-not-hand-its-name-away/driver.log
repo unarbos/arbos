@@ -1,0 +1,4 @@
+1789735797537 kernel started pid 745662
+1789735797990 BREAK fm-02-broken-place-config-is-silent-to-the-user: `.arbos/mcp.toml` does not parse and root's transcript carries no `MCP:` notice (1 line(s) went to the kernel's stderr instead). The desktop routes stderr to `.arbos/runtime/kernel.out.log`, which the window never shows, so its author is told nothing
+1789735797993 kernel stopped with code 0
+1789735798020 bugs: new 272e634ada.md

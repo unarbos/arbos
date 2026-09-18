@@ -1,0 +1,11 @@
+{
+  "name": "fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away",
+  "doc": "`mcp::load` walks four locations in order \u2014 `.arbos/mcp.toml`, `.cursor/mcp.json`,\n        `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` \u2014 and the first file to define a server name\n        keeps it. `qal-j31`: a file that did not parse was skipped with an `eprintln` and the walk went\n        on, so one wrong character in the place's own config handed that server's name to whatever came\n        next, and the only record went to a log the window never shows.\n\n        Fixed in #613 (`23ef527c`, on `main` since 09:34 UTC): a place file that fails to parse is said\n        as a notice on root's transcript, and it **blocks the machine's file** so the name cannot be\n        served by the machine's server of the same name.\n\n        Two things are asserted, both #613's contract, both on `main`:\n          1. the notice is there, and names the file and the parse error;\n          2. no server of that name starts when only the machine's file offers one.\n\n        The third \u2014 a later *place* file (`.cursor/mcp.json`, `.mcp.json`) must not hand the name away\n        either \u2014 is #644, still open at 12:45 UTC and reproduced here. Rather than stand a red for an\n        open PR, the check gates itself on the product's own claim: #644 makes the notice say no later\n        file was read, so once it says that, a started server contradicts it and is a break. Until\n        then the residual is recorded as a note.",
+  "tags": [
+    "landing",
+    "unchecked-write",
+    "first-match",
+    "mcp",
+    "config"
+  ]
+}

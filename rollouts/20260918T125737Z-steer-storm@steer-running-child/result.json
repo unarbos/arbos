@@ -1,0 +1,25 @@
+{
+  "scenario": "steer-storm@steer-running-child",
+  "doc": "Twenty-five steer frames land during one running turn. Kernel alive, transcript parseable, steers recorded in order, turn ends. (against feature branch cursor/steer-running-child-b027)",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "steer-order",
+      "detail": "steers were recorded out of order",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "steer-running-child",
+    "steers_recorded": 25
+  },
+  "duration_s": 16.8,
+  "place": "/tmp/arbos-qa-steer-storm@steer-running-child-08kxh8e0/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 a8678ac16636 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T125737Z-steer-storm@steer-running-child",
+  "branch": "main",
+  "usd": 0.02834
+}

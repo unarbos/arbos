@@ -1,0 +1,22 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:settings-model-fields-ad41fcxm/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8139 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:settings-model-fields-ad41fcxm/home/.cache/arbos/tgrep/744bad26863d5848
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn get-and-setup-project: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools get-and-setup-project: 2 calls, wall 1ms, sum 0ms, speedup 0.0x
+turn get-and-setup-project: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools get-and-setup-project: 2 calls, wall 120015ms, sum 120011ms, speedup 1.0x
+turn get-and-setup-project: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn get-and-setup-project: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn get-and-setup-project: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
