@@ -696,7 +696,7 @@ struct ChatRow: View {
     /// numbers and paths read as on the desktop. Plain text if it does
     /// not parse.
     static func prose(_ text: String) -> AttributedString {
-        var out = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        var out = (try? AttributedString(markdown: blockMarkersAsType(text), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
             ?? AttributedString(text)
         // Inline code sits on a soft chip, as Cursor's chat draws it (M-101):
         // monospaced a point smaller, on a faint tile.
@@ -705,6 +705,38 @@ struct ChatRow: View {
             out[run.range].backgroundColor = ArbosTheme.codeChip
         }
         return out
+    }
+
+    /// Turns the markers that start a line into the typography they stand
+    /// for, before the inline parse.
+    ///
+    /// `inlineOnlyPreservingWhitespace` is the right parser here — the full
+    /// one reflows the text and loses the model's own line breaks — but it
+    /// reads only inline syntax, so a heading arrived as `## Shapes` and a
+    /// bulleted list as `- Note one`, markers and all. Numbered lists were
+    /// the only kind that looked right, and only because `1.` reads as a
+    /// number whether it is parsed or not.
+    ///
+    /// Lines inside a fence are left exactly as written: a `-` there is the
+    /// code's, not the prose's.
+    private static func blockMarkersAsType(_ text: String) -> String {
+        guard text.contains("\n") || text.hasPrefix("#") || text.hasPrefix("- ") || text.hasPrefix("* ") else { return text }
+        var fenced = false
+        let lines = text.components(separatedBy: "\n").map { line -> String in
+            let body = line.drop(while: { $0 == " " })
+            let indent = String(line.prefix(line.count - body.count))
+            if body.hasPrefix("```") { fenced.toggle(); return line }
+            guard !fenced else { return line }
+            if body.hasPrefix("#") {
+                let title = body.drop(while: { $0 == "#" }).drop(while: { $0 == " " })
+                return title.isEmpty ? line : indent + "**" + title + "**"
+            }
+            if body.hasPrefix("- ") || body.hasPrefix("* ") {
+                return indent + "•  " + body.dropFirst(2)
+            }
+            return line
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func line(
