@@ -73,5 +73,19 @@ fi
 sleep 1; shot 04-muted
 ui tap "End call" >/dev/null || { echo "  no close button"; exit 1; }
 sleep 4; shot 05-after-close
-echo "  close landed on: $(where)"
+LANDED=$(where)
+echo "  close landed on: $LANDED"
 echo "stills in $OUT"
+
+# One line for a sweep: pulled down, the call takes typing, mutes, and puts
+# you back where you came from.
+echo
+# `where` returns a raw tree line, not a word: a `Back` button means a
+# pushed screen, which from a call entered in the chat is that chat. Matching
+# it against the word "chat" said the close had gone somewhere else when it
+# had gone exactly where M-217 says it should.
+case "$LANDED" in
+  *Back*)     echo "VERDICT: pulled down it types, mutes, and closes back to the chat it came from";;
+  *Projects*) echo "VERDICT: it closed to the projects list, not the chat the call came from";;
+  *)          echo "VERDICT: closed to '$LANDED' — neither the chat nor the list";;
+esac

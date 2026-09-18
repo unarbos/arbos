@@ -56,7 +56,8 @@ put_the_real_token_back() {
 
 echo "== a good build, for the baseline =="
 fresh
-echo "  rows: $(rows)"
+GOOD=$(rows)
+echo "  rows: $GOOD"
 shot 01-rows-with-the-real-token
 
 echo
@@ -84,13 +85,28 @@ idb ui text "not-a-real-token-cycle-$CYCLE" --udid "$UDID"; sleep 1
 shot 03-bad-token-typed
 ui tap "Done" >/dev/null || echo "  no Done button"
 sleep 6; shot 04-list-after-a-bad-token
-echo "  rows now: $(rows)"
+BAD=$(rows)
+echo "  rows now: $BAD"
 echo "  what the screen says:"
+SAIDWHY=no
+ui dump | grep -qi "token refused\|not connected\|could not" && SAIDWHY=yes
 ui dump | grep -vE "Button +[a-z0-9-]+, (Idle|Working)" | grep -E "StaticText" | head -6 | sed 's/^/    /'
 
 echo
 echo "== put it back =="
 put_the_real_token_back
-echo "  rows after restoring the token: $(rows)"
+RESTORED=$(rows)
+echo "  rows after restoring the token: $RESTORED"
 shot 05-rows-restored
 echo "stills in $OUT"
+
+# The row's claim in one line, so a sweep can read it: the list empties when
+# the token cannot work, says why, and comes back when it can.
+echo
+if [ "${BAD:-0}" -lt "${GOOD:-0}" ] && [ "$RESTORED" = "${GOOD:-0}" ] && [ "${SAIDWHY:-no}" = yes ]; then
+  echo "VERDICT: a token that cannot work empties the list to $BAD, says why, and $RESTORED come back"
+elif [ "${SAIDWHY:-no}" != yes ]; then
+  echo "VERDICT: the list changed but the screen never said why — the M-206 fault"
+else
+  echo "VERDICT: unexpected shape — good $GOOD, bad $BAD, restored $RESTORED"
+fi
