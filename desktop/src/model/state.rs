@@ -135,9 +135,19 @@ pub struct State {
     /// chroma is the shipped neutral, whatever the hue says.
     pub hue: f32,
     pub chroma: f32,
-    /// What each project was last showing, by place string. Last in the struct
-    /// because a map renders as TOML tables, and a bare key after one of those
-    /// belongs to it.
+    /// Whether the permissions sheet has been shown once. A first launch
+    /// opens Settings › Permissions; after that it is a click away.
+    #[serde(default)]
+    pub permissions_seen: bool,
+    /// The window's last frame — x, y, width, height in points — so a
+    /// relaunch opens where the window was. Restored only when most of it
+    /// lies on a screen that is there; otherwise the window is centred.
+    #[serde(default)]
+    pub frame: Option<[f32; 4]>,
+    /// What each project was last showing, by place string. Maps render as
+    /// TOML tables, so every bare key must come before them — a key after
+    /// `[last]` belongs to that table and the next launch reads an empty
+    /// map (qal-j35, after #679).
     #[serde(default)]
     pub last: BTreeMap<String, Entry>,
     /// Sidebar titles they typed, by place string. Missing means the folder
@@ -149,15 +159,6 @@ pub struct State {
     /// back on the next launch.
     #[serde(default)]
     pub dismissed: BTreeMap<String, Vec<String>>,
-    /// Whether the permissions sheet has been shown once. A first launch
-    /// opens Settings › Permissions; after that it is a click away.
-    #[serde(default)]
-    pub permissions_seen: bool,
-    /// The window's last frame — x, y, width, height in points — so a
-    /// relaunch opens where the window was. Restored only when most of it
-    /// lies on a screen that is there; otherwise the window is centred.
-    #[serde(default)]
-    pub frame: Option<[f32; 4]>,
     /// Each project's side panel, by place string: whether it was open, how
     /// wide, and its tabs. After `frame` and the other maps for the reason
     /// `last` gives — a bare key written after a table belongs to it.
@@ -198,11 +199,11 @@ impl Default for State {
             bionic_reading: false,
             hue: 0.,
             chroma: 0.,
+            permissions_seen: false,
+            frame: None,
             last: BTreeMap::new(),
             names: BTreeMap::new(),
             dismissed: BTreeMap::new(),
-            permissions_seen: false,
-            frame: None,
             panels: BTreeMap::new(),
         }
     }
@@ -212,6 +213,56 @@ impl Default for State {
 /// put it in, which is also the only case where nothing is remembered.
 pub fn path() -> Option<PathBuf> {
     settings::dir().ok().map(|dir| dir.join("state.toml"))
+}
+
+/// The remembered front entries as they sit on disk, even when the rest
+/// of the file cannot be read as a [`State`]. A save that wrote `[last]`
+/// tables before later bare keys used to fail the typed parse and leave
+/// this map empty at restore (qal-j35, after #679).
+pub fn last_from_disk() -> BTreeMap<String, Entry> {
+    let Some(path) = path() else {
+        return BTreeMap::new();
+    };
+    let Ok(body) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
+    last_from_toml(&body)
+}
+
+fn last_from_toml(body: &str) -> BTreeMap<String, Entry> {
+    if let Ok(state) = toml::from_str::<State>(body)
+        && !state.last.is_empty()
+    {
+        return rekey_last(state.last);
+    }
+    let Ok(value) = body.parse::<toml::Value>() else {
+        return BTreeMap::new();
+    };
+    let Some(table) = value.get("last").and_then(|v| v.as_table()) else {
+        return BTreeMap::new();
+    };
+    let mut last = BTreeMap::new();
+    for (raw, entry) in table {
+        let Ok(entry) = entry.clone().try_into::<Entry>() else {
+            continue;
+        };
+        let key = Place::parse(raw)
+            .map(|place| place.encode())
+            .unwrap_or_else(|| raw.clone());
+        last.entry(key).or_insert(entry);
+    }
+    last
+}
+
+fn rekey_last(stored: BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
+    let mut last = BTreeMap::new();
+    for (raw, entry) in stored {
+        let key = Place::parse(&raw)
+            .map(|place| place.encode())
+            .unwrap_or(raw);
+        last.entry(key).or_insert(entry);
+    }
+    last
 }
 
 /// Local folders that have since vanished are dropped — a renamed folder
@@ -243,12 +294,12 @@ pub fn restore() -> State {
         .unwrap_or(0);
     // Old builds keyed last by the absolute path and by `~`. One encode
     // form, or restore looks in the wrong drawer and the pane is empty.
-    let mut last = BTreeMap::new();
-    for (raw, entry) in stored.last {
-        let key = Place::parse(&raw)
-            .map(|place| place.encode())
-            .unwrap_or(raw);
-        last.entry(key).or_insert(entry);
+    // A file whose `[last]` tables sit before later bare keys used to
+    // fail the whole parse and leave this empty; read the tables
+    // themselves when the typed load missed them (qal-j35).
+    let mut last = rekey_last(stored.last);
+    if last.is_empty() {
+        last = last_from_disk();
     }
     // Panels are keyed the same way, and for the same reason: a key in the
     // old absolute-path form would leave the drawer looking unremembered.
@@ -283,11 +334,11 @@ pub fn restore() -> State {
         bionic_reading,
         hue: stored.hue,
         chroma: stored.chroma,
+        permissions_seen: stored.permissions_seen,
+        frame: stored.frame,
         last,
         names: stored.names,
         dismissed: stored.dismissed,
-        permissions_seen: stored.permissions_seen,
-        frame: stored.frame,
         panels,
     }
 }

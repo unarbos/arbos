@@ -215,7 +215,17 @@ impl Workspace {
             working_card_open: None,
             next_id: 0,
             agent_icons: HashMap::new(),
-            last: state.last,
+            last: {
+                // The remembered front chat must be in the map before any
+                // focus runs. A typed State parse can miss `[last]` when
+                // those tables sat before later bare keys; read the file
+                // itself in that case (qal-j35).
+                let mut last = state.last;
+                if last.is_empty() {
+                    last = state::last_from_disk();
+                }
+                last
+            },
             recents,
             slash_commands: Vec::new(),
             slash_place: None,
@@ -245,6 +255,7 @@ impl Workspace {
         for ix in 0..this.projects.len() {
             this.apply_dismissed(ix);
         }
+        this.ensure_last();
         this.open_last_entry(cx);
         // Only where there is no home to land on — a machine with no home
         // directory — does the launch fall back to where it was started.
@@ -871,6 +882,7 @@ impl Workspace {
     }
 
     fn open_last_entry(&mut self, cx: &mut Context<Self>) {
+        self.ensure_last();
         let Some(ix) = self.active else {
             return;
         };
@@ -959,9 +971,19 @@ impl Workspace {
             })
     }
 
+    /// Fill `last` from disk when the in-memory map is still empty, so
+    /// a focus that runs during launch merge sees the entry the last
+    /// window wrote (qal-j35: #679 focused before this read).
+    fn ensure_last(&mut self) {
+        if self.last.is_empty() {
+            self.last = state::last_from_disk();
+        }
+    }
+
     /// Put the remembered chat in front, now that this project's sessions
     /// are on the list. Returns whether that chat was found.
     fn focus_last_session(&mut self, ix: usize) -> bool {
+        self.ensure_last();
         let Some(entry) = self
             .projects
             .get(ix)
@@ -993,8 +1015,9 @@ impl Workspace {
         }
     }
 
-    /// Remember the chat in front by its file, or by the kernel id when
-    /// the file has not been minted yet.
+    /// Remember the chat in front by its kernel id. A relaunch remints
+    /// session indexes and can rename the file; the agent id is what
+    /// mt-24 compares. The file stands in only before attach mints one.
     fn remember_session(&mut self, project: usize, id: u64) {
         let Some(open) = self.projects.get(project) else {
             return;
@@ -1005,11 +1028,11 @@ impl Workspace {
         let Some(chat) = open.session(id) else {
             return;
         };
-        let remembered = if let Some(file) = &chat.file {
-            Some(file.to_string_lossy().into_owned())
-        } else {
-            chat.agent_session.clone()
-        };
+        let remembered = chat.agent_session.clone().or_else(|| {
+            chat.file
+                .as_ref()
+                .map(|file| file.to_string_lossy().into_owned())
+        });
         if let Some(id) = remembered {
             self.remember(project, state::Kind::Session, id);
         }
@@ -1711,11 +1734,11 @@ impl Workspace {
             if self.projects[ix].main_session().is_none() {
                 self.new_session_in(ix, settings::kernel_agent(), None, cx);
             }
-            // Read the entry the person left, then put that chat in
+            // Load the entry the person left, then put that chat in
             // front — after the kernel rows exist, and before any
-            // remember is allowed. A fresh empty sub-chat must come
-            // back as the front chat, not lose its place to the main
-            // chat this merge just focused.
+            // remember is allowed. #679 focused while `self.last` was
+            // still empty (qal-j35).
+            self.ensure_last();
             if !self.focus_last_session(ix) {
                 let empty_focus = self.projects[ix]
                     .active_session()
