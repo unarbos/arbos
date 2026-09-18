@@ -4018,3 +4018,37 @@ now written into the file itself, so the next round resolves without
 anybody's memory.
 
 **PR:** [#704](https://github.com/unarbos/arbos/pull/704), harness only.
+
+## Cycle 140 — the settings sheet, printed and unread
+
+M-306 measured the sheet at cycle 87: five sections, three `Token saved`
+fields, a build line at the foot. Every run since has **printed** those into
+a log that nothing compares (M-447). A section quietly lost would have sat
+in the output of a passing run.
+
+They are checked now, against cycle 87's own numbers:
+
+```
+  sections: Settings; Voice; Arbos kernel; Mesh hub; Notifications;
+  section count: 5   (M-306 counted 5 at cycle 87)
+  saved-token fields say: 3   (M-306 counted 3)
+  build line: Arbos, 0.2.0 (1)
+```
+
+All three hold. A missing build line is a fault rather than a printed
+`MISSING`, because it is the only place the phone says which build it is
+running.
+
+**And that line cannot answer the question this loop keeps being asked**
+(M-448). On the simulator it reads `(1)` — the locally built number — under
+the words "The TestFlight build on this phone". True on a real install, a
+trap here, and the check now says so when it sees it:
+
+> that is the local build: on the simulator this line cannot say which
+> TestFlight build anyone has — only a real install can
+
+Most of today's messages have been about which TestFlight number is current.
+This line looks like the place to settle that and is not, which is worth a
+printed sentence rather than a reader's assumption.
+
+**PR:** [#705](https://github.com/unarbos/arbos/pull/705), harness only.
