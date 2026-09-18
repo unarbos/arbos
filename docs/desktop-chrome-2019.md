@@ -27,11 +27,15 @@ The empty-chat spacer that cut the transcript short is gone. The chat fills the 
 
 ## Stills
 
-Jacob's shots were named `0524ce21-c1b0-4a5b-b685-fd882ccec724.png` (cutoff) and `511da708-c817-499d-a15e-c0effc43fb37.png` (panel). They were not on disk at the given `assets/` paths in this VM, so they could not be copied yet.
+Jacob's shots were named `0524ce21-c1b0-4a5b-b685-fd882ccec724.png` (cutoff) and `511da708-c817-499d-a15e-c0effc43fb37.png` (panel). They were not on disk at `/home/ubuntu/.cursor/projects/workspace/assets/` in this VM, so they could not be copied.
 
-Linux after the fix:
+Linux after the fix, build `0.2.0 2037 1768ec8`:
 
-- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/01-chat-fills.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/01-chat-fills.png)
-- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/02-strip-toggle-expand.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/02-strip-toggle-expand.png)
-- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/03-no-clear-no-header-x.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/03-no-clear-no-header-x.png)
-- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/04-expand-stays-pinned.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/04-expand-stays-pinned.png)
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/01-chat-fills.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/01-chat-fills.png) — messages start under the project head; composer stays at the foot; no Clear
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/02-strip-toggle-expand.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/02-strip-toggle-expand.png) — panel toggle and expand on the tab strip; Project stays in the drawer
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/03-no-clear-no-header-x.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/03-no-clear-no-header-x.png) — no Clear; no panel header X; no four-squares in the panel header
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/04-expand-stays-pinned.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/04-expand-stays-pinned.png) — after expand, the four-box is still at the window's top-right
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/05-tab-strip-closeup.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/05-tab-strip-closeup.png)
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/06-expand-closeup.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/06-expand-closeup.png)
+
+Driver facts: `chat-clear`, `panel-close`, and `panel-expand` are absent. `toggle-panel` and `window-expand` sit on `tab-bar`. After expand, `window-expand` stayed at `(1060, 6)`. The pane stayed `chat`.

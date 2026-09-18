@@ -4,7 +4,7 @@ Jacob asked for three desktop changes on 2026-09-18. One PR on `unarbos/arbos`. 
 
 Terms are defined the first time they appear.
 
-**Status:** implemented on `cursor/desktop-project-page-composer-c3a2`.
+**Status:** implemented on `cursor/desktop-project-page-composer-c3a2`. The git-branch chip under the composer is gone.
 
 ---
 
@@ -16,7 +16,6 @@ Terms are defined the first time they appear.
 
 **What stays in that row.**
 
-- The **branch** pill (the git branch name, when the folder is a local repo). This is not a machine picker.
 - Voice / call status.
 - The spinner while a turn runs.
 - A **plain status line** when the kernel is reconnecting or the link is lost. Not a button. Not a chevron.

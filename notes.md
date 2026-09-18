@@ -19,6 +19,7 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
+- [Trace Jev step latency](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — [Choosing line](https://github.com/unarbos/arbos/pull/657) draft; 15 s cap was the lie; 1.5 s then clear
 - [Remove composer branch chip](bc-97ab6331-b8f3-5844-b20d-2004eb4e2b9d) — removing the git branch item under the composer
 - [Run features agent for Cursor parity](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — only task `qal-j35`; [clock rewind](https://github.com/unarbos/arbos/pull/650) and [steer order](https://github.com/unarbos/arbos/pull/653) held
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2036**; told Jacob; watching past it
@@ -81,7 +82,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] OpenRouter blocks OpenAI models — 403 "user blocked for a previous policy violation" on `openai/*`; it cost Jacob a new project's first turn (raw provider text as the opening line, then 98 silent seconds), fixed in [#298](https://github.com/unarbos/arbos/pull/298): a kickoff probes the key before writing a word, a refusal marks that family blocked for later turns, the switch reads as one plain sentence with the provider's text confined to the log, and a model that sends no first byte in 30 seconds is replaced; loops run on Gemini and Sonnet, and the SWE-bench measurements were never OpenAI so they stay comparable; QA now records a provider refusal as an environment fault rather than an Arbos bug; the pod's voice gateway and every mesh kernel are moved to Gemini and running; [#283](https://github.com/unarbos/arbos/pull/283) and [#284](https://github.com/unarbos/arbos/pull/284) are merged, so the kernel's fallbacks start with the primary's own family, a 403 falls through to the next model, and vision and voice defaults are off OpenAI; only Jacob's own `subnet120` kernel still names a blocked model — offered to switch it; Jacob to query the block on his account
 
-- [ ] [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 29 written; reading continues ([loop](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-loop.md))
+- [ ] [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 30 written; reading continues ([loop](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-loop.md))
 - [ ] [SWE-bench harness PR](https://github.com/unarbos/arbos/pull/94) — Arbos as a verifiers Harness; [first run](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-run-2026-09-13.md) 12/16; [comparison](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-harness-comparison-2026-09-13.md) Arbos 8 vs Codex 10 on shared 12, 5x cheaper, 2x more calls; comparison overspent $73 vs $40 cap
 
 - [ ] [Route harness work through Jev](bc-7330e6eb-85be-5448-944c-6ed6225064ce) — [#546](https://github.com/unarbos/arbos/pull/546) on `main`; next is full integration
