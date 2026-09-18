@@ -3229,3 +3229,39 @@ yet — [#651](https://github.com/unarbos/arbos/pull/651) is green and waiting.
 
 **PRs:** [#658](https://github.com/unarbos/arbos/pull/658) harness,
 [#659](https://github.com/unarbos/arbos/pull/659) the `ios/` batch.
+
+## Cycle 118 — a file mentioning a thing is not a file doing it
+
+Cycle 116 swept for scenarios that assume the app opens on the projects
+list, and marked four of them clean. It did that by searching each file for
+the string `Button +Back`. `call-pulled-down` matched — **inside an
+unrelated helper**, a `where()` that builds a grep from that text — and it
+has been printing `no phone row` in every sweep since (M-389).
+
+I checked for a mention and called it behaviour. So the check is now in
+`check-tools.sh`, where the other harness-hygiene checks live, and it asks
+the real question: does the step happen *before* the tap, in line order?
+
+**It found one more the moment it ran.** `cold-start-and-history` taps its
+row with no step to the list — and worse, its first measurement was of a
+behaviour the app no longer has. "Launch to a list with rows" only worked
+because the sweep runs it first, on a fresh install where there is no chat
+to come back to. It now waits for either landing and names it (M-390):
+
+```
+VERDICT cold start:   3.3s to the chat it was left in (pod)
+                      (cycle 37 measured 3.1s to a list)
+```
+
+The number stays comparable; the sentence stops being false.
+
+**Eleven scenarios, eleven conclusions.** With #651 on `main` and these
+fixed, the sweep is whole again: `call-pulled-down` concludes,
+`voice-notes-wait` and `pill-count-vs-sheet` came back on their own (M-391).
+
+One flap to watch: `list-search-filter-refresh` said the refresh worked in
+one run and `the list is not redrawing the answer` in the next. Its own
+header warns its fixture's trigger is timing-bound, so that is where to look
+first.
+
+**PR:** [#662](https://github.com/unarbos/arbos/pull/662), harness only.
