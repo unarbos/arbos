@@ -19,8 +19,20 @@
 # the two distributions do not overlap at all, which is not what drift looks
 # like.
 set -uo pipefail
+# Every other scenario here takes a cycle number first, and this one takes a
+# directory. Given `127` it said "no logs under 127", which reads as "there
+# are no logs" rather than "that is not what I take" — I fell into it on the
+# first run of this cycle.
 ROOT=${1:-$HOME/mobile-out}
-[ -d "$ROOT" ] || { echo "no logs under $ROOT"; exit 1; }
+case "$ROOT" in
+  [0-9]*) if [ ! -d "$ROOT" ]; then
+            echo "'$ROOT' looks like a cycle number. This one takes an output root,"
+            echo "not a cycle: it reads every call log the loop has ever written."
+            echo "Run it with no argument to read them all."
+            exit 1
+          fi;;
+esac
+[ -d "$ROOT" ] || { echo "no directory at $ROOT"; exit 1; }
 
 grep -rhoE "metric connect [0-9]+ms [a-z]+" "$ROOT" 2>/dev/null \
   | awk '{ gsub(/ms/, "", $3); print $4, $3 }' | sort > /tmp/connects-by-engine.txt
