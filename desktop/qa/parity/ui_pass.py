@@ -248,11 +248,16 @@ class Pass:
                           "observed": observed, "result": result, "branch": self.branch, "still": still})
         log(f"{result:13s} {element:38s} {action[:40]}")
 
-    def check(self, element: str, screen: str, action: str, expected: str, do, ok=None, settle: float = 0.8, still: bool = True) -> dict | None:
+    def check(self, element: str, screen: str, action: str, expected: str, do, ok=None, settle: float = 0.8, still: bool = True, wait: float = 0.0) -> dict | None:
         """Run `do()`, compare state before/after with `ok(before, after)`.
 
         `ok` returns True (pass), False (fail), or a string (observed detail
         that counts as pass). If `ok` is None the check is `unverified`.
+        `wait` keeps re-reading the state, half a second at a time, until
+        `ok` holds or `wait` seconds have passed — for an action whose
+        effect is the kernel's to deliver (a fork, a spawn) and lands late
+        on a loaded box (R31: `fork-turn` read "no state change" on three
+        full gates and passed every time its phase ran alone).
         """
         try:
             before = self.state()
@@ -279,6 +284,19 @@ class Pass:
         except Exception as err:
             self.record(element, screen, action, expected, f"state after failed: {err}", "fail")
             return None
+        if ok is not None and wait > 0:
+            deadline = time.time() + wait
+            while time.time() < deadline:
+                try:
+                    if ok(before, after) is True:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.5)
+                try:
+                    after = self.state()
+                except Exception:
+                    break
         shot = self.still(element) if still else ""
         if ok is None:
             self.record(element, screen, action, expected, "action accepted; no state field to assert", "unverified", shot)
@@ -767,7 +785,7 @@ class Pass:
             self.check("turn-time", sc, "hover", "tooltip; no state change", lambda: self.app.hover(ids["turn-time"]), None)
         if ids["fork-turn"]:
             self.check("fork-turn", sc, "click fork", "a new session appears and becomes active",
-                       lambda: self.app.click(ids["fork-turn"]), lambda a, b: len(sessions(b)) == len(sessions(a)) + 1 and b["active_session"] != a["active_session"], settle=1.5)
+                       lambda: self.app.click(ids["fork-turn"]), lambda a, b: len(sessions(b)) == len(sessions(a)) + 1 and b["active_session"] != a["active_session"], settle=1.5, wait=10.0)
             main = [c for c in sessions(self.state()) if not c.get("parent")]
             if main:
                 self.app.action("arbos::FocusSession", main[0]["id"]) if False else None
@@ -1117,6 +1135,12 @@ class Pass:
             # repeat of the same words could be an old entry.
             nonce = f"nc{int(time.time()) % 100000}"
             self.send(f"Run the shell command `sleep 6` and then reply with exactly: notification check {nonce}.")
+            # The turn must have opened before "idle" means anything: on a
+            # loaded box the kernel's first frame comes past the half
+            # second the tab click takes, wait_idle saw nothing running
+            # and the row read unseen=0 before the reply had landed (R31,
+            # the notify trio on cycle-41c and 44c).
+            self.wait(lambda s: busy(s), 20, what="turn start")
             time.sleep(0.3); self.app.click("tab-0"); time.sleep(0.5)
             self.wait_idle(120); time.sleep(3)
             pr, away = root_of(self.state())
@@ -1267,7 +1291,11 @@ class Pass:
             self.record("opener-create-open", "opener", "Enter on Create", "folder made under the real home; a tab opens on it (path expanded, no literal ~)",
                         f"made={made} opened={opened} new={sorted(after - before)}", "pass" if made and opened else "fail", self.still("opener-create-open"))
             # The new, empty project lands on the kickoff view, never the
-            # Project page (Jacob's third bug).
+            # Project page (Jacob's third bug). The view comes with the
+            # kernel's first frame; on a loaded box that is past two
+            # seconds (R31: four full gates read it absent, by hand it was
+            # there at t+2 s every time).
+            self.wait(lambda s: self.seen("kickoff") or self.app.exists("kickoff-greeting"), 12, what="kickoff view")
             st = self.state()
             self.record("new-project-kickoff", "new-project", "after the opener opens an empty folder", "pane chat; kickoff view (project head + greeting); composer asks what you are working on",
                         f"pane={st.get('pane')} kickoff={self.app.exists('kickoff')} greeting={self.app.exists('kickoff-greeting')} changes_pill={self.app.exists('pill-changes')} branch={self.app.exists('composer-branch')}",
