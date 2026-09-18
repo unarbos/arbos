@@ -80,7 +80,12 @@ echo "stills in $OUT"
 # One line for a sweep: pulled down, the call takes typing, mutes, and puts
 # you back where you came from.
 echo
+# `where` returns a raw tree line, not a word: a `Back` button means a
+# pushed screen, which from a call entered in the chat is that chat. Matching
+# it against the word "chat" said the close had gone somewhere else when it
+# had gone exactly where M-217 says it should.
 case "$LANDED" in
-  *chat*) echo "VERDICT: pulled down it types, mutes and closes back to the chat it came from";;
-  *)      echo "VERDICT: closed to '$LANDED', not the chat the call was entered from";;
+  *Back*)     echo "VERDICT: pulled down it types, mutes, and closes back to the chat it came from";;
+  *Projects*) echo "VERDICT: it closed to the projects list, not the chat the call came from";;
+  *)          echo "VERDICT: closed to '$LANDED' — neither the chat nor the list";;
 esac
