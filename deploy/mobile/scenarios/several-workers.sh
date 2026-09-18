@@ -82,8 +82,31 @@ echo
 echo "== back and reopen =="
 ui tap "End call" >/dev/null 2>&1 || idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID"
 sleep 2
-ui tap "Back" >/dev/null 2>&1; sleep 2
-ui tap "$ROW" >/dev/null; sleep 4
-echo "  pill after reopening: $(pill)"
+# One Back is not "on the list": the sheet or the call may still be up, and
+# after the sheet a single Back lands on the chat. The first tap of this
+# scenario was given reach_the_list at cycle 116 and this one was not —
+# check-tools looks at the first use in a file, so a scenario that returns
+# to the list halfway through fails the same way later and the check stays
+# quiet. This run said `nothing matching 'phone' on screen`.
+reach_the_list "$UDID" || { echo "  could not get back to the list"; exit 1; }
+ui tap "$ROW" >/dev/null || { echo "  '$ROW' is not on the list"; exit 1; }
+sleep 4
+AFTER=$(pill)
+echo "  pill after reopening: $AFTER"
 shot 04-reopened
 echo "stills in $OUT"
+echo
+# The row's claim is that the workers are still there after leaving and
+# coming back, so say whether they were.
+BEFORE_N=$(echo "$HIGH" | grep -oE "[0-9]+" | head -1)
+AFTER_N=$(echo "$AFTER" | grep -oE "[0-9]+" | head -1)
+if [ -z "$AFTER_N" ]; then
+  echo "VERDICT: no pill after reopening — the workers did not survive the trip,"
+  echo "         or the chat did not finish opening"
+elif [ -n "$BEFORE_N" ] && [ "$AFTER_N" -ge "$BEFORE_N" ]; then
+  echo "VERDICT: $MINE of 4 named in the sheet, and the pill reads $AFTER after"
+  echo "         going back and reopening — the workers are kept"
+else
+  echo "VERDICT: the pill read $HIGH at its highest and $AFTER after reopening —"
+  echo "         fewer than were there, so the trip lost some"
+fi
