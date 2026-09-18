@@ -55,7 +55,7 @@ The opener itself (⌘T, the + on the tab strip) does not change. `This Mac` as 
 
 ## 3. `clear` empties the chat view
 
-**What you type.** `clear` in the composer, alone, then Enter. `/clear` does the same. Extra words, or attachments, go to the agent as a normal message.
+**What you type.** `clear` in the composer, alone, then Enter. `/clear` does the same. Extra words, or attachments, go to the agent as a normal message. The top-right Clear control does the same hide-and-recenter. Jacob's shot of the broken send (kernel replied "Cleereed…"): `/home/ubuntu/.cursor/projects/workspace/assets/8ed86ca8-7ff1-4214-8cd1-7b56b90fd7aa.png`.
 
 **What happens.**
 
@@ -95,5 +95,4 @@ The opener itself (⌘T, the + on the tab strip) does not change. `This Mac` as 
 ## How to check
 
 1. Open a project. The row under the composer has no **This Mac** / **This Computer** pill. ⌘T still opens a project.
-2. Press ⌘2. The page has a large name, Recents, then the status page, then a file **list**. Not a card dump. Not Agents / Processes / Resources.
-3. Type `clear` and press Enter. The transcript leaves the screen. The composer sits in the middle. Type a new line: only that turn shows. The file under `.arbos/` still has the old turns.
+2. Press ⌘2. The page has a large name, Recents, then the status page, then a file **list**. Not a card dump. Not Agent
