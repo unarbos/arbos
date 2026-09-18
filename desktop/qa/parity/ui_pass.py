@@ -1875,6 +1875,13 @@ class Pass:
         self.send(P_ASK)
         s = self.wait(lambda s: (active(s) or {}).get("questions"), 90, what="question card")
         if s:
+            # F-207: a chat parked on an ask card reads *asking* to the
+            # panel, not *done*, for as long as the card stands.
+            time.sleep(1.5)
+            asking = active(self.state()) or {}
+            self.record("ask-row-state", sc, "read child_state while the question stands", "asking",
+                        f"child_state={asking.get('child_state')!r} questions={bool(asking.get('questions'))}",
+                        "pass" if asking.get("child_state") == "asking" else ("not-reachable" if not asking.get("questions") else "fail"))
             self.app.click("composer-field"); self.app.type("Unrelated thought: the answer is whichever you prefer.\n"); time.sleep(2)
             act = active(self.state()) or {}
             users = [it.get("text", "") for it in act.get("items", []) if it.get("kind") == "user"]

@@ -1358,7 +1358,10 @@ fn store_rows(resources: &[Resource], theme: &Theme) -> Vec<AnyElement> {
 fn row_summary(chat: &ChatSession) -> Option<String> {
     let text = match chat.child_state() {
         ChildState::Working => chat.current_step()?,
-        ChildState::Asking | ChildState::Waiting => return None,
+        // The question itself, so the person in another chat can read what
+        // the worker waits on without opening it (F-207).
+        ChildState::Asking => chat.questions.as_ref()?.title.clone(),
+        ChildState::Waiting => return None,
         ChildState::Done => chat.items.iter().rev().find_map(|item| match item {
             ChatItem::Agent(text) if !text.trim().is_empty() => Some(text.clone()),
             _ => None,

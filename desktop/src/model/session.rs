@@ -1902,7 +1902,13 @@ impl ChatSession {
         let stepping = self.status.is_some() && self.live();
         if (self.busy() || stepping) && evidence {
             ChildState::Working
-        } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
+        } else if self.answering.is_some()
+            || self.questions.is_some()
+            || self.plan_open().any(|n| n.do_kind == "ask")
+        {
+            // A worker parked on an `ask` card is asking, whatever its plan
+            // says; without the card counted here it read *done* in the
+            // panel while its question stood (F-207, d20).
             ChildState::Asking
         } else if self.closed || self.turn_ended.is_some() || self.agent_gone() {
             ChildState::Done
