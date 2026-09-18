@@ -12,6 +12,19 @@
 # not do to order. The fixture therefore adds a project to its answer after
 # the third /list, so a refresh that works shows a row that was not there
 # before and one that does not, does not.
+#
+# TWO RULES FOR COUNTING ROWS HERE, both learned the hard way.
+#
+# The list is a `LazyVStack`, so a row below the fold is never built and
+# `describe-all` cannot see it. A count is therefore a count of *rendered*
+# rows, not of the list — sound only while every row fits the screen. Raising
+# the keyboard is enough to break it: a first run of this scenario read 11
+# rows at rest and 7 after clearing the search, and the four that "vanished"
+# were simply under the keyboard.
+#
+# And the app remembers every project it has ever opened (M-176), so
+# yesterday's fixtures are still rows today. The app is reinstalled first, or
+# the counts are of this run plus every run before it.
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -68,7 +81,15 @@ sleep 2
 curl -s "http://127.0.0.1:$PORT/list" >/dev/null || { echo "the fixture hub did not start"; exit 1; }
 echo "fixture up: alpha, beta, beta-two, gamma — and arrived-late from the fourth /list on"
 
+APP=${APP:-/tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app}
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+if [ -d "$APP" ]; then
+  xcrun simctl uninstall "$UDID" $B >/dev/null 2>&1
+  xcrun simctl install "$UDID" "$APP" >/dev/null 2>&1
+  echo "reinstalled, so the list starts with no remembered projects"
+else
+  echo "NOTE: $APP is not there, so old remembered rows are still in the list"
+fi
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 -hubURL "http://127.0.0.1:$PORT" >/dev/null 2>&1
 sleep 9
 shot 01-the-list
@@ -99,10 +120,11 @@ else
 fi
 
 for _ in 1 2 3 4; do idb ui key 42 >/dev/null 2>&1; done
+sleep 2
+# Count with the keyboard down: see the note at the top about LazyVStack.
+ui tap "Search" >/dev/null 2>&1
 sleep 3
 echo "cleared:            $(rows) rows — $(names)"
-ui tap "Search" >/dev/null 2>&1
-sleep 2
 
 echo
 echo "--- the All / Live only filter ---"
