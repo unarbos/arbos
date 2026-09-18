@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 16:40 UTC.
+Last checked 2026-09-18 17:01 UTC.
 
-## Click Update. You will get build 2069. Jev is in it.
+## Click Update. You will get build 2076. Jev is in it.
 
-**2069** — signed, notarised, stapled, on the feed since 16:38 UTC.
+**2076** — signed, notarised, stapled, on the feed since 16:59 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2069 (builds 2070–2076):
+
+- **#672** — no seed, spawn or face is written under a project folder that
+  should not hold one
+- **#671** — one vocabulary for how a worker's turn says it is done
+- **#673** — the list never emptied on a bad token
+
+## Before that: 2069
 
 New since 2064 (builds 2065–2069):
 
