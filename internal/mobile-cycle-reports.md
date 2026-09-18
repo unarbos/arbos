@@ -3981,3 +3981,40 @@ is easy; saying whether they matter is what stops a finding from becoming
 somebody's wasted afternoon.
 
 **PR:** [#702](https://github.com/unarbos/arbos/pull/702), harness only.
+
+## Cycle 139 — measuring the thing the still was named after
+
+`the-core-chat-path.sh` has saved a screenshot called `02-streaming` for
+eighty cycles and never measured streaming. It timed the card, the first
+word and the Worked line — all of which a reply arriving in one lump passes
+exactly as well as one growing word by word (M-444). Only the caller sees
+the difference, and they see it for the whole length of the answer.
+
+**It took three attempts, and the numbers caught the first two** (M-445):
+
+- the first sampled the reply's length *after* finding its first word, by
+  which time a three-sentence answer is already whole. It reported "only
+  ever caught at one length", honestly, which is how the timing flaw showed;
+- the second watched from the send but took *the last line matching a word
+  the reply might start with* — which matched the **previous turn's** reply
+  too, and reported **243 characters then 123**. A length going down is not
+  a reply growing. That nonsense is the only reason the flaw was visible;
+- the third measures the transcript's **total** text, which only grows while
+  a turn runs and needs no guess about the reply's first word.
+
+```
+  the reply starts:        6.9s
+  the transcript grows in: 2 step(s)   299 → 549 characters on screen
+```
+
+A run that catches only one length now says it cannot tell streaming from a
+whole reply, rather than implying either.
+
+**And the build number stopped being a matter of belief** (M-446). `2051`
+came with `232518c2` — the #659 merge at 14:59 UTC — against `2117`'s
+`9c00a389`, the #693 merge at 19:52. `git merge-base --is-ancestor` orders
+them: 2051 is the older upload, and the lower number agrees. That test is
+now written into the file itself, so the next round resolves without
+anybody's memory.
+
+**PR:** [#704](https://github.com/unarbos/arbos/pull/704), harness only.

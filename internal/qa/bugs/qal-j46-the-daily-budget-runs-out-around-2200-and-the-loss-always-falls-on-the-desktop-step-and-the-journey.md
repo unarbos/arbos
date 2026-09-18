@@ -1,7 +1,7 @@
 # qal-j46 — the daily budget runs out around 22:00, and the loss always falls on the same steps
 
 - **status**: open (loop design, not a product fault)
-- **found**: 2026-09-18 22:45, working out why `mt-24` never ran in cycle 12
+- **found**: 2026-09-18 22:45, reading cycle 12's desktop step
 - **measured on**: 2026-09-18, eight cycles, `--budget-usd 60`
 
 ## What happened
@@ -9,14 +9,18 @@
 Cycle 12's desktop step ran six scenarios and skipped the rest:
 
 ```
-[skip] kf-01-a-chat-opened-during-kickoff-keeps-what-you-type: daily budget reached ($60.30 of $60.00)
-[skip] mt-01-typed-while-running-steers:                       daily budget reached
-[skip] mt-04-queue-survives-window-restart:                    daily budget reached
-[skip] mt-24-relaunch-restores-active-tab:                     daily budget reached
-[skip] dg-01-a-sub-chats-turn-starts-under-the-harness:        daily budget reached
-[skip] journey-linux:                                          daily budget reached
-[skip] af-02, af-03, cp-02, fb-01, im-02, desktop-composer-pills …
+28 run, 2 with breaks, 18 skipped
+!! SKIPPED (budget): 18 — af-02-two-windows-on-one-place, af-03-desktop-folder-renamed-under-the-window,
+   cp-02-desktop-turn-ends-on-cap, desktop-composer-pills, dg-01-a-sub-chats-turn-starts-under-the-harness,
+   fb-01-feedback-report-written-delivered-picked-up, im-02-desktop-no-quiet-line-while-streaming,
+   journey-linux, kf-01-a-chat-opened-during-kickoff-keeps-what-you-type, mt-01-typed-while-running-steers,
+   mt-04-queue-survives-window-restart, mt-14, mt-18, mt-19, mt-20, mt-23, sq-02 …
 ```
+
+**`mt-24` is not in that list — it ran and passed (7.2 s) at 22:19:15.** I first reported it as
+skipped, on a grep of `^\[(pass|break)\]` that cannot match the log's `[pass ]` with its trailing
+space. The scenario was fine; my pattern was not. What follows stands on the eighteen that really
+were skipped and on cycle 13's count, both re-checked with a pattern that matches.
 
 Not a desktop fault, not a missing binary — the money ran out. The cap is a **UTC day**
 (`run.py:2185`), and today it was reached at **21:57**, eighteen minutes before the desktop step
@@ -50,11 +54,21 @@ Cycle 13 starts at 23:00 UTC, still inside the exhausted day. It should skip ess
 model scenario, including all of the desktop leg. The first cycle after 00:00 UTC gets a fresh $60
 and should be normal.
 
+### Prediction confirmed
+
+Cycle 13 started 23:01 and by 23:07 had logged **344** `daily budget reached` skips — every model
+scenario in it, including the whole desktop leg and the acceptance journey. Its deterministic
+scenarios (`boot-idle`, `second-serve`, `concurrent-sessions`, `malformed-frames` …) run normally,
+so the cycle is not idle; it is half-blind, and blind on the same half as cycle 12.
+
+That is two consecutive cycles — a quarter of the day's eight — with no desktop coverage at all.
+
 ## What it cost today, concretely
 
-`qal-j43` regressed on `main` at 19:11 (`2ea8d565`) and `kf-01` caught it in cycle 12's *earlier*
-step. Had the regression landed a little later, the check written specifically to catch it would
-have been skipped for budget and the regression would have gone unseen until tomorrow.
+`qal-j43` regressed on `main` at 19:11 (`2ea8d565`). `kf-01`, the check written specifically to
+catch it, **was one of the eighteen skipped for budget** in cycle 12's desktop step — so the cycle
+did not catch the regression; I did, by hand, earlier in the evening. That is the concrete cost:
+the guard existed, the regression was live, and the budget kept them apart.
 
 ## What I checked before blaming the obvious thing
 
