@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 18:51 UTC.
+Last checked 2026-09-18 19:12 UTC.
 
-## Click Update. You will get build 2093. Jev is in it.
+## Click Update. You will get build 2097. Jev is in it.
 
-**2093** — signed, notarised, stapled, on the feed since 18:49 UTC.
+**2097** — signed, notarised, stapled, on the feed since 19:09 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2093 (builds 2094–2097):
+
+- **#686** — the kernel's "nothing to compact yet" is drawn only as the
+  answer
+- **#685** — connect-times-by-engine says when its call-log argument is the
+  wrong one
+
+## Before that: 2093
 
 New since 2091 (builds 2092–2093):
 
