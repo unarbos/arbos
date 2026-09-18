@@ -796,9 +796,30 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         );
     }
     // One incremental reader per agent. Each poll reads only what was
-    // appended since the last one.
+    // appended since the last one. Primed now, at every existing
+    // transcript's end, before the first client can be accepted: a cursor
+    // that started at line one made the first tick broadcast every
+    // agent's whole record as live `event` frames, and a window that
+    // attached during that tick (the desktop connects the moment
+    // kernel.json appears) drew every chat twice (F-180, half the launches
+    // on a place with history). The record is `history`'s to serve; the
+    // tick's word is what is appended from here on.
+    let boot_at = std::time::SystemTime::now();
     let mut tails: std::collections::HashMap<String, TranscriptTail> =
         std::collections::HashMap::new();
+    for agent in list_agents(&place).unwrap_or_default() {
+        let path = Layout::new(&place, agent.id.as_str()).transcript();
+        tails.insert(agent.id.to_string(), TranscriptTail::at_end(&path));
+    }
+    klog::info(
+        "tails_primed",
+        None,
+        format!(
+            "agents={} lines={}",
+            tails.len(),
+            tails.values().map(|t| t.lines).sum::<u64>()
+        ),
+    );
     shutdown_backstop(place.lock_paths().to_vec());
     // How far each detached job's journal has been streamed (`agent/jN` →
     // bytes, and whether its final frame went out).
@@ -1184,7 +1205,24 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                         }
                     }
                     let path = Layout::new(&place, agent.id.as_str()).transcript();
-                    let tail = tails.entry(agent.id.to_string()).or_default();
+                    // An agent first seen now: born after boot (a worker
+                    // spawned live), its first lines are live and the
+                    // cursor starts at line one; from before boot (a fork
+                    // or a copy that appeared), its lines are the record,
+                    // and the cursor starts at the end.
+                    let tail = tails.entry(agent.id.to_string()).or_insert_with(|| {
+                        let born_after_boot = Layout::new(&place, agent.id.as_str())
+                            .dir
+                            .join("agent.md")
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .is_ok_and(|t| t >= boot_at);
+                        if born_after_boot {
+                            TranscriptTail::default()
+                        } else {
+                            TranscriptTail::at_end(&path)
+                        }
+                    });
                     for mut ev in tail.read_new(&path).unwrap_or_default() {
                         let opened = record_prs(&place, agent.id.as_str(), &ev);
                         if !opened.is_empty() {

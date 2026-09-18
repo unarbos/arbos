@@ -709,6 +709,35 @@ fn file_identity(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
 }
 
 impl TranscriptTail {
+    /// A cursor standing at the file's end: the next `read_new` returns
+    /// only what is appended after this moment. For a transcript that
+    /// existed before the kernel booted — its lines are the record, which
+    /// a client fetches with `history`; broadcast as live `event` frames
+    /// they doubled every chat on half the launches (desktop F-180). The
+    /// scan counts lines without parsing them.
+    pub fn at_end(path: &Path) -> Self {
+        use std::io::Read;
+        let Ok(mut file) = File::open(path) else {
+            return Self::default();
+        };
+        let identity = file.metadata().ok().and_then(|m| file_identity(&m));
+        let mut buf = Vec::new();
+        if file.read_to_end(&mut buf).is_err() {
+            return Self::default();
+        }
+        // The offset always sits just after a newline: a trailing partial
+        // line (a writer mid-append) is read on the next call.
+        let after_last_newline = buf.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+        Self {
+            offset: after_last_newline as u64,
+            lines: buf[..after_last_newline]
+                .iter()
+                .filter(|b| **b == b'\n')
+                .count() as u64,
+            identity,
+        }
+    }
+
     /// Events on lines appended since the last call, each stamped with its
     /// 1-based physical line. A file that shrank below the offset, or that
     /// is a different file than last time, was replaced; the tail starts
