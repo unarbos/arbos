@@ -139,6 +139,11 @@ pub struct Workspace {
     /// does not stack per place. One bool used to skip every other
     /// project — a remote sidebar then never hydrated its own agents.
     kernel_syncing: HashSet<String>,
+    /// Places whose launch merge has not yet put the remembered chat
+    /// in front. Startup focus must not write `last` until that is
+    /// done — #675's remember in `new_session_in` was rewriting the
+    /// entry to the main chat before restore read it (qal-j35).
+    launching: HashSet<String>,
     /// Kernel ids the user deleted, by place string. A cache so a poll
     /// cannot remint a row we already dropped; the kernel delete is truth.
     dismissed: BTreeMap<String, Vec<String>>,
@@ -192,6 +197,7 @@ impl Workspace {
                 .unwrap_or(0)
         });
         let restore: Vec<usize> = (0..projects.len()).collect();
+        let launching = projects.iter().map(|p| p.place().encode()).collect();
         let panels = state.panels;
         let mut this = Self {
             settings,
@@ -217,6 +223,7 @@ impl Workspace {
             models_place: None,
             board_out: HashMap::new(),
             kernel_syncing: HashSet::new(),
+            launching,
             dismissed: state.dismissed,
             pending_composer: None,
             permissions_seen: state.permissions_seen,
@@ -763,6 +770,7 @@ impl Workspace {
         self.remember_recent(&place);
         self.projects.push(Project::open(place));
         let ix = self.projects.len() - 1;
+        self.launching.insert(self.projects[ix].place().encode());
         self.restore_sessions(ix);
         self.apply_dismissed(ix);
         self.watch_project(ix, cx);
@@ -871,24 +879,21 @@ impl Workspace {
             .get(ix)
             .and_then(|open| self.last_for(&open.place()).cloned());
         if let Some(entry) = remembered {
-            let (kind, id) = (entry.kind, entry.id);
             let Some(project) = self.projects.get_mut(ix) else {
                 return;
             };
             let at = |path: Option<&Path>| {
                 path.is_some_and(|path| {
-                    path.to_string_lossy() == id || path.file_name() == Path::new(&id).file_name()
+                    path.to_string_lossy() == entry.id
+                        || path.file_name() == Path::new(&entry.id).file_name()
                 })
             };
-            match kind {
+            match entry.kind {
                 state::Kind::Session => {
                     if let Some(id) = project
                         .sessions
                         .iter()
-                        .find(|chat| {
-                            at(chat.file.as_deref())
-                                || chat.agent_session.as_deref() == Some(id.as_str())
-                        })
+                        .find(|chat| Self::session_is_entry(chat, &entry))
                         .map(|chat| chat.id)
                     {
                         project.focus_on(id);
@@ -910,7 +915,10 @@ impl Workspace {
                     }
                 }
                 state::Kind::Table => {
-                    project.table = project.tables.iter().position(|table| table.key == id);
+                    project.table = project
+                        .tables
+                        .iter()
+                        .position(|table| table.key == entry.id);
                     project.reload_page();
                 }
             }
@@ -938,20 +946,72 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Whether `chat` is the remembered last entry: same kernel id, or
+    /// the same session file (full path or name).
+    fn session_is_entry(chat: &ChatSession, entry: &state::Entry) -> bool {
+        if entry.kind != state::Kind::Session {
+            return false;
+        }
+        let id = entry.id.as_str();
+        chat.agent_session.as_deref() == Some(id)
+            || chat.file.as_deref().is_some_and(|path| {
+                path.to_string_lossy() == id || path.file_name() == Path::new(id).file_name()
+            })
+    }
+
+    /// Put the remembered chat in front, now that this project's sessions
+    /// are on the list. Returns whether that chat was found.
+    fn focus_last_session(&mut self, ix: usize) -> bool {
+        let Some(entry) = self
+            .projects
+            .get(ix)
+            .and_then(|open| self.last_for(&open.place()).cloned())
+        else {
+            return false;
+        };
+        let Some(id) = self.projects.get(ix).and_then(|project| {
+            project
+                .sessions
+                .iter()
+                .find(|chat| Self::session_is_entry(chat, &entry))
+                .map(|chat| chat.id)
+        }) else {
+            return false;
+        };
+        if let Some(project) = self.projects.get_mut(ix) {
+            project.focus_on(id);
+            return true;
+        }
+        false
+    }
+
+    /// Launch merge for this place is settled — user choices may write
+    /// `last` again. Until then, startup focus must not.
+    fn finish_launch(&mut self, ix: usize) {
+        if let Some(project) = self.projects.get(ix) {
+            self.launching.remove(&project.place().encode());
+        }
+    }
+
     /// Remember the chat in front by its file, or by the kernel id when
     /// the file has not been minted yet.
     fn remember_session(&mut self, project: usize, id: u64) {
-        let Some(chat) = self.projects.get(project).and_then(|open| open.session(id)) else {
+        let Some(open) = self.projects.get(project) else {
             return;
         };
-        if let Some(file) = &chat.file {
-            self.remember(
-                project,
-                state::Kind::Session,
-                file.to_string_lossy().into_owned(),
-            );
-        } else if let Some(sid) = &chat.agent_session {
-            self.remember(project, state::Kind::Session, sid.clone());
+        if self.launching.contains(&open.place().encode()) {
+            return;
+        }
+        let Some(chat) = open.session(id) else {
+            return;
+        };
+        let remembered = if let Some(file) = &chat.file {
+            Some(file.to_string_lossy().into_owned())
+        } else {
+            chat.agent_session.clone()
+        };
+        if let Some(id) = remembered {
+            self.remember(project, state::Kind::Session, id);
         }
     }
 
@@ -1104,6 +1164,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let ix = self.active_ix()?;
+        self.finish_launch(ix);
         self.new_session_in(ix, entry, seed, cx)
     }
 
@@ -1135,6 +1196,7 @@ impl Workspace {
     /// The project has one main chat; ⌘N does not make a second.
     pub fn new_child_session(&mut self, cx: &mut Context<Self>) -> Option<u64> {
         let ix = self.active_ix()?;
+        self.finish_launch(ix);
         let Some(parent) = self.projects[ix].main_session() else {
             return self.new_session_in(ix, settings::kernel_agent(), None, cx);
         };
@@ -1169,6 +1231,7 @@ impl Workspace {
         };
         self.projects[ix].focus_on(id);
         self.active = Some(ix);
+        self.finish_launch(ix);
         self.remember_session(ix, id);
         self.wake_session(id, cx);
         cx.notify();
@@ -1639,41 +1702,36 @@ impl Workspace {
             self.projects[ix].focus_on(main);
         }
         if launch {
-            let empty_focus = self.projects[ix]
-                .active_session()
-                .is_none_or(|chat| chat.items.is_empty());
-            // The chat in front is the one the person left there, when
-            // the remembered entry names it — empty or not. A fresh
-            // sub-chat opened and left open must come back as the front
-            // chat, not lose its place to the busiest one (qal-j35).
-            let left_here = self.projects[ix]
-                .active_session()
-                .zip(self.last_for(&self.projects[ix].place()))
-                .is_some_and(|(chat, entry)| {
-                    entry.kind == state::Kind::Session
-                        && (chat.agent_session.as_deref() == Some(entry.id.as_str())
-                            || chat.file.as_deref().is_some_and(|f| {
-                                f.to_string_lossy() == entry.id
-                                    || f.file_name() == Path::new(&entry.id).file_name()
-                            }))
-                });
             // Every project has one main chat. A folder opened for the
             // first time, or one whose chats were all archived, gets it
             // here — once the kernel has said what it already holds.
+            // This must not write `last`: #675 remembered the new main
+            // chat here, and the left_here guard then compared against
+            // that clobbered entry (qal-j35).
             if self.projects[ix].main_session().is_none() {
                 self.new_session_in(ix, settings::kernel_agent(), None, cx);
-            } else if empty_focus
-                && !left_here
-                && let Some(id) = self.projects[ix]
-                    .sessions
-                    .iter()
-                    .filter(|chat| !chat.items.is_empty() && !chat.closed)
-                    .max_by_key(|chat| chat.touched())
-                    .map(|chat| chat.id)
-            {
-                self.projects[ix].focus_on(id);
-                self.remember_session(ix, id);
             }
+            // Read the entry the person left, then put that chat in
+            // front — after the kernel rows exist, and before any
+            // remember is allowed. A fresh empty sub-chat must come
+            // back as the front chat, not lose its place to the main
+            // chat this merge just focused.
+            if !self.focus_last_session(ix) {
+                let empty_focus = self.projects[ix]
+                    .active_session()
+                    .is_none_or(|chat| chat.items.is_empty());
+                if empty_focus
+                    && let Some(id) = self.projects[ix]
+                        .sessions
+                        .iter()
+                        .filter(|chat| !chat.items.is_empty() && !chat.closed)
+                        .max_by_key(|chat| chat.touched())
+                        .map(|chat| chat.id)
+                {
+                    self.projects[ix].focus_on(id);
+                }
+            }
+            self.finish_launch(ix);
             // Attach after merge so an orphan that just gained a kernel id
             // opens a socket even when local history was already longer.
             self.wake_open_sessions_in(ix, cx);
