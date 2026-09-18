@@ -3869,3 +3869,36 @@ the code disagreed, in a file written to fix exactly that disagreement one
 level up.
 
 **PR:** [#699](https://github.com/unarbos/arbos/pull/699), harness only.
+
+## Cycle 136 — the faces, and a rule checked against the wrong key
+
+"projects list — faces, rows, sections": rows were measured at 112,
+sections at 135, and the faces never, because the accessibility tree cannot
+see one. A row is `const, Idle` whatever colour its folder is. So this reads
+pixels — the one thing in this harness that has to — at the row position the
+tree gives, rather than hunting for rows in the image the way `find_row.py`
+did before it opened the wrong project twice.
+
+**The faces hold** (M-438). Across two cold launches all eight are
+unchanged, with six distinct colours; `purple` and `teal` are each worn by
+two projects, which an eight-colour palette makes ordinary and which the
+check reports rather than counts against anything.
+
+**And I nearly shipped a wrong measurement.** The first draft computed the
+name-derived colour — FNV-1a modulo the palette — and reported:
+
+```
+faces matching the name-derived rule: 0 of 8
+```
+
+which reads as every project wearing a face somebody chose. It was the check
+that was wrong: the app hashes the **target**, `hub:<machine>/<project>`,
+and the list shows a machine for almost no row, so that key cannot be built
+from the screen at all (M-439).
+
+**Zero of eight should have been the giveaway.** With eight colours, chance
+alone gives about one match; zero is the shape of a comparison that is not
+comparing. I committed it before doing that arithmetic, and the rule is now
+named as unchecked rather than checked wrongly.
+
+**PR:** [#700](https://github.com/unarbos/arbos/pull/700), harness only.
