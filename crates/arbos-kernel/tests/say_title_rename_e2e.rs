@@ -140,7 +140,12 @@ fn a_queued_message_with_a_title_labels_the_turn_it_opens() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"Count the colours\",\"task\":\"count\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
-        "{\"agent\":\"count-the-colours\",\"content\":\"counted\"}\n",
+        // The worker takes a moment: its [done] landing while root's
+        // dispatch turn still runs folds in and opens no done turn, so the
+        // titled request is never queued and the status never comes (red
+        // on main 2026-09-18 08:01; the fold-race family of #514, #528,
+        // #550, #585).
+        "{\"agent\":\"count-the-colours\",\"content\":\"counted\",\"delay_ms\":2500}\n",
         "{\"agent\":\"root\",\"content\":\"queueing\",\"calls\":[{\"name\":\"say\",\"arguments\":{\"to\":\"count-the-colours\",\"mode\":\"request\",\"title\":\"Add the hex codes\",\"text\":\"now add hex codes\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"queued\"}\n",
         "{\"agent\":\"count-the-colours\",\"content\":\"adding hex codes\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 6\",\"wait_ms\":30000}}]}\n",
