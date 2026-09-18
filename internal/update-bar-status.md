@@ -66,8 +66,7 @@ New since 2091 (builds 2092–2093):
 
 New since 2083 (builds 2084–2091):
 
-- **#679** — the last chat is restored before startup can rewrite it,
-  which is the path an Update click takes on the way back up
+- **#679** — the last chat is restored before startup can rewrite it
 - **#678** — the rig's fork-turn and new-project-kickoff wait for the
   kernel's effect
 - **#680** — type-send-measured checks the precondition it only stated
@@ -83,8 +82,9 @@ New since 2080 (builds 2081–2083):
 
 New since 2076 (builds 2077–2080):
 
-- **#675** — a relaunch comes back on the sub-chat the person left in
-  front
+- **#675** — aims a relaunch at the sub-chat the person left in front.
+  Not a fix to claim yet: QA still fails mt-24 four times out of four on
+  this merge, so the relaunch-tab bug is open
 - **#674** — the cold start counts rows, not rows that read Idle
 
 ## Before that: 2076
