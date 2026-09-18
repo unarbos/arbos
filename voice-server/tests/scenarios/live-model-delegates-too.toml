@@ -1,0 +1,26 @@
+# The model does what its instructions say and delegates the work question itself, a beat after
+# our transcript already sent it to the kernel. One kernel turn, one commentary, one reply: the
+# model's delegation joins ours and names the answer.
+title = "GPT-Live: the model's own delegation joins ours — one kernel turn, one answer"
+engine = "openai"
+path = "own"
+asr_script = ["Send an agent to tidy the release notes."]
+
+[[steps]]
+say = "Send an agent to tidy the release notes."
+live = { say = "One sec, let me check.", after = 0.6, delegate = true }
+[steps.kernel]
+reply = "I sent the agent tidy-release-notes to clean up the release notes."
+
+[[steps]]
+wait_spoken = "tidy-release-notes"
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+response_dones = 1
+spoken_contains = ["tidy-release-notes"]
+spoken_not_contains = ["let me check"]
+live_commentaries = 1
+user_frames = 1

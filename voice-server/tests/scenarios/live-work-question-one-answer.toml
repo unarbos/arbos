@@ -1,0 +1,31 @@
+# One question, one answer — the kernel's (features-inbox 2026-09-18, choice B). The caller asks
+# a work question. GPT-Live (mock) starts its own answer from its stores half a second after
+# the caller stops, as the real model did ("nothing's in progress"). Our transcript lands, says
+# "work", and the turn goes to the kernel: the model's held first word is dropped, the kernel is
+# asked at once, and the only reply the caller hears is the kernel's words, spoken by the model
+# from the commentary append. Exactly one completed reply; the model's own words never play.
+title = "GPT-Live: a work question gets one spoken answer, and it is the kernel's"
+engine = "openai"
+path = "own"
+asr_script = ["What are we working on right now?"]
+
+[[steps]]
+say = "What are we working on right now?"
+live = { say = "Right now nothing is in progress, all recent workers have finished.", after = 0.5 }
+[steps.kernel]
+reply = "Two workers each ran a timed sleep command and both finished a minute ago."
+
+[[steps]]
+wait_spoken = "timed sleep command"
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+response_dones = 1
+spoken_contains = ["timed sleep command"]
+spoken_not_contains = ["nothing is in progress"]
+live_commentary = ["timed sleep command"]
+live_commentaries = 1
+user_frames = 1
+inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

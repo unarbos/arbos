@@ -36,7 +36,7 @@ from .base import context_text
 from .narrator import Narrator
 from .routing import is_small_talk
 from .audio import float_to_pcm16, pcm16_to_float
-from .duplex import UPSTREAM_CHUNK_BYTES, DuplexSession, _ascii
+from .duplex import TAIL_S, UPSTREAM_CHUNK_BYTES, DuplexSession, _ascii
 from .tts import speakable
 
 log = logging.getLogger("voice.openai")
@@ -52,18 +52,22 @@ SCREEN_BRIEF_CHARS = 8000  # the on-screen chat in the instructions; session.inp
 _ACK_WORDS = re.compile(r"\b(let me (check|look|get|see|find)|one (sec|second|moment)|checking|i'?ll (check|look|find out|get)|"
                         r"hold on|give me a (sec|second|moment)|looking (that|it) up)\b", re.I)
 ACK_GRACE_S = 2.5
+# After the kernel's answer is appended while the model is mid-sentence, how long its burst may
+# run on unheard before the mute is lifted regardless.
+UNMUTE_WATCH_S = 6.0
 
 LIVE_INSTRUCTIONS = (
     "You are Arbos, the voice of a software engineer's agent system, on a call. Be brief, warm and "
     "direct: one or two sentences. You are given three stores and they are updated while you talk: "
     "which project this is, the chat the caller is looking at, and what the main agent and its "
-    "sub-agents (workers) are doing. Answer those from the stores. Never invent a folder, a status "
-    "or a result. Never quote diffs, file contents or a whole repository. Delegate to the backend "
-    "to do work (write, fix, run, send an agent) or when the stores do not have the answer. The "
-    "backend is the Arbos kernel; it does the work and returns the result for you to say. Say "
-    "'one sec, let me check' only when you have actually delegated; then wait for the result and "
-    "say it when it arrives, even if the conversation has moved on. Answer yourself greetings, "
-    "thanks, small talk, and anything the stores already cover."
+    "sub-agents (workers) are doing. Use the stores to understand what the caller means. Never "
+    "invent a folder, a status or a result. Never quote diffs, file contents or a whole repository. "
+    "Anything about the project, its state, its agents, files or work, and any request to do "
+    "something (write, fix, run, send an agent), is answered by the backend: delegate it, do not "
+    "answer it from the stores yourself, and wait for the result. The backend is the Arbos kernel; "
+    "it does the work and returns the answer for you to say. Say 'one sec, let me check' only when "
+    "you have actually delegated; then say the result when it arrives, even if the conversation "
+    "has moved on. Answer yourself only greetings, thanks and small talk."
 )
 
 # Recent project-chat lines seeded into the session at start (session.input): how many, and how
@@ -192,7 +196,12 @@ def _workers_brief(context: dict, kernel, activity) -> str:
 
 class OpenAILiveSession(DuplexSession):
     engine = "openai"
-    HOLD_MODEL_WHILE_DECIDING = False  # GPT-Live decides itself; never delay its first word
+    # One question, one answer. The model's first word is held until our transcript says what the
+    # utterance is: small talk is released and speaks as before (about a Whisper later); a work
+    # question drops the held audio, hands the turn to the kernel at once, and the model speaks
+    # only the kernel's answer (its commentary). Without the hold, a work question would play the
+    # first second of the model's own answer before the kernel's — two answers, one of them cut.
+    HOLD_MODEL_WHILE_DECIDING = True
 
     async def on_open(self) -> None:
         await super().on_open()
@@ -218,6 +227,13 @@ class OpenAILiveSession(DuplexSession):
         self.workers_known: set[str] = set()
         self.seed_task: asyncio.Task | None = None  # the chat-history read, started when the kernel is known
         self.last_answer_at = 0.0  # when a delegation's answer went to the model (its chat copy is not news)
+        self.forced_task: asyncio.Task | None = None  # the delegation we started for a work question
+        self.forced_at = 0.0
+        self.forced_did: str | None = None  # the model's own delegation for that same question, when it makes one
+        self.model_delegation_at = 0.0  # when the model last raised a delegation of its own
+        self.unmute_watch: asyncio.Task | None = None
+        self.await_words: set[str] = set()  # the kernel answer's words, awaited in the model's transcript while muted
+        self.await_seen = ""
 
     # ------------------------------------------------------------------ upstream
 
@@ -481,6 +497,7 @@ class OpenAILiveSession(DuplexSession):
         elif kind == "session.output_transcript.delta":
             delta = msg.get("delta", "")
             self.live_output_since_final = (self.live_output_since_final + delta)[-400:]
+            self._heard_answer_words(delta)
             if self.response_open:
                 self._emit_for_gen(self.gen, P.RESPONSE_TRANSCRIPT, text=delta)
             else:
@@ -493,7 +510,15 @@ class OpenAILiveSession(DuplexSession):
             did = str(delegation.get("id", ""))
             if delegation.get("target", "client") == "client" and did:
                 self.delegations_seen += 1
-                self.delegations[did] = asyncio.create_task(self._delegate(did), name=f"delegate-{did}")
+                if (self.forced_task is not None and not self.forced_task.done() and self.forced_did is None
+                        and time.monotonic() - self.forced_at < 8.0):
+                    # The model delegated the question we already sent to the kernel: same turn,
+                    # one kernel answer. Its id names that answer when it comes back.
+                    self.forced_did = did
+                    log.info("[%s] model's delegation %s joins ours", self.sid, did[-8:])
+                else:
+                    self.delegations[did] = asyncio.create_task(self._delegate(did), name=f"delegate-{did}")
+                    self.model_delegation_at = time.monotonic()
         elif kind in ("session.commentary.appended", "session.thinking.appended", "session.instructions.appended"):
             pass
         elif kind == "session.closed":
@@ -521,30 +546,98 @@ class OpenAILiveSession(DuplexSession):
             log.info("[%s] GPT-Live heard: %r", self.sid, self.live_input.strip()[-160:])
         self.live_input = ""
         self.live_output_since_final = ""
-        log.info("[%s] user (%s): %r", self.sid, source, text)
-        self._release_model()
         narrator = self.narrator
         if narrator is not None and narrator.pending_ask is not None:
             # An approval or a question from the kernel is open: the caller's words answer it.
-            # Ours to decide, never the provider's.
+            # Ours to decide, never the provider's. The model may say its "okay"; let it.
+            log.info("[%s] user (%s, answers the ask): %r", self.sid, source, text)
+            self._release_model()
             narrator.user_said(text, channel=self.channel)
             return
         if self.ack_watch is not None and not self.ack_watch.done():
             self.ack_watch.cancel()
-        self.ack_watch = asyncio.create_task(self._ensure_delegated(self.delegations_seen, text))
+        if is_small_talk(text):
+            # Allowlisted small talk: the model's own reply is the answer. Let the held first word
+            # out; keep one watch for "let me check" said without a delegation behind it.
+            log.info("[%s] user (small talk, %s): %r", self.sid, source, text)
+            self._release_model()
+            self.ack_watch = asyncio.create_task(self._ensure_delegated(self.delegations_seen, text))
+            return
+        # A work question: the kernel answers, once, in the model's voice. Whatever the model was
+        # about to say from its stores is dropped, and the kernel is asked now.
+        log.info("[%s] user (kernel, %s): %r", self.sid, source, text)
+        self._turn_to_kernel()
+        if any(not t.done() for t in self.delegations.values()) and time.monotonic() - self.model_delegation_at < 4.0:
+            # The model already delegated this utterance (its event came before our transcript);
+            # that task takes our words as the question. One kernel turn.
+            log.info("[%s] the model's delegation is already in flight; not doubling it", self.sid)
+            return
+        if self.forced_task is not None and not self.forced_task.done():
+            self.forced_task.cancel()
+        self.forced_at = time.monotonic()
+        self.forced_did = None
+        self.forced_task = asyncio.create_task(self._delegate(None, forced_question=text), name=f"delegate-forced-{self.sid}")
+
+    def _turn_to_kernel(self) -> None:
+        """This turn belongs to the kernel: the model's held first word is dropped and everything
+        it says until the kernel's answer is appended stays unheard (decision == "kernel" in
+        _on_model_audio). Its words for that reply are dropped too."""
+        self.decision = "kernel"
+        self.model_hold = []
+        self.transcript_stash.clear()
+        self.live_output_since_final = ""
+
+    def _kernel_spoke(self, content: str = "") -> None:
+        """The kernel's answer is with the model as commentary: what the model says next is that
+        answer, and the caller hears it. If the model is still mid-burst with its own words when
+        the answer lands, the mute stays on until its transcript starts carrying the answer's
+        words (the model paraphrases, so two of the first content words are enough), or until a
+        pause; a watchdog lifts it regardless, since a lost answer is worse than a leaked tail.
+        A new caller utterance in between (decision pending) keeps its own hold."""
+        if self.decision == "kernel":
+            self.decision = "model"
+        self.transcript_stash.clear()
+        self.await_words = set()
+        if time.monotonic() - self.last_loud_at < TAIL_S:
+            self.muted = True
+            self.await_words = {w for w in re.findall(r"[a-z0-9']+", content.lower())[:14] if len(w) >= 4}
+            self.await_seen = ""
+            if self.unmute_watch is not None and not self.unmute_watch.done():
+                self.unmute_watch.cancel()
+            self.unmute_watch = asyncio.create_task(self._unmute_after(UNMUTE_WATCH_S))
+        else:
+            self.muted = False
+
+    def _heard_answer_words(self, delta: str) -> None:
+        """Output transcript while waiting for the kernel's words to surface in the model's voice."""
+        if not self.await_words or not self.muted:
+            return
+        self.await_seen = (self.await_seen + delta.lower())[-200:]
+        hits = sum(1 for w in self.await_words if w in self.await_seen)
+        if hits >= 2 or (len(self.await_words) < 2 and hits >= 1):
+            log.info("[%s] the model reached the kernel's answer mid-burst; unmuting", self.sid)
+            self.await_words = set()
+            self.muted = False
+            self.transcript_stash.clear()  # the caller's words start here (this delta is stashed by the caller)
+
+    async def _unmute_after(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
+        if self.muted and self.decision == "model":
+            log.warning("[%s] the model never paused after the kernel's answer; unmuting", self.sid)
+            self.await_words = set()
+            self.muted = False
 
     async def _ensure_delegated(self, seen_before: int, text: str) -> None:
-        """The gateway's guarantee, whatever the model decides: anything that is not allowlisted
-        small talk reaches the kernel. If GPT-Live has not created a delegation within the grace
-        period for such an utterance, or said it would check without one, delegate it ourselves."""
+        """Small talk only (work questions are delegated the moment our transcript lands): if the
+        model said it would check and no session.delegation.created followed within the grace
+        period, the check it promised is made by us."""
         await asyncio.sleep(ACK_GRACE_S)
         if self.delegations_seen > seen_before:
             return
-        said_check = bool(_ACK_WORDS.search(self.live_output_since_final))
-        if is_small_talk(text) and not said_check:
-            return  # allowlisted small talk: the model's own answer is the answer
-        log.warning("[%s] model %s without delegating; delegating %r ourselves", self.sid,
-                    "said it would check" if said_check else "took a work question itself", text)
+        if not _ACK_WORDS.search(self.live_output_since_final):
+            return  # it answered the small talk itself, as it should
+        log.warning("[%s] model said it would check without delegating; delegating %r ourselves", self.sid, text)
+        self._turn_to_kernel()
         await self._delegate(None, forced_question=text)
 
     # ------------------------------------------------------------------ the kernel as backend
@@ -564,11 +657,11 @@ class OpenAILiveSession(DuplexSession):
         if not question:
             question = self.live_input.strip() or self.last_final
         if not question:
-            await self._append("session.commentary.append", did, "I did not catch what you asked. Could you say it again?")
+            await self._append("session.commentary.append", did or self.forced_did, "I did not catch what you asked. Could you say it again?")
             return
         kernel = self.kernel
         if kernel is None or not kernel.connected:
-            await self._append("session.commentary.append", did, "The Arbos kernel is not reachable right now.")
+            await self._append("session.commentary.append", did or self.forced_did, "The Arbos kernel is not reachable right now.")
             return
         tag = (did or "forced")[-8:]
         log.info("[%s] delegation %s -> kernel: %r", self.sid, tag, question)
@@ -585,15 +678,18 @@ class OpenAILiveSession(DuplexSession):
                 answer += delta
         except Exception as exc:
             log.exception("[%s] delegation failed", self.sid)
-            await self._append("session.commentary.append", did, f"The kernel failed: {_ascii(str(exc))[:200]}")
+            await self._append("session.commentary.append", did or self.forced_did, f"The kernel failed: {_ascii(str(exc))[:200]}")
             return
         spoken = speakable(answer).replace("\n", " ").strip() or "Arbos had no answer."
         self._emit(P.TOOL_RESULT, name="delegate", output=spoken[:400])
         self.last_answer_at = time.monotonic()
-        await self._append("session.commentary.append", did, spoken[:MAX_APPEND_CHARS])
+        # the model's own delegation for this question, if it made one meanwhile, names the answer
+        await self._append("session.commentary.append", did or self.forced_did, spoken[:MAX_APPEND_CHARS])
         log.info("[%s] delegation %s answered in %.1fs (%d chars)", self.sid, tag, time.monotonic() - t0, len(spoken))
 
     async def _append(self, kind: str, did: str | None, content: str) -> None:
+        if kind == "session.commentary.append":
+            self._kernel_spoke(content)  # from here on the model's voice carries the kernel's words
         if self.up is None:
             return
         await self.up.send(json.dumps({
