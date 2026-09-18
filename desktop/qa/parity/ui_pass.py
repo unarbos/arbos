@@ -1977,10 +1977,12 @@ class Pass:
                     dst = self.store_dir / f.name
                     # A kept place (`arbos-before-nokey`) is a folder: copyfile
                     # on it failed every save after phase O began, and the
-                    # store's results.json stopped at phase X (R32).
+                    # store's results.json stopped at phase X (R32). It stays
+                    # local: its `.git/objects` through the store's mount took
+                    # the save past ten minutes.
                     if f.is_dir():
-                        shutil.copytree(f, dst, dirs_exist_ok=True)
-                    elif not dst.exists() or dst.stat().st_size != f.stat().st_size or f.suffix == ".json":
+                        continue
+                    if not dst.exists() or dst.stat().st_size != f.stat().st_size or f.suffix == ".json":
                         shutil.copyfile(f, dst)
                 break
             except OSError as err:
