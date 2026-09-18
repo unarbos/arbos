@@ -94,7 +94,15 @@ echo "kernel $(head -1 $O/kernel-version.txt)" | tee -a $O/run.txt
 # J1 — open the project from the list (the phone's "create": the project lives on a machine's kernel)
 xcrun simctl terminate $U $B 2>/dev/null; sleep 1
 xcrun simctl launch --console-pty $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" -dictateWav ~/mobile-clips/note.wav -injectWav ~/mobile-clips/ask.wav > $O/console.log 2>&1 &
-sleep 7; shot J1-list
+sleep 7
+# A cold start comes back to the chat that was in front (M-338), so the
+# step called "open the project from the list" may not start on the list at
+# all. This run tapped `phone` at y=85 — the chat's own header, not a row —
+# and passed, because the chat it woke in happened to be the target. Reach
+# the list, so J1 opens a project rather than confirming one was already
+# open.
+reach_the_list "$U" || score J1 FAIL "could not get to the projects list"
+shot J1-list
 # By name, not by measuring the still. `find_row.py` knew project names by
 # glyph colour and divided by 3 for a screenshot that is 1.2x the point
 # size, and cycle 49 opened `pod` twice while believing it had opened a
@@ -282,7 +290,9 @@ if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v erro
 "$HERE/push-check.sh" 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null
 V=$(grep "PUSH verdict" $O/push-check.txt | head -1); case "$V" in *PASS*) score PUSH PASS "$V";; *OFF*) score PUSH U "$V";; *) score PUSH U "$(grep -m1 'PUSH status' $O/push-check.txt)";; esac
 # J6' — kill and reopen: nothing lost
-xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
+xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7
+reach_the_list "$U" || score J6k FAIL "could not get to the projects list after the relaunch"
+shot J6k-list
 ui tap "$ROW" || score J6k FAIL "no $ROW row after the relaunch"
 sleep 6; shot J6k-reopened
 score J6k EYE "reopened chat ends where it ended; no pending cards"
