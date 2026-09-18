@@ -5,9 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 16:05 UTC.
+Last checked 2026-09-18 16:30 UTC.
 
-## Click Update. You will get build 2060. This is the Jev one to test.
+## Click Update. You will get build 2064. Jev is in it.
+
+**2064** — signed, notarised, stapled, on the feed since 16:27 UTC.
+
+Checked the same way as every number here: notary Accepted, ticket stapled,
+Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
+against the key in the app, size and hash are the feed's, all four payloads
+on the release.
+
+New since 2060 (builds 2061–2064):
+
+- **#668** — reading the projects list needs the list as much as tapping
+  it does
+- **#669** — a chat minted while root's kickoff runs takes its own place
+
+## Before that: 2060, where Jev's Decisions API arrived
 
 **2060** — signed, notarised, stapled, on the feed since 16:03 UTC.
 
