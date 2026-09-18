@@ -8085,3 +8085,283 @@
 {"ts": 1789761951425, "scenario": "sq-02-desktop-stop-holds-follow-up", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
 {"ts": 1789761997397, "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
 {"ts": 1789762041425, "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765306110, "scenario": "boot-idle", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765342686, "scenario": "prompt-no-key", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765343119, "scenario": "second-serve", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765347293, "scenario": "concurrent-sessions", "model": "google/gemini-2.5-flash", "prompt_tokens": 143224, "completion_tokens": 16, "usd": 0.04301}
+{"ts": 1789765364032, "scenario": "rapid-create-delete", "model": "google/gemini-2.5-flash", "prompt_tokens": 171276, "completion_tokens": 286, "usd": 0.0521}
+{"ts": 1789765391394, "scenario": "huge-input", "model": "google/gemini-2.5-flash", "prompt_tokens": 25744, "completion_tokens": 192, "usd": 0.0082}
+{"ts": 1789765461189, "scenario": "malformed-folder", "model": "google/gemini-2.5-flash", "prompt_tokens": 109571, "completion_tokens": 58, "usd": 0.03302}
+{"ts": 1789765463905, "scenario": "malformed-frames", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765473896, "scenario": "kill-mid-turn-restart", "model": "google/gemini-2.5-flash", "prompt_tokens": 18277, "completion_tokens": 6, "usd": 0.0055}
+{"ts": 1789765503032, "scenario": "ordinary-task", "model": "google/gemini-2.5-flash", "prompt_tokens": 55705, "completion_tokens": 326, "usd": 0.01753}
+{"ts": 1789765507903, "scenario": "readonly-arbos", "model": "google/gemini-2.5-flash", "prompt_tokens": 36092, "completion_tokens": 44, "usd": 0.01094}
+{"ts": 1789765509361, "scenario": "disk-full", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765509458, "scenario": "clock-jump-cron", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765509550, "scenario": "plan-shell-verdicts", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789765515932, "scenario": "restart-during-compaction", "model": "google/gemini-2.5-flash", "prompt_tokens": 25076, "completion_tokens": 110, "usd": 0.0078}
+{"ts": 1789765529945, "scenario": "steer-storm", "model": "google/gemini-2.5-flash", "prompt_tokens": 107640, "completion_tokens": 248, "usd": 0.03291}
+{"ts": 1789765778855, "scenario": "spawn-storm", "model": "google/gemini-2.5-flash", "prompt_tokens": 698885, "completion_tokens": 1193, "usd": 0.21265}
+{"ts": 1789765964006, "scenario": "bench-standing-job", "model": "google/gemini-2.5-flash", "prompt_tokens": 36496, "completion_tokens": 87, "usd": 0.01117}
+{"ts": 1789765967493, "scenario": "bench-ask-before-risky", "model": "google/gemini-2.5-flash", "prompt_tokens": 18089, "completion_tokens": 21, "usd": 0.00548}
+{"ts": 1789766218426, "scenario": "bench-research-links", "model": "google/gemini-2.5-flash", "prompt_tokens": 381010, "completion_tokens": 1628, "usd": 0.11837}
+{"ts": 1789766464844, "scenario": "bench-fix-commit-branch", "model": "google/gemini-2.5-flash", "prompt_tokens": 76242, "completion_tokens": 269, "usd": 0.02355}
+{"ts": 1789766740793, "scenario": "bench-screenshot", "model": "google/gemini-2.5-flash", "prompt_tokens": 95153, "completion_tokens": 368, "usd": 0.02947}
+{"ts": 1789766764783, "scenario": "secrets-leak-hunt", "model": "google/gemini-2.5-flash", "prompt_tokens": 136209, "completion_tokens": 1280, "usd": 0.04406}
+{"ts": 1789766770020, "scenario": "ask-identity", "model": "google/gemini-2.5-flash", "prompt_tokens": 27970, "completion_tokens": 17, "usd": 0.00843}
+{"ts": 1789766840804, "scenario": "bench-tests-are-spec", "model": "google/gemini-2.5-flash", "prompt_tokens": 176273, "completion_tokens": 705, "usd": 0.05464}
+{"ts": 1789766845063, "scenario": "bench-no-screenshot-unasked", "model": "google/gemini-2.5-flash", "prompt_tokens": 18129, "completion_tokens": 74, "usd": 0.00562}
+{"ts": 1789766845105, "scenario": "desktop-rapid-session-switch", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789766845136, "scenario": "desktop-kill-kernel-under-ui", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789766845181, "scenario": "desktop-composer-pills", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789766845213, "scenario": "desktop-user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789766845244, "scenario": "desktop-fresh-place-no-notice", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789766845277, "scenario": "desktop-huge-transcript-scroll", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789767010319, "scenario": "kickoff-session", "model": "google/gemini-2.5-flash", "prompt_tokens": 2289375, "completion_tokens": 15165, "usd": 0.72473}
+{"ts": 1789767028261, "scenario": "inbox:multitasking-audit", "model": "google/gemini-2.5-flash", "prompt_tokens": 173056, "completion_tokens": 2745, "usd": 0.05878}
+{"ts": 1789767055671, "scenario": "inbox:project-page-coordinator-protocol", "model": "google/gemini-2.5-flash", "prompt_tokens": 178020, "completion_tokens": 460, "usd": 0.05456}
+{"ts": 1789767072931, "scenario": "inbox:swebench-gaps", "model": "google/gemini-2.5-flash", "prompt_tokens": 40140, "completion_tokens": 1027, "usd": 0.01461}
+{"ts": 1789767091193, "scenario": "inbox:swebench-harness-comparison", "model": "google/gemini-2.5-flash", "prompt_tokens": 130248, "completion_tokens": 890, "usd": 0.0413}
+{"ts": 1789767114844, "scenario": "inbox:swebench-loop-cycle-1", "model": "google/gemini-2.5-flash", "prompt_tokens": 200156, "completion_tokens": 1336, "usd": 0.06339}
+{"ts": 1789767174503, "scenario": "inbox:swebench-loop-cycle-2", "model": "google/gemini-2.5-flash", "prompt_tokens": 270670, "completion_tokens": 1174, "usd": 0.08414}
+{"ts": 1789767177542, "scenario": "inbox:swebench-loop-cycle-3", "model": "google/gemini-2.5-flash", "prompt_tokens": 19827, "completion_tokens": 112, "usd": 0.00623}
+{"ts": 1789767203021, "scenario": "inbox:swebench-loop-cycle-4", "model": "google/gemini-2.5-flash", "prompt_tokens": 103675, "completion_tokens": 541, "usd": 0.03245}
+{"ts": 1789767219146, "scenario": "inbox:swebench-loop-cycle-5", "model": "google/gemini-2.5-flash", "prompt_tokens": 157158, "completion_tokens": 546, "usd": 0.04851}
+{"ts": 1789767225663, "scenario": "inbox:done-wakes-remote-lifecycle", "model": "google/gemini-2.5-flash", "prompt_tokens": 96229, "completion_tokens": 306, "usd": 0.02963}
+{"ts": 1789767246602, "scenario": "inbox:kickoff-scorer-reads-archive", "model": "google/gemini-2.5-flash", "prompt_tokens": 158556, "completion_tokens": 1315, "usd": 0.05085}
+{"ts": 1789767268644, "scenario": "inbox:swebench-loop-cycle-10", "model": "google/gemini-2.5-flash", "prompt_tokens": 216299, "completion_tokens": 1439, "usd": 0.06849}
+{"ts": 1789767300107, "scenario": "inbox:swebench-loop-cycle-6", "model": "google/gemini-2.5-flash", "prompt_tokens": 262592, "completion_tokens": 1963, "usd": 0.08369}
+{"ts": 1789767303432, "scenario": "inbox:swebench-loop-cycle-7", "model": "google/gemini-2.5-flash", "prompt_tokens": 19409, "completion_tokens": 112, "usd": 0.0061}
+{"ts": 1789767313874, "scenario": "inbox:swebench-loop-cycle-8", "model": "google/gemini-2.5-flash", "prompt_tokens": 60545, "completion_tokens": 701, "usd": 0.01992}
+{"ts": 1789767330730, "scenario": "inbox:swebench-loop-cycle-9", "model": "google/gemini-2.5-flash", "prompt_tokens": 104127, "completion_tokens": 815, "usd": 0.03328}
+{"ts": 1789767362267, "scenario": "inbox:swebench-loop-cycle-13", "model": "google/gemini-2.5-flash", "prompt_tokens": 188832, "completion_tokens": 974, "usd": 0.05908}
+{"ts": 1789767366296, "scenario": "inbox:swebench-loop-cycle-14", "model": "google/gemini-2.5-flash", "prompt_tokens": 20471, "completion_tokens": 83, "usd": 0.00635}
+{"ts": 1789767372943, "scenario": "inbox:swebench-loop-cycle-15", "model": "google/gemini-2.5-flash", "prompt_tokens": 42170, "completion_tokens": 321, "usd": 0.01345}
+{"ts": 1789767388547, "scenario": "inbox:swebench-loop-cycle-16", "model": "google/gemini-2.5-flash", "prompt_tokens": 85192, "completion_tokens": 1249, "usd": 0.02868}
+{"ts": 1789767399142, "scenario": "inbox:swebench-loop-cycle-17", "model": "google/gemini-2.5-flash", "prompt_tokens": 43114, "completion_tokens": 921, "usd": 0.01524}
+{"ts": 1789767414352, "scenario": "inbox:swebench-loop-cycle-18", "model": "google/gemini-2.5-flash", "prompt_tokens": 81246, "completion_tokens": 452, "usd": 0.0255}
+{"ts": 1789767426701, "scenario": "inbox:swebench-loop-cycle-19", "model": "google/gemini-2.5-flash", "prompt_tokens": 99727, "completion_tokens": 397, "usd": 0.03091}
+{"ts": 1789767452937, "scenario": "inbox:swebench-loop-cycle-20", "model": "google/gemini-2.5-flash", "prompt_tokens": 124340, "completion_tokens": 962, "usd": 0.03971}
+{"ts": 1789767468948, "scenario": "inbox:swebench-loop-cycle-21", "model": "google/gemini-2.5-flash", "prompt_tokens": 123290, "completion_tokens": 778, "usd": 0.03893}
+{"ts": 1789767483852, "scenario": "inbox:qal-j27-the-new-chat-is-not-root", "model": "google/gemini-2.5-flash", "prompt_tokens": 113029, "completion_tokens": 837, "usd": 0.036}
+{"ts": 1789767570101, "scenario": "inbox:qal-j31-mcp-parse-said", "model": "google/gemini-2.5-flash", "prompt_tokens": 588447, "completion_tokens": 1963, "usd": 0.18144}
+{"ts": 1789767582730, "scenario": "inbox:qal-j35-675-does-not-close-it", "model": "google/gemini-2.5-flash", "prompt_tokens": 102865, "completion_tokens": 715, "usd": 0.03265}
+{"ts": 1789767590432, "scenario": "inbox:qal-j35-679-restores-before-the-read", "model": "google/gemini-2.5-flash", "prompt_tokens": 62707, "completion_tokens": 323, "usd": 0.01962}
+{"ts": 1789767603782, "scenario": "inbox:qal-j35-closed-by-679-my-rig-was-erasing-the-fix", "model": "google/gemini-2.5-flash", "prompt_tokens": 88404, "completion_tokens": 1420, "usd": 0.03007}
+{"ts": 1789767638395, "scenario": "inbox:qal-j43-kernel-half-holds", "model": "google/gemini-2.5-flash", "prompt_tokens": 62419, "completion_tokens": 552, "usd": 0.02011}
+{"ts": 1789767664644, "scenario": "inbox:qal-j43-regressed-by-2ea8d565", "model": "google/gemini-2.5-flash", "prompt_tokens": 181034, "completion_tokens": 1694, "usd": 0.05855}
+{"ts": 1789767675213, "scenario": "inbox:swebench-loop-cycle-22", "model": "google/gemini-2.5-flash", "prompt_tokens": 76516, "completion_tokens": 506, "usd": 0.02422}
+{"ts": 1789767686158, "scenario": "inbox:swebench-loop-cycle-23", "model": "google/gemini-2.5-flash", "prompt_tokens": 97213, "completion_tokens": 282, "usd": 0.02987}
+{"ts": 1789767728695, "scenario": "inbox:swebench-loop-cycle-24", "model": "google/gemini-2.5-flash", "prompt_tokens": 416766, "completion_tokens": 1640, "usd": 0.12913}
+{"ts": 1789767824707, "scenario": "inbox:swebench-loop-cycle-25", "model": "google/gemini-2.5-flash", "prompt_tokens": 498128, "completion_tokens": 2473, "usd": 0.15562}
+{"ts": 1789767837034, "scenario": "inbox:swebench-loop-cycle-26", "model": "google/gemini-2.5-flash", "prompt_tokens": 138238, "completion_tokens": 455, "usd": 0.04261}
+{"ts": 1789767856101, "scenario": "inbox:swebench-loop-cycle-27", "model": "google/gemini-2.5-flash", "prompt_tokens": 138927, "completion_tokens": 855, "usd": 0.04382}
+{"ts": 1789767861085, "scenario": "inbox:swebench-loop-cycle-28", "model": "google/gemini-2.5-flash", "prompt_tokens": 29572, "completion_tokens": 138, "usd": 0.00922}
+{"ts": 1789767864205, "scenario": "inbox:swebench-loop-cycle-29", "model": "google/gemini-2.5-flash", "prompt_tokens": 18929, "completion_tokens": 119, "usd": 0.00598}
+{"ts": 1789767872504, "scenario": "inbox:swebench-loop-cycle-30", "model": "google/gemini-2.5-flash", "prompt_tokens": 74418, "completion_tokens": 370, "usd": 0.02325}
+{"ts": 1789767890365, "scenario": "inbox:swebench-loop-cycle-31", "model": "google/gemini-2.5-flash", "prompt_tokens": 135089, "completion_tokens": 332, "usd": 0.04136}
+{"ts": 1789767904465, "scenario": "inbox:swebench-loop-cycle-32", "model": "google/gemini-2.5-flash", "prompt_tokens": 115862, "completion_tokens": 521, "usd": 0.03606}
+{"ts": 1789767912264, "scenario": "inbox:swebench-loop-cycle-33", "model": "google/gemini-2.5-flash", "prompt_tokens": 58309, "completion_tokens": 399, "usd": 0.01849}
+{"ts": 1789767922011, "scenario": "inbox:swebench-loop-cycle-34", "model": "google/gemini-2.5-flash", "prompt_tokens": 74790, "completion_tokens": 430, "usd": 0.02351}
+{"ts": 1789768048519, "scenario": "inbox:two-drafts-ran-on-older-kernels", "model": "google/gemini-2.5-flash", "prompt_tokens": 458829, "completion_tokens": 4608, "usd": 0.14917}
+{"ts": 1789768265375, "scenario": "journey-j8a-headless", "model": "google/gemini-2.5-flash", "prompt_tokens": 18163, "completion_tokens": 25, "usd": 0.00551}
+{"ts": 1789768307263, "scenario": "boot-idle", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768343839, "scenario": "prompt-no-key", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768408295, "scenario": "malformed-folder", "model": "google/gemini-2.5-flash", "prompt_tokens": 46821, "completion_tokens": 70, "usd": 0.01422}
+{"ts": 1789768411009, "scenario": "malformed-frames", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768438243, "scenario": "kill-mid-turn-restart", "model": "google/gemini-2.5-flash", "prompt_tokens": 74420, "completion_tokens": 279, "usd": 0.02302}
+{"ts": 1789768488357, "scenario": "ordinary-task", "model": "google/gemini-2.5-flash", "prompt_tokens": 383719, "completion_tokens": 686, "usd": 0.11683}
+{"ts": 1789768488469, "scenario": "plan-shell-verdicts", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768499922, "scenario": "steer-storm", "model": "google/gemini-2.5-flash", "prompt_tokens": 142794, "completion_tokens": 160, "usd": 0.04324}
+{"ts": 1789768531174, "scenario": "spawn-storm", "model": "google/gemini-2.5-flash", "prompt_tokens": 758983, "completion_tokens": 1229, "usd": 0.23077}
+{"ts": 1789768534710, "scenario": "bench-ask-before-risky", "model": "google/gemini-2.5-flash", "prompt_tokens": 18089, "completion_tokens": 27, "usd": 0.00549}
+{"ts": 1789768558250, "scenario": "bench-no-screenshot-unasked", "model": "google/gemini-2.5-flash", "prompt_tokens": 56275, "completion_tokens": 179, "usd": 0.01733}
+{"ts": 1789768558301, "scenario": "desktop-rapid-session-switch", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768558334, "scenario": "desktop-kill-kernel-under-ui", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768558368, "scenario": "desktop-user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768558401, "scenario": "desktop-fresh-place-no-notice", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768662681, "scenario": "kickoff-session", "model": "google/gemini-2.5-flash", "prompt_tokens": 1723249, "completion_tokens": 5180, "usd": 0.52992}
+{"ts": 1789768662769, "scenario": "inbox:openrouter-default-provider", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662783, "scenario": "inbox:steer-running-child", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662796, "scenario": "inbox:agent-defs", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662810, "scenario": "inbox:attach-replay-deltas", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662823, "scenario": "bench-screenshot@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662836, "scenario": "bench-no-screenshot-unasked@bench-see-and-commit-nudges", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662849, "scenario": "inbox:call-mode", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662862, "scenario": "inbox:changed-frames", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662875, "scenario": "inbox:composer-pills", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662888, "scenario": "desktop-composer-pills@composer-pills", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662902, "scenario": "inbox:composer-plan-alignment", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662915, "scenario": "inbox:cost-per-turn", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662928, "scenario": "inbox:fallback-on-provider-errors", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662941, "scenario": "inbox:hooks-policy", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662955, "scenario": "inbox:image-describe", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662968, "scenario": "inbox:inbox-files", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662981, "scenario": "inbox:jobs-leash", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768662994, "scenario": "inbox:nested-git-phase1", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663007, "scenario": "inbox:pdf-input", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663020, "scenario": "inbox:plan-engine", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663034, "scenario": "inbox:pr-tracking", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663047, "scenario": "inbox:project-page-coordinator-protocol", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663061, "scenario": "inbox:rewind-here", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663074, "scenario": "inbox:rewind", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663087, "scenario": "inbox:rollout-tracing", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663100, "scenario": "inbox:sandbox", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663114, "scenario": "inbox:search-citations", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663127, "scenario": "secrets-leak-hunt@secrets-door", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663141, "scenario": "inbox:sidebar-search-dots", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663155, "scenario": "inbox:spawn-caps", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663168, "scenario": "inbox:spawn-wait", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663182, "scenario": "inbox:stop-word-queue-row", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663195, "scenario": "inbox:subagent-task-panel", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663208, "scenario": "inbox:subs-authored-migrate-ask", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663222, "scenario": "inbox:swebench-harness-comparison", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663235, "scenario": "inbox:swebench-loop-cycle-1", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663249, "scenario": "inbox:thinking-heartbeat", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663262, "scenario": "inbox:turn-feedback", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663275, "scenario": "inbox:ui-qa-fixes", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663289, "scenario": "inbox:voice-linux", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663302, "scenario": "inbox:voice-server", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663315, "scenario": "inbox:webhook-door", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663328, "scenario": "inbox:custom-modes", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663342, "scenario": "inbox:follow-own-prs", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663355, "scenario": "inbox:goals", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663368, "scenario": "inbox:polish-kernel-asks", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663382, "scenario": "inbox:protected-files", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663395, "scenario": "inbox:secrets-scope", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663408, "scenario": "inbox:standing-pass-kernel", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663421, "scenario": "inbox:swebench-loop-cycle-4", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663435, "scenario": "inbox:swebench-loop-cycle-5", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663448, "scenario": "inbox:worktree-cleanup", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663461, "scenario": "inbox:swebench-loop-cycle-10", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663474, "scenario": "inbox:swebench-loop-cycle-6", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663488, "scenario": "inbox:swebench-loop-cycle-7", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663501, "scenario": "inbox:swebench-loop-cycle-8", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663515, "scenario": "inbox:swebench-loop-cycle-11", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663528, "scenario": "inbox:swebench-loop-cycle-13", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663541, "scenario": "inbox:swebench-loop-cycle-14", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663555, "scenario": "inbox:swebench-loop-cycle-15", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663568, "scenario": "inbox:swebench-loop-cycle-17", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663582, "scenario": "inbox:swebench-loop-cycle-19", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663595, "scenario": "inbox:swebench-loop-cycle-21", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663608, "scenario": "inbox:qal-j35-675-does-not-close-it", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663622, "scenario": "inbox:qal-j35-closed-by-679-my-rig-was-erasing-the-fix", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663635, "scenario": "inbox:qal-j37-headless-tail-cut-at-start", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663648, "scenario": "inbox:qal-j38-rewound-clock-fires-once", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663662, "scenario": "inbox:qal-j40-lock-retaken", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663675, "scenario": "inbox:qal-j43-kernel-half-holds", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663688, "scenario": "inbox:store-second-reader-fault-0510", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663701, "scenario": "inbox:store-second-reader-fault-0600", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663715, "scenario": "inbox:swebench-loop-cycle-22", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663728, "scenario": "inbox:swebench-loop-cycle-23", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663741, "scenario": "inbox:swebench-loop-cycle-24", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768663754, "scenario": "inbox:swebench-loop-cycle-26", "skipped": "budget", "spent_today": 60.0887, "budget": 60.0}
+{"ts": 1789768704191, "scenario": "fp-shell-subscription", "model": "google/gemini-2.5-flash", "prompt_tokens": 55051, "completion_tokens": 82, "usd": 0.01672}
+{"ts": 1789768704235, "scenario": "fp-timer-subscription", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704249, "scenario": "fp-plan-md-checklist", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704262, "scenario": "mt-01-typed-while-running-steers", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704275, "scenario": "mt-04-queue-survives-window-restart", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704289, "scenario": "mt-05-voice-utterance-steers", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704302, "scenario": "mt-08-existing-place-keeps-tools", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704315, "scenario": "mt-10-notes-stay-current", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704328, "scenario": "mt-11-child-cannot-write-project-page", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704341, "scenario": "mt-12-one-report-per-child", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704355, "scenario": "mt-14-child-done-does-not-interrupt", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704368, "scenario": "mt-15-done-storm-batched", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704381, "scenario": "mt-16-root-does-not-repeat-result", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704394, "scenario": "mt-18-project-page-not-in-chat-column", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704408, "scenario": "mt-19-standing-work-appears-once", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704421, "scenario": "mt-20-ask-is-a-card-in-place", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704437, "scenario": "mt-24-relaunch-restores-active-tab", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768704467, "scenario": "mt-25-child-can-reach-history", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768704480, "scenario": "mt-27-three-part-no-grandchildren", "skipped": "budget", "spent_today": 60.1055, "budget": 60.0}
+{"ts": 1789768736032, "scenario": "mt-29-rewind-latency", "model": "google/gemini-2.5-flash", "prompt_tokens": 205943, "completion_tokens": 260, "usd": 0.06243}
+{"ts": 1789768736078, "scenario": "rm-01-remote-install-and-spawn", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789768737306, "scenario": "bt-01-say-to-user-refused", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768738620, "scenario": "bt-03-worktree-respawn-next-free-branch", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768739881, "scenario": "bt-04-tool-markup-as-prose-stripped", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768741683, "scenario": "bt-08-files-arrive-as-bytes", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768745281, "scenario": "fs-01-federated-store-read-write-cas", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768746745, "scenario": "fr-03-first-turn-produces-nothing", "model": "google/gemini-2.5-flash", "prompt_tokens": 4, "completion_tokens": 4, "usd": 1e-05}
+{"ts": 1789768746787, "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768746820, "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768746849, "scenario": "journey-j8a-headless", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789768746863, "scenario": "journey-linux", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789768746877, "scenario": "cp-01-turn-ends-on-spend-cap", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789768809192, "scenario": "re-02-approval-blocked-call-never-run", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768809726, "scenario": "wt-01-worktree-base-missing-tree-cut-from-head", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768813241, "scenario": "sq-01-stop-holds-the-queued-follow-up", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768816747, "scenario": "im-01-bash-yields-to-the-users-words", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768816785, "scenario": "im-02-desktop-no-quiet-line-while-streaming", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789768819728, "scenario": "rp-01-finished-job-result-with-reaper-broken", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768833307, "scenario": "st-01-silent-turn-names-its-wait", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768833810, "scenario": "pn-01-panic-does-not-strand-the-agent", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768840083, "scenario": "jl-01-kill-the-displayed-pid-ends-the-group", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768840699, "scenario": "sb-01-backgrounding-subscription-command-finishes", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768859615, "scenario": "rw-01-rewind-with-files-keeps-the-history", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768876121, "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768879516, "scenario": "rw-10-rewind-while-another-git-commits-in-the-same-repository", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768886612, "scenario": "rw-10c-a-long-wait-for-the-checkpoint-tree-is-shown-as-the-command-running", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768893574, "scenario": "co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789768939066, "scenario": "co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769270358, "scenario": "lk-01-a-held-place-is-said-once-then-escalates-on-a-real-loop", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769273508, "scenario": "lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769293401, "scenario": "fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769312439, "scenario": "rw-04-rewind-with-files-in-a-repo-without-git-identity", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769347981, "scenario": "sw-05-failed-migration-rename-doubles-crons-and-tasks", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769359097, "scenario": "af-01-folder-renamed-under-a-running-kernel", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769359136, "scenario": "af-03-desktop-folder-renamed-under-the-window", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789769362970, "scenario": "rw-07-init-in-turn-repo-after-kernel-start-rewind-keeps-files", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769366844, "scenario": "rw-07-clone-repo-after-kernel-start-rewind-keeps-files", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769368267, "scenario": "sv-01-service-place-in-roster", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769371723, "scenario": "uw-01-unwritable-undo-mark-refuses-rather-than-using-an-older-turns", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769377564, "scenario": "uw-03-a-panicked-turn-that-cannot-be-recorded-is-still-said", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769377603, "scenario": "af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789769377617, "scenario": "kf-01-a-chat-opened-during-kickoff-keeps-what-you-type", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789769409717, "scenario": "up-01-a-swap-still-in-progress-is-not-a-failed-restart", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769409818, "scenario": "fm-03-the-kernel-record-that-names-a-live-process-wins-whichever-path-it-is-in", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769410312, "scenario": "fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769410349, "scenario": "steer-storm@steer-running-child", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789769410579, "scenario": "af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes", "skipped": "budget", "spent_today": 60.1679, "budget": 60.0}
+{"ts": 1789769438714, "scenario": "ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded", "model": "google/gemini-2.5-flash", "prompt_tokens": 12345, "completion_tokens": 66, "usd": 0.00387}
+{"ts": 1789769438757, "scenario": "dg-01-a-sub-chats-turn-starts-under-the-harness", "skipped": "budget", "spent_today": 60.1718, "budget": 60.0}
+{"ts": 1789769438800, "scenario": "ds-01-the-double-serving-detector-finds-both-shapes-and-stays-quiet-on-the-innocent-ones", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769500290, "scenario": "en-01-a-write-that-runs-out-of-room-does-not-swallow-the-next-event", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769500793, "scenario": "fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769500892, "scenario": "fm-03-the-kernel-record-that-names-a-live-process-wins-whichever-path-it-is-in", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769500922, "scenario": "kf-01-a-chat-opened-during-kickoff-keeps-what-you-type", "skipped": "budget", "spent_today": 60.1718, "budget": 60.0}
+{"ts": 1789769501399, "scenario": "pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769535855, "scenario": "sf-01-a-shell-subscription-whose-command-fails-tells-somebody", "model": "google/gemini-2.5-flash", "prompt_tokens": 24472, "completion_tokens": 85, "usd": 0.00755}
+{"ts": 1789769568011, "scenario": "up-01-a-swap-still-in-progress-is-not-a-failed-restart", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769571467, "scenario": "uw-01-unwritable-undo-mark-refuses-rather-than-using-an-older-turns", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769572192, "scenario": "uw-02-arbos-not-excluded-from-the-users-repo-is-said-once-per-start", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769578023, "scenario": "uw-03-a-panicked-turn-that-cannot-be-recorded-is-still-said", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769669463, "scenario": "uw-04-subscription-job-whose-marker-cannot-be-written-is-ended-not-orphaned", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769740394, "scenario": "af-02-two-windows-on-one-place", "skipped": "budget", "spent_today": 60.1793, "budget": 60.0}
+{"ts": 1789769740407, "scenario": "af-03-desktop-folder-renamed-under-the-window", "skipped": "budget", "spent_today": 60.1793, "budget": 60.0}
+{"ts": 1789769740421, "scenario": "cp-02-desktop-turn-ends-on-cap", "skipped": "budget", "spent_today": 60.1793, "budget": 60.0}
+{"ts": 1789769740434, "scenario": "desktop-composer-pills", "skipped": "budget", "spent_today": 60.1793, "budget": 60.0}
+{"ts": 1789769740447, "scenario": "desktop-composer-pills@composer-pills", "skipped": "budget", "spent_today": 60.1793, "budget": 60.0}
+{"ts": 1789769751454, "scenario": "desktop-fresh-place-no-notice", "model": "google/gemini-2.5-flash", "prompt_tokens": 57081, "completion_tokens": 159, "usd": 0.01752}
+{"ts": 1789769796391, "scenario": "desktop-huge-transcript-scroll", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769841911, "scenario": "desktop-kill-kernel-under-ui", "model": "google/gemini-2.5-flash", "prompt_tokens": 77094, "completion_tokens": 345, "usd": 0.02399}
+{"ts": 1789769860778, "scenario": "desktop-rapid-session-switch", "model": "google/gemini-2.5-flash", "prompt_tokens": 95917, "completion_tokens": 263, "usd": 0.02943}
+{"ts": 1789769905019, "scenario": "desktop-user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 76572, "completion_tokens": 181, "usd": 0.02342}
+{"ts": 1789769949303, "scenario": "desktop-user-message-card@user-message-card", "model": "google/gemini-2.5-flash", "prompt_tokens": 76890, "completion_tokens": 301, "usd": 0.02382}
+{"ts": 1789769949347, "scenario": "dg-01-a-sub-chats-turn-starts-under-the-harness", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949361, "scenario": "fb-01-feedback-report-written-delivered-picked-up", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949373, "scenario": "im-02-desktop-no-quiet-line-while-streaming", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949386, "scenario": "journey-linux", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949399, "scenario": "kf-01-a-chat-opened-during-kickoff-keeps-what-you-type", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949411, "scenario": "mt-01-typed-while-running-steers", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949424, "scenario": "mt-04-queue-survives-window-restart", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769949437, "scenario": "mt-14-child-done-does-not-interrupt", "skipped": "budget", "spent_today": 60.2975, "budget": 60.0}
+{"ts": 1789769955762, "scenario": "mt-17-plan-strip-empty-chat", "model": "google/gemini-2.5-flash", "prompt_tokens": 18683, "completion_tokens": 42, "usd": 0.00571}
+{"ts": 1789769955800, "scenario": "mt-18-project-page-not-in-chat-column", "skipped": "budget", "spent_today": 60.3032, "budget": 60.0}
+{"ts": 1789769955813, "scenario": "mt-19-standing-work-appears-once", "skipped": "budget", "spent_today": 60.3032, "budget": 60.0}
+{"ts": 1789769955826, "scenario": "mt-20-ask-is-a-card-in-place", "skipped": "budget", "spent_today": 60.3032, "budget": 60.0}
+{"ts": 1789769955839, "scenario": "mt-23-deleted-child-under-live-window", "skipped": "budget", "spent_today": 60.3032, "budget": 60.0}
+{"ts": 1789769963060, "scenario": "mt-24-relaunch-restores-active-tab", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789769963098, "scenario": "sq-02-desktop-stop-holds-follow-up", "skipped": "budget", "spent_today": 60.3032, "budget": 60.0}
+{"ts": 1789770008478, "scenario": "xp-01-dead-kernel-line-stays-in-its-project", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}
+{"ts": 1789770051941, "scenario": "xp-02-queued-line-survives-close-and-reopen-in-place", "model": "google/gemini-2.5-flash", "prompt_tokens": 0, "completion_tokens": 0, "usd": 0.0}

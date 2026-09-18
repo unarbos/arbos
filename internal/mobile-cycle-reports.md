@@ -3944,3 +3944,40 @@ ad-hoc at 124 — listening (127,127,126), thinking (94,94,93), speaking
 (71,88,111) — without being committed anywhere.
 
 **PR:** [#701](https://github.com/unarbos/arbos/pull/701), harness only.
+
+## Cycle 138 — the orb's colours
+
+Last cycle named this gap: the row is "call — voice first, orb, **colours**"
+and `orb-phases.sh` read the phase *labels*, with "colour" appearing only in
+its header comment (M-442). A caller in a quiet room has the colour and
+nothing else, so an orb that changed its accessibility value while looking
+identical would be a fault the sequence check cannot see.
+
+Sampled once per phase, the first time it is entered:
+
+| phase | on screen |
+|---|---|
+| listening | RGB (229, 229, 229) |
+| thinking | RGB (178, 178, 178) |
+| speaking | RGB (128, 167, 218) |
+| connecting | RGB (178, 178, 178) |
+
+The three a caller meets mid-call are distinct — bright, dim, and blue —
+not only in the tree.
+
+**`connecting` and `thinking` are the same grey** (M-443). My first version
+said so flatly, and that would have sent the next reader after a colour
+nobody has to tell apart: connecting happens once, before the call is under
+way, so nobody is ever choosing between the two by eye. Two **mid-call**
+states sharing a face would be the real fault, and the check now says which
+kind it found:
+
+> each pair involves a state that happens once, before the call is under
+> way, so nobody is choosing between them while listening. Worth knowing,
+> not a fault.
+
+That distinction is the cycle's actual work. Finding two identical numbers
+is easy; saying whether they matter is what stops a finding from becoming
+somebody's wasted afternoon.
+
+**PR:** [#702](https://github.com/unarbos/arbos/pull/702), harness only.
