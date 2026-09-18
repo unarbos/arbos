@@ -441,7 +441,15 @@ fn create(place: &arbos_core::Place, cwd: &Path, agent: &str, args: &Value) -> R
         gh_args.push("--head".into());
         gh_args.push(b);
     }
-    if let Some(b) = opt(args, "base") {
+    // The base named, else the place's rule (`[git] base`, or the
+    // repository's default as the guard read it): the same branch the
+    // guard protects is the one the pull request targets, not whatever
+    // `gh` would pick for a fork or a repository whose default moved.
+    let base = opt(args, "base").or_else(|| {
+        let rules = arbos_engine::GitRules::load(place.path());
+        (!rules.base.is_empty()).then_some(rules.base)
+    });
+    if let Some(b) = base {
         gh_args.push("--base".into());
         gh_args.push(b);
     }

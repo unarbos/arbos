@@ -51,6 +51,7 @@ pub use tool::{
     simple_schema, typed_schema,
 };
 pub use tools::git;
+pub use tools::git_guard::GitRules;
 pub use tools::{
     Claim, Grep, GrepHit, Hooks, NO_MESH, PromptSize, StoreFile, StoreWritten, is_readonly_command,
     kill_job, reap_by_pid,
