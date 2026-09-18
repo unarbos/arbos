@@ -3798,3 +3798,35 @@ through can fail exactly the way it guards against. That boundary is printed
 with every pass.
 
 **PR:** [#697](https://github.com/unarbos/arbos/pull/697), harness only.
+
+## Cycle 134 — measured before guessing
+
+The note said opening a chat with workers still clips by about 93 pt, and
+asked for a measurement before a third guess. Measured on `main`
+`b82e2194`:
+
+| chat | unused scroll on opening | last line vs the pill |
+|---|---|---|
+| `phone` | **1 pt** | 87 pt above it |
+| `demo` | **0 pt** | 109 pt above it |
+
+It does not reproduce (M-434). A still confirms it: the last line reads
+whole, well clear of the pill. #638's second scroll and #642's bottom margin
+hold together, and nothing was shipped.
+
+**The 93 pt was itself a bad number.** It came from cycle 110, where I took
+one swipe for the end of a transcript. The real shortfall then was **501
+pt** — which is what #638 fixed, and why measuring it properly mattered more
+than fixing it quickly.
+
+**So the measurement is a file now, not a memory** (M-435). It separates the
+two claims that were being conflated: *landing* at the end of the
+transcript, and the last line being *clear* of the pill that floats over it.
+A chat can do the first and fail the second, which is exactly how #633
+shipped a fix aimed at the wrong mechanism. It pages four times rather than
+once, and refuses to speak when it cannot read both positions.
+
+Anyone tempted to change this surface again can run it and put the numbers
+in the PR.
+
+**PR:** [#698](https://github.com/unarbos/arbos/pull/698), harness only.
