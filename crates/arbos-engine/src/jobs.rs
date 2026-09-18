@@ -744,7 +744,12 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 ///   infinity`, a parent that never waits): `kill -0` on a zombie
 ///   succeeds, so the leash reads the process state and treats `Z` as
 ///   gone. SWE-bench cycle 14 found 4–10 live test processes per rollout
-///   after the kernel had exited, for exactly this reason.
+///   after the kernel had exited, for exactly this reason. Seen twice,
+///   200 ms apart: a multi-threaded process that `execve`s from a thread
+///   other than its leader shows as `Z` for an instant while the kernel
+///   de-threads it (the old leader is reaped by the exec'ing thread), and
+///   a kernel re-exec'ing onto a new binary is exactly that. One look
+///   killed every job at the update (update_gate_e2e under load).
 fn leashed(dir: &Path, program: String, args: Vec<String>) -> (String, Vec<String>) {
     const LEASH: &str = r#"D=$1; P=$2; shift 2; K=$PPID; C=${ARBOS_JOB_LOG_CAP:-67108864}; R=0; L=0; X=; T=0.25
 export ARBOS_LEASH=$$
@@ -753,7 +758,8 @@ ended() { trap '' INT TERM; echo "killed: a signal to the job's pid $$ ended it 
 trap ended INT TERM
 die() { kill -9 "$F" 2>/dev/null; rm -f "$P/runtime/leash/$$" 2>/dev/null; kill -9 -$$ 2>/dev/null; exit 137; }
 note() { printf '{"ts":%s000,"level":"warn","event":"%s","detail":"%s"}\n' "$(date +%s)" "$1" "$2" >> "$P/runtime/kernel.log" 2>/dev/null; }
-alive() { kill -0 "$1" 2>/dev/null || return 1; if [ -r "/proc/$1/stat" ]; then case "$(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null)" in Z) return 1;; esac; else case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 1;; esac; fi; return 0; }
+zst() { if [ -r "/proc/$1/stat" ]; then case "$(cut -d' ' -f3 "/proc/$1/stat" 2>/dev/null)" in Z) return 0;; esac; else case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) return 0;; esac; fi; return 1; }
+alive() { kill -0 "$1" 2>/dev/null || return 1; if zst "$1"; then sleep 0.2; kill -0 "$1" 2>/dev/null || return 1; zst "$1" && return 1; fi; return 0; }
 while :; do
   if ! kill -0 "$F" 2>/dev/null; then
     if [ -z "$X" ]; then
