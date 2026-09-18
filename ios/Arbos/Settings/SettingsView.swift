@@ -20,6 +20,12 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
+            // Every section carries its own row colour. `scrollContentBackground`
+            // hides the page behind the Form but not the fill behind each row,
+            // and the same modifier on the Form does not reach them: sampled,
+            // the sheet was 45% `#2c2c2e` — iOS's grouped-cell grey, in no
+            // part of this app's palette — against a list screen that is 92%
+            // `#161514`. One screen standing on a different ground.
             Form {
                 Section {
                     if VoiceProvider.available.count > 1 {
@@ -55,6 +61,7 @@ struct SettingsView: View {
                 } footer: {
                     Text(voiceFooter)
                 }
+                .listRowBackground(ArbosTheme.card)
                 Section {
                     TextField("wss://host/", text: $settings.kernelURL)
                         .keyboardType(.URL)
@@ -68,6 +75,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("The main chat: history and streaming replies come from here. The voice server talks to the same kernel.")
                 }
+                .listRowBackground(ArbosTheme.card)
                 Section {
                     TextField("wss://hub-host", text: $settings.hubURL)
                         .keyboardType(.URL)
@@ -81,6 +89,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("Lists the machines and projects the Projects screen shows.")
                 }
+                .listRowBackground(ArbosTheme.card)
                 Section {
                     Text(notifier.pushLine)
                         .font(ArbosTheme.caption)
@@ -90,12 +99,14 @@ struct SettingsView: View {
                 } footer: {
                     Text("Replies, questions and failures while the app is away. What you missed is shown when you come back either way.")
                 }
+                .listRowBackground(ArbosTheme.card)
                 Section {
                     LabeledContent("Arbos", value: Self.buildLine)
                         .foregroundStyle(ArbosTheme.textMuted)
                 } footer: {
                     Text("The TestFlight build on this phone.")
                 }
+                .listRowBackground(ArbosTheme.card)
             }
             .scrollContentBackground(.hidden)
             .background(ArbosTheme.bg)
