@@ -964,7 +964,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // with no agent.md that nothing lists). A turn whose folder is gone is
     // over: nothing more is written for it (QA bug qa-017).
     let gone = || !layout.agent_md().exists();
-    let ranking = std::cell::RefCell::new(crate::brief::Ranking::default());
+    let ranking = std::sync::Mutex::new(crate::brief::Ranking::default());
     let replay = provider.replay.is_some();
     let jev_off = host.config.jev == Some(false);
 
@@ -989,7 +989,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             if jev_off {
                 crate::brief::delete(&place);
             } else {
-                let _ = crate::brief::refresh(&place, &ranking.borrow());
+                let _ = crate::brief::refresh(
+                    &place,
+                    &ranking.lock().unwrap_or_else(|e| e.into_inner()),
+                );
             }
         }
         Ok(())
@@ -1203,7 +1206,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                         control.request_compact();
                     }
                     {
-                        let mut r = ranking.borrow_mut();
+                        let mut r = ranking.lock().unwrap_or_else(|e| e.into_inner());
                         r.keep = decision.keep.clone();
                         r.pointers = decision.pointers.clone();
                     }
