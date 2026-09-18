@@ -83,6 +83,11 @@ open(LOG, "w").close()
 http.server.HTTPServer(("127.0.0.1", PORT), H).serve_forever()
 PY
 
+# The trigger is a file, and a file outlives the run that made it. Left
+# behind by an earlier cycle it makes the fixture serve the "new" project
+# from the very first call, so it is on screen before the pull and the
+# refresh verdict congratulates itself on a row that was always there.
+rm -f /tmp/fixture-add-late
 python3 /tmp/fixture-list.py & FIX=$!
 trap 'kill $FIX 2>/dev/null' EXIT
 sleep 2
@@ -170,6 +175,12 @@ echo "after:              $AFTER"
 echo "/list calls:        $CALLS_BEFORE before the pull, $CALLS_AFTER after"
 # Two separate questions, and the old version could not tell them apart:
 # did the gesture make the app ask again, and did the answer reach the screen?
+# Two separate things: did the app ask again, and did the answer change the
+# screen. The second only means something if the project was absent before.
+case " $BEFORE " in
+  *" arrived-late "*) echo "  NOTE: arrived-late was already on screen before the pull — the"
+                      echo "        'new project' half of this says nothing this run";;
+esac
 if [ "$CALLS_AFTER" -le "$CALLS_BEFORE" ]; then
   echo "  VERDICT: the app never asked again — the gesture missed, or the pull does not refetch"
 elif echo "$AFTER" | grep -q "arrived-late"; then
