@@ -111,12 +111,77 @@ fn config_dir() -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".config").join("arbos"))
 }
 
+/// How many of [`config_paths`] belong to the place itself (its `.arbos/`
+/// and the Cursor / Claude Code files in its root); the rest is the
+/// machine's.
+const PLACE_SCOPE: usize = 3;
+
+/// A config file that could not be used, and what that cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    pub path: PathBuf,
+    /// The parse error, or `<name>: <why>` for one server's entry.
+    pub error: String,
+    /// The file is the place's and did not parse: the machine's file was
+    /// not read in its stead.
+    pub blocked_global: bool,
+}
+
+/// What [`load`] found: the servers, and the files that let it down.
+#[derive(Debug, Default)]
+pub struct Loaded {
+    pub servers: Vec<Server>,
+    pub problems: Vec<Problem>,
+}
+
 /// Every server configured for the place, plus `ARBOS_MCP_CMD` as `env`.
-/// Config trouble is reported on stderr; the rest still loads.
+/// A place file that does not parse is a problem, said; the machine's
+/// file is then not read, so a server the place meant to define is never
+/// silently the machine's one of the same name (qal-j31: one typo in
+/// `.arbos/mcp.toml` handed every name in it to the global file, and
+/// nobody was told).
+pub fn load(place: &Place) -> Loaded {
+    let mut loaded = load_from(&config_paths(place), PLACE_SCOPE);
+    if let Some(cmd) = std::env::var("ARBOS_MCP_CMD")
+        .ok()
+        .filter(|c| !c.is_empty())
+    {
+        if !loaded.servers.iter().any(|s| s.name == "env") {
+            let args = std::env::var("ARBOS_MCP_ARGS")
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            loaded.servers.push(Server {
+                name: "env".into(),
+                transport: Transport::Stdio {
+                    command: cmd,
+                    args,
+                    env: Vec::new(),
+                },
+            });
+        }
+    }
+    loaded
+}
+
+/// [`load`]'s servers alone.
 pub fn load_servers(place: &Place) -> Vec<Server> {
-    let mut out: Vec<Server> = Vec::new();
-    for path in config_paths(place) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
+    load(place).servers
+}
+
+/// The walk over `paths` in order, the first `place_scope` of them the
+/// place's own. The first file to define a name wins. A place file that
+/// does not parse stops the walk before the machine's files.
+fn load_from(paths: &[PathBuf], place_scope: usize) -> Loaded {
+    let mut out = Loaded::default();
+    let mut place_broken = false;
+    for (i, path) in paths.iter().enumerate() {
+        let place_file = i < place_scope;
+        if !place_file && place_broken {
+            break;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
         let parsed = if path.extension().and_then(|e| e.to_str()) == Some("json") {
@@ -128,40 +193,52 @@ pub fn load_servers(place: &Place) -> Vec<Server> {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("mcp: {}: {e}", path.display());
+                if place_file {
+                    place_broken = true;
+                }
+                out.problems.push(Problem {
+                    path: path.clone(),
+                    error: e.to_string(),
+                    blocked_global: place_file,
+                });
                 continue;
             }
         };
         for (name, entry) in file.servers {
-            if out.iter().any(|s| s.name == name) {
+            if out.servers.iter().any(|s| s.name == name) {
                 continue;
             }
-            match server_from(&name, entry, &path) {
-                Ok(server) => out.push(server),
-                Err(e) => eprintln!("mcp: {}: {name}: {e}", path.display()),
+            match server_from(&name, entry, path) {
+                Ok(server) => out.servers.push(server),
+                Err(e) => {
+                    eprintln!("mcp: {}: {name}: {e}", path.display());
+                    out.problems.push(Problem {
+                        path: path.clone(),
+                        error: format!("{name}: {e}"),
+                        blocked_global: false,
+                    });
+                }
             }
-        }
-    }
-    if let Some(cmd) = std::env::var("ARBOS_MCP_CMD")
-        .ok()
-        .filter(|c| !c.is_empty())
-    {
-        if !out.iter().any(|s| s.name == "env") {
-            let args = std::env::var("ARBOS_MCP_ARGS")
-                .unwrap_or_default()
-                .split_whitespace()
-                .map(str::to_string)
-                .collect();
-            out.push(Server {
-                name: "env".into(),
-                transport: Transport::Stdio {
-                    command: cmd,
-                    args,
-                    env: Vec::new(),
-                },
-            });
         }
     }
     out
+}
+
+/// The line a person reads for a config problem, on the transcript.
+pub fn problem_notice(place: &Place, p: &Problem) -> String {
+    let shown = p
+        .path
+        .strip_prefix(&place.path)
+        .map(|r| r.display().to_string())
+        .unwrap_or_else(|_| p.path.display().to_string());
+    if p.blocked_global {
+        format!(
+            "MCP: {shown} does not parse ({}). Its servers are off, and the machine's own MCP file was not used in its place — a server the file meant to define would otherwise have been the machine's of the same name, unnoticed. Fix the file and restart the kernel.",
+            p.error.trim()
+        )
+    } else {
+        format!("MCP: {shown}: {}; that server is off.", p.error.trim())
+    }
 }
 
 /// `{"mcpServers": {name: {command, args, env} | {url, headers}}}`.
@@ -456,4 +533,79 @@ fn rpc_http(
         .find(|m| m.get("id").and_then(Value::as_i64) == Some(2))
         .ok_or_else(|| anyhow!("MCP {server} sent no reply to {method}"))?;
     unwrap_reply(server, method, v)
+}
+
+#[cfg(test)]
+mod config_walk_tests {
+    use super::*;
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("arbos-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// qal-j31: one typo in the place's file discarded the whole file in
+    /// silence and every name in it fell through to the machine's file.
+    /// Now the broken place file is a problem, said, and the machine's
+    /// file is not read in its stead; place files that do parse still
+    /// load; a machine file that does not parse is a problem too, and the
+    /// place's servers stand.
+    #[test]
+    fn a_place_file_that_does_not_parse_is_said_and_blocks_the_machines_file() {
+        let d = dir("walk");
+        let place_toml = d.join("mcp.toml");
+        let place_json = d.join("mcp.json");
+        let global = d.join("global.toml");
+        std::fs::write(
+            &place_toml,
+            "[servers.notes]\ncommand = \"notes-mcp\"\nargs = [\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &place_json,
+            r#"{"mcpServers":{"files":{"command":"files-mcp"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &global,
+            "[servers.notes]\ncommand = \"global-notes\"\n[servers.web]\ncommand = \"web-mcp\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&[place_toml.clone(), place_json.clone(), global.clone()], 2);
+        let names: Vec<&str> = loaded.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["files"],
+            "the parsing place file loads; nothing from the machine's"
+        );
+        assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
+        let p = &loaded.problems[0];
+        assert_eq!(p.path, place_toml);
+        assert!(p.blocked_global, "{p:?}");
+        assert!(!p.error.is_empty());
+
+        // The machine's file broken instead: said, and the place stands.
+        std::fs::write(&place_toml, "[servers.notes]\ncommand = \"notes-mcp\"\n").unwrap();
+        std::fs::write(&global, "[servers.web\ncommand = 1\n").unwrap();
+        let loaded = load_from(&[place_toml.clone(), place_json.clone(), global.clone()], 2);
+        let names: Vec<&str> = loaded.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["notes", "files"]);
+        assert_eq!(loaded.problems.len(), 1);
+        assert!(!loaded.problems[0].blocked_global);
+        assert_eq!(loaded.problems[0].path, global);
+
+        // All well: the place's name wins over the machine's, the rest joins.
+        std::fs::write(
+            &global,
+            "[servers.notes]\ncommand = \"global-notes\"\n[servers.web]\ncommand = \"web-mcp\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&[place_toml.clone(), place_json.clone(), global.clone()], 2);
+        let names: Vec<&str> = loaded.servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["notes", "files", "web"]);
+        assert!(loaded.problems.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
