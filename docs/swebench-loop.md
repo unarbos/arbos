@@ -722,7 +722,21 @@ Every failure read: sympy-17318 ×4, B (the guard), evident — the fourth cycle
 
 Spend $5.80.
 
-## Next (cycle 28)
+## Cycle 28 (2026-09-18) — #601 read on django-10097: the choice unchanged, the mark unwritten, and the instance turns out to be ungradeable here
 
-1. To the features agent: the 6938 result as the step working; the 17318 result as its boundary — a guard chosen over a judgement, with the producer already read. If anything is to be said to the agent about that, it is not "read the function" (done) but "when you can name the wrong predicate, change the predicate; a guard that lets the wrong value through to a different caller is not the conservative choice."
+**Conditions.** #601 (c1d92e96) put the override shape into the contract: *a request that quotes its reference fixes what done means — implement the quote as written, even where your own reading of the wider standard would allow more*, with an "as quoted: …" line as the mark; its own example is this instance. Kernel **`arbos-kernel 0.2.0 e70e1b5c78e4 protocol 1`** = `main` head, built in the worktree, label proved. Network cut, no stall, no cap. Five rollouts on django-10097 ([pre-registration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-28-preregistration.md)). $7.71; 0 of 5 solved — see below for why that number means nothing here.
+
+**The choice.** Two of five forbid `:` in the password as the RFC quote says (`[^\s:@/]*`); **three of five permit it** — the same 2/3 split as cycle 26's five, with #601 in force. Four of five name RFC 1738 in the reply; **none writes the "as quoted:" line.** The rule did not change the choice on its own example in five rollouts, and its mark did not appear.
+
+**The instance cannot be solved in this environment.** One rollout (`a1214553`) produced a patch byte-identical to the gold — the same one-line regex change — and was graded failed. Grading the gold patch itself with the task's own `tests/test.sh` in a fresh container: **reward 0**, with `sqlite3.OperationalError: no such table: main.django_site__old` across the fixtures tests — the Django 2.2 / SQLite ≥ 3.26 `ALTER TABLE` incompatibility, in a FAIL_TO_PASS list 438 tests wide. django-10097 joins requests-2317 as a **grader artefact**: no agent patch passes here. The four earlier 10097 failures classed C or G-override keep their *behavioural* reading — the agent did permit `:` against the quote, seven times in twelve rollouts across cycles 2, 22, 26 and 28 — but their grades never depended on it, and they are re-labelled grader-artefact in the tallies (C 98 → 95; the G-override candidate is a behaviour observed, with no gradeable instance behind it).
+
+So the loop cannot tell whether #601 would have changed a grade; it can say the rule did not change the choice or produce its mark in five rollouts on the instance it was written from, and that the instance is the wrong one to grade it on. A gradeable instance where the request quotes its reference would be needed to say more; none is known in the loop's corpus.
+
+Every failure read: 10097 ×5 — grader artefact (3 of them also the override shape). Cumulative read: 277.
+
+Spend $7.71.
+
+## Next (cycle 29)
+
+1. To the features agent and QA: django-10097 is ungradeable in this environment (gold patch fails on `django_site__old`); it joins requests-2317. #601's mark did not appear in five rollouts on it; a gradeable quoting-reference instance is needed to read the rule properly.
 2. Reading continues on whatever new failures arrive. No measured comparison without its ceiling stated first.

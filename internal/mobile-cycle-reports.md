@@ -2660,3 +2660,149 @@ owns the flake needs the Actions UI, or the retry turned off.
 
 **PR:** [#617](https://github.com/unarbos/arbos/pull/617).
 **Stills:** `media/mobile/cycle-101/`.
+
+## Cycle 102 report (10:00 UTC, 09-18)
+
+**Looked at:** the call's words read back in the chat, oldest row at 76 —
+the feature Jacob specified himself.
+
+**The rule holds** (M-342), but the check that tests it had rotted. The run
+first reported `both wordings are showing`. It had not: the chat showed the
+answer **once**.
+
+The check asked whether this turn's reply *differed from* the kernel's
+wording. That works only while the two differ — and since today's gateway
+change Live often says **exactly** what the kernel said, so the single
+spoken row matched the phrase and was counted as a second copy.
+
+**A check built on a coincidence, and the coincidence ended** (M-343). M-279
+made the rule testable by noticing that the two answers differ. That was
+true when it was written, and it is the whole reason the check worked. It
+stopped being true today, and the check had no way to know — it reported a
+violation of a rule that was being kept.
+
+Replaced by counting the rows this turn gives its answer, which needs no
+assumption about the words. Then counting the *whole screen* over-counted,
+because older turns replay as the kernel's text once their spoken rows are
+gone — so it is scoped to the rows after the last `Spoken` marker.
+
+Two corrections in one cycle, both from the same root: **the world moved
+under a check that had encoded a fact about it.** That is a different
+failure from the rig faults earlier today, and probably the more dangerous
+one — the check was correct when written, reviewed, and used, and became
+wrong without anybody touching it.
+
+**PR:** [#618](https://github.com/unarbos/arbos/pull/618).
+
+## Cycle 103 report (10:05 UTC, 09-18)
+
+**Built a sweep, and it found a rotted check on its first run.**
+
+The reason for building it: today the loop found six rotted checks, one
+cycle at a time, and **every one was found by accident while looking at
+something else**. A scenario that no longer measures what it claims goes on
+passing quietly. So run them together and read the verdicts side by side.
+
+Ten scenarios, ten verdicts. The one that matters (M-344):
+
+```
+pill-count-vs-sheet   they disagree — pill 2, sheet 3, and no shared labels to explain it.
+```
+
+It is not a disagreement. The pill shows `Agents N` — every agent — when
+idle, and **`Working N` — only those running** — when busy; the sheet always
+lists them all. Comparing against the Working form compares a subset with a
+whole.
+
+That is the **third** assumption encoded in that one tool, after the fixed
+page count and the count-by-label, and the **fourth** time it has accused an
+app that was behaving exactly as designed. It declines now unless the pill
+is in its `Agents` form.
+
+**Two more things the sweep surfaced.** The worker-chat row passes
+unattended now (M-345) — cycle 99 proved it by hand, this is the committed
+scenario reaching the same conclusion on its own, which is the difference
+between a finding and a check. And four scenarios reach **no verdict at
+all** (M-346): they print measurements and stop, so the sweep fell back to
+their last line of output. Not broken, but half a check, and invisible until
+something tries to read them in bulk.
+
+**What I would keep from today.** The loop's instruments fail about as often
+as the app does, and far more often than the app in the direction of
+accusing it. Reading them together is the cheapest way to catch that; one
+run found in ten minutes what six cycles found by stumbling.
+
+**PR:** [#619](https://github.com/unarbos/arbos/pull/619).
+
+## Cycle 104 report (10:15 UTC, 09-18)
+
+**Looked at:** the gap the sweep named at 103 — four scenarios that measure
+and never conclude.
+
+**Two of the four now conclude** (M-347):
+
+```
+VERDICT: a token that cannot work empties the list to 1, says why, and 7 come back
+VERDICT: pulled down it types, mutes, and closes back to the chat it came from
+```
+
+Before this the sweep could only quote their last line of output. A scenario
+that measures without concluding is half a check — fine while a person reads
+it holding the row's claims in mind, useless the moment anything reads ten
+at once.
+
+**And the first verdict misread its own scenario** (M-348). It matched
+`where()`'s output against the word "chat" and announced `closed to 'Button
+Back', not the chat the call was entered from`. `where()` returns a raw tree
+line; a `Back` button *is* the pushed chat, and the close had gone exactly
+where M-217 says it should.
+
+I wrote the reader and the thing being read within minutes of each other and
+still encoded a wrong assumption about the format. That is worth recording
+because it corrects something I had half-believed all day: these faults are
+not caused by *distance in time* from the thing being measured. They are
+caused by not looking at the actual output. The fix is the same whether the
+code is five weeks or five minutes old.
+
+**The other two** — `cold-start-and-history` and `the-core-chat-path` —
+carry several claims each and need more than a line; left for the next
+cycle rather than given a verdict that flattens them.
+
+**PR:** [#620](https://github.com/unarbos/arbos/pull/620), harness only.
+
+## Cycle 105 report (10:20 UTC, 09-18)
+
+**Apple refused the #615 upload** — `Upload limit reached. Please wait 1
+day` (M-350). Every commit under `ios/` on `main` spends an upload, so a
+merge per cycle burns the day's allowance on work nobody is testing yet. For
+the rest of today `ios/` changes batch into one PR; harness work under
+`deploy/mobile/` touches no archive and ships as before, which the
+`ios changed?` job already enforces.
+
+Recorded in `internal/mobile-mac-host-and-testflight.md` rather than left in
+a conversation: it is a rule about the calendar, and the next worker will
+not have been here today.
+
+**The last two scenarios now conclude** (M-349), which completes what the
+sweep named at 103:
+
+```
+VERDICT cold start:   3.1s to a list of 7 rows
+VERDICT long history: chat in 1.1s, pager Show 200 earlier lines
+VERDICT away and back: the chat is as it was — 29 text rows both sides
+VERDICT: send → card 1.0s → reply 20.3s → Worked 21.3s, and the composer cleared
+```
+
+`cold-start-and-history` carries four coverage rows, so it gets four lines
+rather than one that flattens them. The measurements were always there; the
+missing piece was the sentence that makes them legible to anything but a
+reader who already knows the row's claims. They also re-confirm four rows in
+passing — cold start 3.1 s against 3.2 s at cycle 86.
+
+**Where this leaves the suite.** Ten scenarios, ten verdicts, one command.
+Three days ago most of these rows were checked by looking at screenshots;
+the value of the last few cycles is that a person can now read what the loop
+concluded without re-deriving it, and so can the sweep that catches the
+checks going stale.
+
+**PR:** [#622](https://github.com/unarbos/arbos/pull/622), harness only.

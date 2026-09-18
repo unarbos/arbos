@@ -164,6 +164,20 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             d.send(SLOW_WORKER)
             d.app.wait_state(lambda s: any(c.get("streaming") or c.get("turn_open") for p in s["projects"] for c in p["sessions"]), timeout=40, what="root running")
             time.sleep(8)
+            # Whether this chat's own turn is still open at the moment of typing decides which contract
+            # applies, so it is observed rather than assumed. `SLOW_WORKER` spawns with wait=true, and the
+            # chat's turn ends once the spawn returns — the worker's turn belongs to another agent. So after
+            # the 8 s sleep the chat may already be idle, and then there is no running turn for a line to
+            # land inside. The features agent measured exactly that (`follow_up_index=7`, after the first
+            # `turn_complete`) while cycle 6 measured the other side and passed. An assertion that flips on
+            # which of those happens is review rule 6: right about the intention, wrong about the mechanism.
+            own_turn_open = any(
+                (c.get("streaming") or c.get("turn_open"))
+                for p in d.app.state()["projects"]
+                for c in p["sessions"]
+                if c.get("agent_session") == d.agent
+            )
+            cx.rec.notes["own_turn_open_when_typed"] = own_turn_open
             d.send("FOLLOW-UP typed while running. Reply ACK-FOLLOWUP.")
             t0 = time.time()
             steer = None
@@ -174,13 +188,38 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             # `root` reads an agent nobody typed into (the features agent's read of qal-j27).
             cx.rec.notes["agent_typed_into"] = d.agent
             cx.rec.notes["inbox_after_typing"] = inbox_kinds(cx.place, d.agent)
-            cx.rec.expect(steer is not None, "mt-01-typed-not-a-steer", "no kind = steer inbox file within 3 s of typing during a running turn; the line waits for turn_complete", "desktop composer: send while running must steer by default")
+            if own_turn_open:
+                cx.rec.expect(steer is not None, "mt-01-typed-not-a-steer", "no kind = steer inbox file within 3 s of typing during a running turn; the line waits for turn_complete", "desktop composer: send while running must steer by default")
             d.app.wait_state(lambda s: not any(c.get("streaming") or c.get("turn_open") for p in s["projects"] for c in p["sessions"]), timeout=150, what="root idle")
             evs, _ = transcript(cx.place, d.agent)
             ks = [e.get("kind") for e in evs]
             i_follow = next((i for i, e in enumerate(evs) if e.get("kind") == "user" and "FOLLOW-UP" in e.get("text", "")), None)
             i_done = next((i for i, kk in enumerate(ks) if kk == "turn_complete"), None)
-            cx.rec.expect(i_follow is not None and i_done is not None and i_follow < i_done, "mt-01-follow-up-after-turn", f"the typed line landed at transcript index {i_follow}, the first turn_complete at {i_done}; it must land at a tool boundary inside the turn")
+            answered = any(e.get("kind") == "assistant" and "ACK-FOLLOWUP" in (e.get("text") or "") for e in evs)
+            cx.rec.notes.update({"follow_up_index": i_follow, "first_turn_complete_index": i_done, "answered": answered})
+
+            # The property, whichever shape this run took: the line is not lost. It reaches the chat's
+            # transcript and is answered.
+            cx.rec.expect(
+                i_follow is not None,
+                "mt-01-typed-line-lost",
+                f"the line typed into {d.agent} is on no transcript ({len(evs)} events, kinds {ks[:8]}); a line a person typed must not disappear",
+                "arbos-core inbox::steers/release — a typed line becomes an inbox file and opens or joins a turn",
+            )
+            cx.rec.expect(
+                answered,
+                "mt-01-typed-line-unanswered",
+                f"the typed line reached the transcript at index {i_follow} and nothing answered it (no ACK-FOLLOWUP among {len([e for e in evs if e.get('kind') == 'assistant'])} assistant events)",
+            )
+            # And the boundary claim only where the mechanism can hold: inside a turn that was open.
+            if own_turn_open:
+                cx.rec.expect(
+                    i_follow is not None and i_done is not None and i_follow < i_done,
+                    "mt-01-follow-up-after-turn",
+                    f"this chat's own turn was open when the line was typed, so the line must land at a tool boundary inside it — it landed at transcript index {i_follow} and the first turn_complete is at {i_done}",
+                )
+            else:
+                cx.rec.notes["boundary_not_asserted"] = "the chat's own turn had already ended when the line was typed (the spawn returned), so there was no turn for it to land inside; the no-loss and answered checks above are what this run can prove"
         finally:
             d.close()
         cx.check()

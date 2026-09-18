@@ -5,16 +5,36 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 09:47 UTC.
+Last checked 2026-09-18 10:18 UTC.
 
-## Click Update. You will get build 1936.
+## Click Update. You will get build 1952.
 
-**1936** — signed, notarised, stapled, on the feed since 09:45 UTC.
+**1952** — signed, notarised, stapled, on the feed since 10:14 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1946 (builds 1947–1952):
+
+- **#614** — dev channel test: a queue of young commits does not outlast a
+  green that has waited
+- **#615** — iOS: a cold start comes back to the chat that was in front, as
+  the desktop reopens its active tab
+
+## Before that: 1946
+
+New since 1936 (builds 1937–1946):
+
+- **#611** — a `project.toml` the kernel wrote names nothing: Home keeps
+  its house, and a tab keeps the colour its path picks
+- **#613** — a place file that does not parse is said on root's
+  transcript, and the machine's file is not used in its place
+- **#612** — the running-worker line was there all along; three patterns
+  matched on the animated spinner and hid it
+
+## Before that: 1936
 
 New since 1930 (builds 1931–1936):
 
