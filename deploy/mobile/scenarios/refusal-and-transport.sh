@@ -129,14 +129,19 @@ class Handler(socketserver.StreamRequestHandler):
                          b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept.encode() + b"\r\n\r\n")
         self.wfile.flush()
 
-        # #417's shape: the reason goes in an error frame, then the socket
-        # closes carrying it again. Before #417 the close raced the frame and
-        # arrived bare, which is what left the phone inventing explanations.
+        # `Hub::attach` sends the reason in one error frame, `detail` prefixed
+        # with "hub: ", and then `refuse_close` waits for the peer and closes
+        # with no code and no reason at all. The reason therefore exists in
+        # exactly one place on the wire. A draft of this fixture put it in the
+        # close frame instead and read the app as losing reasons it was never
+        # sent — and the long one overflowed the 125-byte limit a control
+        # frame has, which the app correctly saw as a broken socket.
         reason = REFUSALS.get(project, "refused")
-        self.wfile.write(ws_frame(0x1, json.dumps({"type": "error", "message": reason}).encode()))
+        frame = {"type": "error", "agent": None, "detail": f"hub: {reason}"}
+        self.wfile.write(ws_frame(0x1, json.dumps(frame).encode()))
         self.wfile.flush()
-        time.sleep(0.05)
-        self.wfile.write(ws_frame(0x8, (1008).to_bytes(2, "big") + reason.encode()))
+        time.sleep(0.3)
+        self.wfile.write(ws_frame(0x8, b""))
         self.wfile.flush()
         time.sleep(0.2)
 
