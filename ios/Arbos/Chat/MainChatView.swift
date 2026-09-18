@@ -364,6 +364,12 @@ struct ProjectChatView: View {
             .onChange(of: chat.workers) { _, _ in
                 if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
             }
+            // The away card grows the transcript like anything else, and
+            // without this it grew into the inset: the card that exists to
+            // be read arrived half behind the workers pill.
+            .onChange(of: chat.unseen) { _, _ in
+                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
+            }
             .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
         }
     }
@@ -952,6 +958,9 @@ struct AwayCard: View {
                         .font(.system(size: note.isAsk || note.failed ? 13 : 6))
                         .foregroundStyle(note.failed ? ArbosTheme.danger : (note.isAsk ? ArbosTheme.accent : ArbosTheme.textDim))
                         .frame(width: 14)
+                        // A bullet. Its colour marks an ask or a failure and
+                        // the words say which, so aloud it is only "Circle".
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         if !note.title.isEmpty {
                             Text(note.title)
