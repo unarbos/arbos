@@ -114,7 +114,11 @@ fn a_retired_workers_row_links_its_pr_when_it_opened_one() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"plan\",\"arguments\":{\"op\":\"add\",\"section\":\"Kernel\",\"text\":\"[Echo gate](agents/echo-gate) — worker running\"}},{\"name\":\"spawn\",\"arguments\":{\"name\":\"echo-gate\",\"task\":\"add the echo gate\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
-        "{\"content\":\"gate added; PR opened\"}\n",
+        // The worker takes a moment: a report landing while root's
+        // dispatch turn still runs folds in and opens no done turn, and
+        // the row is never retired (CI on #550; the fold-race family of
+        // #514 and #528).
+        "{\"agent\":\"echo-gate\",\"content\":\"gate added; PR opened\",\"delay_ms\":2500}\n",
         "{\"agent\":\"root\",\"content\":\"noted\"}\n",
     );
     let mut k = start_kernel_replay_prepared("page-pr-link", replies, "", |place| {

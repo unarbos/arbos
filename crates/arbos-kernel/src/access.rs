@@ -72,6 +72,7 @@ impl Role {
                     | Frame::Read { .. }
                     | Frame::Tail { .. }
                     | Frame::List { .. }
+                    | Frame::TurnChanges { .. }
             ),
         }
     }
