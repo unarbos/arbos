@@ -53,8 +53,14 @@ awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$RAW" | sort -u > "$LABELS
 ROWS=$(wc -l < "$LABELS" | tr -d ' ')
 echo "the sheet lists: $ROWS rows, paged to the end"
 
-DUPES=$(awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$RAW" | sort | uniq -d | wc -l | tr -d ' ')
-echo "labels that appear more than once (would hide a row): $DUPES"
+# Two workers could share a label only if both are on screen together, so
+# the check must be within one dump. Across the ten pages every row repeats
+# by construction, and counting that way reported "12 duplicates" for a list
+# with none.
+DUPES=$(ui dump | grep -E "Button +.+, " \
+        | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' \
+        | sort | uniq -d | wc -l | tr -d ' ')
+echo "labels sharing a name on one screen (each would hide a row): $DUPES"
 
 if [ "$ROWS" = "$COUNT" ]; then
   echo "VERDICT: the two agree on $COUNT."
