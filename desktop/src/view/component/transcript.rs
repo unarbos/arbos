@@ -2191,20 +2191,31 @@ fn display_parts_for(
     running: bool,
     failed: bool,
 ) -> (String, Option<String>) {
+    // Failed: the verb says what did not happen — "Could not edit
+    // hello2.txt · as coordinator you write …" — never the success form
+    // with the refusal beside it (F-45).
     if failed {
         let first = output
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
             .unwrap_or("no result");
-        let (verb, arg) = display_parts_for(kind, label, "", false, false);
-        let mut detail = arg.unwrap_or_default();
+        let (verb, arg) = match kind {
+            ToolKind::Edit => ("Could not edit", tool_leaf(label)),
+            ToolKind::Read => ("Could not read", tool_leaf(label)),
+            ToolKind::Delete => ("Could not delete", tool_leaf(label)),
+            ToolKind::Move => ("Could not move", tool_leaf(label)),
+            ToolKind::Execute => ("Command failed", shorten(&clean_shell(&tool_rest(label)), 60)),
+            ToolKind::Search => ("Search failed", search_rest(label)),
+            ToolKind::Fetch => ("Could not fetch", tool_leaf(label)),
+            _ => ("Failed", label.to_owned()),
+        };
+        let mut detail = arg;
         if !detail.is_empty() {
             detail.push_str(" · ");
         }
-        detail.push_str("refused: ");
         detail.push_str(&shorten(first, 90));
-        return (verb, Some(detail));
+        return (verb.to_owned(), Some(detail));
     }
     if waited_title(label, output).is_some() {
         return (display_title(kind, label, output, running), None);
@@ -3116,6 +3127,11 @@ struct WorkStats {
     spawns: usize,
     add: usize,
     del: usize,
+    /// Calls the kernel refused or that errored: not edits, not reads —
+    /// nothing happened. A refused `write` read "Edited main.py +1" for
+    /// the words it never wrote (F-45).
+    failed: usize,
+    first_failed: Option<(ToolKind, String)>,
     first_file: Option<String>,
     first_edit: Option<String>,
     /// The model's own words for the first command that had some (`bash`'s
@@ -3199,6 +3215,8 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
         commands: 0,
         add: 0,
         del: 0,
+        failed: 0,
+        first_failed: None,
         first_file: None,
         first_desc: None,
         first_edit: None,
@@ -3224,6 +3242,7 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
             diff,
             secs,
             desc,
+            status,
             ..
         } = item
         {
@@ -3238,6 +3257,13 @@ fn work_stats(items: &[ChatItem], body: Range<usize>) -> WorkStats {
             stats.last_label = Some(label.clone());
             let kind = coalesce_kind(*kind, label).unwrap_or(*kind);
             stats.last_kind = Some(kind);
+            if *status == ToolStatus::Failure {
+                stats.failed += 1;
+                if stats.first_failed.is_none() {
+                    stats.first_failed = Some((kind, tool_leaf(label)));
+                }
+                continue;
+            }
             match kind {
                 ToolKind::Read | ToolKind::Delete | ToolKind::Move => {
                     stats.files += 1;
@@ -5140,6 +5166,19 @@ fn work_summary(
     if stats.todos > 0 {
         parts.push("kept its checklist".to_string());
     }
+    // A call that did not happen says so, in the words of what it tried:
+    // Cursor draws a failed call as a failed card, never as its success.
+    if stats.failed > 0 {
+        parts.push(match (stats.failed, &stats.first_failed) {
+            (1, Some((ToolKind::Edit, file))) => format!("could not edit {file}"),
+            (1, Some((ToolKind::Read, file))) => format!("could not read {file}"),
+            (1, Some((ToolKind::Delete, file))) => format!("could not delete {file}"),
+            (1, Some((ToolKind::Execute, _))) => "a command failed".to_owned(),
+            (1, Some((ToolKind::Search, _))) => "a search failed".to_owned(),
+            (1, _) => "1 call failed".to_owned(),
+            (n, _) => format!("{n} calls failed"),
+        });
+    }
     if parts.is_empty() {
         return if running {
             match stats.last_label.as_deref() {
@@ -5163,8 +5202,16 @@ fn work_summary(
         };
     }
     let first = parts.remove(0);
-    let (verb, arg) = first.split_once(' ').unwrap_or((first.as_str(), ""));
-    let verb = match (verb, running) {
+    // "could not edit hello2.txt": the verb is the whole phrase, the
+    // file its argument.
+    let (verb, arg) = if let Some(rest) = first.strip_prefix("could not ") {
+        let (what, file) = rest.split_once(' ').unwrap_or((rest, ""));
+        (format!("Could not {what}"), file)
+    } else {
+        let (verb, arg) = first.split_once(' ').unwrap_or((first.as_str(), ""));
+        (verb.to_owned(), arg)
+    };
+    let verb = match (verb.as_str(), running) {
         ("edited", true) => "Editing",
         ("edited", false) => "Edited",
         ("explored", true) => "Exploring",
@@ -5177,13 +5224,15 @@ fn work_summary(
         ("started", false) => "Started",
         ("updated", true) => "Updating",
         ("updated", false) => "Updated",
+        ("a", _) => "A",
         (other, _) => other,
     };
+    let verb = verb.to_owned();
     let mut rest = arg.to_owned();
     if !parts.is_empty() {
         rest = format!("{rest}, {}", parts.join(", "));
     }
-    (verb.to_owned(), rest)
+    (verb, rest)
 }
 
 fn count_word(n: usize, one: &str, many: &str) -> String {
@@ -5395,8 +5444,10 @@ fn tool(chat: &ChatSession, ix: usize, first: bool, cx: &mut Context<Workspace>)
             stored
         }
     };
-    let edit_body = !parse_diff(peek).is_empty();
     let failed = *status == ToolStatus::Failure;
+    // A refused edit has a diff of the words it never wrote: not a diff
+    // card, a failed row (F-45).
+    let edit_body = !failed && !parse_diff(peek).is_empty();
     let child = child_session.clone();
     let explore = explore_kind(*kind, label);
     let display_kind = explore.unwrap_or(*kind);
@@ -5414,7 +5465,7 @@ fn tool(chat: &ChatSession, ix: usize, first: bool, cx: &mut Context<Workspace>)
             spinner_frame(chat.elapsed().unwrap_or_default(), cx.reduce_motion()).to_string(),
         )
     });
-    let diff = (display_kind == ToolKind::Edit)
+    let diff = (display_kind == ToolKind::Edit && !failed)
         .then(|| diff_counts(peek))
         .flatten();
     // ChatView SummaryRow (read / ls / find / grep) has no chevron.
