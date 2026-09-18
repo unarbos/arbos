@@ -1647,6 +1647,23 @@ fn normalize_workspace(path: &Path) -> String {
 
 /// Transcript the kernel has for one chat. `None` when it cannot be read —
 /// the local copy must then stay.
+/// Physical lines on an agent's live transcript right now — the `seq` its
+/// newest record carries. 0 when there is no file.
+pub fn transcript_lines(place: &Place, id: &str) -> u64 {
+    if !safe_session_id(id) {
+        return 0;
+    }
+    let path = place
+        .path
+        .join(".arbos")
+        .join("agents")
+        .join(id)
+        .join("transcript.jsonl");
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().count() as u64)
+        .unwrap_or(0)
+}
+
 pub fn session_history(place: &Place, id: &str) -> Option<crate::model::history::Replay> {
     // Go `arbos web` answers `/api/sessions/{id}/events` with
     // `{"events":[],"session":null}` for a rust-kernel id it does not
