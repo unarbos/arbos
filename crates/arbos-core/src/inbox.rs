@@ -186,6 +186,28 @@ pub fn deliver(place: &Place, agent: &str, msg: &Message) -> Result<String> {
     )
 }
 
+/// How a worker's `done` message opens, one phrase per way a turn can
+/// end. The kernel writes these (`plan::child_done`, the remote track's
+/// relay) and every window reads them to draw the worker's last words as
+/// a card (the desktop's `done_report`); a phrasing on one side the other
+/// does not know is drawn raw — prefix, ellipsis, and
+/// `.arbos/agents/…/transcript.jsonl` — in a person's chat (QA `qal-j36`,
+/// `mt-14`). One list, both sides.
+pub const DONE_ENDED: &str = "Turn ended. Last words:";
+pub const DONE_ENDED_BADLY: &str = "Turn ended badly. Last words:";
+pub const DONE_USER_STOP: &str = "Turn stopped by the user. Last words:";
+pub const DONE_TURN_CAP: &str = "Turn stopped at the per-turn cap. Last words:";
+pub const DONE_PREFIXES: [&str; 4] = [DONE_ENDED, DONE_ENDED_BADLY, DONE_USER_STOP, DONE_TURN_CAP];
+
+/// The prefix a done body opens with, and the words after it, or `None`
+/// for a line that is not a worker's report.
+pub fn done_report(text: &str) -> Option<(&'static str, &str)> {
+    let text = text.trim_start();
+    DONE_PREFIXES
+        .iter()
+        .find_map(|p| text.strip_prefix(*p).map(|rest| (*p, rest.trim_start())))
+}
+
 /// Every message waiting, oldest first. Unreadable files are skipped.
 pub fn list(place: &Place, agent: &str) -> Vec<Filed> {
     let dir = inbox_dir(place, agent);
@@ -433,6 +455,38 @@ fn slug(from: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// qal-j36 / mt-14: the kernel's done line and the windows' reader
+    /// share one list, so a way a turn can end is never drawn raw. Every
+    /// prefix reads back to itself with the words after it; the file
+    /// pointer the kernel appends is the reader's to cut; prose that
+    /// merely mentions a turn is not a report.
+    #[test]
+    fn every_done_prefix_reads_back_and_prose_does_not() {
+        for p in DONE_PREFIXES {
+            let body = format!("{p} the words\n(transcript: .arbos/agents/w1/transcript.jsonl)");
+            let (got, rest) = done_report(&body).expect(p);
+            assert_eq!(got, p);
+            assert!(rest.starts_with("the words"), "{rest}");
+        }
+        assert_eq!(
+            done_report(
+                "Turn stopped at the per-turn cap. Last words: Stopped at the per-turn cap: $1.20 over $1.00"
+            ),
+            Some((
+                DONE_TURN_CAP,
+                "Stopped at the per-turn cap: $1.20 over $1.00"
+            ))
+        );
+        assert!(done_report("The turn ended. Last words were fine.").is_none());
+        assert!(done_report("Turn ended with no report").is_none());
+        // No prefix is a prefix of another: the first match is the match.
+        for a in DONE_PREFIXES {
+            for b in DONE_PREFIXES {
+                assert!(a == b || !b.starts_with(a), "{a:?} opens {b:?}");
+            }
+        }
+    }
 
     #[test]
     fn a_boundary_takes_every_waiting_steer_in_order() {
