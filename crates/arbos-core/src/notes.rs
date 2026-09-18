@@ -334,16 +334,40 @@ pub struct Added {
     pub replaced: bool,
 }
 
+/// `- [ ] text` / `- [x] text` — and a line that starts with its box,
+/// no dash, as the plan tool's own listing prints it (`[ ] 1 text`): a
+/// model asked to restructure the page pasted that listing back into
+/// notes.md and the items vanished from the kernel's list while the
+/// desktop drew them raw (F-194, desktop #661). On a dashless line the
+/// ordinal the listing puts before the text is dropped; a dashed item
+/// keeps a leading number, since a person wrote it.
 fn parse_item_line(line: &str) -> Option<(bool, &str)> {
     let t = line.trim_start();
-    let rest = t.strip_prefix("- [")?;
+    let (dashed, rest) = match t.strip_prefix("- [") {
+        Some(rest) => (true, rest),
+        None => (false, t.strip_prefix('[')?),
+    };
     let (mark, after) = rest.split_at(rest.find(']')?);
     let done = match mark {
         " " | "" => false,
         "x" | "X" => true,
         _ => return None,
     };
-    Some((done, after[1..].trim()))
+    let text = after[1..].trim();
+    if dashed {
+        return Some((done, text));
+    }
+    // A dashless box is only ever the listing's shape: `[ ] 1 text`.
+    // Its text is what follows the ordinal, or the whole thing when no
+    // ordinal was pasted.
+    let digits = text.chars().take_while(|c| c.is_ascii_digit()).count();
+    let text = match text[digits..].strip_prefix(' ') {
+        Some(rest) if digits > 0 => rest.trim(),
+        _ => text,
+    };
+    // A bare `[` that opens a link (`[label](url)`) is prose, not a box:
+    // the mark check above already refused it (`label` is not a mark).
+    Some((done, text))
 }
 
 impl Notes {
@@ -989,6 +1013,51 @@ mod tests {
     use super::*;
 
     const SAMPLE: &str = "[project context](docs/project-context.md)\n\n## Kernel\n- [ ] [#96](https://x/96) — harness re-run running\n- [ ] [leash](https://x/97) — review\n- [x] [#95](https://x/95) — merged\n\n## Desktop\n- [ ] panel — waiting on layout\n";
+
+    /// F-194: the plan tool's own listing pasted back into the page —
+    /// a box and an ordinal, no dash — reads as items, with the ordinal
+    /// dropped; a dashed item keeps a leading number a person wrote; a
+    /// link that opens with `[` is still prose; `show` round-trips.
+    #[test]
+    fn a_line_that_starts_with_its_box_is_an_item_and_the_listings_ordinal_goes() {
+        let pasted = "# Page
+
+[project context](docs/project-context.md)
+
+## Goal
+[ ] 1 [Kickoff](docs/project-context.md) — ready; waiting for the first ask
+[x] 2 [OCI Layout](archive/agents/a) — worker finished
+- [x] [Word Counts](docs/word_counts.md) — ready
+- [ ] 3 files to review
+[ ] no ordinal here
+";
+        let n = Notes::parse(pasted);
+        let items = n.items();
+        assert_eq!(items.len(), 5, "{items:#?}");
+        assert_eq!(items[0].label(), "Kickoff");
+        assert!(!items[0].done);
+        assert_eq!(items[0].readout(), Some("ready; waiting for the first ask"));
+        assert_eq!(items[1].label(), "OCI Layout");
+        assert!(items[1].done);
+        assert_eq!(items[2].label(), "Word Counts");
+        assert_eq!(
+            items[3].text, "3 files to review",
+            "a dashed item keeps its number"
+        );
+        assert_eq!(items[4].text, "no ordinal here");
+        assert!(
+            n.render().contains("[ ] 1 [Kickoff"),
+            "reading does not rewrite the page"
+        );
+        // The listing reads back as the same items.
+        let shown = n.show();
+        let again = Notes::parse(&shown).items();
+        assert_eq!(
+            again.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
+            items.iter().map(|i| i.text.as_str()).collect::<Vec<_>>(),
+            "{shown}"
+        );
+    }
 
     #[test]
     fn items_are_numbered_across_sections_and_prose_survives() {
