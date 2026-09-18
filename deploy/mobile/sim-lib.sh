@@ -40,7 +40,7 @@ SIM_PT_H=${SIM_PT_H:-852}
 SIM_LIB_DIR=${SIM_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}
 reach_the_list() {
   local udid=$1 i tree
-  for i in 1 2 3; do
+  for i in 1 2 3 4; do
     tree=$(python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null)
     # An empty tree is not "no Back button", it is "I cannot see". Read the
     # first as the second and this returns success from a blind check — the
@@ -49,11 +49,21 @@ reach_the_list() {
       echo "  cannot read the screen — is $SIM_LIB_DIR/ui.py there, and the app up?" >&2
       return 1
     fi
-    echo "$tree" | grep -qE "Button +Back" || return 0
-    python3 "$SIM_LIB_DIR/ui.py" "$udid" tap "Back" >/dev/null 2>&1
+    # Succeed on *seeing the list*, not on the absence of a Back button. The
+    # workers sheet is a modal with no Back, so "no Back" read as "already
+    # there" and the caller then tapped a row that was underneath a sheet:
+    # `nothing matching 'phone' on screen`, with this function having just
+    # reported success.
+    echo "$tree" | grep -qE "StaticText +Projects|Button +[A-Za-z.][A-Za-z0-9._-]*, " && return 0
+    if echo "$tree" | grep -qE "Button +Back"; then
+      python3 "$SIM_LIB_DIR/ui.py" "$udid" tap "Back" >/dev/null 2>&1
+    else
+      # No list and no Back: something is over it. A sheet goes down.
+      idb ui swipe 196 300 196 800 --duration 0.3 --udid "$udid" >/dev/null 2>&1
+    fi
     sleep 3
   done
-  echo "  still not on the projects list after three Backs" >&2
+  echo "  still cannot see the projects list after four tries" >&2
   return 1
 }
 
