@@ -29,6 +29,7 @@ struct ProjectChatView: View {
     @State private var atTail = true
     @State private var connectingSince = Date()
     @State private var openFolds: Set<UUID> = []
+    @State private var pillRowHeight: CGFloat = 0
 
     /// Consecutive tool calls fold into one row: the phone shows what was
     /// said, not every command run to say it (Jacob, build 956).
@@ -100,6 +101,7 @@ struct ProjectChatView: View {
                 )
             }
         }
+        .onPreferenceChange(PillRowHeight.self) { pillRowHeight = $0 }
         .toolbar(.hidden, for: .navigationBar)
         // The bar is hidden, and UIKit hides its edge swipe with it. The
         // gesture Jacob expects (build 1021: "swiping to the left should
@@ -226,6 +228,11 @@ struct ProjectChatView: View {
             }
             .padding(.horizontal, ArbosTheme.barMargin)
             .padding(.bottom, 4)
+            .background(
+                GeometryReader { box in
+                    Color.clear.preference(key: PillRowHeight.self, value: box.size.height)
+                }
+            )
         }
     }
 
@@ -295,7 +302,13 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    Color.clear.frame(height: 8).id("tail")
+                    // The composer is an inset and the transcript ends above
+                    // it, but the pill row above the composer is not counted:
+                    // scrolled to its end, the transcript stopped a pill's
+                    // height short and its last line — a reply, or the away
+                    // card asking to be read — sat behind the pill. Reserve
+                    // the height the pill actually takes.
+                    Color.clear.frame(height: 8 + pillRowHeight).id("tail")
                         // The tail in view means he is reading the newest
                         // words; scrolled away means he is reading older
                         // ones, and the stream must not pull him back
@@ -755,6 +768,9 @@ struct ChatRow: View {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 12)
+                // The text beside it says the same thing; unhidden, VoiceOver
+                // reads "Arrow Turning Down Then Right" before every line.
+                .accessibilityHidden(true)
             Text(text)
                 .lineLimit(2)
                 .truncationMode(truncation)
@@ -923,6 +939,16 @@ private struct ChatScrollAnchor: ViewModifier {
 }
 
 
+/// How tall the pill row above the composer is, so the transcript can end
+/// clear of it. Zero when there are no workers and no pill is drawn.
+private struct PillRowHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+
 /// What happened while the user was away: the kernel's unseen `notify`s,
 /// oldest first, on one raised card under the transcript. "Got it" tells
 /// the kernel, which tells every other client. An ask leads; a failure is
@@ -949,6 +975,9 @@ struct AwayCard: View {
                         .font(.system(size: note.isAsk || note.failed ? 13 : 6))
                         .foregroundStyle(note.failed ? ArbosTheme.danger : (note.isAsk ? ArbosTheme.accent : ArbosTheme.textDim))
                         .frame(width: 14)
+                        // A bullet. Its colour marks an ask or a failure and
+                        // the words say which, so aloud it is only "Circle".
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         if !note.title.isEmpty {
                             Text(note.title)
