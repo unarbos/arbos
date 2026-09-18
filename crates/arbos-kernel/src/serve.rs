@@ -407,6 +407,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let host = Host::load()?;
     host.remember_place(place.path());
     let git_present = say_if_git_missing(&place);
+    let _ = GIT_PRESENT.set(git_present);
     match (host.api_key(), host.config.api_base()) {
         (Some(key), Ok(base)) => {
             // bash inherits this process's environment, so the model's key is
@@ -2100,6 +2101,9 @@ fn drop_rolled_checkpoint_refs(place: &Place, agent: &str, archive: &std::path::
     );
 }
 
+/// Whether `git` was on PATH at start, for the `hello` frame; set once.
+static GIT_PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// The marker that the missing-git notice was said for this place; in
 /// `runtime/`, so a reinstall of the machine starts the question afresh.
 const GIT_MISSING_SAID: &str = "git-missing.said";
@@ -2742,6 +2746,7 @@ pub async fn serve_client(
                 git_sha: klog::git_sha().to_string(),
                 built_at: klog::built_at().to_string(),
                 binary_gone: arbos_core::binary_gone(),
+                git_missing: !GIT_PRESENT.get().copied().unwrap_or(true),
                 tail: ATTACH_TAIL,
                 focus: focus_agent.clone(),
             });

@@ -50,6 +50,12 @@ pub enum Frame {
         /// "restart needed" beside the version. See `arbos_core::binary_gone`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         binary_gone: bool,
+        /// No `git` on the kernel's machine: checkpoints, rewind and undo
+        /// are off there (said once on root's transcript; also in
+        /// `kernel.json`, which a phone attaching over the hub cannot
+        /// read). Only ever sent when true.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        git_missing: bool,
         tail: u32,
         focus: String,
     },
