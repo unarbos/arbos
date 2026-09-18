@@ -1,0 +1,12 @@
+1789704943074 J1: pass — tab present, greeting shown ('Hey — this place is ready! I see a Python project with `shap'), .arbos/ created
+1789704948723 J2: pass — chat busy; workers ['fix-failing-test-and-add'] / 1 spawn card(s)
+1789704977604 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789704980676 J4: pass — mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered
+1789704991060 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789705023331 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789705041343 J6: fail — away-tab notification: the window claims a post the notification daemon never received (dunstctl history)
+1789705041393 J7: pass — tests pass, CHANGELOG written (QA line taken), commit on ['fix/correct-area-function']
+1789705093253 journey exception: BlockingIOError: [Errno 11] Resource temporarily unavailable: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/mobile-journey-history.jsonl'
+1789705096367 BREAK journey-J6: away-tab notification: the window claims a post the notification daemon never received (dunstctl history)
+1789705096367 BREAK journey-J6-twice: J6 failed in two consecutive runs (20260918T035941Z-journey-linux, 20260918T041516Z-journey-linux): away-tab notification: the window claims a post the notification daemon never received (dunstctl history)
+1789705096382 bugs: seen 9c8bf3b8ac.md, seen c944059411.md

@@ -1,0 +1,34 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-inbox:headless-kernel-run-y8nyvj2k/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8137 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-inbox:headless-kernel-run-y8nyvj2k/home/.cache/arbos/tgrep/122384303192ed31
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 5ms, sum 1ms, speedup 0.2x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 269ms, sum 265ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 23772ms, sum 23767ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 269ms, sum 263ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 120005ms, sum 120005ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 277ms, sum 265ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 264ms, sum 264ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 270ms, sum 263ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 270ms, sum 262ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 267ms, sum 262ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 114961ms, sum 114952ms, speedup 1.0x

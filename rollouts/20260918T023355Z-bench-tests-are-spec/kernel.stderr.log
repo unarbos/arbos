@@ -1,0 +1,15 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-tests-are-spec-fo5mrque/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8135 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-tests-are-spec-fo5mrque/home/.cache/arbos/tgrep/53bfe43261d8fa04
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn fix-test-suite: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-test-suite: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn fix-test-suite: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-test-suite: 2 calls, wall 272ms, sum 266ms, speedup 1.0x
+turn fix-test-suite: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools fix-test-suite: 4 calls, wall 5ms, sum 2ms, speedup 0.4x
+turn fix-test-suite: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)

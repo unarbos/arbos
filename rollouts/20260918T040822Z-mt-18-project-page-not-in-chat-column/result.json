@@ -1,0 +1,27 @@
+{
+  "scenario": "mt-18-project-page-not-in-chat-column",
+  "doc": "Item 18. notes.md with 21 open items: the transcript keeps at least half the column; the page is in the Project panel only.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-18-page-fills-column",
+      "detail": "transcript height 0 of window 1000 with 21 open items above the composer",
+      "where": "desktop: notes.md belongs to the Project panel"
+    }
+  ],
+  "notes": {
+    "driver_screenshot_error": "screenshot: capture of :9182 wrote nothing",
+    "transcript_h": 0,
+    "window_h": 1000,
+    "strip_elements": 2
+  },
+  "duration_s": 13.3,
+  "place": "/tmp/arbos-qa-mt-18-project-page-not-in-chat-column-2cq2lnvc/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 3e36fb8e645b protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T040822Z-mt-18-project-page-not-in-chat-column",
+  "branch": "main",
+  "usd": 0.02914
+}

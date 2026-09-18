@@ -1,0 +1,30 @@
+{
+  "scenario": "desktop-user-message-card@user-message-card",
+  "doc": "Feature user-message-card: a short prompt's card hugs its text and sits right; a 200-word prompt wraps within the cap; nothing overflows the reading column. (against feature branch cursor/user-message-card-b027)",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "card-cap",
+      "detail": "the long card takes 0.95 of the column; cap is ~0.8",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "user-message-card",
+    "prompt_cards": 2,
+    "card_width_ratio_short_long": [
+      0.07,
+      0.95
+    ],
+    "driver_screenshot_error": "screenshot: capture of :9182 wrote nothing"
+  },
+  "duration_s": 15.2,
+  "place": "/tmp/arbos-qa-desktop-user-message-card@user-message-card-lhd0jes2/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 3e36fb8e645b protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T035617Z-desktop-user-message-card@user-message-card",
+  "branch": "main",
+  "usd": 0.01963
+}
