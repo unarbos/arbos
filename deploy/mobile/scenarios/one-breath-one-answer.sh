@@ -52,16 +52,23 @@ for i in $(seq 1 "$RUNS"); do
     S=$(echo "$FRAMES" | grep -oE "sent=[0-9]+" | cut -d= -f2)
     [ "$C" = "$S" ] || echo "     NOTE: $((C - S)) frames lost at the socket — this run says nothing about the gateway"
   fi
-  if [ "$TRANSCRIPTS" -gt 1 ] || [ "$ANSWERS" -gt 1 ]; then SPLIT=$((SPLIT + 1)); else WHOLE=$((WHOLE + 1)); fi
+  # Two separate faults, and after #562 they no longer travel together: the
+  # transcript can be whole while the question is still answered twice.
+  [ "$TRANSCRIPTS" -gt 1 ] && SPLIT=$((SPLIT + 1))
+  [ "$ANSWERS" -gt 1 ] && WHOLE=$((WHOLE + 1))
 done
 
 echo
-echo "whole: $WHOLE   split: $SPLIT   of $RUNS"
-if [ "$SPLIT" = 0 ]; then
+echo "runs whose transcript split:      $SPLIT of $RUNS"
+echo "runs answered more than once:     $WHOLE of $RUNS"
+if [ "$SPLIT" = 0 ] && [ "$WHOLE" = 0 ]; then
   echo "VERDICT: one breath, one transcript, one answer. M-146 does not reproduce."
+elif [ "$SPLIT" = 0 ]; then
+  echo "VERDICT: the transcript is whole now — the breath no longer splits it — but the"
+  echo "         question is still answered more than once. Half of M-146."
 elif [ "$WHOLE" = 0 ]; then
-  echo "VERDICT: still splitting, every run. M-146 stands."
+  echo "VERDICT: the transcript still splits, though each half is answered once."
 else
-  echo "VERDICT: intermittent — $SPLIT of $RUNS split. Worth more runs before either claim."
+  echo "VERDICT: both still happen."
 fi
 echo "logs in $OUT"
