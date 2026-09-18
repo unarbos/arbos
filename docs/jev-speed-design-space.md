@@ -27,7 +27,7 @@ This is not more mechanical tool picks as a separate program. That job stays [th
 - **Slice**: one candidate line for the brief. It already exists. It has an id, a clipped body, and sometimes an address.
 - **Pack**: fill the brief budget with the highest-ranked slices. Packing is selection. It is not writing.
 - **Pointer**: an address for a true slice that did not fit (`notes.md#tldr`, `agents/run-tests`). Overflow. Not a second page.
-- **Fall-through**: Jev errors, times out, or returns junk → today’s one-model loop and today’s inject. The turn and the call still work.
+- **Fail in the open**: Jev errors, times out, or returns junk → the turn stops. A failed notice names why. The chat model does **not** run. `act=llm` is a valid pick, not a fail.
 - **`jev = false`**: the off switch. No brief file. No model field applied. Today’s inject. Today’s one-model loop.
 
 ---
@@ -41,6 +41,7 @@ This is not more mechanical tool picks as a separate program. That job stays [th
 5. **No vault values. No file bodies.** Glances and paths only.
 6. **Identity is pinned in code.** Folder, machine, `arbos://`, via. Jev cannot drop them. That is the #492 lesson.
 7. **Model choice is not a feature.** It is one field on the controller object. No settings page. No extra OpenRouter call. No Live-side pick.
+8. **Jev fail is a turn fail.** Error, timeout, or junk: tell the person, end the turn. Do not run `model_step`. `act=llm` still invokes the chat model.
 
 ---
 
@@ -210,7 +211,7 @@ The same file may later feed the call strip and the phone “what is happening�
 - `session.start` only reads the file. It does not call Jev. A missing file does not block the call.
 - No vault values, no file bodies, in the card or the brief.
 - Live still speaks. Jev still does not.
-- Tests pin: parse of `model` / `keep` / `pointers`; pack + overflow; delete on `jev = false`; unknown read is not empty; unknown `model` falls through.
+- Tests pin: parse of `model` / `keep` / `pointers`; pack + overflow; delete on `jev = false`; unknown read is not empty; unknown `model` keeps the configured chat model; junk / timeout / error ends the turn with a failed notice.
 - No `v0.2.0` publish from this work.
 
 ---

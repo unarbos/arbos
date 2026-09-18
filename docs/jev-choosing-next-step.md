@@ -10,7 +10,7 @@ This is a **text** turn, not a call. The voice-path page is [voice-path-latency.
 
 - **Jev**: TypeSafe System One on OpenRouter. Family alias `~typesafe/jev-latest` (Jev 1.13). About $0.042 per million input tokens. Output is free. Window 32,000. Structured decisions, not chat.
 - **Choosing the next step**: the derived status the kernel writes when it starts `jev::ask` (`crates/arbos-engine/src/jev.rs`). The desktop draws it as the live line under `Working`.
-- **First-byte cap**: how long `jev::ask` waits for OpenRouter’s first response byte. After that it falls through to the chat model. One try. No retry.
+- **First-byte cap**: how long `jev::ask` waits for OpenRouter’s first response byte. After that the turn **fails**. The chat model does not run. One try. No retry. No fall-through.
 
 ---
 
@@ -25,7 +25,7 @@ In order, on every kernel step while Jev is on:
 
 The brief file (`.arbos/voice-brief.md`) is packed at **turn end**, not under this line. The gateway does not call Jev.
 
-The line was staying up after step 3. If Jev said `llm`, failed, or timed out, `model_step` ran and the desktop still showed **Choosing the next step** for the whole chat-model wait (seconds). That is the shot.
+The line was staying up after step 3. If Jev said `llm`, failed, or timed out, `model_step` ran and the desktop still showed **Choosing the next step** for the whole chat-model wait (seconds). That is the shot. Jacob does not want that fallback. If Jev fails, the turn stops. The person is told.
 
 ---
 
@@ -35,7 +35,7 @@ The line was staying up after step 3. If Jev said `llm`, failed, or timed out, `
 | --- | --- | --- |
 | **Expected** (healthy Jev) | **200–400** | OpenRouter RTT from the Mac to `~typesafe/jev-latest`. System One. |
 | **Allowed before this fix** | **15,000** | `FIRST_BYTE` in `jev.rs` was 15 s — the chat-model first-byte cap, copied onto the router. |
-| **Allowed after this fix** | **1,500** | Then fall through. The choosing line is cleared so the LLM or the tool owns the headline. |
+| **Allowed now** | **1,500** | Then the turn fails. The choosing line clears. A failed notice is written. No chat model. |
 
 Derived status is also debounced 300 ms (`STATUS_DEBOUNCE_MS` in `hooks.rs`). That is not the seconds.
 
@@ -43,12 +43,13 @@ Derived status is also debounced 300 ms (`STATUS_DEBOUNCE_MS` in `hooks.rs`). Th
 
 ---
 
-## What he should see after the fix
+## What he should see
 
-- A flash of **Choosing the next step**, at most about **1.5 s**, usually a few hundred milliseconds.
-- Then the real work: **Listing …** / the tool name, or **Thinking**, not that line for the rest of the turn.
-- If Jev is silent past 1.5 s, today’s one-model loop. The line goes away. The chat model answers.
-- `jev = false` never shows this line.
+- A flash of **Choosing the next step**, usually a few hundred milliseconds.
+- Then the real work: **Listing …** / the tool name, or **Thinking**.
+- `act=llm` is a valid Jev pick. Thinking is that pick. It is not a fail.
+- If Jev fails, times out, or returns junk: the line goes away. A failed notice says so. The turn ends. The chat model does **not** answer.
+- `jev = false` never shows this line. Today’s one-model loop.
 
 Mac update channel. Do not publish `v0.2.0`. Do not start slices A–G.
 
@@ -64,13 +65,13 @@ Jacob already has the 15 s line. He asked which fail it was: a **400** on the ol
 
 On the Mac desktop, kernel stderr is `.arbos/runtime/kernel.out.log` (not the JSON `kernel.log`). Search that file for the turn.
 
-The line the code prints on a real fail:
+The line the code prints on a real fail (also a failed notice on the transcript):
 
 ```
-turn root: jev fell through (...)
+Jev did not choose the next step: .... The turn stopped. The chat model did not run.
 ```
 
-That print is only for `AskError::Failed` or `AskError::Junk`. A parsed `act=llm` does **not** print it. `act=llm` is a successful decision. The turn then calls the chat model.
+That print is only for `AskError::Failed` or `AskError::Junk`. A parsed `act=llm` does **not** print it. `act=llm` is a successful decision. The turn then calls the chat model. There is no silent fall-through.
 
 ### How to read the parentheses
 
@@ -90,7 +91,7 @@ Then Jev did **not** fail.
 Look at the same turn in the root transcript (`.arbos/agents/root/transcript.jsonl`).
 
 - A tool line whose id starts `jev-` means Jev picked `act=tool` and the kernel ran it.
-- No `jev fell through` line, and no `jev-*` tool, means Jev picked **`act=llm`**. The chat model ran. That is a valid parse, not a fall-through.
+- No fail notice, and no `jev-*` tool, means Jev picked **`act=llm`**. The chat model ran. That is a valid parse, not a fail.
 
 ### Did the code force the LLM on a file-list ask?
 
