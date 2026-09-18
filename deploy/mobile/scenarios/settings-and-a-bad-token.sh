@@ -75,15 +75,29 @@ echo
 echo "== the sheet itself =="
 open_settings || { echo "  no settings button under either name"; exit 1; }
 sleep 3; shot 02-settings
+# Printed and never read, until now. M-306 measured five sections and three
+# `Token saved` fields at cycle 87, and every run since has printed those
+# numbers into a log nothing compares. A section quietly lost would have
+# been in the output and passed.
+SECTIONS=$(ui dump | grep -cE 'Heading')
+FIELDS=$(ui dump | grep -c 'Token saved')
 echo "  sections: $(ui dump | grep -E 'Heading' | awk '{$1="";$2="";$3="";print}' | tr '\n' ';')"
-echo "  saved-token fields say: $(ui dump | grep -c 'Token saved')"
+echo "  section count: $SECTIONS   (M-306 counted 5 at cycle 87)"
+echo "  saved-token fields say: $FIELDS   (M-306 counted 3)"
+[ "$SECTIONS" = 5 ] || { echo "  CHANGED: $SECTIONS sections, not the 5 of cycle 87 — a section gained or lost"; SHEET_CHANGED=$((${SHEET_CHANGED:-0} + 1)); }
+[ "$FIELDS" = 3 ] || { echo "  CHANGED: $FIELDS token fields, not 3 — a credential gained or lost"; SHEET_CHANGED=$((${SHEET_CHANGED:-0} + 1)); }
 # The build line is at the foot of a scrolling sheet, so reading the first
 # screen finds nothing and says so as if the line were missing. Fourth script
 # tonight to count or look at one screen of a scrolling view (M-287, M-303,
 # M-304); the cure each time is to move first and read after.
 for _ in 1 2 3 4; do page_up "$UDID" >/dev/null 2>&1; sleep 0.8; done
-echo "  build line: $(ui dump | grep -iE 'Arbos, [0-9]' | head -1 | sed 's/^ *//')"
+BUILDLINE=$(ui dump | grep -iE 'Arbos, [0-9]' | head -1 | sed 's/^ *//')
+echo "  build line: ${BUILDLINE:-MISSING}"
 echo "  and under it: $(ui dump | grep -i 'TestFlight build' | head -1 | sed 's/^ *//')"
+# The build line is the only place the phone says which build it is running,
+# which is the loop's most argued-about fact all day. Its absence must fail
+# rather than print "MISSING" into a passing run.
+[ -n "$BUILDLINE" ] || { echo "  FAULT: no build line at the foot of the sheet"; SHEET_CHANGED=$((${SHEET_CHANGED:-0} + 1)); }
 
 echo
 echo "== save a hub token that cannot work =="
@@ -121,6 +135,7 @@ BADLIVE=${BADLIVE:-0}
 if [ "${BAD:-0}" = "${GOOD:-0}" ] && [ "$BADLIVE" -lt "${GOOD:-0}" ] && [ "${SAIDWHY:-no}" = yes ]; then
   echo "VERDICT: a token that cannot work keeps all $BAD rows and marks them off"
   echo "         ($BADLIVE still live), says why, and $RESTORED come back"
+  [ "${SHEET_CHANGED:-0}" = 0 ] || echo "         The sheet itself changed: see the ${SHEET_CHANGED} line(s) marked above." 
 elif [ "${BAD:-0}" -lt "${GOOD:-0}" ] && [ "${SAIDWHY:-no}" = yes ]; then
   echo "VERDICT: a token that cannot work removed rows — $GOOD before, $BAD after."
   echo "         It said why, and $RESTORED came back. Rows going is a change from"
