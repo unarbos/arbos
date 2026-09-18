@@ -4043,7 +4043,15 @@ fn zone(
     let report = (matches!(chat.items.get(first), Some(ChatItem::Wake { .. }))
         && matches!(chat.items.get(first + 1), Some(ChatItem::From { .. })))
     .then_some(first + 1);
-    let body_start = if kickoff_turn {
+    // The body starts after whatever the zone drew as the turn's opener:
+    // a prompt, a peer's message, or a notice that opened the turn — a
+    // kickoff the provider refused had its one line drawn twice, as the
+    // opener and again as the body's first row (F-185, cycle 40 f2).
+    let opener_drawn = matches!(
+        chat.items.get(first),
+        Some(ChatItem::User(_) | ChatItem::From { .. } | ChatItem::Notice { .. })
+    );
+    let body_start = if kickoff_turn && !opener_drawn {
         first
     } else {
         (first + 1 + usize::from(report.is_some())).min(turn.range.end)
