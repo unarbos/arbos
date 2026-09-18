@@ -100,7 +100,8 @@ RUNNING=""
   # "Working": `⠙, 2 Working p091543 one · Running sleep 80`. Requiring a
   # digit straight after "Button" matched none of them, and three cycles
   # reported the app drawing no line while it drew one every second.
-  RUNNING=$(ui dump | grep -E "Button +[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], ([0-9]+ )?Working " | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  RAWLINE=$(ui dump | grep -E "Button +[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], ([0-9]+ )?Working " | head -1)
+  RUNNING=$(echo "$RAWLINE" | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
   [ -n "$RUNNING" ] && break
 done
 if [ -z "$RUNNING" ]; then
@@ -117,13 +118,15 @@ if [ -z "$RUNNING" ]; then
 else
   echo "  the line: $RUNNING"
   shot 04-the-running-line
-  # Tap a stable part of the label. The spinner at the front is animated, so
-  # the exact string read a second ago no longer exists by the time the tap
-  # is made — matching on it is a race that always loses, and it looked like
-  # the line refusing to open.
-  STABLE=$(echo "$RUNNING" | sed -E 's/^[^,]*, ([0-9]+ )?Working //; s/ · .*//')
-  echo "  tapping on: $STABLE"
-  ui tap "$STABLE" >/dev/null 2>&1
+  # Tap the frame the dump gave, not a label. Two reasons: the spinner at
+  # the front is animated, so an exact label read a moment ago is already
+  # stale; and the worker's name appears on more than one element, so
+  # matching by name can land somewhere that is not the button. Tapping by
+  # label failed here for a whole cycle and read as the line refusing to
+  # open — by frame it opens first time.
+  LX=$(echo "$RAWLINE" | awk '{print $1}'); LY=$(echo "$RAWLINE" | awk '{print $2}')
+  echo "  tapping its frame at $LX,$LY"
+  idb ui tap "$LX" "$LY" --udid "$UDID" >/dev/null 2>&1
   sleep 4
   shot 05-worker-chat-from-its-line
   WHERE=$(where)
