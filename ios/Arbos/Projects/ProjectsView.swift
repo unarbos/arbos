@@ -298,6 +298,12 @@ struct ProjectRow: View {
                 .truncationMode(.middle)
             }
             Spacer(minLength: 0)
+            if let ago {
+                Text(ago)
+                    .font(ArbosTheme.callout)
+                    .foregroundStyle(ArbosTheme.textDim)
+                    .monospacedDigit()
+            }
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.vertical, 15)
@@ -306,6 +312,24 @@ struct ProjectRow: View {
             Rectangle().fill(ArbosTheme.border).frame(height: 0.5)
                 .padding(.leading, ArbosTheme.gutter + 28)
                 .padding(.trailing, ArbosTheme.gutter)
+        }
+    }
+
+    /// How long since this project last did anything, in the shape the
+    /// desktop and Cursor both use: `4m`, `2h`, `3d`. Nil when the hub has
+    /// heard nothing, because a row that guesses "now" is worse than a row
+    /// that says nothing — and until #538 no row could say anything at all,
+    /// so seven projects reading `Idle` in alphabetical order told a person
+    /// which came first in the alphabet and nothing else.
+    private var ago: String? {
+        guard let at = entry.lastActivity else { return nil }
+        let seconds = Int(Date().timeIntervalSince(at))
+        guard seconds >= 0 else { return nil }
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86_400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86_400)d"
         }
     }
 
