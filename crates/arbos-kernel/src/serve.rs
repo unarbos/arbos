@@ -401,7 +401,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         std::fs::canonicalize(place_path.into())
             .unwrap_or_else(|_| std::env::current_dir().unwrap()),
     );
-    let lock = match acquire_or_wait(&place) {
+    let mut lock = match acquire_or_wait(&place) {
         Held::Taken(lock) => lock,
         Held::StillHeld(code) => return Ok(code),
     };
@@ -1104,6 +1104,49 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
                         break;
                     }
                     arbos_core::StoreState::Intact => store_gone = 0,
+                }
+                // The lock files removed under this kernel (`rm -rf
+                // .arbos/runtime .arbos/lock`, a person resetting a place
+                // they think is stuck): its flocks live on the unlinked
+                // inodes and protect nothing, and the next kernel would
+                // serve this place beside it in silence (qal-j40). Take
+                // them back now and say so; if another kernel already holds
+                // fresh ones, two kernels must not write one store — this
+                // one stops, the other has the place and kernel.json.
+                if !lock.still_at(&place) {
+                    match lock.retake(&place) {
+                        Ok(()) => {
+                            let text = format!(
+                                "This kernel's lock files (.arbos/lock, .arbos/runtime/lock) were removed while it ran; it has written them again (pid {}). Removing them does not stop a kernel — it lets a second one serve the same place — `arbos-kernel stop` does.",
+                                std::process::id()
+                            );
+                            klog::warn("lock_retaken", None, &text);
+                            // runtime/ usually went with them: the record
+                            // windows find this kernel by is written again.
+                            if let Err(e) = write_kernel_json(&place, addr, open, &access, git_present) {
+                                klog::warn("kernel_json_rewrite_failed", None, format!("{e:#}"));
+                            }
+                            let _ = append_event(
+                                &Layout::new(&place, arbos_core::ROOT_ID).transcript(),
+                                &Event::new(EventKind::Notice { text, failed: false }),
+                            );
+                        }
+                        Err(e) => {
+                            let text = format!(
+                                "This kernel's lock files were removed while it ran and another kernel has taken the place since ({e:#}). Two kernels must not write one store: this one (pid {}) stops now; its jobs end with it, and windows reconnect to the other.",
+                                std::process::id()
+                            );
+                            klog::error("place_taken", None, &text);
+                            eprintln!("arbos-kernel stopping: {text}");
+                            let _ = append_event(
+                                &Layout::new(&place, arbos_core::ROOT_ID).transcript(),
+                                &Event::new(EventKind::Notice { text, failed: true }),
+                            );
+                            crate::remote::stop_all(&hooks).await;
+                            exit_code = 4;
+                            break;
+                        }
+                    }
                 }
                 // The binary replaced under this kernel (an update, an
                 // install into the shared PATH): it serves stale code until
