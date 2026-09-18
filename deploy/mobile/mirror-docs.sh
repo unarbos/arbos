@@ -16,6 +16,13 @@
 # fault, not a legitimate edit, and copying it would spread the damage
 # instead of containing it. Deletions are therefore never mirrored; a
 # document that should go is removed by hand in both places.
+#
+# A refusal with no way past it is a refusal people go around. Twice on
+# 09-18 a deliberate shortening — a build number's line rewritten shorter —
+# was copied with a bare `scp` instead, which skips every other check this
+# makes. So there is a way through, and it costs naming the file:
+# `SHORTER_IS_DELIBERATE=<name>`. One file at a time, never a blanket flag,
+# because the fault it guards against arrives one file at a time.
 set -uo pipefail
 
 STORE=${MOBILE_STORE:-/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal}
@@ -48,11 +55,16 @@ for rel in "$@"; do
   local_bytes=$(wc -c < "$src")
   remote_bytes=$(ssh_mac "wc -c < ~/$REMOTE/$name 2>/dev/null || echo 0" | tr -d '[:space:]')
   remote_bytes=${remote_bytes:-0}
-  if [ "$local_bytes" -lt "$remote_bytes" ]; then
+  if [ "$local_bytes" -lt "$remote_bytes" ] && [ "${SHORTER_IS_DELIBERATE:-}" != "$name" ]; then
     echo "mirror: REFUSED $name — store copy $local_bytes b is shorter than the Mac's $remote_bytes b." >&2
     echo "mirror: that is the shape of the fault, not an edit. Read the store copy before deciding." >&2
+    echo "mirror: if you have read it and the shortening is deliberate, say so by name:" >&2
+    echo "mirror:   SHORTER_IS_DELIBERATE=$name $0 $name" >&2
     status=1
     continue
+  fi
+  if [ "$local_bytes" -lt "$remote_bytes" ]; then
+    echo "mirror: $name is shorter and you said so — copying $remote_bytes b → $local_bytes b" >&2
   fi
   if scp -F "$SSH_CONFIG" -q "$src" "$HOST:~/$REMOTE/$name"; then
     echo "mirror: $name $local_bytes b (was $remote_bytes b)"
