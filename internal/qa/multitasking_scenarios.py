@@ -486,7 +486,15 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             snap = d.app.state()
             items = [i for p in snap["projects"] for c in p["sessions"] for i in c.get("items", [])]
             raw = [i for i in items if "Turn ended" in json.dumps(i) or "Last words" in json.dumps(i)]
-            cx.rec.notes.update({"composer_text": comp.get("text"), "raw_done_cards": len(raw)})
+            # The count alone cannot be read: "a raw card is shown" is the claim, and a match only
+            # proves the phrase is somewhere in an item's JSON. Record what matched — kind, and the
+            # text as a person would see it — so the next reader can tell a leaked internal line from
+            # a worker's own words that happen to contain the phrase.
+            cx.rec.notes.update({
+                "composer_text": comp.get("text"),
+                "raw_done_cards": len(raw),
+                "raw_done_items": [{"kind": i.get("kind"), "text": str(i.get("text") or "")[:160]} for i in raw][:3],
+            })
             cx.rec.expect(comp.get("text") == "half a thought, not sent", "mt-14-composer-clobbered", f"composer text after a child finished: {comp.get('text')!r}")
             cx.rec.expect(not raw, "mt-14-raw-done-card", "a raw 'Turn ended. Last words: …' line is shown for a finished child")
         finally:
@@ -718,7 +726,20 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             second = d.new_chat()
             time.sleep(1)
             active_before = d.app.state().get("active_session")
+            # The ids as well as the active one. If a relaunch renumbers sessions, then "active 2
+            # where it was 3" is two different names for one chat and the assertion is meaningless —
+            # the qal-j27 lesson, asked of identity rather than of an agent. Record both lists so the
+            # verdict can be read rather than trusted.
+            cx.rec.notes["sessions_before"] = [
+                {"id": c.get("id"), "agent": c.get("agent_session"), "title": str(c.get("title") or "")[:24]}
+                for pr in d.app.state()["projects"] for c in pr.get("sessions") or []
+            ]
             cx.rec.notes["active_before"] = active_before
+            agent_before = next(
+                (c.get("agent_session") for pr in d.app.state()["projects"] for c in pr.get("sessions") or [] if str(c.get("id")) == str(active_before)),
+                None,
+            )
+            cx.rec.notes["agent_before"] = agent_before
         finally:
             d.close()
         time.sleep(2)
@@ -729,16 +750,47 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             # a slow relaunch then reads an intermediate tab and the red says "not restored" about a
             # restore still in progress (review rule 7). Poll to the same verdict, bounded, and record
             # how long it took so a genuine regression in that time is still visible.
+            # Compare the *agent*, not the session id. Measured 2026-09-18 on the app at
+            # `2301abd291c0`: a relaunch renumbers sessions — the chat that was id 3 comes back as
+            # id 1 — so `active_after != active_before` was true whatever the app did, and the red
+            # named the wrong thing while happening to sit beside a real fault. `agent_session` is
+            # the chat's own identity and survives the relaunch (the qal-j27 lesson, asked of
+            # identity rather than of whose inbox to read).
+            def active_agent(app):
+                st = app.state()
+                want = str(st.get("active_session"))
+                for pr in st["projects"]:
+                    for c in pr.get("sessions") or []:
+                        if str(c.get("id")) == want:
+                            return c.get("agent_session")
+                return None
+
             restored_after, rdeadline = None, time.time() + 20
             while time.time() < rdeadline:
                 active_after = d2.app.state().get("active_session")
-                if str(active_after) == str(active_before):
+                if active_agent(d2.app) == agent_before:
                     restored_after = round(20 - (rdeadline - time.time()), 1)
                     break
                 time.sleep(0.5)
-            cx.rec.notes["restored_after_s"] = restored_after
+            agent_after = active_agent(d2.app)
+            cx.rec.notes.update({"restored_after_s": restored_after, "agent_before": agent_before, "agent_after": agent_after})
+            cx.rec.notes["sessions_after"] = [
+                {"id": c.get("id"), "agent": c.get("agent_session"), "title": str(c.get("title") or "")[:24]}
+                for pr in d2.app.state()["projects"] for c in pr.get("sessions") or []
+            ]
             cx.rec.notes.update({"active_after": active_after, "second": second})
-            cx.rec.expect(str(active_after) == str(active_before) and active_before is not None, "mt-24-active-tab-not-restored", f"active before quit {active_before!r}, after relaunch {active_after!r}")
+            cx.rec.expect(
+                agent_before is not None,
+                "probe-no-active-agent-before-quit",
+                f"the active session {active_before!r} matched no session in the window's own list, so there is nothing to compare after the relaunch",
+            )
+            if agent_before is not None:
+                cx.rec.expect(
+                    agent_after == agent_before,
+                    "mt-24-active-tab-not-restored",
+                    f"the chat active before quit was {agent_before!r} and after relaunch it is {agent_after!r} (session ids renumber, so they are compared by agent): the window comes back on a different chat than the one the person left open",
+                    "desktop: the active session is restored by position and the positions are rebuilt in another order",
+                )
         finally:
             d2.close()
         cx.check()
