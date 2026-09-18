@@ -34,7 +34,7 @@ shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo 
 # is what caught it: seven rows before, seven during, seven after.
 rows() { ui dump | grep -cE "Button +[a-z0-9-]+, "; }
 live_rows() { ui dump | grep -cE "Button +[a-z0-9-]+, (Idle|Working)"; }
-statuses() { ui dump | grep -oE "Button +[a-z0-9-]+, [^,]+" | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' | sort | uniq -c | sort -rn | head -4 | tr '\n' ';'; }
+statuses() { ui dump | grep -oE "Button +[a-z0-9-]+, [^,]+" | sed -E 's/^Button +[a-z0-9-]+, //' | sort | uniq -c | sort -rn | head -4 | awk '{ printf "%s×%s  ", $1, $2 }'; }
 
 fresh() {
   xcrun simctl uninstall "$UDID" $B 2>/dev/null
