@@ -1771,9 +1771,15 @@ class Pass:
         self.go_project()
         # First-spawn connect: every open chat is live, no 'connection failed' left behind.
         # A closed row (idle) is a chat that was archived or whose agent is
-        # gone; it is not waiting on a socket.
+        # gone; it is not waiting on a socket. Only notices this connect
+        # adds count: phase D before this one takes the kernel's file away
+        # under a running chat, and the notice it earns stays on that
+        # transcript (R28 — the row failed on phase D's notice, cycle 39).
+        def failed_notices() -> list[tuple[int, str]]:
+            return [(c.get("id", 0), it.get("text", "")) for c in project_sessions(self.state()) for it in c.get("items", []) if it.get("kind") == "notice" and "connection failed" in it.get("text", "").lower()]
+        before = set(failed_notices())
         s = self.wait(lambda s: all(c["connection"] == "live" for c in sessions(s) if c["connection"] != "idle") and bool(sessions(s)), 25, what="all open sessions live")
-        failed = [it.get("text", "") for c in project_sessions(self.state()) for it in c.get("items", []) if it.get("kind") == "notice" and "connection failed" in it.get("text", "")]
+        failed = [text for text in failed_notices() if text not in before]
         self.record("connect-first-spawn", sc, "launch with two tabs on one kernel", "every session live within 25 s; no 'connection failed' notice; reconnect_attempt back at 0",
                     f"live={[c['connection'] for c in sessions(self.state())]} failed_notices={len(failed)} attempts={[c.get('reconnect_attempt') for c in sessions(self.state())]}",
                     "pass" if s and not failed else "fail", self.still("connect"))

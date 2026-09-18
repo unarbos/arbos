@@ -443,7 +443,7 @@ impl Workspace {
                                 Some((chat.id, sid.clone()))
                             })
                             .collect();
-                        let probes: Vec<(u64, PathBuf)> = if project.place().host.is_some() {
+                        let probes: Vec<(u64, [PathBuf; 2])> = if project.place().host.is_some() {
                             Vec::new()
                         } else {
                             project
@@ -452,7 +452,7 @@ impl Workspace {
                                 .filter(|chat| chat.wants_probe())
                                 .filter_map(|chat| {
                                     let sid = chat.agent_session.as_ref()?;
-                                    Some((chat.id, transcript_path(&project.place().path, sid)))
+                                    Some((chat.id, transcript_paths(&project.place().path, sid)))
                                 })
                                 .collect()
                         };
@@ -483,7 +483,7 @@ impl Workspace {
                     .spawn(async move {
                         probes
                             .into_iter()
-                            .map(|(id, path)| (id, transcript_ended(&path)))
+                            .map(|(id, paths)| (id, transcript_ended(&paths)))
                             .collect()
                     })
                     .await;
@@ -4673,18 +4673,33 @@ fn decode_query(s: &str) -> String {
 }
 
 /// The kernel's transcript for agent `sid` in a local place.
-fn transcript_path(workspace: &Path, sid: &str) -> PathBuf {
-    workspace
-        .join(".arbos")
-        .join("agents")
-        .join(sid)
-        .join("transcript.jsonl")
+/// Where an agent's transcript lives, then where the kernel moves it when
+/// the agent is done. A worker that finished is archived: a probe that
+/// read only the live path found nothing there and said "not ended", and
+/// the worker's tab stayed Working until a relaunch (F-179).
+fn transcript_paths(workspace: &Path, sid: &str) -> [PathBuf; 2] {
+    let store = workspace.join(".arbos");
+    [
+        store
+            .join("agents")
+            .join(sid)
+            .join("transcript.jsonl"),
+        store
+            .join("archive")
+            .join("agents")
+            .join(sid)
+            .join("transcript.jsonl"),
+    ]
 }
 
-/// Whether the last record in a transcript ends a turn. False for a file
-/// that is missing, empty, or mid-turn.
-fn transcript_ended(path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(path) else {
+/// Whether the last record in a transcript ends a turn: the first of the
+/// paths that reads is the transcript. False when none reads, or the file
+/// is empty or mid-turn.
+fn transcript_ended(paths: &[PathBuf]) -> bool {
+    let Some(text) = paths
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+    else {
         return false;
     };
     text.lines()
