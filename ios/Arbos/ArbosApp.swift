@@ -43,15 +43,23 @@ struct ArbosApp: App {
     }
 }
 
-/// Projects first, a project's chat one tap in, the call one more. A cold
-/// start lands on the list (Jacob's reference); the list's own composer
-/// still talks to the project last open.
+/// Projects first, a project's chat one tap in, the call one more.
+///
+/// A cold start comes back to the chat that was in front, as the Mac
+/// desktop does: `Workspace::new` reopens the listed projects and makes the
+/// one that was front active again. The list is a picker you open, not the
+/// landing screen. Before this the phone landed on the list after iOS
+/// reclaimed it — which is what a person meets after a night, and it threw
+/// away the one thing they were doing.
 struct RootView: View {
     @EnvironmentObject private var chat: ChatStore
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var notifier: Notifier
     @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
+    /// Guards the one-time restore so it cannot fire again on a later
+    /// appearance and trap the person in the chat.
+    @State private var restored = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -59,6 +67,18 @@ struct RootView: View {
                 .navigationDestination(for: KernelTarget.self) { target in
                     ProjectChatView(target: target)
                 }
+        }
+        // Once, at launch. Pushing on every appearance would fight the back
+        // gesture: the person leaves the chat and is put straight back in.
+        .task {
+            guard !restored, let stored = settings.frontProject else { restored = true; return }
+            restored = true
+            path.append(KernelTarget(stored: stored))
+        }
+        // What is in front, remembered for the next cold start. An empty
+        // path is the list; anything on it is a chat.
+        .onChange(of: path.count) { _, depth in
+            settings.frontProject = depth > 0 ? settings.kernelTarget.stored : nil
         }
         .tint(ArbosTheme.accent)
         .preferredColorScheme(.dark)

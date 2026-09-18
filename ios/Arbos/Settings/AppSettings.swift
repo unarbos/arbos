@@ -42,6 +42,17 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(hubURL, forKey: "hubURL") }
     }
     /// Which kernel the main chat opens: the pod, or a hub machine/project.
+    /// The project whose chat was in front when the app last went away, or
+    /// nil if the person was on the list.
+    ///
+    /// `kernelTarget` cannot answer this: it names the last project opened
+    /// and stays set while the list is showing, because the list's composer
+    /// talks to it. The desktop keeps the same distinction — `state.toml`
+    /// stores the open tabs *and* `active`, which one was front.
+    @Published var frontProject: String? {
+        didSet { defaults.set(frontProject, forKey: "frontProject") }
+    }
+
     @Published var kernelTarget: KernelTarget {
         didSet { defaults.set(kernelTarget.stored, forKey: "kernelTarget") }
     }
@@ -66,6 +77,7 @@ final class AppSettings: ObservableObject {
             ?? (baked.kernelURL.isEmpty ? Self.defaultKernelURL : baked.kernelURL)
         hubURL = defaults.string(forKey: "hubURL") ?? baked.hubURL
         kernelTarget = KernelTarget(stored: defaults.string(forKey: "kernelTarget") ?? "pod")
+        frontProject = defaults.string(forKey: "frontProject")
         openAIKey = Keychain.read(Self.openAIKeyAccount) ?? ""
         #if DEBUG
         // `-voiceToken …` / `-kernelToken …` / `-hubToken …` on the launch
