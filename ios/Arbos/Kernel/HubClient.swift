@@ -2,6 +2,10 @@ import Foundation
 
 /// One machine as `arbos-hub` lists it (`MachineInfo` in `arbos-core::hub`).
 struct HubMachine: Decodable, Identifiable, Equatable {
+    /// The hub keeps a machine on the roster after its last kernel leaves
+    /// (#545), so a sleeping machine can read as asleep instead of
+    /// vanishing. Older hubs send neither field; absent means online,
+    /// because that is what the roster meant before they existed.
     struct Project: Decodable, Identifiable, Equatable {
         var name: String
         var place: String
@@ -93,6 +97,13 @@ struct HubMachine: Decodable, Identifiable, Equatable {
     var builds: [Build]
     /// Some process here runs a deleted file. `builds` says which.
     var binaryGone: Bool
+    /// The hub keeps a machine on the roster after its last kernel leaves
+    /// (#545), so a sleeping machine can read as asleep rather than
+    /// vanishing. An older hub sends neither field, and absent means online
+    /// — that is what a row on the roster meant before they existed.
+    var online: Bool
+    /// When it went quiet, for saying how long. Zero when it has not.
+    var offlineSinceMs: Int64
 
     var id: String { name }
 
@@ -103,13 +114,15 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         builds.first { $0.role == "kernel" && $0.project == project }
     }
 
-    init(name: String, host: String = "", worker: Bool = false, projects: [Project] = [], builds: [Build] = [], binaryGone: Bool = false) {
+    init(name: String, host: String = "", worker: Bool = false, projects: [Project] = [], builds: [Build] = [], binaryGone: Bool = false, online: Bool = true, offlineSinceMs: Int64 = 0) {
         self.name = name
         self.host = host
         self.worker = worker
         self.projects = projects
         self.builds = builds
         self.binaryGone = binaryGone
+        self.online = online
+        self.offlineSinceMs = offlineSinceMs
     }
 
     init(from decoder: Decoder) throws {
@@ -120,11 +133,14 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? []
         builds = try c.decodeIfPresent([Build].self, forKey: .builds) ?? []
         binaryGone = try c.decodeIfPresent(Bool.self, forKey: .binaryGone) ?? false
+        online = try c.decodeIfPresent(Bool.self, forKey: .online) ?? true
+        offlineSinceMs = try c.decodeIfPresent(Int64.self, forKey: .offlineSinceMs) ?? 0
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, host, worker, projects, builds
+        case name, host, worker, projects, builds, online
         case binaryGone = "binary_gone"
+        case offlineSinceMs = "offline_since_ms"
     }
 }
 
@@ -137,7 +153,12 @@ struct HubMachine: Decodable, Identifiable, Equatable {
 enum HubClient {
     static func list(hubURL: String, token: String) async throws -> [HubMachine] {
         guard var components = URLComponents(string: hubURL) else { throw HubError.badURL }
-        components.scheme = components.scheme?.lowercased() == "ws" ? "http" : "https"
+        // The same rule `attachURL` uses, which this did not follow: a plain
+        // hub (`http` or `ws` — a machine on the same network) stays plain.
+        // Mapping only `ws` meant an `http://` hub was attached to over `ws`
+        // and listed from over `https`, so its roster never loaded and the
+        // list quietly showed only what it had cached.
+        components.scheme = ["http", "ws"].contains(components.scheme?.lowercased() ?? "") ? "http" : "https"
         components.path = "/list"
         components.queryItems = nil
         guard let url = components.url else { throw HubError.badURL }

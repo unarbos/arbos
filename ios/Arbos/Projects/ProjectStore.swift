@@ -93,6 +93,15 @@ final class ProjectStore: ObservableObject {
                         if project.lastActivityMs > 0 {
                             row.lastActivity = Date(timeIntervalSince1970: Double(project.lastActivityMs) / 1000)
                         }
+                        // A machine the hub is holding open after its last
+                        // kernel left (#545). Its projects arrive `live:
+                        // false` like any idle one, so without this the row
+                        // reads "Off" — true, and silent about which thing
+                        // is off, which is the only question this line has
+                        // to answer: his machine, or that project's kernel.
+                        if !machine.online {
+                            row.waitingOn = "\(machine.name) is asleep"
+                        }
                         list.append(row)
                     }
                 }
