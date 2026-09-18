@@ -87,7 +87,7 @@ python3 /tmp/fixture-list.py & FIX=$!
 trap 'kill $FIX 2>/dev/null' EXIT
 sleep 2
 curl -s "http://127.0.0.1:$PORT/list" >/dev/null || { echo "the fixture hub did not start"; exit 1; }
-echo "fixture up: alpha, beta, beta-two, gamma — and arrived-late from the fourth /list on"
+echo "fixture up: alpha, beta, beta-two, gamma — and arrived-late once the pull asks for it"
 
 APP=${APP:-/tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app}
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
