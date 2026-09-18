@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 14:14 UTC.
+Last checked 2026-09-18 14:56 UTC.
 
-## Click Update. You will get build 2039. This one has Jev.
+## Click Update. You will get build 2046. This one has Jev.
 
-**2039** — signed, notarised, stapled, on the feed since 14:12 UTC.
+**2046** — signed, notarised, stapled, on the feed since 14:54 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2039 (builds 2040–2046):
+
+- **#657** — Jev's first-byte wait is 1.5 s, not the chat model's 15 s
+- **#654** — the chat fills the column and the Clear button goes; one
+  expand control
+- **#656** — the git-branch chip under the composer goes, and the status
+  row is omitted when it has nothing to show
+
+## Before that: 2039
 
 New since 2036 (builds 2037–2039):
 

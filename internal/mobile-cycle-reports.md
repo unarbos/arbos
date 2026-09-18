@@ -3191,3 +3191,41 @@ reach_the_list: ok
 ```
 
 **PR:** [#651](https://github.com/unarbos/arbos/pull/651), harness only.
+
+## Cycle 117 — the returning user was already done; three instruments were not
+
+**The returning-user request needs no code.** It shipped at #615 and the
+fault in it was fixed by #635, both on `main`. Driven on the device in the
+two-project form the note itself specifies: suspended two minutes → back in
+the chat he left; killed and reclaimed → back in that chat; and left `phone`
+for the list, opened `demo`, reclaimed → **`demo`**, `the second project,
+the one he was in` (M-384). The phone does not land on the list.
+
+So the cycle went to the first full sweep since `reach_the_list`, and it
+paid three times.
+
+**#633's hidden glyph never took, and my own check passed it.**
+`Arrow Turning Down Then Right` is back beside every ended worker line, with
+`.accessibilityHidden(true)` sitting in the source. The cycle-109
+verification was a **false pass**: worker lines are drawn from live state,
+not the transcript, so they vanish on relaunch — the chat that check opened
+had none on screen. I cleared a screen that did not contain the thing I had
+fixed (M-385). The row is one element now, labelled with its words and
+marked as text, verified against a worker spawned for the purpose.
+
+**`check-names.sh` cleared three screens it never opened.** Pointed at a
+row that does not exist it printed the list, settings and the call, skipped
+the chat and the sheet in silence, and ended `VERDICT: no control reads as a
+symbol name`. It counts now, and refuses: `screens looked at: 3 of 5 /
+VERDICT: incomplete — never reached: chat sheet` (M-386).
+
+**The sweep's summary contradicted its own table**: `0 of 11 reached no
+conclusion at all`, printed directly beneath three rows reading `(no
+verdict) no phone row`. It was counting only runs that printed nothing at
+all (M-387).
+
+Those three "no phone row" runs are `reach_the_list` not being on `main`
+yet — [#651](https://github.com/unarbos/arbos/pull/651) is green and waiting.
+
+**PRs:** [#658](https://github.com/unarbos/arbos/pull/658) harness,
+[#659](https://github.com/unarbos/arbos/pull/659) the `ios/` batch.

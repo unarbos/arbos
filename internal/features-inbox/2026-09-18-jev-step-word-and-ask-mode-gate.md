@@ -46,3 +46,7 @@ read-only raises the allow/deny card in ask mode — or the notice says what
 the gate does. The desktop's ask card per mode (cycle 39 item 4) cannot be
 paired against Cursor's approval row until one of the two holds, because
 the card never appears for the writes a person would expect it on.
+
+## 3. The plan reader and a listing pasted back (cycle 44, F-194)
+
+Asked to *restructure the project page*, the model wrote `notes.md` by hand and pasted the plan tool's own listing format — `[ ] 1 [Kickoff](docs/…) — ready…`, a box and an ordinal, **no dash**. The desktop now reads such a line as an item ([#661](https://github.com/unarbos/arbos/pull/661)); the kernel's plan reader most likely does not, since the items vanished from its list at the same time. Two small asks, either one enough: the plan tool's listing prints items in the form it reads back (`- [ ] …`), or the reader accepts a boxed line without a dash. Not filed as a bug; it is the model copying the kernel's own output.

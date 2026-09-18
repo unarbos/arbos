@@ -35,3 +35,21 @@ The iPhone loop took the answer and shipped it: [#615](https://github.com/unarbo
 Asked to open the note again, I read #615 against it rather than only its verdict. `RootView` records the front project in `.onChange(of: path.count)` as `settings.kernelTarget.stored`; at push time the chat's own `switchTarget` has not run (it is the destination's `.task`), so the setting still names the project left a moment ago. Leave A for the list, open B, reclaim → the cold start returns you to **A**. One row in the scenario hides it, since the two coincide.
 
 [#635](https://github.com/unarbos/arbos/pull/635): the record is the pushed target, written from the destination's `.onAppear`; the path emptying clears it (not `onDisappear` — the call's `fullScreenCover` would have cleared it mid-call). The scenario takes a fourth argument, a second project, and says which one he comes back to. For the loop's rig: `what-a-returning-user-sees.sh <cycle> phone 120 <other row>`; `the second project` is right, `FAULT — the first project` is #615's shape.
+
+## Re-checked on the device, 2026-09-18 14:20 UTC (cycle 117)
+
+Asked again whether the phone still lands on the list. It does not, and
+nothing needed implementing. Run in the two-project form this note
+specifies, `what-a-returning-user-sees.sh 117 phone 120 demo`:
+
+```
+--- still suspended: Home, wait 120s, come back ---
+came back to:      chat:phone   the same screen, the same last three lines
+--- reclaimed: the process is gone, as it would be after a night ---
+  VERDICT: put back in the chat he left, even though the app had been killed
+--- left phone for the list, opened demo, reclaimed ---
+  VERDICT: the second project, the one he was in
+```
+
+The last line is the one that matters: it is #635's shape, not #615's.
+Recorded as M-386's neighbour, M-384.

@@ -112,3 +112,22 @@ So there is no action available to the iPhone loop on this: not a code fix
 (the branch has no Rust), not a re-run (no permission), and not a change to
 the tests (another team's suite, and three separate tests are involved).
 What is available is this evidence, which is why it is written down.
+
+## A fourth, 14:26 UTC — and this one names the test
+
+[#659](https://github.com/unarbos/arbos/pull/659) changes one SwiftUI file
+and nothing else. `kernel (build + test)` failed:
+
+```
+failures:
+    a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged
+test result: FAILED. 2 passed; 1 failed; 0 ignored; finished in 30.73s
+```
+
+Every other suite in the same run reported `0 failed`, and the iPhone build
+passed. The test is a timing one — a nudge after a coordinator goes quiet —
+and it took 30.73 s of a run that is otherwise seconds per suite.
+
+[#658](https://github.com/unarbos/arbos/pull/658), pushed minutes apart and
+also touching no Rust, passed the same job. Still not this loop's to fix;
+recorded because the earlier entries here have the shape and not the name.

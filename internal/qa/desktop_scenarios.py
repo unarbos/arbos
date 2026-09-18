@@ -151,12 +151,19 @@ class Desktop:
         def leaves():
             return {str(e.get("path", "")).split(".")[-1] for e in self.app.elements("*")}
 
-        if "new-subchat" not in leaves():
-            if "toggle-panel" not in leaves():
-                raise RuntimeError("no `new-subchat` and no `toggle-panel` to open the panel with; the app's new-chat control has moved again — check desktop/src/view/panel.rs against this helper")
-            self.app.click("toggle-panel")
-            self.app.wait_element("new-subchat", reachable=True)
-        self.app.click("new-subchat")
+        # ⌘N first, the button second. The button has moved twice: out of the removed sidebar
+        # (qal-j24), then out of reach entirely with `8d6cb643` ("the panel's tabs sit on the window
+        # strip"), after which `new-subchat` renders in neither the fresh window nor the opened panel
+        # and every desktop scenario in cycle 9 died on `timed out waiting for element new-subchat`.
+        # Measured 2026-09-18 on the app at `1beec0a1fd98`: 30 leaves at launch and 37 with the panel
+        # open, `new-subchat` absent from both; `new-tab` and `panel-new-tab` mint nothing even after
+        # nine clicks; `app.key("cmd-n")` mints a chat with its own kernel agent first press. ⌘N is
+        # the app's own documented shortcut for this control (panel.rs:1210, "New sub-chat ⌘N"), so it
+        # is the affordance least likely to move next time.
+        if "new-subchat" in leaves():
+            self.app.click("new-subchat")
+        else:
+            self.app.key("cmd-n")
         st = self.app.wait_state(lambda s: {c["id"] for p in s["projects"] for c in p["sessions"]} - before, timeout=timeout, what="a new session")
         sid = (({c["id"] for p in st["projects"] for c in p["sessions"]}) - before).pop()
         # The kernel agent this chat belongs to. `new-subchat` **mints a new agent** (`chat-<ms>`, via
