@@ -1823,6 +1823,31 @@ fn handle_frame(
                         failed: false,
                     }),
                 );
+                // The leash is on the tree: the agent's live children take
+                // the mode too, so a switch to ask mid-run reaches the
+                // worker that does the writing (desktop cycle 39).
+                for id in hooks
+                    .descendants(&agent)
+                    .into_iter()
+                    .filter(|d| d != &agent)
+                {
+                    if let Ok(mut c) = load_agent(place, &arbos_core::AgentId::new(&id))
+                        && c.mode != mode
+                    {
+                        c.mode = mode;
+                        say_if_unsaved(hooks, &id, "mode", c.save(&place.agent_dir(&id)));
+                        let _ = append_event(
+                            &Layout::new(place, &id).transcript(),
+                            &Event::new(EventKind::Notice {
+                                text: format!(
+                                    "mode: {} — set on {agent}, and on its workers with it",
+                                    mode.as_str()
+                                ),
+                                failed: false,
+                            }),
+                        );
+                    }
+                }
             }
             hooks.broadcast(tree_frame(place));
         }

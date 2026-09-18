@@ -1641,6 +1641,12 @@ impl KernelHooks {
             child.allowlist = saved_parent.allowlist.clone();
         }
         child.readonly = readonly;
+        // The user's leash on the parent is the leash on the tree: a
+        // coordinator in ask mode whose worker ran `echo hi > hello.txt`
+        // with no card (desktop cycle 39) — every write the person
+        // expected a question on was the worker's, and the worker was born
+        // in auto. Plan mode holds for the tree the same way.
+        child.mode = saved_parent.mode;
         // Stored absolute: a relative `cwd` from the spawn call is meant
         // against the parent's own directory.
         child.cwd = cwd

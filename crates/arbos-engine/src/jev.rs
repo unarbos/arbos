@@ -289,7 +289,9 @@ pub async fn ask(
     cancel: &CancellationToken,
     hooks: &dyn Hooks,
 ) -> Result<(Decision, Option<Usage>), AskError> {
-    hooks.kernel_step("jev");
+    // A step a person reads under the shimmer — not the router's name
+    // (the desktop showed "Working jev" on every ordinary turn).
+    hooks.kernel_step("Choosing the next step");
     let card = situation_card(sit);
     let jev = Provider {
         base: src.base.clone(),
