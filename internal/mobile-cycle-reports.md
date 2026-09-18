@@ -2443,3 +2443,63 @@ write passes its own first run and hides the flaw until somebody points it
 somewhere else.
 
 **PR:** [#607](https://github.com/unarbos/arbos/pull/607), harness only.
+
+## Cycle 96 report (09:05 UTC, 09-18)
+
+**Looked at:** the acceptance journey, run against the harness #599 swept.
+
+**Run 34 holds** (M-329). `pod` on kernel `c3247332dc4e`, `main` at
+f662b876: **14 pass, 2 eye, 4 unverified, no failures** — the same shape as
+run 33.
+
+Two of cycle 89's corrections are visible in it. P3's close now taps
+`End call` rather than falling through to a coordinate that lands on **Back**
+— the journey had been closing calls by hitting the wrong control and
+passing while it did. And J5's line no longer tells QA the phone has no Stop
+control; it reads *Stop not exercised by this step (the control exists:
+composer stop square, M-130)*.
+
+**Why this was worth a cycle.** #599 changed fourteen tap targets across the
+harness, the journey's among them. A sweep that size deserves the spine run
+against it rather than an assurance that it should be fine. It was, and now
+that is a measurement rather than a hope.
+
+connect 2532 ms, dictation 5 segments with `delta_shrinks=0`.
+`media/mobile/journey/0918-085213/`, 22 files.
+
+**No PR.** Nothing in the repository needed changing: the run exercised
+code already on `main` and produced evidence, not a diff.
+
+## Cycle 97 report (09:15 UTC, 09-18)
+
+**Looked at:** the part of the attachments row cycle 72 deliberately did not
+credit — the chip's × and the mic-to-send swap, both still reading from 60.
+
+**All three claims measured** (M-330): an empty composer ends in
+`Microphone`; a photo puts **one** chip in the bar and the end becomes
+`Send`; tapping the chip's × leaves **zero** chips and `Microphone` returns.
+
+**The × had no name, and answered to the wrong one** (M-331). Unlabelled it
+read as `Close` — the SF Symbol's own name, and the same word the call's end
+button answered to until #590. With several chips in the bar nothing
+distinguished them, by ear or by script. It now reads
+`Remove <file name>`.
+
+That is the second time in three cycles a measurement could not be built
+until a control had a name; the orb at M-327 was the other. Accessibility
+labels keep turning out to be the *precondition* for testing rather than a
+nicety beside it — which is a better argument for doing them than the one I
+started with.
+
+**And one rig fault, fixed the easy way** (M-332). The first attempt tapped
+the photo picker's buttons by label, found nothing and reported `no chip
+arrived`, blaming the attach. The picker is another process and the app's
+tree holds nothing while it is up — exactly what M-194 said of the
+notification banner.
+
+`photo-reaches-the-model.sh` settled those coordinates at cycle 56, so this
+run uses them rather than inventing a second answer. M-303's lesson applied
+without pain for once: look for the existing fix before writing one.
+
+**PR:** [#610](https://github.com/unarbos/arbos/pull/610).
+**Stills:** `media/mobile/cycle-97/`.

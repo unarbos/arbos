@@ -704,6 +704,76 @@ def register(scenario, registry, transcript, now_ms, branch):
             k.stop()
         cx.check(place=place if place.exists() else moved)
 
+    # ── #450: the detector for a double-serving that has already happened ──
+    @reg("ds-01-the-double-serving-detector-finds-both-shapes-and-stays-quiet-on-the-innocent-ones", tags=("detector", "lock", "after-failure"))
+    def ds01(cx):
+        """#450 (`a9b12f118650`) says two kernels on one place leave two marks: a turn's wake written while
+        another turn of the same agent was still open with no cut line between, and two checkpoints at one
+        transcript line with different times. Its worth is not the warning but the reading — the question
+        it answers is whether a person's places were served twice while the lock was split, so its
+        precision matters as much as its recall. A detector that also fires on an interrupted kernel or an
+        ordinary place sends everyone hunting for a fault they never had.
+
+        Four places, built by hand and read through `arbos-kernel check` as a person reads it: the two
+        shapes it must find, and two innocent states it must stay quiet on — a kernel that died mid-turn
+        with the restart notice that documents the clearing, and a plain place with two clean turns.
+
+        Measured 2026-09-18: on `arbos-kernel 0.2.0 d373422662bd protocol 1` all four arms behave, and on
+        `f80f0b663bac`, which predates #450, all four are silent — so the warnings come from the detector
+        and not from the staging."""
+        root = cx.scratch / "ds01"
+
+        def place(name, transcript_lines, checkpoint_lines=()):
+            p = root / name
+            (p / ".arbos" / "agents" / "root").mkdir(parents=True, exist_ok=True)
+            (p / ".arbos" / "agents" / "root" / "agent.md").write_text("root\n")
+            (p / ".arbos" / "agents" / "root" / "transcript.jsonl").write_text("".join(l + "\n" for l in transcript_lines))
+            if checkpoint_lines:
+                (p / ".arbos" / "agents" / "root" / "checkpoints.jsonl").write_text("".join(l + "\n" for l in checkpoint_lines))
+            return p
+
+        wake = lambda ts: json.dumps({"ts": ts, "kind": "wake", "wake": "user", "text": "go"})
+        done = lambda ts: json.dumps({"ts": ts, "kind": "turn_complete"})
+        note = lambda ts, t: json.dumps({"ts": ts, "kind": "notice", "text": t})
+        cp = lambda line, ts, head: json.dumps({"line": line, "ts": ts, "head": head, "clean": True})
+
+        def warnings_of(p):
+            """The lines a person reads. PROTOCOL.md's absence is an artefact of a hand-built place and is
+            not one of them, so only the double-serving wordings count."""
+            out = subprocess.run([cx.binary, "check", str(p)], capture_output=True, text=True, timeout=60)
+            text = (out.stdout or "") + (out.stderr or "")
+            return [l.strip() for l in text.splitlines() if any(k in l for k in ("still open", "two kernels", "two checkpoints"))]
+
+        arms = {
+            "a_wake_while_the_previous_turn_is_open": (place("a", [wake(1000), done(1100), wake(2000), wake(3000)]), True),
+            "b_two_checkpoints_one_line_different_times": (place("b", [wake(1000), done(1100)], [cp(0, 1000, "aaa"), cp(0, 2000, "bbb")]), True),
+            "c_died_mid_turn_with_the_restart_notice": (place("c", [wake(1000), note(1500, "kernel restarted"), wake(2000), done(2100)]), False),
+            "d_an_ordinary_place_two_clean_turns": (place("d", [wake(1000), done(1100), wake(2000), done(2100)], [cp(0, 1000, "aaa"), cp(2, 2000, "bbb")]), False),
+        }
+        seen = {}
+        for name, (p, want) in arms.items():
+            ws = warnings_of(p)
+            seen[name] = {"expected": "warn" if want else "quiet", "warnings": [w[:200] for w in ws]}
+        cx.rec.notes["arms"] = seen
+
+        for name, (p, want) in arms.items():
+            ws = seen[name]["warnings"]
+            said = name.split("_", 1)[1].replace("_", " ")
+            if want:
+                cx.rec.expect(
+                    bool(ws),
+                    f"ds-01-missed-{name}",
+                    f"`check` says nothing about {said}, so a place served by two kernels reads as sound. This is the shape #450 added the detector for",
+                    "arbos-kernel check.rs check_two_writers",
+                )
+            else:
+                cx.rec.expect(
+                    not ws,
+                    f"ds-01-false-alarm-on-{name}",
+                    f"`check` reports double serving for {said}, which is an ordinary state: {ws[:1]}. A warning that fires on a healthy place cannot be used to decide whether anything was served twice",
+                    "arbos-kernel check.rs check_two_writers — the cut line must clear the open wake",
+                )
+
     # ── first-match readers: the first location fails and the next one takes the name ──
     # fm-01 (the checkpoint sidecar) is in landing_scenarios.py; this is the same family, found by
     # walking the kernel's first-match readers rather than by a break. The audit listed six — the

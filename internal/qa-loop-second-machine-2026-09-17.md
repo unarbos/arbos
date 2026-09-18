@@ -639,8 +639,65 @@ place: the A/B half split (each cycle says which half it ran) and step 3a2, whic
 In cycle 6 that family ran only in the untracked `rust` step and **skipped itself** by gate, which
 is why `af-04` has still not had a real run.
 
+## Cycle 7 died on my own change, and what it cost
+
+The half split remembers its last half in `state/library-half`. `cycle.sh` runs under
+`set -euo pipefail`, and `LIB_HALF=$(cat "$HALF_FILE" 2>/dev/null)` takes `cat`'s status — so on
+the first cycle, with no file yet, the assignment exited 1 and ended the script. The `*)` branch
+written for exactly that case could never be reached, and `2>/dev/null` hid the one line that
+named the cause.
+
+Cycle 7 died at 08:33 between the untracked and tracked steps and lost the tracked step, step 3a2,
+the desktop step, the journey and the mirror. Fixed with `|| true` and `mkdir -p`, with a control
+on the exact lines: first run `A`, then `B`, then `A`, exit 0 throughout, where before the first
+run printed nothing and exited 1. Filed as `qal-j32`; review rule 9 — **run the path that has no
+history** — comes from it and from `qal-j29`, which are the same shape seen from two sides.
+
+## af-04 has run, and it passes
+
+Step 3a2's set was run by hand at 08:37 to recover what cycle 7 lost, against
+`arbos-kernel 0.2.0 d373422662bd protocol 1`. Six scenarios, none skipped — the branch label did
+its job:
+
+| scenario | verdict |
+|---|---|
+| `af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes` | **pass** (79.8 s) |
+| `uw-01` undo mark | pass |
+| `uw-02` git exclude | pass |
+| `uw-03` panic path | pass |
+| `uw-04` subscription marker | pass |
+| `fm-02` MCP config | break — `qal-j31` |
+
+`af-04`'s pass is worth reading rather than counting: `turn_complete_seen: True`,
+`old_path_recreated: None`, `kernel_alive_after: False`, and
+`new_kernel_served_the_moved_folder: True`. A turn really ran, the old kernel stopped itself as
+#377 intends, a new kernel served the moved folder, and the old path did not come back. So it is a
+pass note, as expected, and all four of #444's destructive cases hold on this build.
+
+## A seventh first-match reader, found by looking rather than by breaking
+
+The audit enumerated six first-match readers and cleared five. `mcp::load_servers`
+(`crates/arbos-kernel/src/mcp.rs:116`) is not among them. It walks four config locations and the
+first file to define a server name keeps it — and a file that does not parse is skipped with an
+`eprintln!` while the walk continues.
+
+Two arms, identical but for the global config, same broken `.arbos/mcp.toml` defining `notes`:
+with the global present the kernel goes on to start a `notes` server; without it, no `notes`
+server exists at all. So the place's broken config is skipped and **the global silently takes the
+name**. Nothing reaches the person — the desktop routes kernel stderr to
+`.arbos/runtime/kernel.out.log`, which its own comment calls "process facts, never part of the
+`.arbos/` record". Filed as `qal-j31`, held by `fm-02`.
+
+## Cycle 8
+
+Started 09:01:25Z on kernel `b3770cd0de9e`, running the corrected `cycle.sh` (the `|| true` guard
+is at line 112 of the copy `vm-loop` installed at 09:00:25). This is the first cycle that should
+announce its half.
+
 ## Cross-references
 
+- `internal/qa/bugs/qal-j31-a-place-mcp-config-that-does-not-parse-hands-its-server-name-to-the-global-one-in-silence.md`
+- `internal/qa/bugs/qal-j32-the-half-split-killed-the-cycle-on-the-first-run-because-a-missing-file-is-a-failing-command.md`
 - `internal/qa/bugs/qal-j28-the-inbox-grows-without-bound-and-crowds-the-library-out-of-the-cap.md`
 - `internal/qa/bugs/qal-j29-af-03-reported-a-break-for-four-cycles-because-its-failure-message-crashed.md`
 - `internal/qa/bugs/qal-j30-the-docs-mirror-dropped-168-feedback-reports-because-only-docs-and-internal-are-guarded.md`
