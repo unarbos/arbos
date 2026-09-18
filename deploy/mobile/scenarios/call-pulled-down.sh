@@ -61,7 +61,15 @@ hist | awk -v a="${BEFORE:-0}" '$1+0 > a+0' | tail -2 | cut -c1-140 | sed 's/^/ 
 
 echo
 echo "== mute, then close =="
-ui tap "Microphone" >/dev/null 2>&1 && echo "  muted" || echo "  no mic button to mute"
+# The call's mute disc is "Mute" (and "Unmute" once it is on) since #590.
+# This tapped "Microphone", which is the *composer's* mic in the chat, and
+# reported "no mic button to mute" from the one screen that has a mute.
+if ui tap "Mute" >/dev/null 2>&1; then
+  sleep 1
+  echo "  muted; the disc now reads: $(ui dump | grep -oE 'Button +(Mute|Unmute)' | head -1 | awk '{print $2}')"
+else
+  echo "  no Mute on the pulled-down row"
+fi
 sleep 1; shot 04-muted
 ui tap "End call" >/dev/null || { echo "  no close button"; exit 1; }
 sleep 4; shot 05-after-close
