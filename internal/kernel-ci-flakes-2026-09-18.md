@@ -131,3 +131,25 @@ and it took 30.73 s of a run that is otherwise seconds per suite.
 [#658](https://github.com/unarbos/arbos/pull/658), pushed minutes apart and
 also touching no Rust, passed the same job. Still not this loop's to fix;
 recorded because the earlier entries here have the shape and not the name.
+
+## A fifth, 22:35 UTC — a different e2e again
+
+[#702](https://github.com/unarbos/arbos/pull/702) changes one bash file.
+`kernel (build + test)` failed:
+
+```
+test a_person_watches_the_page_live_and_takes_the_wheel ... FAILED
+thread '…' panicked at crates/arbos-kernel/tests/browser_takeover_e2e.rs:175:5
+test result: FAILED. 0 passed; 1 failed; finished in 3.71s
+```
+
+Every other job in the run passed, including `macOS (check kernel +
+desktop)`, which compiles the same crate. That is now five failures across
+the day on branches touching no Rust, and **each one a different e2e test**:
+the coordinator nudge, and now the browser takeover. A single flaky test
+would repeat; five different ones point at the environment these e2e tests
+run in rather than at any of them.
+
+Still not this loop's to fix. Recorded because the pattern — different test
+each time — is worth more to whoever does own it than another instance of
+the same name.

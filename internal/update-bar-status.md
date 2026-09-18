@@ -5,11 +5,11 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 22:26 UTC.
+Last checked 2026-09-18 22:47 UTC.
 
-## Click Update. You will get build 2134. Jev is in it.
+## Click Update. You will get build 2136. Jev is in it.
 
-**2134** — signed, notarised, stapled, on the feed since 22:24 UTC.
+**2136** — signed, notarised, stapled, on the feed since 22:44 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
@@ -19,6 +19,12 @@ on the release.
 The relaunch-tab bug (mt-24) is still open. #675 aimed at it and QA still
 fails it four times out of four, so do not read any build here as closing
 it.
+
+New since 2134 (builds 2135–2136):
+
+- **#701** — `attach-a-file.sh`, the files half of the attachments row
+
+## Before that: 2134
 
 New since 2131 (builds 2132–2134):
 
