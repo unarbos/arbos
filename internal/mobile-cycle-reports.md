@@ -3519,3 +3519,39 @@ Corrected in a second commit rather than an amend, because the wrong
 sentence is the useful part of the record.
 
 **PR:** [#680](https://github.com/unarbos/arbos/pull/680), harness only.
+
+## Cycle 126 — the journey passes, and the check that guards it did not work
+
+The last phone-only row, `journey — the phone-only steps P1, P2, P3`, was
+measured at cycle 72. A full journey run against `pod` says it holds: **P1,
+P2, P2e and P3 all pass**, with J1–J3, J4a/J4m, J5q/J5s and J7/J7v besides
+(M-411). The photo step is worth a word — it passes on the model naming the
+picture ("Ice plant flowers, predominantly magenta"), not on the reply
+failing to sound like a refusal, which is how it passed for months while
+attaching nothing.
+
+**But J1 did not open a project.** "Open the project from the list" tapped
+`phone` at **y=85** — the chat's own header — and passed, because the chat
+the app woke in happened to be the target (M-412). The journey has the fault
+the last six cycles have been clearing out of the scenarios, and the check
+written for it never looked at the journey, which lives outside
+`scenarios/`.
+
+**So I pointed the check at it, and the check stayed silent — with the step
+deleted.** Two faults, in opposite directions (M-413):
+
+- a one-line helper, `score() { …; }`, opens a brace and closes it on the
+  same line; the body-skipping took that as entering a function and ignored
+  every use in the rest of the file;
+- it recorded the **last** `reach_the_list`, not the first, so a file that
+  reaches the list at J1 and again after the J6k relaunch looked like one
+  that never did.
+
+Both fixed, and then demonstrated the only way that means anything: delete
+the journey's step and the check speaks; restore it and the check falls
+silent. That rule has now been narrowed and widened across three cycles, and
+the version I trust is the one I watched fail on purpose.
+
+`sleeping-machine` was the last scenario genuinely missing the step.
+
+**PR:** [#683](https://github.com/unarbos/arbos/pull/683), harness only.

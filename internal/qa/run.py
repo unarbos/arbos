@@ -85,6 +85,28 @@ PRICES = {"google/gemini-2.5-flash": (0.30, 2.50), "google/gemini-2.5-pro": (1.2
 # A provider refusing the key is the environment's failure, not Arbos's: such a rollout is
 # recorded as `env:provider-blocked` and never drafted as a bug.
 PROVIDER_BLOCK = re.compile(r"policy violation|user blocked|HTTP 403|status 403|\b403 Forbidden", re.I)
+# A turn the provider rate-limited to death is the environment's failure too, and it arrives in a
+# shape `PROVIDER_BLOCK` does not see. Since the Jev controller landed (`a47c5104`, "Jev fail ends
+# the turn; the chat model does not run") every turn needs a controller call before the chat model,
+# so a 429 on that call ends the turn with the chat model never running:
+#
+#   Turn ended badly. Last words: Jev did not choose the next step: 429 rate limited: HTTP 429:
+#   {"detail":{"error_type":"api_usage_error","message":"Rate limit exceeded. Please retry
+#   shortly."}}. The turn stopped.
+#
+# The scenario then reports what you would expect of a turn that never ran — `wrong-output`, "the
+# file was not created" — and those get drafted as product bugs. Two of the last sixty rollouts did
+# exactly that on 2026-09-18 (`bench-fix-commit-branch`, `bench-research-links`), each filing three
+# `wrong-output` breaks for work the model was never asked to do.
+#
+# Deliberately narrow: a bare 429 the kernel retried and recovered from is not this, and must still
+# be allowed to fail the scenario if the output is wrong. This needs the rate limit **and** the
+# turn's death in the same text.
+PROVIDER_RATE_LIMITED = re.compile(
+    r"(?:429|rate.?limit\w*)[^\n]{0,200}?(?:the turn stopped|turn ended badly)"
+    r"|(?:the turn stopped|turn ended badly)[^\n]{0,200}?(?:429|rate.?limit\w*)",
+    re.I,
+)
 PRICE_FALLBACK = (2.00, 8.00)
 SPEND = QA_DIR / "spend.jsonl"
 
@@ -1849,6 +1871,19 @@ def provider_blocked(rec, cx):
     return any(PROVIDER_BLOCK.search(t) for t in texts)
 
 
+def provider_rate_limited(rec, cx):
+    """Did a turn die because the provider rate-limited it? Same sources as `provider_blocked`:
+    the kernel's stderr and the transcripts, never the scenario's own checks."""
+    texts = []
+    for p in list(rec.dir.glob("kernel*.stderr.log")):
+        texts.append(p.read_text(errors="replace"))
+    for d in agent_dirs(cx.place):
+        tr = d / "transcript.jsonl"
+        if tr.exists():
+            texts.append(tr.read_text(errors="replace"))
+    return any(PROVIDER_RATE_LIMITED.search(t) for t in texts)
+
+
 def draft_bug(scenario, rec, brk):
     if str(brk.get("rule", "")).startswith("env:"):
         return None
@@ -1992,6 +2027,8 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
         rec.broke("driver-exception", f"{type(e).__name__}: {e}")
     finally:
         cx.cleanup()
+    if meta["needs_model"] and rec.breaks and provider_rate_limited(rec, cx):
+        rec.breaks = [{"rule": "env:provider-rate-limited", "detail": f"a turn died on a provider 429 ({MODEL}), so the model never did the work these {len(rec.breaks)} finding(s) are about; not an Arbos failure"}]
     if meta["needs_model"] and provider_blocked(rec, cx):
         rec.breaks = [{"rule": "env:provider-blocked", "detail": f"the model route refused the key ({MODEL}); not an Arbos failure — {len(rec.breaks)} finding(s) of this run set aside", "where": "OpenRouter account"}]
     rec.snapshot(cx.place, "state-after")
