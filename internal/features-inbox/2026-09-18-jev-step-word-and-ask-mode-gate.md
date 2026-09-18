@@ -54,3 +54,7 @@ Asked to *restructure the project page*, the model wrote `notes.md` by hand and 
 ## 4. "nothing to compact yet" written unasked (cycle 46, F-199)
 
 On main `00cc5ba8` the root's transcript carries `notice: nothing to compact yet: the whole working set is recent` five times in one journey run — after the kickoff's first tool call, after a `plan`, after a `spawn`, after a `fold`. `compact::next_move` writes it only on the *manual* path (`control.take_compact()` or a compact wake), so something is setting the manual flag per step without a `/compact` from anyone. The desktop now shows the line only within a minute of a `/compact` it sent ([#686](https://github.com/unarbos/arbos/pull/686)); the kernel is still writing it to the record. Ask: find what sets `manual`, or drop the notice when nobody asked.
+
+## 5. The refused-key notice names Jev and a raw 401 (cycle 46, F-200)
+
+With a bad key the kickoff's transcript notice now reads `Jev did not choose the next step: 401 bad API key: User not found.. The turn stopped. The chat model did not run.` The earlier kernel said `google/gemini-2.5-flash did not accept the API key. Check the API key (api_key or api_key_env in ~/.config/arbos/config.toml)` — the model, the fact, and where the key lives. The desktop's short line covers the pane (*No working model key on this kernel.*), but the record and every client without that mapping carry the router's name, an HTTP code and a double stop. Ask: the provider's refusal, in the earlier words, whichever step met it first.

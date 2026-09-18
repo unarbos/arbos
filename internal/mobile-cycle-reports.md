@@ -3685,4 +3685,4 @@ loading the library in the simulator (M-423). Recorded so the next person
 watching the recording does not go hunting for it in our code.
 
 **Recording:** `media/mobile/cycle-130/recording_demo.mp4`.
-**PR:** [#692](https://github.com/unarbos/arbos/pull/692), the `ios/` batch.
+**PR:** [#693](https://github.com/unarbos/arbos/pull/693), the `ios/` batch.

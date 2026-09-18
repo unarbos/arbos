@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 19:12 UTC.
+Last checked 2026-09-18 19:50 UTC.
 
-## Click Update. You will get build 2097. Jev is in it.
+## Click Update. You will get build 2110. Jev is in it.
 
-**2097** — signed, notarised, stapled, on the feed since 19:09 UTC.
+**2110** — signed, notarised, stapled, on the feed since 19:47 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2097 (builds 2098–2110):
+
+- **#688** — Jacob's chrome list: Call on the composer, no orb, waveform or
+  Chat button
+- **#690** — the Jev hop draws nothing: no Choosing line, no waiting banner
+- **#689** — `worker-chat-shape.sh` counts what a worker's chat is made of
+- **#691** — mobile: a photo says it is a photo
+
+## Before that: 2097
 
 New since 2093 (builds 2094–2097):
 
