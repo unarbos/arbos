@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 20:29 UTC.
+Last checked 2026-09-18 21:03 UTC.
 
-## Click Update. You will get build 2119. Jev is in it.
+## Click Update. You will get build 2121. Jev is in it.
 
-**2119** — signed, notarised, stapled, on the feed since 20:27 UTC.
+**2121** — signed, notarised, stapled, on the feed since 21:01 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2119 (builds 2120–2121):
+
+- **#695** — `poll-feedback.sh` runs from the checkout it lives in, not a
+  second clone in `$HOME`
+
+## Before that: 2119
 
 New since 2117 (builds 2118–2119):
 
