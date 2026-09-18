@@ -2008,6 +2008,9 @@ pub const PROTOCOL: u32 = 1;
 const ATTACH_TAIL: u32 = 200;
 /// Most lines one `history` request returns.
 const HISTORY_MAX: u32 = 2000;
+/// Attach connections, numbered: a claim is held by the connection that
+/// made it.
+static CONN_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn focus_agent(place: &Place) -> String {
     let focus = arbos_core::read_focus(place);
@@ -2863,6 +2866,11 @@ pub async fn serve_client(
                     format!("who={} count={asks}", who.name),
                 );
             }
+            // Paths other windows hold open with unsaved edits, so this
+            // one can show them held from the start.
+            for f in accept_hooks.claims_held() {
+                let _ = out_tx.send(f);
+            }
             tokio::spawn(attach::write_loop(w, out_rx));
             // History requests are answered on this connection alone;
             // everything else goes to the kernel like before.
@@ -2873,9 +2881,35 @@ pub async fn serve_client(
             let out_for_history = out_tx.clone();
             let out_for_read = out_tx;
             let who_name = who.name.clone();
+            // This connection's number: what its claims are held under,
+            // and released with.
+            let conn = CONN_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            let hooks_for_claims = Arc::clone(&accept_hooks);
             tokio::spawn(async move {
                 while let Some(frame) = local_rx.recv().await {
                     match frame {
+                        // A person's editor holds a path with unsaved
+                        // edits (or let it go): kept per connection, told
+                        // to every window; a write there is refused in
+                        // the agent's own turn (side-panels handover 6).
+                        Frame::Claim { path, held } => {
+                            let p = std::path::Path::new(&path);
+                            if hooks_for_claims.claim_key(p).is_none() {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: None,
+                                    detail: format!("claim: {path} is outside this place"),
+                                });
+                                continue;
+                            }
+                            if let Some(f) = hooks_for_claims.set_claim(p, held, &who_name, conn) {
+                                klog::info(
+                                    "claim",
+                                    None,
+                                    format!("who={who_name} conn={conn} held={held} path={path}"),
+                                );
+                                hooks_for_claims.broadcast(f);
+                            }
+                        }
                         Frame::History {
                             agent,
                             since,
@@ -3041,6 +3075,18 @@ pub async fn serve_client(
                             }
                         }
                     }
+                }
+                // The connection is gone: what it held is held no more.
+                let released = hooks_for_claims.release_claims_of(conn);
+                if !released.is_empty() {
+                    klog::info(
+                        "claims_released",
+                        None,
+                        format!("who={who_name} conn={conn} count={}", released.len()),
+                    );
+                }
+                for f in released {
+                    hooks_for_claims.broadcast(f);
                 }
             });
             let role = who.role;
