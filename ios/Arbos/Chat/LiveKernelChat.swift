@@ -198,7 +198,7 @@ final class LiveKernelChat: ChatSource {
             } else if isChild(agent) {
                 setWorker(agent, running: running, step: running ? nil : "")
                 if !running {
-                    stream?.yield(.item(ChatItem(.subagent(name: childNames[agent] ?? agent, status: "done"))))
+                    stream?.yield(.item(ChatItem(.subagent(name: childNames[agent] ?? Self.readable(agent), status: "done"))))
                 }
             }
         case .status(let agent, let step, _):
@@ -381,7 +381,7 @@ final class LiveKernelChat: ChatSource {
             // the tree, so this is the only word of its finish.
             adopt(from)
             if !replaying, children.contains(from) { setWorker(from, running: false, step: "") }
-            return ChatItem(.subagent(name: childNames[from] ?? from, status: text))
+            return ChatItem(.subagent(name: childNames[from] ?? Self.readable(from), status: text))
         case .ask(let question):
             return ChatItem(.agent(question, streaming: false))
         case .notice(let text, let failed):
@@ -451,6 +451,16 @@ final class LiveKernelChat: ChatSource {
     private func isChild(_ id: String) -> Bool {
         adopt(id)
         return children.contains(id)
+    }
+
+    /// A worker's id read back as words, for the moments the app has no
+    /// brief for it. The id is the goal slugged — `say-sentence-about-rivers`
+    /// — and showing it raw put the same four workers on one screen under two
+    /// spellings: three read "Done say sentence about mountains" and one
+    /// "Done say-sentence-about-rivers", because its spawn had not been seen
+    /// when its done arrived.
+    static func readable(_ id: String) -> String {
+        id.contains("-") && !id.contains(" ") ? id.replacingOccurrences(of: "-", with: " ") : id
     }
 
     private static func slug(_ text: String) -> String {
