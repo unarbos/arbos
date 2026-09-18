@@ -251,11 +251,16 @@ fn a_parent_waiting_on_a_worker_picks_up_after_a_restart_and_hears_the_report_on
     // Both mid-flight: root inside spawn wait, slow inside its bash.
     let after = concat!(
         "{\"agent\":\"root\",\"content\":\"Restarted while waiting on slow; it is still building.\"}\n",
-        // Pause after the restart so this report lands after root's
-        // serve-wake turn has ended. An instant "built" reports while
-        // root is still on that turn; the report folds in as a say and
-        // no done wake comes (the same red as #523).
-        "{\"agent\":\"slow\",\"content\":\"building\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"sleep 2; echo built\",\"description\":\"Finish after the restart\"}}]}\n",
+        // The report must land after root's serve-wake turn has ended:
+        // one that lands during it folds in as a say and no done wake
+        // comes (the same red as #523). A fixed 2 s pause was a bound on
+        // the wrong thing — root's restart turn took longer than that
+        // on a loaded runner (red on #542 and #433, 2026-09-18) — so the
+        // worker waits for the fact itself: a `turn_complete` on root's
+        // transcript after its `serve` wake. Bounded at 60 s. (Proved:
+        // with a 5 s model delay on root's restart line the old pause
+        // failed and this passes.)
+        "{\"agent\":\"slow\",\"content\":\"building\",\"calls\":[{\"name\":\"bash\",\"arguments\":{\"command\":\"n=0; until awk '/\\\"wake\\\":\\\"serve\\\"/{s=1} s && /\\\"kind\\\":\\\"turn_complete\\\"/{f=1} END{exit !f}' .arbos/agents/root/transcript.jsonl 2>/dev/null; do n=$((n+1)); [ $n -ge 300 ] && break; sleep 0.2; done; echo built\",\"description\":\"Finish after root's restart turn\"}}]}\n",
         "{\"agent\":\"slow\",\"content\":\"built\"}\n",
         "{\"agent\":\"root\",\"content\":\"slow reports: built.\"}\n",
     );
