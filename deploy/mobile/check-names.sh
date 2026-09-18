@@ -101,6 +101,34 @@ screen "the projects list"
 
 ui tap "$ROW" >/dev/null 2>&1 && sleep 5 && screen "a project's chat"
 
+# The workers sheet. Its rows are worker names, so anything symbol-shaped
+# here is chrome nobody labelled.
+PILL=$(ui dump | grep -E "Button +([^ ]+, )?(Agents|Working) [0-9]+" | head -1)
+if [ -n "$PILL" ]; then
+  idb ui tap "$(echo "$PILL" | awk '{print $1}')" "$(echo "$PILL" | awk '{print $2}')" --udid "$UDID" >/dev/null 2>&1
+  sleep 3
+  screen "the workers sheet"
+  idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID" >/dev/null 2>&1
+  sleep 2
+fi
+
+# Settings, which has more controls than any other screen and produced the
+# first symbol name anybody noticed.
+ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
+if ui tap "Settings" >/dev/null 2>&1; then
+  sleep 3
+  screen "the settings sheet"
+  ui tap "Done" >/dev/null 2>&1; sleep 2
+fi
+
+# The call, which shows almost no words by design and so rests entirely on
+# the labels of its four controls.
+xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 >/dev/null 2>&1
+sleep 9
+ui dump | grep -qE "Button +Allow" && { ui tap "Allow" >/dev/null 2>&1; sleep 4; }
+screen "the call"
+
 echo
 if [ "$FOUND" = 0 ]; then
   echo "VERDICT: no control reads as a symbol name"
