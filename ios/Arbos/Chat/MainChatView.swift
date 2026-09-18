@@ -29,7 +29,6 @@ struct ProjectChatView: View {
     @State private var atTail = true
     @State private var connectingSince = Date()
     @State private var openFolds: Set<UUID> = []
-    @State private var pillRowHeight: CGFloat = 0
 
     /// Consecutive tool calls fold into one row: the phone shows what was
     /// said, not every command run to say it (Jacob, build 956).
@@ -101,7 +100,6 @@ struct ProjectChatView: View {
                 )
             }
         }
-        .onPreferenceChange(PillRowHeight.self) { pillRowHeight = $0 }
         .toolbar(.hidden, for: .navigationBar)
         // The bar is hidden, and UIKit hides its edge swipe with it. The
         // gesture Jacob expects (build 1021: "swiping to the left should
@@ -228,11 +226,6 @@ struct ProjectChatView: View {
             }
             .padding(.horizontal, ArbosTheme.barMargin)
             .padding(.bottom, 4)
-            .background(
-                GeometryReader { box in
-                    Color.clear.preference(key: PillRowHeight.self, value: box.size.height)
-                }
-            )
         }
     }
 
@@ -302,13 +295,7 @@ struct ProjectChatView: View {
                             .foregroundStyle(ArbosTheme.textDim)
                             .padding(.top, 4)
                     }
-                    // The composer is an inset and the transcript ends above
-                    // it, but the pill row above the composer is not counted:
-                    // scrolled to its end, the transcript stopped a pill's
-                    // height short and its last line — a reply, or the away
-                    // card asking to be read — sat behind the pill. Reserve
-                    // the height the pill actually takes.
-                    Color.clear.frame(height: 8 + pillRowHeight).id("tail")
+                    Color.clear.frame(height: 8).id("tail")
                         // The tail in view means he is reading the newest
                         // words; scrolled away means he is reading older
                         // ones, and the stream must not pull him back
@@ -377,7 +364,19 @@ struct ProjectChatView: View {
             .onChange(of: chat.workers) { _, _ in
                 if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
             }
-            .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
+            .onAppear {
+                proxy.scrollTo("tail", anchor: .bottom)
+                // One scroll cannot reach the tail of a long chat. The rows
+                // between are not realised yet, so the proxy works from an
+                // estimate and lands short — measured on the way into a chat
+                // of 2900 lines, 501 points short, five lines of reply hidden
+                // under the composer and the pill. A second scroll, once
+                // those rows exist, arrives at the end.
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(150))
+                    proxy.scrollTo("tail", anchor: .bottom)
+                }
+            }
         }
     }
 
@@ -935,16 +934,6 @@ private struct ChatScrollAnchor: ViewModifier {
         } else {
             content.defaultScrollAnchor(.bottom)
         }
-    }
-}
-
-
-/// How tall the pill row above the composer is, so the transcript can end
-/// clear of it. Zero when there are no workers and no pill is drawn.
-private struct PillRowHeight: PreferenceKey {
-    static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }
 
