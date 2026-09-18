@@ -251,7 +251,7 @@ final class ChatStore: ObservableObject {
                 // could not be reached" beside the hub's own explanation, on a
                 // host it plainly had reached. When the link has already named
                 // what is wrong, a guess next to it is noise.
-                if standing == nil, what != lastTransport {
+                if standing == nil, refusal == nil, what != lastTransport {
                     lastTransport = what
                     items.append(ChatItem(.notice(what, failed: false)))
                 }
