@@ -51,6 +51,17 @@ struct CallView: View {
                 VoiceOrb(level: model.level, phase: model.phase)
                     .frame(width: 200, height: 200)
                     .onTapGesture(perform: tapOrb)
+                    // The screen stays wordless on purpose, and the orb's
+                    // colour carries the state. Colour carries it to one kind
+                    // of person only: read aloud, this screen said nothing at
+                    // all about whether it was listening, thinking or
+                    // speaking. The phase goes to VoiceOver, where it costs
+                    // the design nothing.
+                    .accessibilityElement()
+                    .accessibilityLabel("Call")
+                    .accessibilityValue(model.phase.label)
+                    .accessibilityHint(model.phase == .idle ? "Tap to call" : "")
+                    .accessibilityAddTraits(.isButton)
                 // Who is on the line: the gateway's own word once the call
                 // is up (`session.ready.project`), the chat's face before.
                 // With the keyboard up the transcript line rises into this
@@ -126,11 +137,12 @@ struct CallView: View {
                     }
                 }
             } label: {
-                CallDisc(symbol: "line.3.horizontal") {}
+                CallDisc(symbol: "line.3.horizontal", label: "Call menu") {}
                     .allowsHitTesting(false)
             }
+            .accessibilityLabel("Call menu")
             Spacer()
-            CallDisc(symbol: "slider.horizontal.3") { showSettings = true }
+            CallDisc(symbol: "slider.horizontal.3", label: "Settings") { showSettings = true }
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 2)
@@ -194,7 +206,7 @@ struct CallView: View {
                 .frame(height: 43)
                 .background(Capsule().fill(ArbosTheme.inputBg))
                 .overlay(Capsule().strokeBorder(ArbosTheme.border, lineWidth: 1))
-                CallDisc(symbol: model.muted ? "mic.slash" : "mic", filled: model.muted) {
+                CallDisc(symbol: model.muted ? "mic.slash" : "mic", label: model.muted ? "Unmute" : "Mute", filled: model.muted) {
                     model.muted.toggle()
                 }
                 .disabled(!model.phase.inCall)
@@ -209,6 +221,7 @@ struct CallView: View {
                         .background(Circle().fill(ArbosTheme.text))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("End call")
             }
             .padding(.horizontal, 36)
         }
@@ -324,6 +337,9 @@ struct CallView: View {
 /// A 40 pt round control on the raised plate; `filled` inverts it.
 struct CallDisc: View {
     let symbol: String
+    /// What the disc is for. Without one, SwiftUI reads the SF Symbol's own
+    /// name — the same fault the list's round buttons had (M-264).
+    var label: String
     var filled = false
     let action: () -> Void
 
@@ -337,6 +353,7 @@ struct CallDisc: View {
                 .overlay(Circle().strokeBorder(filled ? Color.clear : ArbosTheme.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }
 
