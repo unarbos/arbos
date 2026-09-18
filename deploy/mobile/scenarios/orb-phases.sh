@@ -17,6 +17,14 @@
 # listening. What matters is that it passes through them in that order and
 # does not flap — cycle 43's fault (M-145) was the orb dropping back to
 # listening mid-turn and jumping forward again.
+#
+# The coverage row is "call — voice first, orb, **colours**", and until now
+# this file read the phase *labels* and never looked at a colour: the word
+# appeared only in this comment. A caller in a quiet room sees the colour
+# and nothing else, so the orb changing its value while looking identical
+# would be a real fault that the sequence above cannot see. Each phase is
+# therefore sampled from the screen as well, once, the first time it is
+# entered.
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -61,6 +69,8 @@ for _ in $(seq 1 120); do
     printf "%s  %s\n" "$T" "$P"
     SEQ="$SEQ $P"
     LAST=$P
+    # One still the first time each phase is entered, for the colour.
+    [ -f "$OUT/phase-$P.png" ] || xcrun simctl io "$UDID" screenshot "$OUT/phase-$P.png" >/dev/null 2>&1
   fi
   sleep 0.4
 done
@@ -69,6 +79,42 @@ xcrun simctl terminate "$UDID" $B 2>/dev/null
 
 echo
 echo "the sequence:$SEQ"
+echo
+echo "what each phase looked like:"
+python3 - "$OUT" <<'PY'
+from pathlib import Path
+import sys
+try:
+    from PIL import Image
+except ImportError:
+    print("  no PIL on this machine — the colours were not read"); raise SystemExit
+out = Path(sys.argv[1])
+seen = {}
+for png in sorted(out.glob("phase-*.png")):
+    name = png.stem[len("phase-"):]
+    im = Image.open(png).convert("RGB")
+    w, h = im.size
+    # The orb sits in the middle of the screen. Its own pixels, not the
+    # ground around it: the brightest tenth of the box, since the orb is
+    # lit and the background is near-black.
+    box = im.crop((int(w * 0.30), int(h * 0.33), int(w * 0.70), int(h * 0.55)))
+    px = sorted(box.getdata(), key=sum, reverse=True)
+    top = px[: max(1, len(px) // 10)]
+    avg = tuple(sum(c[i] for c in top) // len(top) for i in range(3))
+    seen[name] = avg
+    print(f"  {name:12} RGB {avg}")
+if len(seen) < 2:
+    print("  only one phase was seen, so nothing could be compared")
+else:
+    pairs = [(a, b) for a in seen for b in seen if a < b]
+    same = [f"{a} and {b}" for a, b in pairs
+            if max(abs(x - y) for x, y in zip(seen[a], seen[b])) <= 8]
+    if same:
+        print("  LOOK THE SAME: " + "; ".join(same))
+        print("  A caller in a quiet room has only the colour to go on.")
+    else:
+        print(f"  all {len(seen)} phases differ on screen, not only in the tree")
+PY
 echo
 # Flapping is the fault worth catching: a phase that is entered, left and
 # entered again inside one turn is what M-145 described, and what a caller
