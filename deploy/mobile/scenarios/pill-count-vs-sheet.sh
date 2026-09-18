@@ -57,9 +57,18 @@ DUPES=$(ui dump | grep -E "Button +.+, " \
         | sort | uniq -d | wc -l | tr -d ' ')
 echo "labels sharing a name on one screen (each would hide a row): $DUPES"
 
-if [ "$ROWS" = "$COUNT" ]; then
+# Rows are counted by their label, so two workers with the same goal text
+# count once. That is fine while labels are unique and worthless the moment
+# they are not — and with enough runs behind it this project has repeats.
+# A tool that cannot measure should say so rather than produce a number and
+# a verdict, which is how cycle 74 filed a disagreement that did not exist.
+if [ "$DUPES" -gt 0 ]; then
+  echo "VERDICT: cannot say. $DUPES label(s) are shared on a single screen, and rows are"
+  echo "         counted by label, so the sheet's $ROWS is a floor and not a count."
+  echo "         Pill $COUNT. Compare these two only on a project whose goals are distinct."
+elif [ "$ROWS" = "$COUNT" ]; then
   echo "VERDICT: the two agree on $COUNT."
 else
-  echo "VERDICT: they disagree — pill $COUNT, sheet $ROWS. One of the app's own two counts is wrong."
+  echo "VERDICT: they disagree — pill $COUNT, sheet $ROWS, and no shared labels to explain it."
   echo "         Rows are in $LABELS if you want to see which are present."
 fi
