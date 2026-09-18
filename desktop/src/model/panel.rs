@@ -20,13 +20,19 @@ use crate::model::surface::SurfaceId;
 /// the space beside the sidebar — 592 — and clamps between 377 and 766, with
 /// the chat never squeezed under 418.
 ///
-/// The project tab keeps the narrow measure it was drawn for, which is the
-/// width already matched against Cursor's *sidebar*; the wide one is for
-/// Cursor's *side panel*, which is what every other tab is.
-pub const PAGE_WIDTH: f32 = 280.;
+/// Project and every other tab share that wide measure. A 280-pt Project
+/// tab next to a 592-pt Terminal read as two different drawers; they are
+/// one drawer, so they open at the same width. A drag still remembers its
+/// own number and wins over this default.
+pub const PAGE_WIDTH: f32 = 592.;
 pub const SURFACE_WIDTH: f32 = 592.;
 pub const MIN_WIDTH: f32 = 377.;
 pub const MAX_WIDTH: f32 = 766.;
+
+/// The chat's floor. Cursor's divider clamps at 418 and never squeezes the
+/// chat under it; this app has no left sidebar, so the same floor leaves more
+/// room, not less.
+pub const CHAT_MIN_WIDTH: f32 = 418.;
 
 /// Whether a document tab lets him type into the file.
 ///
@@ -94,8 +100,7 @@ pub struct Panel {
     /// it.
     pub open: bool,
     /// The width the person dragged it to, if they ever did. `None` takes
-    /// [`PAGE_WIDTH`] or [`SURFACE_WIDTH`] from what is in front, so the
-    /// `.arbos/` view keeps the measure it was drawn for.
+    /// [`SURFACE_WIDTH`] for every tab, Project included.
     pub width: Option<f32>,
     tabs: Vec<PanelTab>,
     active: usize,
@@ -133,15 +138,31 @@ impl Panel {
     }
 
     /// How wide to draw: what the person dragged it to, held inside the range
-    /// a drag may take, or the measure the tab in front was drawn for.
+    /// a drag may take, or the shared default every tab opens at.
     pub fn width(&self) -> f32 {
-        match self.width {
-            Some(chosen) => chosen.clamp(MIN_WIDTH, MAX_WIDTH),
-            None => match self.active_tab() {
-                PanelTab::Project => PAGE_WIDTH,
-                PanelTab::Surface(_) | PanelTab::New(_) => SURFACE_WIDTH,
-            },
-        }
+        self.width
+            .unwrap_or(SURFACE_WIDTH)
+            .clamp(MIN_WIDTH, MAX_WIDTH)
+    }
+
+    /// Remember a dragged width. Held inside the range a drag may take, so a
+    /// pointer past either end cannot leave a drawer the chat cannot live
+    /// beside.
+    pub fn set_width(&mut self, width: f32) {
+        self.width = Some(width.clamp(MIN_WIDTH, MAX_WIDTH));
+    }
+
+    /// ⌘\\ and the four-box: grow to the space the window can spare, or
+    /// return to the default if it is already there. Never moves the tab
+    /// into the chat column — that cloned a Terminal over the conversation.
+    pub fn toggle_expanded_width(&mut self, available: f32) {
+        let max = available.clamp(MIN_WIDTH, MAX_WIDTH);
+        let current = self.width();
+        self.width = Some(if current >= max - 8.0 {
+            SURFACE_WIDTH
+        } else {
+            max
+        });
     }
 
     pub fn select(&mut self, ix: usize) {
@@ -295,7 +316,29 @@ mod tests {
         let panel = Panel::default();
         assert!(!panel.open);
         assert_eq!(panel.tabs(), &[PanelTab::Project]);
-        assert_eq!(panel.width(), PAGE_WIDTH);
+        assert_eq!(panel.width(), SURFACE_WIDTH);
+        assert_eq!(
+            PAGE_WIDTH, SURFACE_WIDTH,
+            "Project and Terminal share one default width"
+        );
+    }
+
+    #[test]
+    fn a_drag_remembers_the_width() {
+        let mut panel = Panel::default();
+        panel.set_width(640.0);
+        assert_eq!(panel.width(), 640.0);
+        panel.set_width(20.0);
+        assert_eq!(panel.width(), MIN_WIDTH);
+    }
+
+    #[test]
+    fn the_four_box_grows_the_drawer_instead_of_leaving_it() {
+        let mut panel = Panel::default();
+        panel.toggle_expanded_width(MAX_WIDTH);
+        assert_eq!(panel.width(), MAX_WIDTH);
+        panel.toggle_expanded_width(MAX_WIDTH);
+        assert_eq!(panel.width(), SURFACE_WIDTH);
     }
 
     #[test]

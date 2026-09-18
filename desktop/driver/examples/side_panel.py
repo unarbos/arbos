@@ -101,6 +101,11 @@ def main() -> int:
             "opening it gives it the focus, so the lit tab row is its row",
             state["panel"]["focused"] is True,
         )
+        check(
+            "the Project tab opens as wide as a Terminal tab",
+            state["panel"]["width"] == 592,
+            f"width={state['panel']['width']}",
+        )
 
         projects = len(state["projects"])
         app.key("cmd-t")
@@ -164,15 +169,23 @@ def main() -> int:
                 front["kind"] == "surface" and bool(front["title"]),
                 f"front={front}",
             )
-            # ⌘\ gives the tab in front the whole window, and gives it back.
+            # ⌘\ grows the drawer. It must not clone the tab into the chat
+            # column — that was the four-box bug.
+            before = state["panel"]["width"]
             app.key("cmd-\\")
             state = app.wait_state(
-                lambda s: s["showing"] == "surface", what="the zoom"
+                lambda s: s["panel"]["width"] != before, what="the drawer grown"
             )
-            check("⌘\\ zooms the tab in front into the column", True)
+            check(
+                "⌘\\ expands the drawer and leaves the chat in the column",
+                state["showing"] == "chat" and state["panel"]["width"] > before,
+                f"showing={state['showing']} width={state['panel']['width']}",
+            )
             app.key("cmd-\\")
-            state = app.wait_state(lambda s: s["showing"] == "chat", what="the chat back")
-            check("and the same key gives the chat back", True)
+            state = app.wait_state(
+                lambda s: s["panel"]["width"] == before, what="the drawer restored"
+            )
+            check("and the same key gives the default width back", True)
 
             at = state["panel"]["active"]
             app.click(f"panel-tab-close-{at}")
