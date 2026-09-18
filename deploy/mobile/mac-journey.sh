@@ -8,6 +8,13 @@
 #   mac-journey.sh <target>    target: pod | <machine>/<project>
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
+# The tools this journey runs come from the checkout beside it, not from
+# copies in $HOME. Both existed, they drifted, and the journey was using the
+# stale one: `kernel.py` was corrected three times on 09-18 and not one of
+# those fixes reached a run, because the run read `"$HERE/kernel.py"`. It also
+# meant a rebuilt Mac needed an undocumented "copy these four into $HOME"
+# step before the loop's own acceptance test would work.
+HERE=$(cd "$(dirname "$0")" && pwd)
 . "$(cd "$(dirname "$0")" && pwd)/sim-lib.sh"   # tap_shot: screenshot pixels -> device points
 U=B1185668-7488-420F-B12D-4412BAAC7673; B=com.unarbos.arbos.ios
 TARGET=${1:-pod}; ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
@@ -22,9 +29,9 @@ shot() { xcrun simctl io "$U" screenshot "$O/$1.png" >/dev/null 2>&1; echo "$(da
 # fails for want of evidence instead of finding somebody else's.
 hist() {
   if [ -z "${AFTER:-}" ]; then echo "hist: no anchor set; refusing to read the whole transcript" >&2; return 0; fi
-  python3 ~/kernel.py $TARGET history 120 2>/dev/null | awk -v a="$AFTER" '$1+0 > a+0'
+  python3 "$HERE/kernel.py" $TARGET history 120 2>/dev/null | awk -v a="$AFTER" '$1+0 > a+0'
 }
-seq_of() { python3 ~/kernel.py $TARGET history 120 2>/dev/null | grep -E "$1" | tail -1 | awk '{print $1}'; }
+seq_of() { python3 "$HERE/kernel.py" $TARGET history 120 2>/dev/null | grep -E "$1" | tail -1 | awk '{print $1}'; }
 score() { echo "$1 $2 $3" | tee -a $O/score.txt; }
 wait_hist() { local s=$1 re=$2 secs=$3 t=0; while [ $t -lt $secs ]; do if hist | grep -qE "$re"; then score "$s" PASS "/$re/ after ${t}s"; return 0; fi; sleep 5; t=$((t+5)); done; score "$s" FAIL "no /$re/ within ${secs}s"; return 1; }
 # Type a line and make sure the whole of it is in the box before sending it.
@@ -75,13 +82,13 @@ type_send() {
   echo "type_send: gave up on a line after three tries" | tee -a $O/run.txt
   return 1
 }
-rd() { python3 ~/kernel.py $TARGET read "$1" 2>/dev/null; }
+rd() { python3 "$HERE/kernel.py" $TARGET read "$1" 2>/dev/null; }
 echo "run $RUN id $ID target $TARGET dir $DIR" | tee $O/run.txt
 # Which kernel this run is measured against. Asked of the kernel on the
 # attach socket, not of the hub: the roster's git_sha is whichever process
 # registered last and has named a current build for a node that had been
 # running a deleted binary for two days.
-python3 ~/kernel.py $TARGET hello > $O/kernel-version.txt 2>&1 || echo "no hello" > $O/kernel-version.txt
+python3 "$HERE/kernel.py" $TARGET hello > $O/kernel-version.txt 2>&1 || echo "no hello" > $O/kernel-version.txt
 echo "kernel $(head -1 $O/kernel-version.txt)" | tee -a $O/run.txt
 
 # J1 — open the project from the list (the phone's "create": the project lives on a machine's kernel)
@@ -118,7 +125,7 @@ xcrun simctl io "$U" recordVideo --codec h264 --force "$O/j2-raw.mp4" > "$O/reco
 sleep 2; grep -q "already in progress" "$O/record.log" 2>/dev/null && echo "recording refused: the device still has a recorder on it" | tee -a $O/run.txt
 # the spawn tool record lands in the transcript only when the call ends (wait:true); the child's own
 # `turn running` frame is live, so a frame log is what says "a worker is running now"
-(python3 ~/frame-log.py $TARGET 400 > $O/frames.log 2>&1 &)
+(python3 "$HERE/frame-log.py" $TARGET 400 > $O/frames.log 2>&1 &)
 type_send "$ID challenge: in $DIR, through one worker you wait for: fix the failing test, then add perimeter(w, h) and diagonal(w, h) to mathlib.py with three unit tests each (including edge cases), add a CHANGELOG.md entry describing every change, make 'python3 -m unittest -q' from the project folder pass (fix discovery if needed), and commit the work on a branch (not main). Tell me the branch name and the test output's last line."
 wait_hist J2 "user +$ID challenge" 30; C=$(seq_of "user +$ID challenge"); AFTER=$C
 # Without the challenge line there is no run to score: everything below would
@@ -172,7 +179,7 @@ TIME_ANS=$(hist | awk -v f="$F" '$1+0 > f+0' | grep -ciE "assistant .*([0-9]{1,2
 type_send "$ID verify: in $DIR, run these git and python commands yourself and paste the raw output under the headings BRANCHES, CHANGELOG, RETURNS, TESTS, AHEAD, nothing else: (1) list every local branch with its last commit date, newest first; (2) show the CHANGELOG.md from the newest branch that is not main and not the initial setup branch; (3) grep the return lines of mathlib.py on that branch; (4) check that branch out in a detached temporary worktree and run python3 -m unittest -q there, keep only the last line; (5) count that branch commits ahead of main."
 wait_hist J7v "user +$ID verify" 30 >/dev/null; V=$(seq_of "user +$ID verify")
 t=0; while [ $t -lt 120 ]; do hist | awk -v s="$V" '$1+0 > s+0' | grep -qiE "assistant .*(AHEAD|TESTS)" && break; sleep 5; t=$((t+5)); done
-sleep 8; python3 ~/kernel.py $TARGET history 40 2>/dev/null | awk -v s="$V" '$1+0 > s+0' | grep -E "assistant" | tail -1 > $O/verify.txt
+sleep 8; python3 "$HERE/kernel.py" $TARGET history 40 2>/dev/null | awk -v s="$V" '$1+0 > s+0' | grep -E "assistant" | tail -1 > $O/verify.txt
 VR=$(cat $O/verify.txt)
 if echo "$VR" | grep -q "QA-$ID"; then [ "$ENDED_BEFORE" != "0" ] && score J4 U "CHANGELOG carries QA-$ID, but the challenge turn had ended before the line (mid-flight half unverified); answer to the summary: $ANS" || score J4 PASS "CHANGELOG carries QA-$ID, taken by the running work (spawns after: $SPAWNS_AFTER); summary answered: $ANS"; else score J4 FAIL "CHANGELOG lacks QA-$ID (spawns after: $SPAWNS_AFTER, answer: $ANS)"; fi
 [ "$SPAWNS_AFTER" != "0" ] && score J4 FAIL "a second worker was spawned for the follow-up"
@@ -266,17 +273,17 @@ ui tap "Close" >/dev/null 2>&1 || idb ui tap 42 85 --udid $U
 sleep 2; grep -E "^metric" $O/console.log | tail -4 | tee $O/call-metrics.txt
 if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v error -y -i "$O/p-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-photo-and-call.mp4" && rm -f "$O/p-raw.mp4"; fi
 # PUSH — the hub's own report (#333): enabled or why not; a test alert when the key exists
-~/push-check.sh 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null
+"$HERE/push-check.sh" 2>&1 | tee $O/push-check.txt | grep -E "PUSH (status|verdict)" | sed "s/^/PUSH /" >/dev/null
 V=$(grep "PUSH verdict" $O/push-check.txt | head -1); case "$V" in *PASS*) score PUSH PASS "$V";; *OFF*) score PUSH U "$V";; *) score PUSH U "$(grep -m1 'PUSH status' $O/push-check.txt)";; esac
 # J6' — kill and reopen: nothing lost
 xcrun simctl terminate $U $B; sleep 2; xcrun simctl launch $U $B -noAskNotifications 1 -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 7; shot J6k-list
 ui tap "$ROW" || score J6k FAIL "no $ROW row after the relaunch"
 sleep 6; shot J6k-reopened
 score J6k EYE "reopened chat ends where it ended; no pending cards"
-python3 ~/kernel.py $TARGET history 150 > $O/transcript-tail.txt 2>/dev/null
+python3 "$HERE/kernel.py" $TARGET history 150 > $O/transcript-tail.txt 2>/dev/null
 # Again, now the run is over: a kernel replaced under a run has happened
 # here, and a run that measured two builds must say so rather than pick one.
-python3 ~/kernel.py $TARGET hello > $O/kernel-version-end.txt 2>&1 || true
+python3 "$HERE/kernel.py" $TARGET hello > $O/kernel-version-end.txt 2>&1 || true
 echo "--- score"; cat $O/score.txt
 echo "--- kernel"; head -1 $O/kernel-version.txt
-python3 ~/journey-record.py "$O" "$TARGET" "${APP_BUILD:-main@unknown}" "${RUN_NOTES:-}"
+python3 "$HERE/journey-record.py" "$O" "$TARGET" "${APP_BUILD:-main@unknown}" "${RUN_NOTES:-}"
