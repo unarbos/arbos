@@ -730,8 +730,9 @@ pub struct Arbos {
     /// The open session menu was opened from the chat header's `⋯`, so it
     /// anchors there rather than at a panel row.
     pub(crate) menu_at_header: bool,
-    /// The git branch of the last local place looked at, for the row under
-    /// the composer. `(place path, branch or none)`.
+    /// The git branch of the last local place looked at, for the project
+    /// panel header. `(place path, branch or none)`. The composer no
+    /// longer shows a branch chip.
     pub(crate) branch_cache: std::cell::RefCell<Option<(std::path::PathBuf, Option<String>)>>,
     pub(crate) terminals:
         std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
