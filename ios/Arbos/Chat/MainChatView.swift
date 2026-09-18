@@ -778,9 +778,6 @@ struct ChatRow: View {
             Image(systemName: symbol)
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: 12)
-                // The text beside it says the same thing; unhidden, VoiceOver
-                // reads "Arrow Turning Down Then Right" before every line.
-                .accessibilityHidden(true)
             Text(text)
                 .lineLimit(2)
                 .truncationMode(truncation)
@@ -791,6 +788,13 @@ struct ChatRow: View {
         }
         .font(ArbosTheme.callout)
         .foregroundStyle(tint)
+        // One line, one thing said. `accessibilityHidden` on the glyph alone
+        // did not take — the tree still carried "Arrow Turning Down Then
+        // Right" beside every worker line — so the row is made a single
+        // element that reads its words and nothing else.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(trailing.isEmpty ? text : "\(text), \(trailing)")
+        .accessibilityAddTraits(.isStaticText)
     }
 }
 
