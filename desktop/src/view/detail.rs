@@ -11,7 +11,7 @@ use crate::{
         surface::Surface,
     },
     view::{
-        component::{composer, composer::SessionDrag, menu::Menu, surface as board, transcript},
+        component::{composer, composer::SessionDrag, surface as board, transcript},
         naming::Renaming,
         root::{self, Arbos, NewSession, Pane},
     },
@@ -708,8 +708,10 @@ fn voice_phase() -> Duration {
 
 impl Arbos {
     /// Cursor's chat header: the chat's place in the tree on the left — its
-    /// parents as crumbs, then its title — the chat's menu and the panel
-    /// toggle on the right, on one slim line the transcript scrolls under.
+    /// parents as crumbs, then its title — and the panel toggle on the
+    /// right, on one slim line the transcript scrolls under. Chat actions
+    /// stay on a right-click of the agent row; the header no longer
+    /// carries a three-dot.
     fn chat_header(
         &self,
         theme: &Theme,
@@ -721,7 +723,6 @@ impl Arbos {
             return div().into_any_element();
         };
         let id = chat.id;
-        let closed = chat.closed;
         let title = workspace.display_label(id);
         let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_in_header;
         // A sub-agent in front is shown under its parents, Cursor's way:
@@ -805,37 +806,6 @@ impl Arbos {
                 )
             })
             .child(div().flex_1())
-            .child(
-                self.menu_press(
-                    div()
-                        .id(("chat-header-menu", id))
-                        .relative()
-                        .flex_none()
-                        .size(px(24.))
-                        .rounded(px(5.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|el| el.bg(theme.element_hover)),
-                    Menu::Session(id),
-                    cx,
-                )
-                .tooltip(|window, cx| Tooltip::text("Chat actions", window, cx))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_menu_at_header(Menu::Session(id), cx)
-                }))
-                .child(
-                    icons::icon(icons::system::MENU_DOTS)
-                        .size(px(14.))
-                        .text_color(theme.text_muted),
-                )
-                .children(if self.menu_at_header {
-                    self.session_menu_element(id, closed, cx)
-                } else {
-                    None
-                }),
-            )
             .child(self.panel_toggle(cx))
             .into_any_element()
     }

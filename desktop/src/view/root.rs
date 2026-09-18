@@ -1602,10 +1602,11 @@ impl Arbos {
         self.focus_panel(window, cx);
     }
 
-    /// ⌘\\: the tab in front takes the window, and the same key gives the chat
-    /// back — "let me really work in this one" without a grid to arrange.
-    /// Only a surface can be zoomed; the project tab and an empty tab have
-    /// nothing the column would draw.
+    /// ⌘\\ and the four-box: grow the drawer to the space the window can
+    /// spare, or return it to the default. An older build put the tab in
+    /// front into the chat column, which cloned a Terminal over the
+    /// conversation; if that pane is still showing, this key gives the
+    /// chat back first.
     pub(crate) fn zoom_panel_action(
         &mut self,
         _: &ZoomPanel,
@@ -1616,13 +1617,20 @@ impl Arbos {
             self.show_chat(&ShowChat, window, cx);
             return;
         }
-        let Some(PanelTab::Surface(id)) = self.workspace.read(cx).panel().map(Panel::active_tab)
-        else {
+        if self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_none_or(|panel| !panel.open)
+        {
             return;
-        };
-        self.show_pane(Pane::Surface, cx);
-        self.workspace
-            .update(cx, |workspace, cx| workspace.select_surface(id, cx));
+        }
+        let viewport = f32::from(window.viewport_size().width);
+        let available =
+            (viewport - crate::model::panel::CHAT_MIN_WIDTH).max(crate::model::panel::MIN_WIDTH);
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.toggle_panel_expand(available, cx)
+        });
     }
 
     pub(crate) fn open_settings_action(

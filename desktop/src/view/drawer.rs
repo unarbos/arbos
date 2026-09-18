@@ -14,23 +14,33 @@
 
 use crate::{
     model::{
-        panel::{DOCUMENTS_EDITABLE, PanelTab},
+        panel::{CHAT_MIN_WIDTH, DOCUMENTS_EDITABLE, MAX_WIDTH, MIN_WIDTH, PanelTab},
         surface::{Surface, SurfaceId},
     },
     view::{
-        component::surface as board,
+        component::{menu, menu::Menu, surface as board},
         panel::{PANEL_MIN_WINDOW, PANEL_WIDTH},
         root::{self, Arbos, Pane, TogglePanel, ZoomPanel},
     },
 };
 use bezel::{
     gpui::{
-        AnyElement, ClickEvent, Context, MouseButton, PathPromptOptions, SharedString, Window, div,
-        prelude::*, px,
+        AnyElement, ClickEvent, Context, DragMoveEvent, Empty, MouseButton, PathPromptOptions,
+        SharedString, Window, div, prelude::*, px,
     },
     theme::{TextStyle, Theme, Typeset},
-    ui::{icons, tooltip::Tooltip, widgets::Buttons},
+    ui::{
+        icons,
+        menu::Item,
+        popover,
+        tooltip::Tooltip,
+        widgets::{Buttons, Layout, SPLIT_HANDLE_HIT, SplitStyle},
+    },
 };
+
+/// The payload of a drag on the drawer's divider. Its own type so a drag
+/// of a settings slider or another split cannot move this edge.
+struct PanelSplit;
 
 /// The tab row's pills, measured off Cursor's side panel
 /// (`internal/cursor-side-panel-measured.md`): a 26 px pill in a 40 px row,
@@ -47,11 +57,6 @@ const TAB_MAX_WIDTH: f32 = 180.;
 const CARD_WIDTH: f32 = 110.;
 const CARD_HEIGHT: f32 = 80.;
 const CARD_GAP: f32 = 16.;
-
-/// The chat's floor. Cursor's divider clamps at 418 and never squeezes the
-/// chat under it; this app has no left sidebar, so the same floor leaves more
-/// room, not less.
-const CHAT_MIN_WIDTH: f32 = 418.;
 
 /// What the four cards on an empty tab offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +134,7 @@ impl Arbos {
                 .id("panel")
                 .key_context(root::PANEL_CONTEXT)
                 .track_focus(&self.panel_focus)
+                .relative()
                 .flex_none()
                 .w(px(width))
                 .h_full()
@@ -144,6 +150,12 @@ impl Arbos {
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| this.focus_panel(window, cx)),
                 )
+                .on_drag_move(
+                    cx.listener(|this, event: &DragMoveEvent<PanelSplit>, window, cx| {
+                        this.drag_panel_width(event, window, cx);
+                    }),
+                )
+                .child(self.panel_split(&theme, cx))
                 .child(self.panel_tab_row(&tabs, active, window, cx))
                 .children(body)
                 .children(on_project.then(|| self.panel_foot(&theme, cx)))
@@ -162,6 +174,16 @@ impl Arbos {
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let focused = self.panel_focused(window, cx);
+        let expanded = self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_some_and(|panel| panel.width() >= MAX_WIDTH - 8.0);
+        let expand_label = if expanded {
+            "Restore panel width"
+        } else {
+            "Expand panel"
+        };
         div()
             .id("panel-tabs")
             .flex_none()
@@ -180,26 +202,31 @@ impl Arbos {
             .border_b_1()
             .border_color(if focused { theme.accent } else { theme.border })
             .child(
-                theme
-                    .ghost("panel-new-tab")
-                    .flex_none()
-                    .size(px(TAB_HEIGHT))
-                    .rounded(px(TAB_RADIUS))
-                    .items_center()
-                    .justify_center()
-                    .tooltip(|window, cx| {
-                        Tooltip::with_keystroke("New panel tab", "⌘T", window, cx)
-                    })
-                    .child(
-                        icons::icon(icons::system::PLUS)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.focus_panel(window, cx);
-                        this.workspace
-                            .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
-                    })),
+                self.menu_press(
+                    theme
+                        .ghost("panel-new-tab")
+                        .relative()
+                        .flex_none()
+                        .size(px(TAB_HEIGHT))
+                        .rounded(px(TAB_RADIUS))
+                        .items_center()
+                        .justify_center()
+                        .tooltip(|window, cx| {
+                            Tooltip::with_keystroke("Open a panel", "⌘T", window, cx)
+                        })
+                        .child(
+                            icons::icon(icons::system::PLUS)
+                                .size(px(14.))
+                                .text_color(theme.text_muted),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.focus_panel(window, cx);
+                            this.toggle_menu(Menu::PanelNew, cx);
+                        })),
+                    Menu::PanelNew,
+                    cx,
+                )
+                .children(self.panel_new_menu(cx)),
             )
             .child(
                 div()
@@ -223,8 +250,8 @@ impl Arbos {
                     .rounded(px(TAB_RADIUS))
                     .items_center()
                     .justify_center()
-                    .tooltip(|window, cx| {
-                        Tooltip::with_keystroke("Expand panel", "⌘\\", window, cx)
+                    .tooltip(move |window, cx| {
+                        Tooltip::with_keystroke(expand_label, "⌘\\", window, cx)
                     })
                     .child(
                         icons::icon(icons::system::WIDGET)
@@ -505,6 +532,107 @@ impl Arbos {
             workspace.edit_in_composer(text.to_string(), cx);
         });
         self.focus_composer(window, cx);
+    }
+
+    /// The divider on the drawer's left edge: a 9 px grab strip over the
+    /// hairline the panel already paints, so a drag widens or narrows it.
+    fn panel_split(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        theme
+            .split_handle(bezel::gpui::Axis::Horizontal, SplitStyle::Ghost)
+            .id("panel-split")
+            .absolute()
+            .left(px(-SPLIT_HANDLE_HIT / 2.))
+            .top(px(0.))
+            .h_full()
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    let Some(width) = this.workspace.read(cx).panel().map(|panel| panel.width())
+                    else {
+                        return;
+                    };
+                    this.workspace.update(cx, |workspace, cx| {
+                        workspace.set_panel_width(width, true, cx);
+                    });
+                }),
+            )
+            .on_drag(PanelSplit, |_, _, _, cx| cx.new(|_| Empty))
+            .into_any_element()
+    }
+
+    /// Follow the pointer: the drawer's width is the space from the pointer
+    /// to the window's right edge, held so the chat never drops under its
+    /// reading measure.
+    fn drag_panel_width(
+        &mut self,
+        event: &DragMoveEvent<PanelSplit>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewport = f32::from(window.viewport_size().width);
+        let pointer = f32::from(event.event.position.x);
+        let max = (viewport - CHAT_MIN_WIDTH).min(MAX_WIDTH).max(MIN_WIDTH);
+        let width = (viewport - pointer).clamp(MIN_WIDTH, max);
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.set_panel_width(width, false, cx)
+        });
+    }
+
+    /// The `+` pull-down: a files browser first, then the other things a
+    /// tab can hold. `⌘T` still opens an empty tab; this is the ask.
+    fn panel_new_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.menu != Some(Menu::PanelNew) {
+            return None;
+        }
+        let rows = vec![
+            menu::row(
+                Item::action("Browse files…")
+                    .with_icon(icons::files::FOLDER_WITH_FILES)
+                    .with_description("Open a file from this folder"),
+                |this, _, cx| this.open_file_in_panel(cx),
+            ),
+            menu::row(
+                Item::action("Terminal")
+                    .with_icon(icons::devices::TERMINAL)
+                    .with_description("A shell of your own, in this folder"),
+                |this, _, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.open_shell(cx));
+                },
+            ),
+            menu::row(
+                Item::action("Browser")
+                    .with_icon(icons::devices::GLOBAL)
+                    .with_description("Ask the agent to open a page"),
+                |this, window, cx| this.ask_in_composer("Open a browser page.", window, cx),
+            ),
+            menu::row(
+                Item::action("Project")
+                    .with_icon(icons::files::FOLDER)
+                    .with_description("Agents, processes and the project page"),
+                |this, _, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.select_panel_tab(0, cx));
+                },
+            ),
+            menu::row(Item::Separator, |_, _, _| {}),
+            menu::row(
+                Item::action("New tab")
+                    .with_icon(icons::system::PLUS)
+                    .with_keystroke("⌘T"),
+                |this, _, cx| {
+                    this.workspace
+                        .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
+                },
+            ),
+        ];
+        Some(popover::anchored_menu_below(
+            "panel-new-menu",
+            self.menu_card("panel-new-menu", rows, cx),
+            None,
+        ))
     }
 
     /// Cursor's Open File, into the tab in front: the system picker, then the

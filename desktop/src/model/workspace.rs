@@ -2966,6 +2966,29 @@ impl Workspace {
         self.with_panel(cx, |panel| panel.open = !panel.open);
     }
 
+    /// A drag of the divider, or the four-box expanding it. `persist` is
+    /// whether this width is finished — a live drag writes the number so
+    /// the drawer follows the pointer, and only the last move is filed.
+    pub fn set_panel_width(&mut self, width: f32, persist: bool, cx: &mut Context<Self>) {
+        let Some(ix) = self.active else {
+            return;
+        };
+        let Some(project) = self.projects.get_mut(ix) else {
+            return;
+        };
+        project.panel.set_width(width);
+        if persist {
+            self.save();
+        }
+        cx.notify();
+    }
+
+    /// ⌘\\ / the four-box: grow to the space the window can spare, or
+    /// return to the default. Filed at once — it is a click, not a drag.
+    pub fn toggle_panel_expand(&mut self, available: f32, cx: &mut Context<Self>) {
+        self.with_panel(cx, |panel| panel.toggle_expanded_width(available));
+    }
+
     /// A click on a tab. It opens the drawer too, so the row a person
     /// clicked in the chat's card is never a click that does nothing.
     pub fn select_panel_tab(&mut self, at: usize, cx: &mut Context<Self>) {

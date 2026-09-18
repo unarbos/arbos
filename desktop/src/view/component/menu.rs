@@ -19,6 +19,10 @@ pub(crate) enum Menu {
     Session(u64),
     /// A project tab: edit its face, close it.
     Tab(usize),
+    /// The drawer's `+`: files, a terminal, a browser, the project tab,
+    /// or an empty tab. A click used to open a tab with no ask; the menu
+    /// is the ask.
+    PanelNew,
 }
 
 /// One row of a menu, and what picking it does.
