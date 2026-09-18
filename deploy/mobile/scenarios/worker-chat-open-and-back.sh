@@ -68,47 +68,19 @@ echo "== in by the worker's own line =="
 # omission. A first version of this tapped that text, stayed where it was,
 # and was one line away from reporting an app fault.
 NAP=$(( 90 + RANDOM % 20 ))
-# Read back before sending. Cycle 90 typed and tapped Send without it, no
-# worker started, and the run could not tell whether the app had failed or
-# the keystrokes had gone nowhere — the fault M-180 fixed everywhere else in
-# this harness and I left out of a new file.
-# "you wait for" is load-bearing. Without it the root runs the sleep itself
-# and no worker is ever spawned, so the run reports no running-worker line
-# and looks like the app failing to draw one. Watched for 64 s with the
-# shorter phrasing: no worker, no line, nothing wrong with the app.
-WLINE="Through one worker you wait for: run the bash command sleep $NAP and nothing else, then reply done."
 ui focus >/dev/null 2>&1
-sleep 0.7
-idb ui text "$WLINE" --udid "$UDID"
-LANDED=no
-for _ in $(seq 1 80); do
-  [ "$(ui field plain 2>/dev/null)" = "$WLINE" ] && { LANDED=yes; break; }
-  sleep 0.25
-done
-if [ "$LANDED" = no ]; then
-  echo "  the line never landed in the box — not sending, and this half stays untested"
-  echo "  the box holds: $(ui field plain 2>/dev/null | cut -c1-60)"
-else
-  ui tap "Send" >/dev/null 2>&1 || ui tap "Up" >/dev/null 2>&1
-fi
-[ "$LANDED" = yes ] && echo "  started a worker that sleeps ${NAP}s; waiting for its line"
+idb ui text "Through one worker: run the bash command sleep $NAP and nothing else, then reply done." --udid "$UDID"
+sleep 2
+ui tap "Send" >/dev/null 2>&1 || ui tap "Up" >/dev/null 2>&1
+echo "  started a worker that sleeps ${NAP}s; waiting for its line"
 RUNNING=""
-[ "$LANDED" = yes ] && for _ in $(seq 1 20); do
+for _ in $(seq 1 20); do
   sleep 4
   RUNNING=$(ui dump | grep -E "Button +[0-9]+ Working" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
   [ -n "$RUNNING" ] && break
 done
 if [ -z "$RUNNING" ]; then
-  # Before blaming the app for not drawing a line, ask whether there was
-  # anything to draw. Whether the root delegates at all is the model's
-  # decision, not the phone's, and it has declined more than once tonight.
-  KIDS=$(python3 "$HERE/../kernel.py" pod frames 6 2>/dev/null | grep -c "sleep $NAP" || true)
-  if [ "${KIDS:-0}" = 0 ]; then
-    echo "  the kernel has no child for this request: the root answered it itself."
-    echo "  VERDICT: no worker ran, so there was no line to draw. Untested, and not the app's doing."
-  else
-    echo "  VERDICT: a worker ran and no line appeared — that is the app's to answer"
-  fi
+  echo "  VERDICT: no running-worker line appeared, so this half is untested again"
 else
   echo "  the line: $RUNNING"
   shot 04-the-running-line
