@@ -479,10 +479,10 @@ before committing, not after pushing.
 and it has moved twice while this cycle ran — **1657** was wrong in two of
 my earlier reports, **1716** (`2eae41c7`, carrying #529) replaced it, and
 the steward has since written **1725** (`74b49b4c`, carrying #533) and then
-**1731** (`3ef5f436`, carrying #535). That number is the steward's to set
-and this loop's only to record; it has moved four times while these
-cycles ran, which is why no report of mine should state it as a fact of
-its own.
+**1731** (`3ef5f436`, carrying #535), and now **1735**. That number is the
+steward's to set and this loop's only to record; it has moved five times
+while these cycles ran, which is why no report of mine should state it as a
+fact of its own.
 
 ### Cycle 59, second half (00:25 UTC) — the rest of the chat pairing
 
@@ -717,3 +717,170 @@ This also reframes M-153 from cycle 46, which found worker chats reading
 archived agents. That remains true and separate: one is about which workers
 are listed, the other about whether a listed worker's chat has anything in
 it.
+
+### Cycle 61, closing (01:50 UTC) — the decision I did not need to take
+
+An hour ago I left M-219 open, writing that the fix "needs a decision I
+should not take at 01:40: which of a kernel's children belong on that
+sheet". That was half right and worth correcting.
+
+**The desktop had the answer written down.** `desktop/src/view/panel.rs`
+draws the live tree and folds the kernel's *archived* workers under a
+collapsed `N archived` row, faint with their checks, below the live ones. It
+does not quietly drop live ones. And the phone's twelve were all still in
+the kernel's tree — nothing had archived them. So the phone was not making a
+defensible different choice; it was losing rows.
+
+Fixed: `publishWorkers()` shows a child the kernel has told us about, rather
+than only what this session watched go by. **Two rows before, fourteen
+after**, measured against the kernel's own tree, with the four workers run
+an hour earlier back among them. `media/mobile/cycle-61/06-`.
+
+The lesson is about where I stopped. "This needs a product decision" was
+true of the filter and false of the behaviour, and the brief already names
+the reference app — reading it took five minutes and turned a judgement call
+into a consistency check. Deferring was the right instinct at the wrong
+depth.
+
+Both of cycle 61's changes are on #547: this and the crash on leaving a call
+that never started.
+
+### Cycle 61, journey run 33 (02:00 UTC) — the phone-only steps, settled
+
+The hub is still not serving `last_activity_ms`, so the list's `4m` waits on
+a redeploy, as instructed — not waited on. Instead: the first full journey
+since the repairs of cycles 56 to 61.
+
+| step | run 32 | run 33 |
+|---|---|---|
+| P2e, the photo line reaching the kernel | FAIL | **PASS** |
+| P3, the call's question landing in this project | FAIL | **PASS** |
+| P2, the model naming the picture | passed on a plausible answer | **`Ice plant flowers, predominantly magenta.`** |
+| P1, the dictated line | FAIL | FAIL — but see below |
+
+Every typed line landed again, and the J-steps all pass or carry a standing
+unverified. Evidence and both recordings in `media/mobile/cycle-61/run33-`.
+
+**P1 was failing on a spelling** (M-223). The clip says *summarise*; iOS's
+recogniser writes **summaries**; the check looked for **summarize**. The
+line reached the kernel every time — seq 2326, `Please summaries what the
+workers did today in two sentences.` — and the run log printed it on the
+line above the failure:
+
+```
+P1 heard: Please summaries what the workers did today in two sentences.
+P1 FAIL no /user +please summarize what the workers did/ within 30s
+```
+
+The step's own log had the answer and nothing read it. Matched now on the
+words the recogniser does not get to choose. Cycle 61's earlier fix
+(Microphone → **Stop** → Up) is what made the line reach at all; the
+spelling was hiding behind a step that never sent, and only surfaced once
+sending worked.
+
+That is the twelfth of this family this week and the cheapest to have
+caught: no instrumentation, no rerun — two adjacent lines of a log that
+contradict each other.
+
+### Cycle 61, closing (02:10 UTC) — a tool that was answering the wrong question
+
+Fixing the workers sheet unblocked something cycle 46 had left open, and
+taking it turned up worse.
+
+**A worker's chat does have content** (M-225). Opening `say sentence about
+mountains` from the now-complete sheet: its name, `status`, `read ·
+project-context.md`, `read · notes.md`, its three-step plan, and `Done.
+Follow-ups aren't available for this worker.` `media/mobile/cycle-61/07-`.
+
+**But the tool that said otherwise was broken** (M-224). `kernel.py total
+<agent>` sent the agent name and then printed the **first** `history_end` it
+saw — and attaching starts the root's replay, so the root's frame arrives
+first. Every worker asked about came back with the root's count. Filtering on
+the name alone then reported **0 for the root**, because the kernel answers
+`main` under `root`: the opposite mistake, made and caught in the same
+minute. Fixed both ways, and measured after — root 2336, three workers 8, 8
+and 5, a name that does not exist 0.
+
+**That unmakes M-153's evidence.** Cycle 46 read "8 of 8 workers answer
+total: 0" off this tool and concluded empty worker chats were the kernel's
+truth rather than the app's fault. The conclusion may still be right; the
+measurement never supported it.
+
+**And it cannot be retaken.** The sample was `qa-cycle-11-demo`, whose tree
+now carries zero children. So: worker chats are not inherently empty, and
+whether *archived* ones keep their transcripts is genuinely unknown again. I
+appended a correction to
+`internal/features-inbox/2026-09-16-mobile-worker-history-archived-agents.md`
+— another subagent's document, so the note is additive and attributed, and
+its frontmatter is untouched. Leaving a live ask standing on evidence known
+to be false seemed the worse option; move it if that is the wrong call.
+
+Thirteenth of this family, and the first where the instrument was mine and
+the conclusion was already in the ledger.
+
+### Cycle 61, the gap that closed (02:15 UTC)
+
+The hub is serving `last_activity_ms`, and the phone draws it:
+
+```
+demo        Idle        6h
+subnet120   Idle        4m
+```
+
+Quiet, right-aligned, where Cursor puts it — `media/mobile/cycle-61/08-`.
+That is M-197 closed end to end: found at cycle 59 pairing the list against
+Cursor's, filed for the hub because the app could not invent it, added by
+#538 with the finding cited in its own doc comment, and now on screen.
+
+Four rows still show nothing, and that is the design working rather than a
+gap. The field arrives as each project's kernel updates, so the roster is
+mixed for a while — and **absent is treated as unknown, never as zero**. A
+phone that had defaulted to "now" would be claiming every project on an
+older kernel had moved this second, which is the kind of confident wrong
+answer this loop has spent the week removing.
+
+### Cycle 61, the last question on that field (02:20 UTC)
+
+Three projects show a time and four do not, so I checked whether that was
+the app before reporting it as the design.
+
+It is the kernel's build, exactly. Read against the per-process `builds` the
+roster carries:
+
+| kernel | projects | time |
+|---|---|---|
+| `c3247332dc4e` | demo, feedback, subnet120 | **6h, 32h, 6m** |
+| `cbbe9922d6a2`, `30eef166a191`, `efcab58f29e1` | const, parity-proj, qa-cycle-11-demo, **phone** | absent |
+
+Only kernels at or after #538 send the Activity frame. Nothing for the app
+to do — and worth writing down before somebody chases it, because `phone` is
+this loop's own test project and will stay blank until its kernel updates.
+
+A pleasing detail: the question was answered entirely from the roster's
+per-process `builds`, the field added at #385 precisely because one build
+per machine had misled this loop for days. The instrument built after that
+mistake is what made this a one-command answer.
+
+### Cycle 61, the times re-checked (02:16 UTC)
+
+Asked not to claim the times from a pre-rebuild run, I re-measured rather
+than defend the timeline — which turned out to be the better move, because
+the second reading is stronger evidence than the first.
+
+| | 02:12 | 02:16 |
+|---|---|---|
+| hub says `subnet120` last moved | 4m ago | **8m ago** |
+| the app's row reads | `4m` | **`8m`** |
+
+The number advanced by exactly the elapsed four minutes and agrees with the
+hub to the minute. One reading shows a number; two readings four minutes
+apart show it is *the right* number, and that it tracks rather than
+rendering once and sticking.
+
+For the record on the timeline: the pre-rebuild check at 01:47 had every
+project `ABSENT`, which is what makes the two states distinguishable at all.
+Both the original run and this one were after the hub began serving the
+field. `media/mobile/cycle-61/09-`.
+
+**Noted for next time:** a fresh branch for the next PR rather than the
+previous cycle's.

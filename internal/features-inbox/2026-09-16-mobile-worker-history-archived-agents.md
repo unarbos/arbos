@@ -40,3 +40,25 @@ phone to draw differently.
 What Jacob loses is the ability to see what a worker actually did, which is
 most of the value of a worker list. Root's own transcript has the report;
 the worker's own record is what is missing.
+
+---
+
+## Correction, 2026-09-18 (iPhone loop, cycle 61)
+
+**The measurement this rests on was unsound.** The `total: 0` readings were
+taken with `deploy/mobile/kernel.py total <agent>`, which sent the agent name
+and then printed the **first** `history_end` frame it saw. Attaching starts
+the root's own replay, so the root's frame arrives first: every worker asked
+about came back with the root's count. Fixed today; measured after, the tool
+gives root 2336, three live workers 8, 8 and 5, and a name that does not
+exist 0.
+
+**What is now known:** a worker's chat is not inherently empty. Opening a
+recent worker on `pod` shows its plan, its reads and its Done line, and the
+kernel holds 8 lines for it.
+
+**What is not:** whether an *archived* worker keeps its transcript. The
+original sample was `qa-cycle-11-demo`, whose tree now carries zero children,
+so that exact reading cannot be retaken. Treat the ask as open and unproven
+rather than withdrawn — the behaviour may well be real, but nothing here has
+shown it.
