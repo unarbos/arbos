@@ -596,13 +596,19 @@ struct ChatRow: View {
             VStack(alignment: .trailing, spacing: 4) {
                 if !item.images.isEmpty {
                     HStack(spacing: 6) {
-                        ForEach(item.images.prefix(3), id: \.self) { name in
+                        ForEach(Array(item.images.prefix(3).enumerated()), id: \.element) { index, name in
                             if let image = AttachmentCache.image(name) {
                                 Image(uiImage: image)
                                     .resizable()
                                     .scaledToFill()
                                     .frame(width: item.images.count == 1 ? 220 : 110, height: item.images.count == 1 ? 165 : 110)
                                     .clipShape(RoundedRectangle(cornerRadius: ArbosTheme.promptRadius, style: .continuous))
+                                    // Unlabelled it is read out as "Image",
+                                    // which is the element's type and not a
+                                    // thing anyone sent.
+                                    .accessibilityLabel(item.images.count == 1
+                                        ? "Photo you sent"
+                                        : "Photo \(index + 1) of \(item.images.count) you sent")
                             }
                         }
                     }

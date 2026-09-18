@@ -62,6 +62,10 @@ struct AttachmentChips: View {
                                 .scaledToFill()
                                 .frame(width: 56, height: 56)
                                 .clipShape(RoundedRectangle(cornerRadius: ArbosTheme.cardRadius, style: .continuous))
+                                // The remove button beside it already says
+                                // "Remove <name>"; the chip itself said
+                                // "Image".
+                                .accessibilityLabel("Photo \(file.name)")
                         } else {
                             VStack(spacing: 4) {
                                 Image(systemName: "doc")
