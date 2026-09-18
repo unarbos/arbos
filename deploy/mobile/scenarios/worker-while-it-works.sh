@@ -46,7 +46,12 @@ ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
 sleep 4
 ui field >/dev/null 2>&1 || { echo "no composer after opening $ROW"; exit 1; }
 
-LINE="Through one worker you wait for: run the bash command sleep 300 and nothing else, then reply done."
+# The duration doubles as this run's signature. A first attempt scored on a
+# worker left over from the run before it — the sheet said `sleep 150
+# seconds` while this run had asked for 300 — which is M-160's fault again:
+# evidence belonging to an earlier run, read as this one's.
+NAP=$(( 280 + RANDOM % 40 ))
+LINE="Through one worker you wait for: run the bash command sleep $NAP and nothing else, then reply done."
 ui focus >/dev/null; sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 80); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
@@ -88,12 +93,15 @@ grep -E "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|, running |Working" "$COLLECT" | sed '
 # Where the live one sits matters as much as whether it is there: a worker
 # that is working, listed below a dozen finished ones, is the hardest row to
 # find on the sheet that exists to show it.
-if grep -q "sleep" "$COLLECT"; then
-  echo "  the sleep worker's row: $(grep sleep "$COLLECT" | head -1 | sed 's/^ *//')"
-else
-  echo "  the sleep worker has no row on the sheet at all"
+MINE=$(grep -cE "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏].*$NAP" "$COLLECT" | tr -d ' ')
+if [ "$MINE" -gt 0 ]; then
+  echo "  this run's own worker ($NAP s): $(grep -E "$NAP" "$COLLECT" | head -1 | sed 's/^ *//')"
+elif grep -qE "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]" "$COLLECT"; then
+  echo "  A LIVE ROW, BUT NOT THIS RUN'S — a worker from an earlier run is still going."
+  echo "  Nothing below is evidence about this run. Wait for it to end and run again."
 fi
 if [ "$ROWS" = 0 ]; then echo "  the sheet did not open"
-elif [ "$LIVE" -gt 0 ]; then echo "  VERDICT: the sheet marks the live worker"
+elif [ "$MINE" -gt 0 ]; then echo "  VERDICT: the sheet marks this run's live worker, with its step"
+elif [ "$LIVE" -gt 0 ]; then echo "  VERDICT: inconclusive — the only live row belongs to an earlier run"
 else echo "  VERDICT: the sheet lists $ROWS workers and marks none of them live"; fi
 echo "  kernel, same moment: $(python3 "$HERE/../kernel.py" pod history 2 2>/dev/null | tail -1 | cut -c1-80)"
