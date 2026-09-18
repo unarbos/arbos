@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 21:03 UTC.
+Last checked 2026-09-18 21:26 UTC.
 
-## Click Update. You will get build 2121. Jev is in it.
+## Click Update. You will get build 2126. Jev is in it.
 
-**2121** — signed, notarised, stapled, on the feed since 21:01 UTC.
+**2126** — signed, notarised, stapled, on the feed since 21:23 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+The relaunch-tab bug (mt-24) is still open. #675 aimed at it and QA still
+fails it four times out of four, so do not read any build here as closing
+it.
+
+New since 2121 (builds 2122–2126):
+
+- **#697** — the loop runs the edits that had not been run
+
+## Before that: 2121
 
 New since 2119 (builds 2120–2121):
 
