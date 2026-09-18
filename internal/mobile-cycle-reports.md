@@ -3338,3 +3338,41 @@ Eleven scenarios, eleven conclusions (M-396). The one decline left is
 comparison it cannot make — that one is by design.
 
 **PR:** [#668](https://github.com/unarbos/arbos/pull/668), harness only.
+
+## Cycle 121 — a decline that could never stop declining
+
+`pill-count-vs-sheet` has ended every sweep with `cannot say`. The reason it
+gives is correct: while anything runs the pill reads `Working N`, counting
+only what runs, and the sheet lists every agent — a subset against a whole.
+
+But it runs in the sweep after the scenarios that start workers, so
+something is always working. The decline was permanent, and a row that
+declines every time is uncovered while looking careful (M-397). It waits for
+the project to settle now.
+
+**Then it accused the app the moment it could speak**: `they disagree — pill
+38, sheet 30, and no shared labels to explain it`.
+
+The app cannot disagree with itself here. The pill is `chat.workers.count`;
+the sheet is a `ForEach` over that same array; `workers` is a dictionary
+keyed by the agent's id, so no row is lost to a collision. Reading the
+source settled in a minute what no amount of re-running would have (M-398).
+
+**Which rig fault, then?** `collect_rows` now reports `converged after 5
+page(s)`, and that rules out the swipe — the sheet scrolled and still
+stopped eight short. Rows are counted by their **label**, and this project
+has eight more agents than distinct goals: twins on different pages collapse
+under `sort -u`, and the duplicate check only ever looked within one screen.
+
+Confirmed by running it on a project whose goals are distinct:
+
+```
+qa-cycle-11-demo — the pill says: Agents 12
+                   the sheet lists: 12 rows (converged after 2 pages)
+                   VERDICT: the two agree on 12.
+```
+
+The verdict now separates "never scrolled, fix the swipe" from "scrolled,
+and the labels repeat" rather than naming one cause for both (M-399).
+
+**PR:** [#670](https://github.com/unarbos/arbos/pull/670), harness only.

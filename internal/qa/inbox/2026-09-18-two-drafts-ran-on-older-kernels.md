@@ -16,3 +16,15 @@ cursor:
 Both re-run green on the kernel's own suite (`mcp_parse_said_e2e` plants the `.cursor/mcp.json` case; `update_gate_e2e` covers the swap). If the rig's `--kernel <bin>` for `up-01` still resolves to a build from before #453, that is the older binary on the rig, not the product — worth one look at which binary the up-* scenarios pick up, since they exercise the swap path itself.
 
 Nothing to change in the kernel for either.
+
+## Addendum, 16:20 UTC — every `fm-02` draft is the same closed bug
+
+`qal-j31`'s own file now reads *closed entire*, re-checked on both arms (`a8678ac1` breaks twice, `f97bb348` passes). Three auto-triaged drafts still sit at `status: draft` for it and can be closed against that line:
+
+| draft | ran on | before |
+| --- | --- | --- |
+| `e76d631847` (08:22, *silent to the user*) | pre-#613 | #613, 09:34 |
+| `e774c9f9c9` (13:14, *a file after the broken one handed the name away*) | `a8678ac1` | #644, 12:55 |
+| `806bf95c0e` (13:14, *notice describes less than it did*) | `a8678ac1` | #644 — its wording is exactly the one #644 changed: *no MCP file after it was read in its place — not the place's other files, not the machine's own* |
+
+Nothing further from the kernel on `fm-02`.

@@ -203,11 +203,30 @@ if [ -d "$fb" ]; then
     list="$(mktemp /tmp/mirror-docs-fb.XXXXXX)"
     walk_or_refuse "media/desktop-feedback" "$fb" "$list" || exit 2
     if [ -s "$list" ]; then
-        paste -d' ' <(git hash-object -w --stdin-paths < "$list") "$list" | while IFS=' ' read -r blob f; do
-            rel="${f#"$STORE/"}"
-            git update-index --add --cacheinfo "100644,$blob,$rel"
-        done
-        n_feedback="$(wc -l < "$list")"
+        # Hashing reads every one of these files off the store, and when the mount is slow that is
+        # where the pass spends its life: a 2026-09-18 16:00 pass sat here past the timer's 12 min
+        # timeout and was killed, so docs/ and internal/ never reached the branch either — the mirror
+        # went 35 min stale over a folder that had not changed (qal-j30).
+        #
+        # So give the hashing its own budget, well inside the timer's. If it does not finish, carry
+        # the folder forward from the parent commit unchanged and push the rest. That is strictly
+        # better than both alternatives: dropping it would shrink the tip, and dying takes docs/ and
+        # internal/ down with it. Feedback is the store's most irreplaceable content, so "keep what
+        # the branch already has" is the safe reading of a slow store.
+        if timeout "${MIRROR_FB_BUDGET:-180}" bash -c 'paste -d" " <(git hash-object -w --stdin-paths < "$1") "$1"' _ "$list" > "$list.hashed"; then
+            while IFS=' ' read -r blob f; do
+                rel="${f#"$STORE/"}"
+                git update-index --add --cacheinfo "100644,$blob,$rel"
+            done < "$list.hashed"
+            n_feedback="$(wc -l < "$list")"
+        elif [ -n "$parent" ] && git rev-parse --verify -q "$parent:media/desktop-feedback" >/dev/null; then
+            git read-tree --prefix=media/desktop-feedback/ "$parent:media/desktop-feedback"
+            n_feedback="$(git ls-tree -r --name-only "$parent" media/desktop-feedback/ | wc -l)"
+            log "media/desktop-feedback: hashing did not finish inside ${MIRROR_FB_BUDGET:-180}s; carried $n_feedback file(s) forward from the parent unchanged"
+        else
+            die "media/desktop-feedback could not be hashed and the parent has no copy to carry forward. Not touching the mirror."
+        fi
+        rm -f "$list.hashed"
     fi
     rm -f "$list"
 fi

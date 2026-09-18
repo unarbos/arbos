@@ -758,7 +758,24 @@ Twenty fresh instances across cycles 29–30, fourteen failures, none outside th
 
 Spend $7.49.
 
-## Next (cycle 31)
+## Cycle 31 (2026-09-18) — the quoted-reference rule's new mark on its own example; ten more fresh instances
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 a8678ac16636 protocol 1`** (cycle 30's; the contract unchanged since). Network cut, no stall, no cap. Two reads, concurrent, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-31-preregistration.md)). $19.94.
+
+**Read 1 — #601 with the test mark (5bb0ddec), five rollouts on django-10097.** The instance cannot be graded here (cycle 28: the gold grades 0), so the read is of the transcript only.
+
+*The choice.* Three of five forbid `:` in the password as the RFC quote says — two of them the gold regex exactly, one stricter (`[^\s:@/?#]*`); two permit it (one drops the `user:pass` structure altogether). Cycles 26 and 28 had two of five each. Three of five on a five-draw is not a change the loop can read; it is not the other direction either.
+
+*The mark.* The rule now asks for a test that asserts the quote. Three of five write tests; **none asserts the quote's clause.** All three add the issue's literal example (`http://foo/bar@example.com`, the `/` in the userinfo) to `invalid_urls.txt`; one adds `user:pass/word@`; none adds a URL with a second `:` in the userinfo as invalid — the one case that would pin the quoted grammar rather than the reported symptom. The two rollouts that followed the quote most exactly wrote no test at all. All five name RFC 1738 in the reply. So the mark as written does not appear in five rollouts on the instance the rule was written from; what appears instead is a test of the *symptom*. If a mark is wanted here, the reading is that "a test that asserts the quote" is being read as "a test for the issue's example", and the rule would have to say the difference — an input the quote forbids and the example does not show.
+
+**Read 2 — ten never-run instances at `-r 2`.** **18 of 20** solved; the two failures are both requests-1766, and both are a **grader artefact**: the agent's patch is the gold's one-line change (`qop="auth"`), byte-for-byte in the changed line. Grading the gold patch itself with the task's `tests/test.sh`, network on: **reward 0** — three tests outside the fix fail in this environment (`test_conflicting_post_params`, `test_prepared_from_session`, `test_unicode_multipart_post`), while all six FAIL_TO_PASS tests pass. requests-1766 joins requests-2317 and django-10097 as an instance no patch passes here. On the eighteen gradeable rollouts: 18 of 18.
+
+Thirty fresh instances across cycles 29–31, sixteen failures, none outside the account. Every failure read: 10097 ×5 (grader artefact; two also the override shape), 1766 ×2 (grader artefact). Cumulative read: **301**.
+
+Spend $19.94.
+
+## Next (cycle 32)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
+3. For the features agent, from read 1: the quoted-reference mark is read as "test the example", not "test the quote"; the rule could name the difference (an input the quote forbids that the example does not show). Not a kernel change the loop can grade — no gradeable instance exists.
