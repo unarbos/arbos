@@ -296,7 +296,7 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 | the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
 | the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
 
-### Four additions to the review list, earned overnight
+### Six additions to the review list, earned overnight
 
 6. **An assertion must not bound a race.** Batching, timing and ordering that the product does not
    guarantee must not be asserted; assert the property the optimisation exists for, or make the kernel
@@ -319,6 +319,19 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
    branch written for the first cycle could never be reached; `qal-j29` raised `IndexError` building
    a message out of an empty list, which is what the passing case *is*. In both the quiet path was
    the broken one, and in both a single run from the absent state would have found it.
+10. **A driver that types must prove the app took the keystrokes.** Clicking and typing is an
+    instruction, not an observation. The app says whether the composer is focused and what it holds
+    (`desktop/src/driver.rs:1273`); a helper that reads neither can only report that the words are
+    not where it looked, which is equally true of a stale selector and of real data loss. `xp-01`
+    printed `first-line-lost` — the loop's most serious rule — for five consecutive cycles because
+    one click landed on a window not yet taking input (`qal-j33`). The first click after launch
+    never focuses; the second does.
+11. **Edits live in the store or they do not live.** `vm-loop.sh` copies every scenario module and
+    `deploy/` script from the store at each cycle start, so a local edit is erased at the next cycle
+    boundary. This has cost work twice: the step-3a2 addition to `cycle.sh`, and the `xp-01` repair
+    above, which was overwritten about six minutes after it was proved. Write the store copy in the
+    same breath as the local one, and when a script is *running*, write only the store copy — a file
+    bash is executing must not change under it (the cycle 2 syntax death).
 
 ### And the hardest lesson of the night, which belongs with step 2 of the list
 

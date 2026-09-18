@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+import desktop_scenarios
+
 DESKTOP_BIN = os.environ.get("ARBOS_DESKTOP_BIN", "")
 DRIVER_DIR = os.environ.get("ARBOS_DESKTOP_DRIVER", "")
 
@@ -115,9 +117,25 @@ class TwoProjects:
         return st.get("active_project") == ix
 
     def send(self, text):
+        """Type a line and say what the app did with it.
+
+        `xp-01` reported `first-line-lost` — a data-loss rule — in every cycle from 2026-09-17 18:18
+        to 2026-09-18 11:45, and nobody could act on it, because typing without looking cannot tell
+        three failures apart: the click never focused the field (this rig's fault), the line sits in
+        the composer unsent (a refusal the person can see), or the app took the line and it reached no
+        transcript (real loss). The app's own state carries `composer.text` and `composer.focused`
+        (`desktop/src/driver.rs:1273`), so all three are separable for two reads. It was the first.
+        """
         self.app.wait_element("composer-field", reachable=True)
-        self.app.click("composer-field")
+        got = desktop_scenarios.focus_composer(self.app)
         self.app.type(text + "\n")
+        left, deadline = "", time.time() + 5
+        while time.time() < deadline:
+            left = str((self.app.state().get("composer") or {}).get("text") or "")
+            if not left:
+                break
+            time.sleep(0.25)
+        return {"focused_after_click": got["focused"], "clicks_to_focus": got["clicks"], "composer_left_holding": left[:120], "accepted": got["focused"] and not left}
 
     def close(self, places=()):
         try:
@@ -160,7 +178,8 @@ def register(scenario, registry, transcript, now_ms, branch):
         d = TwoProjects(cx, a, b)
         try:
             cx.rec.expect(d.focus(a), "focus-a", "could not make A the active project")
-            d.send(f"A-first-{tag}: reply with the word ALPHA.")
+            sent_first = d.send(f"A-first-{tag}: reply with the word ALPHA.")
+            cx.rec.notes["first_line_send"] = sent_first
             # Let the first line land and its (keyless) turn end before the kernel dies.
             end = time.time() + 60
             while time.time() < end and not any(f"A-first-{tag}" in u for u in user_lines(a)):
@@ -184,7 +203,26 @@ def register(scenario, registry, transcript, now_ms, branch):
             ta, tb = all_text(a), all_text(b)
             cx.rec.notes.update({"a_user_lines": ua, "b_user_lines": ub, "home_store_user_lines": uh, "a_kernel_before": pid_a, "a_kernel_after": kernel_pid(a)})
             cx.rec.expect(not any(tag in u for u in uh), "xp-01-line-in-home-store", f"a line typed into A or B ran in the home store (~/.arbos), the project that was active at launch: {[u for u in uh if tag in u]}", "desktop: the composer's target must be the chat the words were typed into")
-            cx.rec.expect(any(f"A-first-{tag}" in u for u in ua), "xp-01-first-line-lost", f"A's first line (sent while A had no kernel yet) is not on A's transcript: A={ua} home={uh} B={ub}")
+            # Three failures wore one name until 2026-09-18; each gets its own, and only the last is loss.
+            cx.rec.expect(
+                sent_first["focused_after_click"],
+                "probe-composer-never-focused",
+                f"clicking `composer-field` never focused it, so the first line was typed at nothing and this run says nothing about the app: {sent_first}",
+            )
+            if sent_first["focused_after_click"] and sent_first["composer_left_holding"]:
+                cx.rec.expect(
+                    False,
+                    "xp-01-first-line-stuck-in-the-composer",
+                    f"the first line is still in the composer 5 s after Enter ({sent_first['composer_left_holding']!r}); the app did not take it. The person can see it, so not silent loss — but the line does not go",
+                    "desktop composer: Enter on a project whose kernel is not yet up must either send or say why",
+                )
+            elif sent_first["accepted"]:
+                cx.rec.expect(
+                    any(f"A-first-{tag}" in u for u in ua),
+                    "xp-01-first-line-lost",
+                    f"the app took A's first line — composer focused, emptied on Enter — and it is on no transcript and in no store: A={ua} home={uh} B={ub}. A line a person typed, gone with nothing said",
+                    "desktop session: a send while the project's kernel is still coming up must be held and delivered, not dropped",
+                )
             dup = [u for u in set(ua) if ua.count(u) > 1]
             cx.rec.expect(not dup, "xp-01-line-duplicated", f"a line reached A twice after its kernel was replaced: {dup}", "desktop session: a send to a dead connection must not be replayed on the new one as well")
             cx.rec.expect(not any("A-" in u for u in ub), "xp-01-a-line-in-b", f"A's words ran in B: {[u for u in ub if 'A-' in u]}", "desktop session: a line typed into a project whose kernel is down must stay with that project")

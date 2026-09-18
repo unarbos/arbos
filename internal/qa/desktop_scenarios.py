@@ -40,6 +40,33 @@ def hidden_store_binary(scratch):
     return str(script)
 
 
+def focus_composer(app, timeout=15):
+    """Click `composer-field` until the app says it is focused. Returns what it took.
+
+    `wait_element("composer-field", reachable=True)` says the element is there, not that the window
+    is taking input. Measured 2026-09-18 on the app at `2301abd291c0`: the first send after launch
+    leaves `composer.focused` false two seconds after a single click, and the keystrokes go nowhere —
+    which is how `xp-01` reported `first-line-lost`, a data-loss rule, in five consecutive cycles
+    with nothing wrong in the product. A second click takes focus. Every other send in the library
+    happens later in a run and gets away with one click, so the fault was latent everywhere and
+    visible only where the first send is the assertion.
+
+    `composer.focused` is the app's own account (`desktop/src/driver.rs:1273`), so this waits on the
+    thing it needs rather than on a sleep.
+    """
+    clicks, focused, deadline = 0, False, time.time() + timeout
+    while time.time() < deadline and not focused:
+        app.click("composer-field")
+        clicks += 1
+        settle = time.time() + 2
+        while time.time() < settle:
+            focused = bool((app.state().get("composer") or {}).get("focused"))
+            if focused:
+                break
+            time.sleep(0.1)
+    return {"focused": focused, "clicks": clicks}
+
+
 def available():
     return bool(DESKTOP_BIN and Path(DESKTOP_BIN).exists() and DRIVER_DIR and (Path(DRIVER_DIR) / "arbosdriver.py").exists() and shutil.which("Xvfb"))
 
@@ -179,7 +206,7 @@ class Desktop:
 
     def send(self, text):
         self.app.wait_element("composer-field", reachable=True)
-        self.app.click("composer-field")
+        focus_composer(self.app)
         self.app.type(text + "\n")
 
     def close(self):

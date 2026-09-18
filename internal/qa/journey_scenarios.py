@@ -16,6 +16,8 @@ import sys
 import time
 from pathlib import Path
 
+import desktop_scenarios
+
 DESKTOP_BIN = os.environ.get("ARBOS_DESKTOP_BIN", "")
 DRIVER_DIR = os.environ.get("ARBOS_DESKTOP_DRIVER", "")
 
@@ -234,7 +236,7 @@ class Rig:
 
     def send(self, text):
         self.app.wait_element("composer-field", reachable=True)
-        self.app.click("composer-field")
+        desktop_scenarios.focus_composer(self.app)
         self.app.type(text + "\n")
         self.pulse("send")
 

@@ -578,9 +578,22 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             tr = next((e for e in d.app.elements("*") if e.get("path", "").endswith("transcript") or "transcript" in e.get("path", "")), None)
             strip = [e for e in d.app.elements("*") if "plan-" in e.get("path", "") or "strip" in e.get("path", "")]
             win_h = (d.app.state().get("window") or {}).get("height") or 1000
-            tr_h = (tr or {}).get("bounds", {}).get("height") or (tr or {}).get("height") or 0
-            cx.rec.notes.update({"transcript_h": tr_h, "window_h": win_h, "strip_elements": len(strip)})
-            cx.rec.expect(tr_h >= win_h / 2, "mt-18-page-fills-column", f"transcript height {tr_h} of window {win_h} with 21 open items above the composer", "desktop: notes.md belongs to the Project panel")
+            # `h`, not `bounds.height` and not `height`: an element entry is
+            # {id, path, x, y, w, h, cx, cy, visible, interactive, reachable}
+            # (desktop/src/driver.rs:969, `describe`). Reading the two names that do not exist made
+            # `tr_h` 0 on every build, so `tr_h >= win_h / 2` was unconditionally false and this
+            # scenario broke in all five cycles from 2026-09-17 18:18 with nothing wrong in the app.
+            # `win_h` was right only by luck: the `or 1000` default equals Xvfb's real 1000 here.
+            tr_h = (tr or {}).get("h") or 0
+            cx.rec.notes.update({"transcript_h": tr_h, "window_h": win_h, "strip_elements": len(strip), "transcript_element": (tr or {}).get("path")})
+            # A missing element is this rig failing to look, not the column being full.
+            cx.rec.expect(
+                tr is not None,
+                "probe-no-transcript-element",
+                f"no element whose path holds `transcript` among {len(d.app.elements('*'))} on screen, so the column was never measured and this run says nothing about the page",
+            )
+            if tr is not None:
+                cx.rec.expect(tr_h >= win_h / 2, "mt-18-page-fills-column", f"transcript height {tr_h} of window {win_h} with 21 open items above the composer", "desktop: notes.md belongs to the Project panel")
             cx.rec.expect(not any("[item" in json.dumps(i) for p in d.app.state()["projects"] for c in p["sessions"] for i in c.get("items", [])), "mt-18-raw-markdown", "raw [label](url) markdown in the chat column")
         finally:
             d.close()
@@ -711,8 +724,19 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
         time.sleep(2)
         d2 = ds.Desktop(cx, tag="desktop-relaunch")
         try:
-            time.sleep(3)
-            active_after = d2.app.state().get("active_session")
+            # Wait for the restore rather than sleeping past it. A fixed `time.sleep(3)` and one read
+            # asserts that the window finishes restoring inside three seconds, which nothing promises;
+            # a slow relaunch then reads an intermediate tab and the red says "not restored" about a
+            # restore still in progress (review rule 7). Poll to the same verdict, bounded, and record
+            # how long it took so a genuine regression in that time is still visible.
+            restored_after, rdeadline = None, time.time() + 20
+            while time.time() < rdeadline:
+                active_after = d2.app.state().get("active_session")
+                if str(active_after) == str(active_before):
+                    restored_after = round(20 - (rdeadline - time.time()), 1)
+                    break
+                time.sleep(0.5)
+            cx.rec.notes["restored_after_s"] = restored_after
             cx.rec.notes.update({"active_after": active_after, "second": second})
             cx.rec.expect(str(active_after) == str(active_before) and active_before is not None, "mt-24-active-tab-not-restored", f"active before quit {active_before!r}, after relaunch {active_after!r}")
         finally:

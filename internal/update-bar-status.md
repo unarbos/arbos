@@ -5,16 +5,27 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 11:33 UTC.
+Last checked 2026-09-18 12:11 UTC.
 
-## Click Update. You will get build 2000.
+## Click Update. You will get build 2006.
 
-**2000** — signed, notarised, stapled, on the feed since 11:31 UTC.
+**2006** — signed, notarised, stapled, on the feed since 12:08 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2000 (builds 2001–2006):
+
+- **#635** — iOS: the front project recorded for a cold start is the pushed
+  one
+- **#631** — the kernel's own failed reason replaces the window's "no reply
+  from the kernel" guess when it lands right after it
+- **#634** — `mac-cycle.sh` resets its rig checkout and stops if it is not
+  on the branch it names
+
+## Before that: 2000
 
 New since 1987 (builds 1988–2000):
 
