@@ -3555,3 +3555,31 @@ the version I trust is the one I watched fail on purpose.
 `sleeping-machine` was the last scenario genuinely missing the step.
 
 **PR:** [#683](https://github.com/unarbos/arbos/pull/683), harness only.
+
+## Cycle 127 — 31 more connects, and no new worst case
+
+`call — the microphone path` was last measured at cycle 79, where M-285
+settled the long-running "connect-time drift" look: it was never drift, it
+was two engines. Re-reading every call log the loop has written:
+
+| engine | n | min | median | p90 | max | mean |
+|---|---|---|---|---|---|---|
+| duplex | 101 | 284 | 543 | 732 | 898 | 526 |
+| openai | **68** | 999 | 1951 | 2800 | **5773** | 2089 |
+
+Still no overlap — the slowest `duplex` connect (898 ms) is faster than the
+fastest `openai` one (999 ms). `openai` has 31 more samples than at cycle
+79, and `duplex` none, which is the phone having moved to GPT Live.
+
+**The useful number is the max.** It has not moved: 5773 ms then, 5773 ms
+now, across 31 further connects. So the 6000 ms hold's margin of 227 ms is
+thin but *stable*, not eroding — which is a different thing to worry about,
+and worth knowing before anyone spends a cycle widening the hold (M-414).
+
+**And the scenario told me the wrong thing when I misused it.** It takes an
+output directory where every other scenario here takes a cycle number. Given
+`127` it said `no logs under 127`, which reads as "there are no logs" rather
+than "that is not what I take". I fell into it on the first run (M-415). A
+bare number that is not a directory is now named for what it is.
+
+**PR:** [#685](https://github.com/unarbos/arbos/pull/685), harness only.
