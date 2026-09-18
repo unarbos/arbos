@@ -84,10 +84,24 @@ echo "  rows after unfolding: $BACK"
 [ "$BACK" = "$ALL" ] || { echo "  FAULT: unfolding did not bring them all back ($BACK of $ALL)"; FAULTS=$((FAULTS + 1)); }
 
 echo
+# The third claim in this file's own header — a live project belongs to
+# Working, one without a link to Read — needs both sections on screen at
+# once. A run where every project rests in Read cannot see it, and a
+# verdict that does not say so claims more than it measured. Which is the
+# fault this file was written to fix, one level up.
+if [ -z "$WORKING_Y" ] || [ -z "$READ_Y" ]; then
+  MEMBERSHIP="not tested this run: only one section was on screen, so no row
+         could be seen to be in the right one"
+else
+  MEMBERSHIP="both sections were on screen, and every row sat under one of them"
+fi
+
 if [ "$FAULTS" = 0 ]; then
   echo "VERDICT: the sections hold — no header stands over nothing, and folding"
-  echo "         hides $((ALL - FOLDED)) row(s) and gives them back"
+  echo "         hides $((ALL - FOLDED)) row(s) and gives them back."
+  echo "         Membership: $MEMBERSHIP"
 else
-  echo "VERDICT: $FAULTS fault(s) in the list's sections — named above"
+  echo "VERDICT: $FAULTS fault(s) in the list's sections — named above."
+  echo "         Membership: $MEMBERSHIP"
 fi
 echo "tree and stills in $OUT"
