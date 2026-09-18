@@ -62,8 +62,9 @@ struct Tab {
 
 impl Arbos {
     /// The strip: project tabs from the left, `+` after the last, then the
-    /// right panel's own tabs and its toggle — one row, not a second band
-    /// under the window tabs.
+    /// right panel's own tabs, its toggle, and the pinned expand — one row,
+    /// not a second band under the window tabs. The expand stays at the
+    /// window's top-right.
     pub(crate) fn tab_bar(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
@@ -151,6 +152,7 @@ impl Arbos {
             .child(div().flex_1().h_full())
             .children(panel_shown.then(|| self.panel_tab_pills(window, cx)))
             .children(show_toggle.then(|| self.panel_toggle(cx)))
+            .children(show_toggle.then(|| self.window_expand(window, cx)))
             .into_any_element()
     }
 

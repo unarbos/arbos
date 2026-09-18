@@ -15,7 +15,7 @@ use crate::{
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{Arbos, SearchChats, TogglePanel},
+        root::{Arbos, SearchChats, TogglePanel, ZoomPanel},
     },
 };
 use bezel::{
@@ -1145,7 +1145,7 @@ impl Arbos {
     }
 
     /// The control that hides the panel and brings it back, on the window
-    /// tab strip's right edge.
+    /// tab strip, left of the pinned expand.
     pub(crate) fn panel_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let open = self
@@ -1171,6 +1171,43 @@ impl Arbos {
                     this.toggle_panel_action(&TogglePanel, window, cx)
                 }),
             )
+            .into_any_element()
+    }
+
+    /// The four-box: pinned at the window's top-right, on the tab strip.
+    /// It does not live in the panel header, so widening the drawer cannot
+    /// move it. The same control collapses.
+    pub(crate) fn window_expand(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let viewport = f32::from(window.viewport_size().width);
+        let available = (viewport - crate::model::panel::CHAT_MIN_WIDTH)
+            .max(crate::model::panel::MIN_WIDTH)
+            .min(crate::model::panel::MAX_WIDTH);
+        let expanded = self
+            .workspace
+            .read(cx)
+            .panel()
+            .is_some_and(|panel| panel.width() >= available - 8.0);
+        let label = if expanded {
+            "Restore panel width"
+        } else {
+            "Expand panel"
+        };
+        theme
+            .ghost("window-expand")
+            .flex_none()
+            .size(px(24.))
+            .items_center()
+            .justify_center()
+            .tooltip(move |window, cx| Tooltip::with_keystroke(label, "⌘\\", window, cx))
+            .child(
+                icons::icon(icons::system::WIDGET)
+                    .size(px(14.))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.zoom_panel_action(&ZoomPanel, window, cx)
+            }))
             .into_any_element()
     }
 }

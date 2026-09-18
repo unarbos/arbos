@@ -1312,12 +1312,24 @@ class Pass:
             else:
                 self.gap("toggle-panel-closes", sc, "click", "no panel toggle on the tab strip")
             if self.app.exists("panel-close") or self.app.exists("panel-expand"):
-                self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid",
+                self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid in the panel",
                             f"close={self.app.exists('panel-close')} expand={self.app.exists('panel-expand')}",
                             "fail", self.still("removed-panel-chrome"))
             else:
-                self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid",
-                            "close and expand gone", "pass", self.still("removed-panel-chrome"))
+                self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid in the panel",
+                            "close and expand gone from the panel", "pass", self.still("removed-panel-chrome"))
+            if self.app.exists("window-expand"):
+                self.record("window-expand-pinned", sc, "read the tab strip", "one expand control at the window's top-right",
+                            "window-expand on the strip", "pass", self.still("window-expand-pinned"))
+            else:
+                self.record("window-expand-pinned", sc, "read the tab strip", "one expand control at the window's top-right",
+                            "missing", "fail", self.still("window-expand-pinned"))
+            if self.app.exists("chat-clear"):
+                self.record("chat-clear-gone", sc, "read the chat header", "no Clear button; typed clear / /clear still work",
+                            "chat-clear still drawn", "fail", self.still("chat-clear-gone"))
+            else:
+                self.record("chat-clear-gone", sc, "read the chat header", "no Clear button; typed clear / /clear still work",
+                            "gone", "pass", self.still("chat-clear-gone"))
             return
         self.gap("project-page-back", sc, "-", "no panel-tab-0 on this layout")
 

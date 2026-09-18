@@ -432,8 +432,7 @@ impl Arbos {
     }
 
     /// Hide this chat's transcript in the window. The file on disk does
-    /// not change. Used by `clear` in the composer and by the header
-    /// Clear control.
+    /// not change. Used by typed `clear` and `/clear` in the composer.
     pub(crate) fn hide_chat_view(&mut self, id: u64, cx: &mut Context<Self>) {
         self.workspace.update(cx, |workspace, cx| {
             workspace.with_session(id, cx, |chat| chat.clear_view())
@@ -644,21 +643,14 @@ impl Arbos {
             Some(Pane::Surface) | Some(Pane::Project) => self.conversation(window, cx),
         };
 
-        let header = show_composer.then(|| self.chat_header(&theme, window, cx));
-        // A sub-chat with nothing said gives the composer the middle of the
-        // column. An empty root is Cursor's new-Project view — the header
-        // block and a greeting at the top, the composer at the foot.
-        let empty_chat = show_composer
-            && self.workspace.read(cx).active_session().is_some_and(|chat| {
-                chat.view_cleared() || (chat.items.is_empty() && chat.parent.is_some())
-            });
+        let header = show_composer
+            .then(|| self.chat_header(&theme, window, cx))
+            .flatten();
+        // The chat fills the column. Composer stays at the foot. No empty
+        // band above or below — that is what put messages in the middle
+        // and cut the transcript short.
         let content = div()
-            // An empty chat gives the composer the middle of the column:
-            // the body shrinks to the top half and the composer follows.
-            .when(!empty_chat, |el| el.flex_1())
-            .when(empty_chat, |el| {
-                el.h(px(0.)).flex_grow(1.).flex_basis(px(0.))
-            })
+            .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
@@ -714,9 +706,6 @@ impl Arbos {
                                         .children(context_row),
                                 ),
                         )
-                    })
-                    .when(empty_chat, |column| {
-                        column.child(div().flex_grow(1.).flex_basis(px(0.)))
                     }),
             )
     }
@@ -734,18 +723,17 @@ fn voice_phase() -> Duration {
 impl Arbos {
     /// Cursor's chat header: the chat's place in the tree on the left — its
     /// parents as crumbs, then its title — on one slim line the transcript
-    /// scrolls under. The panel toggle sits on the window tab strip. Chat
-    /// actions stay on a right-click of the agent row.
+    /// scrolls under. Drawn only when a sub-agent is in front. The main
+    /// chat has no header band: Clear is typed (`clear` / `/clear`), and
+    /// the panel toggle sits on the window tab strip.
     fn chat_header(
         &self,
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
         let workspace = self.workspace.read(cx);
-        let Some(chat) = workspace.active_session() else {
-            return div().into_any_element();
-        };
+        let chat = workspace.active_session()?;
         let id = chat.id;
         let title = workspace.display_label(id);
         let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_in_header;
@@ -765,8 +753,11 @@ impl Arbos {
         // thing twice, so only a sub-agent's title is drawn here, after
         // the crumbs that lead back to it.
         let titled = !crumbs.is_empty();
-        let show_clear = !chat.view_cleared() && !chat.items.is_empty();
-        let name_field = (naming && titled).then(|| self.header_name_field(window, cx));
+        if !titled {
+            return None;
+        }
+        let name_field = naming.then(|| self.header_name_field(window, cx));
+        Some(
         div()
             .id("chat-header")
             .flex_none()
@@ -831,32 +822,8 @@ impl Arbos {
                 )
             })
             .child(div().flex_1())
-            .children(show_clear.then(|| {
-                theme
-                    .ghost("chat-clear")
-                    .flex_none()
-                    .h(px(26.))
-                    .px(px(8.))
-                    .items_center()
-                    .justify_center()
-                    .tooltip(|window, cx| {
-                        Tooltip::text(
-                            "Hide the chat. Same project, same transcript on disk.",
-                            window,
-                            cx,
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_style(TextStyle::Callout)
-                            .text_color(theme.text_muted)
-                            .child("Clear"),
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.hide_chat_view(id, cx);
-                    }))
-            }))
-            .into_any_element()
+            .into_any_element(),
+        )
     }
 
     /// The line under the composer: the project's branch, a reconnect
