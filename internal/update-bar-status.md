@@ -5,13 +5,19 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 02:33 UTC.
+Last checked 2026-09-18 02:42 UTC.
 
-## Click Update. You will get build 1765.
+## Click Update. You will get build 1768.
 
-**1765** — signed, notarised, stapled, on the feed since 02:26 UTC.
+**1768** — signed, notarised, stapled, on the feed since 02:38 UTC. It is
+the tip of `main`, so the channel is caught up.
 
-New since 1741, ten merges' worth:
+New since 1765:
+
+- **#551** — two measuring tools in the loop that were answering the wrong
+  question
+
+And from the ten merges 1765 brought in:
 
 - **#541** — "no change needed" takes a recorded repro run and a note
 - **#542** — macOS Enter Full Screen is a native Space; **#544** — Project
@@ -34,21 +40,21 @@ GPT-Live and voice rows, **#499** a store is a folder, **#518**–**#522**.
 
 | | |
 |---|---|
-| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1765, 9bb49c61d844) signed by` it |
+| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1768, 4d63352f692a) signed by` it |
 | Notarised | Apple returned `status: Accepted` |
 | Stapled | ticket present in the downloaded zip — 1674 bytes, signed by Apple System Integration CA for "Software Ticket Signing" |
 | Gatekeeper | `source=Notarized Developer ID` |
-| Bundle | `Info.plist` reads `0.2.0 build 1765` |
+| Bundle | `Info.plist` reads `0.2.0 build 1768` |
 | Feed | every download it names is really on the tag |
 
-The ticket was read out of `Arbos-0.2.0-1765-macos-arm64.zip` as
+The ticket was read out of `Arbos-0.2.0-1768-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
 ## How far behind the channel runs, and why
 
 The channel is a sawtooth, not a queue. Through the evening it published
-1616, 1624, 1657, 1662, 1674, 1688, 1718, 1733, 1741, 1765 — every twenty
-minutes to an hour,
+1616, 1624, 1657, 1662, 1674, 1688, 1718, 1733, 1741, 1765, 1768 — every
+few minutes to an hour,
 catching up in a jump each time.
 
 The publisher declines to build a commit while a newer one is still being
@@ -59,7 +65,8 @@ merging pauses long enough for a tip to settle — Both 1718 and 1741 went out
 because `main` paused for about a quarter of an hour and a tip settled.
 1765 took the longest yet — sixty-six minutes, ten merges, and two
 commits whose CI failed on the way (`58105882`, `dd7814fc`) before
-`9bb49c61` went green and the deferral chain resolved.
+`9bb49c61` went green and the deferral chain resolved. 1768 was the
+quickest: one merge on a quiet `main`, out in twelve minutes.
 
 Nothing is stuck, and every wait checked this evening was on a genuinely
 newer commit genuinely still running. But the latency is real: twenty to

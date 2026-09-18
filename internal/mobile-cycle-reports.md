@@ -479,10 +479,10 @@ before committing, not after pushing.
 and it has moved twice while this cycle ran — **1657** was wrong in two of
 my earlier reports, **1716** (`2eae41c7`, carrying #529) replaced it, and
 the steward has since written **1725** (`74b49b4c`, carrying #533) and then
-**1731** (`3ef5f436`, carrying #535), and now **1735**. That number is the
-steward's to set and this loop's only to record; it has moved five times
-while these cycles ran, which is why no report of mine should state it as a
-fact of its own.
+**1731** (`3ef5f436`, #535), **1735**, and now **1748** (`53dffd33`, #543).
+That number is the steward's to set and this loop's only to record; it has
+moved six times while these cycles ran, which is why no report of mine
+should state it as a fact of its own.
 
 ### Cycle 59, second half (00:25 UTC) — the rest of the chat pairing
 
@@ -923,3 +923,37 @@ single passing run said nothing about whether the command worked.
 shown by one green reading. Three corrections to eleven lines of Python in
 one night, two of them announced prematurely by me, and each time the
 announcement rested on exactly one run. #552.
+
+### Cycle 61 closes (02:40 UTC)
+
+**A prediction confirmed by something I did not do** (M-232). I wrote at
+02:20 that a project shows no time only because its kernel predates #538,
+and that `phone` would stay blank until its own kernel updated. It has:
+`phone` moved from `efcab58f29e1` to `c3247332dc4e`, and its row now reads
+**2m**. Every project on the newer kernel shows a time; the two still on
+older ones do not. The rule is observed now rather than inferred — and
+waiting for it beat proving it by updating the kernel myself, which would
+only have shown that I can change a variable.
+
+**One gap left open on purpose** (M-233). Four attempts at catching the
+workers sheet with a live row. Three surfaces confirmed — the pill
+(`Working 1`, twelve seconds in), the chat's worker line (`1 Working … ·
+Reading notes.md`), and the worker's own chat (`Working running sleep 90`,
+updating). The sheet's own row reading `, Working` is the one I have not
+caught: the first worker finished before the sheet opened, the second tap
+drilled into the worker's chat instead of the sheet, the third never sent.
+
+Three of four surfaces is not "the live state works". Left named rather than
+rounded up. The method is known for next cycle: a `sleep 120` worker gives
+the window, and the pill wants tapping by its frame, because the label it
+carries is one the sheet rows carry too.
+
+**Cycle 61 in sum:** a crash on leaving a call (#547), the workers sheet
+showing two of fourteen (#547), P1 failing on a spelling (#551), the `total`
+command corrected three times (#551, #552), journey run 33 with P2e and P3
+flipped to pass, the list's `4m` shown and then re-shown against the rebuilt
+hub, and a kernel CI flake written up for its owner rather than chased.
+
+The store wobbled repeatedly through the cycle — reads, appends and a
+`mkdir` all refused at least once, every one succeeding on retry. Fifth and
+sixth episodes in two days.
