@@ -36,7 +36,7 @@ PORT=8793
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 # Only the project rows: a row is `<name>, <state>…`, and the chrome
-# buttons (Search, Read, Gear Shape) carry no comma.
+# buttons (Search, Read, Settings) carry no comma.
 rows() { ui dump | grep -cE "Button +[a-z][a-z0-9-]*,"; }
 names() { ui dump | grep -oE "Button +[a-z][a-z0-9-]*," | awk '{print $2}' | tr -d ',' | sort | tr '\n' ' '; }
 
