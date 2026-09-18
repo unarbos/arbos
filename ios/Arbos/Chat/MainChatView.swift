@@ -366,7 +366,11 @@ struct ProjectChatView: View {
     }
 
     private var emptyLine: String {
-        var line = "\(title) is ready."
+        // An empty chat whose link is down is not ready, and saying so
+        // directly above the line explaining why it is not asks a person to
+        // believe two opposite things. The reason below carries the news;
+        // this line only names the place.
+        var line = chat.standing == nil ? "\(title) is ready." : title
         if let entry, !entry.place.isEmpty { line += " \(entry.machine) · \(entry.place)." }
         return line
     }
