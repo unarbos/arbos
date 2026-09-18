@@ -53,14 +53,57 @@ done
 echo "  the card appears:        ${CARD:-never}s   (floor of this method is ~0.5s)"
 shot 01-card
 
-# 2. the first words of the reply
+# 2. the first words of the reply, and how it arrives
+#
+# One pass, not two. The first version measured the first word, and only
+# then began sampling the reply's length — by which time a three-sentence
+# answer is already whole, so it could never see the growth it was looking
+# for. Watching from the send means the same loop gives both.
+#
+# Measured as the transcript's total text, not as "the last line matching a
+# word the reply might start with". That first attempt picked whichever line
+# matched last — including the *previous* turn's reply — and reported
+# lengths of 243 then 123. A length that goes **down** is not a reply
+# growing, and it is the only reason the flaw was visible at all.
+#
+# A total over every row only grows while a turn runs, whatever the model
+# happens to say, so it needs no guess about the reply's first word.
 FIRST=""
-for _ in $(seq 1 120); do
-  ui dump | grep -qiE "StaticText +(The |A |Sea|Wave|Ocean|Salt)" && { FIRST=$(since "$T0"); break; }
-  sleep 0.5
+LENGTHS=""
+BASE=""
+total_chars() { ui dump | grep -E "StaticText" | awk '{ n += length($0) } END { print n+0 }'; }
+for _ in $(seq 1 200); do
+  N=$(total_chars)
+  [ -n "$BASE" ] || BASE=$N
+  if [ "$N" -gt "$BASE" ]; then
+    [ -n "$FIRST" ] || FIRST=$(since "$T0")
+    case " $LENGTHS " in *" $N "*) ;; *) LENGTHS="$LENGTHS $N";; esac
+  fi
+  # Stop when the turn ends rather than after a fixed count: a reply still
+  # growing must not be cut off by the sampler.
+  ui dump | grep -qE "Worked [0-9]+[sm]" && break
+  sleep 0.3
 done
 echo "  the reply starts:        ${FIRST:-never}s"
 shot 02-streaming
+
+# Streaming is the row's third word, and this file has taken a still called
+# `02-streaming` for eighty cycles without measuring it. A reply that
+# arrives whole and one that grows word by word pass every timing here
+# identically; only the caller sees the difference, for the whole length of
+# the answer.
+STEPS=$(echo $LENGTHS | wc -w | tr -d ' ')
+SPAN=$(echo $LENGTHS | awk '{print $1 " → " $NF}')
+echo "  the transcript grows in: ${STEPS:-0} step(s)   ${SPAN:-—} characters on screen"
+
+# 2b. streaming — the row's third word, and this file has taken a still
+# called `02-streaming` for eighty cycles without ever measuring it. A reply
+# that arrives in one lump and one that grows word by word both pass every
+# timing above; only the caller can see the difference, and they see it for
+# the whole length of the answer.
+#
+# The measure is how many *different* lengths the reply is caught at. One
+# means it appeared whole; several mean it grew.
 
 # 3. the Worked line, which is the turn ending
 WORKED=""
@@ -70,6 +113,11 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 echo "  the Worked line lands:   ${WORKED:-never}s   reading '$(ui dump | grep -oE "Worked [0-9]+[sm]" | tail -1)'"
+if [ "${STEPS:-0}" -le 1 ]; then
+  echo "  NOTE: the reply was only ever caught at one length, so this run cannot"
+  echo "        tell streaming from a reply that arrived whole — a short answer"
+  echo "        can finish between two samples"
+fi
 shot 03-worked
 
 echo "  the composer afterwards: $(ui dump | awk '$3 == "TextField" { $1="";$2="";$3=""; print }')"
