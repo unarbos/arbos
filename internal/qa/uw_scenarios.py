@@ -42,6 +42,7 @@ import threading
 import time
 from pathlib import Path
 
+import desktop_scenarios
 import fileplan_scenarios
 
 
@@ -890,6 +891,61 @@ def register(scenario, registry, transcript, now_ms, branch):
             )
         finally:
             k.stop()
+
+    # ── diagnostic: does a sub-chat's turn start under the harness at all? ──
+    @reg("dg-01-a-sub-chats-turn-starts-under-the-harness", needs_model=True, tags=("desktop", "diagnostic"))
+    def dg01(cx):
+        """`mt-01` and `mt-04` are the only two scenarios that wait on a session reporting `streaming`
+        or `turn_open`, and both time out at 40 s on the app at `1beec0a1fd98` while everything they
+        do works when driven by hand outside the harness (`qal-j42`). Helper, payload, predicate and
+        the fields themselves are all eliminated. The one difference left is the launch: the harness
+        starts the app through ns-wrap and my probe did not.
+
+        So: the same steps, inside the harness, recording a timeline instead of a verdict — the flags
+        each second and the chat agent's transcript growing — so "the turn never starts" and "the flag
+        never shows" can be told apart."""
+        if not desktop_scenarios.available():
+            cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
+            return
+        d = desktop_scenarios.Desktop(cx)
+        try:
+            sid = d.new_chat()
+            agent = d.agent
+            cx.rec.notes["agent"] = agent
+            d.send("Reply with the single word DGOK and stop.")
+            tpath = cx.place / ".arbos" / "agents" / str(agent) / "transcript.jsonl"
+            timeline = []
+            for i in range(40):
+                st = d.app.state()
+                flags = [
+                    (c.get("agent_session"), bool(c.get("streaming")), bool(c.get("turn_open")), c.get("connection"))
+                    for p in st["projects"] for c in p.get("sessions") or []
+                ]
+                lines = len(tpath.read_text(errors="replace").splitlines()) if tpath.exists() else 0
+                timeline.append({"t": i, "lines": lines, "flags": flags})
+                if any(f[1] or f[2] for f in flags):
+                    break
+                time.sleep(1)
+            ever = any(any(f[1] or f[2] for f in e["flags"]) for e in timeline)
+            cx.rec.notes.update({
+                "streaming_or_open_ever": ever,
+                "transcript_lines_final": timeline[-1]["lines"],
+                "seconds_watched": len(timeline),
+                "first": timeline[0],
+                "last": timeline[-1],
+            })
+            cx.rec.expect(
+                timeline[-1]["lines"] > 0,
+                "dg-01-the-line-never-reached-the-chat",
+                f"nothing is on {agent}'s transcript after {len(timeline)} s, so the send did not arrive under the harness: {timeline[-1]}",
+            )
+            cx.rec.expect(
+                ever,
+                "dg-01-no-session-ever-reported-a-turn",
+                f"{agent}'s transcript has {timeline[-1]['lines']} line(s) but no session reported streaming or turn_open in {len(timeline)} s: {timeline[-1]['flags']}. If the transcript grew, the turn ran and the flag is the problem; if it did not, the turn never started",
+            )
+        finally:
+            d.close()
 
     # ── a scheduled command that fails: the other property #104 orphaned ──
     @reg("sf-01-a-shell-subscription-whose-command-fails-tells-somebody", tags=("after-failure", "subscriptions"))

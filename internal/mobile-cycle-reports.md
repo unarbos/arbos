@@ -3265,3 +3265,35 @@ header warns its fixture's trigger is timing-bound, so that is where to look
 first.
 
 **PR:** [#662](https://github.com/unarbos/arbos/pull/662), harness only.
+
+## Cycle 119 — a count cannot tell a race from a fault
+
+Last cycle's loose end: `list-search-filter-refresh` said pull-to-refresh
+worked in one run and `the list is not redrawing the answer` in the next.
+
+Reading it, the check could not have known. It counted `/list` calls before
+and after the pull, and a rise is consistent with two quite different
+stories:
+
+- the app asked again **before** the fixture began serving the new project —
+  the request was already in flight, and the run tests nothing;
+- it was served the new project and did not draw it — a real fault.
+
+The scenario blamed the app either way (M-392). The fixture now logs what it
+**answered**, not only that it was asked:
+
+```
+/list calls:          2 before the pull, 3 after
+answers carrying it:  1 of 1 calls since the pull
+  VERDICT: the pull refetched and the new project reached the screen
+```
+
+and a run where no answer carried it says `cannot say — the request was
+already in flight; this run tests nothing`.
+
+**The flap did not reproduce.** Four runs — three isolated, one after
+`list-composer` as the sweep orders them — all pass. I stopped there rather
+than hunt a fifth green (M-393). The next occurrence will name which story
+it was, which is worth more than another pass today.
+
+**PR:** [#665](https://github.com/unarbos/arbos/pull/665), harness only.

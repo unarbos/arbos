@@ -109,3 +109,90 @@ fail at once with the same exception, naming the element rather than the change 
 fix each time has been to reach for something less positional — the panel toggle (`qal-j24`),
 `panel-agent-<id>` rather than a row index, `agent_session` rather than a tab number (`qal-j27`),
 `composer.focused` rather than a click landing (`qal-j33`), and now a keystroke rather than a button.
+
+## Measured: the fix restored the leg, and exactly two scenarios remain
+
+Re-ran a representative five of cycle 9's casualties on the fixed helper
+(`arbos-kernel 0.2.0 cecd48e1bd76`, app `1beec0a1fd98`):
+
+| scenario | before | now |
+|---|---|---|
+| `desktop-fresh-place-no-notice` | driver-exception | **pass** |
+| `desktop-kill-kernel-under-ui` | driver-exception | **pass** |
+| `mt-17-plan-strip-empty-chat` | driver-exception | **pass** |
+| `mt-24-relaunch-restores-active-tab` | driver-exception | breaks on **`qal-j35`** — the real product bug, correctly detected |
+| `mt-04-queue-survives-window-restart` | driver-exception | still `timed out waiting for root running` |
+
+So ⌘N restored the leg, and `mt-24` now reaches its actual finding instead of dying at the door.
+
+## The remaining two, narrowed to one line
+
+`mt-01` and `mt-04` are the **only two scenarios in the library** that wait on this:
+
+```python
+d.app.wait_state(lambda s: any(c.get("streaming") or c.get("turn_open")
+                               for p in s["projects"] for c in p["sessions"]),
+                 timeout=40, what="root running")
+```
+
+`desktop-kill-kernel-under-ui` sends twice and passes, so it is not "new_chat then send". It is that
+wait. What has been eliminated:
+
+- the helper — `Desktop.send`'s exact sequence delivers the line and a session does report streaming;
+- the payload — the same with `SLOW_WORKER`'s backticks and semicolon, and with plain words;
+- the predicate — run verbatim against the live state it **evaluates True**, and every project carries
+  a `sessions` key, so it is not raising inside `wait_state` and reading as a timeout;
+- the fields — `streaming` and `turn_open` are still per-chat in the driver's serialisation
+  (`driver.rs:1344`, `:1349`), so they have not moved or been renamed.
+
+What is left is the one difference between my probe and the harness: `ds.Desktop(cx)` launches the
+app through `hidden_store_binary(cx.scratch)` — inside ns-wrap — and my probe launched the binary
+directly. Model turns plainly work under the harness (`journey-linux` passed in cycle 8 at 147.8 s),
+so a blanket "no model under ns-wrap" is already ruled out; what is not ruled out is a sub-chat's
+turn specifically.
+
+Next probe, one run: the same send through `ds.Desktop(cx)` versus a direct launch, watching both the
+chat agent's transcript and the session's `streaming` flag. That is the last difference standing.
+
+## Six eliminations, and I did not find it
+
+The remaining two (`mt-01`, `mt-04`) are now a well-bounded open question rather than a lead. A
+diagnostic scenario, `dg-01-a-sub-chats-turn-starts-under-the-harness`, does `mt-01`'s steps inside
+the harness and records a per-second timeline instead of a verdict. It says:
+
+```
+agent chat-1789744436578   connection live
+transcript lines after 40 s: 0      inbox files: 0
+no session ever reported streaming or turn_open
+```
+
+So under the harness the typed line **never reaches the kernel at all** — no inbox file, no
+transcript line — while the composer clears and the session sits `live`. Driven by hand it arrives
+every time. Everything I could name as different has been tested and cleared:
+
+| difference | tested by | result |
+|---|---|---|
+| `Desktop.send`'s sequence | driving it verbatim | line arrives |
+| the payload's backticks and semicolon | `SLOW_WORKER` vs plain words | both arrive |
+| `mt-01`'s predicate raising inside `wait_state` | running it against the live state | evaluates **True**; every project has `sessions` |
+| `streaming`/`turn_open` moved or renamed | `driver.rs:1344`, `:1349` | still per-chat |
+| the ns-wrap launch (`hidden_store_binary`) | probe launched through ns-wrap | line arrives |
+| the agent's missing parent | probe chats are parentless too | 4–7 transcript lines each |
+| `HOME` set to a scratch dir (`run.py:444`) | probe with a scratch HOME | line arrives |
+
+The app's own log carries one line from a failing run that may or may not be related, and is worth
+a look from whoever owns sessions either way:
+
+```
+session 2 (chat-…): filed parent Some("root"), the kernel's record says None; the record wins
+```
+
+**One difference I noticed and did not test**: the harness writes
+`$XDG_CONFIG_HOME/arbos/config.toml` with `api_base`, `api_key_env`, `model` and `window_tokens`
+(`run.py:440`), while my probe's XDG directory is empty. That should not govern whether a *user line
+is recorded* — the kernel writes that before any model call — but it is the last difference I can
+name, so it is the next thing to try.
+
+`dg-01` is kept rather than deleted. It is cheap, it is tagged `diagnostic`, and it turns this from
+"two scenarios time out" into a timeline anyone can read. If it goes green on a later build, that is
+the answer arriving without anyone chasing it.
