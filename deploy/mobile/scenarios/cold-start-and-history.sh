@@ -33,7 +33,9 @@ wait_for() {
   echo never; return 1
 }
 
-echo "== 1. cold start =="
+# reaches-the-list: not before the landing is measured — step 1's whole
+# subject is which screen a cold start opens on.
+echo "== 1. cold start ="
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 2
 T0=$(now)
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
