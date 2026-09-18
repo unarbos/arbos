@@ -19,16 +19,15 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — draft, waiting CI
-- [Match project page and composer](bc-430b995c-1df7-5754-8490-5479c873c3a2) — typed `clear` hides the transcript and recenters; same chat on disk
+- [Project page and clear](https://github.com/unarbos/arbos/pull/629) — draft, waiting CI
+- [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — on `main` (`522ef479`)
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1962**; watching past it
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [files editor](https://github.com/unarbos/arbos/pull/628) when green; TestFlight **1936**; Mac **1962**
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [clear](https://github.com/unarbos/arbos/pull/629) when green; TestFlight **1936**; Mac **1962**
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
 
-- [ ] [Match project page and composer](bc-430b995c-1df7-5754-8490-5479c873c3a2) — typed `clear` hides the transcript and recenters; same chat on disk
-- [ ] [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — draft, waiting CI ([plan](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-files-editor-terminal.md))
+- [ ] [Project page and clear](https://github.com/unarbos/arbos/pull/629) — draft, waiting CI ([plan](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-project-page-composer.md))
 - [ ] [Fix project panel layout](bc-33718272-0f05-555b-946f-f08db1b9ee4b) — [#544](https://github.com/unarbos/arbos/pull/544) on `main`; in **1765**
 - [ ] [Make settings an inline tab](bc-6d9c3785-7bed-5cb3-9eb7-bca86aad4ee5) — his ask: a full inline tab rather than a floating window, with the gear still the way in and real routes back, and without reintroducing a separate band across the top; boundaries written down against the parity loop after two duplications today
 
@@ -96,10 +95,10 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1962** on the feed; watching past it
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [files editor](https://github.com/unarbos/arbos/pull/628) when green; TestFlight **1936**; Mac **1962**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [clear](https://github.com/unarbos/arbos/pull/629) when green; TestFlight **1936**; Mac **1962**; `v0.2.0` stays a draft
+- [x] [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — on `main` (`522ef479`)
 - [x] [No symbol names](https://github.com/unarbos/arbos/pull/626) — on `main` (`5555d1b7`)
 - [x] [Notifications sweep](https://github.com/unarbos/arbos/pull/624) — on `main` (`b047160f`)
-- [x] [Chat style-pair](https://github.com/unarbos/arbos/pull/625) — on `main` (`3c268227`)
 
 ## Running Arbos
 
