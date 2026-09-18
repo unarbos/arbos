@@ -950,20 +950,19 @@ def register(scenario, registry, transcript, now_ms, branch):
     # ── the kickoff race itself, minted on purpose (qal-j43) ──
     @reg("kf-01-a-chat-opened-during-kickoff-keeps-what-you-type", needs_model=True, tags=("desktop", "after-failure"))
     def kf01(cx):
-        """`qal-j43`: a chat minted while its place is still serving the **kickoff turn** is inert.
-        The app mints it, activates it, reports its connection live, and the composer clears on
-        Enter — but the kernel never creates the agent's transcript and the line is lost silently.
-        Measured 4/4 on app `1beec0a1fd98` / `arbos-kernel 0.2.0 cecd48e1bd76`: minted during
-        kickoff the transcript stays empty, minted after it is `['wake', 'user']`.
+        """`qal-j43`: on app builds before `1768ec83`, a chat minted while its place was still
+        serving the **kickoff turn** was inert. The app minted it, activated it, reported its
+        connection live, and the composer cleared on Enter — but the typed line never reached
+        `Session::send()` at all, so no frame went on the wire and the kernel never heard it.
 
-        `desktop_scenarios.new_chat` now waits for kickoff before minting, so `mt-01`, `mt-04` and
-        `dg-01` pass — which means **none of them can see this bug any more**. This scenario exists
-        so the loop still can: it presses ⌘N itself, deliberately inside the window, and holds the
-        contract that matters. A cleared composer means the line was accepted; an accepted line must
-        arrive.
+        Fixed on `main` by `1768ec83` ("desktop: chat fills the column; Clear goes; expand is
+        pinned at the window's top-right", in [#656](https://github.com/unarbos/arbos/pull/656)),
+        which is a **layout** commit. Nothing in it names this bug, so the fix was almost certainly
+        incidental — which is the whole reason this scenario exists. Bisected 2026-09-18 with an
+        instrumented build: `e10953fb` (its parent) breaks 3/3, `1768ec83` passes 3/3.
 
-        It is expected to break until the app is fixed. When it passes, `qal-j43` is fixed for real
-        rather than merely stepped around."""
+        The contract: a cleared composer means the app accepted the line, and an accepted line must
+        arrive. Minting deliberately inside the kickoff window is the only way to hold it."""
         if not desktop_scenarios.available():
             cx.rec.notes["skipped"] = "desktop binary/driver/Xvfb missing"
             return

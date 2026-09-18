@@ -134,39 +134,6 @@ class Desktop:
     def sessions(self):
         return [c for p in self.app.state()["projects"] for c in p["sessions"]]
 
-    def wait_kickoff_done(self, timeout=60):
-        """Wait for the place's kickoff turn to end before minting a chat.
-
-        Working around a product bug, not testing one (qal-j42): a chat minted while its place is
-        still serving the kickoff turn is **inert**. The app mints it, activates it, gives it an id
-        and reports its connection live, and the composer accepts text and clears on Enter — but the
-        kernel never creates the agent's transcript, so the line reaches nothing. Measured 4/4 on
-        `arbos-kernel 0.2.0 cecd48e1bd76` / app `1beec0a1fd98`: minted during kickoff the transcript
-        stays `[]` and the line is lost; minted after, it is `['wake', 'user']` every time.
-
-        A fresh place spends its first ~10 s on kickoff, and scenarios call `new_chat` milliseconds
-        after launch, so without this wait the desktop leg races the kickoff turn and loses at random
-        — which is why `mt-01` and `mt-04` failed in the leg while passing by hand.
-
-        A passing `mt-01` therefore says nothing about qal-j42's first half being fixed. That one is
-        the app's to solve: text typed into a chat the app presents as live must not vanish.
-        """
-        t = Path(self.cx.place) / ".arbos" / "agents" / "root" / "transcript.jsonl"
-        end = time.time() + timeout
-        while time.time() < end:
-            done = False
-            for raw in t.read_text().splitlines() if t.exists() else []:
-                try:
-                    done = done or json.loads(raw).get("kind") == "turn_complete"
-                except ValueError:
-                    pass
-            if done:
-                return True
-            time.sleep(0.5)
-        # Not fatal: a place with no kickoff turn (an already-open one) never writes `turn_complete`,
-        # and those are exactly the places the race cannot touch.
-        return False
-
     def new_chat(self, ix=0, timeout=20):
         """A new chat in the open project. `new-subchat` lives in the right-hand panel
         (`desktop/src/view/panel.rs`), and the panel is **closed** in a fresh window, so the leaf is
@@ -179,7 +146,6 @@ class Desktop:
         was tried second, its `move: no element matches 'project-0'` became the error 16 desktop
         scenarios a cycle reported from 15 September, naming the fallback instead of the cause. A
         fallback that cannot succeed is worse than none (qal-j24)."""
-        self.wait_kickoff_done()
         before = {c["id"] for c in self.sessions()}
 
         def leaves():
