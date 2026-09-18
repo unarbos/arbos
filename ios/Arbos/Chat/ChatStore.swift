@@ -245,7 +245,13 @@ final class ChatStore: ObservableObject {
                 }
                 refusal = said
             case .transport(let what)?:
-                if what != lastTransport {
+                // The hub sends its reason and then closes the socket bare —
+                // `ws.close(None)`, no code, no reason — so every refusal also
+                // looks like the path failing, and the app said so: "127.0.0.1
+                // could not be reached" beside the hub's own explanation, on a
+                // host it plainly had reached. When the link has already named
+                // what is wrong, a guess next to it is noise.
+                if standing == nil, what != lastTransport {
                     lastTransport = what
                     items.append(ChatItem(.notice(what, failed: false)))
                 }
