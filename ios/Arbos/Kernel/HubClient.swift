@@ -188,6 +188,16 @@ enum KernelTarget: Equatable, Hashable {
         }
     }
 
+    /// The project's folder on its machine, which is what a person calls it
+    /// when the machine is already understood — a chat header, a banner.
+    /// `label` names the machine too and is for places where it is not.
+    var folder: String? {
+        switch self {
+        case .pod: return nil
+        case .hub(_, let project): return project.isEmpty ? nil : project
+        }
+    }
+
     var stored: String {
         switch self {
         case .pod: return "pod"
