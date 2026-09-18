@@ -44,7 +44,10 @@ BAD_EXACT = {
 }
 # Two or more capitalised words with no lower-case connective reads like a
 # symbol spelled out ("Arrow Turning Down Then Right"), not like a label.
-SYMBOLISH = re.compile(r"^(?:[A-Z][a-z0-9]*)(?: [A-Z0-9][a-z0-9]*){1,5}$")
+# Every word a capital *letter*: "Arrow Turning Down Then Right" is a
+# symbol spelled out, "Agents 36" is a pill with a count in it and was
+# being flagged because the pattern let a digit begin a word.
+SYMBOLISH = re.compile(r"^(?:[A-Z][a-z]*)(?: [A-Z][a-z]*){1,5}$")
 for line in sys.stdin.read().splitlines():
     parts = line.split(None, 3)
     if len(parts) < 4:
