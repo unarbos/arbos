@@ -1,0 +1,19 @@
+{
+  "agent": "Arbos",
+  "session": "chat-1789473184580",
+  "parent": "root",
+  "delegate_number": 1,
+  "title": "",
+  "name": null,
+  "updated": 1789639310,
+  "closed": false,
+  "rank": -1,
+  "items": [
+    {
+      "Notice": {
+        "text": "reconnected",
+        "failed": false
+      }
+    }
+  ]
+}

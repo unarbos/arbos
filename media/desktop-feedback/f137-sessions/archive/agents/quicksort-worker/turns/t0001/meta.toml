@@ -1,0 +1,8 @@
+started = "2026-09-17T09:42:45Z"
+from = "agent:root"
+kind = "brief"
+transcript_lo = 0
+ended = "2026-09-17T09:43:11Z"
+verdict = "success"
+outcome = "Done. Iterative quicksort (median-of-three pivot, Hoare partition, insertion sort for partitions <16, explicit stack — no recursion limit issue) at `.arbos/internal/sort_quicksort.py`.…"
+transcript_hi = 10

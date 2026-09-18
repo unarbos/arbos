@@ -667,6 +667,28 @@ def register(scenario, registry, transcript, now_ms, branch):
                 recreated["has_root_agent"] = (place / ".arbos" / "agents" / "root").exists()
             cx.rec.notes["old_path_recreated"] = recreated
             cx.rec.notes["kernel_alive_after"] = k.alive()
+            # Every run of this scenario also leaves `runtime/lock` behind, holding the stopped kernel's
+            # pid. `lock.rs` says that is not cosmetic — "a lock file left behind reads to the next
+            # kernel and to `check` as a holder that is not there" — and it has `release_at(place_now)`
+            # for exactly this case, a folder that moved under the kernel. So ask the outcome instead of
+            # classifying it: can a new kernel serve the place where the folder now is?
+            served = None
+            if moved.exists():
+                k2 = cx.kernel(tag="after-move", place=moved)
+                served = k2.start()
+                lock2 = moved / ".arbos" / "runtime" / "lock"
+                cx.rec.notes["after_move"] = {
+                    "new_kernel_served_the_moved_folder": served,
+                    "leftover_lock_pid": (lock2.read_text(errors="replace").strip()[:12] if lock2.exists() else None),
+                    "old_kernel_pid": k.proc.pid if k.proc else None,
+                }
+                k2.stop()
+                cx.rec.expect(
+                    served,
+                    "af-04-moved-folder-cannot-be-served-again",
+                    f"after the folder moved and its kernel stopped, a new kernel could not serve it at {moved.name}: the lock file left behind names pid {cx.rec.notes['after_move']['leftover_lock_pid']}, which is gone. `lock.rs::release_at` exists for this",
+                    "arbos-core lock.rs Drop/release_at — release by the folder's current path when it moved",
+                )
             cx.rec.expect(
                 recreated is None,
                 "af-04-old-path-recreated-as-a-ghost-project",

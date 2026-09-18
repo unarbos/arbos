@@ -168,12 +168,15 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             t0 = time.time()
             steer = None
             while time.time() < t0 + 3 and not steer:
-                steer = next((f for f in inbox_kinds(cx.place, "root") if f["kind"] == "steer"), None)
+                steer = next((f for f in inbox_kinds(cx.place, d.agent) if f["kind"] == "steer"), None)
                 time.sleep(0.2)
-            cx.rec.notes["inbox_after_typing"] = inbox_kinds(cx.place, "root")
+            # `d.agent`, not "root": `new_chat()` minted this chat's own kernel agent, and reading
+            # `root` reads an agent nobody typed into (the features agent's read of qal-j27).
+            cx.rec.notes["agent_typed_into"] = d.agent
+            cx.rec.notes["inbox_after_typing"] = inbox_kinds(cx.place, d.agent)
             cx.rec.expect(steer is not None, "mt-01-typed-not-a-steer", "no kind = steer inbox file within 3 s of typing during a running turn; the line waits for turn_complete", "desktop composer: send while running must steer by default")
             d.app.wait_state(lambda s: not any(c.get("streaming") or c.get("turn_open") for p in s["projects"] for c in p["sessions"]), timeout=150, what="root idle")
-            evs, _ = transcript(cx.place, "root")
+            evs, _ = transcript(cx.place, d.agent)
             ks = [e.get("kind") for e in evs]
             i_follow = next((i for i, e in enumerate(evs) if e.get("kind") == "user" and "FOLLOW-UP" in e.get("text", "")), None)
             i_done = next((i for i, kk in enumerate(ks) if kk == "turn_complete"), None)
@@ -234,7 +237,11 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             time.sleep(5)
             d.send("QUEUED-BEFORE-RESTART: reply ACK-RESTART-QUEUE.")
             time.sleep(2)
-            cx.rec.notes["inbox_before_quit"] = inbox_kinds(cx.place, "root")
+            # The chat `new_chat()` minted, remembered before the window goes: the relaunched window is
+            # a different Desktop and the words are on this agent's transcript, not root's (qal-j27).
+            typed_into = d.agent
+            cx.rec.notes["agent_typed_into"] = typed_into
+            cx.rec.notes["inbox_before_quit"] = inbox_kinds(cx.place, typed_into)
         finally:
             d.close()
         time.sleep(2)
@@ -243,7 +250,7 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
             end = time.time() + 150
             found = False
             while time.time() < end and not found:
-                evs, _ = transcript(cx.place, "root")
+                evs, _ = transcript(cx.place, typed_into)
                 found = any(e.get("kind") == "user" and "QUEUED-BEFORE-RESTART" in e.get("text", "") for e in evs)
                 time.sleep(2)
             cx.rec.expect(found, "mt-04-queue-lost-on-restart", "the follow-up typed during the turn never reached the transcript after quit + relaunch", "desktop queue must be an inbox file, not window memory")
@@ -481,7 +488,21 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
     # ── Plan representation (desktop) ───────────────────────────────────────
 
     def plan_elements(d):
-        return [e.get("path", "") for e in d.app.elements("*") if any(k in e.get("path", "") for k in ("plan-", "strip", "standing"))]
+        """Elements of the plan strip above the composer — matched by leaf name, not by substring.
+
+        This used to match any path containing `"strip"`, which was safe only while nothing opened the
+        right-hand panel. Once `new_chat` began opening it (qal-j24), `panel.panel-tabs.panel-tab-strip`
+        matched and `mt-17` failed on the panel's own tab row — a loose selector made wrong by a change
+        somewhere else, which is the same defect `session_element`'s old "id contains the number" pass
+        had. The app's ids here are `panel-standing` and `composer-call-strip`; `panel-tab-strip` is the
+        panel's tab row and is not a plan strip."""
+        wanted = {"panel-standing", "composer-call-strip"}
+        out = []
+        for e in d.app.elements("*"):
+            leaf = str(e.get("path", "")).split(".")[-1]
+            if leaf in wanted or leaf.startswith("plan-"):
+                out.append(e.get("path", ""))
+        return out
 
     @reg("mt-17-plan-strip-empty-chat", desktop=True)
     def s17(cx):

@@ -1,0 +1,17 @@
+/Users/const/.arbos/.arbos/agents/root/images:
+total 160
+drwxr-xr-x   5 const  staff    160 Sep 17 06:46:02 2026 .
+drwxr-xr-x@ 11 const  staff    352 Sep 17 06:46:09 2026 ..
+-rw-r--r--   1 const  staff  18402 Sep 17 06:45:44 2026 shot-1789638344414.png
+-rw-r--r--   1 const  staff  19185 Sep 17 06:46:02 2026 shot-1789638362263.png
+-rw-r--r--@  1 const  staff  38963 Sep 17 06:44:31 2026 text-1789638270045.png
+
+/Users/const/.arbos/.arbos/agents/root/inbox:
+total 0
+drwxr-xr-x   2 const  staff   64 Sep 17 06:45:12 2026 .
+drwxr-xr-x@ 11 const  staff  352 Sep 17 06:46:09 2026 ..
+
+/Users/const/.arbos/.arbos/agents/root/inflight:
+total 0
+drwxr-xr-x   2 const  staff   64 Sep 17 06:46:02 2026 .
+drwxr-xr-x@ 11 const  staff  352 Sep 17 06:46:09 2026 ..

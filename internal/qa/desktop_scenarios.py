@@ -61,6 +61,9 @@ class Desktop:
         env["DISPLAY"] = self.display
         env["PATH"] = f"{Path(cx.binary).parent}:{env.get('PATH', '')}"
         env["ARBOS_DRIVER"] = "1"
+        # The kernel agent the scenario is typing into: the project's main chat until `new_chat()`
+        # mints another and sets it.
+        self.agent = "root"
         self.log = self.rec.dir / f"{tag}.app.log"
         self.app = arbosdriver.Arbos.launch(binary=hidden_store_binary(cx.scratch), env=env, log=self.log, xdg=cx.scratch / "xdg", projects=[str(cx.place)], timeout=90)
         self.rec.log(f"{tag}: app pid {self.app.hello().get('pid')} on {self.display}")
@@ -128,7 +131,17 @@ class Desktop:
             self.app.wait_element("new-subchat", reachable=True)
         self.app.click("new-subchat")
         st = self.app.wait_state(lambda s: {c["id"] for p in s["projects"] for c in p["sessions"]} - before, timeout=timeout, what="a new session")
-        return (({c["id"] for p in st["projects"] for c in p["sessions"]}) - before).pop()
+        sid = (({c["id"] for p in st["projects"] for c in p["sessions"]}) - before).pop()
+        # The kernel agent this chat belongs to. `new-subchat` **mints a new agent** (`chat-<ms>`, via
+        # `desktop/src/kernel.rs::mint_chat` → `arbos_core::create_chat`); the project's main chat is
+        # `root` and this one is not. A scenario that types here and then reads `root` is reading an
+        # agent nobody spoke to — which is what made `qal-j27` look like lost words when the line was on
+        # the minted agent's transcript all along (the features agent's read, 2026-09-18 05:55).
+        self.agent = next(
+            (c.get("agent_session") for p in st["projects"] for c in p["sessions"] if c["id"] == sid),
+            None,
+        )
+        return sid
 
     def session_element(self, session_id):
         """The clickable element for a session. A sub-chat's row is `panel-agent-<session id>` in the
@@ -317,10 +330,56 @@ def register(scenario, transcript, kinds, now_ms):
         (cx.place / "notes.md").write_text("See https://github.com/unarbos/arbos/pull/7 for context.\n")
         d = Desktop(cx)
         try:
-            d.new_chat()
+            # NOT a new sub-chat: `detail.rs:1924` returns no pills at all when
+            # `chat.parent.is_some()` — "a subagent's chat in Cursor carries no pills; they are the
+            # project's". This scenario used to open a sub-chat and then assert the project's pills in
+            # it, so `pill-missing` was the app doing exactly what it says it does. The project's own
+            # chat is the one that has them.
+            pass  # the project's main chat is already open
             d.send("Run bash: `echo https://github.com/unarbos/arbos/pull/21`. Then run bash again: `echo https://github.com/unarbos/arbos/pull/21`. Then reply done.")
-            time.sleep(25)
-            pills = elements_matching(d, "pill")
+            # Wait for the fact, and record it: the pill is a response to a PR URL reaching the chat, so
+            # a run where the model never ran bash proves nothing about pills. The old version slept 25 s
+            # and asserted regardless — "no PRs pill after two bash outputs" with no evidence there were
+            # two bash outputs, which is the `checkpoint_refs` defect (an assertion that never proved its
+            # own setup) and a fixed sleep used to wait for a result.
+            # The marker must be one only the system can produce. The first version of this wait
+            # matched `pull/21` anywhere in the chat state and "landed" in 0.1 s — because the URL is in
+            # the *prompt this scenario typed*, echoed back as the user's own line. That is `sb-01`'s
+            # lesson (a marker the scenario wrote into the input proves nothing) and it was reproduced
+            # here in the same file that records it. So: the URL must appear in an item that is not the
+            # user's — a tool result or the agent's words.
+            deadline = time.time() + 90
+            trigger = None
+            # A chat item is a flat dict with `kind` and `text` (as the journey reads them: `kind ==
+            # "tool"`, `"agent"`, `"notice"`, `"user"`). The marker must come from a `tool` item — the
+            # bash result — because the URL is in the user's own line and in `notes.md` too. Two earlier
+            # versions of this wait matched the user's echo and "landed" in 0.1 s.
+            while time.time() < deadline and trigger is None:
+                for proj in (d.app.state().get("projects") or []):
+                    for chat in (proj.get("sessions") or []):
+                        for item in (chat.get("items") or []):
+                            if item.get("kind") == "tool" and "pull/21" in json.dumps(item):
+                                trigger = round(90 - (deadline - time.time()), 1)
+                                cx.rec.notes["trigger_item_kind"] = item.get("kind")
+                                break
+                if trigger is None:
+                    time.sleep(1.0)
+            cx.rec.notes["trigger_landed_after_s"] = trigger
+            if trigger is None:
+                cx.rec.notes["skipped"] = "self: probe-trigger-never-landed — the PR URL never reached the chat within 90 s, so the model did not run the bash this scenario asks for and nothing can be concluded about the pills"
+                return
+            # The trigger landing is not the pill appearing: wait for the pill too, bounded, so
+            # "absent" means absent after a fair chance rather than checked too early. (The version
+            # before this one slept 25 s and never proved the trigger; the one before *that* checked the
+            # instant the trigger landed, at 2.3 s, which is the opposite error.)
+            pill_deadline = time.time() + 25
+            pills = []
+            while time.time() < pill_deadline:
+                pills = elements_matching(d, "pill")
+                if any("pill-prs" in str(e.get("path") or e.get("id")) for e in pills):
+                    break
+                time.sleep(1.0)
+            cx.rec.notes["pill_wait_s"] = round(25 - (pill_deadline - time.time()), 1)
             cx.rec.notes["pill_ids"] = sorted({e["id"] for e in pills})[:10]
             cx.rec.notes["pill_elements"] = [{k: v for k, v in e.items() if k in ("id", "path", "text", "label", "title")} for e in pills][:6]
             prs = [e for e in pills if "pill-prs" in str(e.get("path") or e.get("id"))]

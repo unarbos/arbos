@@ -1,0 +1,36 @@
+{
+  "agent": "Arbos",
+  "session": "hyperliquid-research",
+  "parent": "root",
+  "delegate_number": 2,
+  "title": "",
+  "name": "Hyperliquid research",
+  "updated": 1789484347,
+  "closed": false,
+  "rank": -2,
+  "items": [
+    {
+      "User": {
+        "text": "Read first: .arbos/docs/project-context.md, then .arbos/notes.md\nTask: Gather practical trading information: API examples, common strategies, risk management, and code snippets for beginners\nDo: as the task says; number your steps in your first reply\nRules: Focus on educational content, include links to docs, avoid financial advice\nOutput: Deliverables under .arbos/docs/, working notes under .arbos/internal/, captures under .arbos/media/<topic>/. Verify each file exists before you report it.\nReport: Summary of trading features, API usage examples, and beginner-friendly strategy concepts",
+        "worked_secs": 3,
+        "sent_at": 1789484343802
+      }
+    },
+    {
+      "Tool": {
+        "id": "call_WGBfRk1b9FITPiQSp2GJiAnB",
+        "kind": "read",
+        "label": "read project-context.md",
+        "status": "Success",
+        "output": "     1:wxz|+++\n     2:vaz|owner = \"root\"\n     3:wxz|+++\n     4:maw|# Project context\n     5:dpz|\n     6:ixs|Stable goals, constraints, decisions, and resources. Progress lives in `notes.md`.\n     7:dpz|\n     8:sof|## Goal\n     9:xdj|(what this project is for, in one or two lines)\n    10:dpz|\n    11:zjz|## Constraints\n    12:iea|- \n    13:dpz|\n    14:xkw|## Decisions (dated, newest first)\n    15:iea|- \n    16:dpz|\n    17:oea|## Resources\n    18:qfk|(machines, accounts, vault items by name — never a secret's value)\n    19:iea|- \n",
+        "secs": 0
+      }
+    },
+    {
+      "Notice": {
+        "text": "Stopped by you",
+        "failed": false
+      }
+    }
+  ]
+}

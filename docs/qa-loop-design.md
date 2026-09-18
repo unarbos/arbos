@@ -275,3 +275,41 @@ Definition in `docs/acceptance-journeys.md`. First scores on `main` `c964294c`: 
 - **2026-09-16 04:15 UTC, model route change** to Gemini 2.5 Flash; `env:provider-blocked`.
 - **2026-09-16 07:40 UTC, batch on `43d8569d`.** `bt-01…08` on the replay provider: `say to=user` refused (#289), spawn guard reads the brief (#285), worktree re-spawn `fixer-2` (#286), tool markup stripped (#278), history pages backwards (#272), 403 falls through to `fallback_models` (#283), archived worker visible (#287), image as bytes (#270) — all pass.
 - **2026-09-16 09:10 UTC, mesh federated store (`b49e6163`).** `fs-01`: read/ls/put/CAS/root-owned refusal/`..`/unknown machine all hold; qa-039 for two edges. Cycle notes: `internal/qa-cycle-2026-09-16.md`.
+
+## The cycle as it runs on `qa-vm2` (2026-09-18 06:00) — supersedes the step list above
+
+The loop moved machines on 2026-09-17 12:30 and the cycle changed under this document overnight. Where
+the two disagree, this section is what runs; the reasoning for each line is in `internal/qa/bugs/qal-j21`
+to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
+
+| the sections above say | it now does |
+|---|---|
+| the cycle runs the library | the tracked step runs **one half**, alternating, and says which: `== library half B: 151 of 291 scenarios, headlines in both`. The whole library needs ~162 min of measured work (291 scenarios, 33.5 s mean) against a 100 min cap, so it reached ~62% and registry order decided which — silently, until the truncation alarm |
+| steps 3, 3a, 3b, 3b2, 3c | a **3a2** between 3a and 3b: the `uw-*`/`af-*` family on its own 25-minute invocation (`--tag unchecked-write`), because they register last and a capped step loses its tail — `af-04` was number 291 of 291 |
+| `timeout 50m` on the tracked step | **100m** (`ARBOS_QA_TRACK_TIMEOUT`), 80m on desktop, and `exit 124` is a `!!` alarm naming what the cut cost |
+| the desktop driver comes from `internal/parity` when present | from **the app's own commit** (`$wt/desktop/driver`), copied to local disk and the commit printed. The store copy is a fallback only: it was five hours stale and lacked the fields the app had begun reporting (`qal-j23`, `qal-j25`) |
+| — | the two **headlines run in both halves**. A half without the kickoff replay or the acceptance journey would be a cycle measuring less than it reports |
+| — | durations are **monotonic**. A wall clock on this paused VM reported a 1528-second UI stall that never happened (`qal-j26`); the guest's uptime advanced 3.65 h across 6.28 h of wall clock |
+| — | `publish.sh` **refuses** a push that would delete bug files the branch holds, unless `ARBOS_QA_ALLOW_BUGS_SHRINK` names a reason (`qal-j21`) |
+| — | every rollout and index line records the kernel's own `--version`, and a `--kernel-branch` naming a sha the binary does not carry is an alarm |
+| J6 notifications "always unverified here" | **established**: the app posts, dunst receives it, the badge clears. A *post* is now distinguished from a failed *attempt* — the window's `posted` list carries an `error` per entry and the rig was counting attempts |
+| the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
+| the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
+
+### Two additions to the review list, earned overnight
+
+6. **An assertion must not bound a race.** Batching, timing and ordering that the product does not
+   guarantee must not be asserted; assert the property the optimisation exists for, or make the kernel
+   enforce the bound and then assert it. A test that is right about the intention and wrong about the
+   mechanism goes red with nothing it names being wrong.
+7. **A script must not depend on which of two things happens first**, unless that ordering is the thing
+   being asserted — and then it is asserted explicitly, so a failure names the ordering rather than dying
+   of a line that never came.
+
+### And the hardest lesson of the night, which belongs with step 2 of the list
+
+**Ask the boundary question of the reading side too.** `qal-j27` was filed as data loss on the strength of
+three scenarios agreeing, with four neighbouring contracts passing on the same build to rule out the
+writing side. All three read `root` while typing into a sub-chat, which `new-subchat` gives its own kernel
+agent. Three scenarios sharing one wrong assumption is one fault counted three times, not corroboration.
+The question that would have caught it: **does the probe read what it wrote?**

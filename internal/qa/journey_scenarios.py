@@ -296,8 +296,17 @@ def phone_j8c(max_age_h=24):
     hist = STORE / "internal" / "mobile-journey-history.jsonl"
     if not hist.exists():
         return None
+    # A read of the store mount answers present, absent, or **unknown**: `exists()` passes and the read
+    # raises, which is the shape qal-j23 named (`available()` could not see it coming either). On
+    # 2026-09-18 04:15 this raised `BlockingIOError: [Errno 11]` and the exception was reported as a
+    # `journey exception`, so a mount hiccup on someone else's history file marked the whole acceptance
+    # journey. J8c is the phone loop's verdict and is unverifiable here in any case; say so instead.
+    try:
+        text = hist.read_text(errors="replace")
+    except OSError as e:
+        return {"verdict": "unverified", "why": f"the phone loop's J8c history could not be read from the store mount ({type(e).__name__}: {e})"}
     rows = []
-    for l in hist.read_text(errors="replace").splitlines():
+    for l in text.splitlines():
         try:
             rows.append(json.loads(l))
         except Exception:  # noqa: BLE001

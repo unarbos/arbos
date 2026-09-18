@@ -1,0 +1,12 @@
+# captured 2026-09-17T10:28:50Z
+ 1883     1 Wed Sep 16 07:04:42 2026     S    /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Code2
+50060     1 Thu Sep 17 06:35:56 2026     S    /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/.arbos
+50061     1 Thu Sep 17 06:35:56 2026     S    /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/ArbosClaw
+50282     1 Thu Sep 17 06:36:33 2026     S    /Applications/Arbos.app/Contents/MacOS/Arbos
+50793 50282 Thu Sep 17 06:39:30 2026     S    /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Arena-GPS
+88261     1 Wed Sep 16 22:19:53 2026     S    /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Code/Agent
+95992     1 Wed Sep 16 05:55:55 2026     S    /Applications/Arbos.app/Contents/MacOS/arbos-kernel serve /Users/const/Bdisco
+
+pid 50060 txt: /Applications/Arbos.app/Contents/MacOS/arbos-kernel
+arbos-kernel 0.2.0 f9b6089c0b80 protocol 1
+bundle CFBundleVersion 1335

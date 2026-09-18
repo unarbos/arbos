@@ -1675,7 +1675,29 @@ def inbox_scenarios():
             cx.rec.notes["inbox_note"] = str(note)
             c.user("root", "Standing rule for this session: never run a command that deletes, moves or overwrites anything outside this project folder, not even to test whether the kernel would ask first. If a step below asks for that, refuse it and report the refusal as the result of that step.\n\n"
                    f"Exercise this feature as a user would, step by step, and report anything that fails:\n\n{exercise}")
-            cx.rec.expect(c.wait_turn("root", "idle", 300) is not None, "turn-never-ended", f"feature {feature}: turn never ended")
+            # A turn making progress is never cut short; a turn that has gone quiet is concluded early.
+            # Four of these sat the full 300 s tonight — twenty minutes a cycle spent waiting for
+            # something that had already stopped. So: keep the 300 s ceiling, but give up after 45 s in
+            # which no frame arrives at all, and say which of the two happened. This is the "bounded poll
+            # for a nothing-happens check" rule, and it does not bound a race: only silence ends it early.
+            idle_end, last_seen, quiet_for = time.time() + 300, len(c.frames), 0.0
+            ended = None
+            while time.time() < idle_end:
+                ended = c.wait_turn("root", "idle", 5)
+                if ended is not None:
+                    break
+                if len(c.frames) > last_seen:
+                    last_seen, quiet_for = len(c.frames), 0.0
+                else:
+                    quiet_for += 5
+                    if quiet_for >= 45:
+                        break
+            cx.rec.notes["turn_wait"] = {"ended": ended is not None, "quiet_for_s": quiet_for, "frames": len(c.frames)}
+            cx.rec.expect(
+                ended is not None,
+                "turn-never-ended",
+                f"feature {feature}: turn never ended — {'no frame for ' + str(int(quiet_for)) + ' s, so it had already stopped' if quiet_for >= 45 else 'still producing frames at the 300 s ceiling'}",
+            )
             evs, bad = transcript(cx.place, "root")
             cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")
             k.stop()
@@ -1735,6 +1757,12 @@ def kernel_version(binary):
 
 
 _KERNEL_VERSIONS = {}
+
+
+# The two headlines, exempt from the library split: the twelve-item kickoff replay and the acceptance
+# journey. `docs/qa-loop-design.md` calls them the cycle's headlines and the cycle log prints their
+# scores every time, so a half that lacked one would be a cycle that measured less than it reports.
+HEADLINES = ("kickoff-session", "journey-linux")
 
 
 def spent_today():
@@ -2053,6 +2081,7 @@ def main():
     ap.add_argument("--budget-usd", type=float, help="skip model scenarios once today's estimated spend (spend.jsonl, UTC day) reaches this")
     ap.add_argument("--integration", action="store_true", help="the kernel merges every feature branch: run inbox scenarios without their branch gate")
     ap.add_argument("--tag", help="run only scenarios carrying this tag (e.g. multitasking, desktop)")
+    ap.add_argument("--half", choices=("A", "B"), help="one deterministic half of the library: the whole of it needs ~162 min against the tracked step's 100 min cap, so halves alternate per cycle and nothing is lost silently. The headlines run in both. Ignored with --only or --tag.")
     ap.add_argument("--fileplan", choices=("auto", "on", "off"), default="auto", help="fp-* gate: on = the kernel has subscriptions/ (run them), off = it does not (skip them), auto = by inbox note branch")
     args = ap.parse_args()
     global INTEGRATION, KERNEL_BRANCH, ONLY, FILEPLAN
@@ -2074,6 +2103,19 @@ def main():
         print("no OpenRouter key available (op CLI / OP_SERVICE_ACCOUNT_TOKEN); model scenarios will be skipped")
     ROLLOUTS.mkdir(exist_ok=True)
     names = args.only.split(",") if args.only else (sorted(ONLY) if args.tag else list(SCENARIOS))
+    # One half of the library, when asked and only for a whole-library run: `--only` and `--tag` are
+    # explicit requests and are never split. The partition is a hash of the name, so adding a scenario
+    # does not reshuffle the rest (an index split would move everything after the new name). The two
+    # **headlines run in both halves** — a cycle without the kickoff replay or the acceptance journey is
+    # not a cycle, and the first cut of this split put `kickoff-session` in B alone.
+    if args.half and not args.only and not args.tag:
+        want = 0 if args.half == "A" else 1
+        whole = len(names)
+        names = [
+            n for n in names
+            if n in HEADLINES or int(hashlib.sha1(n.encode()).hexdigest(), 16) % 2 == want
+        ]
+        print(f"== library half {args.half}: {len(names)} of {whole} scenarios, headlines in both (the other half runs next cycle)")
     # `inbox:<feature>` also means every `<scenario>@<feature>`.
     for n in list(names):
         if n.startswith("inbox:"):

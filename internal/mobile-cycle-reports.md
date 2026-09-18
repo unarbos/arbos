@@ -381,8 +381,10 @@ repairs were for.
 
 **Next:** the rotation's oldest remaining rows are the style pair against the
 Cursor stills (cycle 7) and notifications (cycle 36). AirPods, CallKit and
-the TestFlight build all need Jacob's phone and cannot move here. TestFlight
-was **1657** in this report and that was wrong: the steward's number is **1716** (`2eae41c7`), which already carries #529. The build on Jacob's phone is the steward's to say, not this loop's.
+the TestFlight build all need Jacob's phone and cannot move here. A TestFlight
+number was stated in this report and it was wrong. The build on Jacob's
+phone is the steward's to say, not this loop's, and it is written in one
+place only: `internal/mobile-mac-host-and-testflight.md`.
 
 ## Cycle 58 report (00:05 UTC, 09-18)
 
@@ -431,8 +433,9 @@ branch within the minute. #529 is back to its single commit.
 
 **Open:** the style pair is genuinely due around cycle 41 by the repaired
 row, so it goes next. The rows that cannot move from here — AirPods, CallKit,
-the TestFlight build on Jacob's phone — are still waiting on him. TestFlight
-was written as **1657** here and corrected afterwards to the steward's **1716** (`2eae41c7`), which already carries #529.
+the TestFlight build on Jacob's phone — are still waiting on him. A TestFlight
+number was written here and corrected afterwards. It is not restated: the
+steward's number lives in `internal/mobile-mac-host-and-testflight.md`.
 
 ## Cycle 59 report (00:20 UTC, 09-18)
 
@@ -567,8 +570,9 @@ app. The earlier fixes are paying for themselves.
 
 **Next:** with these four done, the oldest rows left that can move here are
 the notifications follow-ups and the worker-chat surfaces. AirPods, CallKit
-and the TestFlight build still need Jacob's phone. The build there is the
-steward's **1725** (`74b49b4c`).
+and the TestFlight build still need Jacob's phone. The build there is the steward's, and
+is recorded in `internal/mobile-mac-host-and-testflight.md` rather than
+here.
 
 ### Cycle 60, second half (01:05 UTC) — the settings sheet, and a gap that closed itself
 
@@ -983,9 +987,9 @@ Fifth time tonight a count asserted a shape the screen never promised, and
 the closest to landing: the verdict was already written. The only habit that
 has ever caught these is reading the dump instead of the count.
 
-TestFlight was, at this hour, the steward's **1748** (`53dffd33`, #543) —
-the sixth number this session, which is why none of my reports state it as a
-fact of their own. The current build lives in one place only:
+TestFlight changed again at this hour — the sixth number in one session,
+which is why no report of mine states one as a fact of its own. The current
+build lives in one place only:
 `internal/mobile-mac-host-and-testflight.md`.
 
 ## Cycle 62 report (02:50 UTC, 09-18)
@@ -1411,3 +1415,223 @@ they are verbatim so the next reader does not improve them.
 
 **Stills:** `media/mobile/cycle-70/` — the fixture list and one per case.
 **PR:** [#566](https://github.com/unarbos/arbos/pull/566), which also carries the scenario.
+
+## Cycle 71 report (05:05 UTC, 09-18)
+
+**Looked at:** the projects list's search, filter and refresh — the oldest
+row left, last exercised at 47.
+
+**The row holds, and now has numbers rather than screenshots** (M-263).
+Against a four-project fixture, every claim counted off the accessibility
+tree:
+
+| | rows |
+| --- | --- |
+| at rest | 5 — alpha, beta, beta-two, gamma, pod |
+| typing `beta` | 2 — beta, beta-two |
+| typing `zzzz` | 0, and the screen says `No project matches “zzzz”.` |
+| cleared | 5 again |
+| Live only | 3 — alpha, beta, pod |
+| All projects | 5 |
+| pull to refresh | `/list` calls 2 → 3, and `arrived-late` reached the screen |
+
+Live only showing three is right: the fixture serves two live projects and
+the pod's own row is a direct kernel that needs no hub. M-191's no-match
+line holds. Nothing in the app needed changing for this row.
+
+**What did need changing was everything around it** (M-264). Every round
+button in the app announced its icon rather than its purpose, because
+SwiftUI reads the SF Symbol's name when there is no label: settings was
+**"Gear Shape"**, and the project glyph in the chat header read **"Move"**
+next to the word `pod`. Worse, a button inside a `Menu` gets no name at all
+— the `Menu` presents itself and the child's label never reaches the tree —
+so the list's filter and the chat's overflow were both **"PopUpButton"**.
+
+That last one has a cost this loop has been paying: the harness has tapped
+the chat's overflow **by coordinate since cycle 56** because there was
+nothing to ask for. Both audiences are served by the same fix. VoiceOver
+stops reading icon names, and `ui menu Filter` now opens the list's filter
+by name. [#571](https://github.com/unarbos/arbos/pull/571).
+
+**Two faults in my own rig, and both would have been reports.**
+
+A count of rendered rows is not a count of the list (M-265). The list is a
+`LazyVStack`, so a row below the fold is never built and `describe-all`
+cannot see it. My first run read 11 rows at rest and 7 after clearing the
+search, and I was reading that as four projects failing to come back. They
+were under the keyboard.
+
+And the refresh test's answer depended on how many times the app had
+happened to ask (M-266): the fixture added its new project from the fourth
+`/list` on, so one run saw it and the next did not, and the second read as
+the app failing to refresh. The scenario now tells the fixture when to add
+it, and the fixture logs every call, so the two questions are asked
+separately — did the gesture make the app ask again, and did the answer
+reach the screen.
+
+That is the fourth and fifth rig-invented fault in this loop's life (M-162,
+M-183, M-224, M-262), two of them tonight. The pattern in all five is the
+same: the rig quietly answers a different question from the one asked, and
+the answer looks like an app bug. The only habit that has ever caught them
+is checking the other side — the view's own code, the hub's own source —
+before writing the finding down.
+
+**Stills:** `media/mobile/cycle-71/`.
+
+## Cycle 72 report (05:40 UTC, 09-18)
+
+**Looked at:** the acceptance journey itself, last run at cycle 55 — the
+loop's spine, and by far the most overdue thing on the board.
+
+**Run 33 is healthy** (M-267). Against `pod` on kernel `c3247332dc4e`:
+**14 pass, 2 eye, 4 unverified, no failures.** The setup line and its
+seeded reply, the challenge and its worker, a clean turn end, the result
+verified on disk through the kernel's own read frame — CHANGELOG present,
+`area = w * h`, unittest OK, a branch with commits — then dictation, the
+photo the model actually described, and the call's question landing in this
+project's transcript.
+
+J8c deserves its own line: the link was cut for **25 seconds mid-turn** and
+the turn finished after it came back.
+
+The four unverified are the standing ones and none is new: a hosted kernel
+cannot be restarted from the phone, J4's mid-flight half, Stop at J5, and
+PUSH until the APNs key exists.
+
+**And the run handed me the measurement cycle 67 could not get** (M-268).
+M-248 widened the pre-socket hold to six seconds and said plainly that the
+failing reading had not been seen to turn green — none of those four runs
+connected slowly enough to be the case. Six runs tonight, counted at both
+ends:
+
+| connect | clip | sent | lost |
+| --- | --- | --- | --- |
+| 2060 ms | 650 | 650 | 0 |
+| 2108 ms | 650 | 650 | 0 |
+| 1999 ms | 650 | 650 | 0 |
+| 1472 ms | 650 | 650 | 0 |
+| 1493 ms | 650 | 650 | 0 |
+| 1282 ms | 650 | 650 | 0 |
+
+Two are past the old two-second boundary and would have lost audio before
+#557. And the journey's own call connected at **2635 ms** — M-246's exact
+magnitude — with P3 passing.
+
+**What I am not claiming.** None of the six counted runs reached 2633 ms.
+The exact magnitude is covered by the journey's pass, which carries no frame
+count, and not by a count of its own. Two readings pointing the same way is
+weaker than one reading of the thing itself, and I caught my own scenario
+about to print a verdict that blurred them — it now counts runs at M-246's
+size separately from runs merely past the old window.
+
+**Two harness faults, both of them claims made under this loop's name.**
+
+The journey has been telling QA that the phone has no Stop control (M-269).
+That string sat in J5's scorer, stated as fact, in every run since it was
+written. The phone has one: the composer's stop square, scored at cycle 40
+and labelled `Stop` in the tree, absent at J5 only because that turn has
+already ended. QA imports these verdicts, which makes a wrong scorer string
+a published claim rather than an internal note.
+
+And the mic-path measurement existed only in one evening's shell history
+(M-270). Cycles 66 and 67 did all that counting with ad-hoc commands that
+were never committed, so closing M-248 tonight began by rebuilding the rig
+from scratch. That is M-133 and M-238 for the third time: the finding
+survives, the means of re-checking it does not.
+
+**PR:** [#572](https://github.com/unarbos/arbos/pull/572), harness only.
+**Evidence:** `media/mobile/journey/0918-051151/` — stills per step, the
+console, the score, the run record and a recording of the challenge and its
+workers.
+
+## Cycle 73 report (05:55 UTC, 09-18)
+
+**Looked at:** the workers sheet's live Working row — the row cycle 61 tried
+four times to catch and never did.
+
+**It is caught** (M-271). With a `sleep` worker running, the sheet draws it
+with the braille spinner and its step: `⠋, sleep 150 seconds, running sleep
+150`, and on a later run `⠙, sleep 300 seconds, sleeping 300 seconds`. The
+chat's own line is right alongside — `1 Working sleep 296 seconds · sleeping
+296 seconds`. The surface works, and shows what the desktop shows.
+
+**One question I am leaving open rather than answering badly** (M-272).
+Both sightings were of workers that had been running for minutes. On the one
+run that started from a quiet project and opened the sheet **18 seconds**
+after the send, the sheet — scrolled to its end — held twelve rows and no
+live one, while the chat behind it named the worker correctly. And every
+run, in every state, shows exactly **twelve** rows.
+
+Three explanations fit: the sheet lags its first publish, it caps at twelve,
+or it orders a new worker outside what is rendered. I have separated none of
+them, so I have filed it as a question with the constant twelve as the
+thread to pull, and changed no app code. Nobody is left uninformed in the
+meantime — the chat's line is live and correct throughout. It is the sheet's
+promptness in doubt, not the app's honesty.
+
+**Two faults in my scenario, and both are repeats of faults this loop has
+already paid for.**
+
+It counted spinner rows from one screen of a scrolling list (M-273) and
+reported that the sheet showed no spinner on any row, with the live row
+present and below the fold. That is cycle 71's mistake exactly (M-265), two
+cycles later. Only rendered rows reach the tree, so "it is not there" taken
+from one screen means "it is not on this screen".
+
+And it scored on the previous run's worker (M-274). The rerun read `sleep
+150 seconds` as its live row while that run had asked for 300 — the worker
+still going had started two minutes earlier. The pill lit within four
+seconds for the same reason, so the wait was satisfied by somebody else's
+work and the sheet was read before this run's worker existed. That is
+M-160's fault in a new place: evidence from an earlier run read as this
+one's.
+
+Both are fixed, and the second is fixed at the right level — the run now
+waits for the project to be quiet before it sends, rather than detecting
+contamination after the fact.
+
+**PR:** [#574](https://github.com/unarbos/arbos/pull/574), harness only.
+**Stills:** `media/mobile/cycle-73/`.
+
+## Cycle 74 report (06:05 UTC, 09-18)
+
+**Looked at:** the worker chat against Cursor's agent chat, last paired at
+46 — and, because it was one tap away, the sheet that opens it.
+
+**The pairing holds** (M-276). Plain header with a back chevron, a tick and
+the worker's name; collapsed tool rows (`read · project-context.md`,
+`read · notes.md`, `status`) with disclosure chevrons; flat surface, no
+bubbles; no composer, which is M-154's deliberate choice rather than an
+omission — the tree carries no `TextField` at all. The header now reads
+`Back` instead of a symbol name, after #571. The chat has real content, plan
+and tool rows and a Done report, which answers M-225 again from a different
+direction.
+
+**And one tap away, the sheet disagrees with the app about itself**
+(M-275). The chat's pill reads `Agents 19`. The sheet it opens, paged to its
+end, holds **12** rows. No two labels are the same, so the 12 is a count of
+distinct rows rather than an artefact of truncated goal text.
+
+This changes the shape of cycle 73's open question rather than answering it.
+The run that saw no live row 18 s in may not have been watching a sheet that
+lags; the sheet is short by seven against the app's own count, and a worker
+that has only just started is a plausible one to be missing. I have not read
+`publishWorkers` against this and I am not changing app code on a number I
+cannot explain yet, so what ships is the comparison itself:
+`deploy/mobile/scenarios/pill-count-vs-sheet.sh`, one command instead of a
+reconstruction.
+
+**A fault of mine inside that scenario, fixed in its own commit.** Its
+duplicate-label check compared across all ten pages, where every row repeats
+by construction, and reported twelve duplicates for a list with none. Two
+workers can only hide each other where both are on screen together, so the
+check has to be within one dump. Left uncorrected it would have made the
+19-versus-12 gap look explained.
+
+**PR:** [#576](https://github.com/unarbos/arbos/pull/576), harness only.
+**Stills:** `media/mobile/cycle-74/`.
+
+**On cycle 72's red kernel job:** that branch changes two shell files and no
+Rust, and `macOS (check kernel + desktop)`, which compiles the kernel,
+passed. It is the flake already filed in
+`internal/kernel-ci-flakes-2026-09-18.md` and not this loop's to fix.

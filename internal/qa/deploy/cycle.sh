@@ -97,6 +97,17 @@ echo "-- run.py exit $?"
 set -e
 rm -rf "$ROOT/loop/__pycache__"
 
+# The library runs in halves that alternate, because the whole of it needs ~162 min of measured work
+# (291 scenarios at a 33.5 s mean, 2026-09-18) against this step's 100 min cap: it reached about 62% and
+# the registry order decided which, silently until the truncation alarm went in. Halves are a hash of the
+# scenario name (stable when one is added) and both carry the two headlines. The half is remembered in
+# state/ and flipped each cycle, and every cycle says which it ran.
+HALF_FILE="$ROOT/state/library-half"
+LIB_HALF=$(cat "$HALF_FILE" 2>/dev/null)
+case "$LIB_HALF" in A) LIB_HALF=B;; B) LIB_HALF=A;; *) LIB_HALF=A;; esac
+echo "$LIB_HALF" > "$HALF_FILE"
+echo "== library half this cycle: $LIB_HALF (the other half runs next cycle; both halves carry the kickoff replay and the acceptance journey)"
+
 # 3a. Tracked branches: whole suite against each, with every inbox gate open
 # (an integration branch carries every feature). Space-separated list.
 for branch in ${ARBOS_QA_TRACK_BRANCHES:-main}; do
@@ -128,13 +139,36 @@ for branch in ${ARBOS_QA_TRACK_BRANCHES:-main}; do
   # inside a 50-minute cap, was killed at `inbox:multitasking-audit` after 76 verdicts, and the cut fell
   # on whatever registers last — which is exactly where new probes go (`af-04`, `uw-01`..`uw-04` never
   # ran). A truncated step must not read as a step that ran, so the kill is an alarm naming what it cost.
-  nice -n 10 timeout "${ARBOS_QA_TRACK_TIMEOUT:-100m}" python3 run.py --kernel "$ROOT/target-track-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --with-model --budget-usd "$BUDGET_USD"
+  nice -n 10 timeout "${ARBOS_QA_TRACK_TIMEOUT:-100m}" python3 run.py --kernel "$ROOT/target-track-$slug/release/arbos-kernel" --kernel-branch "$branch" --integration --fileplan "$fileplan" --half "$LIB_HALF" --with-model --budget-usd "$BUDGET_USD"
   trc=$?
   echo "-- track $branch: run.py exit $trc"
   if [ "$trc" = 124 ]; then
     echo "!! TRACK STEP TRUNCATED ($branch): run.py was killed by its ${ARBOS_QA_TRACK_TIMEOUT:-100m} timeout, so every scenario after the one it had reached never ran — the registration order decides what was lost, and new scenarios register last"
   fi
   set -e
+done
+rm -rf "$ROOT/loop/__pycache__"
+
+# 3a2. The unchecked-write family on its own invocation, because it cannot afford to be last.
+# Scenarios run in registry order and new modules register last: on 2026-09-18 `af-04` was number 291 of
+# 291, so the tracked step's cap decided whether the probes written that day ran at all — and cycle 5's
+# cap cut them without changing what was lost. Raising the cap improved the odds; a separate step removes
+# the question. Five scenarios, 186 s measured, `--tag unchecked-write`.
+for branch in ${ARBOS_QA_TRACK_BRANCHES:-main}; do
+  slug=$(echo "$branch" | tr '/' '-')
+  uwk="$ROOT/target-track-$slug/release/arbos-kernel"
+  if [ ! -x "$uwk" ]; then
+    echo "!! UNCHECKED-WRITE STEP NOT RUN ($branch): no kernel at $uwk — the tracked step must have failed to build"
+    continue
+  fi
+  set +e
+  nice -n 10 timeout "${ARBOS_QA_UW_TIMEOUT:-25m}" python3 run.py --kernel "$uwk" --kernel-branch "$branch" --integration --tag unchecked-write --with-model --budget-usd "$BUDGET_USD"
+  urc=$?
+  set -e
+  echo "-- unchecked-write $branch: run.py exit $urc"
+  if [ "$urc" = 124 ]; then
+    echo "!! UNCHECKED-WRITE STEP TRUNCATED ($branch): killed by its ${ARBOS_QA_UW_TIMEOUT:-25m} timeout; these are the day's newest probes and a cut here loses exactly them"
+  fi
 done
 rm -rf "$ROOT/loop/__pycache__"
 

@@ -457,6 +457,125 @@ the kernel-label guard. `uw_scenarios.py` is now in `vm-loop.sh`'s copy list too
 since `run.py` imports it, a machine that copied the runner without it would have failed at import and
 measured nothing.
 
+## The night's ledger: what was the rig's and what was the product's
+
+The desktop leg went from measuring nothing to measuring everything, and the honest accounting of what
+that produced matters more than the counts. Eight faults found between 18:00 and 05:20; **five were the
+rig's, two were mine, one was the product's.**
+
+| finding | whose | what it cost |
+|---|---|---|
+| `qal-j23` the driver imported off the store's FUSE mount | rig | 24 breaks in one cycle, the journey among them |
+| `qal-j24` `new_chat` fell back to a removed sidebar | rig | 16 scenarios measuring nothing for two days |
+| `qal-j25` the driver five hours older than its app | rig | every desktop result before 22:35 untrustworthy about settings |
+| `qal-j26` a wall clock on a paused VM | rig | a 1528-second "UI stall" that never happened |
+| J6 judged worker rows without opening the panel | rig | the acceptance headline "regressing" twice in a row |
+| `mt-17`'s loose `"strip"` selector | **mine** | a false break the moment my panel fix landed |
+| the pills scenario asserting a project's pills in a sub-chat | rig | a break the app documents as correct behaviour |
+| **`qal-j27`** a line typed while a turn runs is not steered and is lost | **product** | the person's words, silently, since 16 September |
+
+The pattern is worth stating once, because it is the opposite of what a break count suggests: **every rig
+fault that fails early hides the ones behind it.** `qal-j24` hid `qal-j27` for two days — three scenarios
+recorded it each cycle and nobody could see them inside sixteen `driver-exception` lines. Fixing the
+selector produced four more faults in one hour, each of which had been sitting there.
+
+And the corollary for this loop's own credibility: of eight faults, six were in the measuring apparatus.
+A cycle's break count is a statement about the rig until proved otherwise, which is what the boundary
+checks in `qal-j27` are for — four neighbouring contracts passing on the same build in the same cycle is
+what made it the product's.
+
+## What the acceptance journey did, once it could run
+
+| cycle | score | why |
+|---|---|---|
+| 3 | 0/8, 8 unverified | the driver could not be imported (`qal-j23`) — not a result |
+| 4 | 5/8, J1 and J6 fail | the 07:06 driver (`qal-j25`) |
+| 5 | 6/8, J6 fail | correct driver; J6 on the closed panel |
+| hand-run, 04:20 | **7/8, 0 fail** | J6's panel and post-versus-attempt both fixed |
+
+J6's notification contract is **established** for the first time on this rig, where the design doc has it
+as permanently unverified: `posted_new: 1` with `post_error: null`, `daemon_has_it: true`,
+`daemon_entries: 1`, the badge showing `unseen: 1` with its tab dot while away and both clearing on
+opening. Two host packages were missing and are now installed: `libnotify-bin` (so `notify-send` exists
+at all) and, earlier, `x11-apps` for `xwd`.
+
+J8 stays unverified by design — the dropped connection is the phone loop's.
+
+## Four iterations to make one probe honest (the pills)
+
+Kept because it is the clearest worked example of the review list catching its author, and every step
+tripped a rule this project had already written down:
+
+1. The original slept 25 s and asserted "no PRs pill after two bash outputs" **without proving there were
+   two bash outputs** — `checkpoint_refs`'s defect, and a fixed sleep used to wait for a result.
+2. My first wait matched the URL anywhere in the chat state and "landed" in **0.1 s** — the URL is in the
+   prompt the scenario types, echoed back as the user's line. `sb-01`'s rule, reproduced in the file that
+   records it.
+3. My second excluded `User`-shaped items, but the driver's items are flat dicts with `kind`/`text`, so
+   the exclusion never matched and it landed in 0.1 s again. I had guessed the data's shape twice rather
+   than read how the rest of the rig reads it.
+4. My third required a `tool` item and got an honest 2.3 s — then checked for the pill instantly, the
+   opposite error to the original.
+
+The answer, in the end, was in the app's own comment (`detail.rs:1924`): *"a subagent's chat in Cursor
+carries no pills; they are the project's"*. The scenario opened a sub-chat and asserted the project's
+pills in it. Tested on the project's own chat: `pill_ids: ["pill-prs"]`, 1.2 s after a trigger that
+landed at 9.9 s. Nothing to file.
+
+## The tracked step cannot run the whole library, and never has
+
+Measured on cycle 6's tracked step, 2026-09-18 05:47, 60 verdicts in:
+
+- **mean 33.5 s a scenario**, median 10.2 s — the mean is what matters for a cap
+- **291 scenarios registered**, so the whole library needs about **162 minutes**
+- the cap is **100 minutes**, which reaches about **179 of 291 — roughly 62%**
+
+So the step has never run the library it is described as running, on this machine. Which 62% it runs is
+decided by **registry order**, which is module import order, which puts anything new last. Until the
+truncation alarm went in tonight, the log's only sign was `run.py exit 124` among several hundred lines.
+
+Step 3a2 rescues the five scenarios that matter most for this — the day's own probes — but about 105
+others are still cut every cycle, and nobody knows which without reading the log's tail.
+
+Three ways out, and this is the coordinator's call rather than mine:
+
+1. **Raise the cap to ~170 minutes.** Honest coverage, and a cycle then runs 5–6 hours, so fewer cycles a
+   day and a slower loop around a finding.
+2. **Split the library in two halves that alternate cycles**, each cycle saying which half it ran. Full
+   coverage every two cycles, no silent loss, the cycle stays about its present length. My preference.
+3. **Make the expensive scenarios cheaper.** The two 300-second entries in tonight's slowest five are
+   `turn-never-ended` waits timing out — a five-minute wait for something that has already failed —
+   and `spawn-storm` costs 10.8 minutes. There is real time to win here, and it is worth doing whichever
+   of the other two is chosen.
+
+One number in that list is not to be trusted, and it is a good illustration of `qal-j26`:
+`desktop-rapid-session-switch` appears as the most expensive scenario of the night at 25.7 minutes. That
+is the phantom stall from cycle 4, measured on a wall clock across a paused VM. Its real cost is 20
+seconds. Durations recorded before 22:35 should not be used for this kind of arithmetic at all.
+
+## What `docs/qa-loop-design.md` no longer describes
+
+The design doc is what a new worker reads first, and the cycle changed under it tonight. Not edited here,
+because it is the loop's shared document and the machine that rebuilt it was still up; this is the list
+for whoever reconciles the two.
+
+| the doc says | it now does |
+|---|---|
+| the cycle runs the library | the tracked step runs **one half**, alternating, stated in the log (`== library half B: 151 of 291`); the whole of it needs ~162 min against a 100 min cap |
+| steps 3, 3a, 3b, 3b2, 3c | a **3a2** between 3a and 3b: the `uw-*`/`af-*` family on its own 25-minute invocation, because they register last and a capped step loses its tail |
+| `timeout 50m` on the tracked step | **100m**, and `exit 124` is an alarm naming what truncation cost |
+| the desktop driver comes from `internal/parity` when present | from **the app's own commit** (`$wt/desktop/driver`), copied to local disk; the store copy is a fallback (`qal-j23`, `qal-j25`) |
+| — | the two **headlines run in both halves**; a half without the kickoff replay or the journey would be a cycle measuring less than it reports |
+| — | durations are **monotonic**; a wall clock on this paused VM invented a 1528-second stall (`qal-j26`) |
+| — | `publish.sh` **refuses** a push that would delete bug files the branch holds (`qal-j21`) |
+| — | every rollout and index line records the kernel's own `--version`, and a `--kernel-branch` naming a sha the binary lacks is an alarm |
+| J6 notifications "always unverified here" | **established**: the app posts, dunst receives it, the badge clears — and a *post* is now distinguished from a failed *attempt* |
+| the loop's ledgers are `vm-*.jsonl` | per-machine (`ARBOS_QA_MACHINE`), so two loops cannot overwrite each other |
+
+The bug files `qal-j21` through `qal-j27` carry the reasoning for each, and every change is in the store,
+which is what `vm-loop.sh` copies from at the start of a cycle — the machine's copy is a working tree,
+not a home.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j21-publish-mirrors-a-smaller-bug-set-and-deletes-the-branchs-drafts.md`
