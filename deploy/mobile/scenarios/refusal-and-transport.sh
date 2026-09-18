@@ -164,9 +164,23 @@ echo "fixture hub up on $PORT: two refusals with reasons, one 502 tunnel"
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 -hubURL "http://127.0.0.1:$PORT" >/dev/null 2>&1
 sleep 9
+# A cold start comes back to the chat that was in front (M-338, cycle 100),
+# so the app no longer opens on the list. Without this the four probes below
+# tapped names that were not on screen, each said "no <row> row", and the
+# run still printed its closing paragraph as though it had measured the
+# pair. Reach the list deliberately.
+ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
 shot 01-the-fixture-list
 echo "the list:"
 ui dump | grep -E "Button +[a-z-]+," | sed 's/^/  /'
+SEEN=$(ui dump | grep -cE "Button +(no-machine|machine-offline|no-kernel|bad-tunnel),")
+if [ "$SEEN" -lt 4 ]; then
+  echo
+  echo "only $SEEN of the fixture's 4 rows are on screen — the app is not"
+  echo "looking at the fixture hub, so nothing below would be about it."
+  echo "Stopping rather than reporting on four rows that are not there."
+  exit 1
+fi
 
 # Each case gets the same treatment: open it, wait a fixed window, read what
 # the app says, and count how often it came back during that window.
@@ -176,7 +190,7 @@ probe() {
   echo "=== $row ==="
   local start
   start=$(python3 -c 'import time;print(f"{time.time():.3f}")')
-  ui tap "$row" >/dev/null || { echo "  no $row row"; return; }
+  ui tap "$row" >/dev/null || { echo "  no $row row"; MISSED=$((MISSED + 1)); return; }
   sleep "$window"
   shot "$name"
   echo "  what the app says:"
@@ -199,6 +213,7 @@ PY
   sleep 2
 }
 
+MISSED=0
 probe no-machine 02-no-machine-of-that-name 25
 probe machine-offline 03-the-machine-is-offline 25
 probe no-kernel 04-has-no-kernel-serving 25
@@ -208,6 +223,11 @@ echo
 echo "--- the whole attach log ---"
 sort "$LOG" | awk '{print $2}' | uniq -c | sed 's/^/  /'
 echo
-echo "A refusal should be counted once and left alone; the 502 should be"
-echo "counted several times. Any other shape is the pair handled backwards."
+if [ "$MISSED" -gt 0 ]; then
+  echo "VERDICT: none — $MISSED of 4 cases never opened, so this run says nothing"
+  echo "         about how the phone handles a refusal or a transport failure"
+else
+  echo "A refusal should be counted once and left alone; the 502 should be"
+  echo "counted several times. Any other shape is the pair handled backwards."
+fi
 echo "still in $OUT"
