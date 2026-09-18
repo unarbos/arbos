@@ -834,6 +834,16 @@ fn short_notice(text: &str) -> String {
         let model = model.rsplit('/').next().unwrap_or(model);
         return format!("Switched to {model} for this turn.");
     }
+    // "mode: ask — ask: every call that writes …": the head is the setting
+    // and its value; the rule behind the dash is the detail. Cut at the
+    // first colon this read as one word, "mode" (F-188, cycle 41).
+    if let Some((head, _)) = text.split_once(" — ")
+        && let Some((key, value)) = head.split_once(": ")
+        && !key.contains(' ')
+        && !value.contains(' ')
+    {
+        return format!("{key}: {value}");
+    }
     if text.chars().count() > 160 {
         // The first sentence ends at a stop followed by space, not at any
         // dot: "…(openai/gpt-5.4-mini was refused…" was cut to "(openai/gpt-5."
