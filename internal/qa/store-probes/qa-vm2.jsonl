@@ -53,3 +53,4 @@
 {"ts":"2026-09-18T13:23:14Z","machine":"qa-vm2","mounted":true,"docs_dir":true,"docs_md":35,"notes_bytes":44185,"bugs":375,"mirror_script":true,"write_ok":true,"write_err":""}
 {"ts":"2026-09-18T13:39:30Z","machine":"qa-vm2","mounted":true,"docs_dir":true,"docs_md":35,"notes_bytes":44298,"bugs":375,"mirror_script":true,"write_ok":true,"write_err":""}
 {"ts":"2026-09-18T13:55:22Z","machine":"qa-vm2","mounted":true,"docs_dir":true,"docs_md":35,"notes_bytes":44326,"bugs":376,"mirror_script":true,"write_ok":true,"write_err":""}
+{"ts":"2026-09-18T14:11:38Z","machine":"qa-vm2","mounted":true,"docs_dir":false,"docs_md":-1,"notes_bytes":44396,"bugs":378,"mirror_script":true,"write_ok":true,"write_err":""}

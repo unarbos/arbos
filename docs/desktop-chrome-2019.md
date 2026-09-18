@@ -2,7 +2,9 @@
 
 Jacob's asks on 2026-09-18 after Update **0.2.0 (2019)**. Do not publish `v0.2.0`.
 
-[#649](https://github.com/unarbos/arbos/pull/649) is on `main`. The top bar was still wrong. Next PR is from that main, for the Mac channel.
+[#649](https://github.com/unarbos/arbos/pull/649) is on `main`. The top bar was still wrong.
+
+Follow-up: [#654](https://github.com/unarbos/arbos/pull/654) from that main, branch `cursor/desktop-topbar-0690`. Mac channel.
 
 ## The rule
 
@@ -17,9 +19,11 @@ Jacob's asks on 2026-09-18 after Update **0.2.0 (2019)**. Do not publish `v0.2.0
 
 The right-side panel control and the panel's own tabs sit on the same row as the project tabs. A click on Project stays in the drawer. The bottom +, the expand in the panel header, and the header X went. Native fullscreen hides the leftover title band.
 
-## PR
+## This pass (#654)
 
-Follow-up from current main (has #649). Mac channel. `v0.2.0` stays unpublished.
+The empty-chat spacer that cut the transcript short is gone. The chat fills the column. The Clear button is gone; typed `clear` / `/clear` stay. The four-box is back as `window-expand` on the tab strip, pinned at the window's top-right. It does not live in the panel header, so widening the drawer cannot move it.
+
+`v0.2.0` stays unpublished.
 
 ## Stills
 
@@ -30,3 +34,4 @@ Linux after the fix:
 - [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/01-chat-fills.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/01-chat-fills.png)
 - [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/02-strip-toggle-expand.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/02-strip-toggle-expand.png)
 - [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/03-no-clear-no-header-x.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/03-no-clear-no-header-x.png)
+- [/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/04-expand-stays-pinned.png](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/media/desktop-topbar/04-expand-stays-pinned.png)

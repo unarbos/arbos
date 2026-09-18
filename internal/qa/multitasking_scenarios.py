@@ -351,13 +351,38 @@ def register(scenario, registry, transcript, kinds, now_ms, model_turn, branch):
         spawns = [e for e in evs if e.get("kind") == "tool" and e.get("name") == "spawn"]
         assistant = " ".join(e.get("text", "") for e in evs if e.get("kind") == "assistant").lower()
         args = [e.get("args") or {} for e in spawns]
-        fields = ("name", "task", "read_first", "do", "rules", "output", "report")
-        six = [a for a in args if sum(1 for f in fields if a.get(f)) >= 6]
-        cx.rec.notes.update({"spawns": len(spawns), "six_field_briefs": len(six), "read_first": [a.get("read_first") for a in args]})
+        # The brief the *child* gets, not the arguments the model sent. Every field but `name` and
+        # `task` is optional in the spawn schema, and `read_first` carries a default the kernel
+        # applies — "(default: project-context.md, notes.md)" (tools.rs:471). So a flat
+        # `{name, output, task}` call is valid, and the kernel renders the rest: the spawn result
+        # reads "Read first: .arbos/docs/project-context.md, then .arbos/notes.md / Task: … / Do: …".
+        # Reading `args` to decide what the worker was told asserts on the layer before the one that
+        # matters, and broke both of this scenario's brief checks on a build that was behaving
+        # (2026-09-18, `a8678ac16636`).
+        rendered = [str(e.get("body") or e.get("result") or "") for e in spawns]
+        brief_words = ("read first:", "task:", "do:")
+        complete = [r for r in rendered if sum(1 for w in brief_words if w in r.lower()) == len(brief_words)]
+        cx.rec.notes.update({
+            "spawns": len(spawns),
+            "args_sent": [sorted(a) for a in args],
+            "briefs_rendered_complete": len(complete),
+            "read_first_in_rendered": [("project-context" in r) for r in rendered],
+            "rendered_head": [r[:160] for r in rendered][:2],
+        })
         cx.rec.expect(len(spawns) >= 2, "mt-07-no-delegation", f"{len(spawns)} spawn call(s) for a three-part request (expected 2)")
         cx.rec.expect("mile" in assistant, "mt-07-question-not-inline", "the read-only question was not answered in root's own reply")
-        cx.rec.expect(len(six) == len(args) and args, "mt-07-brief-fields", f"briefs missing fields: {[sorted(set(fields) - set(a)) for a in args]}")
-        cx.rec.expect(all("project-context" in str(a.get("read_first", "")) for a in args) if args else False, "mt-07-read-first", "read_first does not name project-context.md")
+        cx.rec.expect(
+            bool(rendered) and len(complete) == len(rendered),
+            "mt-07-brief-fields",
+            f"a worker's rendered brief is missing one of {brief_words}: {cx.rec.notes['rendered_head']}. The kernel fills the optional fields, so a brief short of these reached the worker incomplete",
+            "arbos-core store::Kickoff rendering",
+        )
+        cx.rec.expect(
+            bool(rendered) and all("project-context" in r for r in rendered),
+            "mt-07-read-first",
+            f"a worker's brief does not name project-context.md even after the kernel's default: {cx.rec.notes['rendered_head']}",
+            "arbos-kernel tools.rs spawn — read_first defaults to project-context.md, notes.md",
+        )
         verbatim = [a for a in args if "rules" in a and str(a["rules"]).lower().startswith("rules the worker")]
         cx.rec.expect(not verbatim, "mt-07-rules-verbatim", "a brief's rules are the parameter description verbatim")
         k.stop()

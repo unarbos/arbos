@@ -748,7 +748,17 @@ Cumulative read: **285 honest failures**; the account has held on every one sinc
 
 Spend $21.15. Cycles 25–29 together: $56.69, five landed rules read on their own instances.
 
-## Next (cycle 30)
+## Cycle 30 (2026-09-18) — ten more fresh instances read for the account
 
-1. Nothing is owed on any landed rule. Reading continues on whatever new failures arrive; when the loop has budget and nothing else to read, ten fresh instances at `-r 2` is the shape that keeps testing the account.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 a8678ac16636 protocol 1`** = `main` head, built in the worktree, label proved. Since cycle 29 two contract commits changed marks, not asks — the producer rule's reply line is gone (the read call is the mark, as cycles 25 and 27 found), and the quoted-reference rule's mark is now a test that asserts the quote — neither needing a re-read the loop can do. Network cut, no stall, no cap. Ten never-run instances (`fresh10b.txt`) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-30-preregistration.md)). $7.49; 11 of 20 solved — a count on a fresh draw.
+
+**Nine failures, all inside the account.** django-12325 ×2 — **A, the twin**, evident: the gold changes `options.py` beside `base.py` (the `parent_link` check that `test_clash_parent_link` exercises); both rollouts fixed `base.py` alone, in 14 and 15 tool calls. django-16667 ×2 — C, consistent: the same `except`, a different return value than the pinned `"0-0-0"`. matplotlib-23299 ×2, sympy-15875 ×2, sympy-19495 ×1 — C, consistent: right file, right function, a different mechanism or detail than the gold's; the failing assertion not visible in the transcript.
+
+Twenty fresh instances across cycles 29–30, fourteen failures, none outside the account. Cumulative read: **294**.
+
+Spend $7.49.
+
+## Next (cycle 31)
+
+1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.

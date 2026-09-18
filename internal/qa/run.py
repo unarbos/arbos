@@ -1942,6 +1942,9 @@ def reap_scratch(scratch):
 REAPED = []
 
 
+_COMPLETED = []
+
+
 def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     meta = SCENARIOS[name]
     if meta["needs_model"] and not key:
@@ -2012,6 +2015,7 @@ def run_one(name, binary, key, kernel_branch=None, budget_usd=None):
     # label is hand-typed while the version is not. 2026-09-17 14:34: a control was run from
     # repo/target/release, which the cycle's own step 1 had rebuilt to the day's head — the label still
     # said the old sha and the run "passed", reporting behaviour only a later PR has. Loud, and recorded.
+    _COMPLETED.append(name)
     label_sha = re.findall(r"\b[0-9a-f]{8,12}\b", str(KERNEL_BRANCH or ""))
     mislabelled = [h for h in label_sha if h not in result["kernel_version"]]
     if mislabelled:
@@ -2189,4 +2193,20 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A traceback out of main() exits 1, which is also what "there were breaks" exits. On 2026-09-18
+    # half B died at scenario 133 of 157 on a FileNotFoundError and the step read as a normal finish
+    # for exactly that reason — the step's alarm only looked for 124. So a crash says so in the
+    # loop's own alarm format, before the traceback, and names what it cost.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — re-raised below; this only adds the alarm
+        done = len(globals().get("_COMPLETED", []) or [])
+        print(
+            f"!! RUN CRASHED: {type(exc).__name__}: {exc}. "
+            f"{done} scenario(s) had finished; every one after that never ran. "
+            f"This exits 1, which is also what breaks exit, so read the traceback and not the code.",
+            flush=True,
+        )
+        raise
