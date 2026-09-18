@@ -105,11 +105,20 @@ def main():
     els = elements(udid)
 
     if verb == "menu":
-        # The "…" in the top bar has no label of its own, and its items are
-        # only in the tree once it is open. It is the one pop-up button up
-        # there, which is a surer way to find it than a remembered point.
+        # The top bar's pop-up buttons carry names now ("More" in a chat,
+        # "Filter" in the list), so prefer the name and keep the positional
+        # search only for builds older than that. Either way the menu's own
+        # items are in the tree only once it is open, which is why this verb
+        # exists instead of a plain tap by label.
+        wanted = sys.argv[3] if len(sys.argv) > 3 else None
         bar = [e for e in els if (e.get("type") or "") == "PopUpButton"
                and (e.get("frame") or {}).get("y", 999) < 150]
+        if wanted:
+            named = [e for e in bar if (e.get("AXLabel") or "") == wanted]
+            if not named:
+                print(f"ui: no pop-up button named {wanted!r} in the top bar", file=sys.stderr)
+                sys.exit(1)
+            bar = named
         if len(bar) != 1:
             print(f"ui: want one pop-up button in the top bar, found {len(bar)}", file=sys.stderr)
             sys.exit(1)

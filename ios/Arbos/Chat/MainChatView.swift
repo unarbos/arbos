@@ -163,7 +163,7 @@ struct ProjectChatView: View {
             }
             .frame(maxWidth: 220)
             HStack {
-                RoundButton(symbol: "chevron.left") { dismiss() }
+                RoundButton(symbol: "chevron.left", label: "Back") { dismiss() }
                 Spacer()
                 Menu {
                     Button {
@@ -183,8 +183,11 @@ struct ProjectChatView: View {
                         Label("Settings", systemImage: "gearshape")
                     }
                 } label: {
-                    RoundButton(symbol: "ellipsis") {}.allowsHitTesting(false)
+                    RoundButton(symbol: "ellipsis", label: "More") {}.allowsHitTesting(false)
                 }
+                // A Menu presents itself, so the label of the button inside
+                // it never reaches the tree; it needs its own.
+                .accessibilityLabel("More")
             }
         }
         .padding(.horizontal, ArbosTheme.gutter)

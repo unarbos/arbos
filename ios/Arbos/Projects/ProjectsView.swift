@@ -153,9 +153,9 @@ struct ProjectsView: View {
     /// where the reference has its back chevron; search and filter right.
     private var topBar: some View {
         HStack {
-            RoundButton(symbol: "gearshape") { showSettings = true }
+            RoundButton(symbol: "gearshape", label: "Settings") { showSettings = true }
             Spacer()
-            RoundButton(symbol: "magnifyingglass") {
+            RoundButton(symbol: "magnifyingglass", label: "Search") {
                 withAnimation(.easeInOut(duration: 0.2)) { searching.toggle() }
                 searchFocus = searching
                 if !searching { query = "" }
@@ -166,9 +166,10 @@ struct ProjectsView: View {
                     Text("Live only").tag(true)
                 }
             } label: {
-                RoundButton(symbol: "line.3.horizontal.decrease") {}
+                RoundButton(symbol: "line.3.horizontal.decrease", label: "Filter") {}
                     .allowsHitTesting(false)
             }
+            .accessibilityLabel("Filter")
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 4)
@@ -373,6 +374,11 @@ struct ProjectRow: View {
 /// search, filter and menu buttons.
 struct RoundButton: View {
     let symbol: String
+    /// What the button is for, said as a person would say it. Without one,
+    /// SwiftUI reads the symbol's own name aloud — the settings button
+    /// announced itself as "Gear Shape" — and a button wrapped in a `Menu`
+    /// gets no name at all, which is what left the filter as "PopUpButton".
+    var label: String
     let action: () -> Void
 
     var body: some View {
@@ -385,6 +391,7 @@ struct RoundButton: View {
                 .overlay(Circle().strokeBorder(ArbosTheme.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }
 

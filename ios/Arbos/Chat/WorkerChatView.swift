@@ -77,7 +77,7 @@ struct WorkerChatView: View {
             }
             .frame(maxWidth: 220)
             HStack {
-                RoundButton(symbol: "chevron.left") { dismiss() }
+                RoundButton(symbol: "chevron.left", label: "Back") { dismiss() }
                 Spacer()
             }
         }
