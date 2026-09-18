@@ -1,0 +1,39 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-rw-06-rewind-right-after-sending-cuts-one-turn-too-many-w33m8lr7/place...
+Found 31 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Skipped 6 additional binary files (detected by content)
+Writing index (5101 trigrams, 25 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-rw-06-rewind-right-after-sending-cuts-one-turn-too-many-w33m8lr7/home/.cache/arbos/tgrep/ff136909ca4808e9
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:2: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:15: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:27: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:39: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:43: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:51: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:63: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:67: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:79: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:87: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:91: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:95: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:99: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:103: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:107: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:111: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:115: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:123: the tree took longer than 20s; the turn goes on without a file checkpoint
+rewind_refused root: rewind: the agent is running; stop the turn first
+checkpoint root:135: the tree took longer than 20s; the turn goes on without a file checkpoint
+checkpoint root:139: the tree took longer than 20s; the turn goes on without a file checkpoint

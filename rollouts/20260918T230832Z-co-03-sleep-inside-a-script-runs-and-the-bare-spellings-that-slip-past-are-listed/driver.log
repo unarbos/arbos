@@ -1,0 +1,4 @@
+1789772912911 kernel started pid 1298623
+1789772913363 BREAK sleep-in-a-loop-refused-or-lost: the loop with `sleep 1` inside did not run to its output: {'command': 'for i in 1 2 3; do sleep 1; done; echo looped', 'refused': True, 'ran': False, 'error': 'bash: refused — `for i in 1 2 3; do sleep 1; done; echo looped` while 1 worker(s) of yours run. Their reports wake you t'}
+1789772913379 kernel stopped with code 0
+1789772913410 bugs: new 28acf9ab81.md

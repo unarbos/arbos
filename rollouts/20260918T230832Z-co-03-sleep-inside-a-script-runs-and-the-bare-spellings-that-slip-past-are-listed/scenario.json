@@ -1,0 +1,9 @@
+{
+  "name": "co-03-sleep-inside-a-script-runs-and-the-bare-spellings-that-slip-past-are-listed",
+  "doc": "#432 scopes the refusal to a bare `sleep N` heading the command. A sleep inside a loop is meant to run. The\n        spellings that mean the same wait but are not bare \u2014 `sh -c 'sleep 75'`, `/bin/sleep 75`, `timeout 80 sleep 75`,\n        `true && sleep 75` \u2014 are recorded here for what the kernel does with them, as an observation and not a break:\n        the PR's contract is the bare form, and this is the list a reviewer should see.",
+  "tags": [
+    "landing",
+    "coordinator",
+    "sleep"
+  ]
+}

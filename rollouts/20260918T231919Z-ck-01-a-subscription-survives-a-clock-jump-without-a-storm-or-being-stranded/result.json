@@ -1,0 +1,22 @@
+{
+  "scenario": "ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded",
+  "doc": "`clock-jump-cron` (run.py:866) held two properties over the old `plan.jsonl` engine:\n\n          - **coalesce** \u2014 a node ten days overdue fires *once*, not once per missed period;\n          - **rewind recovery** \u2014 a node whose `next_due` sits ten days ahead because the clock was\n            set back is pulled to within one period, rather than never firing again.\n\n        #104 replaced that engine with `subscriptions/`, so the scenario now sets itself aside with a\n        note pointing at `fp-shell-subscription` and `fp-timer-subscription`. Neither carries either\n        property: both test the cadence of a subscription that is due now, and `write_subscription`\n        defaults `next_due` to one second ago, so nothing in the library has ever put a subscription\n        far out of date in either direction. The skip is honest and names successors that do not\n        inherit what it was for.\n\n        Both cases are ordinary. A laptop shut for ten days wakes with a 30-second subscription\n        28,800 periods behind; a clock corrected backwards (NTP, a timezone fix, a person) leaves one\n        due in the future. Shell subscriptions here, so the arms cost no model and the count is exact.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "FileNotFoundError: [Errno 2] No such file or directory: '/tmp/arbos-qa-ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded-5vehdxhm/place/.arbos/agents/root/subscriptions/0002-overdue.toml'",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 28.1,
+  "place": "/tmp/arbos-qa-ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded-5vehdxhm/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 11e991cc27f3 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T231919Z-ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded",
+  "branch": "main",
+  "usd": 0.00415
+}
