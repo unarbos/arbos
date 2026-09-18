@@ -34,3 +34,15 @@ Source: App Store Connect beta feedback (`GET /v1/apps/6812503407/betaFeedbackSc
 **Proof of F4/F5, done live 2026-09-16 12:00 UTC** (the steward asked): (A) port 443 cut on the Mac, a marker line typed into `demo`, switched to another project, link restored — the other project never saw it, and the line ran in `demo` when the socket came back (TCP kept it; `media/mobile/cycle-12/01-`–`03-`). (B) `longproj`'s kernel killed on the local hub, a marker typed, switched to `otherproj`, kernel restarted — `otherproj`'s transcript file and kernel log contain no marker (`grep -c` = 0), and the line was dropped rather than sent anywhere (`04-`, `05-`). **Decision for Jacob**: in case B the words are lost. Should the app hold them for that project and show them as pending cards when he comes back to it, sending when it answers? Recommended yes.
 
 Rules the loop follows from here: new feedback is read within 15 minutes; a fix goes into the cycle in progress, ahead of the coverage rotation; anything that needs Jacob's decision is listed here and in the report, not guessed.
+
+**F6 reopened and closed again, 2026-09-18 (cycle 109).** "Can't scroll any
+further to see bottom chat" was closed at build 994 against the keyboard,
+and that cause was real. A second cause of the same sentence was still
+live: with workers in a project, the transcript stopped **59 points** short
+of its end, so the last line sat behind the workers pill. Proven by
+comparing a chat with a pill against one without — with no pill `scrollTo`
+lands exactly at the end — and fixed in
+[#633](https://github.com/unarbos/arbos/pull/633) by reserving the pill's
+measured height. Worth recording as a caution: a complaint closed against
+one cause is not evidence that the words were only ever about that cause.
+See M-360.

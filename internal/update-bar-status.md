@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 11:06 UTC.
+Last checked 2026-09-18 11:23 UTC.
 
-## Click Update. You will get build 1978.
+## Click Update. You will get build 1987.
 
-**1978** — signed, notarised, stapled, on the feed since 11:04 UTC.
+**1987** — signed, notarised, stapled, on the feed since 11:21 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1978 (builds 1979–1987). The desktop ones are the visible half:
+
+- **#623** — a "key: value — rule" notice keeps its value on the line
+- **#629** — no This Mac picker, a Cursor-like Project page (⌘2), and a
+  typed `clear` hides the transcript in this window only
+- **#630** — two timing pins in the end-to-end tests
+
+## Before that: 1978
 
 New since 1973 (builds 1974–1978):
 

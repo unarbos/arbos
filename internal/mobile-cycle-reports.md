@@ -2938,3 +2938,21 @@ zero when there are no workers. After it, the card opens fully in view:
 
 **Two PRs, because the cap splits them:** the harness work ships now; the
 three `ios/` fixes join the batch (M-350).
+
+**A user had already reported this, and I had already closed it.** The
+feedback poll this cycle re-listed F6 — *"Can't scroll any further to see
+bottom chat"* — closed at build 994 against the keyboard hiding the tail.
+That cause was real and is fixed. The pill hiding the tail is a **second**
+cause of the same sentence, still live four weeks later (M-363). The lesson
+is narrow and useful: a complaint closed against one cause is not evidence
+that the words were only ever about that cause.
+
+The poll also marked all 19 items `NEW`, because its state lives in
+`~/mobile-feedback` and a fresh worker creates it empty (M-364). No harm —
+`internal/mobile-feedback-log.md` is the durable record — but the `NEW`
+marker means nothing on a machine's first run.
+
+**PRs, both green:**
+[#632](https://github.com/unarbos/arbos/pull/632) harness,
+[#633](https://github.com/unarbos/arbos/pull/633) the `ios/` batch — iPhone
+build passes; TestFlight stays **1936** until the cap resets.
