@@ -234,6 +234,16 @@ pub(crate) const TOOLBAR_INSET: f32 = if cfg!(target_os = "macos") {
     HEADER_INSET
 };
 
+/// Leading room on the tab strip. In a Space the traffic lights hide with
+/// the menu bar; keeping their inset would be an empty hole at the top.
+pub(crate) fn toolbar_inset(window: &Window) -> f32 {
+    if window.is_fullscreen() || window.is_simple_fullscreen() {
+        HEADER_INSET
+    } else {
+        TOOLBAR_INSET
+    }
+}
+
 pub fn init(cx: &mut App) {
     crate::view::terminal::init(cx);
     crate::view::component::feedback_sheet::init(cx);
@@ -582,6 +592,10 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
                 traffic_light_position: Some(point(px(TRAFFIC_LIGHT_X), px(TRAFFIC_LIGHT_Y))),
                 ..Default::default()
             }),
+            // We draw the tab strip; AppKit must not reserve a second title
+            // band or delay clicks on it. In a Space that leftover band is
+            // the gap #542 left.
+            app_owns_titlebar_drag: true,
             // Glass needs a blurred window background to blur into.
             window_background: Theme::of(cx).window_background_appearance(),
             window_min_size: Some(size(px(600.), px(320.))),
@@ -620,8 +634,8 @@ pub fn open(settings: Settings, state: State, cx: &mut App) -> Result<WindowHand
 pub enum Pane {
     Chat,
     Surface,
-    /// The project page: the status page, the store's files, the context
-    /// document — Cursor's Project tab, full width in the column.
+    /// Kept so old requests compile. The page lives in the right panel
+    /// and never takes this column.
     Project,
 }
 
@@ -1097,7 +1111,10 @@ impl Arbos {
             &workspace,
             window,
             |this, _, request: &PaneRequest, _, cx| match request {
-                PaneRequest::Surface(_) => this.set_pane(Pane::Surface, cx),
+                // A surface belongs in the right panel. Putting it in the
+                // column covered the chat — the same fault as the Project
+                // page (#629).
+                PaneRequest::Surface(_) => {}
                 PaneRequest::Chat => this.set_pane(Pane::Chat, cx),
             },
         )
@@ -1897,9 +1914,17 @@ impl Arbos {
         window.focus(composer.as_ref().unwrap_or(&self.focus), cx);
     }
 
-    /// ⌘2 and the panel's Project header: the project page in the column.
-    pub(crate) fn show_project(&mut self, _: &ShowProject, _: &mut Window, cx: &mut Context<Self>) {
-        self.show_pane(Pane::Project, cx);
+    /// ⌘2 and the panel's Project header: the project page in the right
+    /// panel. Never the main column — that covered the chat (#629).
+    pub(crate) fn show_project(
+        &mut self,
+        _: &ShowProject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.workspace
+            .update(cx, |workspace, cx| workspace.select_panel_tab(0, cx));
+        self.focus_panel(window, cx);
     }
 
     /// ⌘1: the chat, whatever else is open — the way back from the Settings
@@ -3054,10 +3079,16 @@ impl Arbos {
     /// it, so with nothing open there is no pane to name — least of all the
     /// chat, which under the shipped defaults is itself switched off.
     pub(crate) fn showing(&self, cx: &App) -> Option<Pane> {
-        if self.has_pane(self.pane, cx) {
-            return Some(self.pane);
+        // The Project page and a surface stay in the right panel. Asking
+        // for either in the column used to cover the chat (#629).
+        let asked = match self.pane {
+            Pane::Chat => Pane::Chat,
+            Pane::Surface | Pane::Project => Pane::Chat,
+        };
+        if self.has_pane(asked, cx) {
+            return Some(asked);
         }
-        [Pane::Chat, Pane::Surface, Pane::Project]
+        [Pane::Chat]
             .into_iter()
             .find(|&pane| self.has_pane(pane, cx))
     }
@@ -3066,13 +3097,10 @@ impl Arbos {
     pub(crate) fn has_pane(&self, pane: Pane, cx: &App) -> bool {
         let workspace = self.workspace.read(cx);
         match pane {
-            Pane::Chat => {
-                workspace.active_session().is_some()
-                    && workspace
-                        .active_project()
-                        .and_then(|project| project.focus)
-                        .is_some_and(|focus| focus.surface.is_none())
-            }
+            // A surface in the panel must not hide the chat. The old
+            // column-takeover used `focus.surface` to mean the middle of
+            // the window was a document; that is gone (#629).
+            Pane::Chat => workspace.active_session().is_some(),
             Pane::Surface => workspace.active_surface().is_some(),
             // Every open project has a page, written or not.
             Pane::Project => workspace.active_project().is_some(),
@@ -3150,7 +3178,7 @@ impl Render for Arbos {
             // The strip of tabs across the top, then whichever tab is in
             // front: a project — the chat column with the panel on its right —
             // or Settings, which is not a project and so fills the width.
-            .child(self.tab_bar(cx))
+            .child(self.tab_bar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -3214,8 +3242,12 @@ pub(crate) struct Dictation {
 /// Put the transparent titlebar back — macOS 15.3+ clears it on a
 /// style-mask change — and keep the window a native Space so the
 /// green button and View › Enter Full Screen hide the menu bar.
+///
+/// #542 turned Full Screen Primary on. That was not enough: AppKit still
+/// painted a titled band and inset the content. Hide the title, let the
+/// view fill the window, and zero the extra safe-area inset a Space adds.
 #[cfg(target_os = "macos")]
-fn keep_macos_glass(_window: &Window) {
+fn keep_macos_glass(window: &Window) {
     use objc::{
         class, msg_send,
         runtime::{Object, YES},
@@ -3225,7 +3257,19 @@ fn keep_macos_glass(_window: &Window) {
     const FULL_SCREEN_PRIMARY: usize = 1 << 7;
     const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
     const FULL_SCREEN_NONE: usize = 1 << 9;
+    const STYLE_MASK_FULL_SCREEN: usize = 1 << 14;
+    const STYLE_MASK_FULL_SIZE_CONTENT: usize = 1 << 15;
+    const TITLE_HIDDEN: usize = 1;
 
+    #[repr(C)]
+    struct NsEdgeInsets {
+        top: f64,
+        left: f64,
+        bottom: f64,
+        right: f64,
+    }
+
+    let in_space = window.is_fullscreen();
     unsafe {
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
         let windows: *mut Object = msg_send![app, windows];
@@ -3240,8 +3284,28 @@ fn keep_macos_glass(_window: &Window) {
                 continue;
             }
             let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+            let _: () = msg_send![ns_window, setTitleVisibility: TITLE_HIDDEN];
+            let style_mask: usize = msg_send![ns_window, styleMask];
+            if style_mask & STYLE_MASK_FULL_SIZE_CONTENT == 0 {
+                let _: () = msg_send![
+                    ns_window,
+                    setStyleMask: style_mask | STYLE_MASK_FULL_SIZE_CONTENT
+                ];
+            }
             let behavior = (behavior & !FULL_SCREEN_NONE) | FULL_SCREEN_PRIMARY;
             let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
+            if in_space || style_mask & STYLE_MASK_FULL_SCREEN != 0 {
+                let content: *mut Object = msg_send![ns_window, contentView];
+                if !content.is_null() {
+                    let zero = NsEdgeInsets {
+                        top: 0.,
+                        left: 0.,
+                        bottom: 0.,
+                        right: 0.,
+                    };
+                    let _: () = msg_send![content, setAdditionalSafeAreaInsets: zero];
+                }
+            }
         }
     }
 }
@@ -3299,6 +3363,7 @@ fn sync_macos_chrome(cx: &App) {
             let _: () = msg_send![ns_window, setAppearance: appearance];
             let _: () = msg_send![ns_window, setBackgroundColor: color];
             let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: YES];
+            let _: () = msg_send![ns_window, setTitleVisibility: 1usize];
         }
     }
 }

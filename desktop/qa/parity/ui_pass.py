@@ -1293,57 +1293,33 @@ class Pass:
         panel = lambda: (self.state().get("panel") or {})
         if not self.app.exists("panel-project-head") and self.app.exists("toggle-panel") and not panel().get("open"):
             self.app.click("toggle-panel"); time.sleep(1.0)
-        if self.app.exists("panel-tab-0") and not self.app.exists("page-back-to-chat"):
+        if self.app.exists("panel-tab-0"):
             tabs = panel().get("tabs") or []
             active = panel().get("active")
-            self.record("panel-project-tab", sc, "open the drawer", "the Project tab is the drawer's first tab and is active",
-                        f"tabs={[t.get('kind') for t in tabs]} active={active}",
-                        "pass" if tabs and tabs[0].get("kind") == "project" and active == 0 else "fail", self.still("panel-project-tab"))
+            self.record("panel-project-tab", sc, "open the drawer", "the Project tab is the panel's first tab and is active; the chat stays",
+                        f"tabs={[t.get('kind') for t in tabs]} active={active} pane={self.state().get('pane')}",
+                        "pass" if tabs and tabs[0].get("kind") == "project" and active == 0 and self.state().get("pane") == "chat" else "fail", self.still("panel-project-tab"))
+            self.record("project-stays-in-panel", sc, "open Project", "no Project page over the chat, no Back to chat",
+                        f"pane={self.state().get('pane')} back={self.app.exists('page-back-to-chat')}",
+                        "pass" if self.state().get("pane") == "chat" and not self.app.exists("page-back-to-chat") else "fail",
+                        self.still("project-stays-in-panel"))
             self.check("panel-escape-closes", sc, "Escape with the drawer open", "the drawer closes; the chat stays",
                        lambda: self.app.key("escape"), lambda a, b: (b.get("panel") or {}).get("open") is False and b.get("pane") == "chat")
             self.app.key("cmd-b"); time.sleep(0.8)
-            if self.app.exists("panel-close"):
-                self.check("panel-close", sc, "click the drawer's close mark", "the drawer closes",
-                           lambda: self.app.click("panel-close"), lambda a, b: (b.get("panel") or {}).get("open") is False)
+            if self.app.exists("toggle-panel"):
+                self.check("toggle-panel-closes", sc, "click the strip's panel toggle", "the drawer closes",
+                           lambda: self.app.click("toggle-panel"), lambda a, b: (b.get("panel") or {}).get("open") is False)
             else:
-                self.gap("panel-close", sc, "click", "no close mark on the drawer")
-            self.app.key("cmd-b"); time.sleep(0.8)
-            if self.app.exists("panel-expand"):
-                # Expand's effect is not in the driver's state yet (the
-                # drawer's width stayed 280 at 1100 wide — bounded by the
-                # chat's minimum, or a no-op; the side-panel owner is asked):
-                # recorded with the widths, not judged.
-                self.check("panel-expand", sc, "click expand", "the drawer widens or takes the pane",
-                           lambda: self.app.click("panel-expand"),
-                           lambda a, b: f"unverified: width {(a.get('panel') or {}).get('width')} -> {(b.get('panel') or {}).get('width')}, no other state change" if self.diff(a, b) == "no state change" else self.diff(a, b))
-                self.app.key("escape"); time.sleep(0.6)
+                self.gap("toggle-panel-closes", sc, "click", "no panel toggle on the tab strip")
+            if self.app.exists("panel-close") or self.app.exists("panel-expand"):
+                self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid",
+                            f"close={self.app.exists('panel-close')} expand={self.app.exists('panel-expand')}",
+                            "fail", self.still("removed-panel-chrome"))
+            else:
+                self.record("removed-panel-chrome", sc, "drawer open", "no header X and no expand grid",
+                            "close and expand gone", "pass", self.still("removed-panel-chrome"))
             return
-        if not self.app.exists("panel-project-head"):
-            self.gap("project-page-back", sc, "-", "no panel-project-head on this layout")
-            return
-        pane = lambda: self.state().get("pane")
-        def open_page():
-            if pane() != "project":
-                self.app.click("panel-project-head"); time.sleep(0.8)
-        open_page()
-        self.record("project-page-back-control", sc, "open the page", "a labelled Back to chat control on the header", f"pane={pane()} control={self.app.exists('page-back-to-chat')}",
-                    "pass" if pane() == "project" and self.app.exists("page-back-to-chat") else "fail", self.still("project-page-open"))
-        self.check("page-back-to-chat", sc, "click Back to chat", "pane chat", lambda: self.app.click("page-back-to-chat"), lambda a, b: b.get("pane") == "chat")
-        open_page()
-        self.check("project-page-escape", sc, "Escape on the page", "pane chat", lambda: self.app.key("escape"), lambda a, b: b.get("pane") == "chat")
-        open_page()
-        self.check("project-page-cmd-1", sc, "cmd-1 on the page", "pane chat", lambda: self.app.key("cmd-1"), lambda a, b: b.get("pane") == "chat")
-        open_page()
-        ix = self.state().get("active_project")
-        if ix is not None:
-            self.check("project-page-tab-click", sc, "click the active tab", "pane chat", lambda: self.app.click(f"tab-{ix}"), lambda a, b: b.get("pane") == "chat")
-        if self.app.exists("panel-start-page"):
-            open_page()
-            self.check("panel-start-page", sc, "click Start the page… from the page", "pane chat and a prompt in the composer",
-                       lambda: self.app.click("panel-start-page"), lambda a, b: b.get("pane") == "chat" and bool(b["composer"]["text"]) and f"composer={b['composer']['text'][:30]!r}")
-            self.clear_composer()
-        if pane() != "chat":
-            self.app.key("cmd-1"); time.sleep(0.5)
+        self.gap("project-page-back", sc, "-", "no panel-tab-0 on this layout")
 
     def phase_panel(self) -> None:
         if not self.tabs:
@@ -1382,9 +1358,13 @@ class Pass:
                 self.check(pat, sc, "click", "surface / node focused", lambda f=f: self.app.click(f), lambda a, b: self.diff(a, b) or "unverified: click accepted, nothing changed")
             else:
                 self.gap(pat, sc, "click", "no such row in this run (no processes / standing nodes)")
-        self.check("new-subchat", sc, "click +", "a child session of the main chat appears and is active",
-                   lambda: self.app.click("new-subchat"), lambda a, b: len(sessions(b)) == len(sessions(a)) + 1 and (active(b) or {}).get("parent") is not None)
-        self.check("cmd-n", sc, "cmd-n", "another child session", lambda: self.app.key("cmd-n"), lambda a, b: len(sessions(b)) == len(sessions(a)) + 1)
+        if self.app.exists("new-subchat"):
+            self.record("new-subchat", sc, "bottom +", "the bottom + is gone",
+                        "new-subchat still drawn", "fail", self.still("new-subchat"))
+        else:
+            self.record("new-subchat", sc, "bottom +", "the bottom + is gone; ⌘N still opens a sub-chat",
+                        "gone", "pass", self.still("new-subchat"))
+        self.check("cmd-n", sc, "cmd-n", "a child session", lambda: self.app.key("cmd-n"), lambda a, b: len(sessions(b)) == len(sessions(a)) + 1 and (active(b) or {}).get("parent") is not None)
         self.check("alt-cmd-up", sc, "alt-cmd-up", "steps to the previous agent in the tree", lambda: self.app.key("alt-cmd-up"), lambda a, b: b["active_session"] != a["active_session"])
         self.check("alt-cmd-down", sc, "alt-cmd-down", "steps to the next agent", lambda: self.app.key("alt-cmd-down"), lambda a, b: b["active_session"] != a["active_session"])
         self.check("panel-scroll", sc, "scroll the panel", "no error", lambda: self.app.scroll("panel-scroll", dy=-200), None)

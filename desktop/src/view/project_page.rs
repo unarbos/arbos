@@ -1,8 +1,6 @@
-//! The project page, full width in the column: Cursor's Project home.
-//! Large name, Recents, then the status page at reading size, then a
-//! simple file list. Agents, processes and resources stay in the right
-//! panel. Everything on the page is read off the model, which the watch
-//! and the kernel's `changed` frames keep current.
+//! The project page as a reading-size layout. The window no longer puts
+//! this over the chat — the page lives in the right panel.
+#![allow(dead_code)]
 
 use crate::{
     model::{store_view::StoreFile, workspace::Workspace},
