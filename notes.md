@@ -19,10 +19,10 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
+- [Route harness work through Jev](bc-pending) — implementing [Jev in the harness](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-harness.md); Jev picks tools, LLM writes
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1733)**; watching past it
 - [Fix project panel layout](bc-33718272-0f05-555b-946f-f08db1b9ee4b) — same size as Terminal, default closed, + pull-down with files browser, draggable divider
 - [Write Mac hub.toml](bc-871278c5-8986-52dd-8891-f55991d49c6f) — file in place; close and reopen the tab, then call
-- [Fix Mac fullscreen chrome](bc-0df916de-0e66-5368-b418-08c4a8340ec4) — [#542](https://github.com/unarbos/arbos/pull/542) kernel CI red; author fixing
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
