@@ -1635,3 +1635,42 @@ check has to be within one dump. Left uncorrected it would have made the
 Rust, and `macOS (check kernel + desktop)`, which compiles the kernel,
 passed. It is the flake already filed in
 `internal/kernel-ci-flakes-2026-09-18.md` and not this loop's to fix.
+
+## Cycle 75 report (06:20 UTC, 09-18)
+
+**Looked at:** background to resume, the oldest row left, half answered
+since cycle 27.
+
+**The resume half still holds** (M-277): Home, 120 seconds, back — the same
+screen, and the last three lines identical by md5. M-167's result again on a
+build twenty-five cycles later.
+
+**The other half was never examined, and did not need Jacob's phone**
+(M-278). The row has said "hours-long suspension still needs Jacob's phone"
+since cycle 27, and that is true of one case and not of the other. Hours is
+two things: iOS keeping the process, which is the answered case for longer,
+and iOS **reclaiming** it, which is what actually happens overnight. In the
+second, coming back is a cold launch — and reproducing that needs no hours
+at all, only the process gone, which is one command.
+
+Measured: left in the chat, process killed, relaunched — he lands on **the
+projects list**, not the chat he left.
+
+**No app change, deliberately.** The app knows which project he was in;
+`settings.kernelTarget` persists and is what the list's composer uses to
+name one. So the list is a choice the code makes rather than a limit it is
+under, and both answers are defensible — continue where he was, or show the
+roster after a night. The desktop persists and restores workspace state, but
+I established only that it restores panels and tabs *within* a project, not
+that it reopens the active one. Changing navigation on half a comparison is
+the exact shape of fault this loop has paid for repeatedly, so the question
+is filed for a decision:
+`internal/features-inbox/2026-09-18-where-should-the-phone-put-a-returning-user.md`.
+
+Worth naming the general point, because it applies beyond this row: "needs
+Jacob's phone" had been treated as covering the whole of hours, and it
+covered half. A blocked row is worth re-reading occasionally for the part
+that is not blocked.
+
+**PR:** [#578](https://github.com/unarbos/arbos/pull/578), harness only.
+**Stills:** `media/mobile/cycle-75/`.

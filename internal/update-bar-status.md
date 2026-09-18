@@ -5,14 +5,18 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 05:40 UTC.
+Last checked 2026-09-18 06:07 UTC.
 
-## Click Update. You will get build 1831.
+## Click Update. You will get build 1833.
 
-**1831** — signed, notarised, stapled, on the feed since 05:34 UTC. It is
-the tip of `main`, so the channel is caught up.
+**1833** — signed, notarised, stapled, on the feed since 06:03 UTC.
 
-New since 1805:
+New since 1831:
+
+- **#570** — the producer rule's step is reading the producer before the
+  first edit
+
+And new since 1805:
 
 - **#563** — the tail cursors stand at each record's end at boot
 - **#566**, **#571** — iOS: say why the link is down in the phone's own
@@ -62,21 +66,21 @@ GPT-Live and voice rows, **#499** a store is a folder, **#518**–**#522**.
 
 | | |
 |---|---|
-| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1831, d61ec9e08469) signed by` it |
+| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1833, 0ff75662c0e1) signed by` it |
 | Notarised | Apple returned `status: Accepted` |
 | Stapled | ticket present in the downloaded zip — 1674 bytes, signed by Apple System Integration CA for "Software Ticket Signing" |
 | Gatekeeper | `source=Notarized Developer ID` |
-| Bundle | `Info.plist` reads `0.2.0 build 1831` |
+| Bundle | `Info.plist` reads `0.2.0 build 1833` |
 | Feed | every download it names is really on the tag |
 
-The ticket was read out of `Arbos-0.2.0-1831-macos-arm64.zip` as
+The ticket was read out of `Arbos-0.2.0-1833-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
 ## How far behind the channel runs, and why
 
 The channel is a sawtooth, not a queue. Through the evening it published
 1616, 1624, 1657, 1662, 1674, 1688, 1718, 1733, 1741, 1765, 1768, 1784, 1789,
-1799, 1805, 1831 — every few minutes to an hour,
+1799, 1805, 1831, 1833 — every few minutes to an hour,
 catching up in a jump each time.
 
 The publisher declines to build a commit while a newer one is still being
