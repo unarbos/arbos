@@ -2774,6 +2774,17 @@ impl Workspace {
             {
                 chat.status = arbos_core::status::read(&arbos_core::Place::new(&chat.cwd), sid)
                     .map(|s| s.step);
+                // The kernel clears that file when the turn ends, so a step
+                // on it is the kernel's word that a turn is open — a root
+                // waiting on its worker sends no frame this window can hear
+                // until the report lands, and its pane drew the prompt with
+                // nothing under it for the whole run (F-208, d21). The
+                // transcript probe closes the turn again if the file says
+                // it ended.
+                if chat.status.is_some() && !chat.turn_open && !chat.streaming {
+                    chat.turn_open = true;
+                    chat.turn_ended = None;
+                }
             }
             // Whatever was typed while the connection was down goes now, in order.
             chat.drain();

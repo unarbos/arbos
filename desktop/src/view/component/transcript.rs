@@ -4695,12 +4695,18 @@ fn turn_footer(
                 theme.text_faint
             }))
     };
+    // The kernel takes a checkpoint from git when a turn starts; a place
+    // with no `.git` of its own never has one, and the control there
+    // answered every click with "Nothing to rewind to yet" (F-209, d21).
+    // Cursor draws Restore checkpoint only where a checkpoint exists. A
+    // remote place is not read from here; its control stays.
+    let can_rewind = chat.host.is_some() || chat.cwd.join(".git").exists();
     let row = row
         .child(thumb(true, cx))
         .child(thumb(false, cx))
         .child(copy)
         .child(fork)
-        .child(rewind)
+        .when(can_rewind, |row| row.child(rewind))
         .when_some(sent_at.and_then(relative_time), |row, when| {
             row.child(
                 div()

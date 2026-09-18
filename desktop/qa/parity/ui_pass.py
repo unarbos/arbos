@@ -1671,6 +1671,17 @@ class Pass:
             self.record("world-moved-line-kept", sc, "the typed line's fate", "its card is on the pane and the composer is empty; not 'archived'",
                         f"users={len(users(c))} composer={self.state()['composer']['text']!r} archived-word={any('archived' in t for t in n)}",
                         "pass" if users(c) and users(c)[-1].endswith("after the move.") and not self.state()["composer"]["text"] and not any("archived" in t for t in n) else "fail")
+            # F-209: the scratch place has no `.git`; the kernel takes no
+            # checkpoint there, so no prompt card offers a rewind.
+            turns = [i for i, it in enumerate((c or {}).get("items", [])) if it.get("kind") == "user"]
+            if c and turns and not (place / ".git").exists():
+                card = f"prompt-{c['id']}-{turns[-1]}"
+                if self.app.exists(card):
+                    f = self.app.find(card); self.app.hover(x=f["x"] + f["w"] / 2, y=f["y"] + f["h"] / 2); time.sleep(0.6)
+                has_rewind = self.app.exists(f"rewind-turn-{c['id']}-{turns[-1]}")
+                has_fork = self.app.exists(f"fork-turn-{c['id']}-{turns[-1]}")
+                self.record("no-rewind-off-repo", sc, "hover a prompt card in a place with no .git", "fork offered, rewind not (the kernel takes no checkpoint there)",
+                            f"rewind={has_rewind} fork={has_fork}", "pass" if not has_rewind and has_fork else "fail")
             self.send("And this one too.")
             time.sleep(2)
             c = root_of(place)
@@ -1831,6 +1842,21 @@ class Pass:
         self.app = app
         place_window(); time.sleep(1.5)
         self.tabs = self.app.exists("tab-bar"); self.go_project()
+        # F-208: a kernel step on file at attach is the kernel's word that
+        # the turn is open; the pane must draw it as running, not as a
+        # prompt with nothing under it.
+        step_file = PROJ / ".arbos" / "agents" / "root" / "status.toml"
+        step = ""
+        try:
+            step = next((l.split("=", 1)[1].strip().strip('"') for l in step_file.read_text().splitlines() if l.startswith("step")), "")
+        except OSError:
+            pass
+        if step:
+            s_busy = self.wait(lambda s: busy(s), 6, what="busy after attach")
+            self.record("relaunch-open-turn-drawn", sc, "relaunch while the kernel's status file holds a step", "the chat reads busy within 6 s (its turn is open)",
+                        f"step={step!r} busy={bool(s_busy)}", "pass" if s_busy else "fail", self.still("relaunch-open-turn"))
+        else:
+            self.gap("relaunch-open-turn-drawn", sc, "read status.toml", "no step on file at attach (the turn had ended)")
         s2 = self.wait(lambda s: not busy(s), 120, what="idle")
         # Not `wait_idle`: its recover() presses Stop, and the kernel drops a
         # queued prompt on Stop (F-105, filed) — the row would then measure
