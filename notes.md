@@ -19,9 +19,9 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — TestFlight **2051**
+- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2049** on the feed; watching past it
 - [Trace Jev step latency](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — [no fallback](https://github.com/unarbos/arbos/pull/664) draft; if Jev fails the turn stops
-- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2046** on the feed; watching past it
+- [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — TestFlight **2051**
 - [Run features agent for Cursor parity](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — steered again onto `qal-j35`
 </tldr>
 
@@ -45,8 +45,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] Voice in the call — both faults fixed and live on the pod: every non-small-talk turn now goes to the kernel and its answer is spoken (the model had called the agent once in 101 turns, so it was made structural), and barge-in cuts a reply in 0.35–0.41 s instead of nearly two seconds; the phone must stop forwarding finals itself and re-measure over AirPods, and a loud speakerphone without echo cancellation is still the open limit
 
-- [ ] [Fix top bar chrome](bc-85782d4e-78b3-55d7-80ba-a25615cd0690) — [top bar](https://github.com/unarbos/arbos/pull/654) in Mac **2046**
-- [ ] [Remove composer branch chip](bc-97ab6331-b8f3-5844-b20d-2004eb4e2b9d) — [branch chip](https://github.com/unarbos/arbos/pull/656) in Mac **2046**
+- [ ] [Fix top bar chrome](bc-85782d4e-78b3-55d7-80ba-a25615cd0690) — [top bar](https://github.com/unarbos/arbos/pull/654) in Mac **2049**
+- [ ] [Remove composer branch chip](bc-97ab6331-b8f3-5844-b20d-2004eb4e2b9d) — [branch chip](https://github.com/unarbos/arbos/pull/656) in Mac **2049**
 - [ ] [Fix Mac fullscreen chrome](bc-0df916de-0e66-5368-b418-08c4a8340ec4) — [#542](https://github.com/unarbos/arbos/pull/542) on `main`; still not a real Space; [chrome on 2019](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-chrome-2019.md) owns the next pass
 - [ ] [Architect desktop call mode](bc-9590b6c7-3ece-5b78-bb08-21ae0191cf3f) — slice 1 live: [design](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-call-mode-design.md), [gateway narrator #100](https://github.com/unarbos/arbos/pull/100), [inbox channel #99](https://github.com/unarbos/arbos/pull/99), [desktop call UI #101](https://github.com/unarbos/arbos/pull/101), slices 1–4 shipped: spoken approvals with re-ask, reconnect, drill-down by phrase, hub attach per call, 11/11 harness, live hub call into `mac/.arbos`; desktop call now matches the phone in [#101 `eb5f930`](https://github.com/unarbos/arbos/pull/101): in-process playback, continuous uplink, model voice for small talk + narrator, gateway ASR for Fn (0.7 s first word); Mac live check pending; QA owns perfecting
 - [ ] [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — [harness](https://github.com/unarbos/arbos/pull/658) [ios batch](https://github.com/unarbos/arbos/pull/659) on `main`; TestFlight **2051**; leftover `bc-08d8261b` stays asleep
@@ -97,9 +97,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2046** (`93e335e`); builds 2040–2046 carry [Choosing line](https://github.com/unarbos/arbos/pull/657) [top bar](https://github.com/unarbos/arbos/pull/654) [branch chip](https://github.com/unarbos/arbos/pull/656); watching past it
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2049** (`ccf871b`); builds 2047–2049 carry [harness](https://github.com/unarbos/arbos/pull/658); watching past it
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [no fallback](https://github.com/unarbos/arbos/pull/664) [harness](https://github.com/unarbos/arbos/pull/662) when ready and green; hold [#640](https://github.com/unarbos/arbos/pull/640) [#661](https://github.com/unarbos/arbos/pull/661) [#663](https://github.com/unarbos/arbos/pull/663); leave [#650](https://github.com/unarbos/arbos/pull/650) [#652](https://github.com/unarbos/arbos/pull/652) [#653](https://github.com/unarbos/arbos/pull/653) [#655](https://github.com/unarbos/arbos/pull/655) [#660](https://github.com/unarbos/arbos/pull/660); TestFlight **2051**; Mac **2046**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [no fallback](https://github.com/unarbos/arbos/pull/664) [harness](https://github.com/unarbos/arbos/pull/662) when ready and green; hold [#640](https://github.com/unarbos/arbos/pull/640) [#661](https://github.com/unarbos/arbos/pull/661) [#663](https://github.com/unarbos/arbos/pull/663); leave [#650](https://github.com/unarbos/arbos/pull/650) [#652](https://github.com/unarbos/arbos/pull/652) [#653](https://github.com/unarbos/arbos/pull/653) [#655](https://github.com/unarbos/arbos/pull/655) [#660](https://github.com/unarbos/arbos/pull/660); TestFlight **2051**; Mac **2049**; `v0.2.0` stays a draft
 - [x] [ios batch](https://github.com/unarbos/arbos/pull/659) — on `main` (`232518c2`)
 - [x] [Harness](https://github.com/unarbos/arbos/pull/658) — on `main` (`ccf871bd`)
 - [x] [Choosing line](https://github.com/unarbos/arbos/pull/657) — on `main` (`e82843fc`)
