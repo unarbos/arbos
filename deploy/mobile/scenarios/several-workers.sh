@@ -10,6 +10,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../sim-lib.sh"   # page_up: scroll in points
 CYCLE=${1:?cycle}; ROW=${2:-phone}
 OUT="$HOME/mobile-out/$CYCLE/workers"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
@@ -51,7 +52,19 @@ sleep 2; shot 03-workers-sheet
 # The labels read "<goal>, Done" — the state is last, with no space after
 # it, so a grep for "Done " counts none of them and reports an empty sheet
 # over a full one.
-echo "  rows in the sheet: $(ui dump | grep -cE ', (Done|Working)$')"
+# Paged to the end, not counted off one screen. The sheet scrolls, only
+# rendered rows reach the tree, and a single dump gave 12 while the pill
+# said 22 — the fault M-287 withdrew a finding over. That fix went into the
+# two scenarios written the same hour and not into this one, which had it
+# already.
+SHEET=$OUT/sheet-rows.txt; : > "$SHEET"
+for _ in 1 2 3 4 5 6 7 8; do
+  ui dump | grep -E ', (Done|Working)$' >> "$SHEET"
+  page_up "$UDID" >/dev/null 2>&1
+  sleep 1.2
+done
+awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$SHEET" | sort -u > "$SHEET.names"
+echo "  rows in the sheet, paged to the end: $(wc -l < "$SHEET.names" | tr -d ' ')"
 ui dump | grep -E ', (Done|Working)$' | head -8 | sed 's/^/    /'
 
 echo
