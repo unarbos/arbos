@@ -1674,3 +1674,342 @@ that is not blocked.
 
 **PR:** [#578](https://github.com/unarbos/arbos/pull/578), harness only.
 **Stills:** `media/mobile/cycle-75/`.
+
+## Cycle 76 report (06:25 UTC, 09-18)
+
+**Looked at:** the call's words read back in the project chat, oldest at 54
+— the feature Jacob specified himself.
+
+**His rule holds** (M-279). A delegated turn is answered twice and the two
+answers differ, which is exactly what makes the rule checkable:
+
+| | |
+| --- | --- |
+| the kernel wrote | `This project (poems, sorting algorithms, and thirteen mathlib challenges…) is fully done, tested, and committed…` |
+| the chat shows | `Everything's complete and committed on its branches; no work is in progress.` |
+
+Six rows marked `Spoken`, his own halves among them, and the kernel's
+wording absent from that turn. The scenario used to take stills and leave
+the comparison to whoever opened them; it now takes a distinctive run of the
+kernel's words and requires it to be absent from this turn's reply.
+
+**A fault in that check, caught only because I had already seen the
+screenshot** (M-280). The first version searched the whole screen for the
+kernel's phrase, found it, and reported that both wordings were showing. It
+was there legitimately — spoken rows do not survive a restart, so older
+turns replay as the kernel's text, which M-179 recorded when the rule
+landed. Scoped now to the rows after the last `Spoken` marker.
+
+Worth being plain about how close that came: without the screenshot in my
+hand I would have filed a regression against a rule that was working
+perfectly. The rig's answer was true; it answered a question nobody asked.
+That is the sixth time tonight, and the only defence that has ever worked is
+holding a second, independent view of the same thing.
+
+**A third slow connect, in passing** (M-281). This run connected at
+**2724 ms**, above M-246's 2633 ms, and both turns completed with audio.
+With the journey's 2635 ms at cycle 72, two connects past that magnitude
+have now carried a whole conversation. Neither carries a frame count and the
+counted rig's slowest run is still 2108 ms, so it is supporting evidence and
+recorded as such — three observations pointing one way, none pointing the
+other.
+
+**PR:** [#579](https://github.com/unarbos/arbos/pull/579), harness only.
+**Stills:** `media/mobile/cycle-76/`.
+
+## Cycle 77 report (06:30 UTC, 09-18)
+
+**Looked at:** voice barge-in, and the recording due on the every-third rule.
+
+**Barge-in holds** (M-282). On current `main`: `barge_in_speech_started
+181 ms`, `barge_in_response_done 223 ms`. That sits inside cycle 65's pair
+(137/185 and 179/227 ms) and far below cycle 42's 500–522 ms. Connect
+1888 ms, first reply audio 521 ms. The recording is 30 s at
+`media/mobile/cycle-77/recording-barge-in-181ms-30s.mp4`, verified by md5
+against the file on the Mac.
+
+**A DEBUG metric called its own success a failure** (M-283). The run's tail
+read `metric barge_in_unarmed clip=false injector=true`, and I took it —
+for about a minute — as the barge having failed to arm, which is the case
+M-244 saw once. It had armed, fired and been measured twenty lines earlier.
+
+There is one barge clip per run, spent on the first reply, so every later
+reply prints that line, and the wording gave the spent case and the
+never-supplied case the same name. It now says which: `clip already used`,
+`no clip given`, `no injector`. [#580](https://github.com/unarbos/arbos/pull/580), DEBUG only.
+
+Two things worth keeping from that. The fault was in the *words* and the
+measurement was perfect, which is a different failure from the rig faults
+earlier tonight and needs a different guard — reading a metric's name as if
+it were a verdict. And I was exposed to it by reading the tail of a log
+rather than the log: everything I needed was in the middle.
+
+## Cycle 78 report (06:35 UTC, 09-18)
+
+**Looked at:** the coverage table itself, against what journey run 33
+actually exercised.
+
+**Three rows were understating themselves, by as much as eighteen cycles**
+(M-284). The rotation takes the oldest rows first, so a table that
+undercounts sends the loop back to work it did the cycle before:
+
+| row | said | run 33 actually exercised |
+| --- | --- | --- |
+| the harness — typing into the composer | 54 | seven typed lines sent, seven reached the kernel |
+| journey — the phone-only steps P1, P2, P3 | 56 | all three passed |
+| attachments (`+`), photos, files | 60 | the photo attached and the model described it |
+
+**Credited narrowly, on purpose.** The attachments row now reads 72 *for the
+photo reaching the model*, and leaves the chip's ×, files and the mic-to-send
+swap at their cycle-60 reading, because the journey does not touch them.
+Dating a whole row from one step of a journey would swap one wrong number
+for another, and this row already has a history of sending readers to the
+wrong place.
+
+That is the second time a coverage row has misdirected the loop — the
+style-pair row at cycle 58 had its cycles and its still numbers in each
+other's columns. Both faults have the same cause: the table is written by
+hand at the end of a cycle, when the run's detail is freshest and the
+temptation to summarise is strongest. Worth watching for a third.
+
+**No PR.** Nothing in the repository needed changing, and inventing a commit
+to satisfy the one-per-cycle habit would be the same kind of bookkeeping
+fiction this cycle is correcting.
+
+## Cycle 79 report (06:45 UTC, 09-18)
+
+**Looked at:** connect-time drift, a standing look since cycle 66 and never
+isolated.
+
+**It is not drift** (M-285). It is two engines, and the answer was already
+in the record: every call run the loop has done printed its connect time and
+its engine into a console log, and 138 of those logs are still on the Mac.
+
+| engine | n | min | median | p90 | max | mean |
+| --- | --- | --- | --- | --- | --- | --- |
+| duplex | 101 | 284 | 543 | 732 | 898 | 526 |
+| openai | 37 | 999 | 1936 | 2635 | 5773 | 2109 |
+
+The two do not overlap at all: the slowest duplex connect is faster than the
+fastest openai one. Of the seventeen connects over two seconds, all
+seventeen are openai; of the 102 under a second, 101 are duplex.
+
+The numbers appeared to grow across the cycles because the phone moved to
+GPT Live as its gateway partway through. The engine changed underneath the
+measurement, so the record read as one population wandering. That is why it
+survived thirteen cycles as a look: nobody had grouped it, and no new
+experiment was ever needed.
+
+**The grouping also shows something nobody had written down** (M-286). The
+pre-socket hold is 6000 ms. The worst connect in the whole record is
+**5773 ms** — a margin of **227 ms**, under four per cent.
+
+Six seconds was chosen at cycle 67 against that exact reading, so this is a
+decision already taken and not an oversight. But a margin that thin,
+recorded nowhere, is a trap for whoever meets it next, and a connect
+slightly worse than the worst yet seen costs the caller their opening
+words. I have not widened it on my own; the scenario prints the margin on
+every run instead.
+
+**A fault of mine, in its own commit:** the overlap test unpacked a
+four-tuple into two names and threw — after the table had already printed,
+which is the only reason I saw the numbers before the traceback.
+
+**PR:** [#582](https://github.com/unarbos/arbos/pull/582), harness only, and it takes no new
+measurements.
+
+## Cycle 80 report (07:00 UTC, 09-18)
+
+**Looked at:** the diagnosis I deferred at cycle 74 — the pill counting 19
+agents while the sheet listed 12.
+
+**The app was right and my scroll was broken** (M-287). Re-measured with the
+gesture inside the screen: the pill says 19, the sheet pages out at 19, they
+agree. The kernel's tree, asked directly, holds fifteen children of root
+with fifteen distinct names, so no duplicate labels were hiding rows either.
+
+The mechanism is worth more than the correction. Both scenarios I wrote this
+session swiped from **y=900 on a screen 852 points tall**. Nothing errors:
+the gesture lands nowhere, the list never moves, and every "page" re-reads
+the first screen — so a list of nineteen reports as twelve, ten times over,
+with perfect consistency. The screenshot is 1024 px tall and the screen is
+852 pt, which is the pixels-versus-points trap `pt()` was written for at
+M-152, resurfacing in new code that did not use it.
+
+Fixed where it cannot recur: `page_up()` in `sim-lib.sh` computes the
+gesture from `SIM_PT_H` and takes only the udid. Every older scenario was
+checked and they all stay under y=850.
+
+**What that costs the ledger** (M-288). M-275 is withdrawn outright. M-272 —
+"the scrolled sheet held 12 rows and no live one" — is qualified down to
+nothing measured, because that sheet was never scrolled either; whether a
+brand-new worker reaches the sheet promptly is untested rather than
+doubtful. What stands from cycle 73 is M-271: the live row exists, caught
+twice, with its spinner and step.
+
+**The part I want on the record.** Three findings this session rested on one
+broken gesture, and all three read as *the app being wrong*. That is the
+direction this loop's rig errors always point — never once has a broken
+measurement flattered the app — and it is the cheapest available warning
+sign. A measurement that makes the app look bad deserves the second look
+that a flattering one would never get.
+
+**PR:** [#584](https://github.com/unarbos/arbos/pull/584).
+
+## Cycle 81 report (07:15 UTC, 09-18)
+
+**Looked at:** the list composer, oldest row at 57.
+
+**All four of its claims hold** (M-289), measured off the tree rather than
+looked at:
+
+| claim | reading |
+| --- | --- |
+| at rest it names a project on screen | `Message phone…`, and `phone` is a row |
+| a filter moves it | `sub` → `Message subnet120…`, the only row left |
+| an empty filter empties it | `Plan, ask, build…`, and the screen says why |
+| it rides above the keyboard | composer top **480 pt**, keyboard top **568 pt** |
+
+The 480 is the same number cycle 57 recorded independently twenty-four
+cycles ago, which is a pleasant check on both runs.
+
+**Two bad reads in the fourth measurement** (M-290). It took the *first*
+TextField — the search box at 177 pt, not the composer at 490 — and looked
+for elements of type `Key`, which do not exist; the keyboard arrives as the
+`GenericElement` covering the bottom of the screen. Both came from guessing
+at the tree instead of dumping it once and reading what is in it.
+
+The thing worth keeping is how it failed. It printed **"could not read both
+numbers — inconclusive"** rather than a confident wrong number. That is the
+same class of mistake as the off-screen swipe an hour ago, and the
+difference is that this one was caught by the code. A check that cannot get
+its inputs should say so; that is cheap to write and it is the only reason
+this did not become another withdrawn finding.
+
+**On the kernel CI red** on the connect-drift branch: one shell file, no
+Rust, and `macOS (check kernel + desktop)` passed. Third time tonight in
+that shape, and each time the failed log is gone by the time I look because
+a re-run has replaced it. The flake file stands as the evidence and this is
+not the loop's to fix.
+
+**PR:** [#586](https://github.com/unarbos/arbos/pull/586), harness only.
+**Stills:** `media/mobile/cycle-81/`.
+
+## Cycle 82 report (07:30 UTC, 09-18)
+
+**Looked at:** notifications, oldest row at 58.
+
+**The path still works end to end** (M-291). Reinstalled so the permission
+decision is fresh: the ask appears and is allowed, the reply posts a banner
+about two seconds after going away, and tapping it lands in the `phone`
+chat. The console agrees — `notify 432 reply state=2 unseen=1`,
+`banner 432: posted`.
+
+The still is better evidence than usual because it carries both halves at
+once: the banner reading `phone · root replied — OK`, and a red **1** on the
+Arbos icon behind it. Real pushes still wait on Jacob's APNs key; this is
+the local path.
+
+**A before-and-after pair with no difference in it** (M-292).
+`03-home-waiting` and `04-home-with-the-banner` came out byte-identical, md5
+`f608d57b…`. The banner arrives about two seconds after going away and the
+before-shot was taken at four, so both had it.
+
+Nothing was wrong with the app and nothing was misreported — but a pair of
+stills offered as before-and-after is a claim, and that one was quietly
+false for however many runs it has been in. Fixed, and renamed
+`03-home-before-the-banner` so its job is on its face.
+
+That is the fourth small thing tonight where the evidence was weaker than it
+looked while the app was fine. They are worth as much attention as the
+app's own faults: a loop whose evidence drifts stops being able to tell when
+something real breaks.
+
+**PR:** [#587](https://github.com/unarbos/arbos/pull/587), harness only.
+**Evidence:** `media/mobile/cycle-82/` — the banner-and-badge still and a
+recording of going away and coming back.
+
+## Cycle 83 report (07:45 UTC, 09-18)
+
+**Looked at:** the style pair, oldest row at 59 — the projects list against
+Cursor's agents list.
+
+**They agree on shape, and now there is a number for it** (M-293):
+
+| | ground | row pitch |
+| --- | --- | --- |
+| Arbos | `(22, 21, 20)` | 223 px of 2556 — **8.7%** |
+| Cursor | `(247, 247, 247)` | 227 px of 2736 — **8.3%** |
+
+Within half a percentage point, on phones of different sizes. Structurally
+each element has its counterpart: round buttons at both top corners, a
+title, a collapsible section header, rows of glyph and name with the age
+right-aligned and a second line of state · folder, and a composer pill with
+`+`, placeholder and mic.
+
+The two grounds are nothing to reconcile — `#161514` is the literal the
+desktop's `palette.rs` uses, and dark-only is deliberate on both sides
+(M-202).
+
+**The style rows were the last thing this loop judged by eye** (M-294).
+Forty cycles have moved nearly every other row onto counts, and "the two
+surfaces agree on shape" stayed a verdict from looking at two pictures. Eyes
+are especially bad here: a row ten per cent taller reads as fine beside a
+reference, and a ground two shades off reads as identical.
+
+`deploy/mobile/style-pair.py` prints both grounds and both row pitches as a
+share of screen height. It compares only pitch, and refuses to compare
+colour between a light reference and a dark app — which is the mistake
+anyone would make first, and the reason the refusal is written into the tool
+rather than left as a note.
+
+**PR:** [#588](https://github.com/unarbos/arbos/pull/588), harness only.
+**Still:** `media/mobile/cycle-83/01-the-list-against-cursors.png`.
+
+## Cycle 84 report (08:00 UTC, 09-18)
+
+**Looked at:** two video reviews of recordings I had already filed. Both
+were worth asking for; one was wrong and one found a real fault in the app.
+
+**The dictation review was wrong, and cycle 69's finding stands** (M-295).
+It reported that the dictated words never reach the composer and appear in a
+pending bubble in the transcript. They reach the composer: the code writes
+dictation into `draft`, which is the `ComposerBar`'s own `TextField`, and
+the still shows the words in the composer pill with `+` at its left and the
+up-arrow at its right.
+
+The misreading is worth understanding rather than waving away. The composer
+is a rounded multi-line pill that looks like a bubble, and the scenario
+dictates a sentence **it has already sent in an earlier run**, so the
+identical words are sitting in a real bubble a few inches above. Anyone
+without the code in front of them would read it the same way. The scenario
+should dictate something it has not said before.
+
+**The barge-in review found the app's fault, by asking about the video**
+(M-297). It reported that the recording shows an orb changing colour with no
+captions, no transcript and no status words, and asked what someone who
+could not hear the call would have.
+
+The answer was: nothing. `CallView` carried no accessibility label anywhere.
+The screen is wordless in a call *by design* — `hint` returns nil for
+connecting, listening, thinking and speaking — so colour was the only
+carrier of state, and colour carries to one kind of person. The discs were
+unnamed too.
+
+Fixed without touching the design: the orb is a button labelled `Call` whose
+value is the phase, from the `Phase.label` that already existed, and
+`CallDisc` gained a label as `RoundButton` did in #571 — `Call menu`,
+`Settings`, `Mute`/`Unmute`, `End call`. No text is drawn.
+
+**And my own claim was too strong** (M-296). I filed that recording as a
+demonstration of barge-in. It demonstrates very little: the thing being
+shown is inaudible and unwritten. The counts are the evidence — 181 ms and
+223 ms — and I should have checked that the illustration illustrated
+something before offering it as one.
+
+Two of tonight's habits meet here. The loop's rule that a count is evidence
+and a picture is illustration is only worth anything if somebody looks at
+the picture. And the best question asked all night came from outside the
+loop: *what would a person who cannot hear this see?*
+
+**PR:** [#590](https://github.com/unarbos/arbos/pull/590).
