@@ -43,16 +43,10 @@ AT=$(ui dump | grep -E "Button +(Agents|Working) [0-9]+" | head -1 | awk '{print
 idb ui tap $AT --udid "$UDID"; sleep 3
 xcrun simctl io "$UDID" screenshot "$OUT/01-sheet.png" >/dev/null 2>&1
 
-RAW=$OUT/rows-raw.txt; : > "$RAW"
-for _ in $(seq 1 10); do
-  ui dump | grep -E "Button +.+, " >> "$RAW"
-  page_up "$UDID" >/dev/null 2>&1
-  sleep 1.2
-done
 LABELS=$OUT/rows.txt
-awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$RAW" | sort -u > "$LABELS"
+HOW=$(collect_rows "$UDID" 'Button +.+, ' "$LABELS")
 ROWS=$(wc -l < "$LABELS" | tr -d ' ')
-echo "the sheet lists: $ROWS rows, paged to the end"
+echo "the sheet lists: $ROWS rows (paging $HOW)"
 
 # Two workers could share a label only if both are on screen together, so
 # the check must be within one dump. Across the ten pages every row repeats
