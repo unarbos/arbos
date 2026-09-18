@@ -42,7 +42,7 @@ OUT="$HOME/mobile-out/$CYCLE/sweep"; mkdir -p "$OUT"
 printf '%-34s %s\n' "scenario" "what it concluded"
 printf '%-34s %s\n' "--------" "------------------"
 
-SILENT=0
+SILENT=0; NOVERDICT=0
 for name in "${SCENARIOS[@]}"; do
   log="$OUT/${name%.sh}.log"
   bash "$HERE/scenarios/$name" "$CYCLE" > "$log" 2>&1
@@ -51,7 +51,7 @@ for name in "${SCENARIOS[@]}"; do
   verdict=$(grep -E "^ *VERDICT" "$log" | tail -1 | sed 's/^ *VERDICT: *//')
   if [ -z "$verdict" ]; then
     verdict=$(grep -vE "^ *$|stills in|logs in|still in" "$log" | tail -1 | sed 's/^ *//')
-    [ -n "$verdict" ] && verdict="(no verdict) $verdict"
+    [ -n "$verdict" ] && { verdict="(no verdict) $verdict"; NOVERDICT=$((NOVERDICT + 1)); }
   fi
   if [ -z "$verdict" ]; then
     verdict="NOTHING — no verdict and no output"
@@ -61,6 +61,11 @@ for name in "${SCENARIOS[@]}"; do
 done
 
 echo
-echo "$SILENT of ${#SCENARIOS[@]} reached no conclusion at all."
+# Three scenarios printed "(no verdict) no phone row" while this line said
+# "0 of 11 reached no conclusion at all" — it was counting only the ones
+# that printed nothing whatsoever. A run that says something and concludes
+# nothing is the case worth counting, because it is the one that looks fine.
+echo "$SILENT of ${#SCENARIOS[@]} printed nothing at all."
+echo "$NOVERDICT of ${#SCENARIOS[@]} printed output but reached no verdict — read those first."
 echo "logs in $OUT — read any scenario whose verdict surprises you, especially a"
 echo "confident one, since a rotted check is confident by construction."
