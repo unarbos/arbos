@@ -1,0 +1,25 @@
+{
+  "scenario": "inbox:swebench-loop-cycle-9",
+  "doc": "From inbox note 2026-09-16-swebench-loop-cycle-9.md: exercise feature 'swebench-loop-cycle-9' and run every detector.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature swebench-loop-cycle-9: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "swebench-loop-cycle-9",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-16-swebench-loop-cycle-9.md"
+  },
+  "duration_s": 300.5,
+  "place": "/tmp/arbos-qa-inbox:swebench-loop-cycle-9-y4q6o70a/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1e0e9cde8ca9 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T050412Z-inbox:swebench-loop-cycle-9",
+  "branch": "rust",
+  "usd": 0.46929
+}

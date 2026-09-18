@@ -1,0 +1,5 @@
+1789711066374 kernel started pid 485912
+1789711151722 BREAK turn-never-ended: feature jobs-leash: turn never ended
+1789711151735 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789711151735 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789711151777 bugs: seen f72deab15f.md, seen 285c9098a5.md, seen 83223aad69.md

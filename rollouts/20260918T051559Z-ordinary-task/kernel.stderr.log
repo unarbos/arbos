@@ -1,0 +1,20 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-ordinary-task-nvqkutxj/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8133 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-ordinary-task-nvqkutxj/home/.cache/arbos/tgrep/6ae301324ca9fac8
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn create-and-run-fizzbuzz: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools create-and-run-fizzbuzz: 2 calls, wall 4ms, sum 1ms, speedup 0.2x
+turn create-and-run-fizzbuzz: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools create-and-run-fizzbuzz: 2 calls, wall 25ms, sum 19ms, speedup 0.8x
+turn create-and-run-fizzbuzz: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools create-and-run-fizzbuzz: 2 calls, wall 273ms, sum 269ms, speedup 1.0x
+turn create-and-run-fizzbuzz: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools create-and-run-fizzbuzz: 3 calls, wall 6ms, sum 1ms, speedup 0.2x
+turn create-and-run-fizzbuzz: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)

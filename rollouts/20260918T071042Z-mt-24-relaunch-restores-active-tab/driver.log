@@ -1,0 +1,4 @@
+1789715443475 desktop: app pid 539746 on :9503
+1789715449537 desktop-relaunch: app pid 539941 on :9503
+1789715452625 BREAK mt-24-active-tab-not-restored: active before quit 3, after relaunch 2
+1789715452787 bugs: seen 6d5f8ef30f.md

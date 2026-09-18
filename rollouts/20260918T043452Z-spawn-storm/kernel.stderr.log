@@ -1,0 +1,91 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-spawn-storm-385q4dq8/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-spawn-storm-385q4dq8/home/.cache/arbos/tgrep/25a21b77426b80b2
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 10 calls, wall 41ms, sum 157ms, speedup 3.8x
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-4: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-1: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-7: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-3: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-4: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+turn worker-4: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-3: 2 calls, wall 26ms, sum 2ms, speedup 0.1x
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-1: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-3: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-7: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-4: 2 calls, wall 6ms, sum 1ms, speedup 0.2x
+turn worker-4: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-7: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-3: 2 calls, wall 6ms, sum 2ms, speedup 0.3x
+turn worker-3: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-4: 2 calls, wall 6ms, sum 2ms, speedup 0.3x
+turn worker-4: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-3: 2 calls, wall 1ms, sum 2ms, speedup 2.0x
+turn worker-3: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools worker-4: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn worker-4: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+snapshot_failed: git add: fatal: unable to stat 'agents/worker-7/mechanism.md': No such file or directory
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-1: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-2: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-9: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-6: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-8: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-10: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn worker-5: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 3 calls, wall 3ms, sum 3ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+tools root: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)
+turn root: jev fell through (400 bad request: typesafe/jev-latest is not a valid model ID)

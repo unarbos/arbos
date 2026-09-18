@@ -1,0 +1,25 @@
+{
+  "scenario": "inbox:attach-replay-deltas",
+  "doc": "From inbox note 2026-09-13-attach-replay-deltas.md: exercise feature 'attach-replay-deltas' and run every detector. Needs a kernel built from branch cursor/attach-replay-deltas-b027.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature attach-replay-deltas: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "attach-replay-deltas",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-attach-replay-deltas.md"
+  },
+  "duration_s": 300.4,
+  "place": "/tmp/arbos-qa-inbox:attach-replay-deltas-ukm7edxt/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d373422662bd protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T053437Z-inbox:attach-replay-deltas",
+  "branch": "main",
+  "usd": 0.09274
+}

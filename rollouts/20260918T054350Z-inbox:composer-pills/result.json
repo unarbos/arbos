@@ -1,0 +1,35 @@
+{
+  "scenario": "inbox:composer-pills",
+  "doc": "From inbox note 2026-09-13-composer-pills.md: exercise feature 'composer-pills' and run every detector. Needs a kernel built from branch cursor/composer-pills-b027.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "state:agent-parent-dangling",
+      "detail": "parent 'pill-behavior-verifier' has no folder",
+      "where": "/tmp/arbos-qa-inbox:composer-pills-af9bt_g9/place/.arbos/agents/sub-agent-1/agent.md"
+    },
+    {
+      "rule": "state:agent-parent-dangling",
+      "detail": "parent 'pill-behavior-verifier' has no folder",
+      "where": "/tmp/arbos-qa-inbox:composer-pills-af9bt_g9/place/.arbos/agents/sub-agent-2/agent.md"
+    },
+    {
+      "rule": "state:agent-parent-dangling",
+      "detail": "parent 'pill-behavior-verifier' has no folder",
+      "where": "/tmp/arbos-qa-inbox:composer-pills-af9bt_g9/place/.arbos/agents/sub-agent-3/agent.md"
+    }
+  ],
+  "notes": {
+    "feature": "composer-pills",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-composer-pills.md"
+  },
+  "duration_s": 101.6,
+  "place": "/tmp/arbos-qa-inbox:composer-pills-af9bt_g9/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d373422662bd protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T054350Z-inbox:composer-pills",
+  "branch": "main",
+  "usd": 0.13371
+}

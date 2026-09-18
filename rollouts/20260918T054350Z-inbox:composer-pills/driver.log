@@ -1,0 +1,6 @@
+1789710230335 kernel started pid 472207
+1789710331865 kernel stopped with code 0
+1789710331866 BREAK state:agent-parent-dangling: parent 'pill-behavior-verifier' has no folder
+1789710331867 BREAK state:agent-parent-dangling: parent 'pill-behavior-verifier' has no folder
+1789710331867 BREAK state:agent-parent-dangling: parent 'pill-behavior-verifier' has no folder
+1789710331922 bugs: new 352b12971c.md, seen 352b12971c.md, seen 352b12971c.md

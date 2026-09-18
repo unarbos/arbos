@@ -1,0 +1,25 @@
+{
+  "scenario": "mt-14-child-done-does-not-interrupt",
+  "doc": "Item 14. Root idle, composer holds unsent text, a child finishes: the composer text is untouched, no raw 'Turn ended. Last words' card.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-14-raw-done-card",
+      "detail": "a raw 'Turn ended. Last words: \u2026' line is shown for a finished child",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "composer_text": "half a thought, not sent",
+    "raw_done_cards": 1
+  },
+  "duration_s": 78.6,
+  "place": "/tmp/arbos-qa-mt-14-child-done-does-not-interrupt-5ihjaf6e/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d970ec6b1681 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T070805Z-mt-14-child-done-does-not-interrupt",
+  "branch": "main",
+  "usd": 0.04619
+}

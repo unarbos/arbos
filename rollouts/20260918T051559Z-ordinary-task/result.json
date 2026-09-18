@@ -1,0 +1,41 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "no-usage",
+      "detail": "turn_complete carries no usage",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "spawn",
+      "plan",
+      "plan",
+      "status",
+      "plan",
+      "status",
+      "write",
+      "status",
+      "bash",
+      "plan",
+      "plan",
+      "status"
+    ],
+    "tool_errors": [
+      "plan add: text is required. plan takes one of: {\"op\":\"set\",\"items\":[\"text\", {\"section\":\"Phase 1\",\"text\":\"[label](target) \u2014 readout\"}, {\"label\":\"\u2026\",\"readout\":\"\u2026\"}]} \u00b7 {\"text\":\"- [ ] one\\n## Section\\n- [ ] two\"} (a markdown checklist) \u00b7 nested {\"goals\":[{\"goal\":\"\u2026\",\"children\":[\u2026]}]} (a parent with children becomes a ## section) \u00b7 {\"op\":\"add\",\"text\":\"\u2026\"} \u00b7 {\"op\":\"check\",\"n\":1,\"readout\":\"\u2026\"} \u00b7 {\"op\":\"show\"}"
+    ],
+    "trace_files": 10
+  },
+  "duration_s": 22.0,
+  "place": "/tmp/arbos-qa-ordinary-task-nvqkutxj/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d373422662bd protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T051559Z-ordinary-task",
+  "branch": "main",
+  "usd": 0.02291
+}

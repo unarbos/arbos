@@ -1,0 +1,25 @@
+{
+  "scenario": "inbox:swebench-gaps",
+  "doc": "From inbox note 2026-09-13-swebench-gaps.md: exercise feature 'swebench-gaps' and run every detector.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature swebench-gaps: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "swebench-gaps",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-swebench-gaps.md"
+  },
+  "duration_s": 300.9,
+  "place": "/tmp/arbos-qa-inbox:swebench-gaps-1ro8_fwp/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1e0e9cde8ca9 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T044233Z-inbox:swebench-gaps",
+  "branch": "rust",
+  "usd": 0.82499
+}

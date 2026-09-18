@@ -1,0 +1,5 @@
+1789710765620 kernel started pid 477829
+1789711065999 timeout waiting for turn root idle after 300s
+1789711065999 BREAK turn-never-ended: feature job-streaming: turn never ended
+1789711066015 kernel stopped with code 0
+1789711066048 bugs: seen qa-025-runaway-background-job-unbounded-log-outlives-kernel.md

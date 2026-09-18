@@ -1,0 +1,8 @@
+{
+  "name": "inbox:attach-replay-deltas",
+  "doc": "From inbox note 2026-09-13-attach-replay-deltas.md: exercise feature 'attach-replay-deltas' and run every detector. Needs a kernel built from branch cursor/attach-replay-deltas-b027.",
+  "tags": [
+    "inbox",
+    "attach-replay-deltas"
+  ]
+}
