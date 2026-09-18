@@ -263,6 +263,15 @@ check "a green that has waited goes out, whatever is still running" \
   "${SHA[4]}" "${SHA[3]}" 0 3 \
   "${SHA[4]}" pending "${SHA[3]}" waited
 
+# The shape the channel was actually in on the morning of 2026-09-18, and
+# the reason the pending-side cap could not end it: not one newer commit
+# under test but a queue of them, each genuinely young, the newest of them
+# younger still by the time the previous one finished. The green below
+# them is the one that has been kept waiting, and it is the one timed.
+check "a queue of young commits does not outlast a green that has waited" \
+  "${SHA[4]}" "${SHA[2]}" 0 2 \
+  "${SHA[4]}" pending "${SHA[3]}" pending "${SHA[2]}" waited
+
 # The one that publishes is still the newest green. The waiting one is
 # read for the clock, not for the build number.
 check "the green that has waited starts the clock; the newest green goes" \
