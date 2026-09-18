@@ -163,8 +163,10 @@ impl Arbos {
         )
     }
 
-    /// The drawer's own tab row: `+` on the left, the tabs after it, and the
-    /// control that closes the drawer on the right.
+    /// The drawer's own tab row: the tabs, the `+` right after the last of
+    /// them (Cursor's, measured: 16 px after the last tab, never at the
+    /// far edge — `internal/cursor-side-panel-measured.md`; F-184), and the
+    /// controls that widen and close the drawer on the right.
     fn panel_tab_row(
         &self,
         tabs: &[PanelTab],
@@ -184,6 +186,16 @@ impl Arbos {
         } else {
             "Expand panel"
         };
+        // The strip scrolls when the tabs outgrow it; the `+` and the two
+        // controls keep their room, so the strip's ceiling is the row less
+        // the three buttons and their gaps.
+        let width = self
+            .workspace
+            .read(cx)
+            .panel()
+            .map(|panel| panel.width())
+            .unwrap_or(crate::model::panel::MIN_WIDTH);
+        let strip_max = (width - 2. * 6. - 3. * (TAB_HEIGHT + 4.) - 12.).max(TAB_HEIGHT);
         div()
             .id("panel-tabs")
             .flex_none()
@@ -202,11 +214,27 @@ impl Arbos {
             .border_b_1()
             .border_color(if focused { theme.accent } else { theme.border })
             .child(
+                div()
+                    .id("panel-tab-strip")
+                    .flex_none()
+                    .min_w_0()
+                    .max_w(px(strip_max))
+                    .overflow_x_scroll()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.))
+                    .children(tabs.iter().enumerate().map(|(at, tab)| {
+                        self.panel_tab(at, *tab, at == active, focused, &theme, cx)
+                    })),
+            )
+            .child(
                 self.menu_press(
                     theme
                         .ghost("panel-new-tab")
                         .relative()
                         .flex_none()
+                        .ml(px(8.))
                         .size(px(TAB_HEIGHT))
                         .rounded(px(TAB_RADIUS))
                         .items_center()
@@ -228,20 +256,7 @@ impl Arbos {
                 )
                 .children(self.panel_new_menu(cx)),
             )
-            .child(
-                div()
-                    .id("panel-tab-strip")
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(4.))
-                    .children(tabs.iter().enumerate().map(|(at, tab)| {
-                        self.panel_tab(at, *tab, at == active, focused, &theme, cx)
-                    })),
-            )
+            .child(div().flex_1())
             .child(
                 theme
                     .ghost("panel-expand")
@@ -326,9 +341,11 @@ impl Arbos {
             .items_center()
             .justify_center()
             .rounded(px(4.))
-            .when(!active, |el| {
-                el.invisible().group_hover(group.clone(), |el| el.visible())
-            })
+            // The × comes with the pointer, on the front tab too: Cursor's
+            // tabs show it on hover only, and the tab does not widen for
+            // it (`cursor-side-panel-measured.md`, the tab row).
+            .invisible()
+            .group_hover(group.clone(), |el| el.visible())
             .tooltip(|window, cx| Tooltip::text("Close tab", window, cx))
             .child(
                 icons::icon(icons::system::CLOSE)
