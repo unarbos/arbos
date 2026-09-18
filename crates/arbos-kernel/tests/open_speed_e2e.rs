@@ -7,7 +7,7 @@
 //! and printed with `--nocapture`, so a run before a change and a run after
 //! it are comparable line for line.
 //!
-//! Four measures, because "slow" is four different questions:
+//! Five measures, because "slow" is five different questions:
 //!
 //! - **shell → board**: the kernel minted the pty and said so. What the
 //!   window waits for before it can draw a terminal tab at all.
@@ -15,18 +15,18 @@
 //!   by "the terminal opened".
 //! - **browse → board**: the row exists. The tab can be drawn.
 //! - **browse → picture**: the first frame of the page.
-//!
-//! And one more that is not about either open: while a browser is coming
-//! up, is the kernel still answering anything else? `Frame::Browse` used to
-//! run Chromium's whole cold start on the kernel's one frame loop, so every
-//! other client frame — a keystroke into a terminal, a message to an agent —
-//! queued behind it. `a_second_open_during_a_browser_start` measures that
-//! directly: send `browse`, then `shell` right behind it, and time the
-//! shell's board.
+//! - **shell behind a browse**: while a browser is coming up, is the kernel
+//!   still answering anything else? `Frame::Browse` used to run Chromium's
+//!   whole cold start on the kernel's one frame loop, so every other client
+//!   frame — a keystroke into a terminal, a message to an agent — queued
+//!   behind it, and the blocking HTTP client on that path panicked the
+//!   kernel outright. A `shell` sent one frame behind a `browse` has
+//!   nothing to do with Chromium, so its board says what the kernel is
+//!   doing while Chromium starts.
 
 mod common;
 
-use common::{Attach, start_kernel_replay};
+use common::{Attach, Kernel, sigint, start_kernel_replay, wait_exit};
 use std::time::{Duration, Instant};
 
 /// Generous ceilings. The point of this file is the printed numbers; the
@@ -46,6 +46,20 @@ fn has_chrome() -> bool {
 
 fn ms(at: Instant) -> u128 {
     at.elapsed().as_millis()
+}
+
+/// Ask the kernel to stop, and wait for it.
+///
+/// Not `child.kill()`, which the rest of these tests use: that is SIGKILL,
+/// and a kernel that never returns from `run` never drops its `BrowserHub`,
+/// so the Chromium it started outlives it. Two headless browsers left
+/// resident for the remaining twenty minutes of a suite is load every test
+/// after this one pays for, on a runner with four cores.
+fn stop(k: &mut Kernel) {
+    sigint(&k.child);
+    if wait_exit(&mut k.child, Duration::from_secs(20)).is_none() {
+        let _ = k.child.kill();
+    }
 }
 
 /// Terminal: the board frame, then the shell's own first output.
@@ -87,12 +101,18 @@ fn opening_a_terminal_is_prompt() {
         "shell → first pty took {pty_ms} ms (budget {} ms)",
         PTY_BUDGET.as_millis()
     );
-    let _ = k.child.kill();
+    stop(&mut k);
 }
 
-/// Browser: the row, then the first picture of the page.
+/// Browser: the row, then whether the kernel is still answering while
+/// Chromium comes up, then the first picture of the page.
+///
+/// One test and one kernel for all three, because a second one would be a
+/// second Chromium. The kernel's browser starts once and lives as long as
+/// the kernel does, so the cost of asking these questions separately is
+/// another browser resident for the rest of the suite.
 #[test]
-fn opening_a_browser_is_prompt() {
+fn opening_a_browser_is_prompt_and_does_not_stop_the_kernel() {
     if !has_chrome() {
         eprintln!("no chrome here; skipping");
         return;
@@ -106,6 +126,9 @@ fn opening_a_browser_is_prompt() {
 
     let asked = Instant::now();
     a.send(serde_json::json!({"type": "browse", "url": "about:blank"}));
+    // One frame behind the browse, and nothing to do with Chromium: the
+    // only thing that can hold this up is the kernel itself being busy.
+    a.send(serde_json::json!({"type": "shell"}));
     assert!(
         a.wait(Duration::from_secs(30), |f| {
             f["type"] == "board" && f["panel"] == "browser" && f["action"] == "open"
@@ -114,54 +137,6 @@ fn opening_a_browser_is_prompt() {
         "no board frame for the page"
     );
     let board_ms = ms(asked);
-    let picture = a.wait(PICTURE_BUDGET, |f| {
-        f["type"] == "browser" && f["page"] == "b1"
-    });
-    let picture_ms = ms(asked);
-    let Some(picture) = picture else {
-        // Chrome is on the machine but cannot come up here (no display
-        // parts, a locked-down container). The board number still stands.
-        println!("MEASURE browser board_ms={board_ms} picture_ms=none (chrome did not come up)");
-        let _ = k.child.kill();
-        return;
-    };
-
-    println!("MEASURE browser board_ms={board_ms} picture_ms={picture_ms}");
-    assert!(
-        board_ms <= BOARD_BUDGET.as_millis(),
-        "browse → board took {board_ms} ms (budget {} ms)",
-        BOARD_BUDGET.as_millis()
-    );
-    assert!(
-        picture["screenshot"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty()),
-        "the first browser frame carries no picture: {picture}"
-    );
-    let _ = k.child.kill();
-}
-
-/// The kernel goes on serving while a browser starts.
-///
-/// `shell` is sent one frame behind `browse` and its board is timed. It has
-/// nothing to do with Chromium, so the only thing that can delay it is the
-/// kernel itself being busy.
-#[test]
-fn a_second_open_during_a_browser_start_is_not_held_up() {
-    if !has_chrome() {
-        eprintln!("no chrome here; skipping");
-        return;
-    }
-    let mut k = start_kernel_replay("open-speed-both", "");
-    let mut a = Attach::connect(&k.url);
-    assert!(
-        a.wait(Duration::from_secs(10), |f| f["type"] == "snapshot")
-            .is_some()
-    );
-
-    let asked = Instant::now();
-    a.send(serde_json::json!({"type": "browse", "url": "about:blank"}));
-    a.send(serde_json::json!({"type": "shell"}));
     assert!(
         a.wait(Duration::from_secs(60), |f| {
             f["type"] == "board" && f["panel"] == "terminal" && f["action"] == "open"
@@ -170,12 +145,40 @@ fn a_second_open_during_a_browser_start_is_not_held_up() {
         "no board frame for the shell asked for behind the browse"
     );
     let shell_ms = ms(asked);
+    let picture = a.wait(PICTURE_BUDGET, |f| {
+        f["type"] == "browser" && f["page"] == "b1"
+    });
+    let picture_ms = ms(asked);
 
-    println!("MEASURE stall shell_behind_browse_ms={shell_ms}");
+    match &picture {
+        Some(_) => println!(
+            "MEASURE browser board_ms={board_ms} shell_behind_browse_ms={shell_ms} picture_ms={picture_ms}"
+        ),
+        // Chrome is on the machine but cannot come up here (no display
+        // parts, a locked-down container). The other two numbers stand,
+        // and the one this change is about is the middle one.
+        None => println!(
+            "MEASURE browser board_ms={board_ms} shell_behind_browse_ms={shell_ms} picture_ms=none (chrome did not come up)"
+        ),
+    }
+    stop(&mut k);
+
+    assert!(
+        board_ms <= BOARD_BUDGET.as_millis(),
+        "browse → board took {board_ms} ms (budget {} ms)",
+        BOARD_BUDGET.as_millis()
+    );
     assert!(
         shell_ms <= BOARD_BUDGET.as_millis(),
         "a shell asked for behind a browse waited {shell_ms} ms for the kernel (budget {} ms)",
         BOARD_BUDGET.as_millis()
     );
-    let _ = k.child.kill();
+    if let Some(picture) = picture {
+        assert!(
+            picture["screenshot"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty()),
+            "the first browser frame carries no picture: {picture}"
+        );
+    }
 }
