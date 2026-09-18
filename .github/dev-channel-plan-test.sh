@@ -44,7 +44,10 @@ while [ $# -gt 0 ]; do
 done
 now_iso() { date -u -d "@$(( $(date +%s) - ${1:-0} ))" +%Y-%m-%dT%H:%M:%SZ; }
 case "$(awk -v s="$sha" '$1==s{print $2}' "$TABLE")" in
-  success) json='{"workflow_runs":[{"status":"completed","conclusion":"success"}]}' ;;
+  # Green a moment ago: a newer commit may still take its turn.
+  success) json="{\"workflow_runs\":[{\"status\":\"completed\",\"conclusion\":\"success\",\"updated_at\":\"$(now_iso 30)\"}]}" ;;
+  # Green half an hour ago and still not published: it has waited.
+  waited)  json="{\"workflow_runs\":[{\"status\":\"completed\",\"conclusion\":\"success\",\"updated_at\":\"$(now_iso 1800)\"}]}" ;;
   failed)  json='{"workflow_runs":[{"status":"completed","conclusion":"failure"}]}' ;;
   # Started moments ago: worth waiting for.
   pending) json="{\"workflow_runs\":[{\"status\":\"in_progress\",\"conclusion\":null,\"run_started_at\":\"$(now_iso 30)\"}]}" ;;
@@ -61,9 +64,19 @@ printf '{"releases":[{"build":%s}]}' "${FEED:-0}"
 EOF
 cat > "$tmp/bin/git" <<'EOF'
 #!/bin/bash
-# A fetch would reach the network and would move FETCH_HEAD, which each
-# case sets for itself.
-[ "$1" = "fetch" ] && exit 0
+# A fetch would reach the network. It writes the tip each case chose
+# instead, in the form a real fetch leaves behind — the file `FETCH_HEAD`,
+# one line, the sha first.
+#
+# Writing the file rather than `git update-ref FETCH_HEAD`: from git 2.49
+# that is refused as a pseudoref, so the harness passed here and failed on
+# the runner, with every case deciding "none" for a reason that had
+# nothing to do with the decision under test.
+if [ "$1" = "fetch" ]; then
+  printf '%s\t\tbranch '"'"'main'"'"' of origin\n' "$TIP" \
+    > "$(/usr/bin/git rev-parse --git-dir)/FETCH_HEAD"
+  exit 0
+fi
 exec /usr/bin/git "$@"
 EOF
 chmod +x "$tmp/bin"/*
@@ -95,6 +108,20 @@ for i in 1 2 3 4; do
 done
 # Build numbers are commit counts, so commit N is build N.
 
+# The harness's own footing, checked before anything is decided. If the
+# stand-in fetch cannot leave the tip where `git rev-parse FETCH_HEAD`
+# finds it, every case below decides "none" and says nothing about the
+# decision it was written for — which is how this file passed here and
+# failed on a runner with a newer git.
+( cd "$repo" && PATH="$tmp/bin:$PATH" TIP="${SHA[4]}" git fetch --quiet origin main )
+footing="$(git -C "$repo" rev-parse FETCH_HEAD 2>/dev/null || true)"
+if [ "$footing" != "${SHA[4]}" ]; then
+  echo "the stand-in fetch does not work on this git ($(git --version))."
+  echo "FETCH_HEAD reads '${footing:-nothing}', and should read ${SHA[4]}."
+  echo "Nothing below would mean anything, so nothing below ran."
+  exit 1
+fi
+
 # --- the harness ---------------------------------------------------------
 # check <name> <tip> <here> <feed> <expected build|none> <state...>
 check() {
@@ -119,11 +146,10 @@ check() {
   esac
 
   git -C "$repo" checkout -q --detach "$here"
-  git -C "$repo" update-ref FETCH_HEAD "$tip"
   local out="$tmp/out"; : > "$out"
   local why
   why="$( cd "$repo" && \
-    PATH="$tmp/bin:$PATH" TABLE="$tmp/table" FEED="$feed" PATIENCE=600 \
+    PATH="$tmp/bin:$PATH" TABLE="$tmp/table" FEED="$feed" PATIENCE=600 TIP="$tip" \
     EVENT_SHA="$EVENT_SHA" EVENT_CONCLUSION="$EVENT_CONCLUSION" \
     HAVE_KEY=true SCAN=40 TAG=dev GITHUB_REPOSITORY=o/r \
     GITHUB_OUTPUT="$out" GITHUB_STEP_SUMMARY=/dev/null \
@@ -221,6 +247,46 @@ check "a newer commit that has run past the patience does not hold it" \
 check "one stuck commit does not hide a fresher one behind it" \
   "${SHA[4]}" "${SHA[2]}" 0 none \
   "${SHA[4]}" stuck "${SHA[3]}" pending "${SHA[2]}" success
+
+# --- how long a green build may wait -------------------------------------
+# The cap above is read off the pending commit, and while `main` merges
+# faster than CI finishes there is always a young one: every deferral is
+# to a commit that genuinely started moments ago, the cap never fires, and
+# the chain runs for ever. That is what the channel did all morning on
+# 2026-09-18 with the pending-side cap already in place.
+#
+# So the clock that ends a deferral is on the green build instead. No
+# merge can reset it, because it asks how long something publishable has
+# been sitting here rather than how long the newest thing has been under
+# test.
+check "a green that has waited goes out, whatever is still running" \
+  "${SHA[4]}" "${SHA[3]}" 0 3 \
+  "${SHA[4]}" pending "${SHA[3]}" waited
+
+# The one that publishes is still the newest green. The waiting one is
+# read for the clock, not for the build number.
+check "the green that has waited starts the clock; the newest green goes" \
+  "${SHA[4]}" "${SHA[3]}" 1 3 \
+  "${SHA[4]}" pending "${SHA[3]}" success "${SHA[2]}" waited
+
+# A green that is already on the channel has not been kept waiting — it
+# went out. Reading it as a build held back would publish on every event
+# for ever after.
+check "a green the channel already has does not start the clock" \
+  "${SHA[4]}" "${SHA[3]}" 3 none \
+  "${SHA[4]}" pending "${SHA[3]}" waited
+
+check "nothing newer than the channel is green, so nothing publishes" \
+  "${SHA[4]}" "${SHA[4]}" 3 none \
+  "${SHA[4]}" failed "${SHA[3]}" waited
+
+# Reading the clock means walking past the newest green, which brings
+# older commits into view that the walk used to stop before. One of those
+# still running is not a reason to hold anything: the green above it
+# already supersedes it.
+check "a commit still running behind the newest green holds nothing" \
+  "${SHA[4]}" "${SHA[4]}" 0 4 \
+  "${SHA[4]}" success "${SHA[3]}" pending "${SHA[2]}" success
 
 # --- the commit this run was started by -----------------------------------
 # A commit gets two CI runs. The first to finish fires the event; the API
