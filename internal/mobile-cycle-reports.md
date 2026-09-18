@@ -3620,3 +3620,33 @@ rather than a project having gone. It prints the list it did see now
 (M-418).
 
 **PR:** [#689](https://github.com/unarbos/arbos/pull/689), harness only.
+
+## Cycle 129 — do the instruments agree?
+
+Every coverage row the simulator can reach is current, and a great deal of
+the harness changed today. So this cycle ran the instrument set together
+against `main` `02a4ef65` rather than measuring anything new.
+
+They agree (M-419): every tool resolves inside the repository, every
+scenario reaches the list before it needs it, the list's rows all name a
+state and none speaks a separator, and `check-names` visited **5 of 5**
+screens — which it can now be trusted to say, because it refuses a clean
+verdict on any screen it did not open.
+
+**One disagreement, and it was real.** `check-names` found `Image  Image` in
+a project's chat: an element whose label is its own type. Two places draw a
+photo with no label — the sent photo in the transcript, and the composer's
+preview chip, whose **remove button** has read `Remove <name>` since cycle
+108 while the chip beside it read `Image` (M-420).
+
+Fixed, and verified the way cycle 109 taught me to: by finding the photo on
+screen and reading its label, not by opening a chat that might not have one.
+
+```
+ 263  163  Image        Photo you sent
+```
+
+The transcript's label counts them when there are several — three photos
+each announcing "Photo you sent" is the same fault one step along.
+
+**PR:** [#691](https://github.com/unarbos/arbos/pull/691), the `ios/` batch.
