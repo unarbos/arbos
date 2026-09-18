@@ -159,6 +159,54 @@ def check_place(place, kernel_running=False):
                 f"{len(wakes)} wakes but {len(ends)} turn ends: turns are starting without finishing",
             )
 
+        # checkpoints.d/ — the live rewind machinery, and the other half of the gap qal-j39 found.
+        # The `plan-*` rules below aim at a retired engine; the subscription rules above cover its
+        # replacement. Nothing checked checkpoints at all, though `fm-01` exists precisely because a
+        # stale sidecar is reachable and harmful: a rewind cuts turns, new turns reuse the cut ones'
+        # line numbers, and the cut turns' sidecars are not removed — so `settle_tree` can read one
+        # written for a different turn at the same line and accept it because HEAD never moved.
+        #
+        # A sidecar whose line is past the end of the transcript is exactly that leftover, sitting
+        # where a future turn will land on it. It is cheap to see and nothing was looking.
+        cpdir = adir / "checkpoints.d"
+        if cpdir.is_dir():
+            lines_now = len(events) + len(bad)
+            for cp in sorted(cpdir.glob("*.json")):
+                try:
+                    body = json.loads(cp.read_text(errors="replace"))
+                except (OSError, ValueError) as e:
+                    add("checkpoint-unreadable", cp, f"cannot be read as JSON: {e}")
+                    continue
+                # A sidecar names its line and the commit it sits on, and then says what became of
+                # the working tree: `work` when there was something to save, `clean` when there was
+                # not. Both shapes are ordinary — measured across twelve real sidecars, seven with
+                # `work` and five with `clean` — so requiring `work` alone reds every rewind
+                # scenario in the library. Requiring *one of the two* is the real contract.
+                missing = [k for k in ("line", "head") if k not in body]
+                if "work" not in body and "clean" not in body:
+                    missing.append("work or clean")
+                if missing:
+                    add("checkpoint-incomplete", cp, f"no {', '.join(missing)}: settle_tree cannot use it and will not say so")
+                    continue
+                try:
+                    named = int(cp.stem)
+                except ValueError:
+                    add("checkpoint-line-mismatch", cp, f"the name is not a line number; the file says line {body['line']}")
+                    continue
+                if named != body["line"]:
+                    add(
+                        "checkpoint-line-mismatch",
+                        cp,
+                        f"the name says line {named} and the body says {body['line']}; settle_tree looks it up by name",
+                    )
+                if lines_now and body["line"] > lines_now:
+                    add(
+                        "checkpoint-past-the-transcript",
+                        cp,
+                        f"line {body['line']} is past the transcript's {lines_now} line(s): a cut turn's sidecar left where a "
+                        f"later turn will reuse that line (fm-01, qal-j39's other half)",
+                    )
+
         # subscriptions/ — the engine #104 put in place of plan.jsonl. The nine `plan-*` and
         # `attempt-*` rules below still aim at the retired one and cannot fire on any current build;
         # until now nothing here checked the replacement at all, so `cx.check()` validated a

@@ -113,3 +113,41 @@ The sweep took 16 seconds over 3,255 places and needs only a symlink per place, 
 My first attempt pointed it at the rollout directory instead and reported a confident **zero** —
 vacuously, since it never found a `.arbos` and never reached these rules at all. A new detector
 scored against real history is only worth the reading if the reading happened.
+
+## checkpoints.d/ — the other half of the same gap (2026-09-18 22:15)
+
+The original finding was that the checker validated a **retired** engine (`plan.jsonl`, nine rules)
+and nothing of its replacement. The subscription rules closed that side. The same sentence was true
+of checkpoints: seven `plan-*` rules aimed at code that no longer runs, and **nothing** looked at
+`checkpoints.d/`, though `fm-01` exists because a stale sidecar is reachable and harmful — a rewind
+cuts turns, new turns reuse the cut ones' line numbers, and the cut turns' sidecars stay where a
+later turn will land on them.
+
+Four rules added, each verified to fire on its own staged fault and to stay silent on a healthy
+place (`deploy/check-checkpoint-rules.py`):
+
+| rule | fires on |
+|---|---|
+| `checkpoint-unreadable` | the file does not parse |
+| `checkpoint-incomplete` | no `line`, no `head`, or neither `work` nor `clean` |
+| `checkpoint-line-mismatch` | the filename's number and the `line` field disagree |
+| `checkpoint-past-the-transcript` | a sidecar for a line past the end of the transcript — the leftover `fm-01` is about |
+
+### Two things the first draft of these rules got wrong
+
+**`work` is not required.** I wrote the rule from one sample and required `line`, `head` and
+`work`. Run against the library it reddened `fm-01`, `rw-08` and `rw-09` at once. Twelve real
+sidecars say why: seven carry `work`, five carry `clean` instead. A sidecar names its line and
+commit and then says what became of the working tree — something saved, or nothing to save. The
+contract is **one of the two**, and the corrected rule says so. `rw-08` and `rw-09` pass again.
+
+**A standing rule and the scenario that stages it collide.** `fm-01` leaves a sidecar past the end
+of the transcript on purpose, so `checkpoint-past-the-transcript` fired there as a second finding
+for the thing the scenario already reports. Rather than weaken the rule, `cx.check()` now takes
+`staged=(...)`: a scenario names the findings it caused deliberately, they are recorded in the
+notes instead of broken on, and the rule keeps standing for every other place the loop looks at.
+`fm-01` is back to one break — its own.
+
+That second point is the reusable bit. Any standing rule worth adding will eventually name a fault
+some scenario stages on purpose, and the answer is for the scenario to declare it, not for the rule
+to look away.

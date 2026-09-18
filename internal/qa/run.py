@@ -481,9 +481,23 @@ class Cx:
         reap_scratch(self.scratch)
 
 
-    def check(self, kernel_running=False, place=None):
+    def check(self, kernel_running=False, place=None, staged=()):
+        """Every consistency finding is a break, except the ones this scenario **put there**.
+
+        A standing rule and a scenario that stages the fault it names will otherwise report the
+        same thing twice: `fm-01` leaves a checkpoint sidecar past the end of the transcript on
+        purpose, so `checkpoint-past-the-transcript` is the scenario working, not a second finding.
+        Naming it in `staged` keeps the rule standing for every other place the loop looks at
+        without making the scenario that proves it red for proving it.
+
+        Staged findings are still recorded in the notes, so a scenario cannot use this to hide
+        something it did not mean to cause.
+        """
         findings = check_place(place or self.place, kernel_running=kernel_running)
         for f in findings:
+            if f["rule"] in staged:
+                self.rec.notes.setdefault("staged_findings", []).append(f["rule"])
+                continue
             self.rec.broke("state:" + f["rule"], f["detail"], f["path"])
         self.check_forbidden_machines(place or self.place)
         return findings

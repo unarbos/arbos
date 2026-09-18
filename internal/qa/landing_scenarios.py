@@ -2046,7 +2046,9 @@ def register(scenario, registry, transcript, now_ms, branch):
         cx.rec.expect("f3.txt" not in files_after, "stale-sidecar-restored-a-cut-turns-tree", f"rewinding to the new turn 4 brought back f3.txt, a file the earlier rewind removed: the restore took the cut turn's sidecar at the same line (same HEAD) for the new turn's tree — files now {files_after}, expected f1, f2, g3", "arbos-engine tools::git settle_tree — a sidecar is matched by line and HEAD; a cut turn's sidecar at the same line passes both. Remove cut turns' sidecars on rewind, or key the sidecar on the record's ts")
         cx.rec.expect("g3.txt" in files_after, "new-turns-file-lost", f"g3.txt, written by the new turn 3', is gone after rewinding to the new turn 4: {files_after}")
         k2.stop()
-        cx.check()
+        # The stale sidecar past the end of the transcript is what this scenario stages, so the
+        # standing rule naming it is this working, not a second finding (it is kept in the notes).
+        cx.check(staged=("checkpoint-past-the-transcript",))
 
     @reg("rw-09-clean-that-fails-is-in-what-restored-says", tags=("rewind", "misreport"))
     def rw09(cx):

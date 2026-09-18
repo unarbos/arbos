@@ -3902,3 +3902,45 @@ comparing. I committed it before doing that arithmetic, and the rule is now
 named as unchecked rather than checked wrongly.
 
 **PR:** [#700](https://github.com/unarbos/arbos/pull/700), harness only.
+
+## Cycle 137 — the rows whose names promise more than their checks
+
+Cycles 135 and 136 each found one: a coverage row naming three things with
+a check covering one or two. This cycle read every row at once, against the
+scenarios that claim it.
+
+**The clearest remaining gap was "attachments (`+`), photos, files"**, where
+every measurement is about photos and nothing had ever opened the Files
+picker (M-440).
+
+It cannot be driven here. The picker opens on an empty `Recents`, and
+`Browse` reads **"On My iPhone is Empty"** — the app does not declare
+`UIFileSharingEnabled`, so a file dropped into its own Documents, which this
+cycle tried, is nowhere the picker can look. Making it visible means
+changing the app to suit the harness, which is the wrong way round.
+
+So the gap is written down instead. What *can* be driven is now checked, and
+it is not nothing: the `+` menu offers Files at all, the picker opens, and
+the way out is clean — the last of which has history, since a picker left
+open in journey run 32 swallowed the photo line and the whole call step
+after it.
+
+```
+VERDICT: the + menu offers Files, the picker opens and closes, and
+         cancelling leaves the composer as it was.
+         Attaching a file is NOT exercised: … and says so.
+```
+
+**The audit also caught a slip of my own** (M-441). `call — barge-in` still
+read **77** in the table, though cycle 124 measured it and wrote the
+finding. The ledger was under-reporting the loop's own coverage. Reading
+every row's last cycle in one list is worth doing for its own sake: that
+table is the only thing that says what has gone stale, and it is kept by
+hand.
+
+One gap named and left for a later cycle: `call — voice first, orb,
+colours` was last marked at 95, and the orb's **colours** were measured
+ad-hoc at 124 — listening (127,127,126), thinking (94,94,93), speaking
+(71,88,111) — without being committed anywhere.
+
+**PR:** [#701](https://github.com/unarbos/arbos/pull/701), harness only.
