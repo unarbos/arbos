@@ -1,0 +1,19 @@
+# 0aecaef536: refusal-names-no-alternative (co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives)
+
+status: draft (auto-triaged; a person or fix agent confirms)
+scenario: co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives
+feature: 
+rollout: /home/ubuntu/arbos-qa/loop/rollouts/20260917T125357Z-co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives
+first_seen: 20260917T125513Z
+
+## Detail
+
+the refusal does not say what to do instead: 
+
+## Suspected location
+
+(fill in)
+
+## Repro
+
+`python3 run.py --kernel <bin> --only co-01-bare-sleep-with-workers-is-refused-and-the-report-arrives`
