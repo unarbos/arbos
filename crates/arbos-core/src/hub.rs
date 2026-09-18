@@ -292,6 +292,24 @@ pub struct MachineInfo {
     /// Unix millis of the first registration still connected.
     #[serde(default)]
     pub since: i64,
+    /// Some process of this machine is connected now. False for a
+    /// machine the hub remembers: every registrant left, and the hub
+    /// keeps the row so a client can tell "this project is asleep" from
+    /// "this machine was never here" (iPhone loop, M-170: a Mac's only
+    /// kernel stopped and `/list` went empty). A remembered machine's
+    /// projects are all `live: false`; it is forgotten after seven days,
+    /// or when the hub restarts. Absent in rosters from an older hub,
+    /// which listed only connected machines — so absent reads as true.
+    #[serde(default = "yes")]
+    pub online: bool,
+    /// When the machine's last registrant left, Unix millis; zero while
+    /// it is online.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub offline_since_ms: i64,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// One registered process's build, as it reported itself.
@@ -329,6 +347,9 @@ impl MachineInfo {
     pub fn describe(&self) -> String {
         let mut s = self.name.clone();
         let mut bits: Vec<String> = Vec::new();
+        if !self.online {
+            bits.push("offline".into());
+        }
         if self.worker {
             bits.push("worker".into());
         }
@@ -1085,6 +1106,8 @@ Report: link [the audit](arbos://cloud/demo/docs/echo.md); read arbos://cloud/de
                 last_activity_ms: 0,
             }],
             since: 1,
+            online: true,
+            offline_since_ms: 0,
         };
         write_roster(&place, "wss://hub", &[m.clone()]).unwrap();
         assert_eq!(read_roster(&place), vec![m.clone()]);
