@@ -103,11 +103,24 @@ elif [ "$ROWS" -lt "$COUNT" ]; then
   # A shortfall is this scenario failing to reach the end of the sheet, and
   # `collect_rows` cannot tell "I reached the end" from "my swipe did
   # nothing" — both look like a page that added no labels.
+  # Both numbers come from one array in the app — the pill counts it, the
+  # sheet draws it, and `workers` is keyed by the agent's id — so the app
+  # cannot disagree with itself. Which of the two rig faults it is depends
+  # on whether the sheet scrolled at all.
+  PAGES=$(echo "$HOW" | grep -oE "[0-9]+" | head -1)
   echo "VERDICT: cannot say. The sheet's paging found $ROWS of the pill's $COUNT."
-  echo "         Both come from one array in the app — the pill counts it, the"
-  echo "         sheet draws it — so this is the paging stopping short, not the"
-  echo "         two disagreeing. Raise the page ceiling or check the swipe is"
-  echo "         inside the sheet before reading anything into the numbers."
+  echo "         The app draws both from one array, so the two cannot disagree;"
+  if [ "${PAGES:-1}" -le 1 ]; then
+    echo "         and the sheet converged on its first page, so it never scrolled."
+    echo "         Fix the swipe — it is landing outside the sheet."
+  else
+    echo "         and it scrolled $PAGES pages before converging, so the swipe works."
+    echo "         Rows are counted by their label and this project has $((COUNT - ROWS))"
+    echo "         more agents than distinct goals: twins on different pages count"
+    echo "         once, and the per-screen duplicate check above cannot see them."
+    echo "         Use a project whose goals are distinct — qa-cycle-11-demo at"
+    echo "         cycle 92, where pill and sheet agreed on 12."
+  fi
 else
   echo "VERDICT: they disagree — pill $COUNT, sheet $ROWS, and no shared labels to explain it."
   echo "         Rows are in $LABELS if you want to see which are present."
