@@ -28,6 +28,7 @@ struct ProjectChatView: View {
     @State private var followGrowth = true
     @State private var atTail = true
     @State private var connectingSince = Date()
+    @State private var pillRowHeight: CGFloat = 0
     @State private var openFolds: Set<UUID> = []
 
     /// Consecutive tool calls fold into one row: the phone shows what was
@@ -100,6 +101,7 @@ struct ProjectChatView: View {
                 )
             }
         }
+        .onPreferenceChange(PillRowHeight.self) { pillRowHeight = $0 }
         .toolbar(.hidden, for: .navigationBar)
         // The bar is hidden, and UIKit hides its edge swipe with it. The
         // gesture Jacob expects (build 1021: "swiping to the left should
@@ -226,6 +228,11 @@ struct ProjectChatView: View {
             }
             .padding(.horizontal, ArbosTheme.barMargin)
             .padding(.bottom, 4)
+            .background(
+                GeometryReader { box in
+                    Color.clear.preference(key: PillRowHeight.self, value: box.size.height)
+                }
+            )
         }
     }
 
@@ -361,6 +368,10 @@ struct ProjectChatView: View {
                     proxy.scrollTo("tail", anchor: .bottom)
                 }
             }
+            // Landing on the tail is one thing; resting there by hand is
+            // another. Without this the reader's own scroll stops with the
+            // last line under the pill, and they have to nudge it out.
+            .contentMargins(.bottom, pillRowHeight, for: .scrollContent)
             .onChange(of: chat.workers) { _, _ in
                 if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
             }
@@ -934,6 +945,16 @@ private struct ChatScrollAnchor: ViewModifier {
         } else {
             content.defaultScrollAnchor(.bottom)
         }
+    }
+}
+
+
+/// How tall the pill row above the composer is, so a scroll by hand cannot
+/// come to rest with the last line underneath it.
+private struct PillRowHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
