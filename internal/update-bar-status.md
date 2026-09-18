@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 15:07 UTC.
+Last checked 2026-09-18 15:28 UTC.
 
-## Click Update. You will get build 2049. This one has Jev.
+## Click Update. You will get build 2054. This one has Jev.
 
-**2049** — signed, notarised, stapled, on the feed since 15:05 UTC.
+**2054** — signed, notarised, stapled, on the feed since 15:25 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2049 (builds 2050–2054):
+
+- **#659** — mobile: a worker line is one accessibility element that reads
+  its words
+- **#662** — `check-tools.sh` asks whether the reach-the-list step happens
+  before the tap
+
+## Before that: 2049
 
 New since 2046 (builds 2047–2049):
 
