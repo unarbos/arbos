@@ -43,16 +43,10 @@ AT=$(ui dump | grep -E "Button +(Agents|Working) [0-9]+" | head -1 | awk '{print
 idb ui tap $AT --udid "$UDID"; sleep 3
 xcrun simctl io "$UDID" screenshot "$OUT/01-sheet.png" >/dev/null 2>&1
 
-RAW=$OUT/rows-raw.txt; : > "$RAW"
-for _ in $(seq 1 10); do
-  ui dump | grep -E "Button +.+, " >> "$RAW"
-  page_up "$UDID" >/dev/null 2>&1
-  sleep 1.2
-done
 LABELS=$OUT/rows.txt
-awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$RAW" | sort -u > "$LABELS"
+HOW=$(collect_rows "$UDID" 'Button +.+, ' "$LABELS")
 ROWS=$(wc -l < "$LABELS" | tr -d ' ')
-echo "the sheet lists: $ROWS rows, paged to the end"
+echo "the sheet lists: $ROWS rows (paging $HOW)"
 
 # Two workers could share a label only if both are on screen together, so
 # the check must be within one dump. Across the ten pages every row repeats
@@ -63,9 +57,18 @@ DUPES=$(ui dump | grep -E "Button +.+, " \
         | sort | uniq -d | wc -l | tr -d ' ')
 echo "labels sharing a name on one screen (each would hide a row): $DUPES"
 
-if [ "$ROWS" = "$COUNT" ]; then
+# Rows are counted by their label, so two workers with the same goal text
+# count once. That is fine while labels are unique and worthless the moment
+# they are not — and with enough runs behind it this project has repeats.
+# A tool that cannot measure should say so rather than produce a number and
+# a verdict, which is how cycle 74 filed a disagreement that did not exist.
+if [ "$DUPES" -gt 0 ]; then
+  echo "VERDICT: cannot say. $DUPES label(s) are shared on a single screen, and rows are"
+  echo "         counted by label, so the sheet's $ROWS is a floor and not a count."
+  echo "         Pill $COUNT. Compare these two only on a project whose goals are distinct."
+elif [ "$ROWS" = "$COUNT" ]; then
   echo "VERDICT: the two agree on $COUNT."
 else
-  echo "VERDICT: they disagree — pill $COUNT, sheet $ROWS. One of the app's own two counts is wrong."
+  echo "VERDICT: they disagree — pill $COUNT, sheet $ROWS, and no shared labels to explain it."
   echo "         Rows are in $LABELS if you want to see which are present."
 fi
