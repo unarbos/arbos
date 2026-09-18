@@ -759,6 +759,9 @@ final class CallViewModel: ObservableObject {
 
     private var injector: DebugInjector?
     private var bargeClip: Data?
+    /// Whether the barge clip has been used, so a later reply can say that
+    /// rather than reporting the same thing as never having had one.
+    private var spentBarge = false
 
     /// Level of a PCM16 frame, as the engine measures the microphone.
     nonisolated private static func level(of data: Data) -> Float {
@@ -810,10 +813,16 @@ final class CallViewModel: ObservableObject {
 
     private func scheduleBargeIn() {
         guard let clip = bargeClip, let injector else {
-            print("metric barge_in_unarmed clip=\(bargeClip != nil) injector=\(injector != nil)")
+            // There is one barge clip per run and it is spent on the first
+            // reply, so every later reply comes through here. Saying
+            // "unarmed" for both cases read as a failure on a run where the
+            // barge had already fired and been measured.
+            let why = injector == nil ? "no injector" : (spentBarge ? "clip already used" : "no clip given")
+            print("metric barge_in_not_armed \(why)")
             return
         }
         bargeClip = nil
+        spentBarge = true
         Task {
             try? await Task.sleep(for: .milliseconds(1500))
             guard phase == .speaking else {
