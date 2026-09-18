@@ -50,3 +50,7 @@ the card never appears for the writes a person would expect it on.
 ## 3. The plan reader and a listing pasted back (cycle 44, F-194)
 
 Asked to *restructure the project page*, the model wrote `notes.md` by hand and pasted the plan tool's own listing format — `[ ] 1 [Kickoff](docs/…) — ready…`, a box and an ordinal, **no dash**. The desktop now reads such a line as an item ([#661](https://github.com/unarbos/arbos/pull/661)); the kernel's plan reader most likely does not, since the items vanished from its list at the same time. Two small asks, either one enough: the plan tool's listing prints items in the form it reads back (`- [ ] …`), or the reader accepts a boxed line without a dash. Not filed as a bug; it is the model copying the kernel's own output.
+
+## 4. "nothing to compact yet" written unasked (cycle 46, F-199)
+
+On main `00cc5ba8` the root's transcript carries `notice: nothing to compact yet: the whole working set is recent` five times in one journey run — after the kickoff's first tool call, after a `plan`, after a `spawn`, after a `fold`. `compact::next_move` writes it only on the *manual* path (`control.take_compact()` or a compact wake), so something is setting the manual flag per step without a `/compact` from anyone. The desktop now shows the line only within a minute of a `/compact` it sent ([#686](https://github.com/unarbos/arbos/pull/686)); the kernel is still writing it to the record. Ask: find what sets `manual`, or drop the notice when nobody asked.
