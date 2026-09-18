@@ -1,5 +1,7 @@
 # A kernel's late writes recreate a moved place at its old path — for the kernel owner
 
+> **Corrected 23:40 UTC — the attribution below is wrong.** The features agent showed (`2026-09-17-recreated-place-the-maker-is-attach-or-spawns-bootstrap.md`, from QA's 0-of-4 on a directly attached kernel) that the maker was the **desktop**: `attach_or_spawn` bootstrapped the workspace path on every attach, and the sidecar's `project::init` recreated `<old>/.arbos/desktop/` first. The kernel's writes were already guarded (#499, #522). Fixed in [#530](https://github.com/unarbos/arbos/pull/530). Nothing here is asked of the kernel any more; the note stays for the record of how the wrong reading was reached (mtimes at the old path read as the kernel's writes, when the timing fit the desktop's attach as well).
+
 **From:** the desktop symmetry loop, cycle 35 → 36, 2026-09-17 20:30 UTC. Gate run `media/qa-ui/cycle-35d/` (phase D), 1 of 3 runs that day.
 
 ## What the rig saw

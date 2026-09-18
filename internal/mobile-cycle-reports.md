@@ -342,3 +342,94 @@ from.
 been repairing its own instruments. With the journey honest again, cycle 57
 goes back to the oldest coverage row — the list composer, last checked at
 cycle 11.
+
+## Cycle 57 report (23:40 UTC, 09-17)
+
+**Looked at:** the list composer, the oldest coverage row — last exercised at
+cycle 11, forty-six cycles ago — measured on `77f7c964`, which carries #433
+and #524.
+
+**Its three standing claims all hold**, and are now numbers rather than
+opinions:
+
+- the placeholder names the project a line would go to (`Message phone…`,
+  seven rows on screen);
+- with a filter on it names one that is **on screen**, which is #433's rule:
+  `sub` → `Message subnet120…`, `const` → `Message const…`;
+- with nothing matching it offers nothing — `Plan, ask, build…`, send
+  disabled — rather than an invisible project;
+- and it rides above the keyboard: the composer's top moves **774 → 480**
+  points as the keyboard comes up, and the keyboard starts at **683**, so a
+  182-point gap. Cycle 11 judged this from a still; it is read off the
+  accessibility tree now, so the next check is a comparison.
+
+**One real fault, and it is the app's** (M-191). A search matching nothing
+left the screen blank under the search box, with an empty **"Read ⌄"** header
+sitting over it — which reads as a section somebody collapsed, or a list
+still loading, not as an answer. The empty state only ever fired when the
+*roster* was empty; a filter emptying the list had no branch. It now says
+`No project matches “zzzz”.`, and `No project is live. Turn the filter off to
+see the rest.` for the live-only filter, and the misleading header stands
+down. #529.
+
+Before and after: `media/mobile/cycle-57/04-no-match-before-blank-screen.png`
+and `05-no-match-after-it-says-so.png`.
+
+**Worth saying:** this is the first cycle in three to find something in the
+app rather than in the loop's own instruments, which is what the instrument
+repairs were for.
+
+**Next:** the rotation's oldest remaining rows are the style pair against the
+Cursor stills (cycle 7) and notifications (cycle 36). AirPods, CallKit and
+the TestFlight build all need Jacob's phone and cannot move here. TestFlight
+was **1657** in this report and that was wrong: the steward's number is **1716** (`2eae41c7`), which already carries #529. The build on Jacob's phone is the steward's to say, not this loop's.
+
+## Cycle 58 report (00:05 UTC, 09-18)
+
+**Looked at:** notifications, the rotation's oldest row at cycle 36; and the
+style pair, which turned out not to be due.
+
+**The style row was not old — the ledger was wrong** (M-195). Its
+reference-still numbers (2–7) were sitting in the *last checked* column and
+the cycles (17, 18, 21, 37, 38) in *how*, so it read as last exercised at
+cycle 7. Both the coordinator and I acted on that. It was last done at 38.
+Row repaired; the rotation is only as good as the column it sorts on.
+
+**Notifications work, and the banner had a fault worth having found**
+(M-193). A reply arriving while the phone is elsewhere raised
+
+```
+arboslife/phone · root replied
+```
+
+where the chat header, the list row and the composer all say `phone`.
+`ChatStore.title` went straight to the target's label, while the chat *view*
+had always preferred the project's own name, then its folder, then the
+target — so two surfaces drawn from the same store disagreed, and the one
+showing the raw string was the one with the least room and the least
+context. Fixed on #533, with before and after captured on the same simulator
+minutes apart: `media/mobile/cycle-58/01-` and `02-`.
+
+**The recording is done** and is this flow:
+`media/mobile/cycle-58/recording-notification-away-and-back.mp4` — a line
+sent, the phone put away, the banner, the badge, and the tap landing back in
+the project.
+
+**Two ways the rig faked a failure before any of that** (M-194). The banner
+belongs to SpringBoard, so `describe-all` cannot see it, and a detector
+reading the accessibility tree reported "no banner in 120s" through a run
+with one plainly on the screen. And a slow reply raises no banner at all —
+it is posted from the live socket and iOS suspends a backgrounded app after
+about half a minute, so asking the kernel to count slowly to twenty gives a
+badge and nothing else. Both are now written into
+`deploy/mobile/scenarios/notifications.sh` with the reasons beside them.
+Neither was a fault in the app; both would have been filed as one.
+
+**One correction of my own process.** I committed the banner fix onto the
+cycle-57 branch, which the steward is watching, and moved it to its own
+branch within the minute. #529 is back to its single commit.
+
+**Open:** the style pair is genuinely due around cycle 41 by the repaired
+row, so it goes next. The rows that cannot move from here — AirPods, CallKit,
+the TestFlight build on Jacob's phone — are still waiting on him. TestFlight
+was written as **1657** here and corrected afterwards to the steward's **1716** (`2eae41c7`), which already carries #529.
