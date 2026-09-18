@@ -76,16 +76,23 @@ echo
 echo "--- 4. above the keyboard ---"
 # The keyboard is a big element low on the screen; the composer is the
 # TextField. Both tops, in points, from the same dump.
-DUMP=$(ui dump)
-COMPOSER_Y=$(echo "$DUMP" | awk '$3=="TextField" {print $2; exit}')
-KEY_Y=$(idb ui describe-all --udid "$UDID" | python3 -c '
+# Two TextFields are on screen with the search open — the search box near
+# the top and the composer near the bottom — so take the lower one. Reading
+# the first gave 177 pt, which is the search box, and made the comparison
+# nonsense.
+#
+# The keyboard is not exposed as keys. It arrives as the GenericElement that
+# covers the bottom of the screen, so its top is the number wanted.
+read -r COMPOSER_Y KEY_Y <<<"$(idb ui describe-all --udid "$UDID" | python3 -c '
 import json, sys
 els = json.load(sys.stdin)
-tops = [e["frame"]["y"] for e in els
-        if (e.get("type") or "") == "Key" and (e.get("frame") or {}).get("y")]
-print(round(min(tops)) if tops else "")
-')
-echo "  composer centre: ${COMPOSER_Y:-?} pt"
+def tops(kind):
+    return [e["frame"]["y"] for e in els
+            if (e.get("type") or "") == kind and (e.get("frame") or {}).get("y") is not None]
+fields, generic = tops("TextField"), tops("GenericElement")
+print(round(max(fields)) if fields else "", round(min(generic)) if generic else "")
+')"
+echo "  composer top:    ${COMPOSER_Y:-?} pt"
 echo "  keyboard top:    ${KEY_Y:-?} pt"
 if [ -n "$COMPOSER_Y" ] && [ -n "$KEY_Y" ]; then
   if [ "$COMPOSER_Y" -lt "$KEY_Y" ]; then
