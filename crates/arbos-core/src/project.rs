@@ -104,6 +104,30 @@ pub struct ProjectConfig {
     /// `crate::hub::store_access`.
     #[serde(default, skip_serializing_if = "ShareConfig::is_empty")]
     pub share: ShareConfig,
+    /// `[git] base = "main"`, `protected = ["main", "release"]`: the
+    /// branch pull requests target and the branches no commit or push may
+    /// land on. The project file is where the F design puts it; the older
+    /// `.arbos/git.toml` still reads when this is absent. Neither set: the
+    /// base is read from the repository (`origin/HEAD`).
+    #[serde(default, skip_serializing_if = "GitConfig::is_empty")]
+    pub git: GitConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GitConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected: Option<Vec<String>>,
+    /// `enabled = false` turns the guard off for this place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl GitConfig {
+    pub fn is_empty(&self) -> bool {
+        self.base.is_none() && self.protected.is_none() && self.enabled.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -301,6 +325,7 @@ pub fn write_for_new_place(place: &Place, name: &str) -> Result<()> {
         },
         spend: SpendConfig::default(),
         share: ShareConfig::default(),
+        git: GitConfig::default(),
     };
     save(place, &cfg)
 }

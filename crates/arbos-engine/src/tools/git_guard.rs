@@ -22,6 +22,10 @@ pub struct GitRules {
     /// Branches a direct push may not land on. The base is always one.
     pub protected: Vec<String>,
     pub enabled: bool,
+    /// The base came from the repository (`origin/HEAD`, or a local
+    /// `main`/`master`), not from a file: said so in the prompt.
+    #[serde(skip)]
+    pub base_detected: bool,
 }
 
 impl Default for GitRules {
@@ -30,12 +34,81 @@ impl Default for GitRules {
             base: String::new(),
             protected: vec!["main".into(), "master".into()],
             enabled: true,
+            base_detected: false,
         }
     }
 }
 
+/// The repository's own word on its base: the branch `origin/HEAD` points
+/// at (what `git clone` records), else `main` or `master` when one exists
+/// locally. None outside a repository or when none of these is there.
+pub fn detect_base(repo: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if let Some(branch) = name.strip_prefix("origin/").filter(|b| !b.is_empty()) {
+            return Some(branch.to_string());
+        }
+    }
+    ["main", "master"].into_iter().find_map(|b| {
+        std::process::Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{b}"),
+            ])
+            .current_dir(repo)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|_| b.to_string())
+    })
+}
+
 impl GitRules {
+    /// The rules for a place: `[git]` in `.arbos/project.toml` (the F
+    /// design's home for them), else the older `.arbos/git.toml`, else the
+    /// defaults. A base neither names is read from the repository at
+    /// `place` — `origin/HEAD`'s branch, or a local `main`/`master` — so a
+    /// fresh clone's guard knows where pull requests go without a line of
+    /// configuration (K-07's follow-up).
     pub fn load(place: &Path) -> Self {
+        let mut rules = Self::configured(place);
+        if rules.base.is_empty()
+            && let Some(found) = detect_base(place)
+        {
+            rules.base = found;
+            rules.base_detected = true;
+        }
+        rules
+    }
+
+    /// The rules as written, with no look at the repository.
+    fn configured(place: &Path) -> Self {
+        let project = arbos_core::project::load(&arbos_core::Place::new(place));
+        if !project.git.is_empty() {
+            let mut rules = Self::default();
+            if let Some(b) = project.git.base {
+                rules.base = b.trim().to_string();
+            }
+            if let Some(p) = project.git.protected {
+                rules.protected = p;
+            }
+            if let Some(e) = project.git.enabled {
+                rules.enabled = e;
+            }
+            return rules;
+        }
         let path = place.join(".arbos").join("git.toml");
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
@@ -61,6 +134,11 @@ impl GitRules {
         }
         let base = if self.base.is_empty() {
             "not configured: name --base explicitly on gh pr create".to_string()
+        } else if self.base_detected {
+            format!(
+                "`{}` (the repository's default; set [git] base in .arbos/project.toml to change it): open PRs against it, never push to it",
+                self.base
+            )
         } else {
             format!("`{}`: open PRs against it, never push to it", self.base)
         };
@@ -640,6 +718,89 @@ mod tests {
             err.contains(&name),
             "the refusal names the repo, not the place: {err}"
         );
+    }
+
+    /// K-07's follow-up: the base comes from `[git]` in project.toml,
+    /// else from the older git.toml, else from the repository — the
+    /// branch `origin/HEAD` names, or a local `main`/`master` — and the
+    /// prompt says which. A base the repository named is protected like
+    /// one a file named.
+    #[test]
+    fn the_base_is_read_from_the_project_file_or_the_repository() {
+        let dir = repo("base");
+        // A fresh clone's shape: origin/HEAD → origin/release.
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&dir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            );
+        };
+        git(&["update-ref", "refs/remotes/origin/release", "HEAD"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/release",
+        ]);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        let rules = GitRules::load(&dir);
+        assert_eq!(rules.base, "release");
+        assert!(rules.base_detected);
+        assert!(
+            rules
+                .prompt_line()
+                .contains("`release` (the repository's default"),
+            "{}",
+            rules.prompt_line()
+        );
+        // Detected, so protected: a commit on it is refused.
+        git(&["checkout", "-q", "-b", "release"]);
+        let err = check(&dir, &dir, "git commit -m x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("on `release`, a protected branch"), "{err}");
+
+        // The project file beats the repository.
+        std::fs::write(
+            dir.join(".arbos/project.toml"),
+            "schema = 2\n[git]\nbase = \"develop\"\nprotected = [\"develop\", \"main\"]\n",
+        )
+        .unwrap();
+        let rules = GitRules::load(&dir);
+        assert_eq!(
+            (rules.base.as_str(), rules.base_detected),
+            ("develop", false)
+        );
+        assert_eq!(rules.protected, vec!["develop", "main"]);
+        assert!(
+            rules
+                .prompt_line()
+                .contains("`develop`: open PRs against it")
+        );
+        // `[git] enabled = false` turns the guard off.
+        std::fs::write(
+            dir.join(".arbos/project.toml"),
+            "schema = 2\n[git]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(!GitRules::load(&dir).enabled);
+
+        // The older file still reads when the project file says nothing.
+        std::fs::write(dir.join(".arbos/project.toml"), "schema = 2\n").unwrap();
+        std::fs::write(dir.join(".arbos/git.toml"), "base = \"trunk\"\n").unwrap();
+        let rules = GitRules::load(&dir);
+        assert_eq!((rules.base.as_str(), rules.base_detected), ("trunk", false));
+
+        // No origin/HEAD, no file: a local main is the base.
+        std::fs::remove_file(dir.join(".arbos/git.toml")).unwrap();
+        git(&["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+        assert_eq!(detect_base(&dir), Some("main".into()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Kickoff item 8: the fix was committed straight onto main.
