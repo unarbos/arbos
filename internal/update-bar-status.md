@@ -5,11 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 08:46 UTC.
+Last checked 2026-09-18 09:02 UTC.
 
-## Click Update. You will get build 1910.
+## Click Update. You will get build 1916.
 
-**1910** — signed, notarised, stapled, on the feed since 08:44 UTC.
+**1916** — signed, notarised, stapled, on the feed since 09:00 UTC.
+
+Checked the same way as every number here: notary Accepted, ticket stapled,
+Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
+against the key in the app, size and hash are the feed's, all four payloads
+on the release.
+
+New since 1910 (builds 1911–1916):
+
+- **#602** — the loop cannot blame the app for what the model decided:
+  it reads back before sending, and asks the kernel whether a worker ran
+
+And everything below, which 1916 also carries.
+
+## Before that: 1910
 
 Checked, not assumed: Apple's notary said Accepted, the ticket is stapled
 into the bundle, Gatekeeper reads it as a Notarized Developer ID, the zip's

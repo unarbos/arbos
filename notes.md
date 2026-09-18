@@ -19,7 +19,7 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — next [title-queue pin](https://github.com/unarbos/arbos/pull/606), [orb phases](https://github.com/unarbos/arbos/pull/607); Mac **1910**
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — taking [title-queue pin](https://github.com/unarbos/arbos/pull/606) and [orb phases](https://github.com/unarbos/arbos/pull/607); Mac **1910**
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1910** on the feed; [green-clock cap](https://github.com/unarbos/arbos/pull/604) on `main`
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — cycle 96 next; [orb phases](https://github.com/unarbos/arbos/pull/607) open; TestFlight **1904**
 - [Run features agent for Cursor parity](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — [title-queue pin](https://github.com/unarbos/arbos/pull/606) green; producer-guard inbox next
@@ -92,7 +92,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1910** on the feed; [green-clock cap](https://github.com/unarbos/arbos/pull/604) on `main`
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — next [title-queue pin](https://github.com/unarbos/arbos/pull/606), [orb phases](https://github.com/unarbos/arbos/pull/607); TestFlight **1904**; Mac **1910**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — taking [title-queue pin](https://github.com/unarbos/arbos/pull/606) and [orb phases](https://github.com/unarbos/arbos/pull/607); TestFlight **1904**; Mac **1910**; `v0.2.0` stays a draft
 - [x] [Checkout tools](https://github.com/unarbos/arbos/pull/605) — on `main` (`b3770cd0`)
 - [x] [Green-clock cap](https://github.com/unarbos/arbos/pull/604) — on `main` (`0c641fff`)
 - [x] [Pill/sheet close](https://github.com/unarbos/arbos/pull/603) — on `main`
