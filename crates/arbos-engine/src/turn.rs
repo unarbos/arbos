@@ -1048,6 +1048,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     };
     let mut hidden_seen = 0usize;
     let mut first_step = true;
+    let mut picks = crate::jev::Picks::default();
     loop {
         if gone() {
             eprintln!(
@@ -1182,12 +1183,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             provider.replay.is_some(),
         ) && !skip
         {
-            let names: Vec<String> = registry
-                .names()
-                .into_iter()
-                .filter(|n| view.get(n).is_some())
-                .map(str::to_string)
-                .collect();
+            // Only the tools a pick can actually run: the Decisions door
+            // answers with a tool name and no arguments.
+            let names = crate::jev::pickable(&view);
             let repro = crate::repro::list(&place, &agent.id).last().map(|r| {
                 format!(
                     "exit={} {}",
@@ -1202,7 +1200,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             sit.model_menu = crate::brief::menu_line(models.all());
             let spoke = sit.spoke;
             let model = host.config.jev_model().unwrap_or(crate::jev::DEFAULT_MODEL);
-            match crate::jev::ask(&provider, model, &sit, control.cancel(), hooks.as_ref()).await {
+            match crate::jev::ask(&provider, model, &sit, control.cancel()).await {
                 Ok((decision, usage)) => {
                     if let Some(c) = usage.and_then(|u| u.cost) {
                         turn_cost = Some(turn_cost.unwrap_or(0.0) + c);
@@ -1225,7 +1223,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                             provider.model = models.current().to_string();
                         }
                     };
-                    match crate::jev::route(decision, &view, spoke) {
+                    match picks.settle(crate::jev::route(decision, &view, spoke)) {
                         crate::jev::Route::Tool { name, args } => {
                             let (calls, outcomes) =
                                 crate::jev::run_tool(&view, &cx, &control, batch_cfg, name, args)
@@ -1275,8 +1273,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     return end(spent(last_usage, turn_cost, turn_cached), None);
                 }
             }
-            // Choosing is over. An empty derived step lets Thinking / the
-            // tool name take the headline. A fail already cleared it.
+            // The hop itself is never on the window. An empty derived
+            // step clears whatever the last one left there, so Thinking /
+            // the tool name takes the headline. A fail already cleared it.
             hooks.kernel_step("");
         }
         if jev_no_change {
