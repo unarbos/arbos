@@ -1145,7 +1145,7 @@ fn user_prompt(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .when(message.has_attachments(), |el| {
+        .when(!message.images.is_empty(), |el| {
             el.child(user_attachments(message, theme))
         })
         .when(!message.described.is_empty(), |el| {
@@ -1159,13 +1159,26 @@ fn user_prompt(
                     .child(SharedString::from(cmd)),
             )
         })
-        .when(!body.is_empty(), |el| {
+        .when(!body.is_empty() || !message.files.is_empty(), |el| {
             el.child(
                 div()
                     .flex()
                     .flex_row()
+                    .flex_wrap()
                     .items_start()
                     .gap(px(6.))
+                    // The attached files lead the sentence, as Cursor sets
+                    // them: `≡ name` in the link colour, then the words.
+                    .children(message.files.iter().enumerate().map(|(fx, file)| {
+                        attachment::token(
+                            ("history-file", fx),
+                            file.name.clone(),
+                            TextStyle::Body.painted_line_height() * 1.3,
+                            theme,
+                        )
+                        .flex_none()
+                        .into_any_element()
+                    }))
                     // Spoken on a call: a small microphone leads the line.
                     .when(message.channel == "voice", |row| {
                         row.child(
@@ -1320,17 +1333,13 @@ fn split_slash(text: &str) -> (Option<String>, &str) {
     (Some(cmd), rest)
 }
 
-/// Composer chips for a sent message: files and images above the text,
-/// same card as the tray, without the ✕.
+/// The sent message's pictures above its text, small squares as Cursor's;
+/// its files lead the text as tokens (`user_prompt`).
 fn user_attachments(message: &UserMessage, theme: &Theme) -> AnyElement {
-    if !message.has_attachments() {
+    if message.images.is_empty() {
         return div().into_any_element();
     }
     attachment::row()
-        .children(message.files.iter().enumerate().map(|(ix, file)| {
-            attachment::chip(("history-file", ix), file.name.clone(), None, theme)
-                .into_any_element()
-        }))
         .children(message.images.iter().enumerate().map(|(ix, image)| {
             attachment::thumb(("history-image", ix), image.preview(), 40., 40., theme)
                 .into_any_element()

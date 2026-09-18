@@ -2245,11 +2245,75 @@ impl Composer {
         )
     }
 
+    /// The attached files, as tokens in the text row after the `+`: Cursor
+    /// sets a file as `≡ name` in the sentence, with nothing at rest and
+    /// the ✕ on hover. Pictures are the tray's (`chips`).
+    fn file_tokens(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.attachments
+            .get(self.bound)
+            .into_iter()
+            .flat_map(|tray| tray.items.iter())
+            .enumerate()
+            .filter(|(_, attachment)| attachment.preview.is_none())
+            .map(|(ix, attachment)| {
+                let name = attachment
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("file")
+                    .to_string();
+                let group = SharedString::from(format!("composer-attachment-{ix}"));
+                // On hover the ✕ takes the glyph's place at the token's
+                // head — Cursor's context pills do the same — so nothing
+                // moves and the words start a space after the name.
+                div()
+                    .group(group.clone())
+                    .flex_none()
+                    .relative()
+                    .my(px((root::COMPOSER_HIT - TextStyle::Body.painted_line_height()) / 2.))
+                    .child(super::attachment::token(
+                        ("composer-file", ix),
+                        name,
+                        TextStyle::Body.painted_line_height(),
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .id(("composer-file-x", ix))
+                            .absolute()
+                            .top(px((TextStyle::Body.painted_line_height() - 14.) / 2.))
+                            .left(px(-1.))
+                            .size(px(14.))
+                            .rounded_full()
+                            .bg(theme.input_bg)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .invisible()
+                            .group_hover(group, |el| el.visible())
+                            .hover(|hit| hit.bg(theme.element_active))
+                            .child(
+                                icons::icon(icons::system::CLOSE)
+                                    .size(px(10.))
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_attachment(ix, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn chips(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         if self
             .attachments
             .get(self.bound)
-            .is_none_or(|tray| tray.items.is_empty() && tray.loading == 0)
+            .is_none_or(|tray| {
+                tray.items.iter().all(|item| item.preview.is_none()) && tray.loading == 0
+            })
             && self.chat_links.is_empty()
         {
             return div().into_any_element();
@@ -2285,66 +2349,50 @@ impl Composer {
                     .into_iter()
                     .flat_map(|tray| tray.items.iter())
                     .enumerate()
+                    .filter(|(_, attachment)| attachment.preview.is_some())
                     .map(|(ix, attachment)| {
-                        let path = &attachment.path;
-                        let name = path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("file")
-                            .to_string();
                         // Cursor's tray: a picture is a bare rounded thumbnail
-                        // with an ✕ badge on its corner when hovered; a file is
-                        // a small chip with its name. Neither shows the ✕ at
+                        // with an ✕ badge on its corner when hovered, never at
                         // rest (cycle 21, `cursor-reference/composer-attachments/`).
+                        // A file is a token in the text row (`file_tokens`).
                         let group = SharedString::from(format!("composer-attachment-{ix}"));
-                        let close = |badge: bool| {
-                            div()
-                                .id(("composer-file-x", ix))
-                                .size(px(if badge { 18. } else { 14. }))
-                                .rounded_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .when(badge, |el| {
-                                    el.absolute()
-                                        .top(px(-5.))
-                                        .right(px(-5.))
-                                        .bg(theme.surface_raised_hover)
-                                        .border_1()
-                                        .border_color(theme.border)
-                                })
-                                .invisible()
-                                .group_hover(group.clone(), |el| el.visible())
-                                .hover(|hit| hit.bg(theme.element_active))
-                                .child(
-                                    icons::icon(icons::system::CLOSE)
-                                        .size(px(10.))
-                                        .text_color(theme.text_muted),
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.remove_attachment(ix, cx);
-                                }))
-                        };
-                        if attachment.preview.is_some() {
-                            div()
-                                .group(group.clone())
-                                .relative()
-                                .child(super::attachment::thumb(
-                                    ("composer-file", ix),
-                                    attachment.preview.clone(),
-                                    64.,
-                                    120.,
-                                    theme,
-                                ))
-                                .child(close(true))
-                                .into_any_element()
-                        } else {
-                            super::attachment::chip(("composer-file", ix), name, None, theme)
-                                .group(group.clone())
-                                .child(close(false))
-                                .into_any_element()
-                        }
+                        let close = div()
+                            .id(("composer-file-x", ix))
+                            .size(px(18.))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .absolute()
+                            .top(px(-5.))
+                            .right(px(-5.))
+                            .bg(theme.surface_raised_hover)
+                            .border_1()
+                            .border_color(theme.border)
+                            .invisible()
+                            .group_hover(group.clone(), |el| el.visible())
+                            .hover(|hit| hit.bg(theme.element_active))
+                            .child(
+                                icons::icon(icons::system::CLOSE)
+                                    .size(px(10.))
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_attachment(ix, cx);
+                            }));
+                        div()
+                            .group(group)
+                            .relative()
+                            .child(super::attachment::thumb(
+                                ("composer-file", ix),
+                                attachment.preview.clone(),
+                                64.,
+                                120.,
+                                theme,
+                            ))
+                            .child(close)
+                            .into_any_element()
                     }),
             )
             .into_any_element()
@@ -2687,6 +2735,7 @@ impl Composer {
                                             .text_color(theme.text_muted),
                                     ),
                             )
+                            .children(self.file_tokens(&theme, cx))
                             .child(
                                 div()
                                     .flex_1()
