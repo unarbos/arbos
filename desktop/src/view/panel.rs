@@ -153,6 +153,9 @@ struct AgentLine {
 struct ArchivedOnly {
     id: String,
     title: String,
+    /// The worker's last words, from its archived transcript — the same
+    /// line an archived row with a chat here shows after its title.
+    summary: Option<String>,
 }
 
 /// What rides under the cursor while an agent is being carried.
@@ -1313,20 +1316,48 @@ fn archived_only(path: &std::path::Path, sessions: &[ChatSession]) -> Vec<Archiv
             let title = field("title:")
                 .or_else(|| field("name:"))
                 .unwrap_or_else(|| id.clone());
-            Some(ArchivedOnly { id, title })
+            let summary = archived_summary(&entry.path().join("transcript.jsonl"));
+            Some(ArchivedOnly { id, title, summary })
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     out
 }
 
+/// The last thing an archived worker said, first line, as the row shows
+/// it after the title — read from the archive when no chat here holds it.
+fn archived_summary(transcript: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(transcript).ok()?;
+    let last = text.lines().rev().find_map(|line| {
+        let event: arbos_core::Event = serde_json::from_str(line).ok()?;
+        match event.kind {
+            arbos_core::EventKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text),
+            _ => None,
+        }
+    })?;
+    let line = last
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))?
+        .trim_start_matches(['-', '*', ' '])
+        .to_string();
+    let mut phrase: String = line.chars().take(90).collect();
+    if line.chars().count() > 90 {
+        phrase.push('…');
+    }
+    Some(phrase)
+}
+
 /// A row for an archived worker with no chat here: its title, a check,
-/// nothing to click — the history is the kernel's (`grep scope=history`).
+/// its last words, nothing to click — the history is the kernel's
+/// (`grep scope=history`). Same indent as the archived rows that do have
+/// a chat: one list under "N archived", not a second step with no header
+/// over it (F-183, cycle 39 d17).
 fn archived_only_row(line: ArchivedOnly, theme: &Theme) -> AnyElement {
     div()
         .flex_none()
         .h(px(ROW_HEIGHT))
-        .pl(px(8. + TREE_STEP * 2.))
+        .pl(px(8. + TREE_STEP))
         .pr(px(8.))
         .flex()
         .flex_row()
@@ -1343,9 +1374,25 @@ fn archived_only_row(line: ArchivedOnly, theme: &Theme) -> AnyElement {
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_color(theme.text_faint)
-                .child(SharedString::from(line.title)),
+                .flex()
+                .flex_row()
+                .items_baseline()
+                .child(
+                    div()
+                        .flex_none()
+                        .truncate()
+                        .text_color(theme.text_faint)
+                        .child(SharedString::from(line.title)),
+                )
+                .when_some(line.summary, |el, summary| {
+                    el.child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme.text_faint)
+                            .child(SharedString::from(format!(" — {summary}"))),
+                    )
+                }),
         )
         .into_any_element()
 }
