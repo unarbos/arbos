@@ -26,7 +26,15 @@ ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 # improved. Prefer the name, fall back to what older builds say.
 open_settings() { ui tap "Settings" >/dev/null 2>&1 || ui tap "Gear Shape" >/dev/null 2>&1; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
-rows() { ui dump | grep -cE "Button +[a-z0-9-]+, (Idle|Working)"; }
+# A row is a project row whatever its status says. Counting only the ones
+# reading `Idle` or `Working` is how this scenario reported "a token that
+# cannot work empties the list to 1" for weeks: a refused token does not
+# remove the rows, it changes what they say — `const, Off` — and rows that
+# stopped matching the pattern were counted as gone. A recording of cycle 94
+# is what caught it: seven rows before, seven during, seven after.
+rows() { ui dump | grep -cE "Button +[a-z0-9-]+, "; }
+live_rows() { ui dump | grep -cE "Button +[a-z0-9-]+, (Idle|Working)"; }
+statuses() { ui dump | grep -oE "Button +[a-z0-9-]+, [^,]+" | sed -E 's/^Button +[a-z0-9-]+, //' | sort | uniq -c | sort -rn | head -4 | awk '{ printf "%s×%s  ", $1, $2 }'; }
 
 fresh() {
   xcrun simctl uninstall "$UDID" $B 2>/dev/null
@@ -89,7 +97,9 @@ shot 03-bad-token-typed
 ui tap "Done" >/dev/null || echo "  no Done button"
 sleep 6; shot 04-list-after-a-bad-token
 BAD=$(rows)
-echo "  rows now: $BAD"
+BADLIVE=$(live_rows)
+echo "  rows now: $BAD ($BADLIVE still reading Idle or Working)"
+echo "  what the rows say: $(statuses)"
 echo "  what the screen says:"
 SAIDWHY=no
 ui dump | grep -qi "token refused\|not connected\|could not" && SAIDWHY=yes
@@ -103,13 +113,20 @@ echo "  rows after restoring the token: $RESTORED"
 shot 05-rows-restored
 echo "stills in $OUT"
 
-# The row's claim in one line, so a sweep can read it: the list empties when
-# the token cannot work, says why, and comes back when it can.
+# The row's claim in one line, so a sweep can read it. It used to say the
+# list *empties*; it does not, and never did. A refused token leaves every
+# row where it is and changes what each one says.
 echo
-if [ "${BAD:-0}" -lt "${GOOD:-0}" ] && [ "$RESTORED" = "${GOOD:-0}" ] && [ "${SAIDWHY:-no}" = yes ]; then
-  echo "VERDICT: a token that cannot work empties the list to $BAD, says why, and $RESTORED come back"
+BADLIVE=${BADLIVE:-0}
+if [ "${BAD:-0}" = "${GOOD:-0}" ] && [ "$BADLIVE" -lt "${GOOD:-0}" ] && [ "${SAIDWHY:-no}" = yes ]; then
+  echo "VERDICT: a token that cannot work keeps all $BAD rows and marks them off"
+  echo "         ($BADLIVE still live), says why, and $RESTORED come back"
+elif [ "${BAD:-0}" -lt "${GOOD:-0}" ] && [ "${SAIDWHY:-no}" = yes ]; then
+  echo "VERDICT: a token that cannot work removed rows — $GOOD before, $BAD after."
+  echo "         It said why, and $RESTORED came back. Rows going is a change from"
+  echo "         cycle 94, where all seven stayed and turned off."
 elif [ "${SAIDWHY:-no}" != yes ]; then
-  echo "VERDICT: the list changed but the screen never said why — the M-206 fault"
+  echo "VERDICT: the rows changed but the screen never said why — the M-206 fault"
 else
-  echo "VERDICT: unexpected shape — good $GOOD, bad $BAD, restored $RESTORED"
+  echo "VERDICT: unexpected shape — good $GOOD, bad $BAD ($BADLIVE live), restored $RESTORED"
 fi
