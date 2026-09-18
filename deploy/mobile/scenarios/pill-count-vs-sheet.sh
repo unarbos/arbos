@@ -65,7 +65,8 @@ echo "labels sharing a name on one screen (each would hide a row): $DUPES"
 if [ "$DUPES" -gt 0 ]; then
   echo "VERDICT: cannot say. $DUPES label(s) are shared on a single screen, and rows are"
   echo "         counted by label, so the sheet's $ROWS is a floor and not a count."
-  echo "         Pill $COUNT. Compare these two only on a project whose goals are distinct."
+  echo "         Pill $COUNT. Compare these two only on a project whose goals are distinct —"
+  echo "         qa-cycle-11-demo was one at cycle 92, where the two agreed on 12."
 elif [ "$ROWS" = "$COUNT" ]; then
   echo "VERDICT: the two agree on $COUNT."
 else
