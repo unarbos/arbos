@@ -21,9 +21,23 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 echo "scripts under $HERE reaching outside the checkout for a tool:"
 # A tool is a .py or .sh; ~/mobile-clips and ~/mobile-out are data and
 # machine-specific by design, so they are not what this is about.
-HITS=$(grep -rnE '(~|\$HOME)/[A-Za-z0-9_-]+\.(py|sh)' "$HERE" \
+# Two shapes, not one. Running `~/tool.sh` is the obvious reach; `cd
+# ~/some-checkout` is the same fault wearing a coat, and it is how
+# poll-feedback.sh came to run its poller from a second clone in $HOME.
+# The exemptions end at a boundary, and the boundary is "not a name
+# character" rather than "a slash": `cd ~/arbos &&` ends in a space. Without
+# any boundary `arbos` exempted `arbos-tools`, the one thing this was
+# widened to catch, and the report went clean with the probe still sitting
+# in the directory. Both mistakes were made here, in that order.
+#
+# `~/arbos` is exempt because it *is* the checkout on the Mac, which is a
+# different thing from a second clone beside it. Home directories holding
+# data rather than code — mobile-out, the clips, the docs mirror, the vault
+# file — are where output belongs, and are named here so the check stays
+# about tools.
+HITS=$(grep -rnE '(~|\$HOME)/[A-Za-z0-9_-]+\.(py|sh)|cd +"?(~|\$HOME)/' "$HERE" \
        --include='*.sh' --include='*.py' 2>/dev/null \
-       | grep -v "check-tools.sh" || true)
+       | grep -vE "check-tools.sh|(~|\\\$HOME)/(arbos|mobile-out|mobile-clips|mobile-docs|mobile-refs|mobile-bundles|mobile-feedback|mobile-derived|\.op-env)([^A-Za-z0-9_-]|$)" || true)
 
 if [ -z "$HITS" ]; then
   echo "  none — every tool resolves inside the repository"
