@@ -1,10 +1,15 @@
 #!/bin/bash
 # Cycle 13: stream-while-scrolled-up (F12 check, recorded), workers pill → sheet → worker chat, background 8 s, cold start.
+# Tools come from the checkout beside this file, never from a copy in
+# $HOME. M-238 fixed the journey this way and left every other script
+# calling ~/: the two drift, and a fix that lands in the repository
+# never reaches the run.
+HERE=$(cd "$(dirname "$0")" && pwd)
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 U=B1185668-7488-420F-B12D-4412BAAC7673; O=$HOME/mobile-out/cycle-13; B=com.unarbos.arbos.ios; mkdir -p $O
 shot() { xcrun simctl io "$U" screenshot "$O/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
-row() { xcrun simctl io "$U" screenshot /tmp/list.png >/dev/null 2>&1; python3 ~/find_row.py /tmp/list.png "$1"; }
+row() { xcrun simctl io "$U" screenshot /tmp/list.png >/dev/null 2>&1; python3 "$HERE/../find_row.py" /tmp/list.png "$1"; }
 T=$(plutil -extract hubToken raw -o - ~/arbos/ios/Arbos/Secrets.plist); H=$(plutil -extract hubURL raw -o - ~/arbos/ios/Arbos/Secrets.plist)
 xcrun simctl terminate $U $B 2>/dev/null; sleep 2
 xcrun simctl launch --console-pty $U $B -hubURL "$H" -hubToken "$T" > $O/console.log 2>&1 &

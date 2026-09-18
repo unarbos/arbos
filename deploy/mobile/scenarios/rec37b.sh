@@ -1,4 +1,9 @@
 #!/bin/bash
+# Tools come from the checkout beside this file, never from a copy in
+# $HOME. M-238 fixed the journey this way and left every other script
+# calling ~/: the two drift, and a fix that lands in the repository
+# never reaches the run.
+HERE=$(cd "$(dirname "$0")" && pwd)
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 O=~/mobile-out/cycle-37; U=$(cut -d' ' -f2 $O/sim.txt); B=com.unarbos.arbos.ios
 T=$(plutil -extract hubToken raw -o - ~/arbos/ios/Arbos/Secrets.plist); H=$(plutil -extract hubURL raw -o - ~/arbos/ios/Arbos/Secrets.plist)
@@ -14,7 +19,7 @@ idb connect $U >/dev/null 2>&1
 xcrun simctl terminate $U $B 2>/dev/null; sleep 1; xcrun simctl launch $U $B -hubURL "$H" -hubToken "$T" >/dev/null 2>&1; sleep 5
 rm -f $O/recording-long-history-paging*.mp4
 xcrun simctl io $U recordVideo --codec h264 $O/recording-long-history-paging.mp4 >/dev/null 2>&1 & REC=$!; sleep 1.5
-Y=$(xcrun simctl io $U screenshot /tmp/r.png >/dev/null 2>&1; python3 ~/find_row.py /tmp/r.png phone); idb ui tap 120 $Y --udid $U; sleep 2.5
+Y=$(xcrun simctl io $U screenshot /tmp/r.png >/dev/null 2>&1; python3 "$HERE/../find_row.py" /tmp/r.png phone); idb ui tap 120 $Y --udid $U; sleep 2.5
 for i in $(seq 1 12); do idb ui swipe 196 250 196 800 --duration 0.08 --udid $U; done; sleep 1.2
 E=$(ypos earlier); echo "earlier at $E"; shot 30-after-top; idb ui tap $E --udid $U; sleep 2.5; shot 31-after-page-1
 for i in $(seq 1 12); do idb ui swipe 196 250 196 800 --duration 0.08 --udid $U; done; sleep 1.2

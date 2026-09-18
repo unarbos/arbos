@@ -2,11 +2,16 @@
 # Cycle 37 b: the agents sheet with the keyboard down, then the long
 # history on phone reached by flinging to the top (a status-bar tap does
 # not scroll a SwiftUI ScrollView to the top in the simulator). Recorded.
+# Tools come from the checkout beside this file, never from a copy in
+# $HOME. M-238 fixed the journey this way and left every other script
+# calling ~/: the two drift, and a fix that lands in the repository
+# never reaches the run.
+HERE=$(cd "$(dirname "$0")" && pwd)
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 O="$HOME/mobile-out/cycle-37"; U=$(cut -d' ' -f2 "$O/sim.txt"); B=com.unarbos.arbos.ios
 shot() { xcrun simctl io "$U" screenshot "$O/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
-row() { xcrun simctl io "$U" screenshot /tmp/r.png >/dev/null 2>&1; python3 ~/find_row.py /tmp/r.png "$1"; }
+row() { xcrun simctl io "$U" screenshot /tmp/r.png >/dev/null 2>&1; python3 "$HERE/../find_row.py" /tmp/r.png "$1"; }
 desc() { idb ui describe-all --udid "$U" 2>/dev/null; }
 # centre y of the first element whose label contains $1
 ypos() { desc | python3 -c '
