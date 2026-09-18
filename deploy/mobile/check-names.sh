@@ -42,6 +42,16 @@ BAD_EXACT = {
     "Mic", "Mic Fill", "Mic Slash", "Speaker Wave 2", "Phone Down",
     "Slider Horizontal 3", "Doc", "Checkmark", "Arrow Up",
 }
+# A symbol name is not always two words. The multi-word rule below walked
+# straight past `Circle`, the away card's bullet, sitting one row from a
+# name it did flag. These are shapes and objects nobody names a control
+# after, so one word is enough to be sure.
+BAD_EXACT |= {
+    "Circle", "Square", "Triangle", "Star", "Bolt", "Bell", "Trash",
+    "Folder", "Gear", "Person", "Clock", "Hammer", "Wrench", "Paperclip",
+    "Pencil", "Bookmark", "Flag", "House", "Tag", "Bubble", "Chevron",
+    "Arrow", "Circle Fill", "Questionmark Circle", "Exclamationmark Circle",
+}
 # Two or more capitalised words with no lower-case connective reads like a
 # symbol spelled out ("Arrow Turning Down Then Right"), not like a label.
 # Every word a capital *letter*: "Arrow Turning Down Then Right" is a
@@ -90,13 +100,14 @@ SELFTEST=$(printf '%s\n' \
   " 351   85  PopUpButton  PopUpButton" \
   "  26  196  Image        Arrow Turning Down Then Right" \
   " 299   85  Button       Search" \
-  " 196  120  Button       Sheet Grabber" | suspect | grep -c .)
-if [ "$SELFTEST" != 3 ]; then
-  echo "the detector failed its own self-test ($SELFTEST of 3 known-bad names caught)."
+  " 196  120  Button       Sheet Grabber" \
+  "  39  713  Image        Circle" | suspect | grep -c .)
+if [ "$SELFTEST" != 4 ]; then
+  echo "the detector failed its own self-test ($SELFTEST of 4 known-bad names caught)."
   echo "Not running: a check that cannot fail cannot pass either."
   exit 1
 fi
-echo "detector self-test: caught 3 of 3 known-bad names, and let 'Search' and"
+echo "detector self-test: caught 4 of 4 known-bad names, and let 'Search' and"
 echo "the system's 'Sheet Grabber' through"
 echo
 
