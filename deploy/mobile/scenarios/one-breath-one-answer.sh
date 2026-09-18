@@ -37,9 +37,18 @@ CLIP=${CLIP:-$HOME/mobile-clips/pause.wav}
 SAYS=${SAYS:-1}
 echo "clip: $(basename "$CLIP") — expecting $SAYS utterance(s) and $SAYS answer(s) per run"
 
-SPLIT=0; WHOLE=0
+SPLIT=0; WHOLE=0; NOTKERNEL=0
+# What the kernel itself recorded before any of this. Counting the gateway's
+# frames says how many answers were *spoken*; only the kernel's own record
+# says whether the kernel is the one that answered. With the gateway serving
+# its own model those numbers come apart — the caller hears a reply and the
+# project never knows a question was asked.
+TARGET=${TARGET:-pod}
+ktotal() { python3 "$HERE/../kernel.py" "$TARGET" history 1 2>/dev/null | grep -oE "^ *[0-9]+" | tr -d ' '; }
+
 for i in $(seq 1 "$RUNS"); do
   LOG="$OUT/run-$i.log"
+  BEFORE=$(ktotal)
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
   xcrun simctl launch --console-pty "$UDID" $B -noAskNotifications 1 -previewCall 1 -micWav "$CLIP" > "$LOG" 2>&1 &
   LAUNCH=$!
@@ -59,6 +68,25 @@ for i in $(seq 1 "$RUNS"); do
     S=$(echo "$FRAMES" | grep -oE "sent=[0-9]+" | cut -d= -f2)
     [ "$C" = "$S" ] || echo "     NOTE: $((C - S)) frames lost at the socket — this run says nothing about the gateway"
   fi
+  # Did the kernel answer, or did the gateway answer for it? Read the lines
+  # the kernel added during this run: one `user`, one `assistant`, one
+  # `turn_complete` is the shape of a single question answered by the
+  # project. Nothing new at all means the caller heard a reply the project
+  # never knew about.
+  AFTER=$(ktotal)
+  if [ -n "$BEFORE" ] && [ -n "$AFTER" ] && [ "$AFTER" -gt "$BEFORE" ]; then
+    NEW=$(python3 "$HERE/../kernel.py" "$TARGET" history $(( (AFTER - BEFORE) + 2 )) 2>/dev/null \
+      | awk -v b="$BEFORE" '$1+0 > b')
+    KU=$(echo "$NEW" | grep -c " user  " | tr -d ' ')
+    KA=$(echo "$NEW" | grep -c " assistant  " | tr -d ' ')
+    echo "     kernel recorded: $KU question(s), $KA answer(s)"
+    echo "$NEW" | grep " assistant  " | cut -c1-110 | sed 's/^/       /'
+    { [ "$KU" = "$SAYS" ] && [ "$KA" = "$SAYS" ]; } || NOTKERNEL=$((NOTKERNEL + 1))
+  else
+    echo "     kernel recorded: nothing — the caller heard a reply the project never saw"
+    NOTKERNEL=$((NOTKERNEL + 1))
+  fi
+
   # Two separate faults, and after #562 they no longer travel together: the
   # transcript can be whole while the question is still answered twice.
   [ "$TRANSCRIPTS" -gt "$SAYS" ] && SPLIT=$((SPLIT + 1))
@@ -68,8 +96,12 @@ done
 echo
 echo "runs with more than $SAYS transcript(s): $SPLIT of $RUNS"
 echo "runs with more than $SAYS answer(s):    $WHOLE of $RUNS"
-if [ "$SPLIT" = 0 ] && [ "$WHOLE" = 0 ]; then
-  echo "VERDICT: one breath, one transcript, one answer. M-146 does not reproduce."
+echo "runs the kernel did not answer:      $NOTKERNEL of $RUNS"
+if [ "$SPLIT" = 0 ] && [ "$WHOLE" = 0 ] && [ "$NOTKERNEL" = 0 ]; then
+  echo "VERDICT: one breath, one transcript, one kernel answer. M-146 does not reproduce."
+elif [ "$SPLIT" = 0 ] && [ "$WHOLE" = 0 ]; then
+  echo "VERDICT: one transcript and one spoken answer, but the kernel did not answer"
+  echo "         $NOTKERNEL of $RUNS run(s) — the caller heard a reply the project never saw."
 elif [ "$SPLIT" = 0 ]; then
   echo "VERDICT: the transcript is whole now — the breath no longer splits it — but the"
   echo "         question is still answered more than once. Half of M-146."
