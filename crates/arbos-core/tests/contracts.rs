@@ -231,6 +231,13 @@ fn every_frame_variant_round_trips_with_a_snake_case_tag() {
             "shell",
         ),
         (
+            Frame::Browse {
+                owner: None,
+                url: Some("about:blank".into()),
+            },
+            "browse",
+        ),
+        (
             Frame::Board {
                 owner: "root".into(),
                 action: "open".into(),

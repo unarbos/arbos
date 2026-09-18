@@ -37,17 +37,12 @@ pub const CHAT_MIN_WIDTH: f32 = 418.;
 /// Whether a document tab lets him type into the file.
 ///
 /// **Jacob's ruling, 2026-09-17: his version wins and the agent is refused.**
-/// The window owns three of the four rules that follow from it — the file is
-/// always his to type in, nothing is reloaded under him, and his save is a
-/// compare-and-swap — but the fourth is the kernel's: while his editor holds
-/// unsaved edits, the agent's write to that path must be *refused*, and told
-/// so in its own turn. That frame does not exist yet (side-panel handover 6).
-///
-/// So this is `false`, and it is not a preference: a tab that took his
-/// keystrokes today could not keep them, and offering an edit we cannot defend
-/// is worse than offering a view. Turning it on means claiming the path and
-/// having the kernel refuse — not adding a text field.
-pub const DOCUMENTS_EDITABLE: bool = false;
+/// The window owns three of the four rules — the file is always his to type
+/// in, nothing is reloaded under him, and his save is a compare-and-swap.
+/// The fourth is the kernel's `claim` frame: while the editor holds unsaved
+/// edits, the agent's write to that path is refused. That frame exists, so
+/// a file tab is an editor.
+pub const DOCUMENTS_EDITABLE: bool = true;
 
 /// Which side opened a surface. The window knows its own clicks, and since
 /// [#461](https://github.com/unarbos/arbos/pull/461) a `board` frame says as

@@ -6,6 +6,8 @@ pub mod chips;
 pub mod component;
 pub mod detail;
 pub mod drawer;
+pub mod file_editor;
+pub mod files;
 #[cfg(target_os = "macos")]
 mod fn_key;
 pub mod menubar;

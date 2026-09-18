@@ -105,7 +105,16 @@ impl PtyHub {
             .unwrap_or_else(|| "sh".to_string());
         let mut cmd = CommandBuilder::new(&shell);
         cmd.arg("-il");
+        // zsh prints `%` (PROMPT_EOL_MARK) when the first paint does not
+        // end on a newline. A new shell in the drawer must show only the
+        // prompt. `+o PROMPT_SP` turns that mark off; the empty env var
+        // covers a zsh that still draws it.
+        if shell.rsplit('/').next().is_some_and(|name| name == "zsh") {
+            cmd.arg("+o");
+            cmd.arg("PROMPT_SP");
+        }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("PROMPT_EOL_MARK", "");
         cmd.cwd(cwd);
         let child = pair.slave.spawn_command(cmd)?;
         let pid = child.process_id().unwrap_or(0);
