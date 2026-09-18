@@ -39,6 +39,137 @@ pub fn handle(place: &Place, frame: Frame) -> Option<Frame> {
     }
 }
 
+/// A person's save of a project file from a window's editor: whole
+/// (tmp + rename), compare-and-swap on `base_hash` — required, so a save
+/// never lands over a change the editor has not seen. Not the store
+/// (`put` owns `.arbos/`), never `.git/`, and a protected file only when
+/// the saver owns the place. `by` rides on the reply so other windows
+/// know whose save it was.
+pub fn save(place: &Place, rel: &str, text: &str, base_hash: &str, owner: bool, by: &str) -> Frame {
+    let refused = |e: String, full: Option<&Path>| {
+        let (size, hash) = match full.map(std::fs::read) {
+            Some(Ok(bytes)) => (bytes.len() as u64, arbos_core::hub::content_hash(&bytes)),
+            _ => (0, String::new()),
+        };
+        Frame::Saved {
+            path: rel.to_string(),
+            size,
+            hash,
+            by: by.to_string(),
+            error: Some(e),
+        }
+    };
+    let full = match confine_place(place, rel) {
+        Ok(p) => p,
+        Err(e) => return refused(e, None),
+    };
+    let shown = full
+        .strip_prefix(&place.path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| rel.to_string());
+    if full.starts_with(place.arbos()) {
+        return refused(
+            format!("{shown}: under .arbos/ — the store is written with put"),
+            None,
+        );
+    }
+    if full
+        .strip_prefix(&place.path)
+        .ok()
+        .and_then(|r| r.components().next())
+        .is_some_and(|c| c.as_os_str() == ".git")
+    {
+        return refused(
+            format!("{shown}: .git/ is never written by hand here"),
+            None,
+        );
+    }
+    if let Some(entry) = arbos_core::store::protected_by(place.path(), &full)
+        && !owner
+    {
+        return refused(
+            format!(
+                "{shown}: {entry} shapes how agents here behave; only the place's owner saves it"
+            ),
+            None,
+        );
+    }
+    if full.is_dir() {
+        return refused(format!("{shown} is a folder"), None);
+    }
+    let current = match std::fs::read(&full) {
+        Ok(bytes) => arbos_core::hub::content_hash(&bytes),
+        Err(_) => String::new(),
+    };
+    if base_hash != current {
+        return refused(
+            if current.is_empty() {
+                format!(
+                    "{shown}: conflict — the file no longer exists; read it again before saving"
+                )
+            } else if base_hash.is_empty() {
+                format!("{shown}: conflict — the file exists now; read it before saving")
+            } else {
+                format!(
+                    "{shown}: conflict — the file changed since you read it (an agent's edit, or another window's save); read it again and redo the edit"
+                )
+            },
+            Some(&full),
+        );
+    }
+    if let Some(parent) = full.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return refused(format!("{shown}: {e}"), None);
+    }
+    let tmp = full.with_file_name(format!(
+        ".{}.{}.tmp",
+        full.file_name().and_then(|n| n.to_str()).unwrap_or("save"),
+        std::process::id()
+    ));
+    if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, &full)) {
+        let _ = std::fs::remove_file(&tmp);
+        return refused(format!("{shown}: {e}"), Some(&full));
+    }
+    Frame::Saved {
+        path: shown,
+        size: text.len() as u64,
+        hash: arbos_core::hub::content_hash(text.as_bytes()),
+        by: by.to_string(),
+        error: None,
+    }
+}
+
+/// `rel` as an absolute path inside the place: relative to it, or
+/// absolute and under it; `.` and `..` folded without touching the disk.
+/// A path that leaves the place is refused.
+fn confine_place(place: &Place, rel: &str) -> Result<PathBuf, String> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err("save: no path".into());
+    }
+    let start = Path::new(rel);
+    let joined = if start.is_absolute() {
+        start.to_path_buf()
+    } else {
+        place.path.join(start)
+    };
+    let mut out = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if !out.starts_with(&place.path) || out == place.path {
+        return Err(format!("{rel}: outside this place"));
+    }
+    Ok(out)
+}
+
 /// Why a peer's write was refused, in words the writer can act on.
 pub const PUT_WHERE: &str =
     "a peer writes only the store's shared folders: docs/, internal/, media/";
