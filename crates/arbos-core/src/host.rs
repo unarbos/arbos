@@ -248,6 +248,14 @@ pub struct HostConfig {
     /// them; past it the turn ends with a notice that names the cap.
     /// 0 = no cap. `ARBOS_MAX_TURN_COST` in the environment overrides.
     pub max_turn_cost_usd: f64,
+    /// Whether Jev routes mechanical steps. Absent = on when the provider
+    /// is OpenRouter and a key exists. `false` keeps the one-model loop.
+    /// Jev is a router, not a fallback: it does not replace `fallback_models`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jev: Option<bool>,
+    /// Router model. Default `typesafe/jev-latest`. Empty string turns Jev off.
+    #[serde(default = "default_jev_model")]
+    pub jev_model: String,
 }
 
 impl Default for HostConfig {
@@ -307,6 +315,8 @@ impl Default for HostConfig {
             protect_tool_results: 8,
             trace: false,
             max_turn_cost_usd: 0.0,
+            jev: None,
+            jev_model: default_jev_model(),
         }
     }
 }
@@ -400,6 +410,26 @@ impl HostConfig {
         self.api_base = kind.default_base().unwrap_or_default().to_string();
         self.api_key_env = None;
         self.model = kind.default_model().to_string();
+    }
+
+    /// The Jev slug in force, or None when `jev_model` is empty (off).
+    pub fn jev_model(&self) -> Option<&str> {
+        let m = self.jev_model.trim();
+        if m.is_empty() { None } else { Some(m) }
+    }
+
+    /// Whether this host should ask Jev before each mechanical step.
+    /// Default on for OpenRouter when a key exists. An empty `jev_model`
+    /// or `jev = false` keeps today's one-model loop.
+    pub fn jev_enabled(&self, has_key: bool) -> bool {
+        if self.jev_model().is_none() {
+            return false;
+        }
+        match self.jev {
+            Some(false) => false,
+            Some(true) => has_key,
+            None => has_key && self.provider() == ProviderKind::OpenRouter,
+        }
     }
 }
 
@@ -593,6 +623,68 @@ fn write_private(path: &Path, text: &str) -> Result<()> {
 
 fn default_first_byte_ms() -> u64 {
     30_000
+}
+
+/// OpenRouter family alias: always the newest Jev.
+pub const DEFAULT_JEV_MODEL: &str = "typesafe/jev-latest";
+
+fn default_jev_model() -> String {
+    DEFAULT_JEV_MODEL.into()
+}
+
+#[cfg(test)]
+mod jev_config_tests {
+    use super::*;
+
+    #[test]
+    fn jev_defaults_on_for_openrouter_with_a_key() {
+        let cfg = HostConfig::default();
+        assert_eq!(cfg.jev_model(), Some(DEFAULT_JEV_MODEL));
+        assert!(cfg.jev_enabled(true));
+        assert!(!cfg.jev_enabled(false));
+    }
+
+    #[test]
+    fn jev_false_is_the_old_loop() {
+        let cfg = HostConfig {
+            jev: Some(false),
+            ..HostConfig::default()
+        };
+        assert!(!cfg.jev_enabled(true));
+    }
+
+    #[test]
+    fn empty_jev_model_turns_jev_off() {
+        let cfg = HostConfig {
+            jev_model: String::new(),
+            ..HostConfig::default()
+        };
+        assert!(cfg.jev_model().is_none());
+        assert!(!cfg.jev_enabled(true));
+    }
+
+    #[test]
+    fn openai_provider_leaves_jev_off_unless_asked() {
+        let mut cfg = HostConfig::default();
+        cfg.set_provider(ProviderKind::OpenAi);
+        assert!(!cfg.jev_enabled(true));
+        cfg.jev = Some(true);
+        assert!(cfg.jev_enabled(true));
+    }
+
+    #[test]
+    fn missing_jev_keys_parse_as_defaults() {
+        let cfg: HostConfig = toml::from_str("model = \"x\"").unwrap();
+        assert_eq!(cfg.jev, None);
+        assert_eq!(cfg.jev_model, DEFAULT_JEV_MODEL);
+        assert!(cfg.jev_enabled(true));
+    }
+
+    #[test]
+    fn empty_jev_model_in_toml_is_off() {
+        let cfg: HostConfig = toml::from_str("jev_model = \"\"").unwrap();
+        assert!(!cfg.jev_enabled(true));
+    }
 }
 
 pub fn dirs_config() -> PathBuf {
