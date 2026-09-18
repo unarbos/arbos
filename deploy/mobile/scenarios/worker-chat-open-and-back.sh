@@ -113,7 +113,13 @@ if [ -z "$RUNNING" ]; then
 else
   echo "  the line: $RUNNING"
   shot 04-the-running-line
-  ui tap "$RUNNING" >/dev/null 2>&1
+  # Tap a stable part of the label. The spinner at the front is animated, so
+  # the exact string read a second ago no longer exists by the time the tap
+  # is made — matching on it is a race that always loses, and it looked like
+  # the line refusing to open.
+  STABLE=$(echo "$RUNNING" | sed -E 's/^[^,]*, ([0-9]+ )?Working //; s/ · .*//')
+  echo "  tapping on: $STABLE"
+  ui tap "$STABLE" >/dev/null 2>&1
   sleep 4
   shot 05-worker-chat-from-its-line
   WHERE=$(where)
