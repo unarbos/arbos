@@ -67,16 +67,13 @@ echo "== in by the worker's own line =="
 # transcript, which is kernel text and not a tap target — by design, not by
 # omission. A first version of this tapped that text, stayed where it was,
 # and was one line away from reporting an app fault.
+# A single trivial request is not reliably delegated — cycles 90 and 91 both
+# watched the root do the sleep itself. The plural form is what worked at
+# cycle 88, so ask for two and take whichever line appears. Reusing a proven
+# wording rather than inventing a third.
 NAP=$(( 90 + RANDOM % 20 ))
-# Read back before sending. Cycle 90 typed and tapped Send without it, no
-# worker started, and the run could not tell whether the app had failed or
-# the keystrokes had gone nowhere — the fault M-180 fixed everywhere else in
-# this harness and I left out of a new file.
-# "you wait for" is load-bearing. Without it the root runs the sleep itself
-# and no worker is ever spawned, so the run reports no running-worker line
-# and looks like the app failing to draw one. Watched for 64 s with the
-# shorter phrasing: no worker, no line, nothing wrong with the app.
-WLINE="Through one worker you wait for: run the bash command sleep $NAP and nothing else, then reply done."
+TAG=r$(date -u +%H%M%S)
+WLINE="Start two workers at once, each waiting for none of the other. Their goals are exactly $TAG one and $TAG two. Each runs the bash command sleep $NAP and nothing else, then replies done."
 ui focus >/dev/null 2>&1
 sleep 0.7
 idb ui text "$WLINE" --udid "$UDID"
@@ -90,8 +87,8 @@ if [ "$LANDED" = no ]; then
   echo "  the box holds: $(ui field plain 2>/dev/null | cut -c1-60)"
 else
   ui tap "Send" >/dev/null 2>&1 || ui tap "Up" >/dev/null 2>&1
+  echo "  asked for two workers sleeping ${NAP}s ($TAG); waiting for a running line"
 fi
-[ "$LANDED" = yes ] && echo "  started a worker that sleeps ${NAP}s; waiting for its line"
 RUNNING=""
 [ "$LANDED" = yes ] && for _ in $(seq 1 20); do
   sleep 4
