@@ -149,6 +149,14 @@ sleep 9
 ui dump | grep -qE "Button +Allow" && { ui tap "Allow" >/dev/null 2>&1; sleep 4; }
 screen "the call"
 
+# Leave the app where the next run expects it. Ending inside the preview
+# call sent the following steps tapping at a screen that has no composer,
+# and they reported about the call while believing they were in a chat.
+xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
+sleep 8
+ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 2; }
+
 echo
 if [ "$FOUND" = 0 ]; then
   echo "VERDICT: no control reads as a symbol name"
