@@ -1,12 +1,25 @@
-use crate::{agent::acp, kernel, model::place::Place};
-use arbos_core::wire::Frame;
+//! The terminal pane: a grid, a keyboard, and nothing else.
+//!
+//! The bytes come from the window's own kernel connection, by way of
+//! [`crate::model::pty::PtyStreams`], and the keys go back the same way. The
+//! pane opens no socket of its own and waits on nothing.
+//!
+//! It used to. A pane attached to the place's kernel itself — which meant a
+//! canonicalize, a bootstrap of `.arbos/`, a liveness probe, an HTTP call to
+//! `/healthz` and, once, running the kernel binary to read its commit — and
+//! then a second attach that replayed the greeting, the snapshot and the
+//! focused chat's transcript before anything of the shell could arrive.
+//! After all of it the prompt was not there to be had: it had gone out over
+//! the connection the window already held, moments before this one existed.
+//! The drawer showed "Connecting…", then an empty screen, until the person
+//! pressed a key.
+
 use bezel::{
     gpui::{
-        self, App, ClipboardItem, Context, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
-        MouseButton, Pixels, Point, Task, Window, div, prelude::*, px,
+        self, App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, KeyBinding,
+        KeyDownEvent, MouseButton, Pixels, Point, SharedString, Task, Window, div, prelude::*, px,
     },
     theme::{TextStyle, Theme, Typeset},
-    ui::widgets::{ButtonStyle, Buttons},
 };
 use std::time::Duration;
 use terminal::{
@@ -15,11 +28,6 @@ use terminal::{
         GridGeometry, GridSnapshot, RESIZE_DEBOUNCE_MS, TERM_LINE_HEIGHT, TerminalElement, cell_at,
         keystroke_bytes, paste_bytes, terminal_panel_bg,
     },
-};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::TcpStream,
-    sync::mpsc,
 };
 
 gpui::actions!(terminal, [Copy, Paste]);
@@ -33,104 +41,34 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
-enum Event {
-    Connected,
-    Output(Vec<u8>),
-    Closed(String),
-}
-
-fn encode_bytes(bytes: &[u8]) -> String {
-    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
-}
-
-async fn connect(
-    place: Place,
-    id: String,
-    mut input: mpsc::UnboundedReceiver<Vec<u8>>,
-    output: mpsc::UnboundedSender<Event>,
-) -> anyhow::Result<()> {
-    let info = tokio::task::spawn_blocking({
-        let place = place.clone();
-        move || kernel::attach_or_spawn_place(&place)
-    })
-    .await??;
-    let addr = kernel::tcp_addr(&info.url).ok_or_else(|| anyhow::anyhow!("bad kernel url"))?;
-    let stream = tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(addr)).await??;
-    let (reader, mut writer) = stream.into_split();
-    let _ = output.send(Event::Connected);
-    let _ = writer
-        .write_all(
-            serde_json::to_string(&Frame::PtyIn {
-                agent: "root".into(),
-                page: id.clone(),
-                data: encode_bytes(&[]),
-            })?
-            .as_bytes(),
-        )
-        .await;
-    let _ = writer.write_all(b"\n").await;
-    let mut lines = BufReader::new(reader).lines();
-    loop {
-        tokio::select! {
-            line = lines.next_line() => match line {
-                Ok(Some(text)) => {
-                    if let Ok(Frame::Pty { page, data, .. }) = serde_json::from_str(&text) {
-                        if page == id {
-                            if let Ok(bytes) = base64::Engine::decode(
-                                &base64::engine::general_purpose::STANDARD,
-                                data,
-                            ) {
-                                if output.send(Event::Output(bytes)).is_err() { break; }
-                            }
-                        }
-                    }
-                }
-                Ok(None) => break,
-                Err(err) => return Err(err.into()),
-            },
-            message = input.recv() => match message {
-                Some(bytes) => {
-                    let frame = Frame::PtyIn {
-                        agent: "root".into(),
-                        page: id.clone(),
-                        data: encode_bytes(&bytes),
-                    };
-                    let line = serde_json::to_string(&frame)?;
-                    writer.write_all(line.as_bytes()).await?;
-                    writer.write_all(b"\n").await?;
-                }
-                None => return Ok(()),
-            }
-        }
-    }
-    let _ = output.send(Event::Closed("Disconnected".into()));
-    Ok(())
+/// What the pane has for the shell: keys, a paste, or the emulator's own
+/// answer to a query the shell sent it. The window puts it on the wire.
+pub enum TerminalEvent {
+    Input(Vec<u8>),
 }
 
 pub struct TerminalPane {
-    place: Place,
+    /// The kernel's id for this shell (`t1`), which is what its output is
+    /// carried under.
     id: String,
     emulator: Emulator,
     focus: FocusHandle,
     geometry: Option<GridGeometry>,
     selecting: bool,
     scroll_remainder: f32,
-    input: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    connection: Option<tokio::task::JoinHandle<()>>,
-    reader: Option<Task<()>>,
+    /// How much of the shell's output has been fed to the emulator, counted
+    /// from its first byte. What [`crate::model::pty::PtyStream::since`]
+    /// takes to answer with the rest.
+    cursor: u64,
+    /// Whether keys go anywhere: false with the place's link down or the
+    /// shell ended.
+    live: bool,
+    /// The kernel's words when the shell is not live. Nothing while it is.
+    note: Option<SharedString>,
     resize: Option<Task<()>>,
-    status: String,
-    connected: bool,
-    closed: bool,
 }
 
-impl Drop for TerminalPane {
-    fn drop(&mut self) {
-        if let Some(task) = self.connection.take() {
-            task.abort();
-        }
-    }
-}
+impl EventEmitter<TerminalEvent> for TerminalPane {}
 
 impl Focusable for TerminalPane {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -139,98 +77,68 @@ impl Focusable for TerminalPane {
 }
 
 impl TerminalPane {
-    pub fn new(place: Place, id: String, cx: &mut Context<Self>) -> Self {
-        let mut pane = Self::disconnected(place, id, cx);
-        pane.attach(cx);
-        pane
-    }
-
-    fn disconnected(place: Place, id: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(id: String, cx: &mut Context<Self>) -> Self {
         Self {
-            place,
             id,
             emulator: Emulator::new(80, 24),
             focus: cx.focus_handle(),
             geometry: None,
             selecting: false,
             scroll_remainder: 0.,
-            input: None,
-            connection: None,
-            reader: None,
+            cursor: 0,
+            live: true,
+            note: None,
             resize: None,
-            status: "Connecting…".into(),
-            connected: false,
-            closed: false,
         }
     }
 
-    fn attach(&mut self, cx: &mut Context<Self>) {
-        if let Some(task) = self.connection.take() {
-            task.abort();
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Everything the shell has written since this pane last looked. Called
+    /// with the window's held bytes each time they change — and once when
+    /// the pane is built, which is what puts the prompt on screen.
+    pub fn feed(&mut self, bytes: &[u8], cursor: u64, cx: &mut Context<Self>) {
+        if bytes.is_empty() {
+            return;
         }
-        self.resize = None;
-        let cols = self.emulator.cols() as u16;
-        let rows = self.emulator.rows() as u16;
-        self.emulator = Emulator::new(cols, rows);
-        self.connected = false;
-        self.closed = false;
-        self.status = "Connecting…".into();
-        let (input, receiver) = mpsc::unbounded_channel();
-        let (output, mut events) = mpsc::unbounded_channel();
-        let place = self.place.clone();
-        let id = self.id.clone();
-        self.input = Some(input);
-        self.connection = Some(acp::runtime().spawn(async move {
-            if let Err(error) = connect(place, id, receiver, output.clone()).await {
-                let _ = output.send(Event::Closed(format!("Connection failed: {error}")));
-            }
-        }));
-        self.reader = Some(cx.spawn(async move |this, cx| {
-            while let Some(event) = events.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        match event {
-                            Event::Connected => {
-                                this.connected = true;
-                                this.status = "Connected".into();
-                            }
-                            Event::Output(bytes) => {
-                                let response = this.emulator.feed(&bytes);
-                                if !response.is_empty() {
-                                    this.send(response);
-                                }
-                            }
-                            Event::Closed(reason) => {
-                                this.connected = false;
-                                this.closed = true;
-                                this.input = None;
-                                this.status = reason;
-                            }
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        }));
+        self.cursor = cursor;
+        let answer = self.emulator.feed(bytes);
+        if !answer.is_empty() {
+            cx.emit(TerminalEvent::Input(answer));
+        }
         cx.notify();
     }
 
-    fn send(&self, message: Vec<u8>) {
-        if let Some(input) = &self.input {
-            let _ = input.send(message);
+    /// How much of the shell's output the pane already holds.
+    pub fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    /// Whether the shell can still be typed into, and what to say when it
+    /// cannot.
+    pub fn set_state(&mut self, live: bool, note: Option<String>, cx: &mut Context<Self>) {
+        let note = note.map(SharedString::from);
+        if self.live == live && self.note == note {
+            return;
         }
+        self.live = live;
+        self.note = note;
+        cx.notify();
+    }
+
+    fn send(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        cx.emit(TerminalEvent::Input(bytes));
     }
 
     fn type_bytes(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
-        if !self.connected {
+        if !self.live {
             return;
         }
         self.emulator.clear_selection();
         self.emulator.scroll_to_bottom();
-        self.send(bytes);
+        self.send(bytes, cx);
         cx.notify();
     }
 
@@ -386,19 +294,8 @@ impl Render for TerminalPane {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(self.status.clone()),
+                            .children(self.note.clone()),
                     )
-                    .when(self.closed, |row| {
-                        row.child(
-                            theme
-                                .button("Reconnect", ButtonStyle::Ghost, None)
-                                .id("terminal-reconnect")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.attach(cx);
-                                    window.focus(&this.focus, cx);
-                                })),
-                        )
-                    })
                     .child("⌘C copy · ⌘V paste"),
             )
     }
@@ -408,6 +305,7 @@ impl Render for TerminalPane {
 mod tests {
     use super::*;
     use bezel::gpui::Modifiers;
+    use std::sync::{Arc, Mutex};
     use terminal::emulator::CellColor;
 
     #[gpui::test]
@@ -416,24 +314,29 @@ mod tests {
             bezel::theme::appearance::init(bezel::theme::appearance::AppearanceMode::default(), cx);
             init(cx);
         });
-        let (input, mut received) = mpsc::unbounded_channel();
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut pane = TerminalPane::disconnected(Place::default(), "test".into(), cx);
-            pane.input = Some(input);
-            pane.connected = true;
-            pane.emulator.feed(b"hello world\r\n");
+            let mut pane = TerminalPane::new("t1".into(), cx);
             window.focus(&pane.focus, cx);
             pane
         });
+        let typed: Arc<Mutex<Vec<u8>>> = Arc::default();
+        let held = Arc::clone(&typed);
+        let watch = cx.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &TerminalEvent, _| {
+                let TerminalEvent::Input(bytes) = event;
+                held.lock().unwrap().extend_from_slice(bytes);
+            })
+        });
+        // What the window hands a pane the moment it is built: the shell's
+        // scrollback, prompt and all, taken off its own connection.
+        view.update(cx, |pane, cx| pane.feed(b"hello world\r\n", 13, cx));
         cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |pane, _| pane.cursor()), 13);
         assert!(view.read_with(cx, |pane, _| pane.geometry.is_some()));
-        while received.try_recv().is_ok() {}
+        typed.lock().unwrap().clear();
         cx.simulate_keystrokes("a space b enter ctrl-c up");
-        let mut bytes = Vec::new();
-        while let Ok(data) = received.try_recv() {
-            bytes.extend_from_slice(&data);
-        }
-        assert_eq!(bytes, b"a b\r\x03\x1b[A");
+        cx.run_until_parked();
+        assert_eq!(typed.lock().unwrap().as_slice(), b"a b\r\x03\x1b[A");
         let grid = view.read_with(cx, |pane, _| pane.geometry.unwrap());
         let position = grid.origin + gpui::point(px(grid.cell_w * 2.5), px(grid.line_h * 0.5));
         cx.simulate_mouse_move(position, None, Modifiers::default());
@@ -452,25 +355,22 @@ mod tests {
                 Some("hello".into())
             )
         });
-        view.update(cx, |pane, _| {
-            pane.emulator.feed(b"\x1b[?2004h");
+        view.update(cx, |pane, cx| {
+            pane.feed(b"\x1b[?2004h", 21, cx);
         });
+        typed.lock().unwrap().clear();
         cx.simulate_keystrokes("cmd-v");
-        let mut pasted = Vec::new();
-        while let Ok(data) = received.try_recv() {
-            pasted.extend_from_slice(&data);
-        }
-        assert_eq!(pasted, b"\x1b[200~hello\x1b[201~");
-    }
-
-    #[test]
-    fn attach_url_is_tcp() {
-        let info = kernel::WebInfo {
-            url: "tcp://127.0.0.1:9".into(),
-            pid: 0,
-            started: 0,
-        };
-        assert!(kernel::tcp_addr(&info.url).is_some());
+        cx.run_until_parked();
+        assert_eq!(typed.lock().unwrap().as_slice(), b"\x1b[200~hello\x1b[201~");
+        // A shell that has ended takes no more keys.
+        view.update(cx, |pane, cx| {
+            pane.set_state(false, Some("shell gone".into()), cx)
+        });
+        typed.lock().unwrap().clear();
+        cx.simulate_keystrokes("x");
+        cx.run_until_parked();
+        assert!(typed.lock().unwrap().is_empty());
+        drop(watch);
     }
 
     #[test]

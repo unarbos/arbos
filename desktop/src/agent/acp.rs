@@ -236,6 +236,17 @@ pub enum Event {
         path: String,
         kind: String,
     },
+    /// What one of the place's shells has written, already decoded.
+    ///
+    /// Not scoped to this chat: the kernel keys a shell by its page (`t1`)
+    /// and stamps every one of them with the agent `root`, whoever asked
+    /// for it, so a sub-chat's terminal would be lost by an agent test here.
+    /// The window sorts out whose it is and reads one chat's copy
+    /// ([`crate::model::pty::PtyStreams`]).
+    Pty {
+        page: String,
+        data: Vec<u8>,
+    },
     /// The agent's browser page moved or was pictured.
     Browser {
         page: String,
@@ -708,6 +719,18 @@ impl Session {
         let _ = self.send_frame(&Frame::Shell { owner: None, cwd });
     }
 
+    /// Keys, a paste, or the emulator's answer to the shell's own query,
+    /// on the shell `page` (`t1`). The kernel keys its shells under the
+    /// agent `root` whoever asked for them, so that is the name here.
+    pub fn pty_in(&self, page: &str, bytes: &[u8]) {
+        use base64::Engine;
+        let _ = self.send_frame(&Frame::PtyIn {
+            agent: arbos_core::ROOT_ID.to_string(),
+            page: page.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        });
+    }
+
     /// Ask for a browser page of this person's own. The kernel answers
     /// with a `board` frame carrying `by: user`.
     pub fn browse(&self, url: Option<String>) {
@@ -986,6 +1009,16 @@ fn frame_events(agent: &str, frame: Frame) -> Vec<Event> {
         // Not agent-scoped: every attached chat hears it, and the
         // workspace's re-read is idempotent.
         Frame::Changed { path, .. } if store_file(&path) => vec![Event::StoreChanged(path)],
+        // A shell's output. Decoded here, on the reader task, rather than on
+        // the window's own thread: this is the one frame that arrives for
+        // every keystroke a person makes.
+        Frame::Pty { page, data, .. } => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(data.as_bytes()) {
+                Ok(bytes) => vec![Event::Pty { page, data: bytes }],
+                Err(_) => Vec::new(),
+            }
+        }
         Frame::Board {
             owner,
             action,

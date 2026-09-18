@@ -10,7 +10,7 @@ use crate::{
         settings::Settings,
         state::{self, State},
         surface::SurfaceId,
-        workspace::{PaneRequest, Reloaded, Workspace},
+        workspace::{PaneRequest, PtyWrote, Reloaded, Workspace},
     },
     view::{
         component::{
@@ -25,6 +25,7 @@ use crate::{
         },
         naming::Renaming,
         settings::{CloseSettings, Section, SettingsPane},
+        terminal::{TerminalEvent, TerminalPane},
     },
 };
 use anyhow::Result;
@@ -773,8 +774,7 @@ pub struct Arbos {
     /// panel header. `(place path, branch or none)`. The composer no
     /// longer shows a branch chip.
     pub(crate) branch_cache: std::cell::RefCell<Option<(std::path::PathBuf, Option<String>)>>,
-    pub(crate) terminals:
-        std::collections::HashMap<String, Entity<crate::view::terminal::TerminalPane>>,
+    pub(crate) terminals: std::collections::HashMap<String, Entity<TerminalPane>>,
     active_terminal: Option<String>,
     /// Text files open in the drawer. Keyed by the resolved path so a
     /// second open of the same file keeps the buffer.
@@ -875,50 +875,94 @@ pub struct Arbos {
 
 impl Arbos {
     fn sync_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let workspace = self.workspace.read(cx);
-        self.terminals.retain(|id, _| {
-            workspace.projects.iter().any(|project| {
-                project
-                    .surfaces
-                    .iter()
-                    .any(|surface| surface.terminal_id() == Some(id.as_str()))
-            })
-        });
-        // Which terminal wants a live pane: the one the side panel is showing,
-        // or the one in the column when a tab has been zoomed there. Before
-        // the drawer existed only the column could hold one, and a terminal
-        // opened into the panel drew "This terminal has no session" for ever.
-        let in_panel = match workspace.panel().map(Panel::active_tab) {
-            Some(PanelTab::Surface(id)) => workspace
-                .active_project()
-                .and_then(|project| project.surface(id))
-                .and_then(|surface| surface.terminal_id())
-                .map(str::to_owned),
-            Some(PanelTab::Project | PanelTab::New(_)) | None => None,
-        };
-        let active = in_panel
-            .or_else(|| {
+        let active = {
+            let workspace = self.workspace.read(cx);
+            self.terminals.retain(|id, _| {
+                workspace.projects.iter().any(|project| {
+                    project
+                        .surfaces
+                        .iter()
+                        .any(|surface| surface.terminal_id() == Some(id.as_str()))
+                })
+            });
+            // Which terminal wants a live pane: the one the side panel is
+            // showing, or the one in the column when a tab has been zoomed
+            // there. Before the drawer existed only the column could hold
+            // one, and a terminal opened into the panel drew "This terminal
+            // has no session" for ever.
+            let in_panel = match workspace.panel().map(Panel::active_tab) {
+                Some(PanelTab::Surface(id)) => workspace
+                    .active_project()
+                    .and_then(|project| project.surface(id))
+                    .and_then(|surface| surface.terminal_id())
+                    .map(str::to_owned),
+                Some(PanelTab::Project | PanelTab::New(_)) | None => None,
+            };
+            in_panel.or_else(|| {
                 workspace
                     .active_surface()
                     .and_then(|surface| surface.terminal_id())
                     .map(str::to_owned)
             })
-            .zip(workspace.active_project().map(|project| project.place()));
-        let active_id = active.as_ref().map(|(id, _)| id.clone());
+        };
+        let active_id = active.clone();
         let zoomed = self.pane == Pane::Surface;
-        if let Some((id, place)) = active {
-            let terminal = self.terminals.entry(id.clone()).or_insert_with(|| {
-                cx.new(|cx| crate::view::terminal::TerminalPane::new(place, id, cx))
-            });
+        if let Some(id) = active {
+            let pane = match self.terminals.get(&id) {
+                Some(pane) => pane.clone(),
+                None => {
+                    let pane = cx.new(|cx| TerminalPane::new(id.clone(), cx));
+                    // The keys go out on the connection the window already
+                    // holds. Nothing of the pane's own reaches the kernel.
+                    cx.subscribe(&pane, |this, pane, event: &TerminalEvent, cx| {
+                        let TerminalEvent::Input(bytes) = event;
+                        let page = pane.read(cx).id().to_owned();
+                        let bytes = bytes.clone();
+                        this.workspace
+                            .update(cx, |workspace, _| workspace.pty_send(&page, bytes));
+                    })
+                    .detach();
+                    self.terminals.insert(id.clone(), pane.clone());
+                    pane
+                }
+            };
+            self.feed_terminal(&id, cx);
             // The column takes the caret with it, since zooming a terminal is
             // an act of sitting down at it. In the drawer nothing takes the
             // focus but a click, as everywhere else here.
             if zoomed && self.active_terminal != active_id {
-                window.focus(&terminal.focus_handle(cx), cx);
+                window.focus(&pane.focus_handle(cx), cx);
             }
         }
         self.active_terminal = active_id;
         self.sync_file_editors(cx);
+    }
+
+    /// Hand a pane everything its shell has written since it last looked.
+    ///
+    /// Called when the pane is built — where the bytes handed over are the
+    /// whole scrollback, prompt and all, written before the tab existed —
+    /// and on every `PtyWrote` after that. Only the pane repaints: the
+    /// output of a running build must not redraw the window around it.
+    pub(crate) fn feed_terminal(&mut self, page: &str, cx: &mut Context<Self>) {
+        let Some(pane) = self.terminals.get(page).cloned() else {
+            return;
+        };
+        let cursor = pane.read(cx).cursor();
+        let (held, live, note) = {
+            let workspace = self.workspace.read(cx);
+            (
+                workspace.pty_since(page, cursor),
+                workspace.pty_live(page),
+                workspace.pty_note(page),
+            )
+        };
+        pane.update(cx, |pane, cx| {
+            if let Some((bytes, cursor)) = held {
+                pane.feed(&bytes, cursor, cx);
+            }
+            pane.set_state(live, note, cx);
+        });
     }
 
     fn sync_file_editors(&mut self, cx: &mut Context<Self>) {
@@ -1128,6 +1172,14 @@ impl Arbos {
         // The model is the only thing that says a session appeared or a turn
         // ended; the composer's placeholder, commands and busy state are all
         // read back from it rather than pushed by whoever caused the change.
+        // A shell's output goes to its own pane and no further. Everything
+        // else the model reports comes through `observe` below and repaints
+        // the window; a terminal streaming a build would repaint it a
+        // hundred times a second for output nothing else on screen shows.
+        cx.subscribe(&workspace, |this, _, event: &PtyWrote, cx| {
+            this.feed_terminal(&event.0, cx);
+        })
+        .detach();
         cx.observe(&workspace, |this, _, cx| {
             this.sync_composer(cx);
             this.reap_notifications(cx);

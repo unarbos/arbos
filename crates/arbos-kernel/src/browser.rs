@@ -25,6 +25,9 @@ impl From<String> for BrowserOut {
 pub struct BrowserHub {
     chrome: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    /// Held for the whole of one start, so a second caller waits for the
+    /// first Chromium instead of launching one of its own.
+    launching: Mutex<()>,
     /// Chrome's own profile dir for this kernel; removed when the hub drops.
     profile: Mutex<Option<std::path::PathBuf>>,
     pages: Mutex<HashMap<String, String>>,
@@ -51,6 +54,7 @@ impl BrowserHub {
         Self {
             chrome: Mutex::new(None),
             port: Mutex::new(None),
+            launching: Mutex::new(()),
             profile: Mutex::new(None),
             pages: Mutex::new(HashMap::new()),
             drivers: Mutex::new(HashMap::new()),
@@ -462,6 +466,27 @@ impl BrowserHub {
         }
     }
 
+    /// A window's own open: go to `url` and take one picture, on one CDP
+    /// connection.
+    ///
+    /// Not [`Self::act`]`("navigate")`, which also reads the title and runs
+    /// the snapshot script — a second and third round trip, and four
+    /// kilobytes of page text, gathered for a model that is not being
+    /// spoken to here. The window draws the picture and the address, so
+    /// those are what it waits for.
+    pub fn show(&self, agent: &str, url: &str) -> Result<Option<Vec<u8>>> {
+        if let Some(why) = self.agent_refused(agent, "navigate") {
+            bail!("{why}");
+        }
+        self.pages
+            .lock()
+            .unwrap()
+            .insert(agent.to_string(), url.to_string());
+        let mut cdp = self.session()?;
+        cdp.navigate(url)?;
+        Ok(cdp.screenshot().ok())
+    }
+
     /// A picture of the page for the desktop's browser row, taken after an
     /// action that changed it. Not for the model: nothing is attached to the
     /// tool result, so the transcript does not pay for it.
@@ -503,6 +528,19 @@ impl BrowserHub {
         if let Some(p) = *self.port.lock().unwrap() {
             return Ok(p);
         }
+        // One start at a time, and the port is asked for again inside the
+        // gate. A window's `browse` and the screencast it turns on arrive a
+        // frame apart, and both used to find no port and launch: the second
+        // launch deletes the `DevToolsActivePort` the first had just
+        // written, so neither could read a port and both sat out the 25 s
+        // deadline for a Chromium that was already up.
+        let _starting = self
+            .launching
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(p) = *self.port.lock().unwrap() {
+            return Ok(p);
+        }
         let bin = which::which("chromium")
             .or_else(|_| which::which("google-chrome"))
             .or_else(|_| which::which("chromium-browser"))
@@ -538,6 +576,11 @@ impl BrowserHub {
         // Chrome takes a moment to open the devtools port; poll for the file,
         // then for the port to answer, and fail with a clear message.
         // A cold runner takes a while to bring Chrome up.
+        //
+        // The wait is polled every 10 ms rather than every 150: a person is
+        // watching an empty page for the whole of it, and the poll is a
+        // small file read until the port is announced. The old step added
+        // most of a tenth of a second to every start for nothing.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
         let port = loop {
             let announced = std::fs::read_to_string(profile.join("DevToolsActivePort"))
@@ -551,7 +594,7 @@ impl BrowserHub {
             if std::time::Instant::now() > deadline {
                 bail!("chrome started but never announced a devtools port");
             }
-            std::thread::sleep(std::time::Duration::from_millis(150));
+            std::thread::sleep(std::time::Duration::from_millis(10));
         };
         *self.profile.lock().unwrap() = Some(profile);
         *self.port.lock().unwrap() = Some(port);

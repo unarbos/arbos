@@ -13,6 +13,7 @@ use crate::{
         identity::Identity,
         panel::Panel,
         place::Place,
+        pty::PtyStreams,
         session::ChatSession,
         store_view::StoreView,
         surface::{Bind, Child, Focus, Surface, SurfaceId, SurfaceKind},
@@ -48,6 +49,11 @@ pub struct Project {
     /// Surfaces this project's agents have opened. Derived at runtime from
     /// board commands and `show`; not filed on disk.
     pub surfaces: Vec<Surface>,
+    /// What this project's shells have written, taken off the window's own
+    /// kernel connection. Held here rather than in the pane, because the
+    /// output starts before a pane exists and goes on while its tab is
+    /// behind another (see [`crate::model::pty`]).
+    pub ptys: PtyStreams,
     /// The agent in front, and whether one of its children fills the column.
     pub focus: Option<Focus>,
     /// The side panel on the right: what is open in it, which tab is in
@@ -121,6 +127,7 @@ impl Project {
             path: place.path,
             sessions: Vec::new(),
             surfaces: Vec::new(),
+            ptys: PtyStreams::default(),
             focus: None,
             panel: Panel::default(),
             next_key: 1,
@@ -437,6 +444,15 @@ impl Project {
     pub fn sync_panel(&mut self) {
         let live: Vec<SurfaceId> = self.surfaces.iter().map(|surface| surface.id).collect();
         self.panel.retain_surfaces(|id| live.contains(&id));
+        // A closed terminal's scrollback goes with its row. Held any longer
+        // it would be carried for the life of the window with nothing left
+        // that could ask for it.
+        let shells: Vec<&str> = self
+            .surfaces
+            .iter()
+            .filter_map(|surface| surface.terminal_id())
+            .collect();
+        self.ptys.retain(|page| shells.contains(&page));
     }
 
     /// Drop surfaces this agent owns. Child agents stay; their surfaces go
