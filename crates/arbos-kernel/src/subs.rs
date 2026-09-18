@@ -674,7 +674,8 @@ fn fire_with_note(
             let agent_id = id.to_string();
             tokio::task::spawn_blocking(move || {
                 let outcome = poll_github_prs(&hooks, &agent_id, &sub);
-                forget_in_flight(&key);
+                // In flight until the file says when the next look is
+                // (see the `github_pr` arm).
                 if let Some(mut current) = subscription::get(&hooks.place, &agent_id, sub.id) {
                     current.seen = outcome.seen.or(current.seen);
                     current.error = outcome.error;
@@ -686,6 +687,7 @@ fn fire_with_note(
                         outcome.last,
                     );
                 }
+                forget_in_flight(&key);
                 hooks.kick();
             });
         }
@@ -703,7 +705,12 @@ fn fire_with_note(
             let agent_id = id.to_string();
             tokio::task::spawn_blocking(move || {
                 let outcome = poll_github(&hooks, &agent_id, &sub);
-                forget_in_flight(&key);
+                // In flight until the file says when the next look is:
+                // with the key dropped before `settle` rewrote `next_due`,
+                // a tick that fell in between saw the subscription still
+                // due and free, polled again, and the agent heard "merged"
+                // twice (`follow_prs_e2e` red on #563's CI: three
+                // `subscription_closed` for two subscriptions).
                 if let Some(current) = subscription::get(&hooks.place, &agent_id, sub.id) {
                     let mut current = current;
                     current.seen = outcome.seen.or(current.seen);
@@ -726,6 +733,7 @@ fn fire_with_note(
                         outcome.last,
                     );
                 }
+                forget_in_flight(&key);
                 hooks.kick();
             });
         }
