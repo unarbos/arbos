@@ -30,6 +30,7 @@ ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 9
+reach_the_list "$UDID" || exit 1
 ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
 sleep 5
 

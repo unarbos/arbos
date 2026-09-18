@@ -26,6 +26,29 @@ SIM_SHOT_H=${SIM_SHOT_H:-1024}
 SIM_PT_W=${SIM_PT_W:-393}
 SIM_PT_H=${SIM_PT_H:-852}
 
+# reach_the_list <udid> — get to the projects list, wherever the app woke up.
+#
+# Since M-338 a cold start comes back to the chat that was in front, so a
+# scenario that launches and taps a project row no longer knows what it is
+# tapping. Worse, it depends on run order: a fresh install has no front
+# project and lands on the list, so the same scenario passes when it runs
+# first and taps at a chat when it runs after another. Cycle 115 found
+# `refusal-and-transport.sh` had been opening no case at all for fifteen
+# cycles that way, and reporting as though it had.
+#
+# Call this after launch, before tapping a row.
+SIM_LIB_DIR=${SIM_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
+reach_the_list() {
+  local udid=$1 i
+  for i in 1 2 3; do
+    python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null | grep -qE "Button +Back" || return 0
+    python3 "$SIM_LIB_DIR/ui.py" "$udid" tap "Back" >/dev/null 2>&1
+    sleep 3
+  done
+  echo "  still not on the projects list after three Backs" >&2
+  return 1
+}
+
 # pt <pixels-on-a-screenshot> -> points for idb, vertical scale.
 pt() { python3 -c "print(round($1 * $SIM_PT_H / $SIM_SHOT_H))"; }
 
