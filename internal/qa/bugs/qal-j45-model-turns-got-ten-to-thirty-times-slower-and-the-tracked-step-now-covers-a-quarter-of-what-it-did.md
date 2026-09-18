@@ -1,6 +1,6 @@
 # qal-j45 — model turns got ten to thirty times slower, and the cycle's first step now covers a quarter of what it did
 
-- **status**: open. The slowdown is real and measured. **The Jev commits are ruled out** — a kernel from before them is equally slow right now. The cause is time-varying and outside the build (see "Answered: not the kernel").
+- **status**: **closed — environmental, not the product.** The same binary ran 26.4 s at 20:18 and >600 s at 19:41. The Jev commits are ruled out. Nothing to fix in Arbos; the loop's exposure to it is the open question (see "What follows for the loop").
 - **found**: 2026-09-18 19:05, checking whether cycle 11 would finish inside its cap
 - **kernel**: slow on `arbos-kernel 0.2.0 fba8688d92d2`; fast on `cea8b902eecf` and everything before
 - **cost so far**: cycle 11's first step stopped at **25 scenarios**; cycle 10's reached **62**
@@ -144,3 +144,25 @@ The current-build arm was `fba8688d92d2` when this test began and `1b4ef7a93fe6`
 finished — the loop rebuilt it twice underneath me, exactly as it had overwritten my first "old"
 binary. Any measurement that spans more than one cycle must hold its own copies of **both** sides.
 The `old` arm did this time; that is the only reason the answer is trustworthy.
+
+## It recovered on its own, which closes the question
+
+Thirty minutes after the alternating test, on the **same binary** that had just exceeded ten
+minutes three rounds running:
+
+```
+20:18   ordinary-task   26.4s   pass
+```
+
+That is inside this morning's 21-29 s range. Nothing was rebuilt, nothing was configured, and no
+code changed between 19:41 and 20:18 — only the hour.
+
+So the chain is complete. The slowdown is real and costs coverage; it is not the Jev commits (a
+pre-change kernel was equally slow during it); and it is not any build, because one build was both
+fast and slow within forty minutes. It is the provider, and it comes and goes.
+
+**Nobody should chase a regression for this.** What remains is the loop's exposure, which is a
+decision rather than a defect: a fixed 100-minute cap turns a provider's bad hour into a set of
+permanently unasked questions, and always the same tail, because the library's order is fixed. The
+two containments already in place — `env:provider-rate-limited` and the bounded `spawn-storm`
+teardown — reduce the noise and return a few minutes; neither changes that.

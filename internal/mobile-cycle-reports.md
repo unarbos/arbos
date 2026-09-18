@@ -3725,3 +3725,39 @@ mirror:   SHORTER_IS_DELIBERATE=<name> deploy/mobile/mirror-docs.sh <name>
 Proven both ways by lengthening the Mac's copy on purpose.
 
 **PR:** [#694](https://github.com/unarbos/arbos/pull/694), harness only.
+
+## Cycle 132 — the feedback poll was reading from somewhere else
+
+Two builds went out since the last poll (1997 and 2117), so this cycle
+polled. **Nothing new**: 19 screenshots, 0 crashes, and F1–F19 stand as they
+are (M-427).
+
+The poll printed two lines of shell error above that report, which is what
+the cycle turned out to be about.
+
+**It was running its poller from a second clone.** `poll-feedback.sh` began
+`cd ~/arbos-tools` — the shape that cost this loop forty cycles of tooling,
+twice. Here the directory does not exist, so the `cd` failed, the `&&` chain
+stopped, and the run carried on in whatever directory it was started from.
+It worked only because that happened to be a checkout too (M-428). It also
+sourced `~/.op-env` without testing for it; it says where the credentials
+came from now.
+
+**`check-tools` had reported this tree clean all day.** It looks for
+`~/tool.sh` and not for `cd ~/some-checkout`, which is the same reach
+wearing a coat (M-429).
+
+Widening it went wrong twice, in opposite directions, and both are worth
+the record:
+
+- `~/arbos` is the Mac's own checkout, so it must be exempt — but an
+  exemption with **no boundary** exempted `arbos-tools`, the single thing
+  the widening was for, and the report went clean with my probe still
+  sitting in the directory;
+- the boundary then had to be "not a name character" rather than "a slash",
+  because `cd ~/arbos &&` ends in a space.
+
+Proven by planting the probe and watching it caught, then wrongly cleared,
+then caught again.
+
+**PR:** [#695](https://github.com/unarbos/arbos/pull/695), harness only.

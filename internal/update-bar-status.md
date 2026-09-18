@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 20:11 UTC.
+Last checked 2026-09-18 20:29 UTC.
 
-## Click Update. You will get build 2117. Jev is in it.
+## Click Update. You will get build 2119. Jev is in it.
 
-**2117** — signed, notarised, stapled, on the feed since 20:08 UTC.
+**2119** — signed, notarised, stapled, on the feed since 20:27 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2117 (builds 2118–2119):
+
+- **#694** — `mirror-docs.sh`'s shorter-file refusal has a way through, by
+  naming a reason
+
+## Before that: 2117
 
 New since 2110 (builds 2111–2117):
 
