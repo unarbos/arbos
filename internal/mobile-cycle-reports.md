@@ -2902,3 +2902,39 @@ state I already knew, which is the cheapest verification available and the
 one I keep having to relearn.
 
 **PR:** [#626](https://github.com/unarbos/arbos/pull/626), harness only.
+
+## Cycle 109 — every screen, and what the pill was hiding
+
+Cycle 108's check only ever walked two screens. Pointed at the other three
+it found the labelling work holds: **settings and the call are clean**, and
+the workers sheet's only flag was `Sheet Grabber`, UIKit's own drag handle
+(M-358).
+
+**The detector had a hole a row away from a name it caught** (M-359). It
+wanted two capitalised words, so `Image Circle` — the away card's bullet —
+walked past it, in output I had already read and called clean.
+
+**Then the thing worth the cycle** (M-360). Reading a still for the bullet,
+the away card's last line was sitting under the workers pill. Scrolled to
+its end, the transcript stops **59 points short**:
+
+| | last line, as opened | true end of content |
+|---|---|---|
+| chat with workers (pill) | y 731 — behind the pill | y 672 |
+| chat with none (no pill) | y 721 | y 721 — identical |
+
+The right-hand column is the whole diagnosis. With no pill, `scrollTo` lands
+exactly at the end; with one, it stops a pill's height short, and whatever is
+last — a reply, or the card that exists to be read — sits behind it.
+
+**I got it wrong first.** I blamed the scroll arriving before the layout,
+added a settle-then-scroll, and it changed nothing. A log line proved the
+scroll ran with its guard passing. A second scroll 400 ms later landed in
+the same place. Only the no-pill comparison settled it, and it took a minute.
+
+The fix reserves the height the pill actually measures — not a constant, and
+zero when there are no workers. After it, the card opens fully in view:
+`OK` at y 632 against the pill at 731.
+
+**Two PRs, because the cap splits them:** the harness work ships now; the
+three `ios/` fixes join the batch (M-350).

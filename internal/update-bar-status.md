@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 10:59 UTC.
+Last checked 2026-09-18 11:06 UTC.
 
-## Click Update. You will get build 1973.
+## Click Update. You will get build 1978.
 
-**1973** — signed, notarised, stapled, on the feed since 10:57 UTC.
+**1978** — signed, notarised, stapled, on the feed since 11:04 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1973 (builds 1974–1978):
+
+- **#628** — files open as an editor, Browse files is a tree, Browser
+  opens a page, and a new Terminal has no stray `%`
+- **#626** — `check-names.sh` flags controls named after their SF Symbol,
+  and self-tests the detector before trusting a pass
+
+## Before that: 1973
 
 New since 1962 (builds 1963–1973):
 
