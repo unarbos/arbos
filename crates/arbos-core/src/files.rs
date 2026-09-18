@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use std::{
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -590,7 +590,6 @@ pub fn append_events(path: &Path, events: &[Event]) -> Result<usize> {
 /// next successful append into one damaged line. Cut the file back to the
 /// last complete line. `wrote_at_most` bounds how far back to look.
 pub fn drop_partial_line(file: &mut File, wrote_at_most: usize) {
-    use std::io::{Read, Seek, SeekFrom};
     let Ok(len) = file.metadata().map(|m| m.len()) else {
         return;
     };
@@ -610,6 +609,54 @@ pub fn drop_partial_line(file: &mut File, wrote_at_most: usize) {
         None => len - look,
     };
     let _ = file.set_len(keep);
+}
+
+/// A transcript whose last line has no newline: the head of a write the
+/// kernel that made it never finished — SIGKILL, a power cut, the OOM
+/// killer (qal-j37). `drop_partial_line` mends that only in the process
+/// whose own write failed; after a crash nobody ran it, every reader
+/// skipped the headless line, and the next kernel's first append ran onto
+/// it and was skipped too — a `wake` or the person's own `user` line, gone.
+/// Cut the file back to its last complete line. For the kernel's start,
+/// before anything appends: with one writer per place that is the moment
+/// no write can be in flight. Returns the bytes dropped, `None` when the
+/// file was whole or absent.
+pub fn drop_headless_tail(path: &Path) -> std::io::Result<Option<u64>> {
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(None);
+    }
+    // The last complete line's end, found by walking back in chunks: a
+    // half-written event can be long (a tool's output), so no fixed bound.
+    const CHUNK: u64 = 64 * 1024;
+    let mut end = len;
+    let mut keep: Option<u64> = None;
+    let mut first = true;
+    while end > 0 && keep.is_none() {
+        let start = end.saturating_sub(CHUNK);
+        let mut buf = vec![0u8; (end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(&mut buf)?;
+        if first {
+            if buf.last() == Some(&b'\n') {
+                return Ok(None);
+            }
+            first = false;
+        }
+        if let Some(i) = buf.iter().rposition(|b| *b == b'\n') {
+            keep = Some(start + i as u64 + 1);
+        }
+        end = start;
+    }
+    let keep = keep.unwrap_or(0);
+    file.set_len(keep)?;
+    file.sync_data()?;
+    Ok(Some(len - keep))
 }
 
 /// Every parseable event, each stamped with its 1-based physical line.
@@ -1254,5 +1301,53 @@ mod batch_ts_tests {
             "a line already later keeps its own time"
         );
         assert!(back.windows(2).all(|w| w[0].ts < w[1].ts));
+    }
+}
+
+#[cfg(test)]
+mod headless_tail_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "arbos-headless-{tag}-{}-{}",
+            std::process::id(),
+            crate::now_ms()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// qal-j37: the head of a line a dead kernel never finished is cut
+    /// back to the last whole line; a whole record is untouched; a record
+    /// that is one headless line becomes empty; a long half line (past the
+    /// chunk the scan reads at a time) is found all the same.
+    #[test]
+    fn a_headless_last_line_is_cut_and_a_whole_record_is_left() {
+        let p = scratch("cut");
+        std::fs::write(&p, "{\"a\":1}\n{\"b\":2}\n{\"c\":3,\"text\":\"hal").unwrap();
+        assert_eq!(drop_headless_tail(&p).unwrap(), Some(18));
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "{\"a\":1}\n{\"b\":2}\n"
+        );
+        assert_eq!(drop_headless_tail(&p).unwrap(), None, "whole now");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "{\"a\":1}\n{\"b\":2}\n"
+        );
+
+        std::fs::write(&p, "{\"only\":\"half").unwrap();
+        assert_eq!(drop_headless_tail(&p).unwrap(), Some(13));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "");
+        assert_eq!(drop_headless_tail(&p).unwrap(), None, "empty is whole");
+
+        let long = "x".repeat(200 * 1024);
+        std::fs::write(&p, format!("{{\"a\":1}}\n{{\"t\":\"{long}")).unwrap();
+        assert_eq!(drop_headless_tail(&p).unwrap(), Some(6 + long.len() as u64));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "{\"a\":1}\n");
+
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(drop_headless_tail(&p).unwrap(), None, "absent is fine");
     }
 }

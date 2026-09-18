@@ -377,6 +377,25 @@ fn log_line_to_place(place: &Place, level: &str, event: &str, detail: &str) {
     }
 }
 
+/// Every agent transcript whose last line a dead kernel left unfinished,
+/// cut back to its last whole line: `(agent id, bytes dropped)`. Archived
+/// agents are not touched — nothing appends to them.
+fn repair_headless_tails(place: &Place) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for agent in list_agents(place).unwrap_or_default() {
+        let path = Layout::new(place, agent.id.as_str()).transcript();
+        match arbos_core::files::drop_headless_tail(&path) {
+            Ok(Some(dropped)) => out.push((agent.id.to_string(), dropped)),
+            Ok(None) => {}
+            Err(e) => eprintln!(
+                "arbos: {}: could not check its last line: {e}",
+                path.display()
+            ),
+        }
+    }
+    out
+}
+
 pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let place = Place::new(
         std::fs::canonicalize(place_path.into())
@@ -386,8 +405,29 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
         Held::Taken(lock) => lock,
         Held::StillHeld(code) => return Ok(code),
     };
+    // Before anything appends — bootstrap's own notice included: a record
+    // the last kernel left mid-line (a crash in a write) would swallow the
+    // first line written onto it (qal-j37). The lock is held, so no write
+    // is in flight; this is the one moment the cut is safe.
+    let repaired = repair_headless_tails(&place);
     bootstrap(&place)?;
     klog::init(klog::log_path_for(&place.arbos()));
+    for (agent, dropped) in repaired {
+        klog::warn(
+            "transcript_repaired",
+            Some(&agent),
+            format!("{dropped} bytes of a half-written last line dropped (a crash mid-write)"),
+        );
+        let _ = append_event(
+            &Layout::new(&place, &agent).transcript(),
+            &Event::new(EventKind::Notice {
+                text: format!(
+                    "The kernel that wrote this record before ended in the middle of a line ({dropped} bytes, the head of one event). That half line was dropped so everything from here on reads whole; the event it began was lost with that kernel, not now."
+                ),
+                failed: false,
+            }),
+        );
+    }
     // Which folder this store is (device, inode): every later look at the
     // path compares against it, so a store renamed out from under the
     // kernel is told apart from a folder recreated where it was.
