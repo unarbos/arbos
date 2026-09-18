@@ -78,6 +78,36 @@ impl Identity {
         toml::from_str(&body).ok()
     }
 
+    /// The file as a face for `place`: what it names stays, what it leaves
+    /// out comes from [`Self::defaults`]. The kernel's bootstrap writes a
+    /// `project.toml` with only `name = "<folder>"` — the folder's own name,
+    /// nobody's choice — and read plain that turned the Home tab into
+    /// *.arbos* with a folder glyph instead of *Home* with the house
+    /// (F-186, cycle 41, a box whose home store the kernel had opened).
+    pub fn load_for(store: &Path, place: &Place, home: bool) -> Option<Self> {
+        let body = std::fs::read_to_string(Self::path(store)).ok()?;
+        let table: toml::Table = toml::from_str(&body).ok()?;
+        let defaults = Self::defaults(place, home);
+        let folder = place.path.file_name().and_then(|n| n.to_str());
+        let name = table
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && Some(*name) != folder)
+            .map(str::to_string);
+        let icon = table
+            .get("icon")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or(defaults.icon);
+        let color = table
+            .get("color")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or(defaults.color);
+        Some(Self { name, icon, color })
+    }
+
     /// What a folder wears before anyone chooses: its own name; the house
     /// for the home tab, a globe for a folder on another machine, a folder
     /// for the rest; and a colour picked by the path so two new tabs do
