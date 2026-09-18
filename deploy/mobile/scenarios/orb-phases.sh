@@ -21,7 +21,13 @@ set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
 CYCLE=${1:?cycle}
-CLIP=${2:-$HOME/mobile-clips/acceptance.wav}
+CLIP=${2:-$HOME/mobile-clips/pause.wav}
+# How many things the clip asks. Each turn legitimately walks thinking →
+# speaking → listening, so a two-utterance clip revisits all three and is
+# not flapping. Run against acceptance.wav (two utterances) the first
+# version called a perfectly ordinary two-turn call a fault — the same
+# "one question baked in" error as M-301, for the third time.
+SAYS=${SAYS:-1}
 OUT="$HOME/mobile-out/$CYCLE/orb-phases"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
@@ -67,23 +73,26 @@ echo
 # Flapping is the fault worth catching: a phase that is entered, left and
 # entered again inside one turn is what M-145 described, and what a caller
 # sees as the orb twitching.
-python3 - "$SEQ" <<'PY'
+python3 - "$SEQ" "$SAYS" <<'PY'
 import sys
 seq = sys.argv[1].split()
 if not seq:
     print("VERDICT: the orb never reported a phase — nothing to read")
     raise SystemExit
+says = int(sys.argv[2])
 runs = []
 for p in seq:
     if not runs or runs[-1] != p:
         runs.append(p)
-back = [p for p in set(runs) if runs.count(p) > 1]
-print(f"phases seen: {len(set(runs))} distinct, {len(runs)} changes")
+spoke = runs.count("speaking")
+print(f"phases seen: {len(set(runs))} distinct, {len(runs)} changes; "
+      f"spoke {spoke} time(s) for {says} question(s)")
 if "speaking" not in runs:
     print("VERDICT: it never reached speaking — the call did not get an answer out")
-elif back:
-    print(f"VERDICT: re-entered {', '.join(sorted(back))} — check for flapping (M-145)")
+elif spoke > says:
+    print(f"VERDICT: {spoke} spoken answers to {says} question(s) — either a reply in "
+          f"parts or the double answer of M-146")
 else:
-    print("VERDICT: each phase entered once, in order, no flapping")
+    print("VERDICT: one pass through the phases per question, in order, no flapping")
 PY
 echo "console in $OUT"
