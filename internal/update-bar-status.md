@@ -5,16 +5,28 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 10:32 UTC.
+Last checked 2026-09-18 10:59 UTC.
 
-## Click Update. You will get build 1962.
+## Click Update. You will get build 1973.
 
-**1962** — signed, notarised, stapled, on the feed since 10:30 UTC.
+**1973** — signed, notarised, stapled, on the feed since 10:57 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1962 (builds 1963–1973):
+
+- **#620**, **#622** — four loop scenarios that measured without concluding
+  now say what they found
+- **#621** — a fork holds the copied checkpoints' tree commits under its
+  own refs, so a rewind in a fork survives the source's cut
+- **#625** — row pitch means nothing on a chat, so `style-pair.py` says so
+- **#624** — notifications concludes with a VERDICT line and joins the
+  sweep
+
+## Before that: 1962
 
 New since 1952 (builds 1953–1962):
 
