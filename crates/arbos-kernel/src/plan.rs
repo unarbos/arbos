@@ -828,18 +828,20 @@ fn notify_parent_done(hooks: &KernelHooks, agent: &str) {
     // (F-96, journey J09).
     let user_stop = outcome.starts_with(USER_STOPPED);
     let capped = outcome.starts_with(arbos_core::spend::TURN_CAP_PREFIX);
-    let status = if ok {
-        "ended"
+    // One of the openings every reader knows (`inbox::DONE_PREFIXES`):
+    // a fourth phrasing here was drawn raw in the desktop until both
+    // sides read the same list.
+    let opening = if ok {
+        inbox::DONE_ENDED
     } else if user_stop {
-        "stopped by the user"
+        inbox::DONE_USER_STOP
     } else if capped {
-        "stopped at the per-turn cap"
+        inbox::DONE_TURN_CAP
     } else {
-        "ended badly"
+        inbox::DONE_ENDED_BADLY
     };
-    let mut body = format!(
-        "Turn {status}. Last words: {outcome}\n(transcript: .arbos/agents/{agent}/transcript.jsonl)"
-    );
+    let mut body =
+        format!("{opening} {outcome}\n(transcript: .arbos/agents/{agent}/transcript.jsonl)");
     if user_stop {
         body.push_str(&format!(
             "\nThis is the user pausing, not a failure. Its folder and transcript are intact: when the user says to continue, `say to={agent} mode=request` with what to pick up, or spawn afresh with what is left."

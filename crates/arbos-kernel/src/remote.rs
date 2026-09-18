@@ -1324,7 +1324,8 @@ fn deliver(hooks: &KernelHooks, record: &Record, text: &str) -> Result<()> {
         wake: true,
         hops: 0,
         body: format!(
-            "Turn ended. Last words: {text}\n(transcript: .arbos/agents/{}/transcript.jsonl; it ran on {}{})",
+            "{} {text}\n(transcript: .arbos/agents/{}/transcript.jsonl; it ran on {}{})",
+            arbos_core::inbox::DONE_ENDED,
             record.agent,
             record.machine,
             if record.store.is_empty() {

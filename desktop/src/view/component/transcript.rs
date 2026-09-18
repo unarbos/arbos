@@ -1459,19 +1459,20 @@ enum Verdict {
 }
 
 /// The kernel's done file for a worker, as it lands in the parent's chat:
-/// `Turn ended. Last words: … (transcript: …)`, `Turn ended badly. …`, or
-/// `Turn stopped by the user. …`. The verdict and the words, without the
-/// file pointer and whatever the kernel wrote after it (F-116).
+/// one of `arbos_core::inbox::DONE_PREFIXES` — the same list the kernel
+/// writes from, so a way a turn can end that this window did not know
+/// (the per-turn cap, until qal-j36) is not drawn raw. The verdict and
+/// the words, without the file pointer and whatever the kernel wrote
+/// after it (F-116).
 fn done_report(text: &str) -> Option<(Verdict, String)> {
-    let text = text.trim();
-    let (verdict, rest) = if let Some(rest) = text.strip_prefix("Turn ended. Last words:") {
-        (Verdict::Done, rest)
-    } else if let Some(rest) = text.strip_prefix("Turn ended badly. Last words:") {
-        (Verdict::Failed, rest)
-    } else if let Some(rest) = text.strip_prefix("Turn stopped by the user.") {
-        (Verdict::Stopped, rest.trim_start().strip_prefix("Last words:").unwrap_or(rest))
-    } else {
-        return None;
+    let (prefix, rest) = arbos_core::inbox::done_report(text)?;
+    let verdict = match prefix {
+        arbos_core::inbox::DONE_ENDED => Verdict::Done,
+        arbos_core::inbox::DONE_ENDED_BADLY => Verdict::Failed,
+        // The user's Stop, or the per-turn cap closing the turn: a pause
+        // the rule made, not the worker failing.
+        arbos_core::inbox::DONE_USER_STOP | arbos_core::inbox::DONE_TURN_CAP => Verdict::Stopped,
+        _ => return None,
     };
     let mut words = rest.trim().to_string();
     if let Some(at) = words.find("(transcript:") {
