@@ -2929,9 +2929,125 @@ pub async fn serve_client(
             // and released with.
             let conn = CONN_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             let hooks_for_claims = Arc::clone(&accept_hooks);
+            // Screencasts this connection asked for, by agent: a flag the
+            // thread reads; raised on `off` and when the connection ends.
+            let mut watches: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>> =
+                std::collections::HashMap::new();
             tokio::spawn(async move {
                 while let Some(frame) = local_rx.recv().await {
                     match frame {
+                        // The page as it changes, to this window alone,
+                        // on a thread with its own CDP socket.
+                        Frame::BrowserWatch { agent, on } => {
+                            if let Some(stop) = watches.remove(&agent) {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if !on {
+                                continue;
+                            }
+                            if !arbos_core::agent_exists(&place_for_history, &agent) {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(agent.clone()),
+                                    detail: format!("browser_watch: no agent is named {agent}"),
+                                });
+                                continue;
+                            }
+                            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            watches.insert(agent.clone(), Arc::clone(&stop));
+                            let hooks = Arc::clone(&hooks_for_claims);
+                            let out = out_for_history.clone();
+                            let who = who_name.clone();
+                            std::thread::Builder::new()
+                                .name(format!("screencast-{agent}"))
+                                .spawn(move || {
+                                    klog::info(
+                                        "browser_watch",
+                                        Some(&agent),
+                                        format!("who={who} on"),
+                                    );
+                                    if let Err(e) =
+                                        hooks.browsers.screencast(&agent, out.clone(), stop)
+                                    {
+                                        klog::warn("browser_watch", Some(&agent), format!("{e:#}"));
+                                        let _ = out.send(Frame::Error {
+                                            agent: Some(agent.clone()),
+                                            detail: format!("browser_watch: {e:#}"),
+                                        });
+                                    }
+                                    klog::info(
+                                        "browser_watch",
+                                        Some(&agent),
+                                        format!("who={who} off"),
+                                    );
+                                })
+                                .ok();
+                        }
+                        // A person's input on the page, only while they
+                        // drive it; the agent's own turn is refused then.
+                        Frame::BrowserInput {
+                            agent,
+                            kind,
+                            x,
+                            y,
+                            dx,
+                            dy,
+                            button,
+                            count,
+                            text,
+                            key,
+                        } => {
+                            if hooks_for_claims.browsers.driver(&agent).0 != "user" {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(agent),
+                                    detail: format!(
+                                        "browser_input: {}",
+                                        crate::browser::USER_NOT_DRIVING
+                                    ),
+                                });
+                                continue;
+                            }
+                            let args = serde_json::json!({
+                                "x": x, "y": y, "dx": dx, "dy": dy, "button": button,
+                                "count": count, "text": text, "key": key,
+                            });
+                            let hooks = Arc::clone(&hooks_for_claims);
+                            let out = out_for_history.clone();
+                            tokio::task::spawn_blocking(move || {
+                                if let Err(e) = hooks.browsers.input(&agent, &kind, &args) {
+                                    let _ = out.send(Frame::Error {
+                                        agent: Some(agent),
+                                        detail: format!("browser_input {kind}: {e:#}"),
+                                    });
+                                }
+                            });
+                        }
+                        // Who drives: the person takes the page or hands
+                        // it back; every window hears.
+                        Frame::BrowserDrive { agent, driver } => {
+                            if !matches!(driver.as_str(), "user" | "agent") {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(agent),
+                                    detail: format!(
+                                        "browser_drive: driver is user or agent, not {driver:?}"
+                                    ),
+                                });
+                                continue;
+                            }
+                            if hooks_for_claims.browsers.set_driver(&agent, &driver) {
+                                klog::info(
+                                    "browser_drive",
+                                    Some(&agent),
+                                    format!("who={who_name} driver={driver}"),
+                                );
+                            }
+                            let (driver, since_ms) = hooks_for_claims.browsers.driver(&agent);
+                            hooks_for_claims.broadcast(Frame::BrowserDriver {
+                                agent,
+                                driver,
+                                by: who_name.clone(),
+                                since_ms,
+                            });
+                        }
                         // A person's save from an editor in a window:
                         // compare-and-swap, whole; every window hears a
                         // save that landed, the asker alone a refusal.
@@ -3212,7 +3328,11 @@ pub async fn serve_client(
                         }
                     }
                 }
-                // The connection is gone: what it held is held no more.
+                // The connection is gone: its screencasts end, and what
+                // it held is held no more.
+                for stop in watches.values() {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 let released = hooks_for_claims.release_claims_of(conn);
                 if !released.is_empty() {
                     klog::info(

@@ -94,6 +94,11 @@ class DuplexSession(BaseSession):
         self.vad_run_ms = 0
         self.vad_quiet_ms = 0
         self.cap_active = False
+        self.cap_id = 0  # the capture segment's number; a continuation names the one before it
+        self.cap_end_at = 0.0
+        self.held_text: str | None = None  # a finished segment's words, waiting for its continuation
+        self.continues: int | None = None
+        self.final_lock = asyncio.Lock()
         self.cap_buf: list[np.ndarray] = []
         self.cap_preroll: deque = deque(maxlen=max(1, self.tuning.preroll_ms // WINDOW_MS))
         self.cap_silence_ms = 0
@@ -364,6 +369,15 @@ class DuplexSession(BaseSession):
             if not self.cap_active:
                 self.cap_preroll.append(window)
                 if prob >= t.start_threshold and self.vad_run_ms >= t.min_speech_ms:
+                    # Speech again within the join window of the last segment's end: the same
+                    # utterance goes on after a breath; its final carries the earlier words.
+                    since_end = (time.monotonic() - self.cap_end_at) * 1000 if self.cap_end_at else 1e9
+                    self.continues = self.cap_id if since_end < t.join_ms else None
+                    self.cap_id += 1
+                    if self.continues is not None:
+                        log.info("[%s] speech again %.0fms after segment %d ended: continuing it", self.sid, since_end, self.continues)
+                    else:
+                        log.debug("[%s] speech (%.0fms since the last segment ended)", self.sid, since_end)
                     self.cap_active = True
                     self.cap_buf = list(self.cap_preroll)
                     self.cap_ms = len(self.cap_buf) * WINDOW_MS
@@ -386,11 +400,12 @@ class DuplexSession(BaseSession):
                     self.cap_buf = []
                     self.cap_preroll.clear()
                     self.user_stopped_at = time.monotonic()
+                    self.cap_end_at = self.user_stopped_at
                     self.user_talking = False
                     self._emit(P.SPEECH_STOPPED)
-                    asyncio.create_task(self._utterance_done(audio))
+                    asyncio.create_task(self._utterance_done(audio, self.cap_id))
 
-    async def _utterance_done(self, audio: np.ndarray) -> None:
+    async def _utterance_done(self, audio: np.ndarray, cap_id: int = 0) -> None:
         started = time.monotonic()
         try:
             text = await asyncio.to_thread(self.engines.asr.transcribe, audio, partial=False, language=self.language)
@@ -399,8 +414,37 @@ class DuplexSession(BaseSession):
             self._emit(P.ERROR, message=f"transcription failed: {exc}")
             text = ""
         text = text.strip()
+        # One at a time, in order: a segment's words are held for its continuation before the
+        # continuation's own final looks for them.
+        async with self.final_lock:
+            text = await self._joined(text, cap_id)
+            if text is None:
+                return
         self._emit(P.TRANSCRIPT_FINAL, text=text)
         self._route_final(text, source=f"{audio.size / P.ASR_RATE * 1000:.0f}ms audio, asr {(time.monotonic() - started) * 1000:.0f}ms")
+
+    async def _joined(self, text: str, cap_id: int) -> str | None:
+        """The utterance's whole text once it is really over, or None when these words belong to
+        a continuation still being spoken (held for its final). A segment that ended is not
+        answered until `join_ms` of quiet has followed it (M-146: a breath mid-question was two
+        transcripts and two spoken replies)."""
+        held, self.held_text = self.held_text, None
+        if held:
+            text = f"{held} {text}".strip() if text else held
+        if cap_id != self.cap_id:
+            if self.continues == cap_id:
+                self.held_text = text
+                log.info("[%s] segment %d continues after a pause; holding %r", self.sid, cap_id, text)
+                return None
+            return text  # an unrelated later segment: these words still stand on their own
+        deadline = self.cap_end_at + self.tuning.join_ms / 1000
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            if self.cap_id != cap_id:
+                self.held_text = text
+                log.info("[%s] segment %d continues after a pause; holding %r", self.sid, cap_id, text)
+                return None
+        return text
 
     def _route_final(self, text: str, *, source: str) -> None:
         """A finished caller utterance: who answers it."""

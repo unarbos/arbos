@@ -103,6 +103,12 @@ class PipelineSession(BaseSession):
         self.emitted_words: list[str] = []
         self.last_partial_ms = 0
         self.partial_task: asyncio.Task | None = None
+        # The join window (Tuning.join_ms): when the last segment ended, the words of a segment
+        # that is waiting for its continuation, and the id of the segment a new one continues.
+        self.last_end_at: float = getattr(self, "last_end_at", 0.0)
+        self.held_text: str | None = getattr(self, "held_text", None)
+        self.continues: int | None = getattr(self, "continues", None)
+        self.final_lock: asyncio.Lock = getattr(self, "final_lock", None) or asyncio.Lock()
 
     async def on_audio(self, data: bytes) -> None:
         samples = self.resampler.process(pcm16_to_float(data))
@@ -138,6 +144,10 @@ class PipelineSession(BaseSession):
             self.partial_task = asyncio.create_task(self._partial(self.utt_id))
 
     def _start_utterance(self) -> None:
+        # Speech again within the join window of the last segment's end: the same utterance goes
+        # on after a breath. Its final will carry the earlier segment's words in front.
+        since_end = (time.monotonic() - self.last_end_at) * 1000 if self.last_end_at else 1e9
+        self.continues = self.utt_id if since_end < self.tuning.join_ms else None
         self.utt_id += 1
         self.in_speech = True
         self.utterance = list(self.preroll)
@@ -162,6 +172,7 @@ class PipelineSession(BaseSession):
         audio = np.concatenate(windows) if windows else np.zeros(0, dtype=np.float32)
         self.utterance = []
         self.preroll.clear()
+        self.last_end_at = time.monotonic()
         asyncio.create_task(self._final(audio, self.utt_id))
 
     # ------------------------------------------------------------------ ASR
@@ -208,8 +219,12 @@ class PipelineSession(BaseSession):
             log.exception("[%s] final ASR failed", self.sid)
             self._emit(P.ERROR, message=f"transcription failed: {exc}")
             text = ""
-        if utt_id != self.utt_id:
-            return  # a newer utterance started; its own final will follow
+        # Finals settle one at a time, in order: a segment's words are held for its
+        # continuation before the continuation's own final looks for them.
+        async with self.final_lock:
+            text = await self._joined(text, utt_id)
+            if text is None:
+                return
         self._emit(P.TRANSCRIPT_FINAL, text=text)
         log.info(
             "[%s] transcript.final %.0fms audio, asr %.0fms: %r",
@@ -219,6 +234,28 @@ class PipelineSession(BaseSession):
             self.on_user_final(text)  # to the main agent; the narrator speaks the highlight
         elif text and self.reply_kind != "none" and self.engines.reply:
             self.work.put_nowait(ReplyItem(user_text=text, gen=self.gen))
+
+    async def _joined(self, text: str, utt_id: int) -> str | None:
+        """The utterance's whole text once it is really over, or None when these words belong to
+        a continuation still being spoken (they are held for its final). A segment that ended is
+        not answered until `join_ms` of quiet has followed it."""
+        held, self.held_text = self.held_text, None
+        if held:
+            text = f"{held} {text}".strip() if text else held
+        if utt_id != self.utt_id:
+            if self.continues == utt_id:
+                self.held_text = text
+                log.info("[%s] segment %d continues after a pause; holding %r", self.sid, utt_id, text)
+                return None
+            return None  # a newer, unrelated utterance started; its own final will follow
+        deadline = self.last_end_at + self.tuning.join_ms / 1000
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+            if self.utt_id != utt_id:
+                self.held_text = text
+                log.info("[%s] segment %d continues after a pause; holding %r", self.sid, utt_id, text)
+                return None
+        return text
 
     # ------------------------------------------------------------------ responses
 

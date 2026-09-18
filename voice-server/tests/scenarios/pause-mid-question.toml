@@ -1,0 +1,26 @@
+# M-146 (iPhone loop, cycles 43 and 68): a question with a breath in the middle — "Hello Arbos.
+# What are we working on right now?" … one second … "Give me one sentence." — was two
+# transcripts and two spoken answers. The gateway's own VAD ends a segment at 600 ms of quiet;
+# it now waits `--join-ms` more before answering, and speech that resumes within it continues
+# the same utterance: one transcript, one question to the main agent, one answer.
+title = "A pause mid-question is one question"
+asr_script = ["Hello Arbos. What are we working on right now?", "Give me one sentence."]
+
+[[steps]]
+say = "Hello Arbos. What are we working on right now?"
+gap = 1.0
+then = "Give me one sentence."
+pause_after = 1.0
+kernel = { reply = "We are on the voice gateway. One sentence: it now hears a breath as a breath." }
+
+[[steps]]
+wait_spoken = "voice gateway"
+
+[[steps]]
+wait_quiet = 1.5
+
+[expect]
+transcript_finals = 1
+inbox = [{ channel = "voice", kind = "request" }]
+kernel_user = ["What are we working on right now? Give me one sentence."]
+spoken_contains = ["voice gateway"]

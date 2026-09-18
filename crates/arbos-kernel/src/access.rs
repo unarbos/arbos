@@ -73,6 +73,7 @@ impl Role {
                     | Frame::Tail { .. }
                     | Frame::List { .. }
                     | Frame::TurnChanges { .. }
+                    | Frame::BrowserWatch { .. }
             ),
         }
     }
