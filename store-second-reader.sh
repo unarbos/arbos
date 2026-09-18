@@ -114,22 +114,34 @@ store_ok=1
 root_listing="$(ls "$STORE" 2>/dev/null | tr '\n' ' ')"
 docs_dir=$([ -d "$STORE/docs" ] && echo present || echo MISSING)
 notes=$([ -s "$STORE/notes.md" ] && echo present || echo MISSING)
-zero_bytes=0
+zero_bytes=0; zero_paths=(); bad_paths=(); in_flight=()
 for scope in "${SCOPES[@]}"; do
     p="$STORE/$scope"
     if [ -f "$p" ]; then
         blob=$(git hash-object "$p" 2>/dev/null || echo unreadable)
-        [ -s "$p" ] || zero_bytes=$((zero_bytes+1))
+        [ -s "$p" ] || { zero_bytes=$((zero_bytes+1)); zero_paths+=("$scope"); }
+        [ "$blob" = unreadable ] && bad_paths+=("$scope (unreadable)")
         printf '%s\t%s\n' "$scope" "$blob" >> "$here_list"
     elif [ -d "$p" ]; then
         while IFS= read -r f; do
             rel="${f#"$STORE"/}"
             blob=$(git hash-object "$f" 2>/dev/null || echo unreadable)
-            [ -s "$f" ] || zero_bytes=$((zero_bytes+1))
+            [ -s "$f" ] || { zero_bytes=$((zero_bytes+1)); zero_paths+=("$rel"); }
+            [ "$blob" = unreadable ] && bad_paths+=("$rel (unreadable)")
             printf '%s\t%s\n' "$rel" "$blob" >> "$here_list"
         done < <(find "$p" -type f 2>/dev/null)
     fi
 done
+# A zero-byte file that is non-zero five seconds later was a writer mid-flight (an in-place rewrite
+# the reader landed on), not a truncation. Re-read once; only what stays empty is a fault, and it is named.
+if [ ${#zero_paths[@]} -gt 0 ]; then
+    sleep 5
+    still=()
+    for z in "${zero_paths[@]}"; do
+        if [ -s "$STORE/$z" ]; then in_flight+=("$z"); else still+=("$z"); bad_paths+=("$z (zero bytes)"); fi
+    done
+    zero_bytes=${#still[@]}
+fi
 sort -o "$here_list" "$here_list"
 here_files=$(wc -l < "$here_list")
 
@@ -147,7 +159,7 @@ if [ "$store_ok" = 0 ]; then verdict=FAULT; reason="store not mounted at $STORE"
 elif [ "$docs_dir" = MISSING ]; then verdict=FAULT; reason="docs/ is gone (root lists: $root_listing)"
 elif [ "$notes" = MISSING ]; then verdict=FAULT; reason="notes.md is gone or empty"
 elif [ "$here_files" = 0 ]; then verdict=FAULT; reason="nothing readable in scope"
-elif [ "$unreadable_n" -gt 0 ] || [ "$zero_bytes" -gt 0 ]; then verdict=FAULT; reason="$unreadable_n unreadable, $zero_bytes zero-byte file(s)"
+elif [ "$unreadable_n" -gt 0 ] || [ "$zero_bytes" -gt 0 ]; then verdict=FAULT; reason="$unreadable_n unreadable, $zero_bytes zero-byte file(s): $(IFS=', '; echo "${bad_paths[*]}")"
 elif [ "$missing_n" -gt 0 ] && [ -n "$restore_mark" ] && [ "$restore_age_min" -le 120 ]; then
     verdict=RESTORING; reason="$missing_n file(s) the mirror accepted are not here yet; a restore is running ($restore_since, ${restore_age_min} min ago)"
 elif [ "$missing_n" -gt 0 ]; then verdict=FAULT; reason="$missing_n file(s) the mirror accepted are not here"
@@ -155,7 +167,9 @@ elif [ "$extra_n" -gt 0 ]; then verdict=BEHIND; reason="$extra_n file(s) here th
 fi
 
 missing_json=$(printf '%s\n' "$missing" | python3 -c 'import sys,json; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.strip()][:25]))')
-line=$(python3 - "$NOW" "$CLIENT" "$verdict" "$reason" "$here_files" "$branch_files" "$missing_n" "$extra_n" "$mirror_tip" "$mirror_age_min" "$docs_dir" "$notes" "$missing_json" <<'EOF'
+bad_json=$(printf '%s\n' "${bad_paths[@]}" | python3 -c 'import sys,json; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.strip()][:25]))')
+in_flight_json=$(printf '%s\n' "${in_flight[@]}" | python3 -c 'import sys,json; print(json.dumps([l.rstrip("\n") for l in sys.stdin if l.strip()][:25]))')
+line=$(python3 - "$NOW" "$CLIENT" "$verdict" "$reason" "$here_files" "$branch_files" "$missing_n" "$extra_n" "$mirror_tip" "$mirror_age_min" "$docs_dir" "$notes" "$missing_json" "$bad_json" "$in_flight_json" <<'EOF'
 import sys, json
 a = sys.argv[1:]
 print(json.dumps({
@@ -165,6 +179,8 @@ print(json.dumps({
     "mirror_tip": a[8][:12], "mirror_age_min": int(a[9]),
     "docs_dir": a[10], "notes_md": a[11],
     "missing_sample": json.loads(a[12]),
+    "bad_paths": json.loads(a[13]),
+    "in_flight": json.loads(a[14]),
 }, separators=(",", ":")))
 EOF
 )
@@ -221,6 +237,12 @@ This client saw $here_files file(s) in scope; the mirror's last accepted view (\
 
 First missing paths:
 $(printf '%s\n' "$missing" | grep . | head -25 | sed 's/^/- `/; s/$/`/')
+
+Zero-byte or unreadable paths (still so on a re-read 5 s later):
+$(printf '%s\n' "${bad_paths[@]}" | grep . | head -25 | sed 's/^/- `/; s/$/`/')
+
+Seen empty but filled in within 5 s (a writer mid-flight, not counted):
+$(printf '%s\n' "${in_flight[@]}" | grep . | head -25 | sed 's/^/- `/; s/$/`/')
 
 Recorded on branch \`$WATCH_BRANCH\` as \`readers/$CLIENT.jsonl\`. Compare with the mirror's view at the same minute to tell a service loss (all clients agree) from a client fault (they disagree).
 EOF
