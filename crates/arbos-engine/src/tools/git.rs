@@ -199,17 +199,7 @@ pub fn snapshot_turn_record_with_mark(
 /// The ref that keeps a turn's tree commit alive: `refs/arbos/cp/<agent
 /// with unsafe chars replaced>/<line>`.
 pub fn checkpoint_ref(agent: &str, line: u64) -> String {
-    let safe: String = agent
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    format!("refs/arbos/cp/{safe}/{line}")
+    arbos_core::files::checkpoint_ref(agent, line)
 }
 
 /// Drop the refs of checkpoints no rewind can reach any more: turns a
@@ -2333,6 +2323,70 @@ mod tests {
         drop_agent_checkpoint_refs(&dir, "w1");
         assert!(!refs().contains("refs/arbos/cp/w1/"), "{}", refs());
         assert!(refs().contains("refs/arbos/cp/root/7"), "{}", refs());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fork copies its source's checkpoints (F-103). The tree commits
+    /// they name were kept alive by the source's refs alone, and those go
+    /// when the source rewinds past the turn, rolls, or is archived — after
+    /// which the fork's earlier turns named commits git could reclaim, and
+    /// a "Rewind here" in the fork found no tree. The fork holds them under
+    /// its own refs from the moment it is made.
+    #[test]
+    fn a_fork_holds_the_checkpoint_commits_it_copied_under_its_own_refs() {
+        let dir = identityless_repo("fork-refs");
+        let agent_dir = dir.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        arbos_core::Agent::root("root").save(&agent_dir).unwrap();
+        std::fs::write(dir.join("b.txt"), "turn 3\n").unwrap();
+        let cp = snapshot_turn_record(&dir, &agent_dir, "root", 3)
+            .unwrap()
+            .unwrap();
+        snapshot_turn_tree(&dir, &agent_dir, "root", &cp).unwrap();
+        let root_cp = checkpoints(&agent_dir).pop().unwrap();
+        let work = root_cp.work.clone().expect("root's turn saved its tree");
+
+        let place = arbos_core::Place::new(&dir);
+        let fork = arbos_core::files::fork_chat(&place, "root").unwrap();
+        let fork_dir = place.agent_dir(fork.id.as_str());
+        let fork_cp = checkpoints(&fork_dir)
+            .pop()
+            .expect("the fork copied the record");
+        assert_eq!(fork_cp.work.as_deref(), Some(work.as_str()));
+        assert_eq!(
+            git_out(&dir, &["rev-parse", &checkpoint_ref(fork.id.as_str(), 3)]).as_deref(),
+            Some(work.as_str()),
+            "the fork's own ref names the copied commit"
+        );
+
+        // Root rewinds past turn 3 and its ref goes; git reclaims what no
+        // ref holds. The fork's ref holds the commit, and its restore works.
+        drop_checkpoint_refs(&dir, "root", [3]);
+        std::fs::write(dir.join("b.txt"), "changed since\n").unwrap();
+        let st = Command::new("git")
+            .args(["-c", "gc.reflogExpire=now", "gc", "-q", "--prune=now"])
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(st.success());
+        assert!(
+            Command::new("git")
+                .args(["cat-file", "-e", &format!("{work}^{{commit}}")])
+                .current_dir(&dir)
+                .status()
+                .unwrap()
+                .success(),
+            "the commit outlives the source's ref"
+        );
+        restore(&dir, &fork_cp).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+            "turn 3\n",
+            "the fork's rewind puts the file back"
+        );
+        // And archiving the fork drops only the fork's refs.
+        drop_agent_checkpoint_refs(&dir, fork.id.as_str());
+        assert!(git_out(&dir, &["rev-parse", &checkpoint_ref(fork.id.as_str(), 3)]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

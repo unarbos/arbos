@@ -403,8 +403,59 @@ fn fork_into(place: &Place, source: &Agent, mut agent: Agent) -> Result<Agent> {
             .dir
             .join("checkpoints.jsonl");
         std::fs::copy(&cps_from, &cps_to)?;
+        hold_checkpoint_commits(place, agent.id.as_str(), &cps_to);
     }
     Ok(agent)
+}
+
+/// The ref that keeps a turn's tree commit alive:
+/// `refs/arbos/cp/<agent with unsafe chars replaced>/<line>`. The engine
+/// writes one per checkpoint it saves and drops it when no rewind can
+/// reach the turn; a fork below points its own at the commits it copied.
+pub fn checkpoint_ref(agent: &str, line: u64) -> String {
+    let safe: String = agent
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("refs/arbos/cp/{safe}/{line}")
+}
+
+/// A fork's copied checkpoints name tree commits that only the source's
+/// refs kept alive — and those go when the source rewinds past the turn,
+/// rolls its transcript, or is archived. The copy would then name commits
+/// git may reclaim, and the fork's earlier turns would lose their rewind
+/// with no word said (the restore refuses on the missing object, so
+/// nothing is damaged; it is only gone). The fork holds each commit under
+/// its own name from the moment it is made. Best effort: a place with no
+/// repository has no refs to point.
+fn hold_checkpoint_commits(place: &Place, agent: &str, cps: &Path) {
+    let Ok(raw) = std::fs::read_to_string(cps) else {
+        return;
+    };
+    for line in raw.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (Some(n), Some(work)) = (
+            v.get("line").and_then(|l| l.as_u64()),
+            v.get("work").and_then(|w| w.as_str()),
+        ) else {
+            continue;
+        };
+        let _ = std::process::Command::new("git")
+            .args(["update-ref", &checkpoint_ref(agent, n), work])
+            .current_dir(&place.path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 /// `child` on a spawn record, checked against disk: only when the named
