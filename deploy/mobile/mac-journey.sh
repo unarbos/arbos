@@ -173,7 +173,13 @@ t=0; while [ $t -lt 90 ]; do hist | awk -v s="$S" '$1+0 > s+0' | grep -qE "assis
 ANS=$(hist | awk -v s="$S" '$1+0 > s+0' | grep -cE "assistant" | tr -d ' ')
 # J5 — the read-only ask was answered
 TIME_ANS=$(hist | awk -v f="$F" '$1+0 > f+0' | grep -ciE "assistant .*([0-9]{1,2}:[0-9]{2}|o.clock|UTC|morning|afternoon|evening|around|about)" | tr -d ' ')
-[ "$TIME_ANS" != "0" ] && score J5 U "read-only ask answered; Stop: the phone has no Stop control (unverified)" || score J5 FAIL "the read-only ask got no answer"
+# The Stop half of J5 is not exercised here, and for eleven runs this line
+# said the phone had no Stop control at all. It has one — the composer's
+# stop square, scored at cycle 40 (M-130) and labelled `Stop` in the tree —
+# and it is absent at this moment only because the turn has already ended.
+# QA imports these verdicts, so a scorer that states an app fact must be
+# right about it or say nothing.
+[ "$TIME_ANS" != "0" ] && score J5 U "read-only ask answered; Stop not exercised by this step (the control exists: composer stop square, M-130)" || score J5 FAIL "the read-only ask got no answer"
 # J7 — the result on disk, read through the kernel's read frame (not the model's word)
 # the worker's work may live on a branch in a worktree: read the branch, not the checkout's HEAD
 type_send "$ID verify: in $DIR, run these git and python commands yourself and paste the raw output under the headings BRANCHES, CHANGELOG, RETURNS, TESTS, AHEAD, nothing else: (1) list every local branch with its last commit date, newest first; (2) show the CHANGELOG.md from the newest branch that is not main and not the initial setup branch; (3) grep the return lines of mathlib.py on that branch; (4) check that branch out in a detached temporary worktree and run python3 -m unittest -q there, keep only the last line; (5) count that branch commits ahead of main."
