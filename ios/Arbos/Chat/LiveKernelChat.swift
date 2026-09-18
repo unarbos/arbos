@@ -487,6 +487,17 @@ final class LiveKernelChat: ChatSource {
 
     private func publishWorkers() {
         for (id, worker) in workers where worker.running { touched.insert(id) }
-        stream?.yield(.workers(workerOrder.filter { touched.contains($0) }.compactMap { workers[$0] }))
+        // A child the kernel has told us about belongs on the sheet, whether
+        // or not anything happened to it while this app was open. `touched`
+        // alone is only what this session watched go by, so after a relaunch
+        // the sheet showed **two** of the kernel's twelve children — the ones
+        // the history replay happened to brush against. The desktop's panel
+        // draws the tree and folds the kernel's archived workers under
+        // "N archived"; it does not quietly drop live ones.
+        //
+        // A refused spawn is still gone: that path removes the worker from
+        // `workers` and `workerOrder` outright, so it cannot come back here.
+        let show = workerOrder.filter { touched.contains($0) || inTree.contains($0) }
+        stream?.yield(.workers(show.compactMap { workers[$0] }))
     }
 }
