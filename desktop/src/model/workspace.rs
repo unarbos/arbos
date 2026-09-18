@@ -1124,6 +1124,7 @@ impl Workspace {
         chat.rank = project.front_rank(None);
         project.sessions.push(chat);
         project.focus_on(id);
+        self.remember_session(ix, id);
         self.push_snapshot(ix);
         cx.notify();
         Some(id)
@@ -1150,6 +1151,10 @@ impl Workspace {
         chat.rank = project.front_rank(Some(parent));
         project.sessions.push(chat);
         project.focus_on(id);
+        // The chat a person opens with ⌘N is the one they are in: a
+        // relaunch came back on the main chat because only a sidebar
+        // click remembered the front chat (qal-j35, mt-24).
+        self.remember_session(ix, id);
         self.number_delegates(ix);
         self.push_snapshot(ix);
         cx.notify();
@@ -1637,12 +1642,28 @@ impl Workspace {
             let empty_focus = self.projects[ix]
                 .active_session()
                 .is_none_or(|chat| chat.items.is_empty());
+            // The chat in front is the one the person left there, when
+            // the remembered entry names it — empty or not. A fresh
+            // sub-chat opened and left open must come back as the front
+            // chat, not lose its place to the busiest one (qal-j35).
+            let left_here = self.projects[ix]
+                .active_session()
+                .zip(self.last_for(&self.projects[ix].place()))
+                .is_some_and(|(chat, entry)| {
+                    entry.kind == state::Kind::Session
+                        && (chat.agent_session.as_deref() == Some(entry.id.as_str())
+                            || chat.file.as_deref().is_some_and(|f| {
+                                f.to_string_lossy() == entry.id
+                                    || f.file_name() == Path::new(&entry.id).file_name()
+                            }))
+                });
             // Every project has one main chat. A folder opened for the
             // first time, or one whose chats were all archived, gets it
             // here — once the kernel has said what it already holds.
             if self.projects[ix].main_session().is_none() {
                 self.new_session_in(ix, settings::kernel_agent(), None, cx);
             } else if empty_focus
+                && !left_here
                 && let Some(id) = self.projects[ix]
                     .sessions
                     .iter()
@@ -2696,6 +2717,18 @@ impl Workspace {
         if let Some(ix) = self.project_of(id) {
             self.stamp_children(ix, id);
             self.resolve_parents(ix);
+            // A chat minted a moment ago had no identity to remember when
+            // it was put in front; now it has its kernel id (and soon its
+            // file). If it is still the front chat, remember it by that,
+            // so a relaunch lands on it and not on the main chat (qal-j35).
+            if self.projects[ix]
+                .focus
+                .as_ref()
+                .is_some_and(|f| f.agent == id)
+            {
+                self.remember_session(ix, id);
+                self.save();
+            }
             self.push_snapshot(ix);
         }
         cx.notify();
