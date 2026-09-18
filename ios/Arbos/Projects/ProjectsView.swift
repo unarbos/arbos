@@ -290,7 +290,12 @@ struct ProjectRow: View {
                     Text(stateWord)
                         .foregroundStyle(working ? ArbosTheme.textMuted : ArbosTheme.textFaint)
                     ForEach(details, id: \.self) { detail in
-                        Text(" · ").foregroundStyle(ArbosTheme.textDim)
+                        // Spacing, drawn. Left visible to VoiceOver it is a
+                        // whole element between two words, and the row reads
+                        // "phone, Idle, dot, home, 16m".
+                        Text(" · ")
+                            .foregroundStyle(ArbosTheme.textDim)
+                            .accessibilityHidden(true)
                         Text(detail).foregroundStyle(ArbosTheme.textFaint)
                     }
                 }
