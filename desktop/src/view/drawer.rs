@@ -121,7 +121,6 @@ impl Arbos {
         let width = panel
             .width()
             .min((viewport - CHAT_MIN_WIDTH).max(PANEL_WIDTH));
-        let on_project = tabs.get(active) == Some(&PanelTab::Project);
         let body = match tabs.get(active).copied().unwrap_or(PanelTab::Project) {
             PanelTab::Project => self.panel_store_body(window, cx),
             PanelTab::Surface(id) => self.panel_surface_body(id, window, cx),
@@ -155,7 +154,6 @@ impl Arbos {
                 )
                 .child(self.panel_split(&theme, cx))
                 .children(body)
-                .children(on_project.then(|| self.panel_foot(&theme, cx)))
                 .into_any_element(),
         )
     }
@@ -545,7 +543,9 @@ impl Arbos {
     }
 
     /// The `+` pull-down: a files browser first, then the other things a
-    /// tab can hold. `⌘T` still opens an empty tab; this is the ask.
+    /// tab can hold. Nothing here repeats the `+` itself — a "New tab" row
+    /// under the choices was the button said twice (Jacob, 09-18); `⌘T`
+    /// still opens an empty tab.
     fn panel_new_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.menu != Some(Menu::PanelNew) {
             return None;
@@ -585,16 +585,6 @@ impl Arbos {
                 |this, _, cx| {
                     this.workspace
                         .update(cx, |workspace, cx| workspace.select_panel_tab(0, cx));
-                },
-            ),
-            menu::row(Item::Separator, |_, _, _| {}),
-            menu::row(
-                Item::action("New tab")
-                    .with_icon(icons::system::PLUS)
-                    .with_keystroke("⌘T"),
-                |this, _, cx| {
-                    this.workspace
-                        .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
                 },
             ),
         ];

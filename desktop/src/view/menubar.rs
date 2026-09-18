@@ -72,10 +72,18 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
     cx.on_action(|_: &Minimize, cx: &mut App| front(cx, |window| window.minimize_window()));
     cx.on_action(|_: &Zoom, cx: &mut App| front(cx, |window| window.zoom_window()));
-    // Native Spaces fullscreen: the menu bar hides until the pointer
-    // reaches the top edge, matching Cursor's green-button Space.
+    // Simple (borderless) fullscreen: the window fills the screen and
+    // stays on this Space, so the three traffic lights stay where they
+    // are, top-left of the content. A native Space hides them behind the
+    // top edge, which is what Jacob is missing (09-18); it also blacks the
+    // desktop out, and the frost has nothing to blur.
     cx.on_action(|_: &ToggleFullScreen, cx: &mut App| {
-        front(cx, |window| window.toggle_fullscreen())
+        front(cx, |window| {
+            #[cfg(target_os = "macos")]
+            window.toggle_simple_fullscreen();
+            #[cfg(not(target_os = "macos"))]
+            window.toggle_fullscreen();
+        })
     });
     // The workspace goes with its window. Transcripts are on disk and
     // resumable; tunnels this process opened are torn down on ⌘Q. The

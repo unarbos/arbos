@@ -15,13 +15,13 @@ use crate::{
     },
     view::{
         component::{composer::SessionDrag, menu::Menu, surface as board, transcript},
-        root::{Arbos, SearchChats, TogglePanel, ZoomPanel},
+        root::{Arbos, TogglePanel},
     },
 };
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, Render, SharedString,
-        Stateful, Window, div, prelude::*, px, svg,
+        Stateful, Window, div, prelude::*, px,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
@@ -355,7 +355,6 @@ impl Arbos {
                 .collect()
         };
 
-        let call_btn = self.call_button(&theme, cx);
         let mut body = div()
             .id("panel-scroll")
             .flex_1()
@@ -365,15 +364,7 @@ impl Arbos {
             .pb(px(SECTION_GAP))
             .flex()
             .flex_col()
-            .child(self.panel_head(
-                &name,
-                &where_,
-                branch.as_deref(),
-                glyph,
-                tint,
-                call_btn,
-                &theme,
-            ))
+            .child(self.panel_head(&name, &where_, branch.as_deref(), glyph, tint, &theme))
             .child(section_head(
                 "Agents",
                 (working > 0).then(|| format!("{working} working")),
@@ -439,8 +430,8 @@ impl Arbos {
         Some(body.into_any_element())
     }
 
-    /// The project's name, where it lives, and the branch checked out there;
-    /// the handset that calls it at the end of the name line.
+    /// The project's name, where it lives, and the branch checked out there.
+    /// The handset is on the composer, beside the mic, not up here.
     fn panel_head(
         &self,
         name: &str,
@@ -448,7 +439,6 @@ impl Arbos {
         branch: Option<&str>,
         glyph: &'static str,
         tint: Hsla,
-        call: AnyElement,
         theme: &Theme,
     ) -> AnyElement {
         div()
@@ -473,8 +463,7 @@ impl Arbos {
                             .min_w_0()
                             .truncate()
                             .child(SharedString::from(name.to_string())),
-                    )
-                    .child(call),
+                    ),
             )
             .child(
                 div()
@@ -486,64 +475,6 @@ impl Arbos {
                         None => where_.to_string(),
                     })),
             )
-            .into_any_element()
-    }
-
-    /// The handset: a call to this project's main agent through the speech
-    /// server. Green-tinted while a call is live, when it means hang up; a
-    /// spinner while the call connects; faint with a tooltip that says why
-    /// when no speech server is set up.
-    fn call_button(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let live = self.call.is_some();
-        let connecting = self.call.as_ref().is_some_and(|call| call.connecting);
-        let can = self.can_call(cx);
-        let (path, tip, tint) = match (live, can) {
-            (true, _) => (crate::assets::PHONE_OFF_ICON, "End call", theme.danger),
-            (false, true) => (
-                crate::assets::PHONE_ICON,
-                "Call this project",
-                theme.text_muted,
-            ),
-            (false, false) => (
-                crate::assets::PHONE_ICON,
-                "Call needs a speech server: set voice_url in config.toml",
-                theme.text_faint,
-            ),
-        };
-        let glyph: AnyElement = if connecting {
-            transcript::spinner(
-                self.call
-                    .as_ref()
-                    .map(|call| call.since.elapsed())
-                    .unwrap_or_default(),
-                theme.text_muted,
-                cx,
-            )
-        } else {
-            svg()
-                .path(path)
-                .size(px(13.))
-                .text_color(tint)
-                .into_any_element()
-        };
-        theme
-            .ghost("panel-call")
-            .flex_none()
-            .size(px(22.))
-            .rounded(px(5.))
-            .items_center()
-            .justify_center()
-            .when(live, |el| el.bg(theme.danger.opacity(0.12)))
-            .tooltip(move |window, cx| Tooltip::with_keystroke(tip, "⇧⌘C", window, cx))
-            .child(glyph)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                cx.stop_propagation();
-                if live {
-                    this.end_call(cx);
-                } else if can {
-                    this.start_call(cx);
-                }
-            }))
             .into_any_element()
     }
 
@@ -1113,39 +1044,9 @@ impl Arbos {
         });
     }
 
-    /// The bottom strip: search only. The `+` that opened a sub-chat is
-    /// gone; ⌘N still does that.
-    pub(crate) fn panel_foot(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        // No gear here: the bar under the window carries it, bottom-left,
-        // where Cursor's sidebar foot keeps its one (cycle 26, panel beside
-        // Cursor's sidebar — two gears in one window was one too many).
-        div()
-            .flex_none()
-            .h(px(40.))
-            .px(px(PAD_X))
-            .flex()
-            .flex_row()
-            .items_center()
-            .child(
-                theme
-                    .ghost("search-chats")
-                    .px(px(8.))
-                    .py(px(6.))
-                    .tooltip(|window, cx| Tooltip::with_keystroke("Search chats", "⌘K", window, cx))
-                    .child(
-                        icons::icon(icons::system::MAGNIFER)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.search_chats(&SearchChats, window, cx)
-                    })),
-            )
-            .into_any_element()
-    }
-
     /// The control that hides the panel and brings it back, on the window
-    /// tab strip, left of the pinned expand.
+    /// tab strip. It is the last control on the strip: the four-box that
+    /// widened the panel is gone (Jacob, 09-18); ⌘\ still widens it.
     pub(crate) fn panel_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let open = self
@@ -1171,43 +1072,6 @@ impl Arbos {
                     this.toggle_panel_action(&TogglePanel, window, cx)
                 }),
             )
-            .into_any_element()
-    }
-
-    /// The four-box: pinned at the window's top-right, on the tab strip.
-    /// It does not live in the panel header, so widening the drawer cannot
-    /// move it. The same control collapses.
-    pub(crate) fn window_expand(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        let viewport = f32::from(window.viewport_size().width);
-        let available = (viewport - crate::model::panel::CHAT_MIN_WIDTH)
-            .max(crate::model::panel::MIN_WIDTH)
-            .min(crate::model::panel::MAX_WIDTH);
-        let expanded = self
-            .workspace
-            .read(cx)
-            .panel()
-            .is_some_and(|panel| panel.width() >= available - 8.0);
-        let label = if expanded {
-            "Restore panel width"
-        } else {
-            "Expand panel"
-        };
-        theme
-            .ghost("window-expand")
-            .flex_none()
-            .size(px(24.))
-            .items_center()
-            .justify_center()
-            .tooltip(move |window, cx| Tooltip::with_keystroke(label, "⌘\\", window, cx))
-            .child(
-                icons::icon(icons::system::WIDGET)
-                    .size(px(14.))
-                    .text_color(theme.text_muted),
-            )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.zoom_panel_action(&ZoomPanel, window, cx)
-            }))
             .into_any_element()
     }
 }

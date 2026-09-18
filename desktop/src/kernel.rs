@@ -790,6 +790,10 @@ pub struct ModelOption {
     /// prompts, and the account's "free models" privacy toggle governs
     /// them separately. The picker says so.
     pub free: bool,
+    /// The model's context window in tokens, when the host lists one.
+    /// The card shows it before a turn has counted anything, which is
+    /// where the size used to read "—" forever (Jacob, 09-18).
+    pub context: Option<u64>,
 }
 
 impl ModelOption {
@@ -808,6 +812,33 @@ pub struct ModelsCatalog {
     /// Why the list is empty, when the picker should say so. Empty when
     /// the catalog arrived or there is nothing useful to show.
     pub error: String,
+    /// What decides each step of a turn, when it is not the chat model
+    /// alone: `Some("Jev")` while the router is on. The model card says
+    /// so quietly and permanently, so the answer is on the card rather
+    /// than in a line that comes and goes mid-turn (Jacob, 09-18).
+    pub controller: Option<Controller>,
+}
+
+/// The router in front of the chat model: its name, and the slug it runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Controller {
+    pub name: &'static str,
+    pub model: String,
+}
+
+/// Jev, when this machine's `config.toml` has it on and a key for it.
+/// Read from the same file the kernel reads, so the card and the turn
+/// cannot disagree about a place on this machine.
+pub fn controller() -> Option<Controller> {
+    let host = Host::peek().ok()?;
+    let has_key = host.api_key().is_some();
+    if !host.config.jev_enabled(has_key) {
+        return None;
+    }
+    Some(Controller {
+        name: "Jev",
+        model: host.config.jev_model()?.to_string(),
+    })
 }
 
 /// Provider catalog for `place`. OpenRouter (`config.toml` `api_base`)
@@ -815,18 +846,21 @@ pub struct ModelsCatalog {
 /// when the host listing is unreachable. Attach (`tcp://` in
 /// `kernel.json`) is never the URL.
 pub fn list_models(place: &Place) -> ModelsCatalog {
-    if let Some(catalog) = fetch_host_models() {
-        if !catalog.models.is_empty() {
-            return catalog;
-        }
-    }
-    match http_base_place(place) {
-        Some(base) => fetch_gateway_models(&base),
-        None => ModelsCatalog {
-            error: "Gateway offline".into(),
-            ..Default::default()
+    // Who decides the steps is this machine's own config, whichever list
+    // answers below.
+    let controller = controller();
+    let mut catalog = match fetch_host_models().filter(|catalog| !catalog.models.is_empty()) {
+        Some(catalog) => catalog,
+        None => match http_base_place(place) {
+            Some(base) => fetch_gateway_models(&base),
+            None => ModelsCatalog {
+                error: "Gateway offline".into(),
+                ..Default::default()
+            },
         },
-    }
+    };
+    catalog.controller = controller;
+    catalog
 }
 
 fn fetch_gateway_models(base: &str) -> ModelsCatalog {
@@ -860,6 +894,7 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
         .map(|row| ModelOption {
             name: model_display_name(&row.id),
             free: row.id.ends_with(":free"),
+            context: row.context_length,
             id: row.id,
             vision: None,
         })
@@ -875,6 +910,7 @@ fn fetch_gateway_models(base: &str) -> ModelsCatalog {
         models,
         current,
         error,
+        controller: None,
     }
 }
 
@@ -1012,6 +1048,7 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
                 .filter(|a| !a.input_modalities.is_empty())
                 .map(|a| a.input_modalities.iter().any(|m| m == "image")),
             free: row.is_free(),
+            context: row.window(),
             id: row.id,
         })
         .collect();
@@ -1024,6 +1061,7 @@ fn fetch_host_models() -> Option<ModelsCatalog> {
         models,
         current,
         error: String::new(),
+        controller: None,
     })
 }
 
@@ -2236,6 +2274,20 @@ struct UpstreamModel {
     supported_parameters: Vec<String>,
     #[serde(default)]
     architecture: Option<UpstreamArchitecture>,
+    /// The window the model is listed with.
+    #[serde(default)]
+    context_length: Option<u64>,
+    /// The window the provider actually serves, which can be the smaller
+    /// of the two. The kernel takes the same minimum
+    /// (`arbos_engine::context_window`), so the card and the turn agree.
+    #[serde(default)]
+    top_provider: Option<UpstreamTopProvider>,
+}
+
+#[derive(Deserialize, Default)]
+struct UpstreamTopProvider {
+    #[serde(default)]
+    context_length: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2247,6 +2299,19 @@ struct UpstreamPricing {
 }
 
 impl UpstreamModel {
+    /// The context window this model really has: the listed one and the
+    /// served one, whichever is smaller.
+    fn window(&self) -> Option<u64> {
+        let served = self
+            .top_provider
+            .as_ref()
+            .and_then(|provider| provider.context_length);
+        match (self.context_length, served) {
+            (Some(listed), Some(served)) => Some(listed.min(served)),
+            (listed, served) => listed.or(served),
+        }
+    }
+
     /// `:free` in the id, or a zero price for both prompt and completion.
     fn is_free(&self) -> bool {
         self.id.ends_with(":free")
@@ -2281,6 +2346,9 @@ impl UpstreamModel {
 struct ModelRow {
     #[serde(default)]
     id: String,
+    /// The gateway passes the host's window through when it knows it.
+    #[serde(default)]
+    context_length: Option<u64>,
 }
 
 #[derive(Deserialize)]
