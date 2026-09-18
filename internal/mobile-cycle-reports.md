@@ -478,8 +478,11 @@ before committing, not after pushing.
 **Corrected in the record:** the build on Jacob's phone is the steward's,
 and it has moved twice while this cycle ran — **1657** was wrong in two of
 my earlier reports, **1716** (`2eae41c7`, carrying #529) replaced it, and
-the steward has since written **1725** (`74b49b4c`, carrying #533). That
-number is the steward's to set and this loop's only to record.
+the steward has since written **1725** (`74b49b4c`, carrying #533) and then
+**1731** (`3ef5f436`, carrying #535). That number is the steward's to set
+and this loop's only to record; it has moved four times while these
+cycles ran, which is why no report of mine should state it as a fact of
+its own.
 
 ### Cycle 59, second half (00:25 UTC) — the rest of the chat pairing
 
@@ -567,3 +570,37 @@ app. The earlier fixes are paying for themselves.
 the notifications follow-ups and the worker-chat surfaces. AirPods, CallKit
 and the TestFlight build still need Jacob's phone. The build there is the
 steward's **1725** (`74b49b4c`).
+
+### Cycle 60, second half (01:05 UTC) — the settings sheet, and a gap that closed itself
+
+**The list lost six projects and said nothing** (M-206). With a hub token
+that cannot work the list falls to one row — the pod's own kernel, which
+needs no hub. `HubError` already words it plainly (`Hub token refused.`) and
+`ProjectStore.problem` already held it; the only thing that ever drew it was
+`emptyState`, which fires when the list is empty. It never is, so the
+sentence was unreachable. Now it shows whenever the hub has something to
+say. #543, `media/mobile/cycle-60/14-`.
+
+That is the same shape as M-191 two cycles ago: a message that existed, with
+only the all-empty case able to reach it. Worth watching for a third.
+
+**A saved token outlives the app** (M-207). Testing that path I stranded the
+simulator: uninstall and reinstall does not undo a saved token, because it
+is in the Keychain, which survives an app's removal. The rig said "rows after
+a reinstall: 1" and I read it as the hub being down. The scenario now
+restores by typing the build's own token back, and says why.
+
+**The gap I filed at M-197 came back filled, within the hour** (M-210). #538
+put `last_activity_ms` on the roster per project — its doc comment cites
+cycle 59's finding. The row now carries `now`, `4m`, `2h`, `3d` on the right.
+
+**Not claimed as shown.** The hub deployed on ArbosLife still predates #538
+and omits the field, so the only case observable today is the absent one:
+the list unchanged, no times and no guesses, which is the right behaviour
+and is what the screenshot shows. The times want a run once the hub
+redeploys.
+
+**Store wobble** (M-209): two writes refused with `Resource temporarily
+unavailable`, the third succeeded. Checked first that the file was intact
+and matched the mirror, because the dangerous case is a half-written file
+copied over a good one. It was clean.

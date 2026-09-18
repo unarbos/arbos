@@ -415,6 +415,48 @@ three minutes. The loop already knows this shape — "a process the harness star
 kill, wherever its cwd is" — and it applies to the harness's own parent, too. Stopping a cycle means
 stopping `run.py` and its kernels by pid, then the shell, not the shell alone.
 
+## Cycle 4, 20:55 → 00:37: complete, and the first cycle whose desktop leg measured anything
+
+| step | result |
+|---|---|
+| kickoff replay | 11/12 primary, 8/12 tracked `main` |
+| **acceptance journey** | **5/8**, 1 unverified, 2 fail — J1✗ J6✗ J8? |
+| desktop leg | ran for the first time: `af-02`, `cp-02`, `desktop-fresh-place-no-notice`, `desktop-huge-transcript-scroll`, `desktop-kill-kernel-under-ui`, `im-02` pass; `desktop-user-message-card` breaks on the `hi` card (symmetry's, not reopened) |
+| call mode | **26/26 green** on `main@3ef5f436e529` |
+| publish | **pushed** — the floor held this time |
+| mirrors | both ends |
+| totals | 119 pass, 34 break, 245 skip |
+
+Its desktop leg ran on the store's 07:06 driver, because the running `cycle.sh` predated the pin: **do not
+cite cycle 4 for anything about settings** (`qal-j25`).
+
+## The 1528-second click that was a paused machine (`qal-j26`)
+
+Cycle 4's `desktop-rapid-session-switch` got everything right — 6 rows, 30 switches, 0 failures, 6
+`chat-*` folders — and then reported `ui-stall: switch to panel-agent-7 took 1528.7s (limit 3.0s)`. The
+stall ended at the second this agent resumed from a 2400-second wait, and the same scenario by hand takes
+19.6 s.
+
+The machine's own clocks settle it: `uptime` read 2:23 at 18:13 and 6:02 at 00:30 — 3.65 hours of uptime
+across 6.28 hours of wall clock, **2.63 hours unaccounted** — and `CLOCK_MONOTONIC` equals
+`CLOCK_BOOTTIME` exactly, the signature of a VM *paused* rather than a guest suspended. Both monotonic
+clocks freeze with the machine; only the wall clock jumps on resume. `Desktop.timed` measured with
+`time.time()`.
+
+The loop has known since 2026-09-14 that this VM sleeps while its worker is idle; what had not been drawn
+out is that **assertions on duration do not go quiet, they go loud and wrong**. `timed`, `launch_s` and
+`duration_s` are monotonic now, and two numbers already printed should not be cited: cycle 3's `sq-02` at
+9142.7 s and cycle 4's `desktop-rapid-session-switch` at 1544.9 s.
+
+## Cycle 5, from 01:00:50 on `c3247332dc4e`
+
+Every fix of the day is in the copy it runs, verified by reading the files the loop actually copied rather
+than the ones I edited: the driver taken from the app's own commit, `arbos-hub` built beside the kernel, a
+desktop build failure as an alarm, the publish refusal, `af-04`, monotonic durations, the panel rows, and
+the kernel-label guard. `uw_scenarios.py` is now in `vm-loop.sh`'s copy list too — it was missing, and
+since `run.py` imports it, a machine that copied the runner without it would have failed at import and
+measured nothing.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j21-publish-mirrors-a-smaller-bug-set-and-deletes-the-branchs-drafts.md`
