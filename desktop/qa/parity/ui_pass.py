@@ -1135,6 +1135,12 @@ class Pass:
             # repeat of the same words could be an old entry.
             nonce = f"nc{int(time.time()) % 100000}"
             self.send(f"Run the shell command `sleep 6` and then reply with exactly: notification check {nonce}.")
+            # The turn must have opened before "idle" means anything: on a
+            # loaded box the kernel's first frame comes past the half
+            # second the tab click takes, wait_idle saw nothing running
+            # and the row read unseen=0 before the reply had landed (R31,
+            # the notify trio on cycle-41c and 44c).
+            self.wait(lambda s: busy(s), 20, what="turn start")
             time.sleep(0.3); self.app.click("tab-0"); time.sleep(0.5)
             self.wait_idle(120); time.sleep(3)
             pr, away = root_of(self.state())
