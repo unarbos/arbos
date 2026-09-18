@@ -41,11 +41,17 @@ rows() { ui dump | grep -cE "Button +[a-z][a-z0-9-]*,"; }
 names() { ui dump | grep -oE "Button +[a-z][a-z0-9-]*," | awk '{print $2}' | tr -d ',' | sort | tr '\n' ' '; }
 
 cat > /tmp/fixture-list.py <<'PY'
-import http.server, json, time
+import http.server, json, os, time
 
 PORT = 8793
 NOW = int(time.time() * 1000)
-CALLS = {"n": 0}
+LOG = "/tmp/fixture-list-calls.log"
+# The scenario touches this the moment before it pulls to refresh, so the
+# new project appears exactly then. Counting /list calls instead would make
+# the answer depend on how many the app happened to make first — a first
+# run added the project on the fourth call, a second run never reached four,
+# and the two runs disagreed about whether refresh works.
+TRIGGER = "/tmp/fixture-add-late"
 
 BASE = [
     {"name": "alpha", "live": True, "kind": "", "last_activity_ms": NOW - 120_000},
@@ -58,8 +64,9 @@ LATE = {"name": "arrived-late", "live": True, "kind": "", "last_activity_ms": NO
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        CALLS["n"] += 1
-        projects = list(BASE) + ([LATE] if CALLS["n"] > 3 else [])
+        with open(LOG, "a") as f:
+            f.write(f"{time.time():.3f} {self.path}\n")
+        projects = list(BASE) + ([LATE] if os.path.exists(TRIGGER) else [])
         body = json.dumps({"machines": [
             {"name": "fixture-box", "online": True, "projects": projects}]}).encode()
         self.send_response(200)
@@ -72,6 +79,7 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
 
+open(LOG, "w").close()
 http.server.HTTPServer(("127.0.0.1", PORT), H).serve_forever()
 PY
 
@@ -147,19 +155,27 @@ fi
 echo
 echo "--- pull to refresh ---"
 BEFORE=$(names)
+CALLS_BEFORE=$(wc -l < /tmp/fixture-list-calls.log)
+# From here the fixture serves a fifth project, so anything the app asks for
+# after this moment carries it.
+touch /tmp/fixture-add-late
 # A long, slow drag from just under the header: a flick is a scroll.
 idb ui swipe 196 300 196 760 --duration 1.2 >/dev/null 2>&1
 sleep 6
 shot 06-after-refresh
 AFTER=$(names)
+CALLS_AFTER=$(wc -l < /tmp/fixture-list-calls.log)
 echo "before:             $BEFORE"
 echo "after:              $AFTER"
-if [ "$BEFORE" = "$AFTER" ]; then
-  echo "  VERDICT: the refresh brought nothing new — either the gesture missed or the list does not reload"
+echo "/list calls:        $CALLS_BEFORE before the pull, $CALLS_AFTER after"
+# Two separate questions, and the old version could not tell them apart:
+# did the gesture make the app ask again, and did the answer reach the screen?
+if [ "$CALLS_AFTER" -le "$CALLS_BEFORE" ]; then
+  echo "  VERDICT: the app never asked again — the gesture missed, or the pull does not refetch"
 elif echo "$AFTER" | grep -q "arrived-late"; then
-  echo "  VERDICT: the new project arrived on the refresh"
+  echo "  VERDICT: the pull refetched and the new project reached the screen"
 else
-  echo "  VERDICT: the list changed, but not by gaining arrived-late"
+  echo "  VERDICT: the app asked again but the new project did not appear — the list is not redrawing the answer"
 fi
 echo
 echo "still in $OUT"
