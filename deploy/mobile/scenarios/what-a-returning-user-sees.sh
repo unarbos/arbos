@@ -1,7 +1,13 @@
 #!/bin/bash
 # Put the phone down in a chat. Pick it up later. Where are you?
 #
-#   what-a-returning-user-sees.sh <cycle> [project] [pause seconds]
+#   what-a-returning-user-sees.sh <cycle> [project] [pause seconds] [second project]
+#
+# With a second project named: leave the first for the list, open the
+# second, then the reclaim. The place he comes back to must be the second.
+# (#615 recorded settings.kernelTarget at push time, which still named the
+# first project — the chat's own switch runs after the push — so a cold
+# start put him back in the one he had left.)
 #
 # The coverage row has been half answered since cycle 27. The resume half is
 # done — 7 and 12 minutes backgrounded, the chat exactly as it was, a line
@@ -22,7 +28,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
-CYCLE=${1:?cycle}; ROW=${2:-phone}; PAUSE=${3:-120}
+CYCLE=${1:?cycle}; ROW=${2:-phone}; PAUSE=${3:-120}; ROW2=${4:-}
 OUT="$HOME/mobile-out/$CYCLE/returning-user"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
@@ -80,5 +86,24 @@ case "$COLD_WHERE" in
                    echo "           judgement, but it should be a decided one rather than a default";;
   *)               echo "  VERDICT: somewhere else entirely: $COLD_WHERE";;
 esac
+
+if [ -n "$ROW2" ]; then
+  echo
+  echo "--- left $ROW for the list, opened $ROW2, reclaimed: which one is he in? ---"
+  ui tap "Back" >/dev/null 2>&1; sleep 2
+  ui tap "$ROW2" >/dev/null || { echo "no $ROW2 row"; exit 1; }
+  sleep 5
+  SECOND_WHERE=$(where)
+  echo "left it at:        $SECOND_WHERE"
+  xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 2
+  xcrun simctl launch "$UDID" $B >/dev/null 2>&1
+  sleep 15
+  shot 04-back-in-the-second-project
+  SECOND_COLD=$(where)
+  echo "came back to:      $SECOND_COLD"
+  if [ "$SECOND_COLD" = "$SECOND_WHERE" ]; then echo "  VERDICT: the second project, the one he was in"
+  elif [ "$SECOND_COLD" = "$BEFORE_WHERE" ]; then echo "  VERDICT: FAULT — the first project, the one he had left"
+  else echo "  VERDICT: somewhere else: $SECOND_COLD"; fi
+fi
 echo
 echo "still in $OUT"
