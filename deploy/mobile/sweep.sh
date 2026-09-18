@@ -33,6 +33,7 @@ DEFAULT=(
   call-pulled-down.sh
   worker-chat-open-and-back.sh
   pill-count-vs-sheet.sh
+  notifications.sh
 )
 SCENARIOS=("$@")
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=("${DEFAULT[@]}")
