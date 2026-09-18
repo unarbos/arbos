@@ -1996,6 +1996,13 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             text: text.clone(),
             images: Vec::new(),
         }),
+        // The kernel's compaction housekeeping is not a line of the
+        // conversation read back (F-199; the live path drops it too).
+        arbos_core::EventKind::Notice { text, failed }
+            if !failed && text.trim_start().starts_with("nothing to compact yet") =>
+        {
+            None
+        }
         arbos_core::EventKind::Notice { text, failed } => Some(ChatItem::Notice {
             text: text.clone(),
             failed: *failed,
