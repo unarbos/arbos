@@ -1735,6 +1735,15 @@ impl ChatSession {
     pub fn is_delegate(&self) -> bool {
         self.parent.is_some() || self.parent_kernel.is_some()
     }
+
+    /// A chat a person opened (⌘N, a fork): the kernel files it as
+    /// `chat-<stamp>`, with no brief in the id. A spawned worker's folder is
+    /// named after its brief.
+    pub fn person_opened(&self) -> bool {
+        self.agent_session
+            .as_deref()
+            .is_some_and(|id| id.starts_with("chat-"))
+    }
 }
 
 /// What a sub-agent is up to, as the parent's transcript and the task rail
@@ -1962,7 +1971,10 @@ impl ChatSession {
             .as_deref()
             .filter(|n| !arbos_core::chattitle::is_generic(n, self.agent_session.as_deref()))
         {
-            return if self.is_delegate() {
+            // A brief is cut to its lead ("Fix the docs: read …" → "Fix the
+            // docs"); a chat a person opened keeps its whole name — a title
+            // with a colon in it is not a brief (F-202).
+            return if self.is_delegate() && !self.person_opened() {
                 delegate_label(name)
             } else {
                 name.to_string()
@@ -1974,6 +1986,20 @@ impl ChatSession {
             // a number. Only an id with nothing in it falls back to one.
             if let Some(name) = self.agent_session.as_deref().and_then(worker_name) {
                 return name;
+            }
+            // A chat a person opened under the main one (⌘N, a fork) has a
+            // `chat-…` id with no brief in it; its title is the kernel's or
+            // its first prompt's, as Cursor names a new chat — "Delegate 1"
+            // is for a worker the kernel numbered and nothing else (F-202).
+            if !self.title.is_empty()
+                && !arbos_core::chattitle::is_generic(&self.title, self.agent_session.as_deref())
+            {
+                return self.title.clone();
+            }
+            if let Some(text) = first_user_text(&self.items)
+                && let Some(title) = arbos_core::chattitle::from_prompt(text)
+            {
+                return title;
             }
             return self
                 .delegate_number

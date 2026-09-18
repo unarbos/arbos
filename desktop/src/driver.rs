@@ -1308,9 +1308,11 @@ fn session_json(project: Option<&Project>, chat: &ChatSession) -> Value {
     json!({
         "id": chat.id,
         "title": chat.title,
+        "label": chat.label(),
         "name": chat.name,
         "agent": chat.entry.name,
         "agent_session": chat.agent_session,
+        "parent_kernel": chat.parent_kernel,
         "model": chat.model,
         "parent": chat.parent,
         "readonly": chat.readonly,
