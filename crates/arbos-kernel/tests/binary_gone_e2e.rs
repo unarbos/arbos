@@ -373,13 +373,29 @@ fn a_kernel_whose_binary_was_replaced_restarts_onto_the_new_one_when_idle() {
         std::thread::sleep(Duration::from_millis(200));
     };
     let url = restarted["url"].as_str().unwrap().to_string();
-    let log = std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap();
+    // The new image writes kernel.json (serve.rs:444) before its
+    // `kernel_start` log line (serve.rs:457); a read of the log in that
+    // gap counted one start (red on main, 2026-09-18 09:34). Waited on,
+    // not read once.
+    let log_path = k.place.join(".arbos/runtime/kernel.log");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let log = loop {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if log.matches("\"event\":\"kernel_start\"").count() >= 2 {
+            break log;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the new image started in the same process: {log}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
     assert!(log.contains("\"event\":\"binary_gone\""), "{log}");
     assert!(log.contains("\"event\":\"reexec\""), "{log}");
     assert_eq!(
         log.matches("\"event\":\"kernel_start\"").count(),
         2,
-        "the new image started in the same process: {log}"
+        "the new image started in the same process, once: {log}"
     );
     let mut b = Attach::connect(&url);
     let hello = b
