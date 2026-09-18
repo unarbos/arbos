@@ -2402,3 +2402,44 @@ the ledger said the right thing each time, and only the file changed
 behaviour.
 
 **PR:** [#605](https://github.com/unarbos/arbos/pull/605), harness only.
+
+## Cycle 95 report (09:00 UTC, 09-18)
+
+**Looked at:** the call's orb — a row that had never had a check of its own.
+
+**Measured directly for the first time** (M-327). The reason it never had
+one is that the orb's state existed **only as a colour**; nothing in the
+tree said listening, thinking or speaking. #590 gave the orb a value
+carrying `Phase.label` for VoiceOver's sake, and the side effect is that the
+sequence is machine-readable.
+
+One question, one call:
+
+```
+  3.2  connecting
+  5.8  listening
+  8.4  thinking
+ 20.1  speaking
+ 26.6  listening
+```
+
+One pass, in order, no flapping — and one spoken answer for one question,
+which is M-146 closed again from a different direction.
+
+The provenance is worth keeping. This instrument exists because of an
+accessibility fix made for a person who cannot see the colour. The loop
+asked "what would someone who cannot hear this call see?", fixed the answer,
+and got a new way to measure the app as change from it.
+
+**And "one question" baked in for the third time** (M-328). Run against the
+two-utterance clip, the flapping check called an ordinary two-turn call a
+fault: each turn legitimately walks thinking → speaking → listening, so a
+clip asking twice revisits all three.
+
+M-301 and M-311 were the same assumption in different files. Three times is
+a pattern rather than a slip, and the mechanism is clear — the assumption is
+invisible while the default clip has one question in it, so every checker I
+write passes its own first run and hides the flaw until somebody points it
+somewhere else.
+
+**PR:** [#607](https://github.com/unarbos/arbos/pull/607), harness only.
