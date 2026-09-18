@@ -207,6 +207,21 @@ if [ -n "$parent" ]; then
     fi
 fi
 
+# The same rule for the feedback reports, which had none of it until 2026-09-18. At 04:52 that day
+# the store listed media/desktop-feedback as empty for a single pass, and because only docs/ and
+# internal/ were guarded the mirror pushed 68801ff4 holding 0 of the 168 reports its parent held.
+# The next pass put them back, so the mirror was without them for about an hour — a mirror that
+# exists because the store dropped docs/ once with no event and no undo.
+if [ -n "$parent" ]; then
+    n_feedback_last="$(git ls-tree -r --name-only "$parent" media/desktop-feedback/ 2>/dev/null | wc -l || true)"
+    if [ "$n_feedback_last" -gt 0 ] && [ "$n_feedback" -lt "$n_feedback_last" ]; then
+        if [ -z "${MIRROR_ALLOW_SHRINK:-}" ]; then
+            die "media/desktop-feedback lists $n_feedback mirrorable files but the mirror holds $n_feedback_last. A partial listing from the mount must not become the mirror. If the removal is intended, say why: MIRROR_ALLOW_SHRINK='<reason>' bash mirror-docs.sh"
+        fi
+        shrink_note "feedback" "$n_feedback_last" "$n_feedback"
+    fi
+fi
+
 # The branch carries the tool that reads it.
 stage mirror-docs.sh "$SELF" 100755
 

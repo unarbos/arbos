@@ -5,13 +5,21 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 07:26 UTC.
+Last checked 2026-09-18 07:48 UTC.
 
-## Click Update. You will get build 1875.
+## Click Update. You will get build 1886.
 
-**1875** — signed, notarised, stapled, on the feed since 07:22 UTC.
+**1886** — signed, notarised, stapled, on the feed since 07:44 UTC.
 
-New since 1833, forty-two builds' worth. The two worth naming:
+New since 1875 (builds 1876–1886):
+
+- **#589** — the checkpoint_refs test says what the record and the repo
+  held when it goes red
+- **#590** — the iOS call screen tells VoiceOver what it is doing
+- **#591** — a notice that opens a turn is drawn once
+- **#592** — re-check of the pause split
+
+And new since 1833 (builds 1834–1875). The two worth naming:
 
 - **#575** (build 1843) — the installer no longer loses its atomic swap to
   a passing error, so a reader can never catch the app's path missing
@@ -72,21 +80,21 @@ GPT-Live and voice rows, **#499** a store is a folder, **#518**–**#522**.
 
 | | |
 |---|---|
-| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1875, 6e72ed1fabd4) signed by` it |
+| Signed | `Developer ID Application: Jacob Steeves` — the build records `0.2.0 (1886, 17c5232e2189) signed by` it |
 | Notarised | Apple returned `status: Accepted` |
 | Stapled | ticket present in the downloaded zip — 1674 bytes, signed by Apple System Integration CA for "Software Ticket Signing" |
 | Gatekeeper | `source=Notarized Developer ID` |
-| Bundle | `Info.plist` reads `0.2.0 build 1875` |
+| Bundle | `Info.plist` reads `0.2.0 build 1886` |
 | Feed | every download it names is really on the tag |
 
-The ticket was read out of `Arbos-0.2.0-1875-macos-arm64.zip` as
+The ticket was read out of `Arbos-0.2.0-1886-macos-arm64.zip` as
 downloaded, not from the build log, so it is the copy you will get.
 
 ## How far behind the channel runs, and why
 
 The channel is a sawtooth, not a queue. Through the evening it published
 1616, 1624, 1657, 1662, 1674, 1688, 1718, 1733, 1741, 1765, 1768, 1784, 1789,
-1799, 1805, 1831, 1833, 1875 — every few minutes to eighty
+1799, 1805, 1831, 1833, 1875, 1886 — every few minutes to eighty
 more,
 catching up in a jump each time.
 

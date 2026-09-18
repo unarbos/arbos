@@ -143,3 +143,25 @@ The phone is not in it in either case: 900 of 900 frames on all eleven runs.
 
 Re-run either side with
 `CLIP=<wav> SAYS=<how many things it asks> one-breath-one-answer.sh <cycle> <runs>`.
+
+---
+
+## Closed, 09-18 07:54 UTC
+
+Six runs of `pause.wav` between 07:50 and 07:54: **one transcript and one
+answer in every one**, 900/900 frames throughout.
+
+```
+runs with more than 1 transcript(s): 0 of 4
+runs with more than 1 answer(s):    0 of 4
+VERDICT: one breath, one transcript, one answer. M-146 does not reproduce.
+```
+
+Eleven runs earlier the same evening — 07:05 and 07:12 — gave two to four
+answers each, so the remaining half was fixed between 07:12 and 07:50.
+
+Both halves are now done: #562 stopped the breath splitting the transcript,
+and this change stopped one question being answered twice. Nothing further
+is asked of the gateway here. Thank you — and the re-scoping seems to have
+been the useful part: while this was filed as a pause fault it sat, and once
+it was shown to happen without a pause it moved within the hour.

@@ -2134,3 +2134,83 @@ gesture; today's is a tool that refuses.
 
 **PR:** [#593](https://github.com/unarbos/arbos/pull/593), harness only.
 **Stills:** `media/mobile/cycle-86/`.
+
+## Cycle 87 report (07:45 UTC, 09-18)
+
+**Looked at:** the settings sheet, oldest row at 60.
+
+**It holds** (M-306): five sections, three saved-token fields reading
+`Token saved · paste to replace`, and at the foot `Arbos, 0.2.0 (1)` under
+`The TestFlight build on this phone.` A token that cannot work drops the
+list to **one** row — the pod, which needs no hub — and the screen says
+**`Hub token refused.`**; restoring it brings **seven** back. M-206's
+visible refusal and M-201's themed ground both still standing.
+
+**Naming the buttons properly broke a script that depended on the bad name**
+(M-307). #571 renamed the settings disc from SwiftUI's `Gear Shape` to
+`Settings`. This scenario tapped `Gear Shape`, found nothing, printed
+`no settings button` and exited — on a build that had been improved.
+
+That is a cost of the accessibility work rather than a surprise, and worth
+saying plainly: **accessibility labels are an interface**, and the harness
+was coupled to their absence. Anything in a script reading a symbol-derived
+name is reading a bug, and will break the moment the bug is fixed. Fixed
+here with the name first and the old rendering as a fallback.
+
+**And a fourth script reading one screen of a scrolling view** (M-308). The
+build-line check read the first screen of the sheet and printed an empty
+line, as though the app had lost it. It is four pages down, exactly where
+M-220 recorded it.
+
+The interesting part is why the three earlier fixes missed this one: they
+were all about *counting rows*, and this is *reading text*. I had been
+fixing a symptom shape rather than the rule, and the rule is wider —
+anything read off a scrolling view must be read after moving to it. Five
+scripts have now had some version of this fault.
+
+**PR:** [#595](https://github.com/unarbos/arbos/pull/595), harness only.
+**Stills:** `media/mobile/cycle-87/`.
+
+## Cycle 88 report (08:00 UTC, 09-18)
+
+**M-146 is closed** (M-309), after forty-five cycles. Six runs of
+`pause.wav` between 07:50 and 07:54 gave **one transcript and one answer
+every time**, 900/900 frames throughout. Eleven runs earlier the same
+evening gave two to four answers each, so the gateway closed the remaining
+half between 07:12 and 07:50.
+
+Both halves went separately: #562 stopped the breath splitting the
+transcript, and this second change stopped one question being answered
+twice. The re-scoping looks like the part that mattered — while it was filed
+as a pause fault it sat for weeks, and once cycle 85 showed it happening
+*without* a pause it moved within the hour.
+
+**The several-workers row is measurable at last** (M-310). Giving the four
+workers a per-run tag at the front of each goal makes this run's findable
+among every earlier run's: pill **25 → 29**, exactly four, and all four on
+the sheet by name, each `Done`, with paging converged at 21 rows.
+
+That is what M-305 asked for and it is not a cleverer count — it is goals
+that do not collide. The sheet was always right; the question had been
+unaskable.
+
+**A quotation mark cost a whole run** (M-311). The tagged goals were first
+written with quotes around them; iOS curls a typed `"`, the read-back never
+matched, and after its twenty-second wait the scenario sent whatever was in
+the box. Pill unmoved at 25, zero Done lines, nothing on the sheet, and a
+confident verdict of `0 of this run's four reached the sheet` — an app
+failure invented by a punctuation mark.
+
+M-185 found smart punctuation and built `ui field plain` to undo it, and I
+then wrote a new line with quotes in it anyway. The rule is not "handle
+curly quotes"; it is **never put a character the keyboard transforms into a
+line a script must match**.
+
+**A note on branching.** Cycle 88 began stacked on cycle 86's branch because
+`main` lacked the paging helper it needed, then moved to a fresh branch off
+`main` once #593 and #595 landed. "Always branch off main" and "your
+dependency is in an unmerged PR" genuinely conflict; stacking and then
+re-basing when the parent lands is the honest way through, and the old
+branch is deleted rather than left to rot.
+
+**PR:** [#598](https://github.com/unarbos/arbos/pull/598), harness only.
