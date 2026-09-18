@@ -74,6 +74,13 @@ pub enum PaneRequest {
     Chat,
 }
 
+/// A shell wrote something, on the page named. An event rather than a
+/// `notify`: a shell printing a build log writes many times a second, and
+/// notifying the model would repaint the whole window — transcript, sidebar
+/// and all — for each of them. The window hears this and feeds the one pane.
+#[derive(Debug, Clone)]
+pub struct PtyWrote(pub String);
+
 /// The performance section's figures: what is in memory right now.
 pub struct Resident {
     pub projects: usize,
@@ -2850,6 +2857,95 @@ impl Workspace {
         });
     }
 
+    // ── a shell's output and its keys ────────────────────────────────
+
+    /// Output from one of `chat`'s place's shells, off the window's own
+    /// kernel connection. Kept whether or not a pane is drawing that page:
+    /// the prompt is written before the drawer has a pane to put it in.
+    pub fn pty_output(&mut self, chat: u64, page: String, data: Vec<u8>, cx: &mut Context<Self>) {
+        let Some(ix) = self.project_of(chat) else {
+            return;
+        };
+        let live: Vec<u64> = self.projects[ix]
+            .sessions
+            .iter()
+            .filter(|held| held.live())
+            .map(|held| held.id)
+            .collect();
+        if self.projects[ix]
+            .ptys
+            .accept(chat, &page, &data, |held| live.contains(&held))
+        {
+            cx.emit(PtyWrote(page));
+        }
+    }
+
+    /// What a pane has not read yet of `page`, and where that leaves its
+    /// cursor. `None` when this window holds nothing for that shell.
+    pub fn pty_since(&self, page: &str, cursor: u64) -> Option<(Vec<u8>, u64)> {
+        let stream = self.active_project()?.ptys.get(page)?;
+        let (bytes, next) = stream.since(cursor);
+        Some((bytes.to_vec(), next))
+    }
+
+    /// Keys from a pane, on whichever of the project's chats holds a socket.
+    /// The kernel routes by page, so any of them reaches the same shell.
+    pub fn pty_send(&self, page: &str, bytes: Vec<u8>) {
+        let Some(project) = self.active_project() else {
+            return;
+        };
+        // The chat the row docks under first, so a shell's keys keep to the
+        // connection its output comes back on while that one is up.
+        let owner = project
+            .surfaces
+            .iter()
+            .find(|surface| surface.terminal_id() == Some(page))
+            .and_then(|surface| surface.owner);
+        let session = owner
+            .and_then(|id| project.session(id))
+            .filter(|chat| chat.live())
+            .or_else(|| project.sessions.iter().find(|chat| chat.live()));
+        if let Some(Connection::Live(session)) = session.map(|chat| &chat.connection) {
+            session.pty_in(page, &bytes);
+        }
+    }
+
+    /// Whether the place behind `page` is answering and the shell is still
+    /// open — what a pane needs to know before it sends a keystroke.
+    pub fn pty_live(&self, page: &str) -> bool {
+        let Some(project) = self.active_project() else {
+            return false;
+        };
+        let gone = project
+            .surfaces
+            .iter()
+            .find(|surface| surface.terminal_id() == Some(page))
+            .is_some_and(|surface| surface.gone);
+        !gone && self.panel_link() == Link::Live
+    }
+
+    /// The line under a pane: nothing while the shell is live and the place
+    /// is answering, and the kernel's own words for it when it is not.
+    pub fn pty_note(&self, page: &str) -> Option<String> {
+        let project = self.active_project()?;
+        let surface = project
+            .surfaces
+            .iter()
+            .find(|surface| surface.terminal_id() == Some(page))?;
+        if self.panel_link() == Link::Lost {
+            return Some("link lost".to_string());
+        }
+        if !surface.gone {
+            return None;
+        }
+        Some(
+            surface
+                .status
+                .clone()
+                .unwrap_or_else(|| "this shell has ended".to_string()),
+        )
+    }
+
     /// The Browser tile: ask this place's kernel for a page. It answers
     /// with a row marked `by: user`, which opens the drawer on it.
     pub fn open_browser(&mut self, url: Option<String>, cx: &mut Context<Self>) {
@@ -4730,6 +4826,7 @@ impl Workspace {
 
 impl EventEmitter<Reloaded> for Workspace {}
 impl EventEmitter<PaneRequest> for Workspace {}
+impl EventEmitter<PtyWrote> for Workspace {}
 
 /// Point bezel's tint at the preference. Free rather than a method
 /// because the window reads its background appearance while it is being opened,

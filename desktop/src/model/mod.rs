@@ -15,6 +15,7 @@ pub mod permission_center;
 pub mod place;
 pub mod project;
 pub mod properties;
+pub mod pty;
 pub mod record;
 pub mod session;
 pub mod settings;

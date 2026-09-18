@@ -3682,6 +3682,7 @@ impl ChatSession {
             | Event::Open { .. }
             | Event::Hide { .. }
             | Event::Browser { .. }
+            | Event::Pty { .. }
             | Event::Job { .. }
             | Event::StoreChanged(_) => {}
             Event::Screen {
@@ -4532,6 +4533,7 @@ fn pump(
                             event @ (Event::Open { .. }
                             | Event::Hide { .. }
                             | Event::Browser { .. }
+                            | Event::Pty { .. }
                             | Event::Job { .. }) => surfaces.push(event),
                             Event::ChildSession { call_id, session } => {
                                 link_child(&mut chat.items, &call_id, &session);
@@ -4582,6 +4584,7 @@ fn pump(
                             url,
                             screenshot,
                         } => workspace.browser_moved(id, page, url, screenshot, cx),
+                        Event::Pty { page, data } => workspace.pty_output(id, page, data, cx),
                         Event::Job {
                             id: job,
                             delta,
