@@ -1,6 +1,6 @@
 # Desktop chrome on build 2019
 
-Jacob's asks on 2026-09-18 after Update **0.2.0 (2019)**. One PR on `unarbos/arbos`. Do not publish `v0.2.0`.
+Jacob's asks on 2026-09-18 after Update **0.2.0 (2019)**. One PR on `unarbos/arbos`: [#649](https://github.com/unarbos/arbos/pull/649). Do not publish `v0.2.0`.
 
 Shots: `/home/ubuntu/.cursor/projects/workspace/assets/ffe81426-804b-46f1-9507-2cad8ae7f502.png` (centered chat), `f9c07d08-5be6-4c7a-a6ee-c2c2504c56d6.png` (right list), `387a4bb5-4b45-4f9b-8a7a-ac280f9f23ef.png` (Project over the chat), `1fe1b31d-2574-4bc4-ad41-059e9ec39dfd.png` (bottom +), `17de697f-9126-4dd8-a2bd-b83d6fbab0ae.png` and `4b658afb-6438-410f-b948-4e93e412db97.png` (expand and X).
 

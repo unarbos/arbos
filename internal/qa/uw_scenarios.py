@@ -35,6 +35,7 @@ Every arm names the build it was taken on and was read against a control that fa
 import datetime
 import json
 import os
+import resource
 import signal
 import subprocess
 import threading
@@ -585,7 +586,7 @@ def register(scenario, registry, transcript, now_ms, branch):
             cx.rec.expect(
                 bool(heard),
                 "uw-04-nobody-was-told-the-run-did-not-start",
-                f"{caught} job folder(s) could not take their marker; {len(leftover)} process(es) still run with nothing to place them (pids {[l.split()[0] for l in leftover][:4]}), {len([u for u in unplaceable if u['exit_file']])} of them already finished with output nobody can attribute; nothing was said on the transcript. A restart now finds a job it cannot place and the run's result reaches nobody",
+                f"{caught} job folder(s) could not take their marker; {len(leftover)} process(es) still run with nothing to place them (pids {[l.split()[0] for l in leftover if l.split()][:4]}), {len([u for u in unplaceable if u['exit_file']])} of them already finished with output nobody can attribute; nothing was said on the transcript. A restart now finds a job it cannot place and the run's result reaches nobody",
                 "arbos-kernel subs.rs run_job — an unwritten marker ends the run and says so (#444)",
             )
         finally:
@@ -777,6 +778,118 @@ def register(scenario, registry, transcript, now_ms, branch):
                     f"`check` reports double serving for {said}, which is an ordinary state: {ws[:1]}. A warning that fires on a healthy place cannot be used to decide whether anything was served twice",
                     "arbos-kernel check.rs check_two_writers — the cut line must clear the open wake",
                 )
+
+    # ── a write that runs out of room: the supported path into drop_partial_line ──
+    @reg("en-01-a-write-that-runs-out-of-room-does-not-swallow-the-next-event", tags=("after-failure", "transcript", "destructive-order"))
+    def en01(cx):
+        """The complement to `qal-j37`. `drop_partial_line` exists for a write that fails part-way and
+        names its causes: *"disk full, size limit"*. `qal-j37` showed the **crash** path has no repair
+        at all — nobody runs the guard when the process is gone. This asks whether the guard works on
+        the path it was written for, by the cheapest of its two causes: `RLIMIT_FSIZE`, set on the
+        kernel before exec, with the transcript padded to just under it so the next append crosses it
+        mid-write.
+
+        A size limit is reachable without anything exotic: a quota, a container limit, a filesystem's
+        own ceiling. Whether the process even *gets* an error is the first question — exceeding
+        `RLIMIT_FSIZE` raises `SIGXFSZ`, whose default action is to kill, so a guard on the `write_all`
+        error path only runs if that signal is handled or ignored. If the kernel dies instead, then
+        the comment's "size limit" reaches `qal-j37`'s territory rather than the guard's, which is
+        worth knowing either way.
+
+        Whatever happens, the property is the same as `qal-j37`'s: no event may end up inside an
+        unparseable line, and nothing already whole may be lost."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        plain_agent(place)
+        k0 = cx.kernel(tag="kernel-bootstrap")
+        cx.rec.expect(k0.start(), "en-01-kernel-did-not-bootstrap", "the kernel did not come up to make its folders")
+        k0.stop()
+
+        tpath = place / ".arbos" / "agents" / "root" / "transcript.jsonl"
+        tpath.parent.mkdir(parents=True, exist_ok=True)
+        # RLIMIT_FSIZE is in bytes and applies to every file this process writes, so the ceiling has
+        # to clear the kernel's own small files (kernel.log, kernel.json) and sit just above the
+        # transcript. Pad with whole, readable events so nothing is lost by the padding itself.
+        limit = 64 * 1024
+        pad = {"ts": now_ms() - 1, "kind": "assistant", "text": "x" * 400}
+        line = json.dumps(pad) + "\n"
+        with open(tpath, "w") as f:
+            f.write(json.dumps({"ts": now_ms() - 2, "kind": "wake", "wake": "user", "text": "one"}) + "\n")
+            while tpath.stat().st_size < limit - 600:
+                f.write(line)
+                f.flush()
+            f.write(json.dumps({"ts": now_ms() - 1, "kind": "turn_complete"}) + "\n")
+
+        def read_lines():
+            good, bad = [], []
+            for raw in tpath.read_text(errors="replace").split("\n"):
+                if not raw.strip():
+                    continue
+                try:
+                    good.append(json.loads(raw))
+                except ValueError:
+                    bad.append(raw)
+            return good, bad
+
+        good0, bad0 = read_lines()
+
+        def cap_file_size():
+            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+
+        k = cx.kernel(tag="kernel-capped", preexec=cap_file_size,
+                      extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "ROOM"}]))])
+        try:
+            started = k.start()
+            cx.rec.notes["kernel_started_under_the_cap"] = started
+            if not started:
+                cx.rec.notes["skipped"] = "the kernel could not start with RLIMIT_FSIZE at 64 KiB; the cap is below its own bootstrap writes, so this run stages nothing"
+                return
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            marker = f"ROOM-{now_ms() % 100000}"
+            c.user("root", f"{marker}: reply with the single word ROOM.")
+            wait_turn_complete(c, "root", 60)
+            time.sleep(1)
+
+            good1, bad1 = read_lines()
+            swallowed = [b for b in bad1 if marker in b]
+            err = k.stderr_text() or ""
+            cx.rec.notes.update({
+                "readable_before": len(good0),
+                "readable_after": len(good1),
+                "unparseable_before": len(bad0),
+                "unparseable_after": len(bad1),
+                "bytes_before": limit - 600,
+                "bytes_after": tpath.stat().st_size,
+                "kernel_alive_after": k.alive(),
+                "stderr_mentions_size_or_space": any(w in err.lower() for w in ("file too large", "efbig", "no space", "enospc", "size limit")),
+                "unparseable_tail": [b[:160] for b in bad1][:2],
+            })
+
+            # Probe validity: the transcript must actually have met the ceiling. If the append fitted,
+            # nothing was staged and the arms below say nothing.
+            met_the_ceiling = tpath.stat().st_size >= limit - 600 and (len(bad1) > len(bad0) or not k.alive() or cx.rec.notes["stderr_mentions_size_or_space"])
+            cx.rec.expect(
+                met_the_ceiling,
+                "probe-the-write-had-room",
+                f"the transcript grew to {tpath.stat().st_size} under a {limit}-byte cap with no failure sign, so the append had room and this run does not stage a write that ran out of it",
+            )
+            if not met_the_ceiling:
+                return
+
+            cx.rec.expect(
+                len(good1) >= len(good0),
+                "en-01-earlier-events-lost",
+                f"the transcript held {len(good0)} readable events before and {len(good1)} after; a write that ran out of room must cost nothing that was already whole",
+            )
+            cx.rec.expect(
+                not swallowed,
+                "en-01-event-swallowed-by-the-headless-line",
+                f"an event is inside an unparseable line after a write ran out of room: {(swallowed[0][:150] if swallowed else '')!r}. `drop_partial_line` is meant to cut the headless remainder off on exactly this path",
+                "arbos-core files.rs append_events / drop_partial_line — the failed-write path",
+            )
+        finally:
+            k.stop()
 
     # ── a scheduled command that fails: the other property #104 orphaned ──
     @reg("sf-01-a-shell-subscription-whose-command-fails-tells-somebody", tags=("after-failure", "subscriptions"))
@@ -1062,7 +1175,7 @@ def register(scenario, registry, transcript, now_ms, branch):
             cx.rec.expect(
                 not swallowed,
                 "pl-01-typed-line-swallowed-by-the-partial-line",
-                f"an event appended after the crash is inside an unparseable line, run onto the headless one: {swallowed[0][:150]!r}. "
+                f"an event appended after the crash is inside an unparseable line, run onto the headless one: {(swallowed[0][:150] if swallowed else '')!r}. "
                 f"`append_events` writes a batch in one O_APPEND call, so the headless line takes the batch's first event — here the `wake` — while the rest land whole; every reader skips the combined line, so that event is gone and nothing says so. "
                 f"`drop_partial_line` repairs only the process whose own write failed (files.rs:581, its one caller); after a crash nobody runs it",
                 "arbos-core files.rs append_events — cut a headless last line before appending, not only when this process's write failed",

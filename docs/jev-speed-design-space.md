@@ -18,7 +18,7 @@ This is not more mechanical tool picks as a separate program. That job stays [th
 
 ## 1. Words used here
 
-- **Jev**: TypeSafe’s System One model. It answers typed questions. It does not write prose. It does not speak. OpenRouter slug `typesafe/jev-latest`.
+- **Jev**: TypeSafe’s System One model. It answers typed questions. It does not write prose. It does not speak. OpenRouter slug `~typesafe/jev-latest` (family alias; the tilde is required).
 - **Controller**: the one Jev call on a kernel turn. Same door as #546. Same key.
 - **Live**: the voice model on the call (GPT Live today). It hears Jacob. It speaks. It may **delegate** a question to the kernel.
 - **Gateway**: `voice-server/`. Phone and desktop connect to it. It connects to Live and to one kernel.

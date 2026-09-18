@@ -19,10 +19,10 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
+- [Build Jev controller](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — [Jev controller](https://github.com/unarbos/arbos/pull/647) CI red on `RefCell`
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2023**; watching past it
-- [Build Jev controller](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — one loop: models, tools, brief; [speed design space](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-speed-design-space.md)
 - [Fix panel chrome fullscreen](bc-85782d4e-78b3-55d7-80ba-a25615cd0690) — [chrome on 2019](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-chrome-2019.md)
-- [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [voice path latency](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/voice-path-latency.md)
+- [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [voice path latency](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/voice-path-latency.md); kernel 8–11 s is the wait
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
@@ -32,7 +32,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 ## Voice and phone (end goal)
 
-- [ ] [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [voice path latency](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/voice-path-latency.md); [one spoken answer](https://github.com/unarbos/arbos/pull/594) on `main`
+- [ ] [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [voice path latency](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/voice-path-latency.md); kernel 8–11 s is the wait; bad Jev slug on the Mac
   - [x] [Mirror call text in chat](bc-5691d9b7-e5a5-578a-a19f-a7be750d7671) — [#501](https://github.com/unarbos/arbos/pull/501) on `main`
   - [x] [Give Live full chat context](bc-4e8d547d-fa8a-535d-a931-0d11d7b4fdbb) — [#500](https://github.com/unarbos/arbos/pull/500) on `main`
 - [ ] A call goes silent while the agent works, and Jacob could not tell that from a crash — he asked "what are you working on", heard "let me get that information", and nothing came back, with the strip returning to Listening as though the exchange were over; the cause is being found on the desktop path, with the filler settling the turn as the first suspicion. His ask beside it is the real fix: a sound while commands are running, driven by the actual running state rather than a timer, tolerable for minutes rather than seconds, and ducking out of the way the moment either of them speaks
@@ -87,8 +87,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] [Route harness work through Jev](bc-7330e6eb-85be-5448-944c-6ed6225064ce) — [#546](https://github.com/unarbos/arbos/pull/546) on `main`; next is full integration
   - [x] [Jev in the harness](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-harness.md) — on in **1765**; `jev = false` turns it off
   - [x] [Design full Jev integration](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — [full integration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-full-integration.md) written; slices A–G wait
-  - [ ] [Build Jev controller](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — one loop: models, tools, brief; [speed design space](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-speed-design-space.md)
-- [ ] [Run features agent for Cursor parity](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — only task `qal-j35`; [headless tail](https://github.com/unarbos/arbos/pull/646) is the `qal-j37` draft, not this bug
+  - [ ] [Build Jev controller](bc-1f7d62b4-04dd-557c-9d9e-0260ea321bda) — [Jev controller](https://github.com/unarbos/arbos/pull/647) CI red on `RefCell`
+- [ ] [Run features agent for Cursor parity](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — only task `qal-j35`; [headless tail](https://github.com/unarbos/arbos/pull/646) is `qal-j37`, not this bug
 - [ ] Feature PRs ready for review — [#6 OpenRouter](https://github.com/unarbos/arbos/pull/6) (possible key exposure, rotation is Jacob's call), [#8 steer child](https://github.com/unarbos/arbos/pull/8) (now includes #28's drain fix), [#9 worktree isolation](https://github.com/unarbos/arbos/pull/9), [#15 headless run](https://github.com/unarbos/arbos/pull/15), [#16 screenshot tool](https://github.com/unarbos/arbos/pull/16), [#17 cwd confinement](https://github.com/unarbos/arbos/pull/17), [#18 git guard](https://github.com/unarbos/arbos/pull/18), [#21 sub-agent panel](https://github.com/unarbos/arbos/pull/21), [#23 composer pills](https://github.com/unarbos/arbos/pull/23), [#27 user message card](https://github.com/unarbos/arbos/pull/27), [#29 see/commit contract rules](https://github.com/unarbos/arbos/pull/29), [#30 secrets door](https://github.com/unarbos/arbos/pull/30), [#32 GitHub door](https://github.com/unarbos/arbos/pull/32) (stacked on #30), [#33 remote spawn](https://github.com/unarbos/arbos/pull/33), [#34 fallback models](https://github.com/unarbos/arbos/pull/34), [#35 spawn wait](https://github.com/unarbos/arbos/pull/35), [#36 per-child remote places](https://github.com/unarbos/arbos/pull/36), [#37 permission modes](https://github.com/unarbos/arbos/pull/37), [#38 agent definitions](https://github.com/unarbos/arbos/pull/38) (on #37), [#39 recording tool](https://github.com/unarbos/arbos/pull/39) (on #16), [#40 artifact cards](https://github.com/unarbos/arbos/pull/40), [#41 PR tracking](https://github.com/unarbos/arbos/pull/41) (on #23), [#42 skills](https://github.com/unarbos/arbos/pull/42), [#43 memory](https://github.com/unarbos/arbos/pull/43), [#44 cost per turn](https://github.com/unarbos/arbos/pull/44), [#45 hooks policy](https://github.com/unarbos/arbos/pull/45), [#46 search citations](https://github.com/unarbos/arbos/pull/46), [#47 job streaming](https://github.com/unarbos/arbos/pull/47), [#48 worked timing](https://github.com/unarbos/arbos/pull/48), [#49 MCP servers](https://github.com/unarbos/arbos/pull/49), [#50 under-composer row](https://github.com/unarbos/arbos/pull/50), [#51 desktop voice client](https://github.com/unarbos/arbos/pull/51), [#52 sandbox](https://github.com/unarbos/arbos/pull/52), [#53 attach replay + deltas](https://github.com/unarbos/arbos/pull/53)
 - [ ] [Run QA break-and-fix loop](bc-b4f4cdba-0146-5dea-9731-24ea2538adcd) — cycle 9 half B; `qal-j31` closed entire; next ENOSPC; leftover `bc-f2e2f30d` stays asleep
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
@@ -96,8 +96,8 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2023** on the feed; watching past it
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — waiting on the Jev controller PR; TestFlight **1997**; Mac **2023**; `v0.2.0` stays a draft
-- [ ] [Headless tail](https://github.com/unarbos/arbos/pull/646) — draft `qal-j37`; hold until ready
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [Jev controller](https://github.com/unarbos/arbos/pull/647) when green; TestFlight **1997**; Mac **2023**; `v0.2.0` stays a draft
+- [ ] [Headless tail](https://github.com/unarbos/arbos/pull/646) — ready; steward taking it
 - [x] [Voice-note words](https://github.com/unarbos/arbos/pull/645) — on `main` (`efbeff57`)
 - [x] [MCP walk residual](https://github.com/unarbos/arbos/pull/644) — on `main` (`f97bb348`)
 - [x] [Kernel-answer check](https://github.com/unarbos/arbos/pull/643) — on `main` (`65b98ad4`)

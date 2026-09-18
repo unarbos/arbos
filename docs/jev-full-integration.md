@@ -29,7 +29,7 @@ Each term is defined the first time it matters. This list is the short map.
 - **Kernel**: `arbos-kernel serve <folder>`. One process. One project folder. The agent loop lives here.
 - **Turn**: one wake of the kernel. A user line, a worker report, or a subscription opens it. The kernel works, then ends.
 - **LLM**: the chat model named in `config.toml`. It generates text and tool calls.
-- **Jev**: TypeSafe’s System One model. OpenRouter slug `typesafe/jev-latest` (family alias `~typesafe/jev-latest`). About $0.042 per million input tokens. Output is free. Window: 32,000 tokens. It returns typed decisions, not prose.
+- **Jev**: TypeSafe’s System One model. OpenRouter slug `~typesafe/jev-latest` (family alias; the tilde is required). About $0.042 per million input tokens. Output is free. Window: 32,000 tokens. It returns typed decisions, not prose.
 - **System One**: TypeSafe’s name for models that decide, not chat. Kahneman’s “System 1”: fast judgment. The LLM is the slow, writing half.
 - **State**: the short packet Jev reads. In Arbos this is the **situation card**.
 - **Situation card**: goal, last user line, last few tool glances, files already touched. Never the full transcript. Never a vault key. Never a whole file.
@@ -265,9 +265,9 @@ This is the core. Desktop, phone, and workers all see the result of this loop. T
 | Chat JSON (today’s `complete_stream`) | Decisions fails | The #546 system prompt and card |
 | LLM `model_step` | Both fail, or Jev says `llm`, or confidence is low | Today’s turn |
 
-Same OpenRouter key. Same `jev_model` (default `typesafe/jev-latest`). No TypeSafe account. No second env var.
+Same OpenRouter key. Same `jev_model` (default `~typesafe/jev-latest`). No TypeSafe account. No second env var.
 
-If OpenRouter wants the family alias `~typesafe/jev-latest` on the Decisions door, keep that in one constant. `jev_model` in config still wins.
+The family alias lives in one constant. A saved `typesafe/jev-latest` (no tilde) remaps to it. `jev_model` in config still wins.
 
 ### 9.2 The situation card, still small
 
@@ -640,7 +640,7 @@ All optional. Same file as today: `config.toml`.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `jev` | `true` when provider is OpenRouter and a key exists | Master switch |
-| `jev_model` | `typesafe/jev-latest` | Slug. Empty string = off |
+| `jev_model` | `~typesafe/jev-latest` | Family alias. Empty string = off |
 | `jev_confidence` | `0.5` | Below this, fall through on Choice |
 | `jev_compact` | `true` when `jev` is on | Keep/drop stale tools |
 | `jev_search` | `true` when `jev` is on | Query/hit pick |

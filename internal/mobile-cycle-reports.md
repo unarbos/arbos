@@ -3121,3 +3121,38 @@ instrument gathered the evidence and then judged something narrower than
 its own sentence. Cycle 112 counted rows without hearing them, 113 counted
 answers without asking who gave them, and 114 printed words without reading
 them.
+
+## Cycle 115 — a check that had measured nothing for fifteen cycles
+
+`refusal-and-transport.sh` ran, printed four sections, and ended with its
+paragraph about how a refusal and a transport failure should differ. Every
+section said `no <row> row`. It had opened no case at all.
+
+The cause is mine. At cycle 100 I made a cold start come back to the chat
+that was in front (M-338). That was the right change. It also means the app
+no longer lands on the projects list — and this scenario taps four fixture
+rows by name on the list. It has measured nothing since, and said nothing
+about it, because its closing text is printed unconditionally (M-379).
+
+Fixed three ways: it reaches the list, it refuses to run when the fixture's
+four rows are not on screen, and a case that never opens now produces
+`VERDICT: none`.
+
+**The behaviour itself is fine.** Once the scenario could see the fixture:
+
+| case | attaches in 25 s | |
+|---|---|---|
+| `no machine named` | **1** | stops — nothing will change |
+| `is offline` | 3 | retries — comes back when a kernel starts |
+| `has no kernel serving` | 3 | retries — comes back when someone starts it |
+| 502 at the tunnel | 3 | retries — nobody answered |
+
+Identical to M-257 at cycle 70 (M-380). Only the instrument had rotted.
+
+**And the paragraph was wrong anyway.** It said "a refusal should be counted
+once and left alone", so by its own words two of the three refusals were
+faults — contradicting the very finding the file was written to record. Two
+refusals *should* retry: they name a thing that comes back. Each case now
+carries its expectation and the run reaches a verdict (M-381).
+
+**PR:** [#648](https://github.com/unarbos/arbos/pull/648), harness only.

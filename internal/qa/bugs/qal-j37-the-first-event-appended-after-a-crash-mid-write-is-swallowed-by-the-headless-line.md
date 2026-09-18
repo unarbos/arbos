@@ -83,3 +83,45 @@ Two other injections are still absent and worth the same treatment: a write that
 space (`ENOSPC`, which is the *other* half of `drop_partial_line`'s own comment and reaches it by
 the supported path), and a shifted clock — the kernel reads `ARBOS_NOW` for exactly that purpose and
 no scenario sets it.
+
+## The guard is correct; it only covers one of the two ways this state arises
+
+Added 2026-09-18 13:20, after staging the other cause `drop_partial_line`'s comment names.
+`en-01-a-write-that-runs-out-of-room-does-not-swallow-the-next-event` sets `RLIMIT_FSIZE` on the
+kernel before exec and pads the transcript to just under it, so the next append crosses the ceiling
+mid-write — the "size limit" half of *"disk full, size limit"*. On
+`arbos-kernel 0.2.0 f97bb3487540 protocol 1`:
+
+| | |
+|---|---|
+| kernel met the ceiling | yes — stderr names it, file stopped at 65,451 of a 65,536-byte cap |
+| kernel still serving afterwards | yes |
+| readable events before / after | 145 / **148** |
+| unparseable lines afterwards | **0** |
+
+So on the path it was written for, the guard does exactly its job: the failed write is cut back, the
+next append lands whole, and nothing is lost. `en-01` passes.
+
+That makes this bug narrower and more actionable than first written. It is **not** that
+`drop_partial_line` is wrong — it is right, and proven right. It is that the state it repairs has
+two causes and the guard sits on only one of them:
+
+| how the headless line appears | who repairs it |
+|---|---|
+| this process's own `write_all` fails (disk full, size limit) | `drop_partial_line`, at `files.rs:581` — works, `en-01` |
+| the process is gone mid-write (SIGKILL, power, OOM) | **nobody** — `pl-01` |
+
+The fix therefore needs no new mechanism, only a second call site: cut a headless last line when
+opening the transcript for append, not only when this process's own write failed.
+
+## A note against myself
+
+`pl-01`'s own failure message indexed `swallowed[0]` while asserting `not swallowed` — so it would
+have raised `IndexError` on the day this bug was fixed, and the green would have arrived looking
+like a fresh `driver-exception`. That is review rule 8, which this loop wrote this morning out of
+`qal-j29`, broken in a scenario written hours after it. `en-01` did it too and was caught on its
+first run by the same rule's symptom. Both are guarded now, and the two other `[0]`/`[-1]` sites in
+this module were checked: `fm-02`'s sits inside an `if said:`, and `uw-04`'s comprehension yields
+nothing on an empty list, though it is now also guarded against a blank line.
+
+Writing the rule is not the same as having it.

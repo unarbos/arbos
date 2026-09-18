@@ -4,9 +4,9 @@ Jacob wants Arbos to be fast when he wakes up. He always has an OpenRouter key. 
 
 ## What Jev is
 
-OpenRouter slug: `typesafe/jev-latest` (page: [Jev Latest](https://openrouter.ai/~typesafe/jev-latest)).
+OpenRouter slug: `~typesafe/jev-latest` (page: [Jev Latest](https://openrouter.ai/~typesafe/jev-latest)).
 
-- Family alias: always the newest Jev.
+- Family alias: always the newest Jev. The leading `~` is required. Without it OpenRouter returns 400 and the turn falls through.
 - Cost: about $0.042 per million input tokens. Output is free.
 - Window: 32,000 tokens.
 - Shape: text in, **structured decisions** out. It is not the chat model.
@@ -59,7 +59,7 @@ Barge-in, cancel, and spend caps stay on the kernel. Jev cannot override them.
 
 In `config.toml`, all optional:
 
-- `jev_model` — default `typesafe/jev-latest`. Empty string turns Jev off.
+- `jev_model` — default `~typesafe/jev-latest`. Empty string turns Jev off.
 - `jev` — default `true` when the provider is OpenRouter and a key exists. `false` keeps today’s one-model loop.
 
 No new key. The OpenRouter key already on the host is enough.
