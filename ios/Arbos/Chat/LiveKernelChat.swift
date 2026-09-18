@@ -244,7 +244,12 @@ final class LiveKernelChat: ChatSource {
             // line for the transcript: the store's one calm line covers it.
             // …and "no kernel serving" is the same link, still down, seen from
             // the hub: the calm line covers it too (M-110).
-            if detail.contains("went away") || detail.contains("closed") || detail.contains("no kernel serving") {
+            // …and a machine that is offline is the same again: the link is
+            // down and it can come back, so the calm line covers it. Without
+            // this it fell to the red notice below, which printed the hub's
+            // whole sentence — prefix, timestamp and remedy — once per retry.
+            if detail.contains("went away") || detail.contains("closed")
+                || detail.contains("no kernel serving") || detail.contains("is offline:") {
                 stream?.yield(.dropped(detail))
             } else if detail.contains("no machine named") || detail.contains("no project named") || detail.contains("not registered") {
                 // The hub knows nothing by that name: retrying will not help.
