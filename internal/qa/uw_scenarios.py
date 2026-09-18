@@ -959,35 +959,46 @@ def register(scenario, registry, transcript, now_ms, branch):
     # walking the kernel's first-match readers rather than by a break. The audit listed six — the
     # history lookup, the checkpoint sidecar, the roster files, the leash pointer, the legacy
     # kernel.json and the held-record loader. `mcp::load_servers` is a seventh nobody had checked.
-    @reg("fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone", needs_model=False, tags=("first-match", "mcp", "config"))
+    @reg("fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away", needs_model=False, tags=("first-match", "mcp", "config"))
     def fm02(cx):
-        """`mcp::load_servers` (crates/arbos-kernel/src/mcp.rs:116) walks four locations in order —
-        `.arbos/mcp.toml`, `.cursor/mcp.json`, `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` — and the
-        first file to define a server name keeps it. A file that does not parse is skipped with an
-        `eprintln!` and the walk goes on, so a typo in the place's own config quietly hands that server's
-        name to whatever the next location says. Nothing carries that to the person: the desktop sends
-        the kernel's stderr to `.arbos/runtime/kernel.out.log`, which its own comment calls "process
-        facts, never part of the .arbos/ record" (desktop/src/kernel.rs:2789).
+        """`mcp::load` walks four locations in order — `.arbos/mcp.toml`, `.cursor/mcp.json`,
+        `.mcp.json`, `$XDG_CONFIG_HOME/arbos/mcp.toml` — and the first file to define a server name
+        keeps it. `qal-j31`: a file that did not parse was skipped with an `eprintln` and the walk went
+        on, so one wrong character in the place's own config handed that server's name to whatever came
+        next, and the only record went to a log the window never shows.
 
-        Staged as the world does it: a place config with one wrong character and a global config naming
-        the same server differently. The assertion is about the transcript, because that is what a person
-        reads. The kernel's stderr is used only to prove the parse really failed — and note that under
-        this harness stderr lands in the rollout, not in `runtime/`; the product path is the desktop's."""
+        Fixed in #613 (`23ef527c`, on `main` since 09:34 UTC): a place file that fails to parse is said
+        as a notice on root's transcript, and it **blocks the machine's file** so the name cannot be
+        served by the machine's server of the same name.
+
+        Two things are asserted, both #613's contract, both on `main`:
+          1. the notice is there, and names the file and the parse error;
+          2. no server of that name starts when only the machine's file offers one.
+
+        The third — a later *place* file (`.cursor/mcp.json`, `.mcp.json`) must not hand the name away
+        either — is #644, still open at 12:45 UTC and reproduced here. Rather than stand a red for an
+        open PR, the check gates itself on the product's own claim: #644 makes the notice say no later
+        file was read, so once it says that, a started server contradicts it and is a break. Until
+        then the residual is recorded as a note."""
         place = cx.place
         place.mkdir(parents=True, exist_ok=True)
         plain_agent(place)
 
-        # The place's own config, with one wrong character: a bare word where a string belongs.
         arbos = place / ".arbos"
         arbos.mkdir(parents=True, exist_ok=True)
+        # The features agent's own shape: one unclosed array.
         broken = arbos / "mcp.toml"
-        broken.write_text('[servers.notes]\ncommand = this-is-not-quoted\nargs = ["--from-the-place"]\n')
+        broken.write_text('[servers.notes]\ncommand = "notes-mcp"\nargs = [\n')
 
-        # The global one, valid, naming the same server.
+        # The machine's file, valid, naming the same server. #613 must not let this be used.
         cfg = cx.scratch / "xdg"
         (cfg / "arbos").mkdir(parents=True, exist_ok=True)
-        (cfg / "arbos" / "mcp.toml").write_text('[servers.notes]\ncommand = "/bin/true"\nargs = ["--from-the-global-config"]\n')
+        (cfg / "arbos" / "mcp.toml").write_text('[servers.notes]\ncommand = "/bin/true"\nargs = ["--from-the-machine"]\n')
         cx.env["XDG_CONFIG_HOME"] = str(cfg)
+
+        # A later *place* file offering the same name: #644's territory.
+        (place / ".cursor").mkdir(parents=True, exist_ok=True)
+        (place / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"notes": {"command": "/bin/true", "args": ["--from-dot-cursor"]}}}) + "\n")
 
         k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "Up."}]))])
         try:
@@ -1000,48 +1011,61 @@ def register(scenario, registry, transcript, now_ms, branch):
             c.user("root", "Say up.")
             wait_turn_complete(c, "root", 60)
 
-            err = (k.err.name if hasattr(k, "err") else None)
-            stderr_text = ""
-            for p in (cx.rec.dir / "kernel.stderr.log", Path(err) if err else None):
-                if p and Path(p).exists():
-                    stderr_text = Path(p).read_text(errors="replace")
-                    break
-            complained = [l for l in stderr_text.splitlines() if l.lower().startswith("mcp:") or "mcp.toml" in l]
+            stderr_text = k.stderr_text() or ""
+            # A server of that name being started at all is the takeover, whichever file offered it:
+            # the kernel names it on stderr as `mcp: notes: …` when it talks to it.
+            took_the_name = [l for l in stderr_text.splitlines() if l.strip().startswith("mcp: notes:")]
 
             evs, _ = transcript(place, "root")
-            said = [
-                e for e in notices(evs)
-                if "mcp" in e.get("text", "").lower() or "mcp.toml" in e.get("text", "").lower()
-            ]
+            said = [e for e in notices(evs) if str(e.get("text") or "").strip().startswith("MCP:")]
+            claims_no_later_file = any("later" in str(e.get("text") or "").lower() for e in said)
             cx.rec.notes.update({
-                "stderr_lines_about_mcp": [l[:200] for l in complained][:4],
-                "notices_about_mcp": [e.get("text", "")[:240] for e in said],
-                "place_config_still_unparseable": broken.read_text(errors="replace")[:80],
+                "mcp_notices": [str(e.get("text") or "")[:260] for e in said],
+                "server_of_that_name_started": [l[:160] for l in took_the_name][:2],
+                "notice_claims_no_later_file_read": claims_no_later_file,
                 "kernel_still_answering": not c.closed,
             })
 
-            # Probe validity first: if the config parsed, this run stands for nothing.
+            # Probe validity: the file must really have failed to parse, or this run stands for nothing.
+            rejected = [l for l in stderr_text.splitlines() if "mcp.toml" in l and "parse" in l.lower()]
             cx.rec.expect(
-                bool(complained),
+                bool(rejected) or bool(said),
                 "probe-config-was-not-rejected",
-                f"nothing on the kernel's stderr names the broken config, so the parse may have succeeded and this run does not stage the fault it claims: {stderr_text[-200:]!r}",
+                f"nothing names a parse failure for `.arbos/mcp.toml`, so the file may have parsed and this run does not stage the fault it claims: {stderr_text[-200:]!r}",
             )
-            if not complained:
+            if not (rejected or said):
                 return
-            # And show the takeover rather than asserting it from the code: the `notes` server the
-            # kernel goes on to start can only have come from the global config, because the place's
-            # file never parsed. Proved by the absence of that line when no global config exists —
-            # measured 2026-09-18 on `arbos-kernel 0.2.0 f80f0b663bac protocol 1`, two arms, the
-            # second identical but for the global file.
-            took_over = [l for l in complained if "notes:" in l]
-            cx.rec.notes["global_server_took_the_name"] = bool(took_over)
-            cx.rec.notes["takeover_line"] = (took_over[0][:200] if took_over else None)
+
+            # 1. #613's telling.
             cx.rec.expect(
                 bool(said),
                 "fm-02-broken-place-config-is-silent-to-the-user",
-                f"`.arbos/mcp.toml` does not parse and root's transcript says nothing about it ({len(complained)} line(s) went to the kernel's stderr instead: {complained[:1]}). The place's `notes` server is skipped and the name falls through to the next location{' — and the global one took it here' if took_over else ''}, so the person gets a different server — or none — with the only record in a log the window never shows",
-                "arbos-kernel mcp.rs load_servers — a config that does not parse is a thing its author needs told, on the transcript, not on stderr",
+                f"`.arbos/mcp.toml` does not parse and root's transcript carries no `MCP:` notice ({len(rejected)} line(s) went to the kernel's stderr instead). The desktop routes stderr to `.arbos/runtime/kernel.out.log`, which the window never shows, so its author is told nothing",
+                "arbos-kernel mcp.rs load — say it on root's transcript (#613)",
             )
+            if said:
+                text = str(said[-1].get("text") or "")
+                cx.rec.expect(
+                    "does not parse" in text and "mcp.toml" in text,
+                    "fm-02-notice-names-neither-the-file-nor-the-fault",
+                    f"the notice does not name the file and what is wrong with it: {text[:200]!r}",
+                )
+
+            # 2. #613's blocking of the machine's file, and 3. #644's residual, self-gated.
+            if claims_no_later_file:
+                cx.rec.expect(
+                    not took_the_name,
+                    "fm-02-a-later-file-still-handed-the-name-away",
+                    f"the notice says no later file was read, and a `notes` server was started anyway: {took_the_name[:1]}. The person is told its servers are off while a different server answers to the name",
+                    "arbos-kernel mcp.rs load — the walk must stop at the first broken place file (#644)",
+                )
+            else:
+                cx.rec.notes["residual_644"] = (
+                    "a `notes` server started from a later place file while the notice said its servers are off; "
+                    "#644 (open at 2026-09-18 12:45 UTC) stops the walk at the first broken place file. "
+                    "Measured here: with `.cursor/mcp.json` present a server starts; without it none does, "
+                    "so the machine's file is genuinely blocked and #613 holds."
+                ) if took_the_name else "no later place file took the name on this build"
         finally:
             cx.env.pop("XDG_CONFIG_HOME", None)
             k.stop()

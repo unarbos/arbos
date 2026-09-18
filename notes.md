@@ -19,10 +19,10 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
+- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2019**; watching past it
 - [Run QA break-and-fix loop](bc-b4f4cdba-0146-5dea-9731-24ea2538adcd) — cycle 9 half B; original queue closed
 - [Run features agent for Cursor parity](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — only task `qal-j35`
 - [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 29 written; reading continues
-- [Match Cursor chat view exactly](bc-2a1318aa-e675-52f4-b3ab-94cb9415aa39) — cycle 41 closed; next cycle open; do not revert #629
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
@@ -92,9 +92,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2010** on the feed; watching past it
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2019** on the feed; watching past it
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [hand scroll](https://github.com/unarbos/arbos/pull/642) on `main`; TestFlight **1997**; Mac **2010**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [hand scroll](https://github.com/unarbos/arbos/pull/642) on `main`; TestFlight **1997**; Mac **2019**; `v0.2.0` stays a draft
 - [x] [Hand scroll](https://github.com/unarbos/arbos/pull/642) — on `main` (`a8678ac1`)
 - [x] [List rows](https://github.com/unarbos/arbos/pull/641) — on `main` (`ca6544ee`)
 - [x] [Archived list](https://github.com/unarbos/arbos/pull/636) — on `main` (`20caf305`)
