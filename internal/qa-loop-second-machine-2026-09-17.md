@@ -743,6 +743,57 @@ What the detector cannot see is stated in #450 itself and stands: two kernels an
 different ports, and two writers to `notes.md` via temp-and-rename, which leave no trace and need
 the `kernel_start` pids laid side by side.
 
+## Cycle 8: the first whole tracked step, and the half split confirmed
+
+`== library half this cycle: A` — **146 of 299 scenarios** — and the tracked step ended
+`-- track main: run.py exit 1`: a normal finish with breaks and **no truncation alarm**. All 146
+ran, against 152 of 291 in cycle 6. The `qal-j28` prediction held, and the file now records that
+along with why it is not a closed matter: the library grew 291 → 299 in a day and
+`inbox:swebench-loop-cycle-*` reached 26 from 24 while the file was open.
+
+Step 3a2 then ran its whole family on the cycle's own main build, in-cycle for the first time:
+
+| scenario | verdict |
+|---|---|
+| `af-04` moved place's old path not recreated | **pass** (also passed in the tracked step, 83.0 s) |
+| `ds-01` the double-serving detector | **pass** |
+| `uw-01` … `uw-04` (#444's four cases) | **pass** |
+| `fm-02` MCP config skipped in silence | **break** — `qal-j31`, reproducing every run |
+| `lk-01` (#441) in the tracked step | **pass** |
+
+## The 36 minutes I first read as a stall, and what it really was
+
+Cycle 8's tracked step looked like it had lost 37 minutes to two gaps between scenarios — cycle 6
+lost 3 minutes across 239 rollouts, cycle 7 none. I chased it through three wrong explanations
+before finding it, and the wrong turns are worth recording because each was cheap to rule out:
+
+- **Not the rollout copy.** `copy_tree_contents` is local-to-local; the docstring claiming it
+  copies to the store is stale, since `ROLLOUTS = QA_DIR/"rollouts"` now resolves under
+  `~/arbos-qa/loop`. A synthetic tree of the same shape — 662 files, 11 MB — copies in **0.04 s**
+  against the 1595 s gap I was trying to explain.
+- **Not the store.** `vm-loop.sh` puts only `index.jsonl` there, once per cycle.
+- **Not a per-file cost.** The apparent 2.4 s/file was two data points and coincidence.
+
+What it is: **the VM suspends while this agent is idle, and `ps` lies about it afterwards.** The
+tracked step's first rollout is stamped `20260918T093316Z`, while `ps lstart` reports its `run.py`
+starting at `10:09:44` — 36 minutes later, the same size as the gap. `ps` derives a start time
+from boot-wall-time plus start-ticks, and boot-wall-time is `now − /proc/uptime`; uptime stops
+during a suspension while the wall clock resyncs on resume, so every process started before the
+pause is reported that much *later* than it truly began. The rollout stamps are the honest record.
+
+Two useful consequences:
+
+- `timeout` counts monotonic time, so the step's 100-minute cap is **not** shortened by the pause.
+  That is why half A finished despite the wall clock suggesting it had run out.
+- A sampler taking wall and `/proc/uptime` every 20 s showed **zero** drift across 400 s while the
+  agent was working, so nothing is lost while there is work to do. Short waits are enough; the
+  inherited habit of polling every few minutes is the right one, and my 20-minute sleep is what
+  bought the second gap.
+
+This extends `qal-j26` rather than repeating it: that file established that a paused VM inflates
+wall-clock durations. This adds that it also corrupts `ps lstart`/`etime`, which is the tool one
+naturally reaches for to check whether a long step is stuck.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j31-a-place-mcp-config-that-does-not-parse-hands-its-server-name-to-the-global-one-in-silence.md`

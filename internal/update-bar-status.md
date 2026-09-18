@@ -5,16 +5,27 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 11:23 UTC.
+Last checked 2026-09-18 11:33 UTC.
 
-## Click Update. You will get build 1987.
+## Click Update. You will get build 2000.
 
-**1987** — signed, notarised, stapled, on the feed since 11:21 UTC.
+**2000** — signed, notarised, stapled, on the feed since 11:31 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1987 (builds 1988–2000):
+
+- **#632** — `check-names.sh` walks every screen and catches one-word
+  symbols
+- **#633** — mobile: the transcript ends above the workers pill, and two
+  decorations stop speaking to VoiceOver
+- **#627** — the quoted-reference rule's mark is a test that asserts the
+  quote, not a reply line
+
+## Before that: 1987
 
 New since 1978 (builds 1979–1987). The desktop ones are the visible half:
 

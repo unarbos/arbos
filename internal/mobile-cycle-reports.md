@@ -2956,3 +2956,38 @@ marker means nothing on a machine's first run.
 [#632](https://github.com/unarbos/arbos/pull/632) harness,
 [#633](https://github.com/unarbos/arbos/pull/633) the `ios/` batch — iPhone
 build passes; TestFlight stays **1936** until the cap resets.
+
+## Cycle 110 — the oldest row, and a fix that was not as whole as I said
+
+**First, the rig lied.** `mac-cycle.sh` chains its checkout with `&&` under
+`set -uo pipefail`. Scratch edits I had left on the Mac made `git checkout`
+refuse, the chain stopped, and the script carried on to build, launch and
+report — naming `main` while sitting on the previous tree. It said **BUILD
+SUCCEEDED** twice (M-365). Fixed: it clears the tree, and stops if it is not
+where it claims to be.
+
+**The oldest row holds.** `project chat — send, prompt card, streaming,
+Worked line`, last measured at cycle 62, re-measured on `main` `d2a807e4`:
+card **1.1 s**, reply **2.0 s**, `Worked 7s` at **8.9 s**, composer cleared,
+and the kernel's record shows exactly one turn (M-367).
+
+**And the thing I have to correct.** Yesterday's #633 says the transcript
+now ends above the pill. It does for the away card — 731 to 632, measured
+twice, and that still holds. It does **not** in general:
+
+| | as opened / after | true end | short by |
+|---|---|---|---|
+| open `phone` (has workers) | y 673 | y 580 | **93 pt** |
+| send in `phone` | y 561 | y 560 | 1 pt — flush |
+| open `const` (no workers) | y 721 | y 721 | flush |
+
+So the fault is the **way in** to a chat that has workers, and a long
+trailing paragraph is still clipped by the pill. My published mechanism —
+"the pill row's height is not counted" — is not the whole story.
+
+I tried two fixes from the next theory (the tail is under the inset from the
+first layout, so it never appears and `atTail` stays false):
+`contentMargins(.bottom:for: .scrollContent)` changed nothing, and scrolling
+on the way in regardless of `atTail` landed *further* from the end. **Both
+reverted.** The measurements are written down so the next cycle starts from
+evidence rather than from my third theory in a day (M-366).

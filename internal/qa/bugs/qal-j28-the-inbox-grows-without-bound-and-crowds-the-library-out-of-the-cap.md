@@ -87,6 +87,25 @@ before the silence bound, and under it once the ceiling hits are trimmed. Cycle 
 should therefore **finish rather than truncate**. If it truncates anyway, the split is not enough
 and the inbox needs retirement, not division.
 
+### The prediction held, measured at cycle 8 (cycle 7 died before its tracked step, `qal-j32`)
+
+Cycle 8 announced `library half A: 146 of 299 scenarios` and its tracked step ended
+`-- track main: run.py exit 1` — a normal finish with breaks, **no truncation alarm**. All 146 ran,
+against 152 of 291 in cycle 6. So the split is sufficient for now and the inbox does not need
+retirement *today*.
+
+Two things keep this from being a closed matter:
+
+- the library grew from 291 to 299 in one day, and `inbox:swebench-loop-cycle-*` reached **26**
+  from 24 while this file was open — one per benchmark cycle, exactly as described above. Halving a
+  set that grows is a delay with a known end.
+- the step used close to its whole cap. The first scenarios after the build are cheap and the
+  `inbox:*` block in the middle is not; a handful more notes puts the last family back under the cut.
+
+The budget control at the end of this file is therefore still the one worth having: assert that the
+step's scenario count times its measured mean fits the cap, so the suite goes red when it outgrows
+its cap rather than truncating quietly.
+
 ## The fix this needs
 
 Halving is a delay, not a repair: the inbox grows and will pass the cap again. The repair is for a
