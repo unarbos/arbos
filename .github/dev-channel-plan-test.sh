@@ -42,10 +42,14 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+now_iso() { date -u -d "@$(( $(date +%s) - ${1:-0} ))" +%Y-%m-%dT%H:%M:%SZ; }
 case "$(awk -v s="$sha" '$1==s{print $2}' "$TABLE")" in
   success) json='{"workflow_runs":[{"status":"completed","conclusion":"success"}]}' ;;
   failed)  json='{"workflow_runs":[{"status":"completed","conclusion":"failure"}]}' ;;
-  pending) json='{"workflow_runs":[{"status":"in_progress","conclusion":null}]}' ;;
+  # Started moments ago: worth waiting for.
+  pending) json="{\"workflow_runs\":[{\"status\":\"in_progress\",\"conclusion\":null,\"run_started_at\":\"$(now_iso 30)\"}]}" ;;
+  # Started half an hour ago: past any patience.
+  stuck)   json="{\"workflow_runs\":[{\"status\":\"in_progress\",\"conclusion\":null,\"run_started_at\":\"$(now_iso 1800)\"}]}" ;;
   *)       json='{"workflow_runs":[]}' ;;
 esac
 printf '%s' "$json" | jq -r "$jqexpr"
@@ -119,7 +123,7 @@ check() {
   local out="$tmp/out"; : > "$out"
   local why
   why="$( cd "$repo" && \
-    PATH="$tmp/bin:$PATH" TABLE="$tmp/table" FEED="$feed" \
+    PATH="$tmp/bin:$PATH" TABLE="$tmp/table" FEED="$feed" PATIENCE=600 \
     EVENT_SHA="$EVENT_SHA" EVENT_CONCLUSION="$EVENT_CONCLUSION" \
     HAVE_KEY=true SCAN=40 TAG=dev GITHUB_REPOSITORY=o/r \
     GITHUB_OUTPUT="$out" GITHUB_STEP_SUMMARY=/dev/null \
@@ -200,6 +204,23 @@ MERGE="$(git -C "$repo" rev-parse HEAD)"
 check "a red merge falls back along main, not into the branch it merged" \
   "$MERGE" "$MERGE" 0 4 \
   "$MERGE" failed "$BRANCH_HEAD" success "${SHA[4]}" success
+
+# --- how long a newer commit may hold the channel ------------------------
+# Stepping aside for a commit about to supersede this one is thrift.
+# Stepping aside for one that is nowhere near done starves the channel: on
+# 2026-09-18 that left the feed eighty minutes and forty-two builds behind
+# `main`, with every single deferral correct.
+check "a newer commit that just started is still worth waiting for" \
+  "${SHA[4]}" "${SHA[3]}" 0 none \
+  "${SHA[4]}" pending "${SHA[3]}" success
+
+check "a newer commit that has run past the patience does not hold it" \
+  "${SHA[4]}" "${SHA[3]}" 0 3 \
+  "${SHA[4]}" stuck "${SHA[3]}" success
+
+check "one stuck commit does not hide a fresher one behind it" \
+  "${SHA[4]}" "${SHA[2]}" 0 none \
+  "${SHA[4]}" stuck "${SHA[3]}" pending "${SHA[2]}" success
 
 # --- the commit this run was started by -----------------------------------
 # A commit gets two CI runs. The first to finish fires the event; the API

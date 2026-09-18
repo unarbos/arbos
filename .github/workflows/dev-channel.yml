@@ -166,6 +166,21 @@ jobs:
       # commits; this is room for a bad afternoon without ever becoming an
       # unbounded walk through history.
       SCAN: "40"
+      # How long a newer commit still under test may hold the channel, in
+      # seconds.
+      #
+      # Stepping aside for a commit about to supersede this one saves a
+      # runner and an Apple notarisation. Stepping aside for one that is
+      # nowhere near finishing just starves the channel: on the morning of
+      # 2026-09-18 twelve merges an hour outran CI continuously, every run
+      # correctly deferred, and the feed sat eighty minutes and forty-two
+      # builds behind `main` with nothing wrong anywhere.
+      #
+      # So the deferral is now a short one. Past it the newest green commit
+      # goes out, and if the pending one turns green later it publishes
+      # then and supersedes — which costs a build, and is worth it against
+      # an update button that does not move.
+      PATIENCE: "600"
       # What started this run, taken from the event rather than asked of
       # the API again. See `ci_state`: re-asking about the triggering
       # commit is how a run ends up waiting on itself.
@@ -237,9 +252,26 @@ jobs:
             gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               -f head_sha="$1" -f per_page=20 --jq '
                 if   ([.workflow_runs[] | select(.conclusion == "success")] | length) > 0 then "success"
-                elif ([.workflow_runs[] | select(.status != "completed")]  | length) > 0 then "pending"
+                elif ([.workflow_runs[] | select(.status != "completed")]  | length) > 0 then
+                  # With the moment the oldest unfinished run started, so
+                  # the caller can tell a run about to finish from one that
+                  # has been going long enough to stop waiting for.
+                  "pending " + ([.workflow_runs[]
+                                 | select(.status != "completed")
+                                 | (.run_started_at // .created_at)] | sort | first)
                 elif (.workflow_runs | length) > 0 then "failed"
                 else "none" end' 2>/dev/null || echo "none"
+          }
+
+          # How long a run has been going, in seconds. Anything unreadable
+          # counts as long ago: a timestamp we cannot parse is not a reason
+          # to hold the channel.
+          pending_seconds() {
+            local started now
+            started="$(date -d "$1" +%s 2>/dev/null)" || return 0
+            [ -n "$started" ] || { echo 999999; return 0; }
+            now="$(date +%s)"
+            echo $(( now - started ))
           }
 
           # The same question, except that the commit this run was started
@@ -287,12 +319,21 @@ jobs:
             # merges and direct commits that `main` actually passed
             # through, which is the only sequence the channel publishes.
             for candidate in $(git rev-list --first-parent --max-count="$SCAN" "$tip"); do
-              case "$(ci_state "$candidate")" in
+              state="$(ci_state "$candidate")"
+              case "$state" in
                 success) choose="$candidate"; break ;;
-                # Older than this, but newer than any green we go on to
-                # find — so whatever we would have chosen, this one is
-                # still entitled to publish instead.
-                pending) newer_pending="${newer_pending:-$candidate}" ;;
+                # Newer than any green we go on to find, so it is still
+                # entitled to publish instead of that one — but only for
+                # as long as it looks like finishing soon. Past PATIENCE
+                # it stops being a reason to hold the channel: see below.
+                pending*)
+                  age="$(pending_seconds "${state#pending }")"
+                  if [ "${age:-999999}" -lt "$PATIENCE" ]; then
+                    newer_pending="${newer_pending:-$candidate}"
+                  else
+                    echo "::notice title=Not waiting::${candidate:0:7} has been running ${age}s, past the ${PATIENCE}s this waits. Publishing the newest green commit behind it."
+                  fi
+                  ;;
                 *) ;;
               esac
             done
