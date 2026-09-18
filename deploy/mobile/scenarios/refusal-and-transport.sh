@@ -184,6 +184,23 @@ fi
 
 # Each case gets the same treatment: open it, wait a fixed window, read what
 # the app says, and count how often it came back during that window.
+# What each case should do, and why. The closing paragraph used to say only
+# "a refusal should be counted once and left alone", which contradicts the
+# finding this file was written for: M-257 recorded 1, 3, 3, 3 and called
+# the rule held. Two of the three refusals *should* retry, because they name
+# a thing that comes back — an offline machine, a kernel not started. Only
+# an unknown machine is final. Writing that down here stops a reader judging
+# correct behaviour against a cruder rule than the app's.
+expected() {
+  case $1 in
+    no-machine)      echo "1 stops — the machine is not registered, and no waiting changes that";;
+    machine-offline) echo "3+ retries — the machine comes back when a kernel starts on it";;
+    no-kernel)       echo "3+ retries — the kernel comes back when someone starts it";;
+    bad-tunnel)      echo "3+ retries — nobody answered, so nothing has been decided";;
+  esac
+}
+WRONG=0
+
 probe() {
   local row=$1 name=$2 window=$3
   echo
@@ -209,6 +226,12 @@ print(n)
 PY
 )
   echo "  attach attempts in ${window}s: $hits"
+  echo "  expected:                    $(expected "$row")"
+  if [ "$row" = no-machine ]; then
+    [ "$hits" -le 1 ] || { echo "  WRONG: it kept trying an answer that will not change"; WRONG=$((WRONG + 1)); }
+  else
+    [ "$hits" -ge 2 ] || { echo "  WRONG: it gave up on something that comes back"; WRONG=$((WRONG + 1)); }
+  fi
   ui tap "Back" >/dev/null 2>&1 || ui back >/dev/null 2>&1 || true
   sleep 2
 }
@@ -226,8 +249,11 @@ echo
 if [ "$MISSED" -gt 0 ]; then
   echo "VERDICT: none — $MISSED of 4 cases never opened, so this run says nothing"
   echo "         about how the phone handles a refusal or a transport failure"
+elif [ "$WRONG" = 0 ]; then
+  echo "VERDICT: final where nothing can change, patient where it can —"
+  echo "         an unknown machine is asked once; an offline machine, a"
+  echo "         missing kernel and a dead tunnel are all waited out"
 else
-  echo "A refusal should be counted once and left alone; the 502 should be"
-  echo "counted several times. Any other shape is the pair handled backwards."
+  echo "VERDICT: $WRONG of 4 handled the wrong way round — see WRONG above"
 fi
 echo "still in $OUT"
