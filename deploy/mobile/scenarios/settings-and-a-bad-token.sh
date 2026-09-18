@@ -98,6 +98,14 @@ echo "  and under it: $(ui dump | grep -i 'TestFlight build' | head -1 | sed 's/
 # which is the loop's most argued-about fact all day. Its absence must fail
 # rather than print "MISSING" into a passing run.
 [ -n "$BUILDLINE" ] || { echo "  FAULT: no build line at the foot of the sheet"; SHEET_CHANGED=$((${SHEET_CHANGED:-0} + 1)); }
+# On the simulator that line reads `(1)` — the locally built number — under
+# the words "The TestFlight build on this phone". True on a phone, and a
+# trap here: this line can never answer which TestFlight build Jacob has,
+# which is the fact the loop spends most of its messages on.
+case "$BUILDLINE" in
+  *"(1)"*) echo "  (that is the local build: on the simulator this line cannot say"
+           echo "   which TestFlight build anyone has — only a real install can)";;
+esac
 
 echo
 echo "== save a hub token that cannot work =="
