@@ -74,7 +74,7 @@ type_send() {
     for _ in $(seq 1 40); do [ "$(ui field plain 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
     got=$(ui field plain 2>/dev/null)
     if [ "$got" = "$want" ]; then
-      ui tap "Up" >/dev/null 2>&1 || idb ui key 40 --udid $U >/dev/null 2>&1
+      ui tap "Send" >/dev/null 2>&1 || idb ui key 40 --udid $U >/dev/null 2>&1
       return 0
     fi
     echo "type_send: the box held ${#got} of ${#want} characters; clearing and retrying" | tee -a $O/run.txt
@@ -211,7 +211,7 @@ sleep 3; shot P1-dictated
 heard=$(ui field plain 2>/dev/null)
 if [ -z "$heard" ]; then score P1 FAIL "dictation put nothing in the composer"; else
   echo "P1 heard: $heard" | tee -a $O/run.txt
-  ui tap "Up" || score P1 FAIL "dictated words in the box but no send button: $(ui dump | awk '$2 > 740 && $2 < 830')"
+  ui tap "Send" || score P1 FAIL "dictated words in the box but no send button: $(ui dump | awk '$2 > 740 && $2 < 830')"
 fi
 # Matched on the words the recogniser does not get to choose. The clip says
 # "summarise" and iOS hears "summaries"; the check wanted "summarize", so P1
@@ -275,7 +275,7 @@ sleep 3
 idb ui tap 196 420 --udid $U          # the orb: the call waits for a tap on it
 sleep 6; shot P3-call; sleep 16; shot P3-call-answered
 wait_hist P3 "user +.*(working on|Arbus|Arbos)" 40
-ui tap "Close" >/dev/null 2>&1 || idb ui tap 42 85 --udid $U
+ui tap "End call" >/dev/null 2>&1 || idb ui tap 42 85 --udid $U
 sleep 2; grep -E "^metric" $O/console.log | tail -4 | tee $O/call-metrics.txt
 if [ -n "${PREC:-}" ]; then kill -INT $PREC 2>/dev/null; sleep 2; ffmpeg -v error -y -i "$O/p-raw.mp4" -vf "scale=786:-2,fps=30" -c:v libx264 -crf 24 -preset veryfast -pix_fmt yuv420p -an "$O/recording-photo-and-call.mp4" && rm -f "$O/p-raw.mp4"; fi
 # PUSH — the hub's own report (#333): enabled or why not; a test alert when the key exists

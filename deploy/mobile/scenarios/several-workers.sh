@@ -40,7 +40,7 @@ ui focus >/dev/null || { echo "no composer"; exit 1; }
 sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 80); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
-ui tap "Up" >/dev/null || { echo "no send button"; exit 1; }
+ui tap "Send" >/dev/null || { echo "no send button"; exit 1; }
 
 echo "watching the pill for two minutes"
 HIGH=0
@@ -79,7 +79,7 @@ ui dump | grep -E ', (Done|Working)$' | head -8 | sed 's/^/    /'
 
 echo
 echo "== back and reopen =="
-ui tap "Close" >/dev/null 2>&1 || idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID"
+ui tap "End call" >/dev/null 2>&1 || idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID"
 sleep 2
 ui tap "Back" >/dev/null 2>&1; sleep 2
 ui tap "$ROW" >/dev/null; sleep 4

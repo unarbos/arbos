@@ -36,7 +36,7 @@ for _ in $(seq 1 80); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break;
 [ "$(ui field plain 2>/dev/null)" = "$LINE" ] || { echo "the line never landed in the box"; exit 1; }
 
 T0=$(now)
-ui tap "Up" >/dev/null || { echo "no send button"; exit 1; }
+ui tap "Send" >/dev/null || { echo "no send button"; exit 1; }
 
 # 1. the card: the line must appear as the user's own, at once
 CARD=""
