@@ -48,7 +48,7 @@ LINE="What is in the photo I just attached? Name the subject and its colour in o
 ui focus >/dev/null; sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 80); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
-ui tap "Up" >/dev/null || { echo "no send button"; exit 1; }
+ui tap "Send" >/dev/null || { echo "no send button"; exit 1; }
 echo "sent; waiting for the reply"
 for _ in $(seq 1 24); do
   sleep 5

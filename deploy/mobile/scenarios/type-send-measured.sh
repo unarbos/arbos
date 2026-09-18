@@ -50,7 +50,7 @@ new_send() {
     for _ in $(seq 1 40); do [ "$(ui field plain 2>/dev/null)" = "$want" ] && break; sleep 0.25; done
     got=$(ui field plain 2>/dev/null)
     if [ "$got" = "$want" ]; then
-      ui tap "Up" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID" >/dev/null 2>&1
+      ui tap "Send" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID" >/dev/null 2>&1
       return 0
     fi
     echo "    the box held ${#got} of ${#want} characters; clearing and retrying"

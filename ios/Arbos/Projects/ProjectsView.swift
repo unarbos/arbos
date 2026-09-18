@@ -465,6 +465,9 @@ struct ComposerBar: View {
                             .padding(.bottom, 1)
                     }
                     .buttonStyle(.plain)
+                    // Read aloud this was "Up", the arrow's own name. The
+                    // button sends.
+                    .accessibilityLabel("Send")
                 } else if busy, let onStop {
                     // The kernel's stall line says "Stop ends the turn"; the
                     // phone had no Stop (M-130). As Cursor's: the send disc
@@ -490,6 +493,10 @@ struct ComposerBar: View {
                             .padding(.bottom, 1)
                     }
                     .buttonStyle(.plain)
+                    // "Microphone" is what SwiftUI happened to read out;
+                    // saying it deliberately makes it a name rather than a
+                    // rendering of the symbol that scripts have leant on.
+                    .accessibilityLabel("Microphone")
                     .disabled(!micEnabled)
                 }
             }

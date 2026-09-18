@@ -69,7 +69,7 @@ ui focus >/dev/null; sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 80); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
 [ "$(ui field plain 2>/dev/null)" = "$LINE" ] || { echo "the line never landed in the box"; exit 1; }
-ui tap "Up" >/dev/null || { echo "no send button"; exit 1; }
+ui tap "Send" >/dev/null || { echo "no send button"; exit 1; }
 echo "$(date -u +%H:%M:%S) sent"
 
 for t in $(seq 1 25); do

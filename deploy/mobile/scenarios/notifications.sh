@@ -42,7 +42,7 @@ ui focus >/dev/null || { say "no composer"; exit 1; }
 sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 40); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
-ui tap "Up" || { say "no send button"; exit 1; }
+ui tap "Send" || { say "no send button"; exit 1; }
 sleep 3
 shot 01-sent
 

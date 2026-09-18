@@ -42,7 +42,7 @@ sleep 30; shot 02-call-delegated-answer
 # first two attempts at this still were lost.
 idb ui swipe 196 300 196 700 --duration 0.4 --udid "$UDID"; sleep 1.5
 shot 03-call-pulled-down
-ui tap "Close" || { echo "no close control — the pull did not take"; exit 1; }
+ui tap "End call" || { echo "no close control — the pull did not take"; exit 1; }
 sleep 2.5; shot 04-project-list
 ui tap "${PROJECT:-phone}, Idle" || { echo "project row not on screen"; exit 1; }
 sleep 3; shot 05-chat-tail

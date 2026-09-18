@@ -54,7 +54,7 @@ ui focus >/dev/null 2>&1 || { echo "  no composer on the pulled-down call"; }
 sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
 for _ in $(seq 1 60); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
-ui tap "Up" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID"
+ui tap "Send" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID"
 sleep 12; shot 03-typed-and-answered
 echo "  did it reach the kernel: $(hist | awk -v a="${BEFORE:-0}" '$1+0 > a+0' | grep -c "typed on the call")"
 hist | awk -v a="${BEFORE:-0}" '$1+0 > a+0' | tail -2 | cut -c1-140 | sed 's/^/    /'
@@ -63,7 +63,7 @@ echo
 echo "== mute, then close =="
 ui tap "Microphone" >/dev/null 2>&1 && echo "  muted" || echo "  no mic button to mute"
 sleep 1; shot 04-muted
-ui tap "Close" >/dev/null || { echo "  no close button"; exit 1; }
+ui tap "End call" >/dev/null || { echo "  no close button"; exit 1; }
 sleep 4; shot 05-after-close
 echo "  close landed on: $(where)"
 echo "stills in $OUT"

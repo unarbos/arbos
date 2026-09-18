@@ -51,7 +51,7 @@ echo "  kernel transcript, unsent:     $DURING"
 [ "$DURING" = "$BEFORE" ] && echo "  nothing reached the kernel while it waited" \
                           || echo "  SOMETHING REACHED THE KERNEL BEFORE HE SENT"
 
-ui tap "Up" >/dev/null || { echo "  no send button"; exit 1; }
+ui tap "Send" >/dev/null || { echo "  no send button"; exit 1; }
 sleep 12
 AFTER=$(total)
 echo "  kernel transcript after send:  $AFTER"
