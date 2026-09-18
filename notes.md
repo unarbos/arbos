@@ -21,7 +21,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 <tldr>
 - [Clean desktop chrome clutter](bc-1c45e4f0-9522-56f6-a7b6-f8a1aa864105) — [Jacob's chrome](https://github.com/unarbos/arbos/pull/688) on `main` (`27c77664`)
 - [Fix Jev folder-list face](bc-c1b06b11-d50d-5287-93cd-bffca4a7becc) — [quiet Jev hop](https://github.com/unarbos/arbos/pull/690) on `main` (`c873ca04`)
-- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2126** on the feed; #697 harness only on top of 2121
+- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2128** on the feed; #698 harness only on top of 2126
 - [Speed terminal and browser](bc-fddc4e9f-b8ac-5d93-a0fa-0cb3ec84a180) — [prompt opens](https://github.com/unarbos/arbos/pull/692) in Mac **2117**
 </tldr>
 
@@ -104,9 +104,9 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2126** (`b82e219`); builds 2122–2126 carry [reach-the-list harness](https://github.com/unarbos/arbos/pull/697)
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2128** (`bb741cd`); builds 2127–2128 carry [chat-opens-at-end](https://github.com/unarbos/arbos/pull/698)
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — Mac **2126**; TestFlight **2117**; hold draft [keyless after handshake](https://github.com/unarbos/arbos/pull/696); hold [#640](https://github.com/unarbos/arbos/pull/640) [#661](https://github.com/unarbos/arbos/pull/661) [#663](https://github.com/unarbos/arbos/pull/663) [#666](https://github.com/unarbos/arbos/pull/666) [#676](https://github.com/unarbos/arbos/pull/676); leave [#650](https://github.com/unarbos/arbos/pull/650) [#652](https://github.com/unarbos/arbos/pull/652) [#653](https://github.com/unarbos/arbos/pull/653) [#655](https://github.com/unarbos/arbos/pull/655) [#660](https://github.com/unarbos/arbos/pull/660) [#684](https://github.com/unarbos/arbos/pull/684); `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — Mac **2128**; TestFlight **2117**; hold draft [keyless after handshake](https://github.com/unarbos/arbos/pull/696); hold [#640](https://github.com/unarbos/arbos/pull/640) [#661](https://github.com/unarbos/arbos/pull/661) [#663](https://github.com/unarbos/arbos/pull/663) [#666](https://github.com/unarbos/arbos/pull/666) [#676](https://github.com/unarbos/arbos/pull/676); leave [#650](https://github.com/unarbos/arbos/pull/650) [#652](https://github.com/unarbos/arbos/pull/652) [#653](https://github.com/unarbos/arbos/pull/653) [#655](https://github.com/unarbos/arbos/pull/655) [#660](https://github.com/unarbos/arbos/pull/660) [#684](https://github.com/unarbos/arbos/pull/684); `v0.2.0` stays a draft
 - [x] [list sections](https://github.com/unarbos/arbos/pull/699) — on `main` (`fc3f59a4`)
 - [x] [chat-opens-at-end](https://github.com/unarbos/arbos/pull/698) — on `main` (`bb741cd0`)
 - [x] [reach-the-list harness](https://github.com/unarbos/arbos/pull/697) — on `main` (`b82e2194`)
