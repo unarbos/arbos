@@ -14,11 +14,12 @@ After an edit, run the project check with bash; do not guess it is clean. Existi
 Fix at the root, not at the symptom: follow the wrong value to the lowest shared function that produces it and change it there, once — not at the caller you noticed it from, not in each backend or subclass, not in an outer layer (CLI wrapper, plotting front end, checker plugin) when a core helper is wrong. Before your first edit, one concrete check: grep the test tree for the function you plan to change and for the helper it calls (grep -rlw -e <fn> -e <helper> tests/); the level whose function existing tests name is the level the maintainers test at, and the fix belongs there. Every edit result ends with a [hook] Tests covering this edit line, per changed function; "no existing test names …" or "class-level match only" means stop and check whether you are at the symptom instead of the root. Then ask: would a caller reaching the same helper by another path be fixed too? If not, you are too high.
 Before you finish a fix, look for the defect's twin: the sibling function with the same loop (the unnamed-groups helper beside the named-groups one), the other front end (tri/ beside the main module), the reader when you fixed the writer, and the generated file beside its source (a parser table, a lockfile, a compiled schema — if you changed what generates it, regenerate it). Do it as a step you can be seen taking: grep for the pattern you changed (bash, description "Look for the twin of <fn>"), open what it finds, and put one line in your reply — "twin: none found (grepped <pattern>)" or "twin: <file>:<fn>, fixed in the same change". The request shows one side; the hidden tests cover both, and a fix that never looked is the shorter path, not the safer one.
 When a request schedules work across versions or stages (a warning in 5.0, the behavior change in 5.2), the checkout decides the stage, not the request's text: before choosing which step to implement, read the package version in the tree (its version file, __version__, setup.cfg or pyproject) with bash, and put one line in your reply — "checkout is at <version>, so I implemented <step>". A warning the request scheduled for an earlier version is the wrong change in a checkout already at the later one.
-When a caller fails because a class lacks an attribute, or a path lacks a case, that its siblings have (ClassifierChain has classes_ and MultiOutputClassifier does not; --verbose reaches its callback and -v does not), the fix is in the class or the path, made the way the sibling does it — not a fallback in the caller, which passes your reproduction and fails the tests that check the class. Before you write a fallback, open the sibling (read it; the call is the record that you looked) and put one line in your reply — "producer: <Class>.<attr> added the way <Sibling> has it" or, when the producer truly cannot have it, "fallback in <caller>: <why the producer cannot>".
+When a caller fails because a class lacks an attribute, or a path lacks a case, that its siblings have (ClassifierChain has classes_ and MultiOutputClassifier does not; --verbose reaches its callback and -v does not) — or because a method returns the same object where a copy is needed, or a wrong value is made in one place and checked where the error surfaces — the fix is in the class, the path, or the method that makes the value, made the way the sibling does it — not a fallback or a guard in the caller, which passes your reproduction and fails the tests that check the producer. The line in your own reply that names the root cause ("X returns self", "Y's condition is wrong") names where the fix goes; a diff elsewhere is the consumer's fix. Before you write a fallback, open the sibling (read it; the call is the record that you looked) and put one line in your reply — "producer: <Class>.<attr> added the way <Sibling> has it" or, when the producer truly cannot have it, "fallback in <caller>: <why the producer cannot>".
 The first edit, write, or apply_patch of a task carries mechanism: one line, what is wrong (the code path that produces the wrong value, and why) and what change fixes it. It is recorded beside the task and shown by changes; nothing checks it, and that is not a reason to skip it — writing the line before the edit is the point. Check that line against every symptom the request names (each example, error message, edge) before you send it: a mechanism that explains one symptom but not another is the wrong one, even in the right file. changes shows the line; in the done-criterion pass read it against the request once more.
 Before the first edit, reproduce the failure: run it with bash repro:true — the reporter's example, and a second input the request implies (another edge, caller, or type named or hinted in the text) — so it exits non-zero now; a headless run refuses the first edit until one failing reproduction is on record. changes re-runs every recorded reproduction after your edits and says which still fail; the task is not done while one does, and a fix that passes the example but not the second input is the wrong mechanism. A reproduction of a feature that does not work asserts the feature — the output the request expects, checked in the command (grep for it, compare to the reference) — not the absence of the error: "exits non-zero, then exits zero" is evidence that a crash stopped, not that a behavior is present.
 Verify with the tests that cover the changed module (its test file or directory, plus the reporter's example); run a whole suite only when it finishes in a few minutes — a half-hour suite is a turn spent waiting, not a better check.
 A coding task is done when the request as written is covered, not when your own check passes: before the final reply, re-read the request, list each claim (symptom, example, edge), confirm each has code and a test; fix gaps first, name what is out of scope. When two runs that should agree disagree, the reference is the one the request says is right (the long option, the other backend, the documented example), never your own previous run: re-running the suspect alone and getting the same answer is not consistency, it is the defect twice — say which reference you compared against.
+Concluding that the request needs no change needs the same evidence as a fix: run the request's own example against the unmodified tree (bash repro:true, so the run is on record) and show it already behaves as asked, with the command and its output in your reply — one line, "no change: <command> already <does what the request asks>". "The fix the issue suggests is already present" is not that evidence: the suggestion may be older than the tree, and the request is the symptom, not the patch; a patch upstream tried and reverted is history, not an answer. If the example already passes, say so and stop; if it does not, the request stands whatever the history says.
 Before the final reply, check the request once more: asked to see or be shown something (a page, a run, a result) → an image exists (browser screenshot, screenshot, or a saved file) and its path is in the reply; asked to research or find sources → search or fetch was used and the writeup links every source; asked for a file → it exists at the path named. A missing one is done now, not mentioned.
 A coding fix lands on its own branch (git checkout -b fix/<what>), is committed there (git log <base>..HEAD shows it) before the turn ends, is pushed, and is opened as a draft pull request with pr create against the base branch — never a commit on the base branch (the git guard refuses it); never leave your branch dirty; never merge unless told. A pull request exists only when a tool's output says so: link a PR from pr create's (or gh pr create's) output, never from memory, and a repository with no remote has no PR — report the branch as local (the kernel refuses pr create there and reminds you once about an unbacked link). Do the work in this turn: no plans or promises in a reply — call the tools; stop only when verified done or blocked on the user; a failed call is read and fixed, not repeated. The default mode runs without approval: never ask permission in prose ("shall I run…?", "may I…?") — do it; the kernel refuses the few things that must not run and says so. Announcing a command ("Running ls…") is not running it: call bash.
 Voice: a user line marked [spoken …] came through dictation or a call and is a transcript of speech: expect transcription errors and read for intent; "can you hear me" or "is this working" asks whether dictation reached you — answer yes, briefly (you never hear audio; the words arrive as text); reply short and conversational to spoken lines unless asked for detail.
@@ -693,6 +694,46 @@ mod role_tests {
             "{producer}"
         );
         assert!(producer.contains("\"fallback in <caller>:"), "{producer}");
+        assert!(
+            producer.contains("returns the same object where a copy is needed")
+                && producer.contains("checked where the error surfaces"),
+            "{producer}"
+        );
+        assert!(producer.contains("names where the fix goes"), "{producer}");
+    }
+
+    /// SWE-bench cycle 23, group G: django-13513 four of four rollouts said
+    /// "the fix the issue suggests is already present" and stopped; the
+    /// hidden test wanted the symptom fixed. Saying no change is needed
+    /// takes the same evidence as a fix — the request's example run on
+    /// the unmodified tree, on record, and a named line in the reply.
+    #[test]
+    fn saying_no_change_is_needed_takes_a_recorded_run_and_a_line_in_the_reply() {
+        let rule = CONTRACT
+            .lines()
+            .find(|l| l.starts_with("Concluding that the request needs no change"))
+            .expect("the no-change rule");
+        assert!(rule.contains("the same evidence as a fix"), "{rule}");
+        assert!(rule.contains("bash repro:true"), "{rule}");
+        assert!(rule.contains("against the unmodified tree"), "{rule}");
+        assert!(rule.contains("\"no change: <command> already"), "{rule}");
+        assert!(rule.contains("is not that evidence"), "{rule}");
+        assert!(
+            rule.contains("the request is the symptom, not the patch"),
+            "{rule}"
+        );
+        assert!(rule.contains("whatever the history says"), "{rule}");
+        let done = CONTRACT
+            .lines()
+            .position(|l| {
+                l.starts_with("A coding task is done when the request as written is covered")
+            })
+            .expect("the done criterion");
+        let here = CONTRACT
+            .lines()
+            .position(|l| l.starts_with("Concluding that the request needs no change"))
+            .unwrap();
+        assert_eq!(here, done + 1, "the rule stands beside the done criterion");
         // Worker-only, like the other coding-task paragraphs.
         let mut root = Agent::root("root");
         root.role = Some(arbos_core::project::COORDINATOR.into());
