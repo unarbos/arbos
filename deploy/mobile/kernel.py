@@ -99,8 +99,17 @@ elif cmd == "total":
     # nothing for that worker" without reading either off the screen.
     agent = sys.argv[3] if len(sys.argv) > 3 else "main"
     ws.send(json.dumps({"type": "history", "agent": agent, "since": 0, "limit": 1}))
+    # The agent must match. Attaching starts the root's own replay, so its
+    # `history_end` usually arrives first, and taking whichever came first
+    # printed the root's count under a worker's name — the same number for
+    # every worker asked about. Cycle 46's "8 of 8 workers answer total: 0"
+    # was read this way and has to be taken again (M-224).
+    # `main` and `root` are the same agent: the request aliases one to the
+    # other and the answer comes back under `root`. Filtering on the name as
+    # asked reported 0 for the root, which is the opposite mistake.
+    want = {agent, "root"} if agent == "main" else {agent}
     for f in frames(25):
-        if f.get("type") == "history_end":
+        if f.get("type") == "history_end" and f.get("agent", agent) in want:
             print(f.get("total", 0)); break
     else:
         print("-1"); sys.exit(3)
