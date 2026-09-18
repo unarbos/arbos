@@ -1574,13 +1574,25 @@ fn handle_frame(
                 return;
             }
             // A steer is an inbox file of kind `steer`: the running turn
-            // takes it at its next tool boundary; if the turn ends first,
-            // the file starts the next turn. Nothing lives in memory.
-            if steer && sched.has_job(&agent) {
+            // takes it at its next tool boundary. It also wakes, so when
+            // the turn ends first — or none was running: it ended a moment
+            // ago, or a worker's report is about to start one — the file
+            // starts the next turn itself, and a turn started by anything
+            // else reads it at its first step in order with the steers
+            // that follow. Nothing lives in memory. Filed as a plain
+            // follow-up when the agent happened to be idle, it waited for
+            // its own turn while later steers were read first (QA's
+            // steer-storm: 17–22 typed in the gap after a turn, 23–24
+            // during the done turn, recorded 23 24 17 … 22). The person's
+            // words are read in the order they were said.
+            if steer {
                 let mut msg = inbox::Message::new("user", "steer", text.clone());
                 msg.attachments = attachments.clone();
                 msg.channel = channel.clone();
                 msg.device = device.clone();
+                msg.wake = true;
+                msg.hops = inbox::DEFAULT_HOPS;
+                msg.model = model.trim().to_string();
                 match inbox::deliver(place, &agent, &msg) {
                     Ok(_) => hooks.broadcast(hooks.plan_frame(&agent)),
                     Err(e) => refuse(hooks, Some(&agent), format!("steer: {e:#}")),
