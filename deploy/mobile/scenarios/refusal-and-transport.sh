@@ -14,9 +14,12 @@
 # itself.
 #
 # The live hub cannot produce either on demand, so the app is pointed at a
-# small fixture that produces all three shapes the hub really sends: the
-# commonest refusal (#417's "not registered"), the newer one M-164 named
-# ("has no kernel serving"), and a 502 at the tunnel.
+# small fixture. Its refusals are copied verbatim from `Hub::kernel` in
+# `crates/arbos-hub/src/hub.rs` — all three of them, plus a 502 at the
+# tunnel. Verbatim matters more than it sounds: the app recognises these by
+# shape, and a paraphrased fixture tests the paraphrase. A first draft of
+# this file put the project before the machine and produced a confident
+# report of an app bug that did not exist.
 #
 # What is counted, rather than looked at: how many times the app comes back
 # to each path. Retrying and stopping are claims about behaviour over time,
@@ -41,16 +44,22 @@ GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 NOW = int(time.time() * 1000)
 
 ROSTER = {"machines": [{"name": "fixture-box", "online": True, "projects": [
-    {"name": "not-registered", "live": True, "kind": "", "last_activity_ms": NOW - 60_000},
+    {"name": "no-machine", "live": True, "kind": "", "last_activity_ms": NOW - 60_000},
+    {"name": "machine-offline", "live": True, "kind": "", "last_activity_ms": NOW - 60_000},
     {"name": "no-kernel", "live": True, "kind": "", "last_activity_ms": NOW - 60_000},
     {"name": "bad-tunnel", "live": True, "kind": "", "last_activity_ms": NOW - 60_000},
 ]}]}
 
-# The two refusals are the hub's own wording, so the app is read against what
-# it will really be sent rather than against a paraphrase of it.
+# Verbatim from `Hub::kernel`, trailing detail and all, because the trailing
+# detail is part of what a person is shown when the app does not recognise
+# the shape.
 REFUSALS = {
-    "not-registered": 'machine "fixture-box" is not registered',
-    "no-kernel": 'project "no-kernel" has no kernel serving',
+    "no-machine": 'no machine named "ghost-box" is registered (known: fixture-box)',
+    "machine-offline": 'fixture-box is offline: nothing of it has been connected since '
+                       '2026-09-18T02:14:03Z; it served "machine-offline" — start a kernel '
+                       'there and it comes back',
+    "no-kernel": 'fixture-box has no kernel serving "no-kernel" (live: alpha); it has a '
+                 'worker, so a claim can start one',
 }
 
 log_lock = threading.Lock()
@@ -185,9 +194,10 @@ PY
   sleep 2
 }
 
-probe not-registered 02-a-refusal-with-a-reason 25
-probe no-kernel 03-has-no-kernel-serving 25
-probe bad-tunnel 04-a-transport-failure 25
+probe no-machine 02-no-machine-of-that-name 25
+probe machine-offline 03-the-machine-is-offline 25
+probe no-kernel 04-has-no-kernel-serving 25
+probe bad-tunnel 05-a-transport-failure 25
 
 echo
 echo "--- the whole attach log ---"
