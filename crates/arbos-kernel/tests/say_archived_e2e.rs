@@ -38,7 +38,12 @@ fn a_say_to_an_archived_worker_says_it_finished_and_where_its_report_is() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"design-draft\",\"task\":\"draft the design\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
-        "{\"content\":\"the design is drafted\"}\n",
+        // The worker's report lands after root's dispatch turn has closed,
+        // so it opens the done turn the script assumes. An instant report
+        // folds into the running turn as a say and there is no second
+        // turn_complete to wait for (red on main at 8196ed6e; the fold-race
+        // family — #585, #606).
+        "{\"content\":\"the design is drafted\",\"delay_ms\":2500}\n",
         // Root's done turn: the user's constraint arrives after the worker
         // is gone; root steers it anyway, then tries a name nobody has.
         "{\"agent\":\"root\",\"content\":\"steering\",\"calls\":[{\"name\":\"say\",\"arguments\":{\"to\":\"design-draft\",\"mode\":\"steer\",\"text\":\"also cover remote attach\"}},{\"name\":\"say\",\"arguments\":{\"to\":\"nobody-here\",\"text\":\"hello\"}}]}\n",
