@@ -158,7 +158,7 @@ fn write_plans(plans: Vec<Plan>, body: &mut String, paths: &mut Vec<String>) -> 
                 paths.push(path.display().to_string());
             }
             Plan::Replace(path, contents) => {
-                std::fs::write(&path, contents)?;
+                arbos_core::record::replace_file(&path, contents.as_bytes())?;
                 body.push_str(&format!("updated {}\n", path.display()));
                 paths.push(path.display().to_string());
             }

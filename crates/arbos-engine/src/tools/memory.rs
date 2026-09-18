@@ -306,7 +306,7 @@ fn write_entry(kind: Kind, path: &Path, text: &str) -> Result<ToolOut> {
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    std::fs::write(path, &body)?;
+    arbos_core::record::replace_file(path, body.as_bytes())?;
     #[cfg(unix)]
     if kind == Kind::Script {
         use std::os::unix::fs::PermissionsExt;
