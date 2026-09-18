@@ -61,31 +61,37 @@ echo "  back landed on: $(where)"
 
 echo
 echo "== in by the worker's own line =="
-# A finished worker leaves a `Done <goal>` line in the transcript; tapping
-# it should reach the same chat. This is the half never driven.
-# The line the kernel leaves reads `<worker> · Turn ended. Last words: …`,
-# and it is *older* than the tail, so the search has to walk backwards —
-# `page_up` goes towards the newest line and would never reach it.
-find_line() { ui dump | grep -E "Turn ended|, Done$" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'; }
-LINE=$(find_line)
-for _ in 1 2 3 4 5 6; do
-  [ -n "$LINE" ] && break
-  page_back "$UDID" >/dev/null 2>&1
-  sleep 1
-  LINE=$(find_line)
-done
-if [ -z "$LINE" ]; then
-  echo "  VERDICT: no Done line to tap, so this half is untested again"
-else
-  echo "  the line: $LINE"
-  ui tap "$LINE" >/dev/null 2>&1
+# Only a *running* worker has a line that is a control: `workerLines` in
+# MainChatView draws a Button per running worker and nothing for the rest.
+# A finished worker leaves `<name> · Turn ended. Last words: …` in the
+# transcript, which is kernel text and not a tap target — by design, not by
+# omission. A first version of this tapped that text, stayed where it was,
+# and was one line away from reporting an app fault.
+NAP=$(( 90 + RANDOM % 20 ))
+ui focus >/dev/null 2>&1
+idb ui text "Through one worker: run the bash command sleep $NAP and nothing else, then reply done." --udid "$UDID"
+sleep 2
+ui tap "Send" >/dev/null 2>&1 || ui tap "Up" >/dev/null 2>&1
+echo "  started a worker that sleeps ${NAP}s; waiting for its line"
+RUNNING=""
+for _ in $(seq 1 20); do
   sleep 4
-  shot 04-worker-chat-from-its-line
+  RUNNING=$(ui dump | grep -E "Button +[0-9]+ Working" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  [ -n "$RUNNING" ] && break
+done
+if [ -z "$RUNNING" ]; then
+  echo "  VERDICT: no running-worker line appeared, so this half is untested again"
+else
+  echo "  the line: $RUNNING"
+  shot 04-the-running-line
+  ui tap "$RUNNING" >/dev/null 2>&1
+  sleep 4
+  shot 05-worker-chat-from-its-line
   WHERE=$(where)
   echo "  landed on: $WHERE"
   case "$WHERE" in
-    worker-chat*) echo "  VERDICT: the line opens the worker's chat, as the sheet does";;
-    *)            echo "  VERDICT: tapping the line did not open a worker's chat — it left us on $WHERE";;
+    worker-chat*) echo "  VERDICT: a running worker's line opens its chat, as the sheet does";;
+    *)            echo "  VERDICT: tapping the running line did not open a worker's chat — it left us on $WHERE";;
   esac
 fi
 echo
