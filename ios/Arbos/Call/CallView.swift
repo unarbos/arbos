@@ -51,6 +51,17 @@ struct CallView: View {
                 VoiceOrb(level: model.level, phase: model.phase)
                     .frame(width: 200, height: 200)
                     .onTapGesture(perform: tapOrb)
+                    // The screen stays wordless on purpose, and the orb's
+                    // colour carries the state. Colour carries it to one kind
+                    // of person only: read aloud, this screen said nothing at
+                    // all about whether it was listening, thinking or
+                    // speaking. The phase goes to VoiceOver, where it costs
+                    // the design nothing.
+                    .accessibilityElement()
+                    .accessibilityLabel("Call")
+                    .accessibilityValue(model.phase.label)
+                    .accessibilityHint(model.phase == .idle ? "Tap to call" : "")
+                    .accessibilityAddTraits(.isButton)
                 // Who is on the line: the gateway's own word once the call
                 // is up (`session.ready.project`), the chat's face before.
                 // With the keyboard up the transcript line rises into this
