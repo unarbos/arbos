@@ -78,6 +78,26 @@ jobs:
         working-directory: desktop
         run: cargo check --locked --all-targets
 
+  publishing:
+    # What the dev channel decides to publish is the one piece of CI that
+    # Jacob feels directly: it is the build behind the Update button. Its
+    # decision has been wrong twice — once holding a green build for a
+    # commit that went red and never published, once deferring for eighty
+    # minutes while `main` outran CI — and both times the logic was a
+    # shell step nothing ran but the channel itself.
+    #
+    # The test extracts that step from the workflow and decides real
+    # cases against a throwaway repository, so it is quick and reaches
+    # nothing. It belongs here rather than in a habit of running it.
+    name: publishing (what the dev channel would publish)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The dev channel's plan step
+        run: |
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+          bash .github/dev-channel-plan-test.sh
+
   ios-changed:
     # Decides whether the iPhone job below runs. Only `ios/` counts, so the
     # Rust PRs never wait on an Xcode runner.

@@ -166,8 +166,8 @@ jobs:
       # commits; this is room for a bad afternoon without ever becoming an
       # unbounded walk through history.
       SCAN: "40"
-      # How long a newer commit still under test may hold the channel, in
-      # seconds.
+      # How long a green build may sit unpublished while a newer commit is
+      # still under test, in seconds.
       #
       # Stepping aside for a commit about to supersede this one saves a
       # runner and an Apple notarisation. Stepping aside for one that is
@@ -176,10 +176,21 @@ jobs:
       # correctly deferred, and the feed sat eighty minutes and forty-two
       # builds behind `main` with nothing wrong anywhere.
       #
-      # So the deferral is now a short one. Past it the newest green commit
-      # goes out, and if the pending one turns green later it publishes
-      # then and supersedes — which costs a build, and is worth it against
-      # an update button that does not move.
+      # So the deferral is bounded. Past this, the newest green commit goes
+      # out, and if the pending one turns green later it publishes then and
+      # supersedes — which costs a build, and is worth it against an update
+      # button that does not move.
+      #
+      # The clock runs on the *green* build, not on the pending one, and
+      # that distinction is the whole of it. A clock on the pending commit
+      # is reset by every merge: while `main` moves faster than CI, the
+      # newest commit under test is always a young one, always worth
+      # waiting for, and the deferral chain never ends — which is exactly
+      # what happened for the eighty minutes above, and went on happening
+      # after the first attempt at this cap. A clock on the green build
+      # asks a question no new merge can reset: has something publishable
+      # been waiting here longer than this? Once the answer is yes the
+      # channel moves, whatever is still running ahead of it.
       PATIENCE: "600"
       # What started this run, taken from the event rather than asked of
       # the API again. See `ci_state`: re-asking about the triggering
@@ -232,6 +243,14 @@ jobs:
           # newest publishable commit and this run publishes it, whichever
           # commit happened to trigger the run.
           #
+          # And stepping aside is not for ever. The walk carries on past
+          # the newest green to the greens behind it, all the way down to
+          # the build the channel already has. Those are builds that could
+          # have gone out and did not, and the oldest of them says how
+          # long this channel has been standing still. Past PATIENCE it
+          # stops standing still and publishes, with the pending run left
+          # to supersede it later.
+          #
           # Nothing has been built, signed, submitted or uploaded at this
           # point, so a run that decides to do nothing leaves nothing
           # half-done. That is why the decision is here and not in a
@@ -251,7 +270,13 @@ jobs:
           api_state() {
             gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
               -f head_sha="$1" -f per_page=20 --jq '
-                if   ([.workflow_runs[] | select(.conclusion == "success")] | length) > 0 then "success"
+                if   ([.workflow_runs[] | select(.conclusion == "success")] | length) > 0 then
+                  # With the moment it went green, so the caller can tell a
+                  # build that has just landed from one that has been
+                  # waiting for its turn.
+                  "success " + ([.workflow_runs[]
+                                 | select(.conclusion == "success")
+                                 | (.updated_at // .run_started_at // .created_at)] | sort | last)
                 elif ([.workflow_runs[] | select(.status != "completed")]  | length) > 0 then
                   # With the moment the oldest unfinished run started, so
                   # the caller can tell a run about to finish from one that
@@ -263,10 +288,10 @@ jobs:
                 else "none" end' 2>/dev/null || echo "none"
           }
 
-          # How long a run has been going, in seconds. Anything unreadable
+          # How long ago a moment was, in seconds. Anything unreadable
           # counts as long ago: a timestamp we cannot parse is not a reason
           # to hold the channel.
-          pending_seconds() {
+          seconds_since() {
             local started now
             started="$(date -d "$1" +%s 2>/dev/null)" || return 0
             [ -n "$started" ] || { echo 999999; return 0; }
@@ -285,30 +310,48 @@ jobs:
           # each waited on their own triggering commit, and the channel sat
           # from 21:37 to 22:19.
           #
-          # The event already carries that run's conclusion, so use it. A
-          # sibling that went green still counts — a failed trigger asks
-          # the API in case one did — but the answer for this commit is
-          # never "wait", because there is nothing left to wait for.
+          # The event already carries that run's conclusion, so the answer
+          # for this commit is never "wait": there is nothing left to wait
+          # for. The API is still asked, because a green run is the only
+          # thing that knows *when* the commit went green, and the clock
+          # below is built on that. Its answer is taken only when it is
+          # green; "pending" from a sibling is discarded, which is the
+          # whole point.
           ci_state() {
+            local state
+            state="$(api_state "$1")"
             if [ -n "${EVENT_SHA:-}" ] && [ "$1" = "$EVENT_SHA" ]; then
-              if [ "${EVENT_CONCLUSION:-}" = "success" ]; then
-                echo success
-                return
-              fi
-              case "$(api_state "$1")" in
-                success) echo success ;;
-                *) echo failed ;;
+              case "$state" in
+                success*) echo "$state" ;;
+                *)
+                  if [ "${EVENT_CONCLUSION:-}" = "success" ]; then
+                    # Green as of this event, which has only just fired.
+                    echo "success $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  else
+                    echo failed
+                  fi
+                  ;;
               esac
               return
             fi
-            api_state "$1"
+            echo "$state"
           }
+
+          # Where the channel stands. Read before the walk rather than
+          # after it, because the walk needs it: a commit at or below this
+          # build is already out, and nothing about it can be a reason to
+          # publish anything now.
+          feed_build="$(curl -fsSL --max-time 30 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/arbos-dev.json" 2>/dev/null \
+            | jq -r '[.releases[].build] | max // 0' 2>/dev/null || echo 0)"
+          feed_build="${feed_build:-0}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             choose="$here"
           else
             choose=""
             newer_pending=""
+            waited=""
             # `--first-parent`, or the walk leaves `main` entirely. A plain
             # rev-list descends into the branches that were merged in, and
             # those commits have green CI runs of their own from when the
@@ -319,33 +362,56 @@ jobs:
             # merges and direct commits that `main` actually passed
             # through, which is the only sequence the channel publishes.
             for candidate in $(git rev-list --first-parent --max-count="$SCAN" "$tip"); do
+              # At or below what the channel already has there is nothing
+              # left to learn. An older green is already published, so it
+              # can be neither the build to publish nor a build kept
+              # waiting, and asking about it would only spend requests.
+              [ "$(git rev-list --count "$candidate")" -gt "$feed_build" ] || break
               state="$(ci_state "$candidate")"
               case "$state" in
-                success) choose="$candidate"; break ;;
+                success*)
+                  # The newest green is the one that publishes. The walk
+                  # carries on past it to the greens behind it, because
+                  # those are what the clock is read from: they are builds
+                  # that could have gone out and did not.
+                  : "${choose:=$candidate}"
+                  ready="$(seconds_since "${state#success }")"
+                  if [ "${ready:-999999}" -ge "$PATIENCE" ]; then
+                    waited="$candidate"
+                    break
+                  fi
+                  ;;
                 # Newer than any green we go on to find, so it is still
                 # entitled to publish instead of that one — but only for
                 # as long as it looks like finishing soon. Past PATIENCE
-                # it stops being a reason to hold the channel: see below.
+                # it stops being a reason to hold the channel. A pending
+                # commit *older* than the newest green holds nothing: that
+                # green already supersedes it.
                 pending*)
-                  age="$(pending_seconds "${state#pending }")"
-                  if [ "${age:-999999}" -lt "$PATIENCE" ]; then
-                    newer_pending="${newer_pending:-$candidate}"
-                  else
-                    echo "::notice title=Not waiting::${candidate:0:7} has been running ${age}s, past the ${PATIENCE}s this waits. Publishing the newest green commit behind it."
+                  if [ -z "$choose" ]; then
+                    age="$(seconds_since "${state#pending }")"
+                    if [ "${age:-999999}" -lt "$PATIENCE" ]; then
+                      newer_pending="${newer_pending:-$candidate}"
+                    else
+                      echo "::notice title=Not waiting::${candidate:0:7} has been running ${age}s, past the ${PATIENCE}s this waits. Publishing the newest green commit behind it."
+                    fi
                   fi
                   ;;
                 *) ;;
               esac
             done
 
-            if [ -n "$newer_pending" ]; then
+            if [ -n "$newer_pending" ] && [ -z "$waited" ]; then
               echo "publish=false" >> "$GITHUB_OUTPUT"
               echo "::notice title=Waiting::${newer_pending:0:7} is newer and still running. Its run decides, and comes back here whichever way it goes."
               exit 0
             fi
+            if [ -n "$newer_pending" ]; then
+              echo "::notice title=Waited long enough::${newer_pending:0:7} is newer and still running, but ${waited:0:7} has been green for more than ${PATIENCE}s without going out. Publishing the newest green now; the pending one supersedes it when it lands."
+            fi
             if [ -z "$choose" ]; then
               echo "publish=false" >> "$GITHUB_OUTPUT"
-              echo "::warning title=Nothing green::No commit in the last $SCAN on main has a green CI run, so there is nothing to publish."
+              echo "::warning title=Nothing green::No commit on main newer than build $feed_build has a green CI run, within the last $SCAN, so there is nothing to publish."
               exit 0
             fi
           fi
@@ -354,10 +420,6 @@ jobs:
           # whole thing safe to re-enter: any number of failure events can
           # fire without republishing what is already on the channel.
           want_build="$(git rev-list --count "$choose")"
-          feed_build="$(curl -fsSL --max-time 30 \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/arbos-dev.json" 2>/dev/null \
-            | jq -r '[.releases[].build] | max // 0' 2>/dev/null || echo 0)"
-          feed_build="${feed_build:-0}"
           if [ "$want_build" -le "$feed_build" ]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "::notice title=Already published::The channel is on build $feed_build, and ${choose:0:7} is build $want_build."
