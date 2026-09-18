@@ -3686,3 +3686,42 @@ watching the recording does not go hunting for it in our code.
 
 **Recording:** `media/mobile/cycle-130/recording_demo.mp4`.
 **PR:** [#693](https://github.com/unarbos/arbos/pull/693), the `ios/` batch.
+
+## Cycle 131 — a regex that stopped at the first full stop
+
+Two build numbers arrived this cycle. Writing the first, I replaced the line
+with a regex ending `[^.]*\.` — and `[^.]*` stops at the first period, which
+in `uploaded 0.2.0 (1997) …` is inside the version number. The line came out
+as:
+
+> It is **2110**, written by the steward after #693 reached `main`.2.0
+> (1997) 6b96bbb7` on the #633 ios-testflight run.
+
+The edit reported success (M-424). Repaired by rewriting the whole line
+rather than patching the patch, and it now reads **2117** from
+`uploaded 0.2.0 (2117) 9c00a389`.
+
+**The audit that was this cycle's plan came up clean** (M-425). After cycle
+130's "Working Thinking", I read every file with several literal string
+special-cases. `EndpointDirectory` is a `key: value` config with two named
+keys and a documented bare-URL fallback; the other chain in `MainChatView`
+renders markdown's own syntax. Neither is exceptions standing in for a rule.
+Worth writing down: the audit's value is what it clears as much as what it
+catches.
+
+**And the mirror got a door.** It refuses to copy a store file shorter than
+the Mac's, which is right — that shape is usually a truncation. Twice today
+a deliberate shortening hit the refusal and I went around it with a bare
+`scp`, which skips every other check the mirror makes. A refusal with no way
+past it is a refusal people go around, so there is one now, and it costs
+naming the file (M-426):
+
+```
+mirror: REFUSED … store copy 6456 b is shorter than the Mac's 6499 b.
+mirror: if you have read it and the shortening is deliberate, say so by name:
+mirror:   SHORTER_IS_DELIBERATE=<name> deploy/mobile/mirror-docs.sh <name>
+```
+
+Proven both ways by lengthening the Mac's copy on purpose.
+
+**PR:** [#694](https://github.com/unarbos/arbos/pull/694), harness only.

@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 19:50 UTC.
+Last checked 2026-09-18 20:11 UTC.
 
-## Click Update. You will get build 2110. Jev is in it.
+## Click Update. You will get build 2117. Jev is in it.
 
-**2110** — signed, notarised, stapled, on the feed since 19:47 UTC.
+**2117** — signed, notarised, stapled, on the feed since 20:08 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2110 (builds 2111–2117):
+
+- **#692** — Terminal and Browser open promptly; the terminal pane reads
+  the window's own size
+- **#693** — mobile: the chat does not say "Working Thinking"
+
+## Before that: 2110
 
 New since 2097 (builds 2098–2110):
 
