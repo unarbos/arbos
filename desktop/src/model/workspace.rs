@@ -1165,11 +1165,20 @@ impl Workspace {
     ) -> Option<u64> {
         let ix = self.active_ix()?;
         self.finish_launch(ix);
-        self.new_session_in(ix, entry, seed, cx)
+        let id = self.new_session_in(ix, entry, seed, cx)?;
+        // A person asked for this chat: in front, and remembered.
+        self.projects[ix].focus_on(id);
+        self.remember_session(ix, id);
+        Some(id)
     }
 
     /// Open a root chat in the project at `ix`, whichever is in front. The
-    /// launch merge makes a project's main chat this way.
+    /// launch merge makes a project's main chat this way — so this neither
+    /// remembers the chat nor takes the front from one already there. The
+    /// callers that act for a person (`new_session`, `new_child_session`)
+    /// do both. qal-j35: the remember that sat here rewrote `last` to the
+    /// main chat on every relaunch before the restore read it; #679 put
+    /// that write behind the launch guard, and this takes the write out.
     fn new_session_in(
         &mut self,
         ix: usize,
@@ -1184,8 +1193,9 @@ impl Workspace {
         let project = &mut self.projects[ix];
         chat.rank = project.front_rank(None);
         project.sessions.push(chat);
-        project.focus_on(id);
-        self.remember_session(ix, id);
+        if project.focus.is_none() {
+            project.focus_on(id);
+        }
         self.push_snapshot(ix);
         cx.notify();
         Some(id)
@@ -1198,7 +1208,10 @@ impl Workspace {
         let ix = self.active_ix()?;
         self.finish_launch(ix);
         let Some(parent) = self.projects[ix].main_session() else {
-            return self.new_session_in(ix, settings::kernel_agent(), None, cx);
+            let id = self.new_session_in(ix, settings::kernel_agent(), None, cx)?;
+            self.projects[ix].focus_on(id);
+            self.remember_session(ix, id);
+            return Some(id);
         };
         let parent_kernel = self.projects[ix]
             .session(parent)
