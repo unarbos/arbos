@@ -7,6 +7,8 @@ use super::ToolOut;
 use crate::access::Access;
 use crate::tool::{BoxFuture, Plan, PlanCx, RunCx, Tool, blocking, simple_schema};
 
+use arbos_core::wire::{FileChange, TurnChange};
+
 pub struct Changes;
 pub struct Undo;
 
@@ -441,12 +443,47 @@ const CHECKPOINT_IDENTITY: &[(&str, &str)] = &[
 /// `Ok(None)` when the tree equals HEAD's; `Err(why)` when it could not
 /// be made, which the checkpoint records rather than swallows.
 fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
+    let tree = work_tree(cwd)?;
+    let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")])
+        .ok_or_else(|| format!("git rev-parse {head}^{{tree}} failed"))?;
+    if tree == head_tree {
+        return Ok(None);
+    }
+    let out = Command::new("git")
+        .args(["commit-tree", &tree, "-p", head, "-m", "arbos checkpoint"])
+        .envs(CHECKPOINT_IDENTITY.iter().copied())
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| format!("git commit-tree: {e}"))?;
+    if out.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ))
+    } else {
+        Err(format!(
+            "git commit-tree failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// Each scratch index gets a name of its own: a checkpoint on the
+/// blocking pool and a `turn_changes` read may build one at the same
+/// moment in the same process.
+static SCRATCH_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The working tree as a git tree object — every file `add -A` would
+/// take, `.arbos/` excluded — written through a scratch copy of the
+/// index so the real one is not touched. The tree is in the object store
+/// unreferenced; a checkpoint hangs a commit on it, a diff reads it.
+pub fn work_tree(cwd: &Path) -> Result<String, String> {
     let index = git_out(cwd, &["rev-parse", "--git-path", "index"])
         .ok_or_else(|| "git rev-parse --git-path index failed".to_string())?;
     let index = cwd.join(index);
+    let n = SCRATCH_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let scratch = cwd
         .join(".arbos")
-        .join(format!("index-scratch-{}", std::process::id()));
+        .join(format!("index-scratch-{}-{n}", std::process::id()));
     let _ = std::fs::create_dir_all(cwd.join(".arbos"));
     // Another git in the same repository (a person's `git commit` in a
     // terminal) renames `index.lock` over `index` while this runs: for an
@@ -481,7 +518,7 @@ fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
     // pass under load).
     let excludes = cwd
         .join(".arbos")
-        .join(format!("index-scratch-excludes-{}", std::process::id()));
+        .join(format!("index-scratch-excludes-{}-{n}", std::process::id()));
     {
         let mut text = git_out(cwd, &["config", "--get", "core.excludesFile"])
             .filter(|p| !p.is_empty())
@@ -537,17 +574,196 @@ fn work_commit(cwd: &Path, head: &str) -> Result<Option<String>, String> {
             "--",
             ".arbos",
         ]);
-        let tree = run(&["write-tree"])?;
-        let head_tree = git_out(cwd, &["rev-parse", &format!("{head}^{{tree}}")])
-            .ok_or_else(|| format!("git rev-parse {head}^{{tree}} failed"))?;
-        if tree == head_tree {
-            return Ok(None);
-        }
-        run(&["commit-tree", &tree, "-p", head, "-m", "arbos checkpoint"]).map(Some)
+        run(&["write-tree"])
     })();
     let _ = std::fs::remove_file(&scratch);
     let _ = std::fs::remove_file(&excludes);
     result
+}
+
+/// The tree a checkpoint stands for: its work commit, or HEAD's tree when
+/// the working tree equalled it. None when the record does not know.
+pub fn checkpoint_tree(cp: &Checkpoint) -> Option<String> {
+    match (&cp.work, cp.clean) {
+        (Some(w), _) => Some(w.clone()),
+        (None, true) => Some(cp.head.clone()),
+        (None, false) => None,
+    }
+}
+
+/// The files that differ between two trees (commits or tree objects), as
+/// `git diff --numstat` and `--name-status` count them. Renames detected.
+pub fn diff_trees(cwd: &Path, from: &str, to: &str) -> Result<Vec<FileChange>, String> {
+    let run = |args: &[&str]| -> Result<String, String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .map_err(|e| format!("git diff: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        } else {
+            Err(format!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ))
+        }
+    };
+    // `-z`: paths as they are, no quoting; a rename carries two.
+    let status = run(&["diff", "-M", "--name-status", "-z", from, to])?;
+    let numstat = run(&["diff", "-M", "--numstat", "-z", from, to])?;
+    let mut counts: std::collections::HashMap<String, (u64, u64, bool)> =
+        std::collections::HashMap::new();
+    let mut fields = numstat.split('\0').filter(|s| !s.is_empty()).peekable();
+    while let Some(head) = fields.next() {
+        // `added\tremoved\tpath`, or `added\tremoved\t` then `from`, `to`
+        // for a rename; `-\t-` for binary.
+        let mut parts = head.splitn(3, '\t');
+        let (Some(a), Some(r)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let binary = a == "-";
+        let (added, removed) = if binary {
+            (0, 0)
+        } else {
+            (a.parse().unwrap_or(0), r.parse().unwrap_or(0))
+        };
+        let path = match parts.next().filter(|p| !p.is_empty()) {
+            Some(p) => p.to_string(),
+            None => {
+                let _from = fields.next();
+                fields.next().unwrap_or_default().to_string()
+            }
+        };
+        counts.insert(path, (added, removed, binary));
+    }
+    let mut out = Vec::new();
+    let mut fields = status.split('\0').filter(|s| !s.is_empty());
+    while let Some(code) = fields.next() {
+        let Some(first) = fields.next() else { break };
+        let (kind, from, path) = match code.chars().next() {
+            Some('A') => ("added", String::new(), first.to_string()),
+            Some('D') => ("deleted", String::new(), first.to_string()),
+            Some('M') => ("modified", String::new(), first.to_string()),
+            Some('T') => ("typechange", String::new(), first.to_string()),
+            Some('R') | Some('C') => {
+                let to = fields.next().unwrap_or_default().to_string();
+                ("renamed", first.to_string(), to)
+            }
+            _ => ("modified", String::new(), first.to_string()),
+        };
+        let (added, removed, binary) = counts.get(&path).copied().unwrap_or((0, 0, false));
+        out.push(FileChange {
+            path,
+            kind: kind.to_string(),
+            from,
+            added,
+            removed,
+            binary,
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(out)
+}
+
+/// What each of the newest `limit` turns did to the working tree, oldest
+/// first: turn N's files are the difference between the tree saved at its
+/// start and the one saved at the next turn's start; the newest turn is
+/// measured against the tree as it stands now (its row may still grow).
+/// `touched` comes from the transcript: the paths each tool call of the
+/// turn reported. Outside git, or with the tree unsaved, the row says so
+/// in `unmeasured` instead of guessing.
+pub fn turn_changes(
+    cwd: &Path,
+    agent_dir: &Path,
+    events: &[arbos_core::Event],
+    limit: usize,
+) -> Vec<TurnChange> {
+    let cps = checkpoints(agent_dir);
+    if cps.is_empty() {
+        return Vec::new();
+    }
+    let start = cps.len().saturating_sub(limit.max(1));
+    // A turn that just began has its tree on the way; a moment's wait
+    // reads it filled rather than reporting it unsaved.
+    let cps: Vec<Checkpoint> = cps
+        .iter()
+        .enumerate()
+        .map(|(i, cp)| {
+            if i + 1 >= start {
+                settle_tree(agent_dir, cp, std::time::Duration::from_secs(2))
+            } else {
+                cp.clone()
+            }
+        })
+        .collect();
+    let in_git = git_out(cwd, &["rev-parse", "--git-dir"]).is_some();
+    // One `add -A` for the newest turn, made once whatever `limit` is.
+    let now_tree = if in_git { Some(work_tree(cwd)) } else { None };
+    let mut out = Vec::with_capacity(cps.len() - start);
+    for (i, cp) in cps.iter().enumerate().skip(start) {
+        let next = cps.get(i + 1);
+        let hi = next.map(|n| n.line).unwrap_or(u64::MAX);
+        let mut touched: Vec<String> = events
+            .iter()
+            .filter(|e| e.seq > cp.line && e.seq <= hi)
+            .filter_map(|e| match &e.kind {
+                arbos_core::EventKind::Tool(rec) => Some(rec.paths.iter()),
+                _ => None,
+            })
+            .flatten()
+            // Tools record absolute paths; the row speaks as git does,
+            // relative to the place.
+            .map(|p| {
+                Path::new(p)
+                    .strip_prefix(cwd)
+                    .map(|r| r.display().to_string())
+                    .unwrap_or_else(|_| p.clone())
+            })
+            .collect();
+        touched.sort();
+        touched.dedup();
+        let mut row = TurnChange {
+            line: cp.line,
+            ts: cp.ts,
+            ended: next.is_some(),
+            touched,
+            ..Default::default()
+        };
+        if !in_git {
+            row.unmeasured = "not a git repository: files are not measured".into();
+            out.push(row);
+            continue;
+        }
+        let from = match checkpoint_tree(cp) {
+            Some(t) => t,
+            None => {
+                row.unmeasured = match &cp.work_error {
+                    Some(why) => format!("the tree at this turn's start was not saved: {why}"),
+                    None => "the tree at this turn's start is not on record".into(),
+                };
+                out.push(row);
+                continue;
+            }
+        };
+        let to = match next {
+            Some(n) => match checkpoint_tree(n) {
+                Some(t) => Ok(t),
+                None => Err(match &n.work_error {
+                    Some(why) => format!("the tree at the next turn's start was not saved: {why}"),
+                    None => "the tree at the next turn's start is not on record".into(),
+                }),
+            },
+            None => now_tree.clone().unwrap_or_else(|| Err("no tree".into())),
+        };
+        match to.and_then(|to| diff_trees(cwd, &from, &to)) {
+            Ok(files) => row.files = files,
+            Err(why) => row.unmeasured = why,
+        }
+        out.push(row);
+    }
+    out
 }
 
 /// `~/x` → `$HOME/x`, as git reads `core.excludesFile`.
@@ -1348,6 +1564,87 @@ mod tests {
             vec!["register".to_string(), "set_cmap".into()]
         );
         assert_eq!(got.classes, vec!["Registry".to_string()]);
+    }
+
+    /// `diff_trees` reads what `git diff` says between two trees: an add,
+    /// a change with its line counts, a delete, a rename (with where it
+    /// came from), a binary file (no counts). The working tree's own
+    /// tree object (`work_tree`) diffs like any commit.
+    #[test]
+    fn diff_trees_names_each_kind_of_change_with_its_counts() {
+        let dir = std::env::temp_dir().join(format!("arbos-difftrees-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| -> String {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("keep.txt"), "a\nb\nc\n").unwrap();
+        std::fs::write(dir.join("gone.txt"), "x\n").unwrap();
+        std::fs::write(
+            dir.join("old-name.txt"),
+            "same content\nline two\nline three\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("pic.bin"), [0u8, 159, 146, 150, 0, 1]).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "one"]);
+        let one = git(&["rev-parse", "HEAD"]);
+        std::fs::write(dir.join("keep.txt"), "a\nB\nc\nd\n").unwrap();
+        std::fs::remove_file(dir.join("gone.txt")).unwrap();
+        std::fs::rename(dir.join("old-name.txt"), dir.join("new-name.txt")).unwrap();
+        std::fs::write(dir.join("pic.bin"), [0u8, 159, 146, 150, 0, 2, 3]).unwrap();
+        std::fs::write(dir.join("fresh.txt"), "1\n2\n").unwrap();
+        let now = work_tree(&dir).unwrap();
+        let files = diff_trees(&dir, &one, &now).unwrap();
+        let by = |p: &str| {
+            files
+                .iter()
+                .find(|f| f.path == p)
+                .unwrap_or_else(|| panic!("{p}: {files:?}"))
+        };
+        assert_eq!(files.len(), 5, "{files:?}");
+        let keep = by("keep.txt");
+        assert_eq!(
+            (keep.kind.as_str(), keep.added, keep.removed),
+            ("modified", 2, 1)
+        );
+        assert_eq!(by("gone.txt").kind, "deleted");
+        let fresh = by("fresh.txt");
+        assert_eq!((fresh.kind.as_str(), fresh.added), ("added", 2));
+        let renamed = by("new-name.txt");
+        assert_eq!(
+            (renamed.kind.as_str(), renamed.from.as_str()),
+            ("renamed", "old-name.txt")
+        );
+        let pic = by("pic.bin");
+        assert!(pic.binary && pic.added == 0 && pic.removed == 0, "{pic:?}");
+        // The scratch index left nothing behind and touched nothing real.
+        assert!(
+            !dir.join(".arbos").exists()
+                || std::fs::read_dir(dir.join(".arbos"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+        );
+        assert_eq!(
+            git(&["diff", "--cached", "--name-only"]),
+            "",
+            "the real index is untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

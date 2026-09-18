@@ -2008,6 +2008,10 @@ pub const PROTOCOL: u32 = 1;
 const ATTACH_TAIL: u32 = 200;
 /// Most lines one `history` request returns.
 const HISTORY_MAX: u32 = 2000;
+/// How many turns `turn_changes` answers with when the asker names none,
+/// and the most it will.
+const TURN_CHANGES_DEFAULT: u64 = 20;
+const TURN_CHANGES_MAX: u64 = 200;
 
 fn focus_agent(place: &Place) -> String {
     let focus = arbos_core::read_focus(place);
@@ -2982,6 +2986,60 @@ pub async fn serve_client(
                                 redacted: b.redacted,
                                 truncated: b.truncated,
                                 bytes: b.bytes,
+                            });
+                        }
+                        // What each turn did to the working tree, for a
+                        // files panel: the checkpoints' diff, read now on
+                        // the blocking pool (the newest turn costs one
+                        // `add -A` into a scratch index), answered to the
+                        // asker alone.
+                        Frame::TurnChanges { agent, limit } => {
+                            if !arbos_core::agent_exists(&place_for_history, &agent) {
+                                let _ = out_for_history.send(Frame::Error {
+                                    agent: Some(agent.clone()),
+                                    detail: format!("turn_changes: no agent is named {agent}"),
+                                });
+                                continue;
+                            }
+                            let place = place_for_history.clone();
+                            let out = out_for_history.clone();
+                            let who = who_name.clone();
+                            tokio::task::spawn_blocking(move || {
+                                let limit = if limit == 0 {
+                                    TURN_CHANGES_DEFAULT
+                                } else {
+                                    limit.min(TURN_CHANGES_MAX)
+                                } as usize;
+                                let layout = Layout::new(&place, &agent);
+                                let events = arbos_core::load_transcript(&layout.transcript())
+                                    .unwrap_or_default();
+                                let cwd = arbos_core::load_agent(
+                                    &place,
+                                    &arbos_core::AgentId::new(&agent),
+                                )
+                                .map(|a| a.work_dir(&place.path))
+                                .unwrap_or_else(|_| place.path.clone());
+                                let turns = arbos_engine::git::turn_changes(
+                                    &cwd,
+                                    &layout.dir,
+                                    &events,
+                                    limit,
+                                );
+                                klog::info(
+                                    "turn_changes",
+                                    Some(&agent),
+                                    format!(
+                                        "who={who} turns={} files={} unmeasured={}",
+                                        turns.len(),
+                                        turns.iter().map(|t| t.files.len()).sum::<usize>(),
+                                        turns.iter().filter(|t| !t.unmeasured.is_empty()).count()
+                                    ),
+                                );
+                                let _ = out.send(Frame::TurnChangeList {
+                                    agent,
+                                    turns,
+                                    at_ms: arbos_core::now_ms(),
+                                });
                             });
                         }
                         // What this kernel holds, for a window reconciling
