@@ -48,6 +48,17 @@ page_up() {
   idb ui swipe "$(( SIM_PT_W / 2 ))" "$from" "$(( SIM_PT_W / 2 ))" "$to" --duration 0.5 --udid "$1"
 }
 
+# page_back <udid> — the other direction: toward the older end of a
+# transcript. `page_up` drags the content upward, which walks *towards* the
+# newest line; looking for something older with it finds nothing however
+# long you try, which is how a search for a worker's `Done` line reported
+# the line missing while it sat a screen above.
+page_back() {
+  local from=$(( SIM_PT_H * 35 / 100 ))
+  local to=$(( SIM_PT_H * 85 / 100 ))
+  idb ui swipe "$(( SIM_PT_W / 2 ))" "$from" "$(( SIM_PT_W / 2 ))" "$to" --duration 0.5 --udid "$1"
+}
+
 # collect_rows <udid> <grep-pattern> <outfile> [ui-script]
 #
 # Page a scrolling list to its end and write the distinct row labels found.

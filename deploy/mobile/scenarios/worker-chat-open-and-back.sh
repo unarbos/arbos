@@ -63,12 +63,17 @@ echo
 echo "== in by the worker's own line =="
 # A finished worker leaves a `Done <goal>` line in the transcript; tapping
 # it should reach the same chat. This is the half never driven.
-LINE=$(ui dump | grep -E "Done [a-z]" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
-if [ -z "$LINE" ]; then
-  echo "  no Done line in view — scrolling for one"
-  for _ in 1 2 3; do page_up "$UDID" >/dev/null 2>&1; sleep 1; done
-  LINE=$(ui dump | grep -E "Done [a-z]" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
-fi
+# The line the kernel leaves reads `<worker> · Turn ended. Last words: …`,
+# and it is *older* than the tail, so the search has to walk backwards —
+# `page_up` goes towards the newest line and would never reach it.
+find_line() { ui dump | grep -E "Turn ended|, Done$" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'; }
+LINE=$(find_line)
+for _ in 1 2 3 4 5 6; do
+  [ -n "$LINE" ] && break
+  page_back "$UDID" >/dev/null 2>&1
+  sleep 1
+  LINE=$(find_line)
+done
 if [ -z "$LINE" ]; then
   echo "  VERDICT: no Done line to tap, so this half is untested again"
 else
