@@ -26,7 +26,16 @@ sleep 4
 echo "pill before: $(pill)"
 shot 01-before
 
-LINE="Start four workers at once, each doing one trivial thing and waiting for none of the others: worker one says a sentence about rivers, worker two about mountains, worker three about the sea, worker four about the sky. Tell me when all four are done."
+# Every run used to ask for the same four goals, so the kernel named the
+# workers the same way and the sheet filled with repeats — which is what made
+# it uncountable by label (M-305). The tag goes at the *front* of each goal
+# so it survives the sheet truncating a long name at the end.
+TAG=w$(date -u +%H%M%S)
+# No quotation marks and no dashes in this line. iOS turns a typed " into a
+# curly quote, the read-back never matches, and the scenario sends whatever
+# is in the box after its 20-second wait — which is how this run sent a
+# garbled instruction and got no workers at all (M-185, in a new place).
+LINE="Start four workers at once, each doing one trivial thing and waiting for none of the others. Their goals are exactly $TAG rivers, $TAG mountains, $TAG sea and $TAG sky. Each says one sentence about its word. Tell me when all four are done."
 ui focus >/dev/null || { echo "no composer"; exit 1; }
 sleep 0.7
 idb ui text "$LINE" --udid "$UDID"
@@ -60,6 +69,12 @@ sleep 2; shot 03-workers-sheet
 SHEET=$OUT/sheet-rows.txt
 HOW=$(collect_rows "$UDID" ', (Done|Working)$' "$SHEET")
 echo "  rows in the sheet: $(wc -l < "$SHEET" | tr -d ' ')  (paging $HOW)"
+# The four this run made, told apart from every earlier run's by the tag.
+MINE=$(grep -c "$TAG" "$SHEET" | tr -d ' ')
+echo "  of them, this run's ($TAG): $MINE of 4"
+grep "$TAG" "$SHEET" | sed 's/^/     /'
+[ "$MINE" = 4 ] && echo "  VERDICT: all four of this run's workers are on the sheet" \
+                || echo "  VERDICT: $MINE of this run's four reached the sheet"
 ui dump | grep -E ', (Done|Working)$' | head -8 | sed 's/^/    /'
 
 echo
