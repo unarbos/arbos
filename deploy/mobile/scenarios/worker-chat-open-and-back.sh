@@ -39,7 +39,11 @@ sleep 5
 shot 01-the-project-chat
 
 echo "== in by the sheet =="
-PILL=$(ui dump | grep -E "Button +(Agents|Working) [0-9]+" | head -1)
+# Idle the pill reads `Agents 19`; while anything runs it reads
+# `⠇, Working 2` — the same animated spinner that prefixes the worker lines.
+# A pattern anchored to the word alone finds it only half the time, and
+# reported "no pill in this chat" on a chat that plainly had one.
+PILL=$(ui dump | grep -E "Button +([⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], )?(Agents|Working) [0-9]+" | head -1)
 [ -n "$PILL" ] || { echo "  no pill in this chat"; exit 1; }
 idb ui tap "$(echo "$PILL" | awk '{print $1}')" "$(echo "$PILL" | awk '{print $2}')" --udid "$UDID"
 sleep 3
