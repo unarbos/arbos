@@ -20,6 +20,7 @@ CYCLE=${1:?cycle}; ROW=${2:-phone}
 OUT="$HOME/mobile-out/$CYCLE/notifications"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
 
@@ -29,6 +30,7 @@ xcrun simctl uninstall "$UDID" $B 2>/dev/null
 xcrun simctl install "$UDID" /tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app
 xcrun simctl launch --console-pty "$UDID" $B > "$OUT/console.log" 2>&1 &
 sleep 8
+reach_the_list "$UDID" || exit 1
 ui tap "$ROW" || { say "no $ROW row"; exit 1; }
 sleep 4
 

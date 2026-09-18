@@ -32,6 +32,7 @@ CYCLE=${1:?cycle}; ROW=${2:-phone}; PAUSE=${3:-120}; ROW2=${4:-}
 OUT="$HOME/mobile-out/$CYCLE/returning-user"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 # Where the app is, in one word, read off the tree rather than a screenshot.
@@ -50,7 +51,7 @@ xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 9
 # The app comes back to the chat that was in front now, so the list may not
 # be the first screen. Step back to it before starting, or the run cannot
 # find the row it means to open.
-ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
+reach_the_list "$UDID" || exit 1
 ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
 sleep 5
 shot 01-where-he-left-it

@@ -18,6 +18,7 @@ CYCLE=${1:?cycle}; ROW=${2:-phone}
 OUT="$HOME/mobile-out/$CYCLE/cold-start"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
+. "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 now() { python3 -c 'import time;print(time.time())'; }
@@ -36,11 +37,21 @@ echo "== 1. cold start =="
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 2
 T0=$(now)
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
-FIRST=$(wait_for "Button +[a-z0-9-]+, (Idle|Working)" 40 "$T0")
-echo "  launch to a list with rows: ${FIRST}s   (cycle 37 measured 3.1s)"
+# A cold start no longer always lands on the list: since M-338 it comes back
+# to the chat that was in front. This waited only for list rows, so what it
+# measured depended on whether it ran on a fresh install — which, in the
+# sweep, it always does. Wait for either landing, and say which one it was.
+FIRST=$(wait_for "Button +[a-z0-9-]+, (Idle|Working)|TextField" 40 "$T0")
 shot 01-cold-start
 ROWS=$(ui dump | grep -cE 'Button +[a-z0-9-]+, (Idle|Working)')
-echo "  rows: $ROWS"
+if [ "$ROWS" -gt 0 ]; then
+  LANDED="a list of $ROWS rows"
+else
+  LANDED="the chat it was left in ($(ui dump | awk '$2 < 100 && $3 == "StaticText" { print $4; exit }'))"
+fi
+echo "  launch to $LANDED: ${FIRST}s   (cycle 37 measured 3.1s to a list)"
+
+reach_the_list "$UDID" || exit 1
 
 echo
 echo "== 3. long history =="
@@ -87,7 +98,6 @@ ui dump | head -5 | sed 's/^/  /'
 echo
 echo "== 4. attachments =="
 ui tap "Add" >/dev/null 2>&1 && sleep 1.5 && ui tap "Photo Library" >/dev/null 2>&1 && sleep 4 || echo "  could not open the picker"
-. "$HERE/../sim-lib.sh"
 tap_shot 78 470 "$UDID"; sleep 1
 tap_shot 426 157 "$UDID"; sleep 3
 shot 06-photo-chip
@@ -97,7 +107,7 @@ echo "stills in $OUT"
 # Four claims, four lines — a single verdict would flatten them, and each is
 # a separate row in the coverage table.
 echo
-echo "VERDICT cold start:   ${FIRST:-never}s to a list of ${ROWS:-0} rows"
+echo "VERDICT cold start:   ${FIRST:-never}s to ${LANDED:-nothing}"
 echo "VERDICT long history: chat in ${OPEN:-never}s, pager ${PAGER:-never appeared}"
 if [ "${BEFORE:-0}" = "${AFTER:-1}" ]; then
   echo "VERDICT away and back: the chat is as it was — $BEFORE text rows both sides"

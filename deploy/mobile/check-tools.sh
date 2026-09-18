@@ -36,6 +36,35 @@ else
 fi
 
 echo
+# Second hygiene check, and it exists because the first sweep for it used a
+# proxy. Cycle 116 looked for the string "Button +Back" in each file and
+# called four scenarios clean; one of them only mentioned it inside an
+# unrelated helper, and it had been unable to open its project for a week.
+# A file mentioning a thing is not a file doing it, so this asks whether
+# the step happens before the tap, in line order.
+echo "scenarios that tap a project row after launch:"
+LIST_FAULTS=$(for f in "$HERE"/scenarios/*.sh; do
+  awk -v name="$(basename "$f")" '
+    /simctl launch/ { launched = NR }
+    /reach_the_list/ { reached = NR }
+    /ui tap "\$ROW"/ { if (!tapped) tapped = NR }
+    END {
+      if (launched && tapped && (!reached || reached > tapped))
+        printf "  %-34s taps at line %d with no reach_the_list before it\n", name, tapped
+    }' "$f"
+done)
+if [ -z "$LIST_FAULTS" ]; then
+  echo "  all of them reach the list first"
+else
+  echo "$LIST_FAULTS"
+  echo
+  echo "A cold start comes back to the chat that was in front, so these tap"
+  echo "a name that may not be on screen. They do not fail when they run"
+  echo "first, on a fresh install with no front project — which is why this"
+  echo "is a check and not a memory."
+fi
+
+echo
 echo "tools the harness ships:"
 for t in kernel.py ui.py journey-record.py find_row.py sim-lib.sh mirror-docs.sh; do
   if [ -f "$HERE/$t" ]; then
@@ -45,4 +74,4 @@ for t in kernel.py ui.py journey-record.py find_row.py sim-lib.sh mirror-docs.sh
   fi
 done
 
-[ -z "$HITS" ]
+[ -z "$HITS" ] && [ -z "$LIST_FAULTS" ]
