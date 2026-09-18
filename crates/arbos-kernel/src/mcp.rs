@@ -122,8 +122,9 @@ pub struct Problem {
     pub path: PathBuf,
     /// The parse error, or `<name>: <why>` for one server's entry.
     pub error: String,
-    /// The file is the place's and did not parse: the machine's file was
-    /// not read in its stead.
+    /// The file is the place's and did not parse: the walk stopped at it,
+    /// and no file after it — the place's other files or the machine's —
+    /// was read in its stead.
     pub blocked_global: bool,
 }
 
@@ -172,15 +173,14 @@ pub fn load_servers(place: &Place) -> Vec<Server> {
 
 /// The walk over `paths` in order, the first `place_scope` of them the
 /// place's own. The first file to define a name wins. A place file that
-/// does not parse stops the walk before the machine's files.
+/// does not parse stops the walk there: the names it meant to define are
+/// unknown, so any later file — `.cursor/mcp.json` as much as the
+/// machine's — could hand one of them a different server unnoticed
+/// (qal-j31). Files before it in the walk keep what they defined.
 fn load_from(paths: &[PathBuf], place_scope: usize) -> Loaded {
     let mut out = Loaded::default();
-    let mut place_broken = false;
     for (i, path) in paths.iter().enumerate() {
         let place_file = i < place_scope;
-        if !place_file && place_broken {
-            break;
-        }
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
@@ -193,14 +193,14 @@ fn load_from(paths: &[PathBuf], place_scope: usize) -> Loaded {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("mcp: {}: {e}", path.display());
-                if place_file {
-                    place_broken = true;
-                }
                 out.problems.push(Problem {
                     path: path.clone(),
                     error: e.to_string(),
                     blocked_global: place_file,
                 });
+                if place_file {
+                    break;
+                }
                 continue;
             }
         };
@@ -233,7 +233,7 @@ pub fn problem_notice(place: &Place, p: &Problem) -> String {
         .unwrap_or_else(|_| p.path.display().to_string());
     if p.blocked_global {
         format!(
-            "MCP: {shown} does not parse ({}). Its servers are off, and the machine's own MCP file was not used in its place — a server the file meant to define would otherwise have been the machine's of the same name, unnoticed. Fix the file and restart the kernel.",
+            "MCP: {shown} does not parse ({}). Its servers are off, and no MCP file after it was read in its place — not the place's other files, not the machine's own MCP file — since a server this file meant to define would otherwise have come from another file of the same name, unnoticed. Fix the file and restart the kernel.",
             p.error.trim()
         )
     } else {
@@ -575,10 +575,9 @@ mod config_walk_tests {
         .unwrap();
         let loaded = load_from(&[place_toml.clone(), place_json.clone(), global.clone()], 2);
         let names: Vec<&str> = loaded.servers.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["files"],
-            "the parsing place file loads; nothing from the machine's"
+        assert!(
+            names.is_empty(),
+            "the walk stops at the broken place file: not the place's later file, not the machine's: {names:?}"
         );
         assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
         let p = &loaded.problems[0];

@@ -27,6 +27,14 @@ fn a_place_mcp_file_that_does_not_parse_is_said_on_the_transcript() {
             "[servers.notes]\ncommand = \"notes-mcp\"\nargs = [\n",
         )
         .unwrap();
+        // The place's next file in the walk names the same server too: the
+        // walk stops at the broken file, so this one is not read either.
+        std::fs::create_dir_all(place.join(".cursor")).unwrap();
+        std::fs::write(
+            place.join(".cursor/mcp.json"),
+            r#"{"mcpServers":{"notes":{"command":"/nonexistent/cursor-notes-mcp"}}}"#,
+        )
+        .unwrap();
         // The machine's file names the same server: it must not be taken
         // in the place's stead.
         let xdg = place.parent().unwrap().join("xdg").join("arbos");
@@ -60,7 +68,7 @@ fn a_place_mcp_file_that_does_not_parse_is_said_on_the_transcript() {
         .unwrap()
         .to_string();
     assert!(
-        text.contains("the machine's own MCP file was not used in its place"),
+        text.contains("no MCP file after it was read in its place"),
         "{text}"
     );
     assert!(text.contains("Fix the file and restart"), "{text}");
@@ -70,7 +78,7 @@ fn a_place_mcp_file_that_does_not_parse_is_said_on_the_transcript() {
         std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap_or_default();
     assert!(log.contains("mcp_config"), "{log}");
     assert!(
-        !log.contains("global-notes-mcp"),
+        !log.contains("global-notes-mcp") && !log.contains("cursor-notes-mcp"),
         "the machine's server was not started: {log}"
     );
 }
