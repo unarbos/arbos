@@ -1687,7 +1687,8 @@ impl Arbos {
             .panel()
             .is_none_or(|panel| !panel.open)
         {
-            return;
+            self.workspace
+                .update(cx, |workspace, cx| workspace.set_panel_open(true, cx));
         }
         let viewport = f32::from(window.viewport_size().width);
         let available =
