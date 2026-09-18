@@ -14,15 +14,20 @@ struct HubMachine: Decodable, Identifiable, Equatable {
         /// `worktree` for a worker's checkout, `service` for infrastructure
         /// (the feedback pipe). Only the empty kind is a row in the list.
         var kind: String
+        /// When this project's transcript last gained a line, as the hub
+        /// heard it (#538). Absent — and so zero — when the hub has heard
+        /// nothing; the list shows nothing rather than "just now".
+        var lastActivityMs: Int64
 
         var id: String { name }
 
-        init(name: String, place: String = "", live: Bool = false, identity: ProjectIdentity? = nil, kind: String = "") {
+        init(name: String, place: String = "", live: Bool = false, identity: ProjectIdentity? = nil, kind: String = "", lastActivityMs: Int64 = 0) {
             self.name = name
             self.place = place
             self.live = live
             self.identity = identity
             self.kind = kind
+            self.lastActivityMs = lastActivityMs
         }
 
         // Fields the hub leaves out when empty must decode as defaults.
@@ -33,9 +38,13 @@ struct HubMachine: Decodable, Identifiable, Equatable {
             live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? false
             identity = try c.decodeIfPresent(ProjectIdentity.self, forKey: .identity)
             kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? ""
+            lastActivityMs = try c.decodeIfPresent(Int64.self, forKey: .lastActivityMs) ?? 0
         }
 
-        private enum CodingKeys: String, CodingKey { case name, place, live, identity, kind }
+        private enum CodingKeys: String, CodingKey {
+            case name, place, live, identity, kind
+            case lastActivityMs = "last_activity_ms"
+        }
     }
 
     /// One process registered from this machine — the worker daemon, or a

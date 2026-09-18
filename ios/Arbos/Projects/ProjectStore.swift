@@ -18,6 +18,10 @@ struct ProjectEntry: Identifiable, Equatable {
     /// before, so the row stays and says what it is waiting on rather than
     /// disappearing. Empty when the project is live.
     var waitingOn: String = ""
+    /// When this project's transcript last gained a line, from the hub
+    /// (#538). Nil when the hub has heard nothing, and the row says nothing
+    /// rather than guessing at "just now".
+    var lastActivity: Date?
 
     var id: String { target.stored }
     var title: String { identity.label ?? folder }
@@ -86,6 +90,9 @@ final class ProjectStore: ObservableObject {
                         // different builds, which is why the hub stopped
                         // keeping one row for all of them (#385).
                         row.needsRestart = machine.build(forProject: project.name)?.binaryGone ?? false
+                        if project.lastActivityMs > 0 {
+                            row.lastActivity = Date(timeIntervalSince1970: Double(project.lastActivityMs) / 1000)
+                        }
                         list.append(row)
                     }
                 }

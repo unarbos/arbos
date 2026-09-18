@@ -1,0 +1,84 @@
+#!/bin/bash
+# The settings sheet, and what the app says when its hub token is wrong.
+#
+#   settings-and-a-bad-token.sh <cycle>
+#
+# Destructive on purpose: it saves a token that cannot work, so the recovery
+# is a reinstall, which restores what the build was compiled with. Nothing
+# here ever reads or prints the real token.
+#
+# The question worth asking is not only "do the rows go Off" — cycle 37
+# established that — but whether the screen says *why*. A client that knows
+# it was refused and shows a blank list is inventing a silence.
+set -uo pipefail
+export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
+HERE=$(cd "$(dirname "$0")" && pwd)
+CYCLE=${1:?cycle}
+OUT="$HOME/mobile-out/$CYCLE/settings"; mkdir -p "$OUT"
+UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
+B=com.unarbos.arbos.ios
+APP=/tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app
+ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
+shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
+rows() { ui dump | grep -cE "Button +[a-z0-9-]+, (Idle|Working)"; }
+
+fresh() {
+  xcrun simctl uninstall "$UDID" $B 2>/dev/null
+  xcrun simctl install "$UDID" "$APP"
+  xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
+  sleep 8
+}
+
+# A reinstall does NOT undo a saved token: it is in the Keychain, which
+# outlives the app on iOS. Cycle 60's first run stranded the simulator that
+# way and had to be rescued by hand. The token is read from the build into a
+# shell variable and typed straight in; it is never echoed, and the only
+# exposure is this machine's process list while idb runs.
+put_the_real_token_back() {
+  local tok y
+  tok=$(plutil -extract hubToken raw -o - "$HOME/arbos/ios/Arbos/Secrets.plist" | tr -d '\n')
+  [ -n "$tok" ] || { echo "  no hub token in the build to restore from"; return 1; }
+  echo "  restoring the build's token (${#tok} characters, not shown)"
+  xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+  xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 7
+  ui tap "Gear Shape" >/dev/null; sleep 3
+  y=$(ui dump | awk '$3 == "SecureTextField" || $3 == "TextField" { print $2 }' | sort -n | tail -1)
+  idb ui tap 196 "$y" --udid "$UDID"; sleep 1
+  idb ui text "$tok" --udid "$UDID" >/dev/null 2>&1; sleep 2
+  ui tap "Done" >/dev/null; sleep 8
+}
+
+echo "== a good build, for the baseline =="
+fresh
+echo "  rows: $(rows)"
+shot 01-rows-with-the-real-token
+
+echo
+echo "== the sheet itself =="
+ui tap "Gear Shape" >/dev/null || { echo "  no settings button"; exit 1; }
+sleep 3; shot 02-settings
+echo "  sections: $(ui dump | grep -E 'Heading' | awk '{$1="";$2="";$3="";print}' | tr '\n' ';')"
+echo "  saved-token fields say: $(ui dump | grep -c 'Token saved')"
+echo "  build line: $(ui dump | grep -iE 'Arbos, [0-9]|LabeledContent|build' | head -2 | tr '\n' ';')"
+
+echo
+echo "== save a hub token that cannot work =="
+# The field is the one under the Mesh hub heading; it is found by walking the
+# text fields, because a secure field carries no value to match on.
+HUBTOK=$(ui dump | awk '$3 == "SecureTextField" || $3 == "TextField" { print $2 }' | sort -n | tail -1)
+ui dump | awk -v y="$HUBTOK" '$2 == y { print "  typing into the field at y=" y }'
+idb ui tap 196 "$HUBTOK" --udid "$UDID"; sleep 1
+idb ui text "not-a-real-token-cycle-$CYCLE" --udid "$UDID"; sleep 1
+shot 03-bad-token-typed
+ui tap "Done" >/dev/null || echo "  no Done button"
+sleep 6; shot 04-list-after-a-bad-token
+echo "  rows now: $(rows)"
+echo "  what the screen says:"
+ui dump | grep -vE "Button +[a-z0-9-]+, (Idle|Working)" | grep -E "StaticText" | head -6 | sed 's/^/    /'
+
+echo
+echo "== put it back =="
+put_the_real_token_back
+echo "  rows after restoring the token: $(rows)"
+shot 05-rows-restored
+echo "stills in $OUT"

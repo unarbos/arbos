@@ -36,6 +36,18 @@ struct ProjectsView: View {
                         .padding(.top, 0)
                         .padding(.bottom, 22)
                     if searching { searchField }
+                    // Whatever the hub said, said — not only when the list
+                    // ends up empty. The pod's own kernel is a row without
+                    // the hub, so "Hub token refused." used to be set and
+                    // never drawn: the screen lost six projects and offered
+                    // no account of it.
+                    if let problem = projects.problem, !projects.entries.isEmpty {
+                        Text(problem)
+                            .font(ArbosTheme.callout)
+                            .foregroundStyle(ArbosTheme.textFaint)
+                            .padding(.horizontal, ArbosTheme.gutter)
+                            .padding(.bottom, 10)
+                    }
                     if !working.isEmpty {
                         section("Working", open: $workingOpen, rows: working)
                     }
@@ -286,6 +298,12 @@ struct ProjectRow: View {
                 .truncationMode(.middle)
             }
             Spacer(minLength: 0)
+            if let ago {
+                Text(ago)
+                    .font(ArbosTheme.callout)
+                    .foregroundStyle(ArbosTheme.textDim)
+                    .monospacedDigit()
+            }
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.vertical, 15)
@@ -294,6 +312,24 @@ struct ProjectRow: View {
             Rectangle().fill(ArbosTheme.border).frame(height: 0.5)
                 .padding(.leading, ArbosTheme.gutter + 28)
                 .padding(.trailing, ArbosTheme.gutter)
+        }
+    }
+
+    /// How long since this project last did anything, in the shape the
+    /// desktop and Cursor both use: `4m`, `2h`, `3d`. Nil when the hub has
+    /// heard nothing, because a row that guesses "now" is worse than a row
+    /// that says nothing — and until #538 no row could say anything at all,
+    /// so seven projects reading `Idle` in alphabetical order told a person
+    /// which came first in the alphabet and nothing else.
+    private var ago: String? {
+        guard let at = entry.lastActivity else { return nil }
+        let seconds = Int(Date().timeIntervalSince(at))
+        guard seconds >= 0 else { return nil }
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86_400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86_400)d"
         }
     }
 
