@@ -1407,7 +1407,9 @@ fn handle_frame(
     place: &Place,
     frame: Frame,
     wakes: &mpsc::UnboundedSender<Wake>,
-    hooks: &KernelHooks,
+    // The hub itself, not a borrow of it: work that must leave this loop —
+    // a browser start — takes a handle with it.
+    hooks: &Arc<KernelHooks>,
     sched: &Scheduler,
     ptys: &PtyHub,
 ) {
@@ -2081,23 +2083,34 @@ fn handle_frame(
                 url: Some(url.clone()),
                 by: "user".into(),
             });
-            let args = serde_json::json!({ "url": url });
-            let out = hooks.browsers.act(&owner, "navigate", &args);
-            let png = match &out {
-                Ok(done) => done.png.clone().or_else(|| hooks.browsers.preview()),
-                Err(e) => {
-                    klog::warn("browse", Some(&owner), format!("{e:#}"));
-                    hooks.browsers.preview()
-                }
-            };
-            let at = hooks.browsers.url(&owner);
-            hooks.broadcast(Frame::Browser {
-                agent: owner,
-                page: "b1".into(),
-                url: if at.is_empty() { url } else { at },
-                screenshot: png.as_deref().map(|png| {
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png)
-                }),
+            // Off this loop, and this is not a nicety. Starting Chromium is
+            // seconds of blocking work — spawn the process, poll for its
+            // devtools port, open a WebSocket, wait for the page to load —
+            // and every client frame in the place comes through here, so a
+            // person's Browser click stopped their own typing, their
+            // terminals, and every agent's turn until it was done. Worse
+            // than the wait: the blocking HTTP client inside it drops a
+            // Tokio runtime, and dropping one on a runtime thread is a
+            // panic, so the first Browser click killed the kernel outright
+            // and the window then had to start a replacement.
+            let hooks = Arc::clone(hooks);
+            tokio::task::spawn_blocking(move || {
+                let png = match hooks.browsers.show(&owner, &url) {
+                    Ok(png) => png.or_else(|| hooks.browsers.preview()),
+                    Err(e) => {
+                        klog::warn("browse", Some(&owner), format!("{e:#}"));
+                        hooks.browsers.preview()
+                    }
+                };
+                let at = hooks.browsers.url(&owner);
+                hooks.broadcast(Frame::Browser {
+                    agent: owner,
+                    page: "b1".into(),
+                    url: if at.is_empty() { url } else { at },
+                    screenshot: png.as_deref().map(|png| {
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, png)
+                    }),
+                });
             });
         }
         Frame::JobStop { agent, id } => {
