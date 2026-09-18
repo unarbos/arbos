@@ -2866,16 +2866,14 @@ impl Workspace {
         let Some(ix) = self.project_of(chat) else {
             return;
         };
-        let live: Vec<u64> = self.projects[ix]
-            .sessions
-            .iter()
-            .filter(|held| held.live())
-            .map(|held| held.id)
-            .collect();
-        if self.projects[ix]
-            .ptys
-            .accept(chat, &page, &data, |held| live.contains(&held))
-        {
+        let project = &mut self.projects[ix];
+        let sessions = &project.sessions;
+        let live = |held: u64| {
+            sessions
+                .iter()
+                .any(|chat| chat.id == held && chat.live())
+        };
+        if project.ptys.accept(chat, &page, &data, live) {
             cx.emit(PtyWrote(page));
         }
     }
