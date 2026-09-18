@@ -1048,6 +1048,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     };
     let mut hidden_seen = 0usize;
     let mut first_step = true;
+    let mut picks = crate::jev::Picks::default();
     loop {
         if gone() {
             eprintln!(
@@ -1182,12 +1183,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             provider.replay.is_some(),
         ) && !skip
         {
-            let names: Vec<String> = registry
-                .names()
-                .into_iter()
-                .filter(|n| view.get(n).is_some())
-                .map(str::to_string)
-                .collect();
+            // Only the tools a pick can actually run: the Decisions door
+            // answers with a tool name and no arguments.
+            let names = crate::jev::pickable(&view);
             let repro = crate::repro::list(&place, &agent.id).last().map(|r| {
                 format!(
                     "exit={} {}",
@@ -1225,7 +1223,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                             provider.model = models.current().to_string();
                         }
                     };
-                    match crate::jev::route(decision, &view, spoke) {
+                    match picks.settle(crate::jev::route(decision, &view, spoke)) {
                         crate::jev::Route::Tool { name, args } => {
                             let (calls, outcomes) =
                                 crate::jev::run_tool(&view, &cx, &control, batch_cfg, name, args)

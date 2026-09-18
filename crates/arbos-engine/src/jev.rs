@@ -42,6 +42,13 @@ const LINE_CHARS: usize = 800;
 /// Tools the user will read: Jev must not write these. The LLM does.
 const LLM_TOOLS: &[&str] = &["say", "ask", "plan"];
 
+/// Tools no pick may run, however few arguments they need. A pick is a
+/// mechanical read; `undo` restores the checkpoint and throws the turn's
+/// work away. The editing tools need arguments the door cannot send, so
+/// they never reach a pick; `undo` needs none. The language model still
+/// asks for it by name.
+const NEVER_PICKED: &[&str] = &["undo"];
+
 /// The three acts Jev may return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
@@ -221,9 +228,9 @@ fn string_list(value: &Value, key: &str) -> Vec<String> {
     }
 }
 
-/// Turn a decision into a route. Unknown tools, language tools, and a
-/// `tool` act with no name become an `llm` step. That is a valid pick,
-/// not a fail.
+/// Turn a decision into a route. Unknown tools, language tools, a `tool`
+/// act with no name, and a tool whose required arguments the pick does
+/// not carry all become an `llm` step. That is a valid pick, not a fail.
 pub fn route(decision: Decision, view: &View, spoke: bool) -> Route {
     match decision.act {
         Act::Llm => Route::Llm,
@@ -232,22 +239,88 @@ pub fn route(decision: Decision, view: &View, spoke: bool) -> Route {
             no_change: decision.no_change,
         },
         Act::Tool => {
-            let Some(name) = decision.tool.filter(|n| view.get(n).is_some()) else {
+            let Some(tool) = decision.tool.as_deref().and_then(|n| view.get(n)) else {
                 return Route::Llm;
             };
-            if LLM_TOOLS.contains(&name.as_str()) {
+            let name = tool.name();
+            if LLM_TOOLS.contains(&name) || NEVER_PICKED.contains(&name) {
                 return Route::Llm;
             }
-            if matches!(name.as_str(), "write" | "edit" | "apply_patch")
+            if !args_are_complete(&tool.schema(), &decision.args) {
+                return Route::Llm;
+            }
+            if matches!(name, "write" | "edit" | "apply_patch")
                 && decision.args.get("path").and_then(Value::as_str).is_none()
             {
                 return Route::Llm;
             }
             Route::Tool {
-                name,
+                name: name.to_string(),
                 args: decision.args,
             }
         }
+    }
+}
+
+/// Whether a pick carries every argument its tool declares as required.
+/// The Decisions door answers with a tool name and nothing else, so a
+/// pick of `grep` arrives with no `pattern`: running it only records the
+/// missing argument, and Jev picks it again off the same card. The
+/// language model, which does write arguments, gets the step instead.
+fn args_are_complete(schema: &Value, args: &Value) -> bool {
+    let Some(required) = schema
+        .pointer("/function/parameters/required")
+        .and_then(Value::as_array)
+    else {
+        return true;
+    };
+    required
+        .iter()
+        .filter_map(Value::as_str)
+        .all(|key| args.get(key).is_some_and(|v| !v.is_null()))
+}
+
+/// The tools Jev may be offered. A tool with a required argument cannot
+/// be run from a pick that carries no arguments, so it is not a choice:
+/// offering `grep` and `read` is what turned one folder question into a
+/// run of argument-less searches. `ls` needs nothing — its default path
+/// is the open folder — so it stays.
+pub fn pickable(view: &View) -> Vec<String> {
+    view.schemas()
+        .iter()
+        .filter_map(|schema| {
+            let name = schema.pointer("/function/name")?.as_str()?;
+            (!LLM_TOOLS.contains(&name)
+                && !NEVER_PICKED.contains(&name)
+                && args_are_complete(schema, &json!({})))
+            .then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// The tool calls this turn already ran at Jev's pick. The Decisions
+/// door carries no arguments, so a second pick of one tool is the same
+/// call as the first: without this, `what files are in this folder?`
+/// became one `ls` answer and hundreds of identical `ls` calls after it.
+/// The repeat becomes an `llm` step — the answer is what is missing, not
+/// another listing.
+#[derive(Debug, Default)]
+pub struct Picks {
+    ran: Vec<String>,
+}
+
+impl Picks {
+    /// Record this route and return what the turn should do with it.
+    pub fn settle(&mut self, route: Route) -> Route {
+        let Route::Tool { name, args } = &route else {
+            return route;
+        };
+        let call = format!("{name} {args}");
+        if self.ran.contains(&call) {
+            return Route::Llm;
+        }
+        self.ran.push(call);
+        route
     }
 }
 
@@ -877,6 +950,106 @@ mod tests {
         assert!(
             FIRST_BYTE < crate::provider::HEARTBEAT,
             "a wait longer than one heartbeat puts a waiting banner on the window"
+        );
+    }
+
+    #[test]
+    fn a_pick_with_no_arguments_only_offers_tools_that_need_none() {
+        let view = tool_view();
+        let names = pickable(&view);
+        assert!(names.contains(&"ls".to_string()), "{names:?}");
+        for needs_args in ["grep", "read", "find", "write", "apply_patch"] {
+            assert!(
+                !names.contains(&needs_args.to_string()),
+                "{needs_args} takes a required argument Jev cannot send: {names:?}"
+            );
+        }
+        for spoken in LLM_TOOLS {
+            assert!(!names.contains(&spoken.to_string()), "{spoken}");
+        }
+        assert!(
+            !names.contains(&"undo".to_string()),
+            "undo needs no argument but throws the turn's work away: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_pick_of_undo_becomes_llm() {
+        let view = tool_view();
+        let undo = parse_answers(&json!({
+            "answers": {
+                "act": {"type": "choice", "choice": "tool"},
+                "tool": {"type": "choice", "choice": "undo"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(route(undo, &view, false), Route::Llm);
+    }
+
+    #[test]
+    fn a_tool_missing_its_required_arguments_becomes_llm() {
+        let view = tool_view();
+        let grep = parse_answers(&json!({
+            "answers": {
+                "act": {"type": "choice", "choice": "tool"},
+                "tool": {"type": "choice", "choice": "grep"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(grep.args, json!({}), "the door sends no arguments");
+        assert_eq!(route(grep, &view, false), Route::Llm);
+
+        let ls = parse_answers(&json!({
+            "answers": {
+                "act": {"type": "choice", "choice": "tool"},
+                "tool": {"type": "choice", "choice": "ls"}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            route(ls, &view, false),
+            Route::Tool {
+                name: "ls".into(),
+                args: json!({}),
+            },
+            "ls needs nothing; its default path is the open folder"
+        );
+    }
+
+    #[test]
+    fn the_same_call_twice_is_one_listing_and_then_an_answer() {
+        let mut picks = Picks::default();
+        let ls = || Route::Tool {
+            name: "ls".into(),
+            args: json!({}),
+        };
+        assert_eq!(picks.settle(ls()), ls(), "the first listing runs");
+        assert_eq!(
+            picks.settle(ls()),
+            Route::Llm,
+            "the second is the same call; the answer is what is missing"
+        );
+        assert_eq!(picks.settle(ls()), Route::Llm);
+        assert_eq!(
+            picks.settle(Route::Tool {
+                name: "ls".into(),
+                args: json!({"path": "src"}),
+            }),
+            Route::Tool {
+                name: "ls".into(),
+                args: json!({"path": "src"}),
+            },
+            "another folder is another call"
+        );
+        assert_eq!(
+            picks.settle(Route::Done {
+                need_say: false,
+                no_change: false
+            }),
+            Route::Done {
+                need_say: false,
+                no_change: false
+            }
         );
     }
 
