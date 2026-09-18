@@ -15,6 +15,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../sim-lib.sh"   # page_up: scroll in points, not screenshot pixels
 CYCLE=${1:?cycle}; ROW=${2:-phone}
 OUT="$HOME/mobile-out/$CYCLE/live-worker"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
@@ -94,7 +95,7 @@ shot 02-sheet-while-working
 COLLECT=$OUT/sheet-rows.txt; : > "$COLLECT"
 for page in $(seq 1 8); do
   ui dump | grep -E "Button +.+, " >> "$COLLECT"
-  idb ui swipe 236 900 236 560 --duration 0.4 --udid "$UDID" >/dev/null 2>&1
+  page_up "$UDID" >/dev/null 2>&1
   sleep 1.2
 done
 sort -u -k4 "$COLLECT" -o "$COLLECT"
