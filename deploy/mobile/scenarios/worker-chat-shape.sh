@@ -65,7 +65,10 @@ want() { # want <what> <found> <expected-when-good> <fault message>
   if [ "$2" = "$3" ]; then say "$1" "$2"; else say "$1" "$2   ← $4"; FAULTS=$((FAULTS + 1)); fi
 }
 
-TITLE=$(awk '$3 == "StaticText" && $2 < 120 { print $4; exit }' "$OUT/tree.txt")
+# The whole name, not its first word. A worker is named by its goal, so
+# `$4` printed "count" for "count slowly one to forty, Done" — a header
+# claim that reads as a header of one word.
+TITLE=$(awk '$3 == "StaticText" && $2 < 120 { $1=""; $2=""; $3=""; sub(/^ +/, ""); print; exit }' "$OUT/tree.txt")
 say "the header names" "${TITLE:-nothing}"
 [ -n "$TITLE" ] || { FAULTS=$((FAULTS + 1)); }
 
