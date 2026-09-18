@@ -3492,3 +3492,30 @@ is filed rather than changed.
 
 **Recording:** `media/mobile/cycle-124/recording_demo.mp4`.
 **PR:** [#677](https://github.com/unarbos/arbos/pull/677), harness only.
+
+## Cycle 125 — I wrote a confident sentence about behaviour I had not run
+
+The oldest row left was `the harness — typing into the composer`, last
+measured at cycle 72. It holds: **4 of 4 typed lines arrived, 4 of 4 whole**,
+against M-162's 6-of-8 loss in the cycle-48 journey (M-408).
+
+The scenario's header says "run it with the app on a project chat", and
+nothing checked that (M-409). So I added a guard — and in its comment I
+explained what would otherwise happen:
+
+> Run from the projects list there is no composer to focus, every line goes
+> nowhere, and the run reports `0/4 arrived`.
+
+Then I ran it from the projects list. **2 of 2 arrived, 2 of 2 whole.** The
+list has its own composer — `Message phone…` — and it sends to the project
+it names (M-410).
+
+The guard was right. Its reason was invented, inside a change whose entire
+point was that a precondition should be checked rather than asserted. I have
+spent six cycles finding instruments that stated more than they measured,
+and wrote one into the fix for the seventh.
+
+Corrected in a second commit rather than an amend, because the wrong
+sentence is the useful part of the record.
+
+**PR:** [#680](https://github.com/unarbos/arbos/pull/680), harness only.
