@@ -2013,3 +2013,50 @@ the picture. And the best question asked all night came from outside the
 loop: *what would a person who cannot hear this see?*
 
 **PR:** [#590](https://github.com/unarbos/arbos/pull/590).
+
+## Cycle 85 report (07:15 UTC, 09-18)
+
+**Looked at:** the pause split, re-checked against the gateway's #562
+(`1e0e9cde`, serving since 04:13).
+
+**Half of M-146 is closed** (M-298). Six runs of `pause.wav` down the
+capture path:
+
+| | result |
+| --- | --- |
+| runs whose transcript split | **0 of 6** |
+| runs answered more than once | **6 of 6** — 2, 3, 4, 3, 2, 3 replies with audio |
+| frames captured vs sent | **900 / 900**, every run |
+
+The breath no longer splits the transcript. Every run returns the whole
+question as one final, which is what #562 was for.
+
+**And the half that remains is a different fault now.** One transcript still
+draws more than one spoken answer — from run 2, with only that single
+transcript in the log:
+
+```
+reply: Right now, nothing's in progress; all recent workers have finished.
+event response.done reason=completed playing=true
+phase listening
+reply: We just finished having two workers each run a timed sleep command…
+```
+
+No second transcript precedes the second reply. It is not segmentation any
+more: the gateway hears one question and answers it twice, the second
+arriving over the first. Re-filed with the numbers, and the phone is still
+provably not in it.
+
+**A rig fault worth more than the usual** (M-299). My first verdict counted
+a run as bad if *either* the transcript split *or* more than one answer
+played, and printed "still splitting, every run" — for runs whose
+transcripts were whole.
+
+Every other rig fault tonight made a working app look broken. This one made
+**a gateway fix invisible**, and I would have reported no progress on a
+change that had done exactly what it set out to do. A check inherits the
+shape of the world when it is written, and the world moves; when a fix lands
+upstream, the checks written before it are the first thing to re-read.
+
+**PR:** [#592](https://github.com/unarbos/arbos/pull/592), harness only, and the re-check is
+committed this time so the next ask is one command.

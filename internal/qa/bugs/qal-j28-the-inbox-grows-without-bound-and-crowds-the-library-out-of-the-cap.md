@@ -29,21 +29,29 @@ The inbox took **89% of the step's measured time**. The step was killed by its 1
 
 ## What the cut cost
 
-**139 scenarios never ran**, of which **116 are the deterministic library** — the part that does
-not need a model and that carries today's findings:
+**139 scenarios never ran.** Of those, 23 have a second home and are not a real loss — the
+desktop step's 26-scenario set picks up `journey-linux`, nine `mt-*`, the `desktop-*` set and
+`af-02`/`af-03`, and step 3a2 picks up `uw-01`..`uw-04` and `af-04` from cycle 7 onward.
+(`kickoff-session` was never lost; it ran inside the first 152.)
 
-- the whole rewind family: `rw-01`..`rw-10d`, including `rw-08*` (failed restore leaves the tree
-  where it was) and `rw-10*` (rewind against a concurrent `git`)
-- the whole stale-write family: `sw-01`..`sw-06`, including **`sw-02-stale-undo-mark-resets-past-committed-work`**, which is `qal-j22`'s own subject
-- all 29 `mt-*` multitasking scenarios
-- `lk-01`..`lk-03`, `fm-01`, `af-01`..`af-04`, `uw-01`..`uw-04`
-- `ra-01-root-and-home-wipes-are-refused` — the attack the namespace wrapper exists for
+That leaves **116 measured by no step at all, of which 93 are deterministic** — the part that
+needs no model and carries today's findings:
 
-Two of the lost names are covered elsewhere and are **not** a real loss: `journey-linux` and
-`kickoff-session` run again in the desktop step, which reached `journey-linux` at 07:06 in this
-same cycle. Counting them as cost would overstate the damage. The 116 deterministic scenarios
-above exclude nothing else that a later step picks up: `af-*` and `uw-*` have step 3a2 from cycle
-7 onward, and the rest have no second home.
+| family | unmeasured | what it covers |
+|---|---|---|
+| `mt-*` | 20 of 29 | multitasking, steering, queue survival |
+| `rw-*` | 17 | the whole rewind and restore family, including `rw-08*` (a failed restore leaves the tree where it was) and `rw-10*` (rewind against a concurrent `git`) |
+| `bt-*` | 8 | batch and history paging |
+| `fp-*` | 7 | file-plan subscriptions and plan pages |
+| `sw-*` | 6 | the stale-write family, including **`sw-02-stale-undo-mark-resets-past-committed-work`**, which is `qal-j22`'s own subject |
+| `co-*` | 5 | sleep and worker-report ordering |
+| `rm-*`, `fr-*`, `lk-*` | 4, 3, 3 | remote spawn, first-run fallback, the held-record family |
+| `ra-*` | 2 | **the root and home wipe refusals** — the attack the namespace wrapper exists for |
+| the rest | 18 | one or two each across `re`, `rp`, `fm-01`, `fs`, `jl`, `pn`, `sb`, `st`, `sv`, `wt`, `xp`, `journey-j8a-headless` |
+
+The two facts that matter most in that table: `sw-02` names the exact destruction `qal-j22` is
+open about and has not run on `main` today, and `fm-01` is the first-match property the whole
+`fm-*` family was to be built on.
 
 A cap that always falls in the same place does not sample the library; it truncates it at a fixed
 point. Everything after index 152 in registration order has not been measured on `main` by the

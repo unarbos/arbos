@@ -296,7 +296,7 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 | the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
 | the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
 
-### Two additions to the review list, earned overnight
+### Three additions to the review list, earned overnight
 
 6. **An assertion must not bound a race.** Batching, timing and ordering that the product does not
    guarantee must not be asserted; assert the property the optimisation exists for, or make the kernel
@@ -305,6 +305,13 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 7. **A script must not depend on which of two things happens first**, unless that ordering is the thing
    being asserted — and then it is asserted explicitly, so a failure names the ordering rather than dying
    of a line that never came.
+8. **A failure message must be computable when the assertion passes.** Python builds the message argument
+   before `expect` looks at the condition, so anything the message indexes, pops or unwraps has to be safe
+   in the passing case. `af-03` ended with `f"… {wrong[0]!r} …"` where `wrong` empty *was* the pass, so the
+   scenario raised `IndexError` exactly when it succeeded and printed `driver-exception` for four
+   consecutive cycles while the product was behaving correctly — `qal-j29`. Two consequences worth holding:
+   a `driver-exception` is a rig fault until proven otherwise, and it is **more** urgent than a product
+   break, because it hides its own scenario's finding instead of reporting one.
 
 ### And the hardest lesson of the night, which belongs with step 2 of the list
 

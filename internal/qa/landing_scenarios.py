@@ -2529,7 +2529,12 @@ def register(scenario, registry, transcript, now_ms, branch):
             cx.rec.expect(bool(notices) or in_moved, "af-03-silent", f"the folder moved under the window and the chat says nothing ({cx.rec.notes['new_items']}); the line went {'to the moved folder' if in_moved else 'nowhere'}")
             # What the notice says must be true: the folder moved; nothing was archived.
             wrong = [n for n in notices if "archived" in n.lower() and not any(w in n.lower() for w in ("moved", "renamed", "folder", "no longer", "not found"))]
-            cx.rec.expect(not wrong, "af-03-wrong-explanation", f"the chat explains a renamed folder as {wrong[0]!r} — nothing was archived; the user's line went {'to the moved folder' if in_moved else 'nowhere'}", "desktop session.rs: a kernel that stopped because its store is gone is drawn as an archived agent")
+            # `wrong[0]` inside the message is evaluated before `expect` looks at the condition, so the
+            # passing case — `wrong` empty — raised `IndexError` and the scenario reported
+            # `driver-exception` in every cycle from 2026-09-17 18:18 to 2026-09-18 07:06 while the product
+            # was behaving: no ghost folder, and an honest "folder is gone or was moved" notice.
+            explained = repr(wrong[0]) if wrong else "nothing"
+            cx.rec.expect(not wrong, "af-03-wrong-explanation", f"the chat explains a renamed folder as {explained} — nothing was archived; the user's line went {'to the moved folder' if in_moved else 'nowhere'}", "desktop session.rs: a kernel that stopped because its store is gone is drawn as an archived agent")
         finally:
             try:
                 rig.close(folders=[folder, moved])
