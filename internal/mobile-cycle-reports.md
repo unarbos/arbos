@@ -957,3 +957,178 @@ hub, and a kernel CI flake written up for its owner rather than chased.
 The store wobbled repeatedly through the cycle — reads, appends and a
 `mkdir` all refused at least once, every one succeeding on retry. Fifth and
 sixth episodes in two days.
+
+### Cycle 61, the gap closed (02:42 UTC)
+
+M-233's named gap is shut. Caught with a `sleep 150` worker, seventeen
+seconds in, **all four surfaces show the live state**:
+
+| surface | what it says |
+|---|---|
+| the pill | `Working 1` |
+| the chat's worker line | `1 Working sleep 150 seconds · sleeping 150 seconds` |
+| **the sheet's row** | `⠼, sleep 150 seconds, sleeping 150 seconds` |
+| the worker's own chat | `Working running sleep 90` |
+
+The row's claim holds in full, and `media/mobile/cycle-61/11-` shows it.
+
+**It nearly went into the ledger as a defect** (M-235). The scenario counted
+live rows with `grep ", Working$"`, found **0 of 12**, and printed
+`VERDICT: the sheet lists 12 workers and marks none of them working`. But a
+finished row reads `<goal>, Done` and a live one reads
+`<spinner>, <goal>, <step>` — there is no literal "Working" in it, the
+spinner glyph carrying that. Scrolling the sheet and reading the raw dump is
+what showed the row sitting there, correct.
+
+Fifth time tonight a count asserted a shape the screen never promised, and
+the closest to landing: the verdict was already written. The only habit that
+has ever caught these is reading the dump instead of the count.
+
+TestFlight is the steward's **1748** (`53dffd33`, #543) — the sixth number
+this session, which is why none of my reports state it as a fact of their
+own.
+
+## Cycle 62 report (02:50 UTC, 09-18)
+
+**Looked at:** the project chat's core path — send, card, streaming, Worked
+line — last exercised at cycle 41 and the surface the app is mostly made of.
+
+**It works, and now has numbers** (M-236):
+
+| | |
+|---|---|
+| send → the card | ~1.0 s |
+| send → the reply's first words | **8.9 s** |
+| send → `Worked 8s` | **9.8 s** |
+
+The composer resets to `Follow up…` and the kernel holds both the line and
+the reply (seq 2364–2366). `media/mobile/cycle-62/`, scenario at
+`deploy/mobile/scenarios/the-core-chat-path.sh`.
+
+**One of those three numbers is not what it looks like** (M-237). The card's
+`1.0 s` is at the floor of the method: one `ui dump` costs 0.36–0.44 s over
+five runs, so a poll loop cannot resolve anything faster than about half a
+second, and a card drawn instantly still reads as ~1 s. I measured the
+instrument before quoting it, and the floor is written beside the number in
+the scenario so nobody later reads it as the app being slow to draw a card
+it almost certainly draws at once.
+
+The other two are twenty times the floor and mean what they say.
+
+A number without its resolution is an opinion with a decimal point — and
+this loop has spent the week on instruments that claimed more than they
+could see.
+
+## Cycle 63 report (03:00 UTC, 09-18)
+
+**Looked at:** the loop's own machine, oldest row at 41, and the claim it
+carries — that the harness lives in the repo so no worker's disk is
+load-bearing. That claim is the one written after the night this loop nearly
+lost its Mac, so it is worth testing rather than admiring.
+
+**It was true of the files and not of the paths** (M-238). `mac-journey.sh`
+called four committed tools from `$HOME`: `~/kernel.py` seven times, plus
+`~/frame-log.py`, `~/journey-record.py`, `~/push-check.sh`. All four also
+live in `deploy/mobile/`. Both copies existed and they drifted.
+
+The cost was paid tonight without anyone noticing: `kernel.py` was corrected
+**three times** — the agent filter, the `main`/`root` alias, the race on
+unlabelled frames — and **not one of those fixes reached a journey run**,
+because the run read the home copy. Side by side on the same agent:
+
+```
+via the checkout:  8      the worker's own count, correct
+via ~/kernel.py:   2366   the root's count, the bug fixed three times
+```
+
+Run 33 is not invalidated — the journey uses `history`, not `total` — but
+the next fix that mattered would have gone the same way, silently. #554.
+
+**And it removes an undocumented step from rebuilding the Mac.** The cycle-41
+recovery story implies a fresh machine can clone and run. It could not: it
+needed someone to know that four files must first be copied into `$HOME`,
+which was written down nowhere.
+
+**The shape of it** (M-239). This is "the only copy is not a copy" inverted.
+Cycle 41 stopped the loop depending on one disk by committing the tools.
+Nobody checked which copy the loop actually *ran*, so the repo copy became
+the maintained one and the home copy the used one, and the gap grew quietly
+for twenty-two cycles. Two copies with one maintained is worse than one
+copy, because it reads as safety.
+
+The cheap check is now written into the row: compare each committed tool's
+checksum against the copy the harness invokes.
+
+## Cycle 64 opened (03:10 UTC, 09-18)
+
+**The workers-sheet ask was already shipped, and I re-measured rather than
+say so from memory** (M-240). `main` carries
+`workerOrder.filter { touched.contains($0) || inTree.contains($0) }` from
+#547. Verified by a cold relaunch — terminate, reinstall, launch fresh — and
+the pill read **Agents 16** with the sheet listing `count slowly one to
+forty` and the four `say sentence about …` workers, every one from an
+earlier session. "I already did that" is a sentence this loop has been wrong
+about twice tonight, so it now costs a measurement.
+
+**The voice cluster is the next rotation, and its rig is confirmed up**
+(M-241). Opening it, my probe connected to the gateway and reported
+`frames seen: none in 15s` — which as written is "the gateway accepts
+sockets and says nothing", a finding for another team. It was my probe. The
+client opens the conversation: `SelfHostedVoiceSession` sends
+`session.start` on connect. Sending it first returns
+
+```
+session.ready {engine: openai, asr: openai/gpt-live-1,
+               tts: openai/gpt-live-1,
+               reply: openrouter/google/gemini-2.5-flash}
+```
+
+Third time tonight an instrument of mine would have produced a false finding
+about somebody else's system, and the same check caught it each time: read
+what the real client does before deciding the server is at fault.
+
+**Next:** barge-in (last measured at 42: 500–522 ms round trip, the phone's
+own part 2–4 ms) and the microphone path, with the clips in `~/mobile-clips`
+and a recording due this cycle.
+
+## Cycle 64 report (03:20 UTC, 09-18)
+
+**Looked at:** what the list says about a machine the hub is holding open
+after its last kernel left (#545).
+
+**It said `Off`** (M-242). The hub now sends `online: false` with the
+projects `live: false` and an `offline_since_ms`; the app read neither
+field, so those projects arrived looking like any idle one. `Off` is true
+and says nothing about *which* thing is off — which the row's own comment
+already calls the only question worth answering there. The hub had started
+answering it and the app was not listening.
+
+The rows name it now:
+
+```
+alpha    Idle · 2m
+beta     sleepy-box is asleep
+gamma    sleepy-box is asleep
+phone    arboslife is off
+```
+
+That last line is the remembered-project path from #480, and the two read
+differently on purpose: *asleep* is a machine the hub is holding open for,
+*off* is one it has lost track of. #556, `media/mobile/cycle-64/01-`.
+
+**How it was tested, since the live roster has no sleeping machine.**
+Stopping somebody else's kernels to make one is not a test worth running, so
+the app was pointed at a small local hub serving a fixture of exactly the
+shape #545 documents — checked against the live roster's own fields first.
+
+**And that turned up a second fault** (M-243). The fixture showed nothing
+but stale cached rows. `HubClient.list` mapped **only** `ws` to plain http,
+so an `http://` hub became `https://` and never answered, while `attachURL`
+has always kept `http` and `ws` plain. A plain hub on a local network was
+attached to over `ws` and listed from over `https`: its roster never loaded,
+and the list quietly showed what it had cached, with no error anywhere.
+
+Nobody would have met this on the trycloudflare hubs this loop uses, which
+are all `wss`. It waited for the first plain hub — which happened to be a
+test fixture rather than one of Jacob's machines, which is the good version
+of finding out.
