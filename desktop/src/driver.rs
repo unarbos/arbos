@@ -1381,6 +1381,8 @@ fn item_json(item: &ChatItem) -> Value {
             "feedback": message.feedback,
             "seq": message.seq,
             "reported": message.reported,
+            "worked_secs": message.worked_secs,
+            "steer": message.steer,
         }),
         ChatItem::From { who, text, .. } => json!({
             "kind": "from",
