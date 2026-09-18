@@ -2090,3 +2090,47 @@ Worth noticing what that nearly cost. Without the fix the control run would
 have been called broken, and the comparison that re-scoped M-146 could not
 have been made — the tool would have agreed with the old theory by refusing
 to measure the thing that disproved it.
+
+## Cycle 86 report (07:35 UTC, 09-18)
+
+**Looked at:** the four rows still dated 60 — cold start, long history,
+background-and-back, attachments.
+
+**All four hold** (M-302): cold start **3.2 s** to seven rows; a chat with
+its composer in **1.0 s** on a transcript the kernel puts at **2601** lines,
+paging back in **3.5 s**; **21** text rows before and after eight seconds
+away; and the attachment chip with its `×` in the field. Two committed
+scenarios, one run, three cycles of rows cleared.
+
+**Then three faults in my own harness, each worse than the last.**
+
+Cycle 80's fix went into the two files I had open, not into the fault
+(M-303). `several-workers.sh` counted the sheet off a single screen — 12
+rows against a pill of 22 — which is exactly what M-287 withdrew a finding
+over. I fixed the two scenarios written that hour and never swept. The sweep
+was one `grep` and it took six cycles.
+
+"Paged to the end" was eight pages and a hope (M-304). With 25 agents the
+fixed loop collected 17 rows and called that the end: a page count is an
+assumption about list length dressed as a measurement. `collect_rows` now
+pages until two pages add nothing and says whether it **converged** or hit
+its ceiling.
+
+And with paging provably converged the numbers *still* disagreed — pill 25,
+labels 17 — and the instrument was still the reason (M-305). Rows are
+collected by goal text and **three labels are shared on one screen**; this
+project has run enough poems and sleeps to repeat itself. The comparison now
+prints `cannot say`, calls its own number a floor, and names the condition
+under which it would mean something.
+
+**What I take from the three together.** Each one produced a number that
+looked like the app contradicting itself, and in each the app was fine. The
+progression is the useful part: the first was a gesture that did nothing,
+the second a loop bound mistaken for a measurement, the third a counting
+rule invalidated by the data it was counting. They get subtler as the
+obvious faults are removed, which means the defence cannot be vigilance — it
+has to be tools that report their own limits. Cycle 80's fix was a better
+gesture; today's is a tool that refuses.
+
+**PR:** [#593](https://github.com/unarbos/arbos/pull/593), harness only.
+**Stills:** `media/mobile/cycle-86/`.

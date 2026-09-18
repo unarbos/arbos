@@ -19,10 +19,10 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — B chosen: one spoken answer, the kernel's
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [pause re-check](https://github.com/unarbos/arbos/pull/592) next; watching TestFlight after [orb VoiceOver](https://github.com/unarbos/arbos/pull/590)
-- [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — cycle 86; [orb VoiceOver](https://github.com/unarbos/arbos/pull/590) on `main`; TestFlight **1857** until a newer number
-- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1833**; deferral now 10 minutes, then publish newest green
+- [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — live on the gateway; [one spoken answer](https://github.com/unarbos/arbos/pull/594) open
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [one spoken answer](https://github.com/unarbos/arbos/pull/594) then [list paging harness](https://github.com/unarbos/arbos/pull/593); TestFlight **1882**
+- [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — cycle 87 next; [list paging harness](https://github.com/unarbos/arbos/pull/593) open; TestFlight **1882**
+- [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1875**; watching past `6e72ed1f`
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
@@ -32,7 +32,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 ## Voice and phone (end goal)
 
-- [ ] [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — B chosen: hold until the transcript decides, then speak only the kernel's answer; [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
+- [ ] [Hold Live then speak kernel](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — live on the gateway; [one spoken answer](https://github.com/unarbos/arbos/pull/594) open; [what Live can see](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/gpt-live-context.md)
   - [x] [Mirror call text in chat](bc-5691d9b7-e5a5-578a-a19f-a7be750d7671) — [#501](https://github.com/unarbos/arbos/pull/501) on `main`
   - [x] [Give Live full chat context](bc-4e8d547d-fa8a-535d-a931-0d11d7b4fdbb) — [#500](https://github.com/unarbos/arbos/pull/500) on `main`
 - [ ] A call goes silent while the agent works, and Jacob could not tell that from a crash — he asked "what are you working on", heard "let me get that information", and nothing came back, with the strip returning to Listening as though the exchange were over; the cause is being found on the desktop path, with the filler settling the turn as the first suspicion. His ask beside it is the real fix: a sound while commands are running, driven by the actual running state rather than a timer, tolerable for minutes rather than seconds, and ducking out of the way the moment either of them speaks
@@ -47,7 +47,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] [Fix Mac fullscreen chrome](bc-0df916de-0e66-5368-b418-08c4a8340ec4) — [#542](https://github.com/unarbos/arbos/pull/542) on `main`; in **1765**
 - [ ] [Architect desktop call mode](bc-9590b6c7-3ece-5b78-bb08-21ae0191cf3f) — slice 1 live: [design](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-call-mode-design.md), [gateway narrator #100](https://github.com/unarbos/arbos/pull/100), [inbox channel #99](https://github.com/unarbos/arbos/pull/99), [desktop call UI #101](https://github.com/unarbos/arbos/pull/101), slices 1–4 shipped: spoken approvals with re-ask, reconnect, drill-down by phrase, hub attach per call, 11/11 harness, live hub call into `mac/.arbos`; desktop call now matches the phone in [#101 `eb5f930`](https://github.com/unarbos/arbos/pull/101): in-process playback, continuous uplink, model voice for small talk + narrator, gateway ASR for Fn (0.7 s first word); Mac live check pending; QA owns perfecting
-- [ ] [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — cycle 86; [pause re-check](https://github.com/unarbos/arbos/pull/592) now any-question double answer; TestFlight **1857** until a newer number
+- [ ] [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — cycle 87 next; [list paging harness](https://github.com/unarbos/arbos/pull/593) open; TestFlight **1882**
 - [ ] [Build in-app feedback for desktop](bc-0d55088a-e9bd-57ba-bbdd-3a893272675e) — the whole chain is merged and proven with a real report crossing the hub: the thumbs-down opens a review sheet showing every part as readable lines, the report is on his disk before Send returns, delivery drains itself into a place of its own on ArbosLife where the credential cannot touch his projects, and the parity loop picks it up within fifteen minutes and tells him which build fixed it ([design](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-feedback-design.md)); building it found more than it shipped — a sheet that froze the app on the first real click, a screenshot that would silently never attach, his own words never redacted at all, a retry promise the code did not keep, and a test failing one run in forty that had been holding other workers' PRs; the missing Send button was the status sentence shoving it sideways off the window, measured at x=1216 in his exact state and fixed in [#370](https://github.com/unarbos/arbos/pull/370) along with Send vanishing after a failure, an old kernel's refusal being dropped silently, and reports in closed projects never retrying; four of his reports have now crossed and are in the feedback store with their screenshots, after his `url` was pointed at the tunnel directly — `hub-api.arbos.life` goes to another app until he adds the CNAME; two more wait on his Mac because the drain only sweeps open projects; and after his update the report itself is complete, with the earlier "nothing to send" rows explained by a kernel older than the frame
 
 - [ ] Jacob's TestFlight feedback is an input — the poller runs every fifteen minutes and picked up eight reports with screenshots; today's four fixes are merged and on his TestFlight as build 994, including the serious one where lines typed in a disconnected project were run by the next project he opened — that one was reasoned from his screenshots rather than reproduced, so the loop is proving it live with the network cut; waiting on his word about two older reports, and his `subnet120` kernel needs updating since it is his own project
@@ -80,7 +80,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] OpenRouter blocks OpenAI models — 403 "user blocked for a previous policy violation" on `openai/*`; it cost Jacob a new project's first turn (raw provider text as the opening line, then 98 silent seconds), fixed in [#298](https://github.com/unarbos/arbos/pull/298): a kickoff probes the key before writing a word, a refusal marks that family blocked for later turns, the switch reads as one plain sentence with the provider's text confined to the log, and a model that sends no first byte in 30 seconds is replaced; loops run on Gemini and Sonnet, and the SWE-bench measurements were never OpenAI so they stay comparable; QA now records a provider refusal as an environment fault rather than an Arbos bug; the pod's voice gateway and every mesh kernel are moved to Gemini and running; [#283](https://github.com/unarbos/arbos/pull/283) and [#284](https://github.com/unarbos/arbos/pull/284) are merged, so the kernel's fallbacks start with the primary's own family, a 403 falls through to the next model, and vision and voice defaults are off OpenAI; only Jacob's own `subnet120` kernel still names a blocked model — offered to switch it; Jacob to query the block on his account
 
-- [ ] [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — next django-15022 / 10097 ([loop](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-loop.md))
+- [ ] [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 26 written; reading continues ([loop](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-loop.md))
 - [ ] [SWE-bench harness PR](https://github.com/unarbos/arbos/pull/94) — Arbos as a verifiers Harness; [first run](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-run-2026-09-13.md) 12/16; [comparison](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-harness-comparison-2026-09-13.md) Arbos 8 vs Codex 10 on shared 12, 5x cheaper, 2x more calls; comparison overspent $73 vs $40 cap
 
 - [ ] [Route harness work through Jev](bc-7330e6eb-85be-5448-944c-6ed6225064ce) — [#546](https://github.com/unarbos/arbos/pull/546) on `main`; on in **1765**; `jev = false` turns it off; [Jev in the harness](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/jev-harness.md)
@@ -90,12 +90,12 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1833)** (`0ff75662`); deferral now 10 minutes, then publish newest green
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — click Update **0.2.0 (1875)** (`6e72ed1f`); watching a zip past [style pair](https://github.com/unarbos/arbos/pull/588)
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [pause re-check](https://github.com/unarbos/arbos/pull/592) next; watching TestFlight after [orb VoiceOver](https://github.com/unarbos/arbos/pull/590); Mac **1833**; TestFlight **1857**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [one spoken answer](https://github.com/unarbos/arbos/pull/594) then [list paging harness](https://github.com/unarbos/arbos/pull/593); Mac **1875**; TestFlight **1882**; `v0.2.0` stays a draft
+- [x] [Pause re-check](https://github.com/unarbos/arbos/pull/592) — on `main` (`17c5232e`)
+- [x] [Orb VoiceOver](https://github.com/unarbos/arbos/pull/590) — on `main` (`9cdc14a3`); TestFlight **1882**
 - [x] [Kickoff notice once](https://github.com/unarbos/arbos/pull/591) — on `main` (`9cdc14a3`)
-- [x] [Orb VoiceOver](https://github.com/unarbos/arbos/pull/590) — on `main` (`9cdc14a3`); watching TestFlight
-- [x] [Flake evidence](https://github.com/unarbos/arbos/pull/589) — on `main` (`9cdc14a3`)
 
 ## Running Arbos
 

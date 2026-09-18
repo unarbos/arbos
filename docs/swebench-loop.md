@@ -693,8 +693,20 @@ The choice moved from 0 of 7 to 3 of 10; small numbers, a count. The rule's new 
 
 Spend $5.22.
 
-## Next (cycle 26)
+## Cycle 26 (2026-09-18) — the "no change" rule on its real targets: the behaviour did not appear, and the rule's reach ends where the agent argues instead of declining
 
-1. The G rule's real targets: five rollouts on django-15022 and, if it can be found in the taskset, django-10097 — read for the recorded run of the request's example before any "no change" conclusion. This is the read cycle 25 should have been; $10.
-2. The producer finding goes to the features agent: the mark that names the fault is already present in the failures; what the successes share is having opened the producer before editing. If the rule is to have a step, it is "read the function you named".
-3. Standing: every new failure read against the account; any measured comparison states the ceiling on its set first.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 206d617e9a50 protocol 1`** (`main` with #541 in; `2492c601` is the merge that carries it), read-only, label proved. Network cut, no stall, no cap. Five rollouts each on django-15022 (declined twice before on upstream history) and django-10097 (once before, permitting `:` in the password against the issue's RFC quote). $16.81; **0 of 10 solved** — a count, and the expected one: 15022 has solved 2 of 24 clean rollouts in the loop's history and 10097 0 of 2. Pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-26-preregistration.md)) as a read of whether any rollout concludes "no change" and, if so, whether the recorded run and the line are there.
+
+**No rollout declined.** All ten produced a patch. Every 15022 rollout found the upstream history (the ticket, the reverted patch) and changed the code anyway — the choice to decline was available and was not taken, 5 of 5 (cycle 22's treatment took it in 1 of 2; cycles 14–16, 1 of 12). Because no rollout said "no change", the rule's marks — the `repro:true` run of the request's example, the "no change: …" line — had nothing to attach to; the read cannot say whether they would have been present. Three cases in 258 was always too rare a pattern to read in ten rollouts, and this cycle confirms the rarity rather than the rule.
+
+**django-10097 shows where the rule stops.** The issue quotes RFC 1738: `:`, `@` and `/` in user and password must be encoded. Two of five patches forbid `:` in the password as the issue says (and still failed, on a detail not visible in the transcript — consistent with C). **Three of five permit it** — two with the argument, again, that a colon in the password is legal; one by collapsing `user:pass` into a single character class. This is the shape cycle 19 named (the agent's own reading over the request's explicit statement), now 4 cases on this one instance, 3 of them with #541 in force. The landed rule says "the request stands whatever the history says", which reaches a decline; it does not reach a fix that quietly implements the agent's reading of the spec instead of the issue's. Whether that deserves its own sentence is the features agent's call; the loop records it as a candidate distinct from declining: **G-decline** (15022 ×2, no new cases) and **G-override** (10097 ×4).
+
+Every failure read against the account: 15022 ×5 C (semantics preserved, as in all 24 before); 10097 ×2 C-consistent, ×3 G-override. Nothing new. Cumulative read: 268.
+
+Spend $16.81.
+
+## Next (cycle 27)
+
+1. Nothing is owed on the five rules or on #541; cycle 24 is the statement about the rules, and this cycle is the statement about #541: correct where it applies, unable to show itself in ten rollouts because the behaviour it targets is rare, and not reaching the override shape.
+2. Reading continues on whatever new failures arrive. If the features agent lands the "read the function you named" step for the producer rule, the read is five rollouts on xarray-6938 and sympy-17318 again, first question the same.
+3. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.

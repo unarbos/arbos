@@ -34,10 +34,16 @@ pass() {
     python3 "$ROOT/deploy/mirror-alarm.py" "$ROOT/loop" 3 "$MIRROR" "$REPO" || true
     return
   fi
-  REPO="$REPO" timeout 12m bash "$MIRROR"
+  # Keep the script's own output. Every `die` in mirror-docs.sh logs `REFUSED: <reason>` naming which
+  # guard tripped, and recording only the exit code throws that away. Between 04:02 and 06:49 on
+  # 2026-09-18 this line printed "exit 1"/"exit 2" twelve times with no reason, and working out what one
+  # of them would have said took twenty minutes of reading commit messages. The refusals were correct —
+  # the store was listing directories short — but a guard nobody can read is a guard nobody trusts.
+  mout="$(REPO="$REPO" timeout 12m bash "$MIRROR" 2>&1)"
   mrc=$?
+  [ -n "$mout" ] && printf '%s\n' "$mout"
   if [ "$mrc" -ne 0 ]; then
-    echo "[$ts] mirror-docs exit $mrc (a refusal is an alarm)"
+    echo "[$ts] mirror-docs exit $mrc — $(printf '%s' "$mout" | grep -E 'REFUSED|STALE' | tail -1 | cut -c1-240)"
     python3 "$ROOT/deploy/mirror-alarm.py" "$ROOT/loop" "$mrc" "$MIRROR" "$REPO" || true
     return
   fi
