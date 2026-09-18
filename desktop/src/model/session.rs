@@ -1212,27 +1212,38 @@ impl ChatSession {
                 .is_some_and(|at| at.elapsed() >= DELEGATE_GRACE)
     }
 
-    /// Whether the poll should read this chat's transcript tail: a delegate
+    /// Whether the poll should read this chat's transcript tail: a chat
     /// no `Turn idle` has reached — a relaunch, a socket that was down, or
     /// a tail that lagged past `TAIL_LAG` — and not read in `PROBE_EVERY`.
-    /// Nothing this window sent is in flight.
+    /// Every delegate, and any chat whose turn is open without a prompt
+    /// of this window's in flight (`streaming` holds from the send to the
+    /// end): a turn a wake opened, whose end the kernel told the socket
+    /// once, at the Stop, and not again when the waited spawn came back
+    /// (F-179; the root sat Working 55 s past its own `turn_complete`).
+    /// A tool card still Running does not hold the probe off: a turn the
+    /// kernel ended over a tool (a stop while its command ran) leaves that
+    /// card without a result, and the card was the one thing keeping the
+    /// tab Working.
     pub(crate) fn wants_probe(&self) -> bool {
-        self.is_delegate()
+        (self.is_delegate() || self.turn_open)
             && !self.closed
             && !self.streaming
-            && !self.has_running_tool()
             && self.live.is_empty()
             && self.turn_ended.is_none()
             && self.probed_at.is_none_or(|at| at.elapsed() >= PROBE_EVERY)
     }
 
     /// The tail was read. `ended` is a turn-ending record last in the file:
-    /// the kernel is idle here whatever the stream said.
+    /// the kernel is idle here whatever the stream said, and a tool it
+    /// never answered is not coming back.
     pub(crate) fn probed(&mut self, ended: bool) {
         self.probed_at = Some(Instant::now());
         if ended && self.turn_ended.is_none() {
             self.turn_open = false;
+            self.working = None;
             self.turn_ended = Some(Instant::now());
+            self.fail_running_tools();
+            self.flush();
         }
     }
 
