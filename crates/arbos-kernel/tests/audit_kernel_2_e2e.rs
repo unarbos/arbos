@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Attach, start_kernel_replay};
+use common::{start_kernel_replay, Attach};
 use std::time::Duration;
 
 /// Poll the transcript until `ok` holds or `timeout` passes. The attach
@@ -75,10 +75,9 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
     );
     let mut k = start_kernel_replay("nudge", replies);
     let mut a = Attach::connect(&k.url);
-    assert!(
-        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
-            .is_some()
-    );
+    assert!(a
+        .wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+        .is_some());
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get a helper going"}));
     let evs = wait_transcript(&k.place, Duration::from_secs(40), |evs| {
         evs.iter().any(|e| {
@@ -148,34 +147,27 @@ fn a_coordinator_that_spawns_and_leaves_the_page_alone_is_nudged() {
 /// cites hits by agent and line.
 #[test]
 fn grep_scope_history_reads_other_agents_transcripts() {
+    // Root waits on the helper so the report is in the spawn result and
+    // one turn ends. A free-running helper that finishes after the spawn
+    // turn opens a done wake; sending the next prompt in that window
+    // ate "noted" and never reached grep (kernel CI red on 4770c7cf —
+    // the same race as archive_children, 2026-09-17).
     let replies = concat!(
-        "{\"agent\":\"root\",\"content\":\"delegating\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper\",\"task\":\"say the codeword\"}}]}\n",
+        "{\"agent\":\"root\",\"content\":\"delegating\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"helper\",\"task\":\"say the codeword\",\"wait\":true}}]}\n",
+        "{\"agent\":\"helper\",\"content\":\"the codeword is xylophone\"}\n",
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
-        "{\"content\":\"the codeword is xylophone\"}\n",
-        "{\"agent\":\"root\",\"content\":\"noted\"}\n",
         "{\"agent\":\"root\",\"content\":\"looking back\",\"calls\":[{\"name\":\"grep\",\"arguments\":{\"pattern\":\"xylophone\",\"scope\":\"history\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"found it\"}\n",
     );
     let mut k = start_kernel_replay("history-grep", replies);
     let mut a = Attach::connect(&k.url);
-    assert!(
-        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
-            .is_some()
-    );
+    assert!(a
+        .wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+        .is_some());
     a.send(serde_json::json!({"type": "user", "agent": "root", "text": "get the codeword"}));
     wait_transcript(&k.place, Duration::from_secs(40), |evs| {
         evs.iter().filter(|e| e["kind"] == "turn_complete").count() >= 1
     });
-    // The helper's own turn must be on disk before the second prompt.
-    let helper = k.place.join(".arbos/agents/helper/transcript.jsonl");
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while std::time::Instant::now() < deadline
-        && !std::fs::read_to_string(&helper)
-            .unwrap_or_default()
-            .contains("turn_complete")
-    {
-        std::thread::sleep(Duration::from_millis(200));
-    }
     a.send(
         serde_json::json!({"type": "user", "agent": "root", "text": "what did the helper say?"}),
     );

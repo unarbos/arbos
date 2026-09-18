@@ -1190,7 +1190,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 )
             });
             let mut sit = crate::jev::situation_from_events(&events, &wake, &names, repro);
-            sit.slices = crate::brief::gather(&place);
+            // The brief is packed at turn end, not on this hop. Gathering
+            // notes, workers, transcript, and git here delayed Jev and
+            // was not the card the router needs to pick a tool.
             sit.model_menu = crate::brief::menu_line(models.all());
             let spoke = sit.spoke;
             let model = host.config.jev_model().unwrap_or(crate::jev::DEFAULT_MODEL);
@@ -1257,6 +1259,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     eprintln!("turn {}: jev fell through ({e})", agent.id);
                 }
             }
+            // Choosing is over. Leave the line up and the LLM inherit it
+            // for the next eight seconds (Jacob's "what files are in this
+            // folder?" shot). An empty derived step lets Thinking / the
+            // tool name take the headline.
+            hooks.kernel_step("");
         }
         if jev_no_change {
             append_event(
