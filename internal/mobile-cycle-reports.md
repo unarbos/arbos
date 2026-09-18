@@ -2991,3 +2991,34 @@ first layout, so it never appears and `atTail` stays false):
 on the way in regardless of `atTail` landed *further* from the end. **Both
 reverted.** The measurements are written down so the next cycle starts from
 evidence rather than from my third theory in a day (M-366).
+
+## Cycle 111 — 501 points, and three theories I did not need
+
+Last cycle I left M-366 open: opening a chat that has workers stops short.
+I had three theories and no numbers, because everything I could see came
+from element centres in the accessibility tree — where things *are*, never
+why.
+
+One build with `onScrollGeometryChange` ended it:
+
+```
+ARBOSGEO off 5467.3  end 5968.7  short 501.3  insetB 105.3   ← as opened
+ARBOSGEO off 5863.0  end 6002.7  short 139.7  insetB 139.3   ← one more pass
+```
+
+**501 points short**, about five lines of the newest reply, under the
+composer and the pill. Not the pill's height, not `atTail`, not
+`contentMargins`. The rows between are not realised when the first scroll
+runs, so the proxy scrolls to an estimate. A second scroll, once they exist,
+arrives.
+
+**And #633 comes back out.** Its reservation cured the away card by luck and
+left every chat opening with a pill-high band of nothing under its last
+line. With the second scroll and no reservation, `phone` (has a pill) and
+`const` (has none) both open **exactly** at their true end — three swipes
+move the last line by one point.
+
+The core chat path still holds on the fixed build: card 1.0 s, reply 2.0 s,
+`Worked` at 11.1 s, composer cleared (M-367 re-run).
+
+**PR:** [#635](https://github.com/unarbos/arbos/pull/635), the `ios/` batch.
