@@ -63,6 +63,12 @@ reach_the_list() {
     fi
     sleep 3
   done
+  # One last look. The loop checks then acts, so without this the final
+  # action is never verified: a run reported "cannot see the projects list"
+  # and the list was there a second later, because the fourth swipe worked
+  # and nobody looked again.
+  python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null \
+    | grep -qE "StaticText +Projects|Button +[A-Za-z.][A-Za-z0-9._-]*, " && return 0
   echo "  still cannot see the projects list after four tries" >&2
   return 1
 }
