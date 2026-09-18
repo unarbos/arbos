@@ -3376,3 +3376,39 @@ The verdict now separates "never scrolled, fix the swipe" from "scrolled,
 and the labels repeat" rather than naming one cause for both (M-399).
 
 **PR:** [#670](https://github.com/unarbos/arbos/pull/670), harness only.
+
+## Cycle 122 — a sentence about the app that was a fact about a regex
+
+The bad-token recording from cycle 94 came back reviewed, and it flatly
+contradicted a verdict the sweep has printed for weeks:
+
+> the Projects list never shrinks or collapses. There are still exactly 7
+> rows. Instead of disappearing, the status text under the project names
+> changes to "Off".
+
+The scenario said `a token that cannot work empties the list to 1`.
+
+**It was counting rows by their status.** `rows()` matched only
+`<name>, (Idle|Working)`. A refused token leaves every row where it is and
+changes what each one says, so six rows that turned `Off` stopped matching
+and were counted as gone (M-400). Measured on today's build:
+
+```
+  rows now: 7 (1 still reading Idle or Working)
+  what the rows say: 6×Off  1×Idle
+  what the screen says:  Hub token refused.
+  rows after restoring the token: 7
+```
+
+The one still live is the local kernel, which does not go through the hub.
+
+The verdict now says what happens: **all seven rows stay and are marked
+off**, the screen says why, and all seven come back.
+
+**This is the second time this week a recording has beaten the tree**
+(M-401; M-372 was the scroll resting under the pill). Both times the tree
+was read correctly and the *question* was wrong — "how many rows say Idle"
+is not "how many rows are there", and a still cannot show where a scroll
+comes to rest. Neither would ever have failed on its own.
+
+**PR:** [#673](https://github.com/unarbos/arbos/pull/673), harness only.
