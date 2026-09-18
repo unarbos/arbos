@@ -1,10 +1,10 @@
 # qal-j31 — a place MCP config that does not parse hands its server name to the global one, in silence
 
-- **status**: open
+- **status**: **closed — fixed on `main` by [#613](https://github.com/unarbos/arbos/pull/613) (`23ef527c`), re-checked 2026-09-18 12:49. One residual tracked to [#644](https://github.com/unarbos/arbos/pull/644), open.
 - **found**: 2026-09-18 08:22, by walking the kernel's first-match readers rather than by a break
 - **kernel**: `arbos-kernel 0.2.0 f80f0b663bac protocol 1`
 - **code**: `crates/arbos-kernel/src/mcp.rs:93` (`config_paths`) and `:116` (`load_servers`)
-- **control**: `fm-02-a-place-mcp-config-that-does-not-parse-is-skipped-without-telling-anyone`
+- **control**: `fm-02-a-place-mcp-file-that-does-not-parse-is-said-and-does-not-hand-its-name-away` (renamed with the contract)
 - **rollout**: `20260918T082246Z-fm-02-…`
 
 ## What happens
@@ -80,3 +80,45 @@ That is the argument for building the `fm-*` family as a standing property rathe
 one-off checks, which was the reasoning given when the family was proposed: *the reasons are
 today's, and the next reader added will not have been checked by anyone.* This one was already
 there and unchecked. `fm-02` now holds the property.
+
+## Closed: re-checked against #613
+
+The features agent's read is `internal/qa/inbox/2026-09-18-qal-j31-mcp-parse-said.md`. `mcp::load`
+now returns the servers **and the problems**: a place file that does not parse is said as a notice
+on root's transcript, and it blocks the machine's file, so the name cannot be served by the
+machine's server of the same name.
+
+Re-checked on `arbos-kernel 0.2.0 a8678ac16636 protocol 1` — today's `main`, which carries #613 —
+against `42cb9751ace8`, which does not. Same staging both times: one unclosed array in
+`.arbos/mcp.toml`, and a valid `notes` in `$XDG_CONFIG_HOME/arbos/mcp.toml`.
+
+| | `42cb9751ace8` (before) | `a8678ac16636` (with #613) |
+|---|---|---|
+| `MCP:` notice on root's transcript | **none** | the notice, naming the file and the parse error |
+| the machine's `notes` server started | — | **not** started |
+
+The notice reads: *"MCP: .arbos/mcp.toml does not parse (TOML parse error at line 3, column 10 …
+invalid array, expected `]`). Its servers are off, and the machine's own MCP file was not used in
+its place…"* — the file, the fault, and what it cost, on the transcript rather than in a log the
+window never shows. That is the whole of what this file asked for, so it closes.
+
+## The residual, reproduced here: #644
+
+#613 blocked the **machine's** file only. The place's own later files — `.cursor/mcp.json`,
+`.mcp.json` — were still read, and could hand the same name a different server while the notice
+said "its servers are off". The features note says so, and it reproduces on today's `main` in two
+arms differing only in that one file:
+
+| arm | notice | a `notes` server started |
+|---|---|---|
+| with `.cursor/mcp.json` offering `notes` | yes | **yes** |
+| without it | yes | no |
+
+So the machine's file is genuinely blocked and #613 holds; the later place file is the remaining
+route. [#644](https://github.com/unarbos/arbos/pull/644) stops the walk at the first broken place
+file and makes the notice say that no later file was read. It was open at 12:45 UTC.
+
+`fm-02` does not stand a red for an open PR. It gates that third check on the product's own claim:
+once the notice says no later file was read, a started server contradicts it and is a break; until
+then the residual is recorded as `residual_644` in the rollout's notes. When #644 lands, the
+assertion arms itself with no edit.

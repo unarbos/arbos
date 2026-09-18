@@ -3083,3 +3083,41 @@ the kernel knows about. That is the proof the frame count could never give
 (M-375).
 
 **PR:** [#643](https://github.com/unarbos/arbos/pull/643), harness only.
+
+## Cycle 114 — a check that printed its evidence and never read it
+
+The oldest row left was `voice notes in the composer`, last measured at
+cycle 69. It holds: `2975 → 2975 unsent → 2977 on the send`, twice over.
+Dictation fills the field, the button reads `Send`, and the kernel's
+transcript does not move until he taps it (M-376).
+
+**What the run was not checking.** The scenario's own first line says
+"dictation puts words in the composer and sends nothing until he does". It
+proved the second half properly, off the kernel's counts — and printed the
+first half as a line of text that nothing ever read. An empty field would
+have passed. A sentence from a different clip would have passed.
+
+It compares now, and the comparison is soft on purpose:
+
+```
+  the field holds:               Please summaries what the workers did today in two sentences.
+  of the clip's words:           9/10 kept (90%)
+    not heard:                   summarise
+    heard instead:               summaries
+```
+
+Recognition is never exact — a synthesised voice saying "summarise" comes
+back "summaries" — so demanding every word would make the check flap, and
+demanding nothing made it blind. It asks how much survived and names the
+difference (M-377).
+
+**And the sentence now lives in one place.** `mac-attach.sh` speaks it to
+make the clip; the check needs the same words to compare against. Written
+twice, a check can verify dictation against a sentence the clip no longer
+says. `NOTE_SAYS` in `sim-lib.sh` (M-378).
+
+This is the third cycle running where the fault was the same shape: the
+instrument gathered the evidence and then judged something narrower than
+its own sentence. Cycle 112 counted rows without hearing them, 113 counted
+answers without asking who gave them, and 114 printed words without reading
+them.

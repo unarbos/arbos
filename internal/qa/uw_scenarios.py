@@ -775,6 +775,115 @@ def register(scenario, registry, transcript, now_ms, branch):
                     "arbos-kernel check.rs check_two_writers — the cut line must clear the open wake",
                 )
 
+    # ── after a crash mid-append: the partial line nobody repairs ──
+    @reg("pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line", tags=("after-failure", "transcript", "destructive-order"))
+    def pl01(cx):
+        """`append_events` writes one `O_APPEND` call ending in a newline, and when that write fails
+        part-way it calls `drop_partial_line` to cut the headless line back off. Its own comment names
+        the hazard: *"A write that failed part-way (disk full, size limit) leaves the head of a line
+        with no newline. Every reader skips it, but it also swallows"* what comes next.
+
+        That guard runs in the process whose write failed. A **crash** — SIGKILL, a lost machine, a
+        power cut — leaves the same partial line with nobody to run it: `drop_partial_line` has
+        exactly one caller (`files.rs:581`, the failed-write path) and nothing repairs a transcript at
+        startup. So the next kernel appends its first event onto the partial line, `load_transcript`
+        skips the combined line as unparseable (`files.rs:629`, `if let Ok(...)` with no else), and
+        that event is gone with nothing said.
+
+        Staged as a crash leaves it: three whole events, then a fourth line cut off mid-string with no
+        trailing newline. Then a turn runs. The property is that a person's next words survive a crash
+        that happened before they typed them."""
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        plain_agent(place)
+
+        tpath = place / ".arbos" / "agents" / "root" / "transcript.jsonl"
+        tpath.parent.mkdir(parents=True, exist_ok=True)
+        whole = [
+            {"ts": now_ms() - 3000, "kind": "wake", "wake": "user", "text": "one"},
+            {"ts": now_ms() - 2000, "kind": "assistant", "text": "first"},
+            {"ts": now_ms() - 1000, "kind": "turn_complete"},
+        ]
+        with open(tpath, "w") as f:
+            for e in whole:
+                f.write(json.dumps(e) + "\n")
+            # The crash: a line begun and never finished. No trailing newline is the whole point.
+            f.write('{"ts": %d, "kind": "assistant", "text": "hal' % now_ms())
+
+        before_bytes = tpath.stat().st_size
+
+        def read_lines():
+            good, bad = [], []
+            for line in tpath.read_text(errors="replace").split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    good.append(json.loads(line))
+                except ValueError:
+                    bad.append(line)
+            return good, bad
+
+        good0, bad0 = read_lines()
+        k = cx.kernel(extra_args=["--provider", "replay", "--replies", str(replies_file(cx, [{"agent": "root", "content": "SURVIVED"}]))])
+        try:
+            started = k.start()
+            cx.rec.expect(started, "pl-01-kernel-did-not-start", "the kernel did not come up on a transcript whose last line is partial; a crash must not make a place unservable")
+            if not started:
+                return
+            c = k.attach()
+            c.wait(lambda f: f.get("type") == "snapshot", 5)
+            marker = f"AFTER-CRASH-{now_ms() % 100000}"
+            c.user("root", f"{marker}: reply with the single word SURVIVED.")
+            wait_turn_complete(c, "root", 60)
+
+            good1, bad1 = read_lines()
+            typed = [e for e in good1 if marker in json.dumps(e)]
+            swallowed = [b for b in bad1 if marker in b]
+            cx.rec.notes.update({
+                "readable_before": len(good0),
+                "unparseable_before": len(bad0),
+                "readable_after": len(good1),
+                "unparseable_after": len(bad1),
+                "typed_line_readable": bool(typed),
+                "typed_line_inside_an_unparseable_line": bool(swallowed),
+                "unparseable_tail": [b[:160] for b in bad1][:2],
+                "bytes_before": before_bytes,
+                "bytes_after": tpath.stat().st_size,
+            })
+
+            # Probe validity: the staged line must really be unreadable, or there is no crash here.
+            cx.rec.expect(
+                len(bad0) == 1 and len(good0) == len(whole),
+                "probe-partial-line-not-staged",
+                f"the staged transcript reads as {len(good0)} whole and {len(bad0)} partial line(s); this run does not stand for a crash mid-append",
+            )
+            if not (len(bad0) == 1 and len(good0) == len(whole)):
+                return
+
+            # What a crash must not cost: the events that were already whole.
+            cx.rec.expect(
+                len(good1) >= len(good0),
+                "pl-01-earlier-events-lost",
+                f"the transcript held {len(good0)} readable events before the kernel started and {len(good1)} after; a partial last line must cost nothing that was already whole",
+            )
+            # And the point. `append_events` writes a batch in one `O_APPEND` call, so the headless
+            # line swallows the batch's **first** line and the rest land whole — which is why looking
+            # only for the marker somewhere readable passes by luck. The property is that *no* event
+            # appended after the crash ends up inside an unparseable line.
+            cx.rec.expect(
+                not swallowed,
+                "pl-01-typed-line-swallowed-by-the-partial-line",
+                f"an event appended after the crash is inside an unparseable line, run onto the headless one: {swallowed[0][:150]!r}. "
+                f"`append_events` writes a batch in one O_APPEND call, so the headless line takes the batch's first event — here the `wake` — while the rest land whole; every reader skips the combined line, so that event is gone and nothing says so. "
+                f"`drop_partial_line` repairs only the process whose own write failed (files.rs:581, its one caller); after a crash nobody runs it",
+                "arbos-core files.rs append_events — cut a headless last line before appending, not only when this process's write failed",
+            )
+        finally:
+            k.stop()
+        # No `cx.check()`: the partial line is this scenario's fixture, so the place checker's
+        # `state:transcript-bad-lines` would fire on the thing being staged and bury the verdict.
+        # That rule is how this gap was found — it detects the residue and nothing created it.
+
     # ── #453: the app's swap leaves a gap, and a gap is not a failed restart ──
     @reg("up-01-a-swap-still-in-progress-is-not-a-failed-restart", tags=("after-failure", "update", "destructive-order"))
     def up01(cx):

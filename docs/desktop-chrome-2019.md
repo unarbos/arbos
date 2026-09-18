@@ -1,0 +1,25 @@
+# Desktop chrome on build 2019
+
+Jacob's asks on 2026-09-18 after Update **0.2.0 (2019)**. One PR on `unarbos/arbos`. Do not publish `v0.2.0`.
+
+Shots: `/home/ubuntu/.cursor/projects/workspace/assets/ffe81426-804b-46f1-9507-2cad8ae7f502.png` (centered chat), `f9c07d08-5be6-4c7a-a6ee-c2c2504c56d6.png` (right list), `387a4bb5-4b45-4f9b-8a7a-ac280f9f23ef.png` (Project over the chat), `1fe1b31d-2574-4bc4-ad41-059e9ec39dfd.png` (bottom +), `17de697f-9126-4dd8-a2bd-b83d6fbab0ae.png` and `4b658afb-6438-410f-b948-4e93e412db97.png` (expand and X).
+
+## Align with the tab strip
+
+The right-side panel control sits on the **same row** as the project tabs (Home, other projects, +).
+
+The right panel's own tabs (the panel's Home / +) sit on that **same row** too. Not a second band under the window tabs.
+
+## Project stays in the panel
+
+A click on **Project** (or any other right-panel item) must **not** open a page in the main column. The chat stays. No panel content covers the chat. No "Back to chat" takeover.
+
+## Remove three controls
+
+- The **+** at the bottom of the side panel
+- The **expand panel** button (2×2 grid)
+- The panel header **X**. People close the panel with the one remaining panel toggle
+
+## Fullscreen
+
+Native fullscreen must make the chat fill the Space. #542 was not enough. No leftover title bar, extra top inset, or fake maximize.
