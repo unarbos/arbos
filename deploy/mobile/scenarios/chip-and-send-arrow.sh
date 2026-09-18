@@ -46,9 +46,13 @@ ui tap "Add" >/dev/null 2>&1 || { echo "   no + button"; exit 1; }
 sleep 2
 ui tap "Photo Library" >/dev/null 2>&1 || { echo "   no Photo Library in the menu"; exit 1; }
 sleep 4
-tap_shot 78 470 "$UDID"; sleep 2      # a photo in the grid
-ui tap "Add" >/dev/null 2>&1 || ui tap "Done" >/dev/null 2>&1
-sleep 4
+# The picker is another process, so nothing in it is in the app's tree and
+# it has to be driven by coordinates — the sequence photo-reaches-the-model
+# settled at cycle 56, reused rather than reinvented.
+tap_shot 78 470 "$UDID"; sleep 1      # the magenta flowers, top-left of the grid
+tap_shot 426 157 "$UDID"; sleep 3     # the tick, which closes the picker
+ui field >/dev/null 2>&1 || { echo "   the picker would not close — nothing was attached"; exit 1; }
+sleep 2
 shot 02-chip-in-the-bar
 N=$(chips)
 echo "   chips: $N   the bar ends in: $(tail_button)"
