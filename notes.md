@@ -19,16 +19,16 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Match project page and composer](bc-430b995c-1df7-5754-8490-5479c873c3a2) — drop This Mac, Cursor-like Project page, `clear` resets chat UI only
-- [Fix files editor and terminal](bc-cd726870-bb53-5c1e-8e5a-484a4fd89f10) — editor window, VS Code-like tree, Browser must open, no leading `%` in Terminal
+- [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — draft, waiting CI
+- [Match project page and composer](bc-430b995c-1df7-5754-8490-5479c873c3a2) — typed `clear` hides the transcript and recenters; same chat on disk
 - [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1962**; watching past it
-- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [no symbol names](https://github.com/unarbos/arbos/pull/626) and [notifications sweep](https://github.com/unarbos/arbos/pull/624) open; TestFlight **1936**; Mac **1962**
+- [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [files editor](https://github.com/unarbos/arbos/pull/628) when green; TestFlight **1936**; Mac **1962**
 </tldr>
 
 - [x] [Side panel drawer](https://github.com/unarbos/arbos/pull/476) — merged on `1b51d97`; next Update after 1534 carries it
 
-- [ ] [Match project page and composer](bc-430b995c-1df7-5754-8490-5479c873c3a2) — drop This Mac, Cursor-like Project page, `clear` resets chat UI only
-- [ ] [Fix files editor and terminal](bc-cd726870-bb53-5c1e-8e5a-484a4fd89f10) — files open in a real editor, Browse is a VS Code-like tree, Browser opens, Terminal has no leading `%`
+- [ ] [Match project page and composer](bc-430b995c-1df7-5754-8490-5479c873c3a2) — typed `clear` hides the transcript and recenters; same chat on disk
+- [ ] [Files editor and terminal](https://github.com/unarbos/arbos/pull/628) — draft, waiting CI ([plan](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-files-editor-terminal.md))
 - [ ] [Fix project panel layout](bc-33718272-0f05-555b-946f-f08db1b9ee4b) — [#544](https://github.com/unarbos/arbos/pull/544) on `main`; in **1765**
 - [ ] [Make settings an inline tab](bc-6d9c3785-7bed-5cb3-9eb7-bca86aad4ee5) — his ask: a full inline tab rather than a floating window, with the gear still the way in and real routes back, and without reintroducing a separate band across the top; boundaries written down against the parity loop after two duplications today
 
@@ -49,7 +49,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] [Fix Mac fullscreen chrome](bc-0df916de-0e66-5368-b418-08c4a8340ec4) — [#542](https://github.com/unarbos/arbos/pull/542) on `main`; in **1765**
 - [ ] [Architect desktop call mode](bc-9590b6c7-3ece-5b78-bb08-21ae0191cf3f) — slice 1 live: [design](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-call-mode-design.md), [gateway narrator #100](https://github.com/unarbos/arbos/pull/100), [inbox channel #99](https://github.com/unarbos/arbos/pull/99), [desktop call UI #101](https://github.com/unarbos/arbos/pull/101), slices 1–4 shipped: spoken approvals with re-ask, reconnect, drill-down by phrase, hub attach per call, 11/11 harness, live hub call into `mac/.arbos`; desktop call now matches the phone in [#101 `eb5f930`](https://github.com/unarbos/arbos/pull/101): in-process playback, continuous uplink, model voice for small talk + narrator, gateway ASR for Fn (0.7 s first word); Mac live check pending; QA owns perfecting
-- [ ] [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — [no symbol names](https://github.com/unarbos/arbos/pull/626) open; TestFlight **1936**, Apple daily cap until ~10:00 UTC tomorrow; batching `ios/` today; leftover `bc-08d8261b` stays asleep
+- [ ] [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — [no symbol names](https://github.com/unarbos/arbos/pull/626) on `main`; TestFlight **1936**, Apple daily cap until ~10:00 UTC tomorrow; batching `ios/` today; leftover `bc-08d8261b` stays asleep
 - [ ] [Build in-app feedback for desktop](bc-0d55088a-e9bd-57ba-bbdd-3a893272675e) — the whole chain is merged and proven with a real report crossing the hub: the thumbs-down opens a review sheet showing every part as readable lines, the report is on his disk before Send returns, delivery drains itself into a place of its own on ArbosLife where the credential cannot touch his projects, and the parity loop picks it up within fifteen minutes and tells him which build fixed it ([design](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/desktop-feedback-design.md)); building it found more than it shipped — a sheet that froze the app on the first real click, a screenshot that would silently never attach, his own words never redacted at all, a retry promise the code did not keep, and a test failing one run in forty that had been holding other workers' PRs; the missing Send button was the status sentence shoving it sideways off the window, measured at x=1216 in his exact state and fixed in [#370](https://github.com/unarbos/arbos/pull/370) along with Send vanishing after a failure, an old kernel's refusal being dropped silently, and reports in closed projects never retrying; four of his reports have now crossed and are in the feedback store with their screenshots, after his `url` was pointed at the tunnel directly — `hub-api.arbos.life` goes to another app until he adds the CNAME; two more wait on his Mac because the drain only sweeps open projects; and after his update the report itself is complete, with the earlier "nothing to send" rows explained by a kernel older than the frame
 
 - [ ] Jacob's TestFlight feedback is an input — the poller runs every fifteen minutes and picked up eight reports with screenshots; today's four fixes are merged and on his TestFlight as build 994, including the serious one where lines typed in a disconnected project were run by the next project he opened — that one was reasoned from his screenshots rather than reproduced, so the loop is proving it live with the network cut; waiting on his word about two older reports, and his `subnet120` kernel needs updating since it is his own project
@@ -96,10 +96,10 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **1962** on the feed; watching past it
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — [no symbol names](https://github.com/unarbos/arbos/pull/626) and [notifications sweep](https://github.com/unarbos/arbos/pull/624) open; TestFlight **1936**; Mac **1962**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — take [files editor](https://github.com/unarbos/arbos/pull/628) when green; TestFlight **1936**; Mac **1962**; `v0.2.0` stays a draft
+- [x] [No symbol names](https://github.com/unarbos/arbos/pull/626) — on `main` (`5555d1b7`)
+- [x] [Notifications sweep](https://github.com/unarbos/arbos/pull/624) — on `main` (`b047160f`)
 - [x] [Chat style-pair](https://github.com/unarbos/arbos/pull/625) — on `main` (`3c268227`)
-- [x] [Last two verdicts](https://github.com/unarbos/arbos/pull/622) — on `main` (`8196ed6e`)
-- [x] [Fork checkpoint refs](https://github.com/unarbos/arbos/pull/621) — on `main` (`48a44023`)
 
 ## Running Arbos
 

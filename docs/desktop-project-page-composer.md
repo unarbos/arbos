@@ -4,7 +4,7 @@ Jacob asked for three desktop changes on 2026-09-18. One PR on `unarbos/arbos`. 
 
 Terms are defined the first time they appear.
 
-**Status:** being built now.
+**Status:** implemented on `cursor/desktop-project-page-composer-c3a2`.
 
 ---
 
@@ -53,17 +53,22 @@ The opener itself (⌘T, the + on the tab strip) does not change. `This Mac` as 
 
 ---
 
-## 3. `clear` empties the chat view
+## 3. `clear` is a UI command only
 
-**What you type.** `clear` in the composer, alone, then Enter. `/clear` does the same. Extra words, or attachments, go to the agent as a normal message. The top-right Clear control does the same hide-and-recenter. Jacob's shot of the broken send (kernel replied "Cleereed…"): `/home/ubuntu/.cursor/projects/workspace/assets/8ed86ca8-7ff1-4214-8cd1-7b56b90fd7aa.png`.
+Jacob typed `clear`. The kernel treated it as a chat message and replied ("Cleereed…"). That is the bug. Shot path (not copied; the file was not on this machine): `/home/ubuntu/.cursor/projects/workspace/assets/8ed86ca8-7ff1-4214-8cd1-7b56b90fd7aa.png`.
 
-**What happens.**
+**What counts.** The send text, after trim, is exactly `clear` (any case). `/clear` with no extra words is the same. Extra words, or a file attached, go to the agent as a normal message.
 
-- The chat view hides every line that is already on screen.
-- The column returns to the **centered empty chat**: title above the composer, composer in the middle of the column.
-- The composer field clears.
-- The line is **not** sent to the kernel.
-- The line is **not** written to the transcript.
+**What the window does.**
+
+- Do **not** send the line to the kernel.
+- Do **not** write a user row.
+- Do **not** wake the agent.
+- Hide every transcript line already on screen.
+- Show the same **centered empty composer** as a fresh chat: title above the box, box in the middle of the column.
+- Clear the composer field.
+
+**The top-right Clear control.** The chat header has a **Clear** button on the right, before the panel toggle, when the transcript is visible. It does the same hide-and-recenter. It is not a kernel message. Queuing `clear` for the next turn is intercepted the same way.
 
 **What does not happen.**
 
@@ -95,4 +100,5 @@ The opener itself (⌘T, the + on the tab strip) does not change. `This Mac` as 
 ## How to check
 
 1. Open a project. The row under the composer has no **This Mac** / **This Computer** pill. ⌘T still opens a project.
-2. Press ⌘2. The page has a large name, Recents, then the status page, then a file **list**. Not a card dump. Not Agent
+2. Press ⌘2. The page has a large name, Recents, then the status page, then a file **list**. Not a card dump. Not Agents / Processes / Resources.
+3. Type `clear` and press Enter. Nothing goes to the kernel. The transcript leaves the screen. The composer sits in the middle. The file under `.arbos/` still has the old turns. Type a new line: only that turn shows. The header **Clear** button does the same hide.
