@@ -361,16 +361,22 @@ struct ProjectChatView: View {
                     proxy.scrollTo("tail", anchor: .bottom)
                 }
             }
-            .onChange(of: chat.workers) { _, _ in
-                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
-            }
-            // The away card grows the transcript like anything else, and
-            // without this it grew into the inset: the card that exists to
-            // be read arrived half behind the workers pill.
-            .onChange(of: chat.unseen) { _, _ in
-                if atTail { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) } }
-            }
+            // The first worker grows the bottom inset by a pill, and the away
+            // card grows the transcript by a card. Scrolling in the same pass
+            // aims at the bottom as it was, which left the card that exists
+            // to be read sitting a pill's height behind the pill. Let the
+            // layout settle, then go to the tail as it now is.
+            .onChange(of: chat.workers) { _, _ in settle(proxy) }
+            .onChange(of: chat.unseen) { _, _ in settle(proxy) }
             .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
+        }
+    }
+
+    private func settle(_ proxy: ScrollViewProxy) {
+        guard atTail else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(250))
+            withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("tail", anchor: .bottom) }
         }
     }
 
