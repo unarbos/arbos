@@ -62,6 +62,23 @@ done
 echo "  the reply starts:        ${FIRST:-never}s"
 shot 02-streaming
 
+# 2b. streaming — the row's third word, and this file has taken a still
+# called `02-streaming` for eighty cycles without ever measuring it. A reply
+# that arrives in one lump and one that grows word by word both pass every
+# timing above; only the caller can see the difference, and they see it for
+# the whole length of the answer.
+#
+# The measure is how many *different* lengths the reply is caught at. One
+# means it appeared whole; several mean it grew.
+LENGTHS=$(for _ in $(seq 1 40); do
+  ui dump | grep -oE "StaticText +(The |A |Sea|Wave|Ocean|Salt)[^\"]*" | tail -1 | awk '{print length($0)}'
+  sleep 0.4
+done | grep -E "^[0-9]+$" | uniq)
+STEPS=$(echo "$LENGTHS" | grep -c .)
+GREW=$(echo "$LENGTHS" | tail -1)
+FIRSTLEN=$(echo "$LENGTHS" | head -1)
+echo "  the reply grows in:      $STEPS step(s), $FIRSTLEN → $GREW characters"
+
 # 3. the Worked line, which is the turn ending
 WORKED=""
 for _ in $(seq 1 120); do
@@ -70,6 +87,11 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 echo "  the Worked line lands:   ${WORKED:-never}s   reading '$(ui dump | grep -oE "Worked [0-9]+[sm]" | tail -1)'"
+if [ "${STEPS:-0}" -le 1 ]; then
+  echo "  NOTE: the reply was only ever caught at one length, so this run cannot"
+  echo "        tell streaming from a reply that arrived whole — a short answer"
+  echo "        finishes inside one sample"
+fi
 shot 03-worked
 
 echo "  the composer afterwards: $(ui dump | awk '$3 == "TextField" { $1="";$2="";$3=""; print }')"
