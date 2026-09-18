@@ -64,9 +64,15 @@ LATE = {"name": "arrived-late", "live": True, "kind": "", "last_activity_ms": NO
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        # Log what was *answered*, not only that something was asked. The
+        # count alone cannot tell "the app asked again before the fixture
+        # began serving the new project" from "it was served and the list
+        # did not redraw" — and the two runs of cycle 118 disagreed for
+        # exactly that reason, with no way to say which had happened.
+        late = os.path.exists(TRIGGER)
         with open(LOG, "a") as f:
-            f.write(f"{time.time():.3f} {self.path}\n")
-        projects = list(BASE) + ([LATE] if os.path.exists(TRIGGER) else [])
+            f.write(f"{time.time():.3f} {self.path} late={int(late)}\n")
+        projects = list(BASE) + ([LATE] if late else [])
         body = json.dumps({"machines": [
             {"name": "fixture-box", "online": True, "projects": projects}]}).encode()
         self.send_response(200)
@@ -181,12 +187,20 @@ case " $BEFORE " in
   *" arrived-late "*) echo "  NOTE: arrived-late was already on screen before the pull — the"
                       echo "        'new project' half of this says nothing this run";;
 esac
+# Of the calls after the pull, how many were answered with the new project?
+SERVED=$(tail -n +$((CALLS_BEFORE + 1)) /tmp/fixture-list-calls.log | grep -c "late=1")
+echo "answers carrying it:  $SERVED of $((CALLS_AFTER - CALLS_BEFORE)) calls since the pull"
 if [ "$CALLS_AFTER" -le "$CALLS_BEFORE" ]; then
   echo "  VERDICT: the app never asked again — the gesture missed, or the pull does not refetch"
 elif echo "$AFTER" | grep -q "arrived-late"; then
   echo "  VERDICT: the pull refetched and the new project reached the screen"
+elif [ "$SERVED" = 0 ]; then
+  echo "  VERDICT: cannot say — the app asked again, but every answer since the pull"
+  echo "           was sent before the fixture began serving the new project. The"
+  echo "           request was already in flight; this run tests nothing."
 else
-  echo "  VERDICT: the app asked again but the new project did not appear — the list is not redrawing the answer"
+  echo "  VERDICT: the app asked again, was answered with the new project $SERVED time(s),"
+  echo "           and did not draw it — the list is not redrawing the answer"
 fi
 echo
 echo "still in $OUT"
