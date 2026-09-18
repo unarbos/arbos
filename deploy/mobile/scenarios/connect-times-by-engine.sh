@@ -47,15 +47,15 @@ for engine, values in sorted(rows.items()):
 # the fastest of the other, these are two populations and not one that
 # wandered.
 if len(rows) == 2:
-    (a, av), (b, bv) = sorted(rows.items())
-    lo, hi = (a, av, b, bv) if max(av) < max(bv) else (b, bv, a, av)
+    faster, slower = sorted(rows.items(), key=lambda kv: max(kv[1]))
     print()
-    if max(lo[1]) < min(hi[1]):
-        print(f"No overlap: the slowest {lo[0]} connect ({max(lo[1])} ms) is faster than")
-        print(f"the fastest {hi[0]} one ({min(hi[1])} ms). Two populations, not one drifting.")
+    if max(faster[1]) < min(slower[1]):
+        print(f"No overlap: the slowest {faster[0]} connect ({max(faster[1])} ms) is faster")
+        print(f"than the fastest {slower[0]} one ({min(slower[1])} ms). Two populations, not")
+        print("one that drifted.")
     else:
-        print(f"The two overlap between {min(hi[1])} and {max(lo[1])} ms, so the engine")
-        print("does not account for the spread on its own.")
+        print(f"The two overlap between {min(slower[1])} and {max(faster[1])} ms, so the")
+        print("engine does not account for the spread on its own.")
 
 # The pre-socket hold has to outlast the connect or the opening words are
 # lost (M-246, M-248). Six seconds was chosen against the worst connect then
