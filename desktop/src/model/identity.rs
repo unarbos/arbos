@@ -131,6 +131,14 @@ impl Identity {
     /// Write the file. The directory is made if the folder has no
     /// `.arbos/` yet — a freshly opened tab is exactly that case.
     pub fn save(&self, store: &Path) -> std::io::Result<()> {
+        // The store's parent is the project folder; one that is not there
+        // moved, and a face written here would make the path again.
+        if store.parent().is_some_and(|project| !project.is_dir()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("project folder is gone: {}", store.display()),
+            ));
+        }
         std::fs::create_dir_all(store)?;
         // The file is the project's config too — `[root] role`,
         // `permission`, `[spend]`, `follow_prs` — so the face is set into

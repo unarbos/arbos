@@ -1485,6 +1485,14 @@ pub fn seed_transcript(place: &Place, id: &str, items: &[crate::model::session::
     if place.host.is_some() || !safe_session_id(id) || items.is_empty() {
         return;
     }
+    // A folder that is not there stored nothing because it moved, not
+    // because it is new: writing the seed made `<old>/.arbos/agents/root/`
+    // from scratch, the old path canonicalized again, and the next
+    // attach bootstrapped a whole ghost project at it — the 1-in-3 ghost
+    // of the rig's phase D after F-165 closed the other makers (F-196).
+    if !place.path.is_dir() {
+        return;
+    }
     let path = place
         .path
         .join(".arbos")
@@ -2785,6 +2793,11 @@ fn spawn_count() -> usize {
 
 fn spawn(workspace: &Path) -> Result<Child> {
     let bin = arbos_bin()?;
+    // Never a kernel for a folder that is not there: `runtime/` under it
+    // would make the path, and the kernel would bootstrap the rest.
+    if !workspace.is_dir() {
+        anyhow::bail!("place is gone: {}", workspace.display());
+    }
     SPAWNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     // The kernel's stdout/stderr go under runtime/: process facts, never
     // part of the .arbos/ record.
