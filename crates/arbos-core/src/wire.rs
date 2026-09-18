@@ -498,6 +498,70 @@ pub enum Frame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         screenshot: Option<String>,
     },
+    /// Client → kernel: stream the agent's browser page to this
+    /// connection (`on: true`) as `browser_frame`s, or stop (`on: false`).
+    /// Live rather than one picture per action (side-panels handover 7).
+    /// Sent to the asking connection alone; stops when it closes.
+    BrowserWatch {
+        agent: String,
+        #[serde(default)]
+        on: bool,
+    },
+    /// Kernel → the watching client: one frame of the page, JPEG,
+    /// base64; `width`/`height` are the page's CSS pixels the frame maps
+    /// to, so a click on the picture can be scaled into `browser_input`.
+    BrowserFrame {
+        agent: String,
+        page: String,
+        data: String,
+        width: u32,
+        height: u32,
+        ts: i64,
+    },
+    /// Client → kernel: a person's input on the agent's page, allowed only
+    /// while the person drives (`browser_drive user`): `kind` is `click`
+    /// (`x`, `y`, optional `button`, `count`), `move` (`x`, `y`), `wheel`
+    /// (`x`, `y`, `dx`, `dy`), `type` (`text`), or `key` (`key`, the names
+    /// the tool's `press` takes). Refused as an `error` when the agent
+    /// drives.
+    BrowserInput {
+        agent: String,
+        kind: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dx: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dy: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        button: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        count: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
+    /// Client → kernel: who drives the agent's page — `user` (the person
+    /// takes over; the agent's driving actions are refused in its own
+    /// turn, its reads still work) or `agent` (handed back). Every
+    /// client hears `browser_driver`.
+    BrowserDrive {
+        agent: String,
+        driver: String,
+    },
+    /// Kernel → clients: who drives the agent's page now, since when, and
+    /// which user said so.
+    BrowserDriver {
+        agent: String,
+        driver: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        by: String,
+        #[serde(default, skip_serializing_if = "is_zero_i64")]
+        since_ms: i64,
+    },
     /// Try Live (A-02): a client asks for the screen the agent works on.
     /// For an agent on another machine the kernel forwards the request
     /// over its link and relays the answer back.

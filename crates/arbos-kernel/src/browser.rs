@@ -28,7 +28,23 @@ pub struct BrowserHub {
     /// Chrome's own profile dir for this kernel; removed when the hub drops.
     profile: Mutex<Option<std::path::PathBuf>>,
     pages: Mutex<HashMap<String, String>>,
+    /// Who drives each agent's page: `user` while a person has taken it
+    /// over from a window, with when; absent = the agent. One driver at
+    /// a time, and a loud refusal for the other (side-panels handover 7).
+    drivers: Mutex<HashMap<String, (String, i64)>>,
 }
+
+/// The `browser` tool's actions that move the page. Refused while a
+/// person drives; reading (`snapshot`, `screenshot`, `console`, `wait`)
+/// is not.
+const DRIVING_ACTIONS: &[&str] = &[
+    "navigate", "click", "type", "fill", "press", "hover", "select", "scroll", "back", "forward",
+    "eval",
+];
+
+/// What a window's input is when the agent drives.
+pub const USER_NOT_DRIVING: &str =
+    "the agent is driving this page; take it over first (browser_drive user), then click and type";
 
 impl BrowserHub {
     pub fn new() -> Self {
@@ -37,7 +53,164 @@ impl BrowserHub {
             port: Mutex::new(None),
             profile: Mutex::new(None),
             pages: Mutex::new(HashMap::new()),
+            drivers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Who drives the agent's page now, and since when (0 for the agent
+    /// by default).
+    pub fn driver(&self, agent: &str) -> (String, i64) {
+        self.drivers
+            .lock()
+            .unwrap()
+            .get(agent)
+            .cloned()
+            .unwrap_or_else(|| ("agent".to_string(), 0))
+    }
+
+    /// A window hands the page to the person (`user`) or back to the
+    /// agent (`agent`). True when that changed anything.
+    pub fn set_driver(&self, agent: &str, driver: &str) -> bool {
+        let mut d = self.drivers.lock().unwrap();
+        match driver {
+            "user" => {
+                if d.get(agent).is_some_and(|(who, _)| who == "user") {
+                    return false;
+                }
+                d.insert(agent.to_string(), ("user".into(), arbos_core::now_ms()));
+                true
+            }
+            _ => d.remove(agent).is_some(),
+        }
+    }
+
+    /// The agent's own driving action against a page the person holds:
+    /// the refusal it reads, or None when it may go on.
+    fn agent_refused(&self, agent: &str, action: &str) -> Option<String> {
+        if !DRIVING_ACTIONS.contains(&action) {
+            return None;
+        }
+        let (who, since) = self.driver(agent);
+        if who != "user" {
+            return None;
+        }
+        let held = arbos_core::now_ms().saturating_sub(since) / 1000;
+        Some(format!(
+            "refused: the person is driving this page (took it over {held}s ago), so {action} does not run. Ask them to hand it back from the window, or wait; snapshot, screenshot and console still read the page."
+        ))
+    }
+
+    /// A person's input from a window, on the page the agent owns:
+    /// `click`/`move`/`wheel` at CSS-pixel `x`,`y`; `type` inserts
+    /// `text`; `key` presses `key` (the same names the tool's `press`
+    /// takes). The caller has checked who drives.
+    pub fn input(&self, agent: &str, kind: &str, args: &Value) -> Result<()> {
+        let _ = agent;
+        let num = |k: &str| args.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        let mut cdp = self.session()?;
+        match kind {
+            "click" => {
+                let (x, y) = (num("x"), num("y"));
+                let button = args.get("button").and_then(Value::as_str).unwrap_or("left");
+                let clicks = args.get("count").and_then(Value::as_u64).unwrap_or(1);
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseMoved", "x": x, "y": y}),
+                )?;
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": clicks}),
+                )?;
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": clicks}),
+                )?;
+            }
+            "move" => {
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseMoved", "x": num("x"), "y": num("y")}),
+                )?;
+            }
+            "wheel" => {
+                cdp.call(
+                    "Input.dispatchMouseEvent",
+                    json!({"type": "mouseWheel", "x": num("x"), "y": num("y"), "deltaX": num("dx"), "deltaY": num("dy")}),
+                )?;
+            }
+            "type" => {
+                let text = args
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("type needs text"))?;
+                cdp.call("Input.insertText", json!({"text": text}))?;
+            }
+            "key" => {
+                let key = args
+                    .get("key")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow::anyhow!("key needs key"))?;
+                cdp.press(key)?;
+            }
+            other => bail!("browser_input: no such kind {other:?} (click, move, wheel, type, key)"),
+        }
+        Ok(())
+    }
+
+    /// Stream the page as it changes: one JPEG per `browser_frame`, sent
+    /// on `out` until `stop` is raised, `out` closes (the window went), or
+    /// Chrome does. Blocking — run on a thread of its own. A second CDP
+    /// client on the page beside the tool's, as Chrome allows; the
+    /// agent's actions go on unchanged.
+    pub fn screencast(
+        &self,
+        agent: &str,
+        out: tokio::sync::mpsc::UnboundedSender<arbos_core::wire::Frame>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let port = self.ensure_chrome()?;
+        let mut cdp = Cdp::connect(port)?;
+        cdp.set_timeout(std::time::Duration::from_millis(500))?;
+        cdp.call(
+            "Page.startScreencast",
+            json!({"format": "jpeg", "quality": 60, "maxWidth": 1280, "maxHeight": 960, "everyNthFrame": 1}),
+        )?;
+        while !stop.load(Ordering::Relaxed) {
+            let Some(ev) = cdp.read_event() else {
+                continue;
+            };
+            if ev.get("method").and_then(Value::as_str) != Some("Page.screencastFrame") {
+                continue;
+            }
+            let p = ev.get("params").cloned().unwrap_or(Value::Null);
+            let session = p.get("sessionId").cloned().unwrap_or(Value::Null);
+            let frame = arbos_core::wire::Frame::BrowserFrame {
+                agent: agent.to_string(),
+                page: "b1".into(),
+                data: p
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                width: p
+                    .pointer("/metadata/deviceWidth")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0) as u32,
+                height: p
+                    .pointer("/metadata/deviceHeight")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(0.0) as u32,
+                ts: arbos_core::now_ms(),
+            };
+            if out.send(frame).is_err() {
+                break;
+            }
+            // The next frame comes only after the ack.
+            cdp.send("Page.screencastFrameAck", json!({"sessionId": session}))?;
+        }
+        let _ = cdp.send("Page.stopScreencast", json!({}));
+        Ok(())
     }
 
     /// The page's current URL, empty before the first navigate.
@@ -76,6 +249,9 @@ impl BrowserHub {
     }
 
     pub fn act(&self, agent: &str, action: &str, args: &Value) -> Result<BrowserOut> {
+        if let Some(why) = self.agent_refused(agent, action) {
+            bail!("{why}");
+        }
         match action {
             "navigate" => {
                 let url = args
@@ -575,6 +751,26 @@ impl Cdp {
             stream.set_read_timeout(Some(dur))?;
         }
         Ok(())
+    }
+
+    /// Send `method` and do not wait: for an ack whose reply is not
+    /// needed, on a socket where events are what the caller reads.
+    fn send(&mut self, method: &str, params: Value) -> Result<()> {
+        self.next_id += 1;
+        let msg = json!({"id": self.next_id, "method": method, "params": params}).to_string();
+        self.socket.send(tungstenite::Message::Text(msg.into()))?;
+        Ok(())
+    }
+
+    /// One message off the socket, whatever it is; None on a read
+    /// timeout or a frame that is not JSON text. Replies to `send`s come
+    /// through here too; a caller that wants events filters by `method`.
+    fn read_event(&mut self) -> Option<Value> {
+        let reply = self.socket.read().ok()?;
+        let tungstenite::Message::Text(text) = reply else {
+            return None;
+        };
+        serde_json::from_str::<Value>(&text).ok()
     }
 
     /// Send `method` and wait for its reply, skipping events. Events are
