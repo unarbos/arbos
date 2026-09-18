@@ -137,11 +137,12 @@ struct CallView: View {
                     }
                 }
             } label: {
-                CallDisc(symbol: "line.3.horizontal") {}
+                CallDisc(symbol: "line.3.horizontal", label: "Call menu") {}
                     .allowsHitTesting(false)
             }
+            .accessibilityLabel("Call menu")
             Spacer()
-            CallDisc(symbol: "slider.horizontal.3") { showSettings = true }
+            CallDisc(symbol: "slider.horizontal.3", label: "Settings") { showSettings = true }
         }
         .padding(.horizontal, ArbosTheme.gutter)
         .padding(.top, 2)
@@ -205,7 +206,7 @@ struct CallView: View {
                 .frame(height: 43)
                 .background(Capsule().fill(ArbosTheme.inputBg))
                 .overlay(Capsule().strokeBorder(ArbosTheme.border, lineWidth: 1))
-                CallDisc(symbol: model.muted ? "mic.slash" : "mic", filled: model.muted) {
+                CallDisc(symbol: model.muted ? "mic.slash" : "mic", label: model.muted ? "Unmute" : "Mute", filled: model.muted) {
                     model.muted.toggle()
                 }
                 .disabled(!model.phase.inCall)
@@ -220,6 +221,7 @@ struct CallView: View {
                         .background(Circle().fill(ArbosTheme.text))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("End call")
             }
             .padding(.horizontal, 36)
         }
@@ -335,6 +337,9 @@ struct CallView: View {
 /// A 40 pt round control on the raised plate; `filled` inverts it.
 struct CallDisc: View {
     let symbol: String
+    /// What the disc is for. Without one, SwiftUI reads the SF Symbol's own
+    /// name — the same fault the list's round buttons had (M-264).
+    var label: String
     var filled = false
     let action: () -> Void
 
@@ -348,6 +353,7 @@ struct CallDisc: View {
                 .overlay(Circle().strokeBorder(filled ? Color.clear : ArbosTheme.border, lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }
 
