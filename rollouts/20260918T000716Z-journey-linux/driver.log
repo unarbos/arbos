@@ -1,0 +1,12 @@
+1789690041793 J1: fail — no greeting from the kickoff turn (items 0)
+1789690051633 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789690113587 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789690116515 J4: pass — mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered
+1789690126579 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789690157180 J6: fail — workers existed but no worker/archived row is shown after relaunch
+1789690176808 J7: pass — tests pass, CHANGELOG written (QA line taken), commit on ['fix/geometry-area-calculation']
+1789690255473 J8: unverified — restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)
+1789690258599 BREAK journey-J1: no greeting from the kickoff turn (items 0)
+1789690258599 BREAK journey-J6: workers existed but no worker/archived row is shown after relaunch
+1789690258599 BREAK journey-J6-twice: J6 failed in two consecutive runs (20260917T201311Z-journey-linux, 20260918T000716Z-journey-linux): workers existed but no worker/archived row is shown after relaunch
+1789690258618 bugs: new 40ed2b971d.md, seen 9c8bf3b8ac.md, new c944059411.md

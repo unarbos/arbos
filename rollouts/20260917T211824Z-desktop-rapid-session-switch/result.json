@@ -1,0 +1,42 @@
+{
+  "scenario": "desktop-rapid-session-switch",
+  "doc": "Create six chats and switch between them as fast as the driver allows. The app must stay up and responsive; each chat must keep its own folder.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-gap",
+      "detail": "no clickable session row; ids seen: view-4294967298.tab-bar, view-4294967298.tab-bar.tab-0, view-4294967298.tab-bar.tab-0.tab-close-0, view-4294967298.tab-bar.tab-1, view-4294967298.tab-bar.tab-1.tab-close-1, view-4294967298.tab-bar.new-tab, view-4294967298.chat-header, view-4294967298.chat-header.chat-header-crumb-1, view-4294967298.chat-header.chat-header-title-7, view-4294967298.chat-header.chat-header-menu-7, view-4294967298.chat-header.toggle-panel, view-4294967298.conversation-drop, view-4294967298.conversation-drop.chat-title-7, view-4294967298.view-4294967299.composer-card, view-4294967298.view-4294967299.composer-card.composer-attach, view-4294967298.view-4294967299.composer-card.composer-field, view-4294967298.view-4294967299.composer-card.composer-field.composer-hint, view-4294967298.view-4294967299.composer-card.composer-model, view-4294967298.view-4294967299.composer-card.composer-voice, view-4294967298.composer-context, view-4294967298.composer-context.composer-machine, view-4294967298.panel, view-4294967298.panel.panel-tabs, view-4294967298.panel.panel-tabs.panel-new-tab, view-4294967298.panel.panel-tabs.panel-tab-strip, view-4294967298.panel.panel-tabs.panel-tab-strip.panel-tab-0, view-4294967298.panel.panel-tabs.panel-expand, view-4294967298.panel.panel-tabs.panel-close, view-4294967298.panel.panel-scroll, view-4294967298.panel.panel-scroll.panel-call, view-4294967298.panel.panel-scroll.panel-agent-1, view-4294967298.panel.panel-scroll.panel-agent-2, view-4294967298.panel.panel-scroll.panel-agent-3, view-4294967298.panel.panel-scroll.panel-agent-4, view-4294967298.panel.panel-scroll.panel-agent-5, view-4294967298.panel.panel-scroll.panel-agent-6, view-4294967298.panel.panel-scroll.panel-agent-7, view-4294967298.panel.panel-scroll.panel-project-head, view-4294967298.panel.panel-scroll.panel-start-page, view-4294967298.panel.panel-scroll.panel-file-0",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "sessions": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "session_rows": 0,
+    "switches": 0,
+    "switch_failures": 0,
+    "agent_folders": [
+      "chat-1789679906207",
+      "chat-1789679906702",
+      "chat-1789679907183",
+      "chat-1789679907663",
+      "chat-1789679908148",
+      "chat-1789679908632",
+      "root"
+    ]
+  },
+  "duration_s": 9.7,
+  "place": "/tmp/arbos-qa-desktop-rapid-session-switch-_yyppubp/place",
+  "with_model": false,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/80e6994280f8/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 80e6994280f8 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T211824Z-desktop-rapid-session-switch",
+  "branch": "main-80e6994280f8"
+}

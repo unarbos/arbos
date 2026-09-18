@@ -1,0 +1,8 @@
+1789678664911 kernel started pid 211605
+1789678667572 kernel SIGKILLed
+1789678668073 kernel-restart started pid 211654
+1789678788441 timeout waiting for turn root idle after 120s
+1789678788441 BREAK continued-turn-never-ended: continued turn never reached idle
+1789678789442 BREAK wrong-output: count.txt was never written after the continuation
+1789678789449 kernel-restart stopped with code 0
+1789678789465 bugs: seen 8a212695c0.md, seen 49ede41274.md

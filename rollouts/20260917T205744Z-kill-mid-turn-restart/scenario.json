@@ -1,0 +1,7 @@
+{
+  "name": "kill-mid-turn-restart",
+  "doc": "SIGKILL the kernel while a model turn runs, restart. The turn must continue from the transcript once, without replaying the prompt.",
+  "tags": [
+    "adversarial"
+  ]
+}

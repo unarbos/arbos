@@ -1,0 +1,25 @@
+{
+  "scenario": "inbox:headless-kernel-run",
+  "doc": "From inbox note 2026-09-12-headless-kernel-run.md: exercise feature 'headless-kernel-run' and run every detector. Needs a kernel built from branch cursor/headless-kernel-run-b027.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature headless-kernel-run: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "headless-kernel-run",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-12-headless-kernel-run.md"
+  },
+  "duration_s": 300.4,
+  "place": "/tmp/arbos-qa-inbox:headless-kernel-run-80noebnk/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d9e5ccde0029 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T223305Z-inbox:headless-kernel-run",
+  "branch": "main",
+  "usd": 0.06494
+}

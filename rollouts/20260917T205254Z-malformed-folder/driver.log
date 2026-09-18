@@ -1,0 +1,6 @@
+1789678374424 kernel started pid 208739
+1789678394383 BREAK kernel-died: kernel died talking to damaged agents
+1789678394384 BREAK state:agent-md-missing: agent folder without agent.md; list_agents skips it silently
+1789678394384 BREAK state:agent-parent-dangling: parent 'ghost-parent' has no folder
+1789678394384 BREAK state:transcript-bad-lines: 2 unparseable line(s): [2, 4]
+1789678394410 bugs: new 4f4ec86adf.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md, seen qa-006-prompt-to-unlisted-folder-parks-forever.md

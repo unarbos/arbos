@@ -7,7 +7,7 @@
 ## What happens
 
 `desktop_scenarios.py` puts `DRIVER_DIR` on `sys.path` and imports `arbosdriver` **once per scenario**. With
-    10|`DRIVER_DIR` on the store's FUSE mount, every desktop scenario's import is a read of that mount. When the
+`DRIVER_DIR` on the store's FUSE mount, every desktop scenario's import is a read of that mount. When the
 mount is slow or faulting, the import raises, and the harness records it as a break:
 
 | scenario | break | time |
@@ -18,7 +18,7 @@ mount is slow or faulting, the import raises, and the harness records it as a br
 
 Twenty-four of the cycle's 38 breaks were this one cause, on a build with nothing wrong with it, and each
 drafted a bug file. The journey scored `0/8 pass, 8 unverified` and the cycle log's journey line read as
-    20|a real result.
+a real result.
 
 Three things make it worse than "the mount is slow":
 
@@ -31,7 +31,7 @@ Three things make it worse than "the mount is slow":
    its remaining steps.
 
 ## What we expect
-    30|
+
 The driver is code the harness runs, not data under test, and it must come off local disk:
 
 1. **`cycle.sh` copies the driver to `$ROOT/loop/driver` once per cycle** and points the scenarios there,
@@ -43,7 +43,7 @@ The driver is code the harness runs, not data under test, and it must come off l
    can pass or fail it. Left as a recommendation: it changes what a red means, and the steward reads that.
 
 ## Regression check
-    40|
+
 The before-and-after is the cycle itself: 24 `driver-exception` breaks with the driver on the mount, and a
 local copy that imports cleanly (`arbosdriver.__file__` under `$ROOT/loop/driver`). No probe stages a FUSE
 I/O error on demand — and per the review list, a probe must fail the way the world fails, so inventing one
@@ -55,6 +55,6 @@ registration time rather than by driving a fault.
 
 `qal-j19`'s third shape was a reader that looked in the wrong place first; the mesh worker then found the
 second-reader script had two homes and deleted the store copy so the branch is the only source. This is
-    50|the third instance of the same family in our own tooling: a file with a store copy and a repo copy, where
+the third instance of the same family in our own tooling: a file with a store copy and a repo copy, where
 the store copy is the one that gets used and the mount is the thing that fails. Worth a sweep of every
 path the harness reads at run time for the same shape.

@@ -1,0 +1,29 @@
+{
+  "scenario": "mt-17-plan-strip-empty-chat",
+  "doc": "Item 17. A new chat in a new place shows nothing above the composer: no plan strip, no kernel chore.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-17-strip-on-empty-chat",
+      "detail": "plan strip elements on an empty chat: ['view-4294967298.panel.panel-tabs.panel-tab-strip', 'view-4294967298.panel.panel-tabs.panel-tab-strip.panel-tab-0']",
+      "where": "desktop plan strip: the kernel's git gc chore is not the user's plan"
+    }
+  ],
+  "notes": {
+    "driver_screenshot_error": "screenshot: capture of :9219 wrote nothing",
+    "plan_elements": [
+      "view-4294967298.panel.panel-tabs.panel-tab-strip",
+      "view-4294967298.panel.panel-tabs.panel-tab-strip.panel-tab-0"
+    ],
+    "standing_in_state": false
+  },
+  "duration_s": 6.9,
+  "place": "/tmp/arbos-qa-mt-17-plan-strip-empty-chat-bdmx99tn/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d24875af9109 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T001603Z-mt-17-plan-strip-empty-chat",
+  "branch": "main",
+  "usd": 0.00552
+}

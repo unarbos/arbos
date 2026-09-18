@@ -1,0 +1,9 @@
+1789684266393 kernel started pid 237381
+1789684296415 BREAK wrong-output: tests still fail: om mathx import area
+  File "/tmp/arbos-qa-bench-tests-are-spec-m17090va/place/mathx.py", line 2
+    import math
+    ^
+IndentationError: expected an indented block after function definition on line 1
+
+1789684296423 kernel stopped with code 0
+1789684296456 bugs: seen 691db4c281.md

@@ -9,7 +9,7 @@
 ## What #444 fixes, and what it does not
 
 #444 replaces `let _ = std::fs::write(&mark, …)` with: on failure, `remove_file(&mark)` and return the error, so `undo` finds no mark and refuses. Three arms, each a fresh kernel on the same repository, the mark made unusable **before any record existed** for its arm:
-    10|
+
 | arm | how the mark's write fails | control `cbbe9922d6a2` | #444 `f80f0b663bac` |
 |---|---|---|---|
 | (a) no mark has ever been written; the mark file is an empty, unwritable file from before the first turn | `EACCES` on the file | mark stays (empty), `undo` says `no checkpoint`, nothing destroyed | mark **removed**, `undo` says `no checkpoint`, nothing destroyed |
@@ -20,7 +20,7 @@ So arm (c) is a destructive path with a success message on both builds. The mech
 
 ## Why arm (c) is the case to care about
 
-    20|- **It is the common cause, not the exotic one.** `errors=remount-ro` is ext4's default: one I/O error and the filesystem carrying the place is remounted read-only under the running kernel. Every write in `runtime/` then fails, including the unlink. A container layer turning read-only, or a `chmod` by a person or a sync tool, gives the same state.
+- **It is the common cause, not the exotic one.** `errors=remount-ro` is ext4's default: one I/O error and the filesystem carrying the place is remounted read-only under the running kernel. Every write in `runtime/` then fails, including the unlink. A container layer turning read-only, or a `chmod` by a person or a sync tool, gives the same state.
 - **A full disk is the case the fix does cover**, because `ENOSPC` fails the write and leaves `unlink` working. That is a real win and arm (b) proves it.
 - The place cannot be *started* with a read-only `runtime/` — the kernel exits 1, measured at 12:51 on `cbbe9922d6a2` — so this is a mid-session change, which is exactly what a remount is.
 
@@ -29,7 +29,7 @@ So arm (c) is a destructive path with a success message on both builds. The mech
 The durable fix is not a repair after the fact but a mark that cannot be believed unless it belongs to this turn:
 
 1. **Stamp the mark with its turn's line and check it on read** — which is what [#392](https://github.com/unarbos/arbos/pull/392) already does. `undo` then refuses a mark whose line is not the current turn's, whatever the filesystem did. With #392 landed, arm (c) is covered without depending on any write succeeding. **Landing #392 closes this; #444's removal is a second layer, not the floor.**
-    30|2. Failing that, `undo` must treat "a mark I cannot prove is mine" as no mark: read the mark's mtime against the turn's start, or write the mark through a temp file and rename so a failed write leaves the *old* mark visibly older than the turn.
+2. Failing that, `undo` must treat "a mark I cannot prove is mine" as no mark: read the mark's mtime against the turn's start, or write the mark through a temp file and rename so a failed write leaves the *old* mark visibly older than the turn.
 
 Either way, the general rule from this one is worth keeping: **a repair that runs on the failure path must not need the resource that failed.** Removal needs the directory; if the directory is why you are here, you have no repair.
 
@@ -76,5 +76,5 @@ Two guards inside it, both earned:
 The arm that had to be thrown away, and why it is worth recording: the first version of arm (a) made `runtime/` read-only *before* the kernel started. The kernel exits 1 and there is no turn to measure — a world this bug cannot live in. The probe reported `probe-kernel-did-not-start` rather than a pass, which is how it was caught.
 
 ## One thing #444 does not appear to cost
-    40|
+
 `snapshot_turn_tree` now returns an error where it used to swallow one, so a turn whose mark cannot be written now has a failing step inside it. Measured in arm (a): the turn still ended (`turn_ended: true`) and root's transcript carried no notice about it (`turn_notices: []`). The person's turn is not taken from them — but nobody is told the turn has no undo point either, which is worth a line on the transcript the next time this code is touched.

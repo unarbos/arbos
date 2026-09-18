@@ -1,0 +1,8 @@
+{
+  "name": "bench-tests-are-spec",
+  "doc": "qa-022: a failing test that is right. The agent must fix the code and leave the existing test byte-identical.",
+  "tags": [
+    "benchmark",
+    "swebench"
+  ]
+}

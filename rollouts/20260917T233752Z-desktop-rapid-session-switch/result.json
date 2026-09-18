@@ -1,0 +1,44 @@
+{
+  "scenario": "desktop-rapid-session-switch",
+  "doc": "Create six chats and switch between them as fast as the driver allows. The app must stay up and responsive; each chat must keep its own folder.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "ui-stall",
+      "detail": "switch to panel-agent-7 took 1528.7s (limit 3.0s)",
+      "where": "desktop"
+    }
+  ],
+  "notes": {
+    "driver_screenshot_error": "screenshot: capture of :9219 wrote nothing",
+    "sessions": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "session_rows": 6,
+    "switches": 30,
+    "switch_failures": 0,
+    "agent_folders": [
+      "chat-1789688274731",
+      "chat-1789688275227",
+      "chat-1789688275707",
+      "chat-1789688276187",
+      "chat-1789688276676",
+      "chat-1789688277155",
+      "root"
+    ]
+  },
+  "duration_s": 1544.9,
+  "place": "/tmp/arbos-qa-desktop-rapid-session-switch-q6bb9ouk/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d24875af9109 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T233752Z-desktop-rapid-session-switch",
+  "branch": "main",
+  "usd": 0.01142
+}

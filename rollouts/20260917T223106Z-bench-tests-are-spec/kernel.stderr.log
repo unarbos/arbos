@@ -1,0 +1,16 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-tests-are-spec-m17090va/place...
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8136 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-tests-are-spec-m17090va/home/.cache/arbos/tgrep/18133160526c3b7d
+tools root: 2 calls, wall 3ms, sum 3ms, speedup 1.0x
+tools make-test-suite-pass: 2 calls, wall 267ms, sum 267ms, speedup 1.0x
+tools make-test-suite-pass: 2 calls, wall 268ms, sum 263ms, speedup 1.0x
+tools make-test-suite-pass: 2 calls, wall 269ms, sum 266ms, speedup 1.0x
+tools make-test-suite-pass: 2 calls, wall 272ms, sum 266ms, speedup 1.0x
+tools make-test-suite-pass: 2 calls, wall 1ms, sum 1ms, speedup 1.0x
+tools make-test-suite-pass: 2 calls, wall 1ms, sum 2ms, speedup 2.0x
+tools make-test-suite-pass: 2 calls, wall 26ms, sum 20ms, speedup 0.8x
+tools make-test-suite-pass: 2 calls, wall 37ms, sum 31ms, speedup 0.8x
+snapshot_failed: git add: fatal: unable to stat 'agents/make-test-suite-pass/jobs/j4/exit': No such file or directory

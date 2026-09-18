@@ -1,0 +1,25 @@
+{
+  "scenario": "inbox:mcp-servers",
+  "doc": "From inbox note 2026-09-13-mcp-servers.md: exercise feature 'mcp-servers' and run every detector. Needs a kernel built from branch cursor/mcp-servers-b027.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-ended",
+      "detail": "feature mcp-servers: turn never ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "mcp-servers",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-mcp-servers.md"
+  },
+  "duration_s": 1032.0,
+  "place": "/tmp/arbos-qa-inbox:mcp-servers-llyiqjxb/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d9e5ccde0029 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T230549Z-inbox:mcp-servers",
+  "branch": "main",
+  "usd": 0.00856
+}

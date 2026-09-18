@@ -1,0 +1,27 @@
+{
+  "scenario": "af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes",
+  "doc": "From `internal/features-inbox/2026-09-17-kernel-writes-recreate-a-moved-place.md`: the gate renamed\n        a place under an idle kernel and found the old path **back**, holding the whole tree but no\n        `agents/<id>`, still growing \u2014 the kickoff's tail (`notes.md`, `spend.toml`,\n        `notifications.jsonl`, `kernel.log`) landing seconds late through `create_dir_all` on the absolute\n        path. The process's cwd followed the inode; its writes did not. af-03's rule checks at turn start,\n        so an idle kernel finishing a tail is outside it, and the next person to open that path reads a\n        ghost project.\n\n        The rename is timed off the turn's `turn_complete` **event**, not `idle`: `idle` arrives after the\n        notes nudge, which is itself part of the tail this is trying to race. The note saw it in 1 run of\n        3; this waits on the earlier frame to make the window as wide as the kernel allows, and reports\n        what it caught either way.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "state:lock-leftover",
+      "detail": "lock file left behind after the kernel stopped (lock.rs Drop did not run)",
+      "where": "/tmp/arbos-qa-af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes-g19wnk6d/place/.arbos/runtime/lock"
+    }
+  ],
+  "notes": {
+    "turn_complete_seen": true,
+    "moved_to": "/tmp/arbos-qa-af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes-g19wnk6d/place-moved",
+    "old_path_recreated": null,
+    "kernel_alive_after": false
+  },
+  "duration_s": 84.3,
+  "place": "/tmp/arbos-qa-af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes-g19wnk6d/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/kernels/80e6994280f8/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 80e6994280f8 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260917T224503Z-af-04-a-moved-places-old-path-is-not-recreated-by-the-kernels-late-writes",
+  "branch": "main-80e6994280f8",
+  "usd": 0.02238
+}

@@ -1,0 +1,8 @@
+{
+  "name": "inbox:mcp-servers",
+  "doc": "From inbox note 2026-09-13-mcp-servers.md: exercise feature 'mcp-servers' and run every detector. Needs a kernel built from branch cursor/mcp-servers-b027.",
+  "tags": [
+    "inbox",
+    "mcp-servers"
+  ]
+}
