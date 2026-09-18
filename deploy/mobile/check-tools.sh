@@ -101,6 +101,9 @@ LIST_FAULTS=$(for f in "$HERE"/scenarios/*.sh "$HERE"/mac-journey.sh; do
 done)
 if [ -z "$LIST_FAULTS" ]; then
   echo "  all of them reach the list first"
+  echo "  (first use only — a scenario that goes back to the list halfway"
+  echo "   through is not covered here; several-workers failed that way at"
+  echo "   cycle 133 with this check silent)"
 else
   echo "$LIST_FAULTS"
   echo
