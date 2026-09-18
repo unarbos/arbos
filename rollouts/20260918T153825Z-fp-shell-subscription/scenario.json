@@ -1,0 +1,7 @@
+{
+  "name": "fp-shell-subscription",
+  "doc": "A shell subscription (kind = shell, every = 30s) is the kernel's only cron: it runs the command once per period with no model turn.",
+  "tags": [
+    "file-plan"
+  ]
+}

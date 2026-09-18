@@ -1,0 +1,4 @@
+1789744436378 desktop: app pid 866056 on :9251
+1789744497299 BREAK dg-01-the-line-never-reached-the-chat: nothing is on chat-1789744436578's transcript after 40 s, so the send did not arrive under the harness: {'t': 39, 'lines': 0, 'flags': [('root', False, False, 'live'), ('root', False, False, 'live'), ('chat-1789744436578', False, False, 'live')]}
+1789744497299 BREAK dg-01-no-session-ever-reported-a-turn: chat-1789744436578's transcript has 0 line(s) but no session reported streaming or turn_open in 40 s: [('root', False, False, 'live'), ('root', False, False, 'live'), ('chat-1789744436578', False, False, 'live')]. If the transcript grew, the turn ran and the flag is the problem; if it did not, the turn never started
+1789744497452 bugs: new d1e25b6be1.md, new a85b4f947e.md

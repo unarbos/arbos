@@ -1,0 +1,4 @@
+1789745984665 kernel started pid 889582
+1789745985567 BREAK mt-08-bash-refused: root could not run bash in an existing place: []
+1789745985571 kernel stopped with code 0
+1789745985599 bugs: new bb3765657f.md

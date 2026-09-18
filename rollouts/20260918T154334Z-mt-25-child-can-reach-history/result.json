@@ -1,0 +1,25 @@
+{
+  "scenario": "mt-25-child-can-reach-history",
+  "doc": "Item 25. A brief says 'find what the earlier worker wrote about X': the child searches .arbos/agents and finds it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-25-history-unreachable",
+      "detail": "the child did not find the earlier worker's words",
+      "where": "brief/prompt: nothing tells a child it may grep .arbos/agents"
+    }
+  ],
+  "notes": {
+    "found": false,
+    "child_searched_history": false
+  },
+  "duration_s": 0.9,
+  "place": "/tmp/arbos-qa-mt-25-child-can-reach-history-kdzxgl_u/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T154334Z-mt-25-child-can-reach-history",
+  "branch": "main",
+  "usd": 0.0
+}

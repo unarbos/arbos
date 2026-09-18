@@ -1,0 +1,24 @@
+{
+  "scenario": "mt-16-root-does-not-repeat-result",
+  "doc": "Item 16. The haiku a worker wrote is read to the user once.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-16-result-repeated",
+      "detail": "the haiku was read to the user 0 time(s)",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "times_read": 0
+  },
+  "duration_s": 30.9,
+  "place": "/tmp/arbos-qa-mt-16-root-does-not-repeat-result-u7cq01ax/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T154303Z-mt-16-root-does-not-repeat-result",
+  "branch": "main",
+  "usd": 0.0
+}

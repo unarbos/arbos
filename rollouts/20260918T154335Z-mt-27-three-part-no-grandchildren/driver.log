@@ -1,0 +1,5 @@
+1789746215144 kernel started pid 892336
+1789746221047 BREAK mt-27-child-count: 0 direct children for a three-part ask (expected exactly 3): []
+1789746221047 BREAK mt-27-worker-role: children without role: worker in agent.md: []
+1789746221054 kernel stopped with code 0
+1789746221082 bugs: new 23d1be444e.md, seen a1f03202e6.md

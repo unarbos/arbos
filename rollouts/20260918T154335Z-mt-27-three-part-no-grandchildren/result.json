@@ -1,0 +1,32 @@
+{
+  "scenario": "mt-27-three-part-no-grandchildren",
+  "doc": "A three-part ask to a coordinator root: exactly three children, zero grandchildren. The brief leak made each worker receive the whole plan and spawn three more (nine grandchildren).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-27-child-count",
+      "detail": "0 direct children for a three-part ask (expected exactly 3): []",
+      "where": ""
+    },
+    {
+      "rule": "mt-27-worker-role",
+      "detail": "children without role: worker in agent.md: []",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "children": [],
+    "grandchildren": [],
+    "parents": {},
+    "worker_role": {}
+  },
+  "duration_s": 5.9,
+  "place": "/tmp/arbos-qa-mt-27-three-part-no-grandchildren-cio_5f4r/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T154335Z-mt-27-three-part-no-grandchildren",
+  "branch": "main",
+  "usd": 0.0
+}

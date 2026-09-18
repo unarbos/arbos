@@ -1,0 +1,13 @@
+1789748600803 J1: pass — tab present, greeting shown ('Hey – this place is ready to go, it looks like a Rust worksp'), .arbos/ created
+1789748608756 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789748714650 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789748722265 J4: fail — the mid-flight follow-up was not taken into the running work (no same-turn line, no relay to the live worker, or a second worker): {'index': 19, 'reached_root_s': 0.0, 'task_turn_complete': 16, 'same_turn': False, 'relayed_to_worker': True, 'turn_tools': ['plan', 'say'], 'workers': ['fix-failing-test', 'fix-failing-test-retry'], 'taken': False}
+1789748736267 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789748840833 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': False, 'unseen': 0} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789748937392 J6: fail — away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))
+1789748937439 J7: fail — no branch with a commit ahead of main (['main'])
+1789749284248 journey exception: BlockingIOError: [Errno 11] Resource temporarily unavailable: '/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/mobile-journey-history.jsonl'
+1789749287365 BREAK journey-J4: the mid-flight follow-up was not taken into the running work (no same-turn line, no relay to the live worker, or a second worker): {'index': 19, 'reached_root_s': 0.0, 'task_turn_complete': 16, 'same_turn': False, 'relayed_to_worker': True, 'turn_tools': ['plan', 'say'], 'workers': ['fix-failing-test', 'fix-failing-test-retry'], 'taken': False}
+1789749287365 BREAK journey-J6: away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))
+1789749287365 BREAK journey-J7: no branch with a commit ahead of main (['main'])
+1789749287595 bugs: seen 711f60690b.md, seen 9c8bf3b8ac.md, new c247225fbb.md

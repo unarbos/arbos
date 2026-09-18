@@ -1,0 +1,6 @@
+1789745945473 kernel started pid 889311
+1789745945526 kernel stopped with code 0
+1789745945527 kernel-sub started pid 889357
+1789745976112 BREAK wrong-output: reply lacks TIMER-TICK: ''
+1789745976116 kernel-sub stopped with code 0
+1789745976139 bugs: seen 299583e3bc.md

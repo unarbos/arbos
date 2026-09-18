@@ -1,0 +1,3 @@
+1789749392790 desktop: app pid 969093 on :9614
+1789749523188 BREAK driver-exception: TimeoutError_: timed out waiting for root idle
+1789749523242 bugs: seen fbc45fa1ea.md

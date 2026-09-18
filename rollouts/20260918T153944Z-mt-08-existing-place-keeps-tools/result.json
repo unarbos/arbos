@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-08-existing-place-keeps-tools",
+  "doc": "Item 8 (pin). A place with no `[root] role`: root may run bash; no coordinator contract in its prompt.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-08-bash-refused",
+      "detail": "root could not run bash in an existing place: []",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 0.9,
+  "place": "/tmp/arbos-qa-mt-08-existing-place-keeps-tools-lfv2hmxn/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T153944Z-mt-08-existing-place-keeps-tools",
+  "branch": "main",
+  "usd": 0.0
+}

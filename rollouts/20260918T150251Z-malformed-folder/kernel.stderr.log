@@ -1,0 +1,13 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-malformed-folder-rx63ens5/place...
+agent_unlisted: agents/garbage: agent.md: read /tmp/arbos-qa-malformed-folder-rx63ens5/place/.arbos/agents/garbage/agent.md: stream did not contain valid UTF-8 — not an agent, not listed; remove the folder or give it an agent.md
+agent_unlisted: agents/nomd: no agent.md — not an agent, not listed; remove the folder or give it an agent.md
+Found 33 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8226 trigrams, 33 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-malformed-folder-rx63ens5/home/.cache/arbos/tgrep/76de4f688710f25f
+turn orphan: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+turn orphan: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+turn orphan: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+turn orphan: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+frame_rejected garbage: no agent "garbage" in this place

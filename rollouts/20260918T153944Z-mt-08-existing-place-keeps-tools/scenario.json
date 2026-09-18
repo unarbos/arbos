@@ -1,0 +1,7 @@
+{
+  "name": "mt-08-existing-place-keeps-tools",
+  "doc": "Item 8 (pin). A place with no `[root] role`: root may run bash; no coordinator contract in its prompt.",
+  "tags": [
+    "multitasking"
+  ]
+}

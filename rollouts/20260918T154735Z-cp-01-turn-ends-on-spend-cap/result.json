@@ -1,0 +1,35 @@
+{
+  "scenario": "cp-01-turn-ends-on-spend-cap",
+  "doc": "A turn over the per-turn dollar cap ends with a failed notice that names the cap and the setting, a clean `turn_complete`, and the kernel still answering; a second line meets the same cap the same way \u2014 never silence, never a hang.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "cp-01-no-cap-notice",
+      "detail": "the turn ended without a notice naming the cap",
+      "where": "arbos-engine turn.rs (#347)"
+    },
+    {
+      "rule": "cp-01-second-turn-silent",
+      "detail": "the second turn neither answered nor said why it ended",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "cap_notice": [],
+    "ends_with": [
+      "user",
+      "notice",
+      "turn_complete"
+    ],
+    "second_turn_s": 0.1
+  },
+  "duration_s": 1.1,
+  "place": "/tmp/arbos-qa-cp-01-turn-ends-on-spend-cap-x1pqnkw3/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T154735Z-cp-01-turn-ends-on-spend-cap",
+  "branch": "main",
+  "usd": 0.0
+}

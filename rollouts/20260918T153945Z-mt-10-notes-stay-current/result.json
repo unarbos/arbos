@@ -1,0 +1,26 @@
+{
+  "scenario": "mt-10-notes-stay-current",
+  "doc": "Item 10. After a delegated three-part request, .arbos/notes.md has one item per workstream with a readout, not the template.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-10-notes-stale",
+      "detail": "notes.md unchanged or under two items after a delegated request (0 items)",
+      "where": "coordinator contract: notes stay current without being asked"
+    }
+  ],
+  "notes": {
+    "notes_items": 0,
+    "changed": true,
+    "notes_head": "+++\nowner = \"root\"\n+++\n# Notes\n\nGoals, constraints, decisions: [project-context](docs/project-context.md)\n"
+  },
+  "duration_s": 9.3,
+  "place": "/tmp/arbos-qa-mt-10-notes-stay-current-wg6phq9x/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T153945Z-mt-10-notes-stay-current",
+  "branch": "main",
+  "usd": 0.0
+}

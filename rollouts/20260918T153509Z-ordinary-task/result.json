@@ -1,0 +1,36 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "fizz.py not created",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "final reply did not report FizzBuzz: ''",
+      "where": ""
+    },
+    {
+      "rule": "no-usage",
+      "detail": "turn_complete carries no usage",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [],
+    "tool_errors": [],
+    "trace_files": 1
+  },
+  "duration_s": 1.4,
+  "place": "/tmp/arbos-qa-ordinary-task-t71p2487/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T153509Z-ordinary-task",
+  "branch": "main",
+  "usd": 0.0
+}

@@ -1,0 +1,4 @@
+1789749632338 desktop: app pid 973340 on :9614
+1789749642216 desktop-relaunch: app pid 973730 on :9614
+1789749663001 BREAK mt-24-active-tab-not-restored: the chat active before quit was 'chat-1789749637414' and after relaunch it is 'root' (session ids renumber, so they are compared by agent): the window comes back on a different chat than the one the person left open
+1789749663202 bugs: seen 6d5f8ef30f.md

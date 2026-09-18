@@ -1,0 +1,41 @@
+{
+  "scenario": "kill-mid-turn-restart",
+  "doc": "SIGKILL the kernel while a model turn runs, restart. The turn must continue from the transcript once, without replaying the prompt.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "continued-turn-never-ended",
+      "detail": "continued turn never reached idle",
+      "where": ""
+    },
+    {
+      "rule": "wrong-output",
+      "detail": "count.txt was never written after the continuation",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "findings_after_kill": [
+      {
+        "rule": "lock-leftover",
+        "path": "/tmp/arbos-qa-kill-mid-turn-restart-3csxlt6u/place/.arbos/runtime/lock",
+        "detail": "lock file left behind after the kernel stopped (lock.rs Drop did not run)"
+      }
+    ],
+    "transcript_kinds": [
+      "wake",
+      "user",
+      "notice",
+      "turn_complete"
+    ]
+  },
+  "duration_s": 167.4,
+  "place": "/tmp/arbos-qa-kill-mid-turn-restart-3csxlt6u/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T153221Z-kill-mid-turn-restart",
+  "branch": "main",
+  "usd": 0.0
+}

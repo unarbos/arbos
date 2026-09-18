@@ -1,0 +1,14 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-secrets-leak-hunt-olsoz3xv/place...
+Found 29 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8159 trigrams, 29 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-secrets-leak-hunt-olsoz3xv/home/.cache/arbos/tgrep/333ad9e185707bf6
+turn root: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+turn root: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+tools root: 5 calls, wall 1340ms, sum 1340ms, speedup 1.0x
+turn root: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+tools root: 3 calls, wall 807ms, sum 807ms, speedup 1.0x
+turn root: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)
+tools root: 2 calls, wall 269ms, sum 269ms, speedup 1.0x
+turn root: jev fell through (400 bad request: ~typesafe/jev-latest is a decisions model and cannot be used with the chat/completions endpoint. Use the /api/alpha/decisions endpoint instead.)

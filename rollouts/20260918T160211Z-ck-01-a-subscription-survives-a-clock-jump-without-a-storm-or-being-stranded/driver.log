@@ -1,0 +1,7 @@
+1789747331493 kernel-bootstrap started pid 916098
+1789747331546 kernel-bootstrap stopped with code 0
+1789747331547 kernel-after-jump started pid 916144
+1789747359597 BREAK ck-01-subscription-stranded-in-the-future-by-a-clock-rewind: a subscription whose next_due is ten days ahead — which is what a clock set backwards leaves — did not run in 28 s and its due time on disk is still '2026-09-28T16:02:11Z'. It will not run for ten days, and nothing says so
+1789747359601 kernel-after-jump stopped with code 0
+1789747359602 BREAK state:subscription-due-past-its-period: next_due is 240.0 h ahead on a 30s period: a clock set backwards leaves this, and it will not run for that long (qal-j38)
+1789747359637 bugs: seen c7a56e929c.md, new d1caaaa735.md

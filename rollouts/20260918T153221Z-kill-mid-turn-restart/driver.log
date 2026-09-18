@@ -1,0 +1,9 @@
+1789745541890 kernel started pid 881254
+1789745587324 timeout waiting for first model output after 45s
+1789745587328 kernel SIGKILLed
+1789745587829 kernel-restart started pid 881732
+1789745708217 timeout waiting for turn root idle after 120s
+1789745708217 BREAK continued-turn-never-ended: continued turn never reached idle
+1789745709218 BREAK wrong-output: count.txt was never written after the continuation
+1789745709221 kernel-restart stopped with code 0
+1789745709244 bugs: seen 8a212695c0.md, seen 49ede41274.md

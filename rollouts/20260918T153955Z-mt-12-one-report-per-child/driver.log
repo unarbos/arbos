@@ -1,0 +1,5 @@
+1789745995922 kernel started pid 889762
+1789746116852 timeout waiting for turn root idle after 120s
+1789746136852 BREAK mt-12-two-root-turns: 0 root turn(s) after one child reported (expected 1: the child's say plus its done file both wake root)
+1789746136860 kernel stopped with code 0
+1789746136885 bugs: seen 4144d58f87.md

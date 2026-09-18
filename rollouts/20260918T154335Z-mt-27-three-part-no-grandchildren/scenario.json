@@ -1,0 +1,8 @@
+{
+  "name": "mt-27-three-part-no-grandchildren",
+  "doc": "A three-part ask to a coordinator root: exactly three children, zero grandchildren. The brief leak made each worker receive the whole plan and spawn three more (nine grandchildren).",
+  "tags": [
+    "multitasking",
+    "standing-pass"
+  ]
+}

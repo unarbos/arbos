@@ -1,0 +1,5 @@
+1789746455561 kernel started pid 893452
+1789746456565 BREAK cp-01-no-cap-notice: the turn ended without a notice naming the cap
+1789746456616 BREAK cp-01-second-turn-silent: the second turn neither answered nor said why it ended
+1789746456619 kernel SIGKILLed
+1789746456652 bugs: new 66ab492476.md, new 2410decd03.md

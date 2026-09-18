@@ -1,0 +1,56 @@
+{
+  "scenario": "fs-01-federated-store-read-write-cas",
+  "doc": "Kernel B (machine qa-b, project beta) registers on a local hub. From node A: `store read` of B's notes.md, `store put` into B's docs/ (allowed), the same put with a stale base hash (conflict, current hash returned), a put to B's root-owned notes.md (refused, unchanged), `store ls`, and a read of a path with `..` (refused).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "fs-01-cas-no-current-hash",
+      "detail": "the conflict reply does not carry the file's current hash for a re-read",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "read": [
+      0,
+      "# Notes\n\n- [ ] beta's own page\n[sha256 8f5e0c6290d68d809ee6f52fb49c11ad88c446a2c41cbe1b47cb04543748fa60]"
+    ],
+    "ls": [
+      0,
+      "project-context.md\nshared.md"
+    ],
+    "put_shared": [
+      0,
+      "wrote arbos://qa-b/beta/docs/from-a.md (13 bytes) sha256 03381d195f92400ba13ba98f86f12d64696623c3dc227eed00f19ffae1365584"
+    ],
+    "put_stale": [
+      1,
+      "Error: docs/from-a.md: conflict \u2014 the file changed since you read it; read it again and redo the edit"
+    ],
+    "put_cas_ok": [
+      0,
+      "wrote arbos://qa-b/beta/docs/from-a.md (25 bytes) sha256 8b03030f0276b0fe4a57578d92ccd1c3738fa2bd85e4983337dc29c82855b01b"
+    ],
+    "put_page": [
+      1,
+      "Error: notes.md: .arbos/notes.md (the project page), docs/project-context.md, and archived.md are owned by the main chat (root); keep your own checklist with the plan tool and propose the change with `say to=root`"
+    ],
+    "read_dotdot": [
+      1,
+      "Error: \"arbos://qa-b/beta/../../etc/passwd\": a store path does not climb out with .."
+    ],
+    "read_unknown_machine": [
+      1,
+      "Error: arbos://nobody/beta/notes.md: hub: no machine named \"nobody\" is registered (known: qa-b)",
+      0.0
+    ]
+  },
+  "duration_s": 3.6,
+  "place": "/tmp/arbos-qa-fs-01-federated-store-read-write-cas-p3pj4aif/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cea8b902eecf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260918T154353Z-fs-01-federated-store-read-write-cas",
+  "branch": "main",
+  "usd": 0.0
+}

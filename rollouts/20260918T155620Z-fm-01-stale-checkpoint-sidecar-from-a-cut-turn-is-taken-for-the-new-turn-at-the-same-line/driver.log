@@ -1,0 +1,6 @@
+1789746980509 kernel-a started pid 909901
+1789746983174 kernel-a stopped with code 0
+1789746983175 kernel-b started pid 910231
+1789746991941 BREAK probe-no-stale-sidecar: no cut turn's sidecar at line 20 (old lines [2, 8, 14, 20, 26], sidecars ['2.json', '8.json']); the collision did not happen, this run proves nothing
+1789747000527 kernel-b stopped with code 0
+1789747000560 bugs: seen e0933b788d.md

@@ -1,0 +1,8 @@
+{
+  "name": "cp-01-turn-ends-on-spend-cap",
+  "doc": "A turn over the per-turn dollar cap ends with a failed notice that names the cap and the setting, a clean `turn_complete`, and the kernel still answering; a second line meets the same cap the same way \u2014 never silence, never a hang.",
+  "tags": [
+    "landing",
+    "cap"
+  ]
+}
