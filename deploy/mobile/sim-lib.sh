@@ -29,3 +29,21 @@ ptx() { python3 -c "print(round($1 * $SIM_PT_W / $SIM_SHOT_W))"; }
 
 # tap_shot <x-px> <y-px> <udid> — tap where something is on the last still.
 tap_shot() { idb ui tap "$(ptx "$1")" "$(pt "$2")" --udid "$3"; }
+
+# page_up <udid> — scroll a list down by one screenful, in points.
+#
+# Written because two scenarios of mine swiped from y=900 on a screen that is
+# 852 points tall. Nothing errors: the gesture lands nowhere, the list does
+# not move, and every "page" reads the same rows. Both scenarios then
+# reported a list as shorter than it is, and one of those became a filed
+# finding about the app disagreeing with itself (M-275, withdrawn).
+#
+# The screenshot is 1024 px tall and the screen 852 pt, so a y taken off a
+# still is always too large — the same pixels-versus-points trap as M-152,
+# which `pt` exists for. This wraps the whole gesture so a scenario need not
+# get it right twice.
+page_up() {
+  local from=$(( SIM_PT_H * 80 / 100 ))   # 682 on this device
+  local to=$(( SIM_PT_H * 40 / 100 ))     # 341
+  idb ui swipe "$(( SIM_PT_W / 2 ))" "$from" "$(( SIM_PT_W / 2 ))" "$to" --duration 0.5 --udid "$1"
+}
