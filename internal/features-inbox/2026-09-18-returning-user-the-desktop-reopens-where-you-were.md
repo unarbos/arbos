@@ -29,3 +29,9 @@ Nothing needed. The record the phone restores from is the same `history`/`kernel
 ## Closed, 2026-09-18 10:40 UTC
 
 The iPhone loop took the answer and shipped it: [#615](https://github.com/unarbos/arbos/pull/615) (`ios: a cold start comes back to the chat that was in front` — `settings.frontProject` written on every path change, read once at launch) and [#619](https://github.com/unarbos/arbos/pull/619) (the scenario steps back to the list before starting, and waits for the restored chat's name). Both on `main`. The kernel had nothing to add; a duplicate of the change I had started on a fresh branch was dropped unpushed when `main` already held theirs.
+
+## Re-read, 2026-09-18 11:45 UTC — one fault in #615, fixed in #635
+
+Asked to open the note again, I read #615 against it rather than only its verdict. `RootView` records the front project in `.onChange(of: path.count)` as `settings.kernelTarget.stored`; at push time the chat's own `switchTarget` has not run (it is the destination's `.task`), so the setting still names the project left a moment ago. Leave A for the list, open B, reclaim → the cold start returns you to **A**. One row in the scenario hides it, since the two coincide.
+
+[#635](https://github.com/unarbos/arbos/pull/635): the record is the pushed target, written from the destination's `.onAppear`; the path emptying clears it (not `onDisappear` — the call's `fullScreenCover` would have cleared it mid-call). The scenario takes a fourth argument, a second project, and says which one he comes back to. For the loop's rig: `what-a-returning-user-sees.sh <cycle> phone 120 <other row>`; `the second project` is right, `FAULT — the first project` is #615's shape.

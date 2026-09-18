@@ -268,7 +268,12 @@ if [ "${ARBOS_QA_DESKTOP:-0}" = 1 ] && command -v Xvfb >/dev/null 2>&1; then
       echo "!! NO DESKTOP DRIVER for $branch: neither $wt/desktop/driver nor ARBOS_QA_DRIVER_DIR has arbosdriver.py"
     fi
     echo "-- desktop $branch: building kernel + app ($(git -C "$wt" rev-parse --short=12 HEAD))"
-    if ! (cd "$wt" && CARGO_TARGET_DIR="$ROOT/target-desktop-$slug" nice -n 19 cargo build --release -p arbos-kernel -j "$JOBS" 2>&1 | tail -1); then
+    # `arbos-hub` alongside the kernel: `fb-01` is desktop-tagged, so it runs in this step and looks
+    # for the hub in *this* target dir. The tracked step builds the hub (line 136) and this one did
+    # not, so fb-01 reported `skipped (self: no arbos-hub binary at target-desktop-main/release)`
+    # every cycle — a scenario that sets itself aside establishes nothing, and this one had been
+    # establishing nothing since the step was split.
+    if ! (cd "$wt" && CARGO_TARGET_DIR="$ROOT/target-desktop-$slug" nice -n 19 cargo build --release -p arbos-kernel -p arbos-hub -j "$JOBS" 2>&1 | tail -1); then
       echo "-- desktop $branch: kernel build failed"; continue
     fi
     # The app failing to build takes the desktop scenarios AND the acceptance journey with it, so this
