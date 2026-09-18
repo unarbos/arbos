@@ -25,3 +25,7 @@ The note's worry about "a chat restored onto a stale link" is real and already t
 ## Kernel side
 
 Nothing needed. The record the phone restores from is the same `history`/`kernel.json` it already reads; `last_activity_ms` on the roster (#538) is there if the list wants to show "2m" beside the project it returns you to.
+
+## Closed, 2026-09-18 10:40 UTC
+
+The iPhone loop took the answer and shipped it: [#615](https://github.com/unarbos/arbos/pull/615) (`ios: a cold start comes back to the chat that was in front` — `settings.frontProject` written on every path change, read once at launch) and [#619](https://github.com/unarbos/arbos/pull/619) (the scenario steps back to the list before starting, and waits for the restored chat's name). Both on `main`. The kernel had nothing to add; a duplicate of the change I had started on a fresh branch was dropped unpushed when `main` already held theirs.

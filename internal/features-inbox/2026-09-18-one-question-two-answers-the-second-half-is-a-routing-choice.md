@@ -44,3 +44,7 @@ Neither change is mine to make alone: A changes what the caller is told (the bri
 If B is chosen, the harness can hold it: `tests/mock_openai.py` plays the model; a scenario with a work question can assert `response_dones = 1` (the expectation #562 added) and that the one reply carries the kernel's words; a small-talk scenario asserts the model's own reply still plays. If A is chosen, the same scenario asserts one reply and that the kernel was **not** asked.
 
 The loop's own re-check is the measure either way: `one-breath-one-answer.sh <cycle> <runs>`.
+
+## Closed, 2026-09-18 07:52 UTC — choice B, shipped
+
+[#594](https://github.com/unarbos/arbos/pull/594) took B: `HOLD_MODEL_WHILE_DECIDING = True` for the GPT-Live engine, `_route_final` releases the hold for small talk and delegates a work question to the kernel at once, with the model speaking only the kernel's answer; the mock GPT-Live in `tests/` talks, and three scenarios hold the choice. The iPhone loop's re-check at 07:50–07:54: six runs of `pause.wav`, one transcript and one answer in every one, 900/900 frames (recorded in their note, `2026-09-18-one-question-two-answers-across-a-pause.md`, "Closed"). The cost named above — small talk starts ~1.2 s later — is the accepted one.

@@ -2806,3 +2806,99 @@ concluded without re-deriving it, and so can the sweep that catches the
 checks going stale.
 
 **PR:** [#622](https://github.com/unarbos/arbos/pull/622), harness only.
+
+## Cycle 106 report (10:25 UTC, 09-18)
+
+**Looked at:** notifications, oldest row at 82. Harness-only, to respect the
+upload cap.
+
+**The row holds and now says so** (M-351):
+`banner ~2s after going away (unseen=1), and the tap landed in the project`.
+It had been measuring the ask, the banner, the badge count and the landing,
+then printing a raw tree dump and stopping. It is in the sweep now — eleven
+scenarios, eleven verdicts.
+
+**A second thing found, and deliberately not fixed** (M-352). The
+transcript's worker-line glyph reads `Arrow Turning Down Then Right` —
+SwiftUI rendering `arrow.turn.down.right`, the same family as `Gear Shape`
+and `Move`. It is decoration beside text that already says what the row is,
+so the fix is one line of `.accessibilityHidden(true)`.
+
+It is not going in today. Apple refused the #615 archive with `Upload limit
+reached`, so `ios/` changes batch into one PR — and this is the first entry
+in that batch. Worth having; not worth an upload of its own.
+
+That is a small discipline but a real one: the cap makes the cost of a
+change visible, and a one-line accessibility tidy is exactly the kind of
+thing that would otherwise spend a day's allowance on its own.
+
+**PR:** [#624](https://github.com/unarbos/arbos/pull/624), harness only.
+
+## Cycle 107 report (10:30 UTC, 09-18)
+
+**Looked at:** the style pair, oldest row at 83 — this time the chat rather
+than the list. Harness-only, the cap being on.
+
+**The tool does not transfer, and now says so** (M-353). Pointed at the chat
+against Cursor's chat reference it reported **5.3% against 24.3%** row
+pitch. That looks alarming and means nothing: the tool was built for lists,
+where rows repeat at one height, and a chat has no such unit — on one side
+those "rules" are paragraph edges, on the other message bubbles.
+
+Guarded rather than deleted. It compares the rule counts first and refuses
+when they are nothing alike (2 against 13 here), while the genuine list pair
+(9 against 8) still passes silently. The chat pairing goes back to being
+**unmeasured**, which is the honest state.
+
+**The day's pattern, stated plainly** (M-354). Every rig fault today was an
+instrument used where its assumptions did not hold: a gesture off the
+screen, a page count taken for a list's end, a count by label on repeating
+labels, a pattern blind to an animated glyph, a name the app no longer used,
+a premise about the gateway that changed, a pill counting two different
+things, and a pitch that only exists on lists.
+
+Each was correct on the case it was written for and silently wrong on the
+next case it met, and **none announced its boundary**. The cure that has
+actually worked — seven times now — is making the tool state the condition
+under which its answer means something: `cannot say`, `paging converged`,
+`CAUTION`. Remembering the condition myself has failed every single time.
+
+**PR:** [#625](https://github.com/unarbos/arbos/pull/625), harness only. The worker-line glyph
+stays in the batched `ios/` PR.
+
+## Cycle 108 report (10:40 UTC, 09-18)
+
+**Looked at:** the chrome row from 84 — and rather than eyeball it again,
+gave it a committed check. Harness-only, the cap being on.
+
+**`check-names.sh`** walks the list and a chat and flags anything whose name
+reads like a rendered SF Symbol (M-355). On current `main` the list is
+clean, and the chat carries two `Arrow Turning Down Then Right` — the
+worker-line glyph already in the batched `ios/` PR.
+
+**The check caught itself on its first run** (M-356). I gave it a self-test:
+three names the app really shipped plus one good one, and a refusal to run
+unless it objects to exactly the three. First run: **0 of 3**.
+
+The detector was a shell function running `python3 - <<'PY'`, which takes
+its *program* from stdin — so the piped dump went nowhere and it passed
+everything. **Both screens had already been reported clean by a check
+looking at nothing.**
+
+My own manual attempt to verify that detector was malformed the same way — a
+heredoc swallowing the input redirect — and also reported nothing caught.
+Two independent mistakes of one shape within five minutes, and only the
+version living inside the script caught it.
+
+That is the strongest form of today's lesson I have found. Eight times I
+have written "make the tool state its own limits"; this is the first tool
+that *demonstrates* it can still fail before it claims anything passes, and
+it earned that on its first run.
+
+**Then a false positive** (M-357): `Agents 36` was flagged because the
+pattern let a digit begin a word. Fixed — every word needs a capital letter.
+Both faults were found by reading the output against screens whose true
+state I already knew, which is the cheapest verification available and the
+one I keep having to relearn.
+
+**PR:** [#626](https://github.com/unarbos/arbos/pull/626), harness only.

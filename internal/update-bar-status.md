@@ -5,16 +5,28 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 10:18 UTC.
+Last checked 2026-09-18 10:32 UTC.
 
-## Click Update. You will get build 1952.
+## Click Update. You will get build 1962.
 
-**1952** — signed, notarised, stapled, on the feed since 10:14 UTC.
+**1962** — signed, notarised, stapled, on the feed since 10:30 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 1952 (builds 1953–1962):
+
+- **#616** — `binary_gone_e2e` waits on the second `kernel_start` rather
+  than reading it once
+- **#617** — the loop clears a trigger a previous run left behind
+- **#618** — the one-wording check counted a coincidence as a violation;
+  it now counts the answer's rows
+- **#619** — the loop runs its scenarios together (`sweep.sh`), which
+  found a rotted check on its first run
+
+## Before that: 1952
 
 New since 1946 (builds 1947–1952):
 
