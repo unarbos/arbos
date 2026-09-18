@@ -48,6 +48,13 @@ BAD_EXACT = {
 # symbol spelled out, "Agents 36" is a pill with a count in it and was
 # being flagged because the pattern let a digit begin a word.
 SYMBOLISH = re.compile(r"^(?:[A-Z][a-z]*)(?: [A-Z][a-z]*){1,5}$")
+OURS = (
+    "Back", "Send", "Mute", "Unmute", "Filter", "Search", "Settings",
+    "More", "Call",
+    # UIKit draws and names the sheet's drag handle. An app cannot relabel
+    # it, so flagging it only teaches the reader to ignore the report.
+    "Sheet Grabber",
+)
 for line in sys.stdin.read().splitlines():
     parts = line.split(None, 3)
     if len(parts) < 4:
@@ -55,7 +62,7 @@ for line in sys.stdin.read().splitlines():
     kind, label = parts[2], parts[3].strip()
     if kind not in ("Button", "Image", "PopUpButton"):
         continue
-    if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in ("Back", "Send", "Mute", "Unmute", "Filter", "Search", "Settings", "More", "Call")):
+    if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in OURS):
         print(f"  {kind:12} {label}")
 DETECTOR
 trap 'rm -f "$SUSPECT_PY"' EXIT
@@ -82,13 +89,15 @@ SELFTEST=$(printf '%s\n' \
   "  42   85  Button       Gear Shape" \
   " 351   85  PopUpButton  PopUpButton" \
   "  26  196  Image        Arrow Turning Down Then Right" \
-  " 299   85  Button       Search" | suspect | grep -c .)
+  " 299   85  Button       Search" \
+  " 196  120  Button       Sheet Grabber" | suspect | grep -c .)
 if [ "$SELFTEST" != 3 ]; then
   echo "the detector failed its own self-test ($SELFTEST of 3 known-bad names caught)."
   echo "Not running: a check that cannot fail cannot pass either."
   exit 1
 fi
-echo "detector self-test: caught 3 of 3 known-bad names, and let 'Search' through"
+echo "detector self-test: caught 3 of 3 known-bad names, and let 'Search' and"
+echo "the system's 'Sheet Grabber' through"
 echo
 
 FOUND=0
