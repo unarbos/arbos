@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 13:16 UTC.
+Last checked 2026-09-18 13:28 UTC.
 
-## Click Update. You will get build 2023.
+## Click Update. You will get build 2025.
 
-**2023** — signed, notarised, stapled, on the feed since 13:13 UTC.
+**2025** — signed, notarised, stapled, on the feed since 13:26 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2023 (builds 2024–2025):
+
+- **#645** — the voice-note check reads the words against the clip's
+  sentence, not just the counts
+
+## Before that: 2023
 
 New since 2019 (builds 2020–2023):
 
