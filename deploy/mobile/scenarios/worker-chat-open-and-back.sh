@@ -92,14 +92,18 @@ fi
 RUNNING=""
 [ "$LANDED" = yes ] && for _ in $(seq 1 20); do
   sleep 4
-  RUNNING=$(ui dump | grep -E "Button +[0-9]+ Working" | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  # The label begins with the braille spinner, then an optional count, then
+  # "Working": `⠙, 2 Working p091543 one · Running sleep 80`. Requiring a
+  # digit straight after "Button" matched none of them, and three cycles
+  # reported the app drawing no line while it drew one every second.
+  RUNNING=$(ui dump | grep -E "Button +[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏], ([0-9]+ )?Working " | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
   [ -n "$RUNNING" ] && break
 done
 if [ -z "$RUNNING" ]; then
   # Before blaming the app for not drawing a line, ask whether there was
   # anything to draw. Whether the root delegates at all is the model's
   # decision, not the phone's, and it has declined more than once tonight.
-  KIDS=$(python3 "$HERE/../kernel.py" pod frames 6 2>/dev/null | grep -c "sleep $NAP" || true)
+  KIDS=$(python3 "$HERE/../kernel.py" pod history 12 2>/dev/null | grep -c "$TAG" || true)
   if [ "${KIDS:-0}" = 0 ]; then
     echo "  the kernel has no child for this request: the root answered it itself."
     echo "  VERDICT: no worker ran, so there was no line to draw. Untested, and not the app's doing."
