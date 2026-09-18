@@ -2503,3 +2503,48 @@ without pain for once: look for the existing fix before writing one.
 
 **PR:** [#610](https://github.com/unarbos/arbos/pull/610).
 **Stills:** `media/mobile/cycle-97/`.
+
+## Cycle 98 report (09:25 UTC, 09-18)
+
+**Looked at:** the running-worker line, untested since cycle 90 and reported
+three times as something the app might not be drawing.
+
+**The app draws it, and always did** (M-333). Dumping every Button while two
+workers ran:
+
+```
+⠙, 2 Working p091543 one · Starting
+⠋, Working p091543 two · Running sleep 80
+⠇, Working 2                              (the pill)
+```
+
+Three faults in my own scenario hid it, and every one of them pointed at the
+app:
+
+* the line pattern wanted a digit straight after `Button`, where the label
+  begins with the **animated braille spinner**;
+* the check meant to ask whether a worker had run looked for the sleep
+  duration in the child's *name* — children are named from the goal, so it
+  always answered no and printed `the root answered it itself`, which was
+  false. The kernel's record has `.arbos/agents/r091304-one/` and `-two/`
+  running and finishing;
+* the pill pattern had the same spinner blind spot and said `no pill in this
+  chat` about a chat that had one.
+
+**The rule** (M-334): never match on an animated glyph. The spinner changes
+every frame, so a label read a second ago does not exist when the tap lands
+— a race that always loses, and one that reads exactly like a control
+refusing to respond. Match the part that holds still.
+
+**What I am not claiming** (M-335). With the pattern fixed and the tap aimed
+at the worker's name, the screen stays on the project chat. I am not filing
+that. Three rig faults surfaced in this one file today and all three pointed
+at the app; the worker chat may be presented as a sheet, in which case my
+screen-classifier would see the chat *underneath* and report `project-chat`
+whether or not it opened. That is the next check, and it is about the rig.
+
+**The honest shape of this cycle**: I spent it discovering that three
+previous cycles' careful reports were wrong in the same direction. The
+ledger now says so plainly, which is worth more than the row.
+
+**PR:** [#612](https://github.com/unarbos/arbos/pull/612).

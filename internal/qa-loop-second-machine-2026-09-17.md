@@ -694,6 +694,55 @@ Started 09:01:25Z on kernel `b3770cd0de9e`, running the corrected `cycle.sh` (th
 is at line 112 of the copy `vm-loop` installed at 09:00:25). This is the first cycle that should
 announce its half.
 
+## #441 verified, with the controls failing on the build before it
+
+`lk-01` was written as #441's control by the outgoing worker, so the verification is a comparison
+rather than new code. #441 merged as `80e6994280f8`; `f80f0b663bac` predates it and
+`d373422662bd` carries it.
+
+| | `d373422662bd` (has #441) | `f80f0b663bac` (before it) |
+|---|---|---|
+| `lk-01` a held place is said once then escalates | pass (331.5 s) | **5 breaks** |
+| `lk-02` held record in a read-only `runtime/` | pass | **3 breaks** |
+| `lk-03` holder gone clears the record | pass | **3 breaks** |
+
+What the old build actually did, which is worth reading rather than counting: it exited **1**
+where a held place must exit 3, said the held line **0 times over 164 relaunches**, produced **0
+heartbeats in 5.5 minutes** where one a minute is the contract, never escalated, and after a new
+holder took over left the record as `None` instead of naming the new pid. So the family fails
+comprehensively before #441 and cleanly after it, which is the shape a verification wants.
+
+## #450's detector: both shapes found, and quiet where it must be
+
+#450 (`a9b12f118650`) added `check_two_writers` to `crates/arbos-kernel/src/check.rs`. Its value
+is not the warning but the reading — the question it answers is whether a person's places were
+served twice while the lock was split across the `runtime/` move — so its **precision** matters as
+much as its recall. A detector that also fires on an interrupted kernel would send everyone
+hunting a fault they never had.
+
+Four places built by hand and read through `arbos-kernel check`, now standing as
+`ds-01-the-double-serving-detector-finds-both-shapes-and-stays-quiet-on-the-innocent-ones`:
+
+| arm | wanted | `d373422662bd` | `f80f0b663bac` (before #450) |
+|---|---|---|---|
+| a wake while the previous turn is still open | warn | warns, naming the open line | silent |
+| two checkpoints for one line with different times | warn | warns | silent |
+| died mid-turn, with the restart notice | quiet | quiet | quiet |
+| an ordinary place, two clean turns | quiet | quiet | quiet |
+
+So the detector is sound on both shapes it claims and does not cry wolf on either innocent state,
+and the scenario fails on the build before #450 — it tests the detector rather than the staging.
+
+One thing checked and **not** filed: warning two says "or a rewind's cut left one behind", which
+reads like an innocent cause that would make the warning unusable for deciding anything. It is
+not, on a successful rewind: `rewind.rs:239–259` removes the cut lines' tree sidecars, drops their
+git refs, and rewrites `checkpoints.jsonl` with only the retained records, so a reused line gets
+one record and not two. The caveat covers a rewind that failed part way, which is narrower.
+
+What the detector cannot see is stated in #450 itself and stands: two kernels answering on
+different ports, and two writers to `notes.md` via temp-and-rename, which leave no trace and need
+the `kernel_start` pids laid side by side.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j31-a-place-mcp-config-that-does-not-parse-hands-its-server-name-to-the-global-one-in-silence.md`

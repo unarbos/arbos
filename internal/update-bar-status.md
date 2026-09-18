@@ -5,23 +5,36 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 09:02 UTC.
+Last checked 2026-09-18 09:26 UTC.
 
-## Click Update. You will get build 1916.
+## Click Update. You will get build 1930.
 
-**1916** — signed, notarised, stapled, on the feed since 09:00 UTC.
+**1930** — signed, notarised, stapled, on the feed since 09:23 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
 
+New since 1916 (builds 1917–1930):
+
+- **#603** — the loop's pill and sheet agree; every apparent disagreement
+  was the instrument
+- **#604** — dev channel: the deferral clock runs on the green build, not
+  on the commit still under test. This is the one that keeps the Update
+  button moving while `main` merges faster than CI finishes
+- **#605** — every script runs the tool beside it, and `check-tools.sh`
+  keeps it that way
+- **#606** — `say_title_rename_e2e` waits for the worker's first report
+- **#607** — the loop reads the orb's phases
+- **#608** — when you can name the wrong predicate, change the predicate
+
+## Before that: 1916
+
 New since 1910 (builds 1911–1916):
 
 - **#602** — the loop cannot blame the app for what the model decided:
   it reads back before sending, and asks the kernel whether a worker ran
-
-And everything below, which 1916 also carries.
 
 ## Before that: 1910
 
