@@ -64,7 +64,7 @@ fn server() -> u16 {
                         &mut stream,
                         200,
                         "application/json",
-                        r#"{"data":[{"id":"blocked","context_length":8000},{"id":"open","context_length":8000},{"id":"openai/blocked","context_length":8000},{"id":"anthropic/open","context_length":8000},{"id":"slow/silent","context_length":8000},{"id":"zeta/empty","context_length":8000}]}"#,
+                        r#"{"data":[{"id":"blocked","context_length":200000},{"id":"open","context_length":200000},{"id":"openai/blocked","context_length":200000},{"id":"anthropic/open","context_length":200000},{"id":"slow/silent","context_length":200000},{"id":"zeta/empty","context_length":200000}]}"#,
                     );
                     return;
                 }
