@@ -51,6 +51,8 @@ const TAIL_LAG: Duration = Duration::from_millis(1000);
 const PROBE_EVERY: Duration = Duration::from_secs(10);
 /// The tail of the rewind notice while the kernel is still restoring files.
 const RESTORING: &str = "restoring files\u{2026}";
+/// The window's line for a turn that ended with nothing under the prompt.
+const NO_REPLY: &str = "no reply from the kernel";
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ToolStatus {
@@ -3632,7 +3634,7 @@ impl ChatSession {
                             // Kernel turn failed before any token (missing
                             // agent.md, bad model, no key). Idle used to
                             // clear the thinking row and leave a blank pane.
-                            self.notice(true, "no reply from the kernel");
+                            self.notice(true, NO_REPLY);
                         }
                     }
                     // The kernel spells a user stop `cancelled` or, since the
@@ -4184,6 +4186,16 @@ impl ChatSession {
         if matches!(self.items.last(), Some(ChatItem::Notice { text: t, failed: f }) if t == text && *f == failed)
         {
             return;
+        }
+        // "no reply from the kernel" is what the window says when a turn
+        // ends on the prompt with nothing under it; the kernel's own
+        // reason lands a tail-tick later ("… did not accept the API key").
+        // The reason is the line; the guess before it goes (F-189).
+        if failed
+            && text != NO_REPLY
+            && matches!(self.items.last(), Some(ChatItem::Notice { text: t, .. }) if t == NO_REPLY)
+        {
+            self.items.pop();
         }
         self.items.push(ChatItem::Notice {
             text: text.to_owned(),
