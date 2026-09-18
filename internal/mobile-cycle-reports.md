@@ -3056,3 +3056,30 @@ an ordinary mid-list position (M-373). Worth a line, because a plausible
 fault that is not one costs the next reader the minute it cost me.
 
 **Recording:** `media/mobile/cycle-112/recording_demo.mp4`.
+
+## Cycle 113 — one breath, one transcript, one *kernel* answer
+
+The gateway now serves B, so this is the re-check. Five runs across two
+passes, every one clean: one transcript carrying the whole question across
+the breath, one spoken answer, `900 of 900` mic frames. **M-146 does not
+reproduce**, 70 cycles after it opened (M-374).
+
+**But the scenario was only proving half of what the sentence claims.** It
+counted the gateway's `response.done` frames. That says how many answers
+were *spoken*; it says nothing about who spoke them. B is "hold, then one
+**kernel** answer", and a gateway answering from its own model would pass
+that count exactly — which is not a hypothetical, it is F18.
+
+So it reads the kernel's own record now, per run:
+
+```
+ 2957 user          Hello Arbus. What are we working on right now? Give me one sentence.
+ 2958 assistant     We just replied with three short sentences about the sea for a quick test prompt (core 115306).
+ 2959 turn_complete
+```
+
+One question, one answer — and the answer cites `core 115306`, a turn only
+the kernel knows about. That is the proof the frame count could never give
+(M-375).
+
+**PR:** [#643](https://github.com/unarbos/arbos/pull/643), harness only.

@@ -736,7 +736,19 @@ Every failure read: 10097 ×5 — grader artefact (3 of them also the override s
 
 Spend $7.71.
 
-## Next (cycle 29)
+## Cycle 29 (2026-09-18) — the predicate sentence read on sympy-17318, and ten fresh instances read for the account
 
-1. To the features agent and QA: django-10097 is ungradeable in this environment (gold patch fails on `django_site__old`); it joins requests-2317. #601's mark did not appear in five rollouts on it; a gradeable quoting-reference instance is needed to read the rule properly.
-2. Reading continues on whatever new failures arrive. No measured comparison without its ceiling stated first.
+**Conditions.** 1b083988 on `main` added the sentence cycle 27 proposed: *when you can name the wrong predicate, change the predicate; a guard that lets the wrong value reach a different caller is the same bug with one caller patched.* Kernel **`arbos-kernel 0.2.0 d12118e60d8b protocol 1`** = `main` head, built in the worktree, label proved. Network cut, no stall, no cap. Two reads, pre-registered together ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-29-preregistration.md)); $21.15.
+
+**A. sympy-17318 under the predicate sentence, five rollouts.** All five name the condition in `_sqrt_match` as the fault. **Two changed it** (one adding `is_real` to the predicate, one rewriting the branch) — both solved; **three guarded** downstream (`if not surds` / `if not a`) — all failed. Producer fix by cycle: 0/4 (c22), 1/5 (c25), 1/5 (c27), 2/5 now. Counts, not a rate; the sentence did not settle the choice on the instance it was written from, and the guard remains what the agent reaches for when the right predicate is a judgement.
+
+**B. Ten never-run instances at `-r 2`, read for the account.** 15 of 20 solved — reported as a count on a fresh draw, not as a rate. Five failures, all inside the account: sympy-20438 ×2 — **A, the twin**: the gold adds an `Eq` handler beside the `is_subset` handler (`comparison.py`, `relational.py`); one rollout fixed `issubset.py` alone (evident), the other missed `comparison.py` (consistent); django-15695 ×2 and sympy-18211 ×1 — right file, right mechanism, failing detail not visible: C, consistent. Nothing outside the account on ten instances the loop had never seen, on a kernel carrying every rule.
+
+Cumulative read: **285 honest failures**; the account has held on every one since cycle 18, with the qualifier unchanged — a share of C is consistent-with rather than evident.
+
+Spend $21.15. Cycles 25–29 together: $56.69, five landed rules read on their own instances.
+
+## Next (cycle 30)
+
+1. Nothing is owed on any landed rule. Reading continues on whatever new failures arrive; when the loop has budget and nothing else to read, ten fresh instances at `-r 2` is the shape that keeps testing the account.
+2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.

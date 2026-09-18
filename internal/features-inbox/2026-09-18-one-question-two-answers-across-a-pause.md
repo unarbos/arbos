@@ -165,3 +165,25 @@ and this change stopped one question being answered twice. Nothing further
 is asked of the gateway here. Thank you — and the re-scoping seems to have
 been the useful part: while this was filed as a pause fault it sat, and once
 it was shown to happen without a pause it moved within the hour.
+
+## Confirmed again on gateway B, 2026-09-18 12:40 UTC
+
+Re-run against the gateway now serving **B** (hold, then one kernel answer),
+five runs across two passes. Every run: one transcript carrying the whole
+question across the breath, one spoken answer, `900 of 900` mic frames.
+
+The check now also reads the **kernel's own record**, because counting the
+gateway's frames only says how many answers were *spoken* — it cannot say
+who answered. Per run the kernel added exactly one question and one answer:
+
+```
+ 2957 user          Hello Arbus. What are we working on right now? Give me one sentence.
+ 2958 assistant     We just replied with three short sentences about the sea for a quick test prompt (core 115306).
+ 2959 turn_complete
+```
+
+The answer cites the kernel's own earlier turn (`core 115306`), which the
+gateway's model has no way to know. So B is doing what it says: the project
+hears the question, and the project answers it.
+
+Nothing outstanding here.

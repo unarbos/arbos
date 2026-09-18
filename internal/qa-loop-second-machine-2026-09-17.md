@@ -828,6 +828,92 @@ Two of the repairs left the library better than a straight fix would:
 The shared helper `desktop_scenarios.focus_composer` now backs every send in the library, and
 review rules 10, 11 and 12 come from this pass.
 
+## #446 verified, and the `fm-*` family gets its third member
+
+`#446` (`cb495a38e189`) is the `fm-*` shape exactly: a place holds two kernel records,
+`.arbos/kernel.json` from before the `runtime/` split and `.arbos/runtime/kernel.json` after it,
+with different writers. `runtime/` was read first, so a place that had **ever** been served by a
+newer kernel kept a `runtime/` file for ever — and when an older kernel then served it, the reader
+took the stale record, found its pid gone, and reported **no kernel at all**. An empty-looking place
+is the state in which something starts a second kernel on it, so this is `#450`'s harm arriving by
+another route.
+
+The reader is observed through `arbos-kernel feedback <place>`, whose `kernel.serving` block is
+built by `place.kernel_json_read()` — the reader itself (`feedback_cmd.rs:78`). Three arms pin the
+whole table, on `arbos-kernel 0.2.0 2301abd291c0 protocol 1`:
+
+| arm | staged | must choose | chose |
+|---|---|---|---|
+| a — the case measured on the target | `runtime/` dead, `.arbos/` **live** | the live fallback | `1iveliveaaaa`, live ✓ |
+| b — no regression | `runtime/` **live**, `.arbos/` dead | the live newer path | `1iveliveaaaa`, live ✓ |
+| c — neither live | both dead | the newer path, as before | `deadf00d0000` ✓ |
+
+Standing as `fm-03-the-kernel-record-that-names-a-live-process-wins-whichever-path-it-is-in`.
+
+**The before-arm is not reachable, and the reason is worth recording.** I built a kernel at
+`cb495a38e189^` (`42cb9751ace8`, pinned under `kernels/`) to run the same three arms on the
+unfixed code, and it answers `unknown command feedback`. Checking the history: `feedback` was added
+at `bf38270c599d`, and `bf38270c` and `cb495a38e189` are **siblings** — neither is an ancestor of
+the other, both merged to `main` independently — so the first commit that has `feedback` also has
+`#446`. No build exists that can be asked with this observable and lacks the fix. That is a fact
+about the repository, not a gap in the method, and `fm-03`'s own
+`probe-feedback-unreadable` fired on the old build rather than passing quietly, which is the
+behaviour a probe-validity guard is for.
+
+So `#446` is verified forward — the table is pinned and any regression toward first-match fails at
+least one arm — but not against its own predecessor.
+
+## #453 verified, and the reproduction its author could not get
+
+`#453` (`b0b3cf841c77`) rests, by its own account, on a reading of the code: *"I could not reproduce
+the red here: 0/12 on `main`, 0/12 with the fix."* The window is real but narrow — the app's swap is
+a directory rename and then a copy into the start path, so for a moment that path holds nothing
+usable — so the loop's job is to hold the gap open on purpose.
+
+Staged the way the app makes it: rename the running image aside and leave an empty file at the start
+path. An in-place truncate is impossible on a live binary (`ETXTBSY`), which is *why* the app
+renames, and is why the gap exists at all. Standing as
+`up-01-a-swap-still-in-progress-is-not-a-failed-restart`, measured over 30 s:
+
+| | `42cb9751ace8` (before) | `2301abd291c0` (after) |
+|---|---|---|
+| `reexec` attempts onto the unusable file | **1** | 0 |
+| `reexec_wait` lines | **0** | 6 (one per 5 s tick) |
+| `binary_gone` noticed — probe validity | 1 | 1 |
+
+Both arms stage the fault, so neither result is an accident of the setup.
+
+**The mechanism is worse than the PR describes, and that is the finding.** The old build does not
+merely *wait* a minute: it has no settled check at all, so it **attempts the exec onto a zero-byte
+file** — `reexec: restarting onto … (git 42cb9751ace8 was serving)` — and it is that failed attempt
+which earns `Reexec::Failed` and the full `REEXEC_RETRY_MS`. The fixed build makes no attempt and
+logs `reexec_wait` at every tick until the file is whole and at rest. So the 60-second wait was the
+symptom; jumping onto an unfinished file was the cause.
+
+Two false starts worth recording, because each was my own probe lying to me and each was caught by
+its validity guard rather than by luck:
+
+- the first attempt set `ARBOS_NO_REEXEC=` to an **empty value**, and the code tests
+  `var_os(...).is_some()` — so I had disabled the very thing I was measuring, and
+  `reexec_onto_new_binary` returned `NotReady` before logging anything. The probe reported
+  "no attempt logged; probe invalid" instead of passing.
+- the old build cannot parse today's config file — it rejects `jev_model`, a field added after its
+  commit — so the control arm needs a clean `XDG_CONFIG_HOME`. Without it the kernel never started
+  and the run again declared itself invalid rather than green.
+
+## The original queue is closed
+
+| item | state |
+|---|---|
+| `#441` held-place record | verified, `lk-01`..`lk-03`, comprehensive breaks on the build before |
+| `#444` four destructive cases | verified, `uw-01`..`uw-04`, all pass in-cycle |
+| `#446` kernel.json first-match | verified forward, `fm-03`; before-arm unreachable (observable postdates the fix) |
+| `#450` double-serving detector | verified, `ds-01`, both shapes found and quiet on the innocent ones |
+| `#453` swap gap | verified, `up-01`, two-armed, with the reproduction the PR lacked |
+| `fm-*` family | three members: `fm-01` checkpoint sidecar, `fm-02` MCP config (`qal-j31`), `fm-03` kernel.json |
+
+`kernels/42cb9751ace8/` is pinned as the before-build for `#446`, `#450` and `#453`.
+
 ## Cross-references
 
 - `internal/qa/bugs/qal-j33-five-cycles-of-first-line-lost-were-one-click-on-a-window-not-yet-taking-input.md`

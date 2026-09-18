@@ -34,6 +34,7 @@ Every arm names the build it was taken on and was read against a control that fa
 
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -773,6 +774,185 @@ def register(scenario, registry, transcript, now_ms, branch):
                     f"`check` reports double serving for {said}, which is an ordinary state: {ws[:1]}. A warning that fires on a healthy place cannot be used to decide whether anything was served twice",
                     "arbos-kernel check.rs check_two_writers — the cut line must clear the open wake",
                 )
+
+    # ── #453: the app's swap leaves a gap, and a gap is not a failed restart ──
+    @reg("up-01-a-swap-still-in-progress-is-not-a-failed-restart", tags=("after-failure", "update", "destructive-order"))
+    def up01(cx):
+        """#453 (`b0b3cf841c77`). The app's swap is a directory rename and then a copy into the start
+        path, so for a moment the path holds nothing usable. Before the fix the kernel read that as a
+        failed restart: measured here on `arbos-kernel 0.2.0 42cb9751ace8 protocol 1` (the commit
+        before it), the old build **attempts the exec onto a zero-byte file** — one `reexec` line,
+        "restarting onto …" — and then waits `REEXEC_RETRY_MS`, a full minute, before looking again.
+        The PR describes the minute; the staged gap shows the attempt that earns it.
+
+        After the fix the file must be whole and at rest — same size and mtime across a 250 ms pause,
+        non-empty — and a file that is not is `NotReady`, worth `REEXEC_LOOK_AGAIN_MS` (2 s) rather
+        than sixty. The PR could not reproduce the original red (0/12 either way) and rests on a
+        reading of the code, so this stages the window deterministically instead.
+
+        Held open the way the app makes it: rename the running image aside — an in-place truncate is
+        impossible on a live binary (ETXTBSY), which is *why* the app renames and why the gap exists
+        — and leave an empty file at the start path."""
+        root = cx.scratch / "up01"
+        binpath = root / "bin" / "arbos-kernel"
+        place = root / "place"
+        (root / "bin").mkdir(parents=True, exist_ok=True)
+        place.mkdir(parents=True, exist_ok=True)
+        binpath.write_bytes(Path(cx.binary).read_bytes())
+        os.chmod(binpath, 0o755)
+
+        # The harness starts `cx.binary`, and this scenario needs the copy it can rename out from
+        # under a running kernel. Swapping the context's binary for the duration keeps the kernel
+        # inside ns-wrap, which is not negotiable, instead of re-implementing the launch here.
+        was = cx.binary
+        cx.binary = str(binpath)
+        k = None
+        try:
+            k = cx.kernel(place=place)
+            started = k.start()
+        finally:
+            cx.binary = was
+        try:
+            cx.rec.expect(started, "up-01-kernel-did-not-start", "the kernel did not come up from the copied binary, so the swap window was never staged")
+            if not started:
+                return
+
+            klog = place / ".arbos" / "runtime" / "kernel.log"
+            time.sleep(2)
+            binpath.replace(binpath.with_suffix(".old"))
+            binpath.write_bytes(b"")
+            os.chmod(binpath, 0o755)
+            opened = time.time()
+            time.sleep(30)
+
+            events = []
+            for line in klog.read_text(errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except ValueError:
+                    continue
+            said = [e for e in events if e.get("event") == "binary_gone"]
+            waits = [e for e in events if e.get("event") == "reexec_wait"]
+            tried = [e for e in events if e.get("event") == "reexec"]
+            cx.rec.notes.update({
+                "binary_gone_said": len(said),
+                "reexec_wait_lines": len(waits),
+                "reexec_attempts": len(tried),
+                "watched_s": round(time.time() - opened, 1),
+                "attempt_detail": [str(e.get("detail") or "")[:120] for e in tried][:2],
+            })
+
+            # Probe validity: if it never noticed, the arms below say nothing.
+            cx.rec.expect(
+                bool(said),
+                "probe-binary-gone-never-noticed",
+                f"the kernel never said `binary_gone` after its image was renamed aside, so the swap window was not staged: {len(events)} klog events, {sorted({e.get('event') for e in events})}",
+            )
+            if not said:
+                return
+            cx.rec.expect(
+                not tried,
+                "up-01-exec-attempted-onto-an-unusable-file",
+                f"the kernel tried to exec onto the start path while it held nothing usable ({cx.rec.notes['attempt_detail']}); an empty or half-written file must be waited for, not jumped onto",
+                "arbos-kernel serve.rs reexec_onto_new_binary — the settled check (#453)",
+            )
+            cx.rec.expect(
+                len(waits) >= 2,
+                "up-01-waits-a-minute-on-a-swap-in-progress",
+                f"only {len(waits)} `reexec_wait` line(s) in {cx.rec.notes['watched_s']} s: the kernel is treating a swap still in progress as a failed restart and waiting REEXEC_RETRY_MS (60 s) rather than looking again in 2 s",
+                "arbos-kernel serve.rs: Reexec::NotReady must earn REEXEC_LOOK_AGAIN_MS, not REEXEC_RETRY_MS",
+            )
+        finally:
+            if k is not None:
+                k.stop()
+
+    # ── #446: which kernel.json names the kernel that is actually there ──
+    @reg("fm-03-the-kernel-record-that-names-a-live-process-wins-whichever-path-it-is-in", tags=("first-match", "place", "lock"))
+    def fm03(cx):
+        """#446 (`cb495a38e189`). A place has two kernel records — `.arbos/kernel.json` from before the
+        `runtime/` split and `.arbos/runtime/kernel.json` after it — and they can both exist and
+        disagree, because they have different writers. `runtime/` was read first, so a place that had
+        *ever* been served by a newer kernel kept a `runtime/` file for ever; if an older kernel then
+        served it, the reader took the stale record, found its pid gone, and reported **no kernel at
+        all**. An empty-looking place is precisely the state in which something starts a second
+        kernel on it, which is `#450`'s harm arriving by another route.
+
+        The fix asks "which of these names a process that is still there" instead of "which path is
+        newer", and falls back to the newer path when neither does. Three arms pin that whole table,
+        so a regression in either direction fails: the reader is observed through
+        `arbos-kernel feedback <place>`, whose `kernel.serving` block is built by
+        `place.kernel_json_read()` — the reader itself (`feedback_cmd.rs:78`)."""
+        root = cx.scratch / "fm03"
+        live = subprocess.Popen(["sleep", "600"])
+        dead = subprocess.Popen(["sleep", "0.05"])
+        dead.wait()
+        dead_pid, live_pid = dead.pid, live.pid
+
+        def place(name, runtime_pid, runtime_sha, legacy_pid, legacy_sha):
+            p = root / name
+            (p / ".arbos" / "runtime").mkdir(parents=True, exist_ok=True)
+            (p / ".arbos" / "agents" / "root").mkdir(parents=True, exist_ok=True)
+            (p / ".arbos" / "agents" / "root" / "agent.md").write_text("root\n")
+            (p / ".arbos" / "agents" / "root" / "transcript.jsonl").write_text(
+                json.dumps({"ts": 1000, "kind": "wake", "wake": "user", "text": "go"}) + "\n"
+                + json.dumps({"ts": 1100, "kind": "turn_complete"}) + "\n"
+            )
+            rec = lambda pid, sha: json.dumps({"url": "tcp://127.0.0.1:44471", "auth": "loopback", "pid": pid, "started": now_ms(), "version": "0.2.0", "git_sha": sha, "log": "x"}) + "\n"
+            (p / ".arbos" / "runtime" / "kernel.json").write_text(rec(runtime_pid, runtime_sha))
+            (p / ".arbos" / "kernel.json").write_text(rec(legacy_pid, legacy_sha))
+            return p
+
+        def chosen(p):
+            """What the reader picked, through the CLI that asks it. `feedback` needs an agent named
+            root, which is why each place has one."""
+            out = subprocess.run([cx.binary, "feedback", str(p)], capture_output=True, text=True, timeout=60)
+            try:
+                return ((json.loads(out.stdout) or {}).get("kernel") or {}).get("serving") or {}
+            except (json.JSONDecodeError, ValueError):
+                return {"parse_error": ((out.stdout or "") + (out.stderr or ""))[:200]}
+
+        try:
+            arms = {
+                # the case measured on the target: the preferred path is stale, the fallback is live
+                "a_runtime_dead_legacy_live": (place("a", dead_pid, "deadf00d0000", live_pid, "1iveliveaaaa"), "1iveliveaaaa"),
+                # no regression: when the newer path is the live one it must still win
+                "b_runtime_live_legacy_dead": (place("b", live_pid, "1iveliveaaaa", dead_pid, "deadf00d0000"), "1iveliveaaaa"),
+                # neither is live: the newer path wins exactly as before, so "nothing serving" is unchanged
+                "c_neither_live": (place("c", dead_pid, "deadf00d0000", dead_pid, "0ldand0ld000"), "deadf00d0000"),
+            }
+            seen = {}
+            for name, (p, want_sha) in arms.items():
+                got = chosen(p)
+                seen[name] = {"want_sha": want_sha, "got_sha": got.get("git_sha"), "live": got.get("live"), "known": got.get("known"), "parse_error": got.get("parse_error")}
+            cx.rec.notes.update({"arms": seen, "live_pid": live_pid, "dead_pid": dead_pid})
+
+            # Probe validity first: if `feedback` cannot be asked, the arms say nothing.
+            broken = [n for n, v in seen.items() if v["parse_error"]]
+            cx.rec.expect(
+                not broken,
+                "probe-feedback-unreadable",
+                f"`arbos-kernel feedback` gave no readable JSON for {broken}, so the reader was never asked: {[seen[n]['parse_error'] for n in broken][:1]}",
+            )
+            if broken:
+                return
+            for name, (p, want_sha) in arms.items():
+                got = seen[name]
+                cx.rec.expect(
+                    got["got_sha"] == want_sha,
+                    f"fm-03-wrong-record-{name}",
+                    f"{name.replace('_', ' ')}: the reader took `{got['got_sha']}` where `{want_sha}` is the record that names a live process"
+                    + (". A dead record in the preferred path makes the place read as empty, and an empty place is what a second kernel starts on" if name.startswith("a_") else ""),
+                    "arbos-core place.rs kernel_json_read / names_a_live_pid (#446)",
+                )
+        finally:
+            try:
+                live.send_signal(signal.SIGKILL)
+                live.wait(timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                pass
 
     # ── first-match readers: the first location fails and the next one takes the name ──
     # fm-01 (the checkpoint sidecar) is in landing_scenarios.py; this is the same family, found by

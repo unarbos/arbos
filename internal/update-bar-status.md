@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 12:27 UTC.
+Last checked 2026-09-18 12:49 UTC.
 
-## Click Update. You will get build 2010.
+## Click Update. You will get build 2019.
 
-**2010** — signed, notarised, stapled, on the feed since 12:25 UTC.
+**2019** — signed, notarised, stapled, on the feed since 12:47 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2010 (builds 2011–2019):
+
+- **#636** — archived workers with no chat here sit in the one archived
+  list, at its indent, with their last words
+- **#639** — the producer rule's mark is the read call, not a reply line
+- **#641** — `list-rows.sh` checks what each row of the projects list says
+- **#642** — mobile: a scroll by hand cannot rest under the pill
+
+## Before that: 2010
 
 New since 2006 (builds 2007–2010):
 
