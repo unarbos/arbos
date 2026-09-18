@@ -527,10 +527,22 @@ struct WorkingLine: View {
     /// "Working", "Starting", "Working <step>" — and the parent's own
     /// "waiting on <worker> — <its step>" (#366) as "Waiting on …", not
     /// "Working waiting on …".
+    ///
+    /// The kernel sends two kinds of step and they need opposite treatment.
+    /// A state it has named — `Starting`, `Thinking · 5s` — is already a
+    /// sentence and is shown as it is; an activity — `bash · cargo test`,
+    /// `waiting on demo` — is a thing being done and takes a word in front.
+    /// The kernel capitalises the first kind and not the second, which is
+    /// the only signal there is, and it is a reliable one.
+    ///
+    /// `Starting` and `waiting on` were each special-cased when they turned
+    /// up. `Thinking · 5s` was not, and a recording caught the chat saying
+    /// **"Working Thinking · 5s"** under a sent photo. Two exceptions with
+    /// the same shape are a rule that was not written down.
     static func words(_ step: String) -> String {
         if step.isEmpty { return "Working" }
-        if step == "Starting" { return "Starting" }
         if step.hasPrefix("waiting on ") { return "W" + step.dropFirst() }
+        if let first = step.first, first.isUppercase { return step }
         return "Working \(step)"
     }
 
