@@ -3830,3 +3830,42 @@ Anyone tempted to change this surface again can run it and put the numbers
 in the PR.
 
 **PR:** [#698](https://github.com/unarbos/arbos/pull/698), harness only.
+
+## Cycle 135 — half of a row's name
+
+The coverage row reads "projects list — faces, rows, **sections**".
+`list-rows.sh`, which I wrote at cycle 112 and marked the row current with,
+measures rows and says nothing about sections. Half the name had never been
+checked (M-436).
+
+`list-sections.sh` checks the three claims `ProjectsView` makes: a header is
+drawn only when it has rows under it, tapping it folds them away and back,
+and a live project belongs to `Working` while one without a link rests in
+`Read`.
+
+The first two hold:
+
+```
+headers on screen:  Working absent, Read at y=175
+rows on screen:     8
+  under Read:       8
+folding 'Read':
+  rows after folding:   0   (was 8)
+  rows after unfolding: 8
+```
+
+`Working` being absent is the behaviour — nothing is working — not a fault.
+
+**And the new check tested two of its own three claims.** Membership needs
+both sections on screen at once, and every project rested in `Read`, so no
+row could be *seen* to be in the right one. The first draft would have
+printed a clean verdict having never looked (M-437). It says so now:
+
+> Membership: not tested this run: only one section was on screen, so no row
+> could be seen to be in the right one
+
+Writing the claims into the header is what made that visible — the prose and
+the code disagreed, in a file written to fix exactly that disagreement one
+level up.
+
+**PR:** [#699](https://github.com/unarbos/arbos/pull/699), harness only.
