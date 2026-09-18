@@ -66,6 +66,15 @@ struct RootView: View {
             ProjectsView(path: $path)
                 .navigationDestination(for: KernelTarget.self) { target in
                     ProjectChatView(target: target)
+                        // The project in front is the one pushed, read here
+                        // and not from `settings.kernelTarget`: at push time
+                        // the chat's own `switchTarget` has not run yet, so
+                        // the setting still names the project left a moment
+                        // ago — leave A for the list, open B, and a cold
+                        // start put you back in A. A full-screen cover (the
+                        // call) does not pop the chat, so appearance is the
+                        // record and the path's emptying is the clear.
+                        .onAppear { settings.frontProject = target.stored }
                 }
         }
         // Once, at launch. Pushing on every appearance would fight the back
@@ -75,10 +84,9 @@ struct RootView: View {
             restored = true
             path.append(KernelTarget(stored: stored))
         }
-        // What is in front, remembered for the next cold start. An empty
-        // path is the list; anything on it is a chat.
+        // Back on the list: nothing is in front for the next cold start.
         .onChange(of: path.count) { _, depth in
-            settings.frontProject = depth > 0 ? settings.kernelTarget.stored : nil
+            if depth == 0 { settings.frontProject = nil }
         }
         .tint(ArbosTheme.accent)
         .preferredColorScheme(.dark)
