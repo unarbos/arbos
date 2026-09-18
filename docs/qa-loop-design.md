@@ -295,6 +295,7 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 | J6 notifications "always unverified here" | **established**: the app posts, dunst receives it, the badge clears. A *post* is now distinguished from a failed *attempt* — the window's `posted` list carries an `error` per entry and the rig was counting attempts |
 | the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
 | the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
+| reaching that ceiling was still called `turn-never-ended` | **three outcomes are now told apart** (2026-09-18). Silent for 45 s → `turn-never-ended`, it had stopped. The last six tool calls all the same → **`turn-looping`**, a fault the loop could not name before. Still producing varied work → a *note*, not a break: `headless-kernel-run` made 31 calls of 13 distinct kinds and `settings-model-fields` spent its time in `await {"wait_ms": 120000}` three times over, so both were slower than the bound, not stopped. A timer cannot support the claim "never ended" while frames are arriving. |
 
 ### Eight additions to the review list, earned overnight
 

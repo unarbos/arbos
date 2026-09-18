@@ -1696,11 +1696,44 @@ def inbox_scenarios():
                     quiet_for += 5
                     if quiet_for >= 45:
                         break
-            cx.rec.notes["turn_wait"] = {"ended": ended is not None, "quiet_for_s": quiet_for, "frames": len(c.frames)}
+            # At the ceiling with frames still flowing, "never ended" is a claim a timer cannot
+            # support. Two of these on 2026-09-18 were plainly working: `headless-kernel-run` made 31
+            # tool calls of 13 distinct payloads, and `settings-model-fields` spent its time in
+            # `await {"wait_ms": 120000}` three times over — six minutes of deliberate waiting inside
+            # a five-minute ceiling. Neither had stopped; both were slower than the bound. So the three
+            # outcomes are told apart, and only two of them are faults (review rule 6: a failure has
+            # to mean something).
+            tool_calls = [
+                (f.get("event") or {}).get("name")
+                for _, f in c.frames
+                if isinstance(f, dict) and isinstance(f.get("event"), dict) and f["event"].get("kind") == "tool"
+            ]
+            recent = [t for t in tool_calls if t][-6:]
+            looping = len(recent) >= 6 and len(set(recent)) == 1
+            cx.rec.notes["turn_wait"] = {
+                "ended": ended is not None,
+                "quiet_for_s": quiet_for,
+                "frames": len(c.frames),
+                "tool_calls": len(tool_calls),
+                "distinct_tools": len(set(t for t in tool_calls if t)),
+                "last_six_tools": recent,
+            }
+            if ended is None and quiet_for < 45 and not looping:
+                # Working, just longer than the ceiling. A note, so the cycle still records it, and
+                # not a break, because nothing it names is wrong.
+                cx.rec.notes["turn_longer_than_the_ceiling"] = (
+                    f"feature {feature}: still producing frames at the 300 s ceiling — "
+                    f"{len(c.frames)} frames, {len(tool_calls)} tool calls of "
+                    f"{len(set(t for t in tool_calls if t))} distinct kinds. Longer than the bound, not stopped."
+                )
             cx.rec.expect(
-                ended is not None,
-                "turn-never-ended",
-                f"feature {feature}: turn never ended — {'no frame for ' + str(int(quiet_for)) + ' s, so it had already stopped' if quiet_for >= 45 else 'still producing frames at the 300 s ceiling'}",
+                ended is not None or (quiet_for < 45 and not looping),
+                "turn-looping" if looping else "turn-never-ended",
+                f"feature {feature}: " + (
+                    f"the same tool ({recent[0]}) was called the last {len(recent)} times running at the 300 s ceiling; the turn is going round rather than getting on"
+                    if looping else
+                    f"turn never ended — no frame for {int(quiet_for)} s, so it had already stopped"
+                ),
             )
             evs, bad = transcript(cx.place, "root")
             cx.rec.expect(not bad, "transcript-corrupt", f"bad lines: {bad}")

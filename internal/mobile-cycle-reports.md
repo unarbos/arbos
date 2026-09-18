@@ -3156,3 +3156,38 @@ refusals *should* retry: they name a thing that comes back. Each case now
 carries its expectation and the run reaches a verdict (M-381).
 
 **PR:** [#648](https://github.com/unarbos/arbos/pull/648), harness only.
+
+## Cycle 116 — who else assumed the app opens on the list
+
+Cycle 115's cause generalises, so this cycle looked for the rest rather than
+finding one a week. Seven more scenarios launch the app and tap a project
+row: `chip-and-send-arrow`, `photo-reaches-the-model`, `pill-count-vs-sheet`,
+`several-workers`, `the-core-chat-path`, `voice-notes-wait`,
+`worker-while-it-works`.
+
+**They were not all broken, and that is the worrying part.** A fresh install
+has no front project and lands on the list. So the same scenario passes when
+it runs first and taps at a chat when it runs after another — the answer
+depends on what ran before it, and nothing says so. `cold-start-and-history`
+still reports `3.0s to a list of 7 rows` for exactly this reason: it runs
+straight after the install (M-382).
+
+One `reach_the_list` in `sim-lib.sh`, not seven copies, because eight copies
+of an idiom is how the next one gets missed. Proven by running
+`the-core-chat-path` twice back to back: both reach the same verdict now.
+
+**And it passed while blind on its first test.** Run from a shell where
+`BASH_SOURCE` is unset, it resolved its own directory to `.`, could not find
+`ui.py`, got an empty dump, read "no Back button" from that and returned
+success — with the app in a chat the whole time, as the next dump showed.
+That is the same fault as the one it was written to fix, committed while
+fixing it. An empty tree is "I cannot see", not "nothing is there" (M-383):
+
+```
+--- woke up in:   Back buttons: 1
+reach_the_list: ok
+--- after:        Back buttons: 0, project rows: 12
+--- blind:        guarded: refused to answer blind
+```
+
+**PR:** [#651](https://github.com/unarbos/arbos/pull/651), harness only.

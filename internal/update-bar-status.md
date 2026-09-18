@@ -5,16 +5,30 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-18 13:28 UTC.
+Last checked 2026-09-18 14:01 UTC.
 
-## Click Update. You will get build 2025.
+## Click Update. You will get build 2036. This one has Jev.
 
-**2025** — signed, notarised, stapled, on the feed since 13:26 UTC.
+**2036** — signed, notarised, stapled, on the feed since 13:57 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2025 (builds 2026–2036):
+
+- **#647** — **Jev is the controller.** The brief lives at
+  `.arbos/voice-brief.md`, with overflow pointers and which LLM to invoke;
+  the gateway only reads the file
+- **#649** — panel tabs sit on the window tab strip; Project stays in the
+  drawer and never covers the chat; the bottom +, expand and header X are
+  gone; native fullscreen fills the Space
+- **#648** — the refusal check reads the kernel's record
+- **#646** — a half-written last line left by a dead kernel is cut at
+  start, before anything appends, and said
+
+## Before that: 2025
 
 New since 2023 (builds 2024–2025):
 

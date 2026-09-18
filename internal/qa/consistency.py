@@ -10,6 +10,7 @@ Usage:
 Exit code 0 = consistent, 1 = findings.
 """
 
+import datetime as dt
 import json
 import os
 import re
@@ -157,6 +158,57 @@ def check_place(place, kernel_running=False):
                 tpath,
                 f"{len(wakes)} wakes but {len(ends)} turn ends: turns are starting without finishing",
             )
+
+        # subscriptions/ — the engine #104 put in place of plan.jsonl. The nine `plan-*` and
+        # `attempt-*` rules below still aim at the retired one and cannot fire on any current build;
+        # until now nothing here checked the replacement at all, so `cx.check()` validated a
+        # subsystem that no longer exists and none of the one that does. Two rules, both for faults
+        # this loop has already met rather than invented:
+        #   - a file the kernel silently drops (qa-029: a hand-written subscription without
+        #     id/created/next_due never ran and nothing said so);
+        #   - a due time further ahead than one period, which is what a clock set backwards leaves
+        #     and which strands the subscription for the length of the jump (qal-j38). As a standing
+        #     rule this fires on any place the loop looks at, not only where a scenario staged it.
+        subs_dir = adir / "subscriptions"
+        if subs_dir.is_dir():
+            for sf in sorted(subs_dir.glob("*.toml")):
+                try:
+                    text = sf.read_text(errors="replace")
+                except OSError as e:
+                    add("subscription-unreadable", sf, f"cannot read it: {e}")
+                    continue
+                fields = {}
+                for line in text.splitlines():
+                    if "=" in line and not line.strip().startswith("#"):
+                        k, _, v = line.partition("=")
+                        fields[k.strip()] = v.strip().strip('"')
+                missing = [k for k in ("id", "created", "next_due") if k not in fields]
+                if missing:
+                    add(
+                        "subscription-incomplete",
+                        sf,
+                        f"no {', '.join(missing)}: the kernel drops a subscription without these and says nothing (qa-029)",
+                    )
+                due, every = fields.get("next_due"), fields.get("every", "")
+                if due and every:
+                    secs = None
+                    try:
+                        unit = every[-1].lower()
+                        secs = int(every[:-1]) * {"s": 1, "m": 60, "h": 3600, "d": 86400}.get(unit, 0)
+                    except (ValueError, IndexError):
+                        secs = None
+                    if secs:
+                        try:
+                            when = dt.datetime.strptime(due, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+                            ahead = (when - dt.datetime.now(dt.timezone.utc)).total_seconds()
+                            if ahead > max(secs * 2, secs + 3600):
+                                add(
+                                    "subscription-due-past-its-period",
+                                    sf,
+                                    f"next_due is {ahead / 3600:.1f} h ahead on a {every} period: a clock set backwards leaves this, and it will not run for that long (qal-j38)",
+                                )
+                        except ValueError:
+                            add("subscription-due-unparseable", sf, f"next_due {due!r} is not an RFC 3339 instant")
 
         # plan + attempts
         ppath = adir / "plan.jsonl"
