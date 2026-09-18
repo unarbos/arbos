@@ -296,7 +296,7 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 | the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
 | the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
 
-### Seven additions to the review list, earned overnight
+### Eight additions to the review list, earned overnight
 
 6. **An assertion must not bound a race.** Batching, timing and ordering that the product does not
    guarantee must not be asserted; assert the property the optimisation exists for, or make the kernel
@@ -341,6 +341,15 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
     layer you can see is not the layer you mean, either reach the right one or assert the contract
     that protects it — `mt-14` now checks that the kernel's wording still matches a prefix the view
     knows, which fails *before* a person could see anything wrong.
+13. **A self-skip that points elsewhere must be followed.** A scenario that retires itself politely
+    and names its successors is the most trustworthy-looking thing in a suite. `clock-jump-cron`
+    (`run.py:866`) held two properties over the old `plan.jsonl` engine — an overdue node fires once,
+    and a node pushed into the future by a clock rewind is pulled back — and when `#104` replaced
+    that engine it set itself aside naming `fp-shell-subscription` and `fp-timer-subscription`.
+    Neither inherits either property: both test a subscription that is due now, and the shared
+    writer defaults `next_due` to one second ago. Half the contract was simply gone, and
+    `qal-j38` is what was underneath. Ask of every skip that defers to something else: does the
+    thing it names assert what it asserted?
 ### And the hardest lesson of the night, which belongs with step 2 of the list
 
 **Ask the boundary question of the reading side too.** `qal-j27` was filed as data loss on the strength of

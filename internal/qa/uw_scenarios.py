@@ -32,6 +32,7 @@ Every arm names the build it was taken on and was read against a control that fa
 `result.json` → `notes` holds what each measured.
 """
 
+import datetime
 import json
 import os
 import signal
@@ -39,6 +40,8 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+
+import fileplan_scenarios
 
 
 def replies_file(cx, lines, name="replies.jsonl"):
@@ -774,6 +777,110 @@ def register(scenario, registry, transcript, now_ms, branch):
                     f"`check` reports double serving for {said}, which is an ordinary state: {ws[:1]}. A warning that fires on a healthy place cannot be used to decide whether anything was served twice",
                     "arbos-kernel check.rs check_two_writers — the cut line must clear the open wake",
                 )
+
+    # ── a clock that jumped: the two properties that lost their engine ──
+    @reg("ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded", tags=("after-failure", "subscriptions", "environment"))
+    def ck01(cx):
+        """`clock-jump-cron` (run.py:866) held two properties over the old `plan.jsonl` engine:
+
+          - **coalesce** — a node ten days overdue fires *once*, not once per missed period;
+          - **rewind recovery** — a node whose `next_due` sits ten days ahead because the clock was
+            set back is pulled to within one period, rather than never firing again.
+
+        #104 replaced that engine with `subscriptions/`, so the scenario now sets itself aside with a
+        note pointing at `fp-shell-subscription` and `fp-timer-subscription`. Neither carries either
+        property: both test the cadence of a subscription that is due now, and `write_subscription`
+        defaults `next_due` to one second ago, so nothing in the library has ever put a subscription
+        far out of date in either direction. The skip is honest and names successors that do not
+        inherit what it was for.
+
+        Both cases are ordinary. A laptop shut for ten days wakes with a 30-second subscription
+        28,800 periods behind; a clock corrected backwards (NTP, a timezone fix, a person) leaves one
+        due in the future. Shell subscriptions here, so the arms cost no model and the count is exact.
+        """
+        place = cx.place
+        place.mkdir(parents=True, exist_ok=True)
+        plain_agent(place)
+        k0 = cx.kernel(tag="kernel-bootstrap")
+        cx.rec.expect(k0.start(), "ck-01-kernel-did-not-bootstrap", "the kernel did not come up to make its folders")
+        k0.stop()
+
+        ten_days = datetime.timedelta(days=10)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        fileplan_scenarios.write_subscription(
+            place, "root", "overdue", kind="shell",
+            cmd="echo overdue >> overdue.txt", every="30s", deliver_to="user", notify="overdue",
+            next_due=fileplan_scenarios.rfc3339(now - ten_days),
+        )
+        fileplan_scenarios.write_subscription(
+            place, "root", "future", kind="shell",
+            cmd="echo future >> future.txt", every="30s", deliver_to="user", notify="future",
+            next_due=fileplan_scenarios.rfc3339(now + ten_days),
+        )
+        subs = sorted((place / ".arbos" / "agents" / "root" / "subscriptions").glob("*.toml"))
+
+        k = cx.kernel(tag="kernel-after-jump")
+        try:
+            started = k.start()
+            cx.rec.expect(started, "ck-01-kernel-did-not-start", "the kernel did not come up on subscriptions whose next_due is ten days out")
+            if not started:
+                return
+            time.sleep(28)
+
+            count = lambda name: len((place / name).read_text().splitlines()) if (place / name).exists() else 0
+            overdue_runs, future_runs = count("overdue.txt"), count("future.txt")
+
+            def due_after(path):
+                for line in path.read_text(errors="replace").splitlines():
+                    if line.strip().startswith("next_due"):
+                        return line.split("=", 1)[1].strip().strip('"')
+                return None
+
+            dues = {p.name: due_after(p) for p in subs}
+            cx.rec.notes.update({
+                "overdue_runs_in_28s": overdue_runs,
+                "future_runs_in_28s": future_runs,
+                "next_due_on_disk": dues,
+                "periods_missed": 10 * 24 * 60 * 2,
+            })
+
+            # Probe validity: the kernel must be running subscriptions at all, or neither arm means
+            # anything. The overdue one being due is the cheapest proof of that.
+            cx.rec.expect(
+                overdue_runs > 0,
+                "probe-subscriptions-never-ran",
+                f"neither subscription ran in 28 s, so this run says nothing about clock jumps: next_due on disk {dues}",
+            )
+            if not overdue_runs:
+                return
+
+            # Coalesce. 28,800 periods are missed; a storm is orders of magnitude from the cadence,
+            # so the bound is generous on purpose and still names the harm.
+            cx.rec.expect(
+                overdue_runs <= 3,
+                "ck-01-overdue-subscription-fired-once-per-missed-period",
+                f"a 30-second subscription ten days overdue ran {overdue_runs} times in 28 s. It is {cx.rec.notes['periods_missed']} periods behind, and running the backlog means that many commands — for a timer subscription, that many model turns and their cost",
+                "arbos-kernel subscriptions: a due time in the past coalesces to one run, as the plan engine's cron-coalesce did",
+            )
+
+            # Rewind recovery: it either fired, or its due time was pulled back to somewhere reachable.
+            future_due = next((v for name, v in dues.items() if "future" in name), None)
+            pulled_back = False
+            if future_due:
+                try:
+                    pulled_back = (datetime.datetime.strptime(future_due, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) - now) <= datetime.timedelta(days=1)
+                except (ValueError, TypeError):
+                    pulled_back = False
+            cx.rec.notes["future_due_pulled_back"] = pulled_back
+            cx.rec.expect(
+                future_runs > 0 or pulled_back,
+                "ck-01-subscription-stranded-in-the-future-by-a-clock-rewind",
+                f"a subscription whose next_due is ten days ahead — which is what a clock set backwards leaves — did not run in 28 s and its due time on disk is still {future_due!r}. It will not run for ten days, and nothing says so",
+                "arbos-kernel subscriptions: a due time further ahead than one period is a rewound clock, not a schedule (the plan engine's cron-clock-rewind)",
+            )
+        finally:
+            k.stop()
+        cx.check()
 
     # ── after a crash mid-append: the partial line nobody repairs ──
     @reg("pl-01-a-turn-after-a-crash-mid-append-is-not-swallowed-by-the-partial-line", tags=("after-failure", "transcript", "destructive-order"))

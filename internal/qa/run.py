@@ -46,6 +46,10 @@ os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 INTEGRATION = False
 FILEPLAN = "auto"  # auto | on | off: the fp-* gate (cycle.sh sets it from the kernel source)
 KERNEL_BRANCH = None
+# The build every draft in this run came from. A draft that does not name its build cannot be
+# read: four of mine on 2026-09-18 came from deliberate control arms against an old kernel and
+# looked like open findings on `main` (the rule is to name the commit in every finding).
+RUN_KERNEL_VERSION = "unknown"
 ONLY = set()
 
 # Every kernel under test runs with the Project Agent Store hidden (2026-09-17:
@@ -1826,7 +1830,8 @@ def draft_bug(scenario, rec, brk):
         f"scenario: {scenario}\n"
         f"feature: {feature}\n"
         f"rollout: {rec.final_dir}\n"
-        f"first_seen: {stamp()}\n\n"
+        f"first_seen: {stamp()}\n"
+        f"kernel: {RUN_KERNEL_VERSION}\n\n"
         f"## Detail\n\n{brk['detail']}\n\n"
         f"## Suspected location\n\n{brk.get('where') or '(fill in)'}\n\n"
         f"## Repro\n\n`python3 run.py --kernel <bin> --only {scenario}`\n"
@@ -2087,7 +2092,9 @@ def main():
     global INTEGRATION, KERNEL_BRANCH, ONLY, FILEPLAN
     INTEGRATION = args.integration
     FILEPLAN = args.fileplan
+    global KERNEL_BRANCH, RUN_KERNEL_VERSION
     KERNEL_BRANCH = args.kernel_branch
+    RUN_KERNEL_VERSION = kernel_version(args.kernel)
     ONLY = set(args.only.split(",")) if args.only else set()
     inbox_scenarios()
     register_fileplan()
