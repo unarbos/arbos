@@ -111,7 +111,20 @@ else:
             if max(abs(x - y) for x, y in zip(seen[a], seen[b])) <= 8]
     if same:
         print("  LOOK THE SAME: " + "; ".join(same))
-        print("  A caller in a quiet room has only the colour to go on.")
+        # Not every pair matters equally. `connecting` happens once, before
+        # the call is under way; a caller is never choosing between it and
+        # `thinking`. Two *mid-call* states sharing a face is the one that
+        # leaves someone watching a circle with no way to read it.
+        midcall = {"listening", "thinking", "speaking"}
+        bad = [p for p in same if all(w in midcall for w in p.split(" and "))]
+        if bad:
+            print("  and both of these happen mid-call: " + "; ".join(bad))
+            print("  A caller in a quiet room has only the colour to go on.")
+        else:
+            print("  each pair involves a state that happens once, before the call"
+                  " is under way,")
+            print("  so nobody is choosing between them while listening."
+                  " Worth knowing, not a fault.")
     else:
         print(f"  all {len(seen)} phases differ on screen, not only in the tree")
 PY
