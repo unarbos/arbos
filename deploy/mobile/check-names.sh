@@ -42,12 +42,29 @@ BAD_EXACT = {
     "Mic", "Mic Fill", "Mic Slash", "Speaker Wave 2", "Phone Down",
     "Slider Horizontal 3", "Doc", "Checkmark", "Arrow Up",
 }
+# A symbol name is not always two words. The multi-word rule below walked
+# straight past `Circle`, the away card's bullet, sitting one row from a
+# name it did flag. These are shapes and objects nobody names a control
+# after, so one word is enough to be sure.
+BAD_EXACT |= {
+    "Circle", "Square", "Triangle", "Star", "Bolt", "Bell", "Trash",
+    "Folder", "Gear", "Person", "Clock", "Hammer", "Wrench", "Paperclip",
+    "Pencil", "Bookmark", "Flag", "House", "Tag", "Bubble", "Chevron",
+    "Arrow", "Circle Fill", "Questionmark Circle", "Exclamationmark Circle",
+}
 # Two or more capitalised words with no lower-case connective reads like a
 # symbol spelled out ("Arrow Turning Down Then Right"), not like a label.
 # Every word a capital *letter*: "Arrow Turning Down Then Right" is a
 # symbol spelled out, "Agents 36" is a pill with a count in it and was
 # being flagged because the pattern let a digit begin a word.
 SYMBOLISH = re.compile(r"^(?:[A-Z][a-z]*)(?: [A-Z][a-z]*){1,5}$")
+OURS = (
+    "Back", "Send", "Mute", "Unmute", "Filter", "Search", "Settings",
+    "More", "Call",
+    # UIKit draws and names the sheet's drag handle. An app cannot relabel
+    # it, so flagging it only teaches the reader to ignore the report.
+    "Sheet Grabber",
+)
 for line in sys.stdin.read().splitlines():
     parts = line.split(None, 3)
     if len(parts) < 4:
@@ -55,7 +72,7 @@ for line in sys.stdin.read().splitlines():
     kind, label = parts[2], parts[3].strip()
     if kind not in ("Button", "Image", "PopUpButton"):
         continue
-    if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in ("Back", "Send", "Mute", "Unmute", "Filter", "Search", "Settings", "More", "Call")):
+    if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in OURS):
         print(f"  {kind:12} {label}")
 DETECTOR
 trap 'rm -f "$SUSPECT_PY"' EXIT
@@ -82,13 +99,16 @@ SELFTEST=$(printf '%s\n' \
   "  42   85  Button       Gear Shape" \
   " 351   85  PopUpButton  PopUpButton" \
   "  26  196  Image        Arrow Turning Down Then Right" \
-  " 299   85  Button       Search" | suspect | grep -c .)
-if [ "$SELFTEST" != 3 ]; then
-  echo "the detector failed its own self-test ($SELFTEST of 3 known-bad names caught)."
+  " 299   85  Button       Search" \
+  " 196  120  Button       Sheet Grabber" \
+  "  39  713  Image        Circle" | suspect | grep -c .)
+if [ "$SELFTEST" != 4 ]; then
+  echo "the detector failed its own self-test ($SELFTEST of 4 known-bad names caught)."
   echo "Not running: a check that cannot fail cannot pass either."
   exit 1
 fi
-echo "detector self-test: caught 3 of 3 known-bad names, and let 'Search' through"
+echo "detector self-test: caught 4 of 4 known-bad names, and let 'Search' and"
+echo "the system's 'Sheet Grabber' through"
 echo
 
 FOUND=0
@@ -100,6 +120,42 @@ ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
 screen "the projects list"
 
 ui tap "$ROW" >/dev/null 2>&1 && sleep 5 && screen "a project's chat"
+
+# The workers sheet. Its rows are worker names, so anything symbol-shaped
+# here is chrome nobody labelled.
+PILL=$(ui dump | grep -E "Button +([^ ]+, )?(Agents|Working) [0-9]+" | head -1)
+if [ -n "$PILL" ]; then
+  idb ui tap "$(echo "$PILL" | awk '{print $1}')" "$(echo "$PILL" | awk '{print $2}')" --udid "$UDID" >/dev/null 2>&1
+  sleep 3
+  screen "the workers sheet"
+  idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID" >/dev/null 2>&1
+  sleep 2
+fi
+
+# Settings, which has more controls than any other screen and produced the
+# first symbol name anybody noticed.
+ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
+if ui tap "Settings" >/dev/null 2>&1; then
+  sleep 3
+  screen "the settings sheet"
+  ui tap "Done" >/dev/null 2>&1; sleep 2
+fi
+
+# The call, which shows almost no words by design and so rests entirely on
+# the labels of its four controls.
+xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 >/dev/null 2>&1
+sleep 9
+ui dump | grep -qE "Button +Allow" && { ui tap "Allow" >/dev/null 2>&1; sleep 4; }
+screen "the call"
+
+# Leave the app where the next run expects it. Ending inside the preview
+# call sent the following steps tapping at a screen that has no composer,
+# and they reported about the call while believing they were in a chat.
+xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
+sleep 8
+ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 2; }
 
 echo
 if [ "$FOUND" = 0 ]; then
