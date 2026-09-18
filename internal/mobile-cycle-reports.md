@@ -2364,3 +2364,41 @@ declines to answer is only useful if the next step is obvious; otherwise the
 refusal is simply where the investigation stops.
 
 **PR:** [#603](https://github.com/unarbos/arbos/pull/603).
+
+## Cycle 93 report (08:50 UTC, 09-18)
+
+**Looked at:** the loop's own machine — replaceability — oldest row at 63.
+
+**Eleven scripts were still running tools from `$HOME`, and those copies had
+drifted badly** (M-324). M-238 fixed the journey at cycle 63 and nothing
+else; eleven more scripts went on calling `~/kernel.py` and
+`~/find_row.py`. Measured against the checkout:
+
+| tool | home copy | the repository's | |
+| --- | --- | --- | --- |
+| `ui.py` | 3480 b | 8310 b | less than half the current file |
+| `kernel.py` | 7404 b | 8432 b | missing the agent filter from M-224 |
+| `find_row.py` | same | same | retired, never changed |
+
+The `ui.py` those scripts were using predates `field`, `focus`, `plain`,
+`on_screen` and `menu` — everything cycles 54 to 56 built to make the
+harness reliable. They were running the tooling of five weeks ago while the
+fixes sat in the repository, committed and unused.
+
+That is M-133's failure in its worst form. The first time, the tooling
+existed only on one machine and losing the machine nearly lost it. This time
+the repository had it all along and the scripts simply did not look there —
+which is harder to notice, because nothing ever breaks loudly.
+
+**The check M-238 asked for is a file now** (M-325).
+`deploy/mobile/check-tools.sh` fails if any script reaches outside the
+checkout for a tool, and prints the checksum of each tool the harness ships.
+Both sides agree on all six.
+
+M-238 recommended exactly this check and nobody wrote it, which is why the
+same fault survived thirty cycles in eleven other files. That is the third
+time tonight the difference between a rule and a file has cost something:
+the ledger said the right thing each time, and only the file changed
+behaviour.
+
+**PR:** [#605](https://github.com/unarbos/arbos/pull/605), harness only.

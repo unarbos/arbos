@@ -296,7 +296,7 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
 | the ledgers are `vm-*.jsonl` | per-machine via `ARBOS_QA_MACHINE`, so two loops cannot overwrite each other's runs |
 | the inbox scenario waits 300 s for the turn | it keeps the ceiling but gives up after **45 s with no frame at all**, and says which of the two ended it. Four sat the full five minutes on 2026-09-17 |
 
-### Three additions to the review list, earned overnight
+### Four additions to the review list, earned overnight
 
 6. **An assertion must not bound a race.** Batching, timing and ordering that the product does not
    guarantee must not be asserted; assert the property the optimisation exists for, or make the kernel
@@ -312,6 +312,13 @@ to `qal-j27` and in `internal/qa-loop-second-machine-2026-09-17.md`.
    consecutive cycles while the product was behaving correctly — `qal-j29`. Two consequences worth holding:
    a `driver-exception` is a rig fault until proven otherwise, and it is **more** urgent than a product
    break, because it hides its own scenario's finding instead of reporting one.
+9. **Run the path that has no history.** A first run, an empty directory, a missing file, an
+   assertion that passes — the states where there is nothing yet get written from imagination and
+   tested from the steady state. Two of today's faults are the same shape: `qal-j32` killed a whole
+   cycle because `VAR=$(cat missing 2>/dev/null)` takes `cat`'s status under `set -e`, so the `*)`
+   branch written for the first cycle could never be reached; `qal-j29` raised `IndexError` building
+   a message out of an empty list, which is what the passing case *is*. In both the quiet path was
+   the broken one, and in both a single run from the absent state would have found it.
 
 ### And the hardest lesson of the night, which belongs with step 2 of the list
 
