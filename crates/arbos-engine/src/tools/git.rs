@@ -2311,7 +2311,25 @@ mod tests {
             .unwrap()
             .unwrap();
         snapshot_turn_tree(&dir, &w_dir, "w1", &cp).unwrap();
-        assert!(refs().contains("refs/arbos/cp/w1/2"), "{}", refs());
+        // Red on CI about once a day with no error printed: the save
+        // returned Ok and made no ref, which `work_commit` does when the
+        // working tree equals HEAD's (`clean`). What the next red must
+        // say: the record as written (clean? an error?), what the tree
+        // holds, and what `git status` sees — c.txt was just written.
+        assert!(
+            refs().contains("refs/arbos/cp/w1/2"),
+            "refs: {}\nw1 record: {}\nls-files: {}\nstatus: {}\nls: {:?}",
+            refs(),
+            std::fs::read_to_string(w_dir.join("checkpoints.jsonl")).unwrap_or_default(),
+            git_out(&dir, &["ls-files"]).unwrap_or_default(),
+            git_out(&dir, &["status", "--short", "--untracked-files=all"]).unwrap_or_default(),
+            std::fs::read_dir(&dir)
+                .map(|rd| rd
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
         drop_agent_checkpoint_refs(&dir, "w1");
         assert!(!refs().contains("refs/arbos/cp/w1/"), "{}", refs());
         assert!(refs().contains("refs/arbos/cp/root/7"), "{}", refs());
