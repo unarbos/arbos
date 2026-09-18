@@ -34,19 +34,34 @@ reach_the_list "$UDID" || exit 1
 ui tap "$ROW" >/dev/null || { echo "no $ROW row"; exit 1; }
 sleep 5
 
-PILL=$(ui dump | grep -oE "(Agents|Working) [0-9]+" | head -1)
+# The pill reads `Working N` while anything runs and `Agents N` when nothing
+# does, and only the second is the same quantity the sheet lists. Declining
+# on the first was right, and it made this a permanent decline: run in the
+# sweep, after the scenarios that start workers, there is always something
+# working. So wait for the project to settle before reading it.
+WAITED=0
+while [ "$WAITED" -lt 180 ]; do
+  PILL=$(ui dump | grep -oE "(Agents|Working) [0-9]+" | head -1)
+  case "$PILL" in
+    Agents*) break;;
+    "")      break;;
+  esac
+  [ "$WAITED" = 0 ] && echo "the pill says:  $PILL — waiting for the project to settle"
+  sleep 10
+  WAITED=$((WAITED + 10))
+done
 COUNT=$(echo "$PILL" | grep -oE "[0-9]+")
 [ -n "$COUNT" ] || { echo "no pill in this chat — nothing to compare"; exit 1; }
-echo "the pill says:  $PILL"
+echo "the pill says:  $PILL$([ "$WAITED" -gt 0 ] && echo "   (after $WAITED s)")"
 # The pill counts two different things: `Agents N` is every agent, `Working
 # N` is only the ones running. The sheet always lists them all, so comparing
 # against the Working form is comparing a subset with a whole — it reported
 # "pill 2, sheet 3, and no shared labels to explain it" on a project behaving
 # exactly as designed.
 case "$PILL" in
-  Working*) echo "VERDICT: cannot say. The pill is counting only what is running, and the"
-            echo "         sheet lists every agent, so the two are not the same quantity."
-            echo "         Wait until the project is idle and the pill reads 'Agents N'."
+  Working*) echo "VERDICT: cannot say. Still 'Working' after ${WAITED}s, so the pill is"
+            echo "         counting only what runs while the sheet lists every agent —"
+            echo "         a subset against a whole. Not a fault, and not a comparison."
             exit 0;;
 esac
 
