@@ -488,20 +488,34 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // builtin. A server that fails to answer is skipped, not fatal.
     // Discovery talks to processes and HTTP endpoints (blocking clients),
     // so it runs off the async thread.
-    let discovered = {
+    let (discovered, problems) = {
         let place = place.clone();
         tokio::task::spawn_blocking(move || {
-            crate::mcp::load_servers(&place)
+            let loaded = crate::mcp::load(&place);
+            let discovered = loaded
+                .servers
                 .into_iter()
                 .map(|server| {
                     let specs = server.tools();
                     (Arc::new(server), specs)
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (discovered, loaded.problems)
         })
         .await
         .unwrap_or_default()
     };
+    // A config file that let the person down is said where they read,
+    // not only on stderr (qal-j31: a place file with a typo was skipped in
+    // silence and its names fell through to the machine's file).
+    for p in &problems {
+        let text = crate::mcp::problem_notice(&place, p);
+        klog::error("mcp_config", None, &text);
+        let _ = append_event(
+            &Layout::new(&place, arbos_core::ROOT_ID).transcript(),
+            &Event::new(EventKind::Notice { text, failed: true }),
+        );
+    }
     for (server, specs) in discovered {
         match specs {
             Ok(specs) => {
