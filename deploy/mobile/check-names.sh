@@ -83,6 +83,7 @@ screen() {
   echo "== $what =="
   local bad
   bad=$(ui dump | suspect)
+  VISITED=$((VISITED + 1))
   if [ -z "$bad" ]; then
     echo "  every control here is named"
   else
@@ -112,6 +113,12 @@ echo "the system's 'Sheet Grabber' through"
 echo
 
 FOUND=0
+# How many screens were actually looked at. A tap that misses used to skip a
+# screen silently and the verdict still said the app was clean: cycle 117
+# reported "no control reads as a symbol name" having never opened the chat
+# or the sheet. A check that cannot reach a screen has not cleared it.
+VISITED=0
+MISSED=
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 9
 # The app comes back to the chat that was in front (#615), so reach the list
@@ -119,11 +126,23 @@ xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 9
 ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
 screen "the projects list"
 
-ui tap "$ROW" >/dev/null 2>&1 && sleep 5 && screen "a project's chat"
+if ui tap "$ROW" >/dev/null 2>&1; then
+  sleep 5
+  screen "a project's chat"
+else
+  echo "== a project's chat =="
+  echo "  could not open '$ROW' — not checked"
+  MISSED="$MISSED chat"
+fi
 
 # The workers sheet. Its rows are worker names, so anything symbol-shaped
 # here is chrome nobody labelled.
 PILL=$(ui dump | grep -E "Button +([^ ]+, )?(Agents|Working) [0-9]+" | head -1)
+if [ -z "$PILL" ]; then
+  echo "== the workers sheet =="
+  echo "  no workers pill on screen — not checked"
+  MISSED="$MISSED sheet"
+fi
 if [ -n "$PILL" ]; then
   idb ui tap "$(echo "$PILL" | awk '{print $1}')" "$(echo "$PILL" | awk '{print $2}')" --udid "$UDID" >/dev/null 2>&1
   sleep 3
@@ -139,6 +158,10 @@ if ui tap "Settings" >/dev/null 2>&1; then
   sleep 3
   screen "the settings sheet"
   ui tap "Done" >/dev/null 2>&1; sleep 2
+else
+  echo "== the settings sheet =="
+  echo "  could not open Settings — not checked"
+  MISSED="$MISSED settings"
 fi
 
 # The call, which shows almost no words by design and so rests entirely on
@@ -158,8 +181,13 @@ sleep 8
 ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 2; }
 
 echo
-if [ "$FOUND" = 0 ]; then
-  echo "VERDICT: no control reads as a symbol name"
+echo "screens looked at: $VISITED of 5"
+if [ -n "$MISSED" ]; then
+  echo "VERDICT: incomplete — never reached:$MISSED. A screen this did not open"
+  echo "         is not a screen it cleared, whatever the rest of it found"
+  exit 1
+elif [ "$FOUND" = 0 ]; then
+  echo "VERDICT: no control reads as a symbol name across all 5 screens"
 else
   echo "VERDICT: $FOUND screen(s) carry a control named after its symbol — each is a"
   echo "         label nobody wrote, and a name a scenario must not tap"
