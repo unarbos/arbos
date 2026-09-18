@@ -113,9 +113,112 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     })
 }
 
+/// Replace a file's contents whole: never a moment where a reader finds it
+/// empty. `std::fs::write` truncates, then writes — a reader that lands
+/// between the two sees zero bytes (the store's second reader raised two
+/// FAULTs in one night on `notes.md`, mid-rewrite by an agent's `write`).
+/// The bytes go to a sibling temp file, then a rename lands them. What
+/// the replaced file was is kept: its permission bits (an executable
+/// script stays executable), and a symlink is followed so the target is
+/// replaced, not the link. A file that does not exist yet is created.
+pub fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    // The link's target is the file; a rename over the link would leave
+    // a regular file where the link was.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let parent = target.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path has no parent directory",
+        )
+    })?;
+    if !parent.as_os_str().is_empty() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mode = std::fs::metadata(&target).ok().map(|m| m.permissions());
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
+    let tmp = parent.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        REPLACE_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let done = (|| {
+        std::fs::write(&tmp, bytes)?;
+        if let Some(perm) = mode {
+            std::fs::set_permissions(&tmp, perm)?;
+        }
+        std::fs::rename(&tmp, &target)
+    })();
+    if done.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    done
+}
+
+static REPLACE_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tools' writes land whole: a file keeps its mode across a
+    /// replace, a symlink's target is what changes, a new file is made,
+    /// and no temp file is left behind.
+    #[test]
+    fn replace_file_keeps_the_mode_follows_a_link_and_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("arbos-replace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho one\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        replace_file(&script, b"#!/bin/sh\necho two\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            "#!/bin/sh\necho two\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&script).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            let link = dir.join("link.sh");
+            std::os::unix::fs::symlink(&script, &link).unwrap();
+            replace_file(&link, b"#!/bin/sh\necho three\n").unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "the link stays a link"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&script).unwrap(),
+                "#!/bin/sh\necho three\n"
+            );
+        }
+        let fresh = dir.join("sub").join("new.txt");
+        replace_file(&fresh, b"made\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "made\n");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn absent_and_unknown_are_different_answers() {

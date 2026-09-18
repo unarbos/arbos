@@ -1258,7 +1258,9 @@ pub fn write(root: &Path, cwd: &Path, path: &str, contents: &str) -> Result<Tool
     let kept =
         is_page.then(|| arbos_core::notes::keep_page_head(old.as_deref().unwrap_or(""), contents));
     let written = kept.as_deref().unwrap_or(contents);
-    std::fs::write(&file, written)?;
+    // Whole, never empty for an instant: a reader between a truncate and
+    // the write saw zero bytes (the store's second reader, 2026-09-18).
+    arbos_core::record::replace_file(&file, written.as_bytes())?;
     let mut body = format!("wrote {}", file.display());
     if kept.is_some_and(|k| k != contents) {
         body.push_str(
@@ -1319,7 +1321,7 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, old: &str, new: &str) -> Result
     if next == text {
         return Err(unchanged(&file));
     }
-    std::fs::write(&file, &next)?;
+    arbos_core::record::replace_file(&file, next.as_bytes())?;
     let mut body = format!("edited {}", file.display());
     if let Some(note) = syntax_note(&file) {
         body.push('\n');
@@ -1345,7 +1347,7 @@ pub fn edit_all(root: &Path, cwd: &Path, path: &str, old: &str, new: &str) -> Re
     if next == text {
         return Err(unchanged(&file));
     }
-    std::fs::write(&file, &next)?;
+    arbos_core::record::replace_file(&file, next.as_bytes())?;
     let mut body = format!("edited {} ({count} occurrence(s) replaced)", file.display());
     if let Some(note) = syntax_note(&file) {
         body.push('\n');
