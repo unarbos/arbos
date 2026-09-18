@@ -37,11 +37,19 @@ SIM_PT_H=${SIM_PT_H:-852}
 # cycles that way, and reporting as though it had.
 #
 # Call this after launch, before tapping a row.
-SIM_LIB_DIR=${SIM_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
+SIM_LIB_DIR=${SIM_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}
 reach_the_list() {
-  local udid=$1 i
+  local udid=$1 i tree
   for i in 1 2 3; do
-    python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null | grep -qE "Button +Back" || return 0
+    tree=$(python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null)
+    # An empty tree is not "no Back button", it is "I cannot see". Read the
+    # first as the second and this returns success from a blind check — the
+    # failure every rotted instrument in this loop has had in common.
+    if [ -z "$tree" ]; then
+      echo "  cannot read the screen — is $SIM_LIB_DIR/ui.py there, and the app up?" >&2
+      return 1
+    fi
+    echo "$tree" | grep -qE "Button +Back" || return 0
     python3 "$SIM_LIB_DIR/ui.py" "$udid" tap "Back" >/dev/null 2>&1
     sleep 3
   done
