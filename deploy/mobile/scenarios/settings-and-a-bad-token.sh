@@ -13,6 +13,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../sim-lib.sh"   # page_up
 CYCLE=${1:?cycle}
 OUT="$HOME/mobile-out/$CYCLE/settings"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
@@ -64,7 +65,13 @@ open_settings || { echo "  no settings button under either name"; exit 1; }
 sleep 3; shot 02-settings
 echo "  sections: $(ui dump | grep -E 'Heading' | awk '{$1="";$2="";$3="";print}' | tr '\n' ';')"
 echo "  saved-token fields say: $(ui dump | grep -c 'Token saved')"
-echo "  build line: $(ui dump | grep -iE 'Arbos, [0-9]|LabeledContent|build' | head -2 | tr '\n' ';')"
+# The build line is at the foot of a scrolling sheet, so reading the first
+# screen finds nothing and says so as if the line were missing. Fourth script
+# tonight to count or look at one screen of a scrolling view (M-287, M-303,
+# M-304); the cure each time is to move first and read after.
+for _ in 1 2 3 4; do page_up "$UDID" >/dev/null 2>&1; sleep 0.8; done
+echo "  build line: $(ui dump | grep -iE 'Arbos, [0-9]' | head -1 | sed 's/^ *//')"
+echo "  and under it: $(ui dump | grep -i 'TestFlight build' | head -1 | sed 's/^ *//')"
 
 echo
 echo "== save a hub token that cannot work =="
