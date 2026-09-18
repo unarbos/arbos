@@ -99,5 +99,20 @@ else
   say "no recording: $(tail -1 "$OUT/record.log" 2>/dev/null)"
 fi
 echo "--- where it landed ---"
-ui dump 2>/dev/null | head -6
-echo "stills in $OUT"
+LANDED=$(ui dump 2>/dev/null | head -6)
+echo "$LANDED"
+
+# The row's four claims in one line, so a sweep can read it. The banner
+# itself belongs to SpringBoard and is invisible to `describe-all` (M-194),
+# so its evidence is the app's own console line, not the tree.
+echo
+UNSEEN=$(grep -oE "unseen=[0-9]+" "$OUT/console.log" 2>/dev/null | tail -1)
+INPROJECT=no
+echo "$LANDED" | grep -qE "Button +Back" && INPROJECT=yes
+if [ -z "$BANNER" ]; then
+  echo "VERDICT: no banner was posted within the window — the rest says nothing"
+elif [ "$INPROJECT" = yes ]; then
+  echo "VERDICT: banner ~${BANNER}s after going away (${UNSEEN:-no badge count}), and the tap landed in the project"
+else
+  echo "VERDICT: banner ~${BANNER}s after going away, but the tap did not land in a project"
+fi
