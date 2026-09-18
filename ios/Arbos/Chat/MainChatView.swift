@@ -370,7 +370,8 @@ struct ProjectChatView: View {
         // directly above the line explaining why it is not asks a person to
         // believe two opposite things. The reason below carries the news;
         // this line only names the place.
-        var line = chat.standing == nil ? "\(title) is ready." : title
+        let linkIsDown = chat.standing != nil || chat.refusal != nil
+        var line = linkIsDown ? title : "\(title) is ready."
         if let entry, !entry.place.isEmpty { line += " \(entry.machine) · \(entry.place)." }
         return line
     }
