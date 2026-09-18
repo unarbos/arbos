@@ -523,6 +523,13 @@ final class ChatStore: ObservableObject {
             // Lines typed for the old project stay with it: never carried
             // to the next chat and sent there (Jacob, build 956).
             pendingSends.removeAll()
+            // And so does the reason its link was down. A reason now outlives
+            // the drop that named it, which is what makes it useful — but it
+            // must not outlive the project, or the next chat explains itself
+            // with the last one's trouble.
+            standing = nil
+            lastTransport = nil
+            lastRefusal = nil
         }
         settings.kernelTarget = target
         reconnectAttempt = 0
