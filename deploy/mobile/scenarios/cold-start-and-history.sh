@@ -39,7 +39,8 @@ xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
 FIRST=$(wait_for "Button +[a-z0-9-]+, (Idle|Working)" 40 "$T0")
 echo "  launch to a list with rows: ${FIRST}s   (cycle 37 measured 3.1s)"
 shot 01-cold-start
-echo "  rows: $(ui dump | grep -cE 'Button +[a-z0-9-]+, (Idle|Working)')"
+ROWS=$(ui dump | grep -cE 'Button +[a-z0-9-]+, (Idle|Working)')
+echo "  rows: $ROWS"
 
 echo
 echo "== 3. long history =="
@@ -92,3 +93,14 @@ tap_shot 426 157 "$UDID"; sleep 3
 shot 06-photo-chip
 echo "  composer row: $(ui dump | awk '$2 > 700 && $2 < 900' | tr '\n' ';')"
 echo "stills in $OUT"
+
+# Four claims, four lines — a single verdict would flatten them, and each is
+# a separate row in the coverage table.
+echo
+echo "VERDICT cold start:   ${FIRST:-never}s to a list of ${ROWS:-0} rows"
+echo "VERDICT long history: chat in ${OPEN:-never}s, pager ${PAGER:-never appeared}"
+if [ "${BEFORE:-0}" = "${AFTER:-1}" ]; then
+  echo "VERDICT away and back: the chat is as it was — $BEFORE text rows both sides"
+else
+  echo "VERDICT away and back: $BEFORE text rows before, $AFTER after — the chat changed while away"
+fi

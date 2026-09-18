@@ -74,3 +74,15 @@ echo "  the composer afterwards: $(ui dump | awk '$3 == "TextField" { $1="";$2="
 echo "  and the kernel's record:"
 python3 "$HERE/../kernel.py" pod history 4 2>/dev/null | tail -3 | cut -c1-110 | sed 's/^/    /'
 echo "stills in $OUT"
+
+# The path in one line per claim: the card, the reply, the Worked line.
+echo
+MISSING=""
+[ -z "${CARD:-}" ]   && MISSING="$MISSING card"
+[ -z "${FIRST:-}" ]  && MISSING="$MISSING reply"
+[ -z "${WORKED:-}" ] && MISSING="$MISSING Worked-line"
+if [ -n "$MISSING" ]; then
+  echo "VERDICT: the turn never produced:$MISSING"
+else
+  echo "VERDICT: send → card ${CARD}s → reply ${FIRST}s → Worked ${WORKED}s, and the composer cleared"
+fi
