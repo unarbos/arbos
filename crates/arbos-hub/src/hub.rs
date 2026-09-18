@@ -16,7 +16,7 @@ use anyhow::{Result, bail};
 use arbos_core::hub::{HubFrame, MachineInfo, ProjectInfo, RegistrantBuild, RegistrantKind};
 use arbos_core::wire::Frame;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -123,7 +123,20 @@ struct MachineEntry {
     /// by name: the newest `Activity` its kernel sent. Absent until one
     /// arrives; the roster then carries it as `last_activity_ms`.
     activity: HashMap<String, i64>,
+    /// When the machine's last registrant left; zero while one is here.
+    /// A machine with none left is kept, not dropped, so a phone can
+    /// tell a project that is asleep from a machine that was never here
+    /// (M-170: a Mac's only kernel stopped and `/list` went empty).
+    offline_since: i64,
+    /// Every project a kernel of this machine has served, by name → its
+    /// place. Worktrees are not kept (they are cut and gone). While the
+    /// machine is offline these are its rows, all `live: false`.
+    served: BTreeMap<String, String>,
 }
+
+/// How long a machine with no registrant stays on the roster. The hub
+/// keeps the roster in memory only, so a restart forgets sooner.
+const OFFLINE_KEEP_MS: i64 = 7 * 24 * 3_600_000;
 
 impl MachineEntry {
     /// A project's transcript gained a line. True when the roster's word
@@ -176,6 +189,25 @@ impl MachineEntry {
 
     fn is_empty(&self) -> bool {
         self.worker.is_none() && self.kernels.is_empty()
+    }
+
+    fn online(&self) -> bool {
+        self.offline_since == 0
+    }
+
+    /// The last registrant left: the row stays, marked, with what the
+    /// machine served. Nothing live is kept.
+    fn go_offline(&mut self, now_ms: i64) {
+        self.offline_since = now_ms;
+        self.since = 0;
+        self.builds.clear();
+        self.worker_projects.clear();
+        self.worktrees.clear();
+    }
+
+    /// Forgotten when offline this long.
+    fn forgotten_by(&self, now_ms: i64) -> bool {
+        !self.online() && now_ms - self.offline_since >= OFFLINE_KEEP_MS
     }
 
     /// The project a registered name is a worktree of: as the claim
@@ -242,12 +274,20 @@ impl MachineEntry {
                 }
             })
             .collect();
-        for p in &self.worker_projects {
-            if !self.kernels.contains_key(p) {
+        // A checkout the worker offers; or, on a machine with nobody
+        // here, a project one of its kernels served — asleep, not gone.
+        let offered = self.worker_projects.iter().map(|p| (p, None)).chain(
+            self.served
+                .iter()
+                .filter(|_| !self.online())
+                .map(|(p, place)| (p, Some(place))),
+        );
+        for (p, place) in offered {
+            if !self.kernels.contains_key(p) && !projects.iter().any(|x| &x.name == p) {
                 let share = self.share_of(p, None, default_share);
                 projects.push(ProjectInfo {
                     name: p.clone(),
-                    place: String::new(),
+                    place: place.cloned().unwrap_or_default(),
                     live: false,
                     store: store(p),
                     access: access(&share),
@@ -289,6 +329,8 @@ impl MachineEntry {
             worker: self.worker.is_some(),
             projects,
             since: self.since,
+            online: self.online(),
+            offline_since_ms: self.offline_since,
         }
     }
 }
@@ -336,7 +378,9 @@ impl Hub {
     /// each store's address and the viewer's access to it. `None` leaves
     /// `access` empty.
     pub fn roster_for(&self, viewer: Option<(&str, &str)>) -> Vec<MachineInfo> {
-        let g = self.inner.lock().unwrap();
+        let mut g = self.inner.lock().unwrap();
+        let now = arbos_core::now_ms();
+        g.machines.retain(|_, e| !e.forgotten_by(now));
         let mut out: Vec<MachineInfo> = g
             .machines
             .iter()
@@ -440,6 +484,15 @@ impl Hub {
             );
         };
         match project {
+            Some(p) if !entry.online() => bail!(
+                "{machine} is offline: nothing of it has been connected since {}{}",
+                arbos_core::inbox::rfc3339(entry.offline_since),
+                if entry.served.contains_key(p) {
+                    format!("; it served {p:?} — start a kernel there and it comes back")
+                } else {
+                    String::new()
+                }
+            ),
             Some(p) => entry.kernels.get(p).cloned().ok_or_else(|| {
                 anyhow::anyhow!(
                     "{machine} has no kernel serving {p:?} (live: {}){}",
@@ -451,6 +504,11 @@ impl Hub {
                     }
                 )
             }),
+            None if !entry.online() => bail!(
+                "{machine} is offline: nothing of it has been connected since {}; it served {}",
+                arbos_core::inbox::rfc3339(entry.offline_since),
+                list(entry.served.keys())
+            ),
             None => match entry.kernels.len() {
                 1 => Ok(entry.kernels.values().next().unwrap().clone()),
                 0 => bail!(
@@ -657,6 +715,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
         if entry.is_empty() {
             entry.since = arbos_core::now_ms();
         }
+        entry.offline_since = 0;
         // The token says whose machine it is; every project here is that
         // user's for `[share] mode = "private"`.
         entry.owner_user = token_user.clone();
@@ -725,6 +784,14 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                 // *same* place is a reconnect and replaces its old link.
                 // A kernel that did not say its place (an older build)
                 // cannot be told apart and replaces, as before.
+                // Remembered past this link: a project that was served
+                // here is asleep when its kernel stops, not gone. A
+                // worktree is cut when its worker finishes and is not.
+                if entry.worktree_of(&key).is_none() && !key.is_empty() {
+                    entry
+                        .served
+                        .insert(key.clone(), place.clone().unwrap_or_default());
+                }
                 entry.kernels.insert(key, Arc::clone(&reg));
             }
         }
@@ -874,7 +941,7 @@ pub async fn register(hub: Arc<Hub>, mut ws: Ws, who: Identity, peer: String) {
                 }
             }
             if entry.is_empty() {
-                g.machines.remove(&machine);
+                entry.go_offline(arbos_core::now_ms());
             }
         }
         g.generation += 1;
@@ -1514,6 +1581,106 @@ mod roster_face_tests {
             row("notes").get("last_activity_ms").is_none(),
             "a project nobody spoke for carries no time: {json}"
         );
+    }
+
+    /// M-170: when a Mac's only kernel stopped, the machine left the
+    /// roster and `/list` went empty — a phone could not tell a project
+    /// asleep from a machine that was never here. The row now stays,
+    /// `online: false`, with every project the machine served as a
+    /// `live: false` row that keeps its face and its last activity; an
+    /// attach is refused with the offline word; a kernel coming back
+    /// puts it online; seven days offline forgets it.
+    #[test]
+    fn a_machine_whose_last_kernel_left_stays_on_the_roster_asleep() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let reg = Arc::new(Registrant {
+            id: 1,
+            machine: "mac".into(),
+            user: "owner".into(),
+            project: Some("fieldwork".into()),
+            place: Some("/Users/jacob/fieldwork".into()),
+            to_socket: tx,
+            chans: Mutex::new(HashMap::new()),
+            next_chan: AtomicU64::new(1),
+        });
+        let mut entry = MachineEntry::default();
+        entry.since = 1_000;
+        entry.kernels.insert("fieldwork".into(), reg);
+        entry
+            .served
+            .insert("fieldwork".into(), "/Users/jacob/fieldwork".into());
+        entry.identities.insert(
+            "fieldwork".into(),
+            arbos_core::project::ProjectIdentity {
+                name: Some("Fieldwork".into()),
+                icon: "leaf".into(),
+                color: "green".into(),
+            },
+        );
+        assert!(entry.note_activity("fieldwork", 5_000));
+        let up = entry.info("mac", None, "mesh");
+        assert!(up.online && up.offline_since_ms == 0 && up.projects[0].live);
+
+        entry.kernels.clear();
+        let left = arbos_core::now_ms();
+        entry.go_offline(left);
+        let down = entry.info("mac", None, "mesh");
+        assert!(!down.online);
+        assert_eq!(down.offline_since_ms, left);
+        assert_eq!(down.since, 0);
+        assert_eq!(down.projects.len(), 1, "{down:?}");
+        let p = &down.projects[0];
+        assert_eq!(p.name, "fieldwork");
+        assert!(!p.live);
+        assert_eq!(p.place, "/Users/jacob/fieldwork");
+        assert_eq!(p.identity.as_ref().unwrap().icon, "leaf");
+        assert_eq!(
+            p.last_activity_ms, 5_000,
+            "asleep, and when it last moved is kept"
+        );
+        assert!(down.describe().contains("offline"), "{}", down.describe());
+        let json = serde_json::to_value(&down).unwrap();
+        assert_eq!(json["online"], false);
+        assert_eq!(json["offline_since_ms"], left);
+        let up_json = serde_json::to_value(&up).unwrap();
+        assert!(up_json.get("offline_since_ms").is_none(), "{up_json}");
+
+        assert!(!entry.forgotten_by(left + OFFLINE_KEEP_MS - 1));
+        assert!(entry.forgotten_by(left + OFFLINE_KEEP_MS));
+
+        // Through the hub: an attach names the offline machine plainly.
+        let dir = std::env::temp_dir().join(format!("arbos-hub-offline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hub = Hub::new(
+            "mesh",
+            crate::push::Push::new(crate::push::PushConfig::default(), &dir).unwrap(),
+        );
+        hub.inner
+            .lock()
+            .unwrap()
+            .machines
+            .insert("mac".into(), entry);
+        let e = hub
+            .kernel("mac", Some("fieldwork"))
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(e.contains("mac is offline"), "{e}");
+        assert!(e.contains("it served \"fieldwork\""), "{e}");
+        let e = hub.kernel("mac", None).err().expect("refused").to_string();
+        assert!(
+            e.contains("mac is offline") && e.contains("fieldwork"),
+            "{e}"
+        );
+        assert_eq!(hub.roster_for(None).len(), 1, "still listed");
+        hub.inner
+            .lock()
+            .unwrap()
+            .machines
+            .get_mut("mac")
+            .unwrap()
+            .offline_since = 1;
+        assert!(hub.roster_for(None).is_empty(), "forgotten after a week");
     }
 
     /// M-12: a worker's worktree place (`demo--c616190-1`, a claim with
