@@ -56,6 +56,13 @@ pub struct Decision {
     pub compact: Option<bool>,
     pub fold: Option<bool>,
     pub no_change: bool,
+    /// Which chat model the next LLM invoke should use. Ignored on a
+    /// pure tool step. Unknown values fall through to the configured model.
+    pub model: Option<String>,
+    /// Slice ids that stay as text in the standing brief.
+    pub keep: Vec<String>,
+    /// Slice ids that become addresses only.
+    pub pointers: Vec<String>,
 }
 
 /// Why asking Jev did not produce a usable decision.
@@ -100,6 +107,10 @@ pub struct Situation {
     pub repro: Option<String>,
     pub first_step: bool,
     pub spoke: bool,
+    /// Existing brief glances. Empty when the turn did not gather.
+    pub slices: Vec<crate::brief::Slice>,
+    /// `fast=…  powerful=…` from the turn's model menu.
+    pub model_menu: String,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +172,12 @@ pub fn parse_decision(text: &str) -> Result<Decision, AskError> {
         .trim()
         .to_string();
     let flag = |k: &str| value.get(k).and_then(Value::as_bool);
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Ok(Decision {
         act,
         tool,
@@ -169,7 +186,29 @@ pub fn parse_decision(text: &str) -> Result<Decision, AskError> {
         compact: flag("compact"),
         fold: flag("fold"),
         no_change: flag("no_change").unwrap_or(false),
+        model,
+        keep: string_list(&value, "keep"),
+        pointers: string_list(&value, "pointers"),
     })
+}
+
+fn string_list(value: &Value, key: &str) -> Vec<String> {
+    match value.get(key) {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(Value::String(s)) => s
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Turn a decision into a route. Unknown tools, language tools, and a
@@ -261,6 +300,8 @@ pub fn situation_from_events(
         repro,
         first_step,
         spoke,
+        slices: Vec::new(),
+        model_menu: String::new(),
     }
 }
 
@@ -368,13 +409,14 @@ pub async fn run_tool(
     Ok((vec![call], outcomes))
 }
 
-const SYSTEM: &str = r#"You pick the next mechanical move. Reply with one JSON object only:
-{"act":"tool"|"llm"|"done","tool":"grep","args":{},"why":"short"}
+const SYSTEM: &str = r#"You are the controller. Reply with one JSON object only:
+{"act":"tool"|"llm"|"done","tool":"grep","args":{},"why":"short","model":"fast"|"powerful"|"default","keep":["tldr","working"],"pointers":["ask"]}
 
 act=tool — run that tool this step. Use for read, grep, find, ls, bash (tests, git status), jobs, await, fetch, search, changes, spawn (short title in args), status, agents, transcript. Not for say, ask, or writing prose the user will read.
-act=llm — the language model should write, plan, talk, or do a step you cannot parse.
+act=llm — invoke the language model to write, plan, talk, or do a step you cannot parse. Set model to fast (cheap, short), powerful (hard coding), or default.
 act=done — the turn is finished.
 
+keep — slice ids that stay as text in the standing brief. pointers — ids that become addresses only.
 On a new open-ended ask (plan, design, what should we do) with no tools yet this turn, act=llm.
 If you cannot parse the situation, refuse, or need language, act=llm (or set need_llm:true).
 After a recorded repro:true run that now passes and the tree already matches the request, act=done and "no_change":true.
@@ -487,6 +529,22 @@ fn render_card(sit: &Situation, body_chars: usize) -> String {
                 clip_chars(&t.result, body_chars)
             ));
         }
+    }
+    if !sit.slices.is_empty() {
+        out.push_str("slices:\n");
+        for s in &sit.slices {
+            out.push_str(&format!(
+                "  {} [{}] {}\n",
+                s.id,
+                s.kind,
+                clip_chars(&s.body, 160)
+            ));
+        }
+    }
+    if !sit.model_menu.is_empty() {
+        out.push_str("models: ");
+        out.push_str(&sit.model_menu);
+        out.push('\n');
     }
     out
 }
@@ -634,6 +692,8 @@ mod tests {
             repro: Some("cargo test -p huge".into()),
             first_step: false,
             spoke: false,
+            slices: Vec::new(),
+            model_menu: String::new(),
         };
         let card = situation_card(&sit);
         assert!(
@@ -684,5 +744,22 @@ mod tests {
         let g = glance_tool(&rec);
         assert_eq!(g.result, "(secret; not sent)");
         assert!(!g.args.contains("OPENROUTER"));
+    }
+
+    #[test]
+    fn parse_keeps_act_when_model_is_junk() {
+        let d = parse_decision(
+            r#"{"act":"llm","model":"not-a-real-slug","keep":["tldr","working"],"pointers":["ask"]}"#,
+        )
+        .unwrap();
+        assert_eq!(d.act, Act::Llm);
+        assert_eq!(d.model.as_deref(), Some("not-a-real-slug"));
+        assert_eq!(d.keep, vec!["tldr", "working"]);
+        assert_eq!(d.pointers, vec!["ask"]);
+
+        let tool = parse_decision(r#"{"act":"tool","tool":"grep","model":"fast"}"#).unwrap();
+        assert_eq!(tool.act, Act::Tool);
+        assert_eq!(tool.model.as_deref(), Some("fast"));
+        assert!(tool.keep.is_empty());
     }
 }

@@ -170,6 +170,21 @@ def _seed_messages(lines: list[dict]) -> list[dict]:
     return seed
 
 
+def standing_brief_block(state: str | None, *, kernel_attached: bool) -> str:
+    """STANDING BRIEF for Live. The gateway only reads; Jev is not here.
+
+    A miss is unknown, not empty: do not pretend the project is idle.
+    """
+    if not kernel_attached:
+        return ""
+    if state is None or state == "unknown":
+        return "STANDING BRIEF: unknown"
+    text = state.strip()
+    if not text:
+        return "STANDING BRIEF: unknown"
+    return "STANDING BRIEF (kernel file; answer 'what are you working on' from this):\n" + text
+
+
 def _workers_brief(context: dict, kernel, activity) -> str:
     """Sub-agents on the screen, plus live kernel and activity state."""
     parts: list[str] = []
@@ -226,6 +241,7 @@ class OpenAILiveSession(DuplexSession):
         self.context_kernel = None  # the kernel whose frames feed GPT-Live's context
         self.workers_known: set[str] = set()
         self.seed_task: asyncio.Task | None = None  # the chat-history read, started when the kernel is known
+        self.standing_brief: str | None = None  # kernel file body, "unknown", or None if not attempted
         self.last_answer_at = 0.0  # when a delegation's answer went to the model (its chat copy is not news)
         self.forced_task: asyncio.Task | None = None  # the delegation we started for a work question
         self.forced_at = 0.0
@@ -250,7 +266,8 @@ class OpenAILiveSession(DuplexSession):
         brief = self._project_brief()
         seed_task = self.seed_task or asyncio.create_task(self._history_seed())
         # The connect and the chat-history read run side by side; the seed may cost the model's
-        # start at most a moment, never the caller's first word.
+        # start at most a moment, never the caller's first word. The standing brief is a file
+        # read inside that same seed — Jev is not on this path.
         live_url = os.environ.get("VOICE_OPENAI_URL") or LIVE_URL
         connect = asyncio.ensure_future(websockets.connect(
             live_url, additional_headers={"Authorization": f"Bearer {self.api_key}"},
@@ -261,6 +278,7 @@ class OpenAILiveSession(DuplexSession):
         except Exception as exc:
             log.warning("[%s] chat history not ready in time for the seed (%s); starting without it", self.sid, type(exc).__name__)
             seed = []
+        brief = self._with_standing_brief(brief)
         self.up = await connect
         session: dict = {
             "model": self.live_model,
@@ -348,23 +366,57 @@ class OpenAILiveSession(DuplexSession):
             "anything, say so plainly; never invent files, folders, machines or status."
         )
 
+    def _with_standing_brief(self, brief: str) -> str:
+        """Append the kernel file if the seed read it. Jev is not called here.
+
+        A miss is unknown, not empty: do not pretend the project is idle.
+        """
+        extra = standing_brief_block(self.standing_brief, kernel_attached=self.kernel is not None)
+        if not extra:
+            return brief
+        return brief + "\n" + extra
+
+    async def _read_standing_brief(self, kernel) -> None:
+        """One kernel file read. No Jev. Fits inside the existing seed wait."""
+        try:
+            res = await kernel.read("voice-brief.md", timeout=1.0)
+            text = str(res.get("text") or "").strip()
+            if res.get("error") or not text:
+                self.standing_brief = "unknown"
+            else:
+                self.standing_brief = text[:4000]
+        except Exception as exc:
+            log.warning("[%s] standing brief not readable (%s); treating as unknown", self.sid, type(exc).__name__)
+            self.standing_brief = "unknown"
+
     async def _history_seed(self) -> list[dict]:
         """The chat the caller is looking at, plus older kernel lines, as session.input.
 
         The client's snapshot is what is on screen (user, Arbos, workers, tool labels, notices).
         The kernel transcript fills in older lines the snapshot dropped. Tool bodies and diffs
         are never seeded. Nothing from a different kernel.
+
+        The standing brief is a file read in parallel with the transcript. Jev is not
+        on this path. The outer 1.5s wait covers both; there is no extra wait.
         """
-        if HISTORY_LINES <= 0:
-            return []
         kernel_lines: list[dict] = []
         kernel = self.kernel
         if kernel is not None:
+            hist = asyncio.create_task(kernel.transcript_tail("root", bytes_=80_000))
+            brief = asyncio.create_task(self._read_standing_brief(kernel))
             try:
-                events = await asyncio.wait_for(kernel.transcript_tail("root", bytes_=80_000), 4.0)
+                events = await asyncio.wait_for(hist, 4.0)
                 kernel_lines = _lines_from_transcript(events)
             except Exception as exc:
+                hist.cancel()
                 log.warning("[%s] no chat history from the kernel for the seed: %s", self.sid, type(exc).__name__)
+            try:
+                await brief
+            except Exception as exc:
+                log.warning("[%s] standing brief not ready (%s); treating as unknown", self.sid, type(exc).__name__)
+                self.standing_brief = "unknown"
+        if HISTORY_LINES <= 0:
+            return []
         screen = _lines_from_screen(self.start_context)
         return _seed_messages(_merge_chat_lines(screen, kernel_lines, cap=HISTORY_LINES))
 
@@ -737,7 +789,14 @@ class OpenAILiveSession(DuplexSession):
             self.seed_task = asyncio.create_task(self._history_seed(), name=f"live-seed-{self.sid}")
         if self.up is not None:
             # The model is already up (audio came before session.start): give it the brief now.
-            brief = self._project_brief()
+            # The standing brief is the same file read already in flight — wait on that seed
+            # only, never on Jev, and never longer than the start budget.
+            if self.seed_task is not None and not self.seed_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(self.seed_task), 1.5)
+                except Exception:
+                    pass
+            brief = self._with_standing_brief(self._project_brief())
             if brief != self.brief_sent:
                 self.brief_sent = brief
                 await self._append("session.instructions.append", None, brief)

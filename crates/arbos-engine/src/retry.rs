@@ -256,6 +256,36 @@ impl Models {
         self.current += 1;
         Some(self.current())
     }
+
+    /// Jev named which chat model to invoke first. Unknown or empty
+    /// values keep the configured primary. The rest of the list still
+    /// walks on a 403.
+    pub fn prefer(&mut self, choice: &str) {
+        let pick = choice.trim();
+        if pick.is_empty()
+            || pick.eq_ignore_ascii_case("default")
+            || pick.eq_ignore_ascii_case("powerful")
+        {
+            self.current = 0;
+            return;
+        }
+        let target = if pick.eq_ignore_ascii_case("fast") {
+            self.list
+                .iter()
+                .find(|m| crate::brief::looks_cheap(m))
+                .cloned()
+                .or_else(|| self.list.get(1).cloned())
+                .unwrap_or_else(|| self.list[0].clone())
+        } else if self.list.iter().any(|m| m == pick) {
+            pick.to_string()
+        } else {
+            self.current = 0;
+            return;
+        };
+        if let Some(i) = self.list.iter().position(|m| *m == target) {
+            self.current = i;
+        }
+    }
 }
 
 pub fn human(d: Duration) -> String {
@@ -334,5 +364,26 @@ mod fallback_tests {
         );
         assert_eq!(m.all()[1], "anthropic/claude-opus-5");
         assert_eq!(m.all().last().unwrap(), "openai/gpt-5.6-terra");
+    }
+
+    #[test]
+    fn prefer_fast_picks_a_cheap_menu_slug() {
+        let mut m = Models::new(
+            "anthropic/claude-opus-5".into(),
+            &[
+                "google/gemini-3.8-flash".into(),
+                "openai/gpt-5.6-terra".into(),
+            ],
+        );
+        m.prefer("fast");
+        assert_eq!(m.current(), "google/gemini-3.8-flash");
+        m.prefer("powerful");
+        assert_eq!(m.current(), "anthropic/claude-opus-5");
+        m.prefer("openai/gpt-5.6-terra");
+        assert_eq!(m.current(), "openai/gpt-5.6-terra");
+        m.prefer("invented/nope");
+        assert_eq!(m.current(), "anthropic/claude-opus-5");
+        m.prefer("");
+        assert_eq!(m.current(), "anthropic/claude-opus-5");
     }
 }

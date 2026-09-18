@@ -964,6 +964,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // with no agent.md that nothing lists). A turn whose folder is gone is
     // over: nothing more is written for it (QA bug qa-017).
     let gone = || !layout.agent_md().exists();
+    let ranking = std::cell::RefCell::new(crate::brief::Ranking::default());
+    let replay = provider.replay.is_some();
+    let jev_off = host.config.jev == Some(false);
 
     let end = |usage: Option<Usage>, interrupted: Option<&str>| -> Result<()> {
         if gone() {
@@ -982,6 +985,13 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
         batch.push(Event::new(EventKind::TurnComplete { usage }));
         append_events(&transcript, &batch)?;
         tools::file_hooks::after_turn(&place, &agent);
+        if !replay {
+            if jev_off {
+                crate::brief::delete(&place);
+            } else {
+                let _ = crate::brief::refresh(&place, &ranking.borrow());
+            }
+        }
         Ok(())
     };
 
@@ -1176,7 +1186,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     r.command
                 )
             });
-            let sit = crate::jev::situation_from_events(&events, &wake, &names, repro);
+            let mut sit = crate::jev::situation_from_events(&events, &wake, &names, repro);
+            sit.slices = crate::brief::gather(&place);
+            sit.model_menu = crate::brief::menu_line(models.all());
             let spoke = sit.spoke;
             let model = host.config.jev_model().unwrap_or(crate::jev::DEFAULT_MODEL);
             match crate::jev::ask(&provider, model, &sit, control.cancel(), hooks.as_ref()).await {
@@ -1190,6 +1202,18 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     if decision.compact == Some(true) || decision.fold == Some(true) {
                         control.request_compact();
                     }
+                    {
+                        let mut r = ranking.borrow_mut();
+                        r.keep = decision.keep.clone();
+                        r.pointers = decision.pointers.clone();
+                    }
+                    let model_choice = decision.model.clone();
+                    let apply_model = |models: &mut Models, provider: &mut Provider| {
+                        if let Some(choice) = model_choice.as_deref() {
+                            models.prefer(choice);
+                            provider.model = models.current().to_string();
+                        }
+                    };
                     match crate::jev::route(decision, &view, spoke) {
                         crate::jev::Route::Tool { name, args } => {
                             let (calls, outcomes) =
@@ -1210,11 +1234,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                             jev_no_change = no_change;
                             if need_say {
                                 tools = &[];
+                                apply_model(&mut models, &mut provider);
                             } else {
                                 jev_end = true;
                             }
                         }
-                        crate::jev::Route::Llm => {}
+                        crate::jev::Route::Llm => {
+                            apply_model(&mut models, &mut provider);
+                        }
                     }
                 }
                 Err(crate::jev::AskError::Interrupted) => {

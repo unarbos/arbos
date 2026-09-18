@@ -3,6 +3,7 @@
 mod access;
 pub mod apology;
 mod batch;
+mod brief;
 pub mod blocked;
 pub mod compact;
 mod control;
