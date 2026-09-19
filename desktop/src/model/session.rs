@@ -1426,9 +1426,50 @@ impl ChatSession {
         };
         let squash = |s: &str| s.split_whitespace().collect::<String>();
         let is_user = |item: &ChatItem| matches!(item, ChatItem::User(_));
+        // A kernel line written while no turn ran — "the kernel's program
+        // file was replaced under it … restarting onto the new build" on a
+        // re-exec — belongs to no turn and so was never taken here: it
+        // showed after a relaunch and not on the reconnect that followed
+        // it (F-239, cycle 71). Trailing notices the record lacks come in
+        // whatever else does.
+        let known_notices: HashSet<String> = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ChatItem::Notice { text, .. } => Some(squash(text)),
+                _ => None,
+            })
+            .collect();
+        let trailing_notices = |from: usize| -> Vec<ChatItem> {
+            replay.items[from..]
+                .iter()
+                .rev()
+                .take_while(|item| !is_user(item))
+                .filter(|item| {
+                    matches!(item, ChatItem::Notice { text, .. }
+                        if !known_notices.contains(&squash(text))
+                            && !is_waiting_line(text)
+                            && !is_page_nudge(text)
+                            && !text.trim_start().starts_with("nothing to compact yet"))
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        };
         // The record's newest prompt, by its transcript line when the card
         // kept one, else by its words.
         let Some(ChatItem::User(known)) = self.items.iter().rev().find(|item| is_user(item)) else {
+            // No prompt yet (the kickoff alone): the kernel's trailing
+            // notices are still news.
+            if !self.items.is_empty() {
+                let fresh = trailing_notices(0);
+                if !fresh.is_empty() {
+                    self.items.extend(fresh);
+                    self.flush();
+                }
+            }
             return;
         };
         let known_words = squash(&known.text);
@@ -1448,6 +1489,11 @@ impl ChatSession {
             .position(is_user)
             .map(|offset| known_at + 1 + offset)
         else {
+            let fresh = trailing_notices(known_at + 1);
+            if !fresh.is_empty() {
+                self.items.extend(fresh);
+                self.flush();
+            }
             return;
         };
         // Whole turns only, and none this record already has: a prompt the
