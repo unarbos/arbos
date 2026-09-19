@@ -217,6 +217,31 @@ jobs:
       # been waiting here longer than this? Once the answer is yes the
       # channel moves, whatever is still running ahead of it.
       PATIENCE: "600"
+      # How long a run stays and asks again, rather than ending on the
+      # promise that something else will ask, in seconds. And how long it
+      # waits between asking.
+      #
+      # Every ending in the plan below used to be "somebody will come back
+      # here". On 2026-09-19 nobody did, three times. A commit gets two CI
+      # runs; the failing one finished first, fired this workflow, and was
+      # correctly told there was nothing green yet — and the green sibling
+      # then completed and fired nothing at all. #767's green sat 38
+      # minutes, #770's until a fix was written for it, #776's until this
+      # was. The ten-minute timer added for exactly this (#771) has not
+      # fired once in the two hours since it landed, and this repository
+      # has never had a scheduled run of any workflow, so the channel
+      # cannot be left leaning on it.
+      #
+      # A run that stays needs nothing from GitHub's scheduler and nothing
+      # from the next merge. It costs one idle `ubuntu-latest` job for as
+      # long as it waits, and only when something is actually running that
+      # might go green — a red `main` with nothing in flight ends at once,
+      # because no amount of waiting changes it.
+      #
+      # Ten minutes, matching PATIENCE: past that the green-clock cap
+      # publishes anyway, so there is nothing further for staying to win.
+      WATCH: "600"
+      BEAT: "60"
       # What started this run, taken from the event rather than asked of
       # the API again. See `ci_state`: re-asking about the triggering
       # commit is how a run ends up waiting on itself.
@@ -374,9 +399,15 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             choose="$here"
           else
+            # A run that would end on "something else will come back here"
+            # stays and asks again instead, because three times today the
+            # something else never came. See WATCH.
+            began="$(date +%s)"
+            while :; do
             choose=""
             newer_pending=""
             waited=""
+            pending_seen=""
             # `--first-parent`, or the walk leaves `main` entirely. A plain
             # rev-list descends into the branches that were merged in, and
             # those commits have green CI runs of their own from when the
@@ -413,6 +444,10 @@ jobs:
                 # commit *older* than the newest green holds nothing: that
                 # green already supersedes it.
                 pending*)
+                  # Something here may yet go green, which is what makes
+                  # staying worth the runner. Recorded whether or not it
+                  # holds the channel.
+                  pending_seen=yes
                   if [ -z "$choose" ]; then
                     age="$(seconds_since "${state#pending }")"
                     if [ "${age:-999999}" -lt "$PATIENCE" ]; then
@@ -426,19 +461,36 @@ jobs:
               esac
             done
 
+            # Both of the endings below used to be "somebody else will ask
+            # this again". Where something may still go green, this run
+            # asks it again itself.
+            watched="$(( $(date +%s) - began ))"
             if [ -n "$newer_pending" ] && [ -z "$waited" ]; then
+              if [ "$watched" -lt "${WATCH:-600}" ]; then
+                sleep "${BEAT:-60}"
+                continue
+              fi
               echo "publish=false" >> "$GITHUB_OUTPUT"
-              echo "::notice title=Waiting::${newer_pending:0:7} is newer and still running. Its run decides, and comes back here whichever way it goes."
+              echo "::notice title=Waiting::${newer_pending:0:7} is newer and still running, and this run has watched it for ${watched}s. Its own run decides now."
               exit 0
             fi
             if [ -n "$newer_pending" ]; then
               echo "::notice title=Waited long enough::${newer_pending:0:7} is newer and still running, but ${waited:0:7} has been green for more than ${PATIENCE}s without going out. Publishing the newest green now; the pending one supersedes it when it lands."
             fi
             if [ -z "$choose" ]; then
+              # Nothing green *yet* is not the same as nothing green. If
+              # something is still running it may land while this run is
+              # here to see it; if nothing is, no amount of waiting helps.
+              if [ -n "$pending_seen" ] && [ "$watched" -lt "${WATCH:-600}" ]; then
+                sleep "${BEAT:-60}"
+                continue
+              fi
               echo "publish=false" >> "$GITHUB_OUTPUT"
               echo "::warning title=Nothing green::No commit on main newer than build $feed_build has a green CI run, within the last $SCAN, so there is nothing to publish."
               exit 0
             fi
+            break
+            done
           fi
 
           # Already out? Then this run has nothing to add. What makes the
