@@ -16,6 +16,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../sim-lib.sh"   # reach_the_list, and the helpers every other scenario shares
 CYCLE=${1:?cycle}
 CLIP=${2:-$HOME/mobile-clips/acceptance.wav}
 OUT="$HOME/mobile-out/$CYCLE/call-text"; mkdir -p "$OUT"
@@ -45,7 +46,14 @@ idb ui swipe 196 300 196 700 --duration 0.4 --udid "$UDID"; sleep 1.5
 shot 03-call-pulled-down
 ui tap "End call" || { echo "no close control — the pull did not take"; exit 1; }
 sleep 2.5; shot 04-project-list
-ui tap "${PROJECT:-phone}, Idle" || { echo "project row not on screen"; exit 1; }
+# By the project's name, not by a whole row label. This tapped
+# "<project>, Idle", which was the entire row when the check was written; the
+# row has since gained its machine and an age — "phone, Idle, home, 5m" — so
+# the string never matched again and the run stopped here, sixty-five cycles
+# after it last passed. The same fault M-314 named: a script tapping words
+# the app no longer says.
+reach_the_list "$UDID" || exit 1
+ui tap "${PROJECT:-phone}" || { echo "project row not on screen"; exit 1; }
 sleep 3; shot 05-chat-tail
 
 # One screen back reaches the same question as it was answered before the

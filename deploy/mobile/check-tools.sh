@@ -124,3 +124,27 @@ for t in kernel.py ui.py journey-record.py find_row.py sim-lib.sh mirror-docs.sh
 done
 
 [ -z "$HITS" ] && [ -z "$LIST_FAULTS" ]
+
+# A scenario can call a shared helper it never sourced. The call reads fine,
+# the check above sees the words and passes it, and at runtime the shell says
+# "command not found", the helper returns 127, and a `|| exit 1` beside it
+# ends the run before it measures anything. Cycle 167 nearly shipped exactly
+# that: list-rows.sh gained a reach_the_list call and had no sim-lib line.
+echo
+echo "scenarios calling a shared helper without sourcing sim-lib:"
+HELPERS=$(grep -oE "^[a-z_]+\(\)" "$HERE/sim-lib.sh" | tr -d '()' | tr '\n' '|' | sed 's/|$//')
+ORPHANS=0
+for f in "$HERE"/scenarios/*.sh "$HERE"/mac-*.sh; do
+  [ -f "$f" ] || continue
+  grep -q "sim-lib.sh" "$f" && continue
+  # A call, not the word. "pt" appears in a comment about pt coordinates in
+  # two of these files, and matching bare words reported them as calling a
+  # helper they only mentioned.
+  USED=$(grep -vE "^[[:space:]]*#" "$f" \
+         | grep -oE "(^|[;&|(]|\\\$\()[[:space:]]*($HELPERS)[[:space:]]" \
+         | grep -oE "($HELPERS)" | sort -u | tr '\n' ' ')
+  [ -n "$USED" ] || continue
+  echo "  $(basename "$f") calls: $USED"
+  ORPHANS=$((ORPHANS + 1))
+done
+[ "$ORPHANS" = 0 ] && echo "  none — every helper called is one the file has sourced"

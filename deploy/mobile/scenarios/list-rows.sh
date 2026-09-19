@@ -22,6 +22,7 @@
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../sim-lib.sh"   # reach_the_list
 CYCLE=${1:?cycle}
 OUT="$HOME/mobile-out/$CYCLE/list-rows"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
@@ -31,8 +32,11 @@ ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
 sleep 11
-# The app comes back to the chat that was in front, so reach the list.
-ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 3; }
+# The app comes back to the chat that was in front, so reach the list. This
+# used to tap Back once and carry on regardless: one tap, no check that the
+# list arrived. reach_the_list tries four times and confirms it can see rows
+# or the Projects header, which is what the rest of the harness uses.
+reach_the_list "$UDID" || exit 1
 ui dump > "$OUT/tree.txt"
 xcrun simctl io "$UDID" screenshot "$OUT/01-list.png" >/dev/null 2>&1
 
