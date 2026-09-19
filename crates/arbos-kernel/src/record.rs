@@ -70,8 +70,8 @@ impl Tool for Record {
             &[
                 (
                     "op",
-                    "start|stop|discard|status (discard ends it and keeps no file)",
-                    true,
+                    "start|stop|discard|status (default status; discard ends it and keeps no file)",
+                    false,
                     "string",
                 ),
                 (
@@ -95,7 +95,14 @@ impl Tool for Record {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let live = Arc::clone(&self.live);
         Box::pin(async move {
-            let raw = args.get("op").and_then(Value::as_str).unwrap_or("");
+            // No op is `status`: a Jev pick carries none, and status is
+            // the read.
+            let raw = args
+                .get("op")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("status");
             let op = Op::parse(raw).ok_or_else(|| {
                 anyhow::anyhow!("record: op must be start, stop, discard, or status, not {raw:?}")
             })?;

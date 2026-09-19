@@ -294,7 +294,7 @@ pub async fn preflight(view: &View, cx: &RunCx, name: &str, args: &Value) -> Res
     // Small models drop `path` on the second edit to the same file. The
     // file they touched last in this turn is what they mean; the result
     // says so, so a wrong guess is visible and cheap to correct.
-    if matches!(decided.tool.as_str(), "edit" | "write")
+    if matches!(decided.tool.as_str(), "edit" | "write" | "read")
         && crate::tool::opt_str(&decided.args, "path").is_none()
         && decided.args.is_object()
     {

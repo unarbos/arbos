@@ -49,6 +49,12 @@ const LLM_TOOLS: &[&str] = &["say", "ask", "plan"];
 /// asks for it by name.
 const NEVER_PICKED: &[&str] = &["undo"];
 
+/// Tools whose schema declares nothing required but whose call is
+/// nothing without words: `spawn` with no task is a worker with no
+/// brief, and every pick of it failed. Not offered; the language model
+/// writes the brief.
+const NEEDS_WORDS: &[&str] = &["spawn"];
+
 /// The three acts Jev may return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
@@ -243,7 +249,10 @@ pub fn route(decision: Decision, view: &View, spoke: bool) -> Route {
                 return Route::Llm;
             };
             let name = tool.name();
-            if LLM_TOOLS.contains(&name) || NEVER_PICKED.contains(&name) {
+            if LLM_TOOLS.contains(&name)
+                || NEVER_PICKED.contains(&name)
+                || NEEDS_WORDS.contains(&name)
+            {
                 return Route::Llm;
             }
             if !args_are_complete(&tool.schema(), &decision.args) {
@@ -292,6 +301,7 @@ pub fn pickable(view: &View) -> Vec<String> {
             let name = schema.pointer("/function/name")?.as_str()?;
             (!LLM_TOOLS.contains(&name)
                 && !NEVER_PICKED.contains(&name)
+                && !NEEDS_WORDS.contains(&name)
                 && args_are_complete(schema, &json!({})))
             .then(|| name.to_string())
         })
@@ -886,6 +896,53 @@ mod tests {
         );
     }
 
+    /// Jacob asked for more of Jev's picks. Decisions send `args: {}`, so
+    /// a tool is pickable only when `{}` is a real call: `read` (the last
+    /// file touched stands in), `await` (the newest job), `ls`, `jobs`,
+    /// `changes` are; `grep`, `find`, `write`, `edit`, `apply_patch`,
+    /// `bash` still need a field and stay off; `undo` never; `say`, `ask`,
+    /// `plan` are the language model's. A `{}` pick of a pickable tool
+    /// routes to Tool, not Llm.
+    #[test]
+    fn empty_picks_route_to_the_tools_whose_empty_call_is_real() {
+        let view = tool_view();
+        let picks = pickable(&view);
+        for on in ["read", "await", "ls", "jobs", "changes"] {
+            assert!(picks.iter().any(|p| p == on), "{on} pickable: {picks:?}");
+            let d = parse_decision(&format!(r#"{{"act":"tool","tool":"{on}"}}"#)).unwrap();
+            assert_eq!(
+                route(d, &view, false),
+                Route::Tool {
+                    name: on.into(),
+                    args: json!({})
+                },
+                "{on}"
+            );
+        }
+        for off in [
+            "grep",
+            "find",
+            "write",
+            "edit",
+            "apply_patch",
+            "bash",
+            "undo",
+            "say",
+            "ask",
+            "plan",
+            "delete",
+        ] {
+            assert!(
+                !picks.iter().any(|p| p == off),
+                "{off} not pickable: {picks:?}"
+            );
+            if view.get(off).is_some() {
+                let d = parse_decision(&format!(r#"{{"act":"tool","tool":"{off}"}}"#)).unwrap();
+                assert_eq!(route(d, &view, false), Route::Llm, "{off}");
+            }
+        }
+    }
+
     #[test]
     fn situation_card_stays_under_32k() {
         let huge = "x".repeat(200_000);
@@ -958,7 +1015,9 @@ mod tests {
         let view = tool_view();
         let names = pickable(&view);
         assert!(names.contains(&"ls".to_string()), "{names:?}");
-        for needs_args in ["grep", "read", "find", "write", "apply_patch"] {
+        // `read` left this list when the last file touched this turn
+        // began to stand in for a missing path (Jacob: more of Jev).
+        for needs_args in ["grep", "find", "write", "apply_patch"] {
             assert!(
                 !names.contains(&needs_args.to_string()),
                 "{needs_args} takes a required argument Jev cannot send: {names:?}"

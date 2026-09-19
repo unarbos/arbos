@@ -4308,3 +4308,76 @@ pub fn store_attachment(place: &Place, a: &str) -> String {
     }
     a.to_string()
 }
+
+#[cfg(test)]
+mod jev_pickable_tests {
+    use super::*;
+
+    /// The kernel's whole tool set, as root sees it: which picks Jev may
+    /// make with `args: {}`. Before: agents, changes, jobs, ls, screenshot,
+    /// secret, spawn — and spawn failed on every pick (a worker with no
+    /// brief). Now browser (snapshot), subscribe (list), todo (show),
+    /// record (status), transcript (the newest worker), await (the newest
+    /// job) and read (the last file touched) are real calls on `{}`; spawn
+    /// is not offered; the editors, grep, find and bash stay off; a `{}`
+    /// pick of each new name routes to Tool.
+    #[test]
+    fn the_kernels_pickable_tools_are_the_ones_whose_empty_call_is_real() {
+        let dir = std::env::temp_dir().join(format!("arbos-pickable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let place = Place::new(dir.clone());
+        arbos_core::files::bootstrap(&place).unwrap();
+        let agent = arbos_core::load_agent(&place, &arbos_core::AgentId::new("root")).unwrap();
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (kick_tx, _kick_rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = KernelHooks::new(place.clone(), wake_tx, kick_tx);
+        let ptys = Arc::new(crate::pty::PtyHub::new());
+        let view = kernel_registry(&hooks, &ptys).view(&agent);
+        let picks = arbos_engine::jev::pickable(&view);
+        for on in [
+            "browser",
+            "subscribe",
+            "todo",
+            "record",
+            "transcript",
+            "await",
+            "read",
+            "agents",
+            "changes",
+            "jobs",
+            "ls",
+        ] {
+            assert!(picks.iter().any(|p| p == on), "{on} pickable: {picks:?}");
+            let d =
+                arbos_engine::jev::parse_decision(&format!(r#"{{"act":"tool","tool":"{on}"}}"#))
+                    .unwrap();
+            assert!(
+                matches!(
+                    arbos_engine::jev::route(d, &view, false),
+                    arbos_engine::jev::Route::Tool { .. }
+                ),
+                "{on} routes to Tool"
+            );
+        }
+        for off in [
+            "spawn",
+            "write",
+            "edit",
+            "bash",
+            "grep",
+            "find",
+            "apply_patch",
+            "say",
+            "ask",
+            "plan",
+            "undo",
+        ] {
+            assert!(
+                !picks.iter().any(|p| p == off),
+                "{off} stays off: {picks:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
