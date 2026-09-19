@@ -164,6 +164,12 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
     APPENDS_SYSTEM_PROMPT = False
     SUPPORTS_MCP = False
 
+    def __init__(self, config: ArbosHarnessConfig) -> None:
+        super().__init__(config)
+        # Where each rollout's artifacts went, by trace id, so `cleanup` can add
+        # the in-run verifier's output beside them after scoring.
+        self._dests: dict[str, Path] = {}
+
     def kernel_path(self) -> Path:
         configured = self.config.kernel or os.environ.get("ARBOS_KERNEL", "")
         if configured:
@@ -346,6 +352,7 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         name = safe_name(task.name or f"task-{task.idx}")
         dest = Path(self.config.artifacts) / f"{name}--{trace.id[:8]}"
         dest.mkdir(parents=True, exist_ok=True)
+        self._dests[trace.id] = dest
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             tar.extractall(dest, filter="data")
         (dest / "task.json").write_text(
@@ -362,7 +369,33 @@ class ArbosHarness(Harness[ArbosHarnessConfig]):
         return len(data)
 
     async def cleanup(self, trace: Trace, runtime: Runtime) -> None:
+        # verifiers runs cleanup after the task's score, so this is the one
+        # moment the in-run verifier's output exists and can be kept. SWE-bench
+        # cycle 38: two requests-6028 rollouts with the gold's change line for
+        # line graded 0 in the run and 1 offline, and nothing recorded what the
+        # in-run grader saw. The verifier writes /logs/verifier (report.json,
+        # reward.txt); its test log is the script's mktemp file under /tmp.
+        dest = self._dests.pop(trace.id, None)
+        if dest is not None:
+            await self.keep_verifier_log(dest, runtime)
         await runtime.run(["rm", "-rf", f"/tmp/vf-arbos/{trace.id}", OUT_DIR], {})
+
+    async def keep_verifier_log(self, dest: Path, runtime: Runtime) -> None:
+        script = (
+            "d=$(mktemp -d) && "
+            "{ [ -d /logs/verifier ] && cp -r /logs/verifier \"$d\"/verifier; } 2>/dev/null; "
+            "mkdir -p \"$d\"/verifier && "
+            "for f in $(ls -t /tmp/tmp.* 2>/dev/null | head -3); do "
+            "[ -f \"$f\" ] && cp \"$f\" \"$d\"/verifier/test-log-$(basename \"$f\").txt; done; "
+            "cd \"$d\" && tar -czf - verifier | base64 -w0"
+        )
+        result = await runtime.run(["sh", "-c", script], {})
+        if result.exit_code != 0 or not result.stdout.strip():
+            logger.warning("arbos: no verifier log to keep: %s", result.stderr[-300:])
+            return
+        data = base64.b64decode(result.stdout.strip())
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            tar.extractall(dest, filter="data")
 
 
 def safe_name(name: str) -> str:
