@@ -149,6 +149,12 @@ struct ProjectsView: View {
                     // walk is what varies; the button's own label does not.
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(rowWords(entry))
+                    // `.ignore` takes the button's traits with the children,
+                    // so the row stopped announcing itself as a button —
+                    // and every harness check that finds rows by looking for
+                    // Buttons found none, then reported "every row" clean
+                    // over nothing. A row you can tap is a button.
+                    .accessibilityAddTraits(.isButton)
                 }
             }
         }
