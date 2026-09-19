@@ -4850,3 +4850,83 @@ Evidence in `media/mobile/cycle-161/`: the sweep summary, the clean list, and
 an example of what the new capture keeps.
 
 **PR:** [#750](https://github.com/unarbos/arbos/pull/750), harness only.
+
+## Cycle 162 — four faults in one check, none of them the app
+
+Cycle 161's sweep left `tool-fold` reporting `FAULT: opening the fold showed
+nothing more (4 → 4)`. None of it was the app (M-500).
+
+**It counted the wrong thing.** It compared how many `StaticText` rows were
+on screen. Opening a fold pushes the transcript up, so it loses as many lines
+off the top as it adds below — four to four, with the fold open. It compares
+the lines themselves now.
+
+**It made those lines unique.** Two calls that ran the same command have the
+same label, so a fold of six would have reported as hiding three. That is the
+workers-sheet mistake of twenty cycles ago, in a new place. Duplicates are
+kept.
+
+**It tapped words the screen had stopped showing.** The fold's count climbs
+while the turn runs. The check read `3 tool calls` early and tapped those
+words later, when the screen read `6 tool calls`. It re-reads the line
+immediately before each tap and prints what it read.
+
+**And it never checked whether the tap landed.** A tap that found nothing
+read as an app that would not open.
+
+All four were load-bearing. The final run reads the fold as 3, re-reads it as
+**6** before tapping, and opening reveals **6** lines — including `bash ·
+echo one` twice, which the unique count would have called three. Repeated
+once more for the record: six again.
+
+**The check also could not reach its own subject** (M-501). It asked for
+"three bash commands one after another" and the model sensibly ran one call
+holding `echo one; echo two; echo three`. Two runs in a row folded a single
+call, and the scenario honestly declined to test opening — which means the
+thing it exists for went untested most of the time. Combining is forbidden
+now.
+
+**What closed this was the screenshot** (M-502). The tree said the tap
+succeeded and nothing changed, which is a fault report with no explanation in
+it. The still showed `> 6 tool calls`, chevron closed, a different number
+from the one being tapped. Two cycles running, the picture has caught what
+the accessibility tree reported faithfully and misleadingly.
+
+Evidence: `media/mobile/cycle-162/01-the-fold-open.png` and
+`tool-fold-run.txt`.
+
+**PR:** [#751](https://github.com/unarbos/arbos/pull/751), harness only.
+
+## Cycle 163 — a sixth dead end, and the dot was never the thing I said it was
+
+The separator had one hypothesis left that I could test cheaply: every dotted
+reading came from a list longer than the screen, and a scrolling list recycles
+its rows. A recycled row losing its accessibility modifiers would fit
+everything.
+
+It does not (M-503). Scrolled the `phone` row off the bottom of a ten-row
+list and back: clean. That makes six explanations eliminated with evidence —
+a stale binary, a second call site, the spoken label itself, the build step,
+two sections being open, and now recycling. All six are written into
+`list-rows.sh` beside the capture, so the next cycle spends its time
+somewhere new.
+
+**And the recording corrected my framing** (M-504). The reviewer looked at the
+list and described `Idle · home`. The dot is *drawn*, on purpose, on every row
+that has a machine part — rows without one show `Idle` alone. So this fault
+has only ever been about whether the row **speaks** it, and I had let that
+blur across several cycles of shorthand. The check says so now: anyone who
+sets out to remove the dot from the screen has misread the finding.
+
+**The recording itself is clean** (M-505). No clipping, no stuck spinner, no
+half-drawn transition; the sheet paged to its end on camera and the worker
+chat opened. The reviewer flagged two things, both known and both deliberate:
+the first worker line carries the running count where the others do not
+(desktop parity, M-480), and one project shows no age on the right (the hub
+gives no timestamp for it). Two independent reviewers have now read that count
+as a mistake, which is worth a designer's minute even though it is not mine to
+change.
+
+Film and still in `media/mobile/cycle-163/`.
+
+**PR:** [#752](https://github.com/unarbos/arbos/pull/752), harness only.
