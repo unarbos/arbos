@@ -111,4 +111,46 @@ else
   echo "  VERDICT: could not read both numbers — inconclusive"
 fi
 echo
+echo "--- 4. the same project a cold start would reopen? ---"
+# Two features promise the same thing and nothing checked they agree. The
+# composer names "the project in front"; a cold start reopens "the project
+# that was in front" (M-338). If those two ever drift apart, the list would
+# offer to message one project while the app reopens another — and each
+# feature's own check would still pass.
+if [ -z "${NAMED:-}" ] || [ "$NAMED" = "$AT_REST" ]; then
+  echo "  the composer named no project at rest, so there is nothing to compare"
+else
+  # Open it first. The composer's name survives across launches, but the
+  # cold-start landing is about the chat that was in front *this* session —
+  # so with no chat opened, the app comes back to the list and there is
+  # nothing to compare. That is a real difference between the two memories,
+  # and it is not the question this step is asking.
+  # From a clean launch: step 2 leaves a filter in the search box, so the
+  # named project is not on screen and the tap found nothing — "could not
+  # open 'const'", on a list showing only the rows matching "sub".
+  xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+  xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 10
+  reach_the_list "$UDID" >/dev/null 2>&1
+  ui tap "$NAMED" >/dev/null 2>&1 && sleep 4
+  OPENED_IT=$(ui dump | grep -cE "Button +Back")
+  [ "$OPENED_IT" = 0 ] && echo "  could not open '$NAMED' to put it in front"
+  xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+  xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 11
+  shot 04-after-a-cold-start
+  LANDED=$(ui dump | awk '$2+0 < 120 && $3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print; exit }')
+  echo "  the composer named:   $NAMED"
+  echo "  a cold start opened:  ${LANDED:-the list}"
+  if [ "$LANDED" = "$NAMED" ]; then
+    echo "  VERDICT: they agree — the list offers the project the app comes back to"
+  elif [ -z "$LANDED" ]; then
+    echo "  VERDICT: cannot say — the cold start landed on the list even after"
+    echo "           '$NAMED' was opened, so there is nothing to compare"
+  else
+    echo "  VERDICT: they disagree. The list offers to message '$NAMED' and a cold"
+    echo "           start opens '$LANDED'. Both features are about the project in"
+    echo "           front, and each one's own check passes."
+  fi
+fi
+
+echo
 echo "stills in $OUT"
