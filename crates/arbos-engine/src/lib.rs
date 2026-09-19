@@ -51,7 +51,7 @@ pub use tool::{
     BoxFuture, Param, Plan, PlanCx, Registry, RunCx, Tool, ToolOut, opt_bool, opt_strings,
     simple_schema, typed_schema,
 };
-pub use tools::fs::decode_text;
+pub use tools::fs::{decode_text, without_bom};
 pub use tools::git;
 pub use tools::git_guard::GitRules;
 pub use tools::{
