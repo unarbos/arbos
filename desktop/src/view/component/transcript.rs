@@ -1811,7 +1811,19 @@ fn children_lines(
                     };
                     (verb, rest, theme.text_muted)
                 }
-                ChildState::Asking => ("Asking".to_string(), child.title.clone(), theme.accent),
+                // The question itself on the line, so the person in the
+                // coordinator's seat reads what is asked before opening the
+                // worker (F-216, d26); the line opens it on the press.
+                ChildState::Asking => (
+                    "Asking".to_string(),
+                    match &child.question {
+                        Some(q) if !q.trim().is_empty() => {
+                            format!("{} — {}", child.title, q.trim())
+                        }
+                        _ => child.title.clone(),
+                    },
+                    theme.accent,
+                ),
                 ChildState::Waiting => {
                     ("Waiting".to_string(), child.title.clone(), theme.text_faint)
                 }

@@ -1775,6 +1775,8 @@ pub struct ChildSummary {
     /// What the worker is on right now: its `status` line from the kernel
     /// when it sent one, else the tool it is running or last ran.
     pub step: Option<String>,
+    /// The question a worker parked on, for the parent's line (F-216).
+    pub question: Option<String>,
 }
 
 impl ChatSession {

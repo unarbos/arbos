@@ -3913,6 +3913,7 @@ impl Workspace {
                 readonly: chat.readonly,
                 agent_kind: chat.agent_kind.clone(),
                 step: chat.current_step(),
+                question: chat.questions.as_ref().map(|q| q.title.clone()),
             })
             .collect()
     }
