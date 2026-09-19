@@ -4290,3 +4290,33 @@ an accusation.** Missing evidence gets its own branch, and that branch comes
 first.
 
 **PR:** [#718](https://github.com/unarbos/arbos/pull/718), harness only.
+
+## Cycle 148 — pressing the one control nothing had pressed
+
+The journey's J5 has carried the note "Stop not exercised by this step (the
+control exists)" since it was written, and nothing else touched it. It is a
+control the kernel itself advertises: the stall line reads "Stop ends the
+turn".
+
+So a Stop that only quietened the phone would be the app repeating a promise
+the kernel made and not keeping it — and from the screen those look
+identical. This is judged on the kernel's record (M-463).
+
+Against a `sleep 75`:
+
+```
+  the send disc became Stop: yes
+  the square went away:      yes
+  transcript right after Stop: 3448
+  and thirty seconds later:    3448
+     3446 user          stop 030429: run the bash command sleep 75 …
+     3447 interrupted
+     3448 turn_complete
+```
+
+The `interrupted` line is the kernel's own, and the count not moving over
+thirty seconds is what rules out a turn that merely looks stopped.
+
+In the sweep, so it stays pressed.
+
+**PR:** [#719](https://github.com/unarbos/arbos/pull/719), harness only.

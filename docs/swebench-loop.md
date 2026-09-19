@@ -834,7 +834,17 @@ Eighty fresh instances across cycles 29–36, twenty-nine failures, none outside
 
 Spend $14.55.
 
-## Next (cycle 37)
+## Cycle 37 (2026-09-19) — ten more fresh instances, all twenty solved; a fifty-minute host stall
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 e5e66f71c418 protocol 1`** = `main` head, built in the worktree, label proved. The one engine change since a8678ac1 (180f1644: the sleep-while-workers-run guard counts a literal for-loop's passes) is a coordinator-with-workers case a root agent without workers does not reach. Jev off. Network cut, no stall of the agent's own, no cap. Ten never-run instances (`fresh10i.txt`) at `-r 2`, images pre-pulled, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-37-preregistration.md)). $7.06; **20 of 20** solved (a count). Nothing to read.
+
+**The host stalled for fifty minutes.** The eval log has no line between 01:58:53 and 02:49:03. Three rollouts were live at 01:59 and each came back at 02:47 with the kernel's notice "nothing has happened for 48m" — two waiting on a `bash` (a pytest run), one waiting on the model — and all three then finished and solved (walls 3,050 s, 3,048 s, 3,105 s against 80–300 s for their siblings). Inside the containers `ps` showed the kernel as seconds old while its files were an hour old: the clock jumped. This is the VM freeze the loop has met before, not a kernel event and not the cycle-36 reproduction re-run; the cycle-36 finding stands on its own evidence (the `changes` durations and the re-runs seen in the container). Wall times from this cycle are not to be read.
+
+Ninety fresh instances across cycles 29–37, twenty-nine failures, none outside the account. Cumulative read: **314** (unchanged).
+
+Spend $7.06.
+
+## Next (cycle 38)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
