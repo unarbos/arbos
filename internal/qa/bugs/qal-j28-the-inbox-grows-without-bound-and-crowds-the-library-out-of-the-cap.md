@@ -130,3 +130,41 @@ The control worth keeping afterwards is the budget one: assert the tracked step'
 times its measured mean fits inside the cap, so the suite goes red when it outgrows its cap
 instead of silently truncating. A truncation that prints per-scenario passes and no total is the
 failure mode this whole file is about.
+
+## Half the cap is not scenario work (measured 2026-09-19)
+
+A thing this write-up assumed and I had not checked: that the 100-minute cap is spent *running
+scenarios*. Summing the durations the loop itself records, per cycle's first step:
+
+| cycle | scenarios | measured work | outcome |
+|---|---|---|---|
+| 15:01 | 70 | 27.8 min | completed |
+| **17:01** | **33** | **49.9 min** | **TRUNCATED at 100 min** |
+| 21:01 | 80 | 49.3 min | completed |
+| 00:00 | 81 | 44.3 min | completed |
+
+Two readings come out of it.
+
+**The truncated cycle did no more work than the ones that finished** — 49.9 min against 49.3 and
+44.3. It reached 33 scenarios instead of 80 because each cost more: that hour is `qal-j45`'s
+provider slowdown (`ordinary-task` 361 s, `secrets-leak-hunt` 501 s against 21-29 s and 15-35 s).
+So the crowding-out this bug describes is not the only way the tail goes unasked; a slow hour does
+it with the same library.
+
+**And only half the window was measured work at all.** 49.9 min of scenario time inside a 100-min
+cap leaves ~50 min unaccounted. The two clocks differ by design: `run.py` times scenarios with
+`time.monotonic()` *specifically so a paused VM does not inflate them* (`run_one`, citing
+`qal-j26`), while `timeout 100m` is wall clock and keeps counting while the machine is suspended.
+This VM is suspended whenever the agent is idle.
+
+I have **not** isolated the 50 minutes — per-scenario snapshotting sits outside the timed region
+too, and I have not measured it — so I am not filing this as its own bug. What is established is
+narrower and still worth knowing:
+
+> The cap and the work are measured on different clocks. A step can be truncated having spent half
+> its window doing nothing the loop counts, and the summary will read as though the library was
+> too big for the time.
+
+Anyone deciding what to do about the cap (`qal-j46` lists the options for its budget twin) should
+know that raising the library's efficiency cannot recover a window that was not spent on the
+library.
