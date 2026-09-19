@@ -4224,5 +4224,5 @@ The change is reverted in the same cycle it was made, and the finding is
 rewritten to describe what is actually wrong. Twenty cycles of calling this
 a display bug rested on never having asked what the call was waiting *for*.
 
-**PR:** [#714](https://github.com/unarbos/arbos/pull/714) — the `ios/`
+**PR:** [#715](https://github.com/unarbos/arbos/pull/715) — the `ios/`
 branch, now empty of behaviour change, kept for the record of the attempt.
