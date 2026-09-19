@@ -1054,9 +1054,13 @@ Cumulative read: **425**.
 
 Spend $27.44.
 
-## Next (cycle 49)
+## Hold (from 2026-09-19 22:10 UTC)
 
-1. Both pools are spent (never-run: cycle 42; once-failed second draws: cycle 48). New material now comes only from landed steps and new failures. Until the coordinator names another source, the loop reads those as they arrive and otherwise holds.
+Both pools are spent and the coordinator's word is to hold: read new failures and landed steps as they arrive, invent no other source. Checked at 22:10 UTC: `main` at 833da250, 37 commits past the cycle-48 kernel, none under `crates/arbos-engine/src/` or `crates/arbos-core/src/host.rs` (the work is the mobile journey loop) — nothing for this loop to read. The kernel the loop would build next is whatever `main` head carries the first engine change; the harness stays at d1226d8c (#734). Jev off.
+
+## Next (cycle 49, when there is something to read)
+
+1. A landed step on a recorded observation is read where the observation was made (the pattern of cycles 38, 41, 42); a new failure class arriving from elsewhere is read against the account. Nothing else runs.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
 4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice — seven of seven (42, 47); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 71 of 72 (43–48); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45); two halves of one fix, each rollout doing one (46); a no-change verdict with the rule's evidence honestly met and the hidden test beyond the issue (47).

@@ -6177,3 +6177,55 @@ the journey. The journey's own evidence is in
 `media/mobile/journey/0919-215053/`.
 
 **PR:** [#799](https://github.com/unarbos/arbos/pull/799), harness only.
+
+## Cycle 195 — a refused tap that looked like a wrong one
+
+The oldest rows were the workers sheet (185) and the microphone path (184).
+
+**The workers sheet failed, and the failure was not what it said** (M-609).
+The check reported:
+
+> LANDED ELSEWHERE: tapped 'w220642 rivers' and the header reads 'say
+> sentence about the sky'
+
+Nothing had been tapped. The dump carries the whole scroll view, so a row
+paged above the top is still in it with a negative y — this run had rows at
+**-188** and **-119** — and the row was picked by tree order without looking
+at where it was. `ui.py`'s `match()` filters to on-screen elements, so the tap
+was refused. The call is written `ui tap … >/dev/null 2>&1`, so the refusal
+went nowhere. And the screen afterwards was the screen before, which is
+exactly what landing on the wrong worker looks like.
+
+**Cycles 185 and 186 blamed momentum, and momentum was only half of it**
+(M-610). Cycle 186 measured a real 167-point glide and added `settle`, which
+was right and is still right. This fault survived it, because the row it
+chose was never reachable at all: a second, independent cause wearing the
+same symptom. Rows are chosen from what a finger could reach now, in the
+scenario and in `first_worker_row`. Reran clean — `opening w221227 rivers`,
+`landed on: w221227 rivers`, and the archived chat holding six lines of what
+the worker did.
+
+**Sixty-four taps across the harness are silenced the same way** (M-611).
+Editing all of them is a large, risky change for a fault that is really the
+tool's to report. So `ui.py` writes every refusal to `refused-taps.log` and
+the sweep reads them back at the end — the other sixty-three are covered
+without being touched.
+
+**A voice run measured no barge-in and read as healthy** (M-612). The reply
+ran 14.3 s, the barge clip plays at a fixed offset, and `barge_in_skipped
+reply already over` went past among a hundred console lines while the summary
+spoke only of reply timings. The summary states which it was now. Verified
+both ways: the next run printed `exercised: 273 ms / 315 ms`, and the skipped
+run's log prints the refusal.
+
+**The kernel-answered reply varies far more than the gateway's** (M-613):
+7585, 7822, 8386 and now 14307 ms for the same question, against 1224–1249 ms
+for the gateway's small talk across every run since cycle 167. Not filed as a
+regression — cycle 170 nearly filed one and was wrong; the spread is the
+kernel thinking, and there are 55 agents on the box now.
+
+Stills in `media/mobile/cycle-195/`:
+`landed-on-the-worker-it-chose.png` and, for the contrast,
+`before-the-fix-a-different-workers-chat.png`.
+
+**PR:** [#800](https://github.com/unarbos/arbos/pull/800), harness only.
