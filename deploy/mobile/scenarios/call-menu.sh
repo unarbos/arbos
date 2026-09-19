@@ -28,6 +28,19 @@ CLIP=${CLIP:-$HOME/mobile-clips/small.wav}
 . "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 items() { ui dump | grep -oE "Button +(Back to chat|Use speaker|Use headset|Hang up)" | sed 's/Button *//' | tr '\n' ';'; }
+# Open it and wait for it, rather than tapping and reading two seconds
+# later. The first run of this read "offers: nothing" from a menu that opens
+# perfectly well — a fixed sleep timing out is indistinguishable, in the
+# output, from a menu with nothing in it.
+open_menu() {
+  ui tap "Call menu" >/dev/null 2>&1 || return 1
+  local i
+  for i in 1 2 3 4 5 6; do
+    [ -n "$(items)" ] && return 0
+    sleep 1
+  done
+  return 1
+}
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 -injectWav "$CLIP" >/dev/null 2>&1
@@ -35,8 +48,7 @@ sleep 12
 
 FAULTS=0
 echo "== the menu, mid-call =="
-ui tap "Call menu" >/dev/null 2>&1 || { echo "  no Call menu button"; exit 1; }
-sleep 2
+open_menu || { echo "  the Call menu did not open, or opened empty"; exit 1; }
 FIRST=$(items)
 xcrun simctl io "$UDID" screenshot "$OUT/01-menu.png" >/dev/null 2>&1
 echo "  offers: ${FIRST:-nothing}"
@@ -54,8 +66,7 @@ else
   echo "  before: $TOGGLE"
   ui tap "$TOGGLE" >/dev/null 2>&1
   sleep 2
-  ui tap "Call menu" >/dev/null 2>&1
-  sleep 2
+  open_menu || echo "  the menu did not reopen"
   AFTER=$(items | grep -oE "Use (speaker|headset)" | head -1)
   echo "  after:  ${AFTER:-nothing}"
   if [ -z "$AFTER" ]; then
@@ -72,7 +83,7 @@ fi
 
 echo
 echo "== back to the chat =="
-ui dump | grep -qE "Button +Back to chat" || { ui tap "Call menu" >/dev/null 2>&1; sleep 2; }
+case "$(items)" in *"Back to chat"*) ;; *) open_menu >/dev/null 2>&1;; esac
 ui tap "Back to chat" >/dev/null 2>&1
 sleep 3
 xcrun simctl io "$UDID" screenshot "$OUT/02-back.png" >/dev/null 2>&1
