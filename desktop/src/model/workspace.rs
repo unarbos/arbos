@@ -3579,6 +3579,17 @@ impl Workspace {
         let Some(ix) = self.project_of(owner) else {
             return;
         };
+        // The output also goes into the command's running card in the
+        // chat (F-220): an attached command has no process row until the
+        // kernel's long-command threshold, and the card is where Cursor
+        // shows a command's output as it comes.
+        if running && !delta.is_empty() {
+            let command = job_command(&self.job_log(ix, owner, &job));
+            if let Some(chat) = self.session_mut(owner) {
+                chat.job_streamed(command.as_deref(), &delta);
+                cx.notify();
+            }
+        }
         let held = self.projects[ix]
             .surfaces
             .iter_mut()
@@ -4939,6 +4950,17 @@ fn decode_query(s: &str) -> String {
 /// the agent is done. A worker that finished is archived: a probe that
 /// read only the live path found nothing there and said "not ended", and
 /// the worker's tab stayed Working until a relaunch (F-179).
+/// The command a job runs, from the `meta.json` beside its journal at
+/// `log`. `None` when the file is not here (a remote place) or says nothing.
+fn job_command(log: &Path) -> Option<String> {
+    let meta = std::fs::read_to_string(log.with_file_name("meta.json")).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&meta).ok()?;
+    meta.get("command")?
+        .as_str()
+        .map(|cmd| cmd.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|cmd| !cmd.is_empty())
+}
+
 fn transcript_paths(workspace: &Path, sid: &str) -> [PathBuf; 2] {
     let store = workspace.join(".arbos");
     [

@@ -4967,7 +4967,7 @@ fn run_fold(
                     .flex()
                     .flex_col()
                     .gap(px(ITEM_GAP))
-                    .children(range.map(|ix| match &chat.items[ix] {
+                    .children(range.clone().map(|ix| match &chat.items[ix] {
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
                         // A `status` call is the live step, not a row (#185).
                         ChatItem::Tool { label, .. } if is_status_call(label) => {
@@ -4996,6 +4996,26 @@ fn run_fold(
                         ChatItem::Tool { .. } => tool(chat, ix, false, cx),
                         _ => div().into_any_element(),
                     })),
+            )
+        })
+        // A command still running is not history to fold: Cursor keeps the
+        // in-flight terminal card on screen, its output moving, and groups
+        // only the runs that have returned (F-220). The card stands under
+        // the shut line until it settles.
+        .when(!open, |el| {
+            el.children(
+                range
+                    .filter(|ix| {
+                        matches!(
+                            &chat.items[*ix],
+                            ChatItem::Tool {
+                                kind: ToolKind::Execute,
+                                status: ToolStatus::Running,
+                                ..
+                            }
+                        )
+                    })
+                    .map(|ix| tool(chat, ix, false, cx)),
             )
         })
         .into_any_element()

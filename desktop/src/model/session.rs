@@ -49,6 +49,11 @@ const TAIL_LAG: Duration = Duration::from_millis(1000);
 
 /// How often the poll may read a transcript tail for one chat.
 const PROBE_EVERY: Duration = Duration::from_secs(10);
+
+/// How many lines of a running command's output its card holds while the
+/// command runs — what Cursor's running terminal card shows before it
+/// scrolls. The kernel's record brings the whole body when it returns.
+const LIVE_JOB_TAIL: usize = 8;
 /// The tail of the rewind notice while the kernel is still restoring files.
 const RESTORING: &str = "restoring files\u{2026}";
 /// The window's line for a turn that ended with nothing under the prompt.
@@ -1011,6 +1016,65 @@ impl ChatSession {
             rank: self.rank,
             items: self.items.clone(),
             draft: self.draft.clone(),
+        }
+    }
+
+    /// The kernel streamed a piece of an attached command's output while
+    /// the command still holds the tool call (F-220, cycle 58). The call's
+    /// card is on the pane from the kernel's call-start event, running and
+    /// empty; the output goes into it as it arrives, so the card moves the
+    /// way Cursor's does. The frame names the job, not the call: the card
+    /// is the newest running command whose label carries the job's
+    /// command — or the only running command, when the window cannot read
+    /// the command (a remote place). The kernel's record replaces the tail
+    /// with the whole body when the command returns.
+    pub(crate) fn job_streamed(&mut self, command: Option<&str>, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let running: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                matches!(
+                    item,
+                    ChatItem::Tool {
+                        kind: ToolKind::Execute,
+                        status: ToolStatus::Running,
+                        ..
+                    }
+                )
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let ix = match command {
+            Some(command) => running.iter().rev().copied().find(|ix| match &self.items[*ix] {
+                ChatItem::Tool { label, .. } => squeeze(label).contains(&squeeze(command)),
+                _ => false,
+            }),
+            None if running.len() == 1 => running.first().copied(),
+            None => None,
+        };
+        let Some(ix) = ix else {
+            return;
+        };
+        let ChatItem::Tool { output, .. } = &mut self.items[ix] else {
+            return;
+        };
+        output.push_str(delta);
+        // The card shows a tail. Keep only what it can show, so a chatty
+        // command does not grow the pane for output the record brings
+        // whole when the command returns.
+        let lines = output.lines().count();
+        if lines > LIVE_JOB_TAIL {
+            let cut = output
+                .match_indices('\n')
+                .nth(lines - LIVE_JOB_TAIL - 1)
+                .map(|(at, _)| at + 1)
+                .unwrap_or(0);
+            output.replace_range(..cut, "");
         }
     }
 
@@ -3576,6 +3640,14 @@ impl ChatSession {
                 // rewinding" and drew no footer (F-122, cycle 24 gate).
                 // Same lag rule as `turn_alive`.
                 if !self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
+                    // A turn starting over a parked question: the answer
+                    // came from elsewhere — the parent's `say`, another
+                    // window — and the agent is working again. The card
+                    // stood on under the running command, Skip and
+                    // Continue still offered (F-221, cycle 58).
+                    if !self.turn_open && self.questions.is_some() {
+                        self.questions = None;
+                    }
                     self.turn_open = true;
                     self.turn_ended = None;
                 }
@@ -4042,6 +4114,9 @@ impl ChatSession {
                         *label = call.title;
                     }
                     *status = tool_status(call.status);
+                    if *status != ToolStatus::Running {
+                        self.tool_started.remove(&id);
+                    }
                     if !output.is_empty() {
                         *held = output;
                     }
