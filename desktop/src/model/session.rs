@@ -4319,6 +4319,18 @@ impl ChatSession {
                 !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
             });
         }
+        // "compacted 2 turn(s): ~32k → ~21k tokens" is the end of the story
+        // "compacting 2 turn(s), ~32k tokens…" began: one line, the result,
+        // where the progress line stood (F-226, cycle 59). Cursor marks a
+        // compaction once, after the fact.
+        if !failed
+            && text.trim_start().starts_with("compacted ")
+            && let Some(ix) = self.items.iter().rposition(
+                |item| matches!(item, ChatItem::Notice { text: t, failed: false } if t.trim_start().starts_with("compacting ")),
+            )
+        {
+            self.items.remove(ix);
+        }
         // A retry replaces the retry before it: "retrying in 2.4s (attempt
         // 4/5)" is the same story one step on, and five copies with the
         // URL in each was Jacob's first screen on a new project (F-76).
