@@ -4052,3 +4052,36 @@ This line looks like the place to settle that and is not, which is worth a
 printed sentence rather than a reader's assumption.
 
 **PR:** [#705](https://github.com/unarbos/arbos/pull/705), harness only.
+
+## Cycle 141 — into the sweep, and what the first run found
+
+Eight checks have been written since the sweep's list was set, and none of
+them were in it. They ran when I remembered, which is exactly how four
+scenarios went seventeen cycles without a run at cycle 133 — three passed
+and one had been broken the whole time (M-449).
+
+The sweep is nineteen now: **19 scenarios, 19 conclusions, none silent and
+none verdict-less.** What stays out is written down with its reason — the
+ones that drive a real call, the ones that wait two minutes by design, the
+one that needs a composer already open — so nobody has to work out whether
+an omission was deliberate.
+
+**The first run with them in found a regression**, which is the argument for
+the change making itself. `list-rows` failed:
+
+```
+  PUNCTUATION:     phone: '·'
+```
+
+That is M-370, fixed in #642, and cycle 128 read the row cleanly. By now it
+reads `phone, Idle,  · , home, 39m` again — with `.accessibilityHidden(true)`
+still sitting in `ProjectsView`, untouched (M-450).
+
+It is the same failure as the worker line's glyph at cycle 117: the modifier
+takes once and then stops holding. The form that worked there works here —
+make the status line a single element and write its label, `Idle, home`.
+Twice now a hidden-modifier fix has passed once and quietly come undone; the
+one-element form has not.
+
+**PRs:** [#706](https://github.com/unarbos/arbos/pull/706) the sweep,
+[#707](https://github.com/unarbos/arbos/pull/707) the `ios/` batch.
