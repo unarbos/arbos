@@ -39,6 +39,7 @@ DEFAULT=(
   attach-a-file.sh
   voice-notes-wait.sh
   the-core-chat-path.sh
+  stop-a-turn.sh
   call-pulled-down.sh
   worker-chat-open-and-back.sh
   worker-chat-shape.sh
