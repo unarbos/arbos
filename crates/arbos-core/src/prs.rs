@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::place::Place;
@@ -52,11 +51,7 @@ pub fn record_pr(place: &Place, rec: &PrRec) -> Result<bool> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    writeln!(f, "{}", serde_json::to_string(rec)?)?;
+    crate::files::append_line(&path, rec)?;
     Ok(true)
 }
 

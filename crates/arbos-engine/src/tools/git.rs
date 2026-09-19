@@ -171,17 +171,7 @@ pub fn snapshot_turn_record_with_mark(
         clean: false,
         work_error: Some(TREE_PENDING.to_string()),
     };
-    let path = agent_dir.join("checkpoints.jsonl");
-    let mut text = serde_json::to_string(&cp)?;
-    text.push('\n');
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("open {}", path.display()))?
-        .write_all(text.as_bytes())
-        .with_context(|| format!("append {}", path.display()))?;
+    arbos_core::files::append_line(&agent_dir.join("checkpoints.jsonl"), &cp)?;
     let mark_error = match snapshot(cwd) {
         Ok(()) => None,
         Err(e) => {
