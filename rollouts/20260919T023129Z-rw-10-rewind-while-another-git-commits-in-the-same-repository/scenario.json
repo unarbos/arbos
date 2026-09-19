@@ -1,0 +1,9 @@
+{
+  "name": "rw-10-rewind-while-another-git-commits-in-the-same-repository",
+  "doc": "Jacob's normal state: a terminal open in the project, git committing there while the kernel works. A second\n        git renames index.lock over index, so for an instant .git/index is not a regular file; the checkpoint's index\n        copy must survive that (retry, #419 at 5340c0d2), every turn must still get a work tree, and a rewind with files\n        landing in the middle of that churn must either restore fully or fail with the tree where it was.",
+  "tags": [
+    "landing",
+    "rewind",
+    "concurrency"
+  ]
+}

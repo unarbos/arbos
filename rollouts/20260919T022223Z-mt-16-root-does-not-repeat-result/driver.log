@@ -1,0 +1,4 @@
+1789784543541 kernel started pid 1422094
+1789784601005 BREAK mt-16-result-repeated: the haiku was read to the user 0 time(s)
+1789784601008 kernel stopped with code 0
+1789784601043 bugs: seen 9f517735db.md

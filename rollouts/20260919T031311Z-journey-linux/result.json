@@ -1,0 +1,211 @@
+{
+  "scenario": "journey-linux",
+  "doc": "The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "journey-J3",
+      "detail": "the chat reads idle but the transcript ends in notice (dangling wake)",
+      "where": "docs/acceptance-journeys.md"
+    },
+    {
+      "rule": "journey-J6",
+      "detail": "away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))",
+      "where": "docs/acceptance-journeys.md"
+    },
+    {
+      "rule": "journey-J7",
+      "detail": "tests still fail: ['FAILED (failures=1)']; area()/perimeter() do not give the right answers when the rig calls them itself; no CHANGELOG.md",
+      "where": "docs/acceptance-journeys.md"
+    }
+  ],
+  "notes": {
+    "steps": {
+      "J1": {
+        "verdict": "pass",
+        "why": "tab present, greeting shown ('Hey \u2014 the `shapes-project` place is ready with a Python proj'), .arbos/ created"
+      },
+      "J2": {
+        "verdict": "pass",
+        "why": "chat busy; workers ['fix-failing-test-and-add'] / 1 spawn card(s)"
+      },
+      "J3": {
+        "verdict": "fail",
+        "why": "the chat reads idle but the transcript ends in notice (dangling wake)"
+      },
+      "J4": {
+        "verdict": "pass",
+        "why": "mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered"
+      },
+      "J5": {
+        "verdict": "pass",
+        "why": "steer taken, read-only question answered, Stop ended the turn and the next prompt ran"
+      },
+      "J6": {
+        "verdict": "fail",
+        "why": "away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))"
+      },
+      "J7": {
+        "verdict": "fail",
+        "why": "tests still fail: ['FAILED (failures=1)']; area()/perimeter() do not give the right answers when the rig calls them itself; no CHANGELOG.md"
+      },
+      "J8": {
+        "verdict": "unverified",
+        "why": "restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)"
+      }
+    },
+    "score": "4/8",
+    "unverified": [
+      "J8"
+    ],
+    "failed": [
+      "J3",
+      "J6",
+      "J7"
+    ],
+    "evidence": {
+      "J1": {
+        "items": 4,
+        "agent_lines": 1,
+        "failed_notices": [],
+        "arbos_dir": true
+      },
+      "J2": {
+        "went_busy": true,
+        "workers": [
+          "fix-failing-test-and-add"
+        ],
+        "spawn_cards": 1
+      },
+      "J3": {
+        "idle_within_600s": true,
+        "duplicate_agent_items": [],
+        "status_drawn_as_reply": [],
+        "transcript_ends": "notice",
+        "workers_open": []
+      },
+      "J4": {
+        "midflight": {
+          "index": 19,
+          "reached_root_s": 0.0,
+          "task_turn_complete": 16,
+          "same_turn": false,
+          "relayed_to_worker": true,
+          "turn_tools": [
+            "plan",
+            "say",
+            "say"
+          ],
+          "workers": [
+            "fix-failing-test-and-add"
+          ],
+          "taken": true
+        },
+        "after": {
+          "started": true,
+          "answered": true
+        }
+      },
+      "J5": {
+        "steer_in_turn": true,
+        "readonly_answered": true,
+        "stop_clicked": true,
+        "interrupt": {
+          "ended_within_20s": true,
+          "interrupted_line": true,
+          "took_s": 0.5
+        },
+        "prompt_after_stop_answered": true
+      },
+      "J6": {
+        "tab_back": true,
+        "landed_on": "/tmp/arbos-qa-journey-linux-9g9zmd16/shapes-project",
+        "landed_on_project": true,
+        "late_reply_landed_while_closed": true,
+        "notify_before_click": {
+          "tab_dot": true,
+          "unseen": 1
+        },
+        "notify_after_click": {
+          "tab_dot": false,
+          "unseen": 0
+        },
+        "touched_before_click": false,
+        "touched_after_click": true,
+        "os_posts_on_relaunch": 0,
+        "items_before": 30,
+        "items_after": 31,
+        "sessions_before": 2,
+        "sessions_after": 2,
+        "worker_rows": 2,
+        "notes_unchanged": true,
+        "notifications": "unverified: the driver exposes no unseen count",
+        "away": {
+          "nonce": "away29815",
+          "unseen_away": 0,
+          "tab_dot_away": false,
+          "posted_new": 0,
+          "posted_hit": false,
+          "post_error": null,
+          "daemon_has_it": false,
+          "daemon_entries": 0,
+          "unseen_after_click": 0,
+          "tab_dot_after_click": false,
+          "notifier": "notify-send"
+        }
+      },
+      "J7": {
+        "tests_pass": false,
+        "test_file_untouched": true,
+        "fix_verified_independently": false,
+        "last_test_line": [
+          "FAILED (failures=1)"
+        ],
+        "changelog": false,
+        "changelog_has_qa": false,
+        "branches": [
+          "arbos/fix-failing-test-and-add",
+          "main"
+        ],
+        "ahead_of_main": {
+          "arbos/fix-failing-test-and-add": "1"
+        },
+        "main_moved": false
+      },
+      "J8": {
+        "restart": {
+          "pid_before": 1456796,
+          "pid_after": 1461402,
+          "line_count": 1,
+          "answered": true,
+          "failed_notices": [],
+          "side_effect_runs": 1
+        },
+        "second_project": {
+          "in_second": 1,
+          "in_first": 0,
+          "in_home_store": 0
+        },
+        "dropped_connection": {
+          "verdict": "unverified",
+          "why": "phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)"
+        }
+      },
+      "liveness": {
+        "pulses": 24,
+        "slowest_ms": 96,
+        "slowest_after": "launch",
+        "limit_ms": 1000
+      }
+    }
+  },
+  "duration_s": 367.9,
+  "place": "/tmp/arbos-qa-journey-linux-9g9zmd16/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 aab7565275d3 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T031311Z-journey-linux",
+  "branch": "main",
+  "usd": 0.0
+}

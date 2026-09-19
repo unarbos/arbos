@@ -1,0 +1,13 @@
+1789787603993 J1: pass — tab present, greeting shown ('Hey — the `shapes-project` place is ready with a Python proj'), .arbos/ created
+1789787609705 J2: pass — chat busy; workers ['fix-failing-test-and-add'] / 1 spawn card(s)
+1789787781643 J3: fail — the chat reads idle but the transcript ends in notice (dangling wake)
+1789787784763 J4: pass — mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered
+1789787795307 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789787829626 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789787925719 J6: fail — away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))
+1789787925766 J7: fail — tests still fail: ['FAILED (failures=1)']; area()/perimeter() do not give the right answers when the rig calls them itself; no CHANGELOG.md
+1789787956418 J8: unverified — restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)
+1789787959498 BREAK journey-J3: the chat reads idle but the transcript ends in notice (dangling wake)
+1789787959498 BREAK journey-J6: away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))
+1789787959498 BREAK journey-J7: tests still fail: ['FAILED (failures=1)']; area()/perimeter() do not give the right answers when the rig calls them itself; no CHANGELOG.md
+1789787959574 bugs: new dc509b215b.md, seen 9c8bf3b8ac.md, seen c247225fbb.md

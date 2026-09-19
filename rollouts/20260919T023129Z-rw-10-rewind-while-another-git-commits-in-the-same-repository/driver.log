@@ -1,0 +1,4 @@
+1789785089233 kernel started pid 1428532
+1789785091702 BREAK checkpoint-tree-lost-to-the-other-git: 1 of 6 checkpoints have no work tree while another git was committing: ["git add -A -- . failed: error: short read while indexing terminal-0.txt\nerror: terminal-0.txt: failed to insert into database\nerror: unable to index file 'terminal-0.txt'\nfatal: updating files failed"]
+1789785092590 kernel stopped with code 0
+1789785092631 bugs: new d037f76151.md

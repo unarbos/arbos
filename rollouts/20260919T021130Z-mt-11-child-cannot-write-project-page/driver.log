@@ -1,0 +1,4 @@
+1789783890578 kernel started pid 1418431
+1789784144815 BREAK mt-11-child-wrote-page: a worker overwrote .arbos/notes.md
+1789784144818 kernel stopped with code 0
+1789784144902 bugs: new 52c296a5ec.md

@@ -1,0 +1,38 @@
+{
+  "scenario": "co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "doc": "The yielding path is the one that can lose work. Root runs an attached twelve-second loop (not a bare sleep, which\n        would be refused outright) while a worker finishes in ~2 s. #432: the command yields when the worker's report lands, goes on as a job, and\n        its result follows. Check both halves: the yield is said, and the command's own output reaches the record.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "yielded-command-dropped",
+      "detail": "the yielded command never finished as a job: no jobs/*/out.log holds its output",
+      "where": "arbos-engine tools/bash.rs \u2014 a yielded command must go on as a job (#432)"
+    },
+    {
+      "rule": "yielded-result-never-reported",
+      "detail": "the command finished as a job (its out.log holds the output) but its result never reached root's transcript as anything but the call's own arguments within 20 s",
+      "where": "arbos-kernel \u2014 job completion \u2192 the agent's record (#432)"
+    }
+  ],
+  "notes": {
+    "first_turn_s": 0.1,
+    "long_command_record": {
+      "started": "1789785107122",
+      "ended": "1789785107123",
+      "error": "bash: refused \u2014 `for i in $(seq 12); do sleep 1; done; echo finished-after-yi\u2026` while 1 worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the t",
+      "body": "bash: refused \u2014 `for i in $(seq 12); do sleep 1; done; echo finished-after-yi\u2026` while 1 worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the t",
+      "output": "bash: refused \u2014 `for i in $(seq 12); do sleep 1; done; echo finished-after-yi\u2026` while 1 worker(s) of yours run. Their reports wake you the moment they land; a sleep only delays reading them. End the t"
+    },
+    "job_output_file": null,
+    "result_reached_root_as": null
+  },
+  "duration_s": 45.5,
+  "place": "/tmp/arbos-qa-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives-_c0b4mkh/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d644bdf0b24e protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T023146Z-co-04-attached-command-yields-to-a-workers-report-and-its-result-still-arrives",
+  "branch": "main",
+  "usd": 0.0
+}

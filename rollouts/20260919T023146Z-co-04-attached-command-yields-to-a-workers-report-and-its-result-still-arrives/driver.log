@@ -1,0 +1,5 @@
+1789785106751 kernel started pid 1436423
+1789785152177 BREAK yielded-command-dropped: the yielded command never finished as a job: no jobs/*/out.log holds its output
+1789785152177 BREAK yielded-result-never-reported: the command finished as a job (its out.log holds the output) but its result never reached root's transcript as anything but the call's own arguments within 20 s
+1789785152184 kernel stopped with code 0
+1789785152221 bugs: seen 1d6d5828af.md, seen a07b86c9dd.md

@@ -1,0 +1,43 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "final reply did not report FizzBuzz: \" I need to spawn a worker to handle code creation and execution. The worker encountered an error. It will try running `fizz.py` again. I've sent a note to the worker. It will read it at its next turn.\"",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "write",
+      "spawn",
+      "say",
+      "status",
+      "plan",
+      "write",
+      "plan",
+      "status",
+      "bash",
+      "bash",
+      "bash",
+      "plan",
+      "status",
+      "bash"
+    ],
+    "tool_errors": [
+      "as coordinator you write only the project store (.arbos/notes.md, docs/, internal/, media/, archived.md); code and other files are a worker's job. Do it now: spawn name:\"<five words, imperative>\" task:\"<the user's request, in their words>\" wait:true \u2014 its report comes back as that call's result; relay it in one sentence. Do not read or edit the code yourself first."
+    ],
+    "trace_files": 4
+  },
+  "duration_s": 39.5,
+  "place": "/tmp/arbos-qa-ordinary-task-11mkf_9m/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d644bdf0b24e protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T004746Z-ordinary-task",
+  "branch": "main",
+  "usd": 0.02314
+}

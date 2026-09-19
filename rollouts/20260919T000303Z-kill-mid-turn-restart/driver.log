@@ -1,0 +1,7 @@
+1789776183968 kernel started pid 1323325
+1789776186828 kernel SIGKILLed
+1789776187330 kernel-restart started pid 1323380
+1789776198001 BREAK turn-contract: transcript does not end in turn_complete: ['turn_complete', 'notice', 'nudge']
+1789776198002 BREAK wrong-output: count.txt was never written after the continuation
+1789776198005 kernel-restart stopped with code 0
+1789776198033 bugs: seen 78cee31f6c.md, seen 49ede41274.md

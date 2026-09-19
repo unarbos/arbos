@@ -1,0 +1,76 @@
+{
+  "scenario": "rw-10-rewind-while-another-git-commits-in-the-same-repository",
+  "doc": "Jacob's normal state: a terminal open in the project, git committing there while the kernel works. A second\n        git renames index.lock over index, so for an instant .git/index is not a regular file; the checkpoint's index\n        copy must survive that (retry, #419 at 5340c0d2), every turn must still get a work tree, and a rewind with files\n        landing in the middle of that churn must either restore fully or fail with the tree where it was.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "checkpoint-tree-lost-to-the-other-git",
+      "detail": "1 of 6 checkpoints have no work tree while another git was committing: [\"git add -A -- . failed: error: short read while indexing terminal-0.txt\\nerror: terminal-0.txt: failed to insert into database\\nerror: unable to index file 'terminal-0.txt'\\nfatal: updating files failed\"]",
+      "where": "arbos-engine tools::git snapshot_turn_tree \u2014 copy the index while another git renames it (#419 at 5340c0d2 retries)"
+    }
+  ],
+  "notes": {
+    "checkpoints": [
+      {
+        "line": 2,
+        "work": "a0759669aa",
+        "clean": null,
+        "work_error": ""
+      },
+      {
+        "line": 8,
+        "work": "190dadaa20",
+        "clean": null,
+        "work_error": ""
+      },
+      {
+        "line": 14,
+        "work": "ff2b2f79ae",
+        "clean": null,
+        "work_error": ""
+      },
+      {
+        "line": 20,
+        "work": "1b5ee8cea8",
+        "clean": null,
+        "work_error": ""
+      },
+      {
+        "line": 26,
+        "work": "",
+        "clean": null,
+        "work_error": "git add -A -- . failed: error: short read while indexing terminal-0.txt\nerror: terminal-0.txt: failed to insert into dat"
+      },
+      {
+        "line": 32,
+        "work": "7783c3a598",
+        "clean": null,
+        "work_error": ""
+      }
+    ],
+    "other_git_commits_during_turns": 973,
+    "restore_report": {
+      "type": "error",
+      "agent": "root",
+      "detail": "rewind: transcript cut, files not restored: git reset --hard 9722d3c0e337c129283aadfc99eacf1d41de2d2f failed; and the tree could not be put back (HEAD is at 4787da20b4ba instead of b02e448307b6) \u2014 recover by hand: git reset --hard b02e448307b69ff16e71488c0ca11492ce9c9992 && git read-tree -u --reset 26c461cba7cf5ef154db04e0b7dab9d18829c708 && git reset -q"
+    },
+    "files_after": [
+      "f1.txt",
+      "f2.txt",
+      "f3.txt",
+      "f4.txt",
+      "f5.txt",
+      "f6.txt"
+    ],
+    "tree_diff_after_failed_restore": []
+  },
+  "duration_s": 3.4,
+  "place": "/tmp/arbos-qa-rw-10-rewind-while-another-git-commits-in-the-same-repository-oq67jedd/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 d644bdf0b24e protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T023129Z-rw-10-rewind-while-another-git-commits-in-the-same-repository",
+  "branch": "main",
+  "usd": 0.0
+}

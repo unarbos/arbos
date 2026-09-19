@@ -1,0 +1,6 @@
+1789785483564 holder-a started pid 1440306
+1789785485615 arriving-b started pid 1440352
+1789785486665 BREAK lk-04-two-kernels-serve-one-place: the holder (pid 1440306) is still alive and the arriving kernel (pid 1440352) took the place anyway after both lock files were removed; it said nothing about the place being held (qal-j40)
+1789785486669 arriving-b stopped with code 0
+1789785486672 holder-a stopped with code 0
+1789785486696 bugs: seen 06c30e0315.md
