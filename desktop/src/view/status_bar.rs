@@ -14,6 +14,7 @@
 //! | --- | --- |
 //! | resting, up to date | `0.2.0 (1877)` in faint text; hovering lifts it |
 //! | update waiting | a filled blue `⭳ Update`; hovering lightens the plate |
+//! | update waiting, but this copy cannot take it | a muted `0.2.0 (2283) is out` that does nothing on a click; the tooltip says why (no kernel beside it, no key) |
 //! | updating | the same plate with the download filling it left to right, reading `Updating… 42%`, then `Installing…`, then `Restarting…` |
 //! | failed | the plate goes to the danger colour and reads `Update failed`; the reason is in the tooltip, and a click tries again |
 //!
@@ -311,6 +312,32 @@ impl Arbos {
                     checked,
                 },
                 cx,
+            ),
+            // A copy that cannot take the update (no kernel beside it, a
+            // build without the key) is told so on the offer, not at the
+            // end of a click: the plate offered *Update* and the press
+            // turned it red with the reason a moment later (F-227, cycle
+            // 61). The quiet state already keeps this promise; the offer
+            // did not.
+            State::Ready(update) if trouble.is_some() => plate(
+                cx,
+                Plate {
+                    id: "status-bar-update-elsewhere",
+                    label: format!("{} is out", update.version.human()),
+                    icon: Some(icons::files::DOWNLOAD),
+                    fill: theme.text_muted,
+                    progress: None,
+                    tooltip: Some(format!(
+                        "Update to {}{}\n\n{}",
+                        update.version.human(),
+                        match update.notes.trim() {
+                            "" => String::new(),
+                            notes => format!(" — {notes}"),
+                        },
+                        trouble.clone().unwrap_or_default()
+                    )),
+                    action: Action::None,
+                },
             ),
             State::Ready(update) => plate(
                 cx,
