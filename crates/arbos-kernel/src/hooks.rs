@@ -614,25 +614,29 @@ impl KernelHooks {
             self.notes_nudge_check(agent);
         }
         self.correction_nudge_check(agent);
-        // A child whose turn ended without a report: its last words, or its
-        // failure, are what the waiting parent gets.
+        // A child whose turn ended without a report: what the waiting
+        // parent gets is the turn's outcome as the done message reads it
+        // — its last words; its failure; or that the user stopped it. A
+        // child the person stopped mid-bash came back to spawn as "(the
+        // child's turn ended without a report)", and the parent told the
+        // person "The worker finished." (desktop cycle 69, d39).
         if let Some((_, tx)) = self.waits.lock().unwrap().remove(agent) {
             self.waited.lock().unwrap().insert(agent.to_string());
             let events =
                 arbos_core::load_transcript(&self.layout(agent).transcript()).unwrap_or_default();
-            let text = events
+            let lo = events
                 .iter()
                 .rev()
-                .find_map(|e| match &e.kind {
-                    EventKind::Assistant { text, .. } if !text.trim().is_empty() => {
-                        Some(text.clone())
-                    }
-                    EventKind::Notice { text, failed: true } => {
-                        Some(format!("(the child failed) {text}"))
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| "(the child's turn ended without a report)".into());
+                .find(|e| e.is_wake())
+                .map_or(0, |e| e.seq);
+            let (outcome, ok) = crate::plan::turn_outcome(&events, lo);
+            let text = if outcome.trim().is_empty() || outcome == "(no reply)" {
+                "(the child's turn ended without a report)".to_string()
+            } else if ok {
+                outcome
+            } else {
+                format!("(the child did not finish) {outcome}")
+            };
             let _ = tx.send(text);
         }
     }
