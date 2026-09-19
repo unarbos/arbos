@@ -5156,3 +5156,46 @@ Evidence: `media/mobile/cycle-169/`, and 19 stills in
 `media/mobile/journey/0919-122406/`.
 
 **PR:** [#765](https://github.com/unarbos/arbos/pull/765), harness only.
+
+## Cycle 170 — the orb has no colour for thinking
+
+The queue named `call — the microphone path` at cycle 127, and a recording
+was due. They went together.
+
+**The mic path works**: connect 1.5–2.3 s, the clip transcribed correctly,
+barge-in cutting playback at 306 ms and done at 351 ms.
+
+**Then a number nearly became a regression** (M-524). `reply_first_audio` read
+11.0, 11.1, 12.4 and 13.1 seconds across four runs, against 1249 ms recorded
+three cycles ago — a tenfold slowdown, if the two were the same measurement.
+They are not. One run of `call-text-in-chat` printed both on the same build:
+1244 ms for its small talk and 12223 ms for its delegated question. The
+gateway answers a greeting itself; a question about the project waits for the
+kernel to think. `mac-voice.sh` asks the second kind, and says so now where
+the number is read.
+
+**The recording found the real thing** (M-525). Reviewed, it reported that the
+app "looks stalled" during the ten seconds a delegated question takes, and
+that thinking could not be distinguished from listening at all.
+
+Measured, by the check's own sampling: connecting `(178,178,178)`, listening
+`(229,229,229)`, thinking `(179,179,179)`, speaking `(128,167,218)`. Three
+greys and one blue. Thinking and listening differ only in brightness — and
+inside a range listening already travels on its own, as the voice rises and
+falls.
+
+The check had been comparing phases by distance in RGB, which passes a pair
+the eye cannot separate. Two phases now count as sharing a face when neither
+has a hue, and it catches this live.
+
+**And its verdict had been reading clean over it** (M-526): the colour section
+said "listening and thinking wear the same face mid-call" while the closing
+line said "one pass through the phases, in order, no flapping". The verdict
+carries it now.
+
+No app change: what colour a thinking orb should be is a product decision,
+and this loop's job was to show that it does not currently have one.
+
+Film and still in `media/mobile/cycle-170/`.
+
+**PR:** [#766](https://github.com/unarbos/arbos/pull/766), harness only.
