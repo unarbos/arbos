@@ -10,11 +10,15 @@
 # It cannot tell you whether the machine under it has what those tools need,
 # and a rented Mac is replaced often enough for that to matter.
 #
-# It already bit. At cycle 152 `style-pair.py` died on the Mac with
-# `ModuleNotFoundError: No module named 'PIL'`, mid-cycle, and the work went
-# on by copying the screenshots to another machine and comparing them there.
-# That workaround is still how that row gets measured, which means the tool
-# lives here and runs somewhere else.
+# It already bit, though not the way I recorded it. At cycle 152
+# `style-pair.py` died on the Mac with `ModuleNotFoundError: No module named
+# 'PIL'`, and I moved that measurement to another machine and left it there.
+# The module was installed the whole time. This Mac has two interpreters: an
+# ssh command that sets no PATH gets `/usr/bin/python3`, which has neither
+# PIL nor websocket, and anything setting the harness PATH gets homebrew's,
+# which has both. So both interpreters are asked below. A report from the
+# good one alone would look clean and hide the failure that actually
+# happened.
 #
 # The Python list is read out of the harness's own imports rather than typed
 # here. A list typed here would be right on the day it was written and would
@@ -47,13 +51,27 @@ MODS=$(grep -ohE "^(import|from) [a-zA-Z_][a-zA-Z0-9_]*" "$HERE"/*.py \
        | awk '{print $2}' | sort -u)
 [ -n "$MODS" ] || { echo "  read no imports out of $HERE/*.py — the reader is broken,"
                     echo "  and every line here would be an empty pass"; exit 1; }
+BARE=/usr/bin/python3
+TRAP=0
 for m in $MODS; do
-  if python3 -c "import $m" >/dev/null 2>&1; then
-    ok "$m" "importable"
+  WHO=$(grep -lE "^(import|from) $m\b" "$HERE"/*.py | xargs -n1 basename | tr '\n' ' ')
+  HAVE=no; python3 -c "import $m" >/dev/null 2>&1 && HAVE=yes
+  BHAVE=no; [ -x "$BARE" ] && "$BARE" -c "import $m" >/dev/null 2>&1 && BHAVE=yes
+  if [ "$HAVE$BHAVE" = yesyes ]; then ok "$m" "importable by either python"
+  elif [ "$HAVE" = yes ]; then
+    printf '  %-22s only on PATH — %s breaks under a command that sets no PATH\n' "$m" "$WHO"
+    TRAP=$((TRAP + 1))
   else
-    gone "$m" "$(grep -lE "^(import|from) $m\b" "$HERE"/*.py | xargs -n1 basename | tr '\n' ' ')cannot run"
+    gone "$m" "${WHO}cannot run"
   fi
 done
+if [ "$TRAP" -gt 0 ]; then
+  echo
+  echo "  $TRAP module(s) exist for $(command -v python3) and not for $BARE."
+  echo "  An ssh command with no PATH gets the second one. That is how cycle 152"
+  echo "  read 'no module named PIL' off a machine that had it, and moved a"
+  echo "  whole coverage row onto another machine for eight cycles."
+fi
 
 echo
 echo "what the harness reads and writes:"

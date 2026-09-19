@@ -17,7 +17,19 @@ against each other at all.
 """
 import sys
 
-from PIL import Image
+try:
+    from PIL import Image
+except ModuleNotFoundError:
+    # This Mac has two interpreters. An ssh command that sets no PATH gets
+    # /usr/bin/python3, which has no PIL; the harness PATH gets homebrew's,
+    # which does. Cycle 152 read the bare traceback as "the Mac cannot do
+    # this" and moved the whole comparison to another machine for eight
+    # cycles. Say which python is running, so the next reader does not.
+    sys.exit(f"{sys.executable} has no PIL.\n"
+             "The harness uses the one on its own PATH:\n"
+             "    export PATH=/opt/homebrew/bin:$PATH\n"
+             "An ssh command that sets no PATH gets /usr/bin/python3, which "
+             "has neither PIL nor websocket.")
 
 
 def content_rows(img, thresh=25):
