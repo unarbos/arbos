@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 11:10 UTC.
+Last checked 2026-09-19 11:43 UTC.
 
-## Click Update. You will get build 2250. Jev is in it.
+## Click Update. You will get build 2259. Jev is in it.
 
-**2250** — signed, notarised, stapled, on the feed since 11:07 UTC.
+**2259** — signed, notarised, stapled, on the feed since 11:41 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2250 (builds 2251–2259):
+
+- **#753** — `add -A` gets six tries when a file is rewritten under it
+- **#752**, **#754** — two loop checks say what they found
+- **#755** — a child's shell write into the project page is refused before
+  it runs, as the write tools already refuse it
+
+## Before that: 2250
 
 New since 2245 (builds 2246–2250):
 

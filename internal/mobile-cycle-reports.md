@@ -5012,3 +5012,41 @@ Stills in `media/mobile/cycle-165/`.
 
 **PR:** [#757](https://github.com/unarbos/arbos/pull/757), harness only —
 `ios/` ends this cycle untouched.
+
+## Cycle 166 — two projects, one face
+
+Cycle 165 measured `phone` drawn purple in the list and red on the call
+screen, and left the question open. This cycle pulled it.
+
+**The code said one thing and the measurement said another** (M-514). Reading
+the source, the story was clean: the list applies the hub roster's face and
+fills a missing colour by hashing `hub:<machine>/<project>`, while the chat
+takes the kernel's identity straight off the `hello` frame with no filling.
+So the list invents and the call screen shows the real thing — and the list
+is the screen you look at most.
+
+Then I measured a second project. `demo` draws **0xE5533D** under the orb,
+exactly as `phone` does, while the list gives them different faces. A third,
+`const`, draws **0x4C8DFF** — the first colour in the palette, which is what
+`tint` returns when it recognises no colour at all.
+
+**So the call screen is not drawing the project's face** (M-513). It draws
+whatever identity the attached kernel sent, and one kernel serves several
+projects, so those projects share a face. Where no identity arrived it falls
+to `colors[0]`. The list, hashing each project's own key, is the screen
+telling them apart.
+
+**There is no fix in this cycle, because the fix is a decision** (M-515).
+Making the kernel's face stick in the list needs two changes at once — the
+chat writing the cache the list reads, and the roster not overwriting a
+learned colour with a hashed one — and both rest on a question nobody has
+answered: should the orb name the project you called, or the kernel you are
+talking to? Filed, with the numbers, at
+`internal/features-inbox/2026-09-19-one-project-two-faces-which-one-wins.md`.
+
+`call-face.sh` measures it on every run, so whenever the answer comes there
+is a check waiting for it. Its first run: three projects, two faces.
+
+Stills in `media/mobile/cycle-166/`.
+
+**PR:** [#759](https://github.com/unarbos/arbos/pull/759), harness only.

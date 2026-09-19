@@ -211,3 +211,42 @@ What is established, and is enough to matter:
 Anyone deciding what to do about the cap (`qal-j46` lists the options for its budget twin) should
 know that making the library more efficient cannot recover a window that was not spent on the
 library — and that there is a 50% overhead worth finding before anyone raises the cap to cover it.
+
+## Settled: it is suspension, and I retracted that too soon
+
+I wrote that suspension explained the missing half, retracted it on one wall-clock argument, then
+measured properly. The retraction was wrong. What decides it is two controlled runs with the
+machine **continuously awake**, timed from outside `run.py`:
+
+| run | scenarios | reported | wall clock | gap |
+|---|---|---|---|---|
+| deterministic | 10 | 247.4 s | 248.0 s | **0.6 s** (0.1 s each) |
+| model-driven | 6 | 759.5 s | 760.0 s | **0.5 s** (0.1 s each) |
+
+With nobody asleep, the loop's own numbers account for essentially all of the wall clock — for
+model scenarios as much as deterministic ones. **There is no per-scenario overhead to find.** In
+cycles that span my idle periods the same gap is 16–39 s per scenario. The only difference between
+those two conditions is the machine being suspended, so that is what the gap is.
+
+The objection that made me retract does not survive either: I thought the kernel build before
+`run.py` might absorb the difference, but cycle start to first scenario is **0.8 min**, three
+cycles running.
+
+### What I still cannot say
+
+The 04:37 step spans **133 min of wall clock** and its `timeout 100m` had not yet fired — so the
+timeout's clock lost about 33 minutes to the suspension, while `time.monotonic()` (the scenario
+durations) lost more. **The two clocks discount suspended time by different amounts**, and that
+difference is the fifty minutes. I have not worked out the exact rule each follows on this
+hypervisor, and it would take a deliberate experiment — suspend for a known interval, read both
+clocks — rather than inference from cycle logs.
+
+### What it means in practice
+
+A step's cap is partly spent on time the machine was asleep. Cycles that run across an idle period
+truncate having done less work, and the summary reads as though the library was too big for the
+window. Cycle 16 is the control: it ran with me mostly present, its main step **completed** rather
+than truncating, and it got through 89 scenarios where the 17:01 step managed 33.
+
+So the loop's throughput depends on the agent being there — which is worth knowing before anyone
+tunes the cap or trims the library to fit it.
