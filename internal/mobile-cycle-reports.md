@@ -5359,3 +5359,41 @@ Stills in `media/mobile/cycle-174/`, film beside them.
 
 **PR:** [#775](https://github.com/unarbos/arbos/pull/775) — the first `ios/`
 change in twenty cycles, batched.
+
+## Cycle 175 — what the stale app was hiding, and what it was not
+
+Cycle 173 found three scenarios installing a day-old build and fixed it. This
+cycle re-ran the same sweep with the fix in, to see which verdicts had been
+resting on that stale app.
+
+**One changed, and it is the one that mattered** (M-540). `list-rows` now
+reads "every row names a state, ages read as ages, and nothing speaks a
+separator", where the identical check in cycle 173's sweep reported the
+separator. Same scenario, same position in the run, one change between them.
+#774 is confirmed by a second measurement rather than only by the hand-run
+that motivated it.
+
+**The other fault did not change, and my explanation of it was wrong**
+(M-541). I wrote in cycle 173 that `tool-fold` "was measuring that same stale
+app". It was not. It is main's copy of the *check* — whose repair, cycle 162,
+found four separate faults in it and none of them in the app — sitting in an
+open PR ever since.
+
+Measured both on one build: main's copy prints `opening the fold showed
+nothing more (4 → 4)`; the copy from #751 prints `'6 tool calls' hides 6
+line(s) and gives them back`, listing `bash · echo one` twice. The sweep has
+been printing a fault that was disproved thirteen cycles ago.
+
+**Two harness fixes are stranded in open PRs** (M-542): #751 for the fold, and
+#732 for the recording scenario, which I have been checking out by hand for
+every film since cycle 155. The sweep's header now says to check whether a
+fault's fix is already written and merely unmerged before chasing it — the
+sweep runs what is checked out, and that is `main` unless a cycle says
+otherwise.
+
+Twenty-five scenarios, none silent, none without a verdict, one fault and it
+is a stale check.
+
+Evidence in `media/mobile/cycle-175/`.
+
+**PR:** [#776](https://github.com/unarbos/arbos/pull/776), harness only.
