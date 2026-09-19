@@ -571,6 +571,14 @@ fn normalize(p: &Path) -> PathBuf {
 pub fn sleep_wait_secs(cmd: &str) -> Option<u64> {
     let mut total: Option<u64> = None;
     let mut in_loop = false;
+    // How many times the loops run, when every one is a `for` over a
+    // literal list: `for i in 1 2 3` is three passes. A `while`/`until`,
+    // or a `for` over an expansion (`$(seq 1 60)`, `*`, `{1..60}`), has no
+    // count a reader can see and stays a poll. A bounded loop with a
+    // `sleep 1` in it is three seconds of script, not a wait on workers
+    // (QA co-03: `for i in 1 2 3; do sleep 1; done; echo looped` was
+    // refused while a worker ran).
+    let mut passes: Option<u64> = Some(1);
     for words in segments(cmd) {
         let mut i = 0;
         // Loop and branch keywords open a segment; the command follows.
@@ -580,8 +588,19 @@ pub fn sleep_wait_secs(cmd: &str) -> Option<u64> {
                 "do" | "then" | "else" | "!" | "{" | "while" | "until" | "for" | "if"
             )
         {
-            if matches!(words[i].text.as_str(), "while" | "until" | "for") {
-                in_loop = true;
+            match words[i].text.as_str() {
+                "while" | "until" => {
+                    in_loop = true;
+                    passes = None;
+                }
+                "for" => {
+                    in_loop = true;
+                    passes = match (passes, for_list_len(&words[i + 1..])) {
+                        (Some(p), Some(n)) => Some(p.saturating_mul(n)),
+                        _ => None,
+                    };
+                }
+                _ => {}
             }
             i += 1;
         }
@@ -645,10 +664,37 @@ pub fn sleep_wait_secs(cmd: &str) -> Option<u64> {
             total = Some(total.unwrap_or(0).saturating_add(s));
         }
     }
-    match total {
-        Some(s) if in_loop => Some(s.max(3600)),
-        other => other,
+    match (total, passes) {
+        (Some(s), Some(n)) if in_loop => Some(s.saturating_mul(n)),
+        (Some(s), None) if in_loop => Some(s.max(3600)),
+        (other, _) => other,
     }
+}
+
+/// The items of `for <name> in <items…>` when every item is a literal
+/// word; `None` for a list a reader cannot count (an expansion, a glob, a
+/// brace range, a `for ((…))`, or no `in` at all, which loops over `$@`).
+fn for_list_len(words: &[Word]) -> Option<u64> {
+    let mut it = words.iter();
+    let name = it.next()?;
+    if name.text.starts_with("((") {
+        return None;
+    }
+    if it.next().map(|w| w.text.as_str()) != Some("in") {
+        return None;
+    }
+    let mut n = 0u64;
+    for w in it {
+        if w.quoted {
+            n += 1;
+            continue;
+        }
+        if w.text.contains(['$', '*', '?', '`', '{', '[']) {
+            return None;
+        }
+        n += 1;
+    }
+    Some(n)
 }
 
 /// `75`, `0.5`, `2m`, `1h` as whole seconds.
@@ -1009,6 +1055,23 @@ mod tests {
         assert!(s("while :; do sleep 1; done").unwrap() >= 3600);
         assert!(s("for i in $(seq 1 60); do echo poll $i; sleep 1; done").unwrap() >= 3600);
         assert!(s("until grep -q done out.log; do sleep 2; done").unwrap() >= 3600);
+        // A loop a reader can count is that many passes, not a poll
+        // (QA co-03): three seconds of script ran while a worker was up.
+        assert_eq!(s("for i in 1 2 3; do sleep 1; done; echo looped"), Some(3));
+        assert_eq!(s("for f in a b; do sleep 2; sleep 1; done"), Some(6));
+        assert_eq!(
+            s("for i in 1 2 3 4 5 6 7 8 9 10; do sleep 1; done"),
+            Some(10)
+        );
+        // Lists a reader cannot count stay a poll.
+        assert!(s("for i in {1..60}; do sleep 1; done").unwrap() >= 3600);
+        assert!(s("for f in *.log; do sleep 1; done").unwrap() >= 3600);
+        // A quoted expansion is one word, so one pass; unquoted, it is
+        // as many as the shell finds.
+        assert_eq!(s("for x in \"$LIST\"; do sleep 1; done"), Some(1));
+        assert!(s("for x in $LIST; do sleep 1; done").unwrap() >= 3600);
+        assert!(s("for i; do sleep 1; done").unwrap() >= 3600);
+        assert!(s("for ((i=0;i<9;i++)); do sleep 1; done").unwrap() >= 3600);
         // No sleep: nothing.
         assert_eq!(s("ls -la"), None);
         assert_eq!(s("cargo build"), None);
