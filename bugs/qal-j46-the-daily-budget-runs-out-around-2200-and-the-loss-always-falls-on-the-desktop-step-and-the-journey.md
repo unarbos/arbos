@@ -116,3 +116,13 @@ were already breaking earlier today and are not new.
 
 So the budget did not merely delay coverage — it hid a live regression for one cycle and would have
 hidden a second indefinitely.
+
+## It also corrupts the headline (qal-j48)
+
+The journey lives in the desktop step, so a spent budget removes it — and the journey pass rate
+counts an unrun step as a **failure**, not as "not measured". Four of the last ten journey runs
+verified nothing at all, and those four count against every step at once.
+
+So the budget does not just cost coverage; it makes the loop's own summary report that lost
+coverage as product failure. `qal-j48` has the numbers: real failures are 0-2 per step where the
+headline reads 4-6.

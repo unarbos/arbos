@@ -1,0 +1,9 @@
+{
+  "name": "af-01-folder-renamed-under-a-running-kernel",
+  "doc": "The kernel serves `place`; the user renames the folder (Finder, `mv`, a sync tool). Then a line arrives. User-visible questions: does the turn run; where does the transcript go \u2014 into the renamed folder, or into a ghost `.arbos/` recreated at the old path; does the window (a fresh attach) see the same history; and does the kernel say anything? A ghost at the old path is the destructive outcome: the user's history splits in two.",
+  "tags": [
+    "landing",
+    "after-failure",
+    "filesystem"
+  ]
+}

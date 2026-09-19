@@ -1,0 +1,31 @@
+{
+  "scenario": "journey-j8a-headless",
+  "doc": "J8a without the desktop: a bash command with a side effect (`echo ran-<tag> >> side-effects.log; sleep 30`), SIGKILL the kernel during the sleep, restart it. The continued turn must not run the command again \u2014 side-effects.log holds the tag once (qal-j02 / #316).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "side-effect-never-ran",
+      "detail": "the command's first run left no side effect within 60 s",
+      "where": ""
+    },
+    {
+      "rule": "side-effect-missing",
+      "detail": "side-effects.log holds the tag 0 time(s) across the kernel restart (expected once; qal-j02)",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "side_effect_runs": 0,
+    "tool_lines": 1,
+    "interrupted_tool_record": 0
+  },
+  "duration_s": 216.3,
+  "place": "/tmp/arbos-qa-journey-j8a-headless-vop21qaz/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 63528126ed21 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T122611Z-journey-j8a-headless",
+  "branch": "main",
+  "usd": 0.00557
+}

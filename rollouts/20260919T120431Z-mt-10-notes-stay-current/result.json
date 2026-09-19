@@ -1,0 +1,26 @@
+{
+  "scenario": "mt-10-notes-stay-current",
+  "doc": "Item 10. After a delegated three-part request, .arbos/notes.md has one item per workstream with a readout, not the template.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-10-notes-stale",
+      "detail": "notes.md unchanged or under two items after a delegated request (1 items)",
+      "where": "coordinator contract: notes stay current without being asked"
+    }
+  ],
+  "notes": {
+    "notes_items": 1,
+    "changed": true,
+    "notes_head": "+++\nowner = \"root\"\n+++\n# Notes\n\nGoals, constraints, decisions: [project-context](docs/project-context.md)\n\n## Poems\n- [ ] [Write poems about rivers and mountains](docs/river.md) \u2014 Poems written and delivered.\n"
+  },
+  "duration_s": 35.6,
+  "place": "/tmp/arbos-qa-mt-10-notes-stay-current-u1rhfrq3/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 63528126ed21 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T120431Z-mt-10-notes-stay-current",
+  "branch": "main",
+  "usd": 0.02371
+}

@@ -1,0 +1,10 @@
+{
+  "name": "bench-screenshot@bench-see-and-commit-nudges",
+  "doc": "Checklist item 3: run something and send back a screenshot the user can see (browser tool -> image file). (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "tags": [
+    "inbox",
+    "bench-see-and-commit-nudges",
+    "benchmark",
+    "item-3"
+  ]
+}

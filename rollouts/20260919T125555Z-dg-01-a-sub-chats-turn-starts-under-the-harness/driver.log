@@ -1,0 +1,3 @@
+1789822556543 desktop: app pid 1706344 on :9175
+1789822574032 BREAK dg-01-the-line-never-reached-the-chat: nothing is on chat-1789822556746's transcript after 1 s, so the send did not arrive under the harness: {'t': 0, 'lines': 0, 'flags': [('root', False, True, 'live'), ('root', False, False, 'live'), ('chat-1789822556746', False, False, 'live')]}
+1789822574176 bugs: seen d1e25b6be1.md

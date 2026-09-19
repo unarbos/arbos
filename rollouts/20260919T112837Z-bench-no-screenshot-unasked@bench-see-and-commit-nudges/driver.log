@@ -1,0 +1,4 @@
+1789817317580 kernel started pid 1646812
+1789817320086 BREAK wrong-output: reply lacks the result: ' I need a `task` or `brief` to spawn a worker. Please provide a description for the worker.'
+1789817320089 kernel stopped with code 0
+1789817320118 bugs: seen 253e3b5e85.md

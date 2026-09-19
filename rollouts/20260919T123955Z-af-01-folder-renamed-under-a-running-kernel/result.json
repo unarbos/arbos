@@ -1,0 +1,36 @@
+{
+  "scenario": "af-01-folder-renamed-under-a-running-kernel",
+  "doc": "The kernel serves `place`; the user renames the folder (Finder, `mv`, a sync tool). Then a line arrives. User-visible questions: does the turn run; where does the transcript go \u2014 into the renamed folder, or into a ghost `.arbos/` recreated at the old path; does the window (a fresh attach) see the same history; and does the kernel say anything? A ghost at the old path is the destructive outcome: the user's history splits in two.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "af-01-line-lost-in-silence",
+      "detail": "the line typed after the rename went nowhere; the kernel stopped itself (stderr only) and nothing a person could read says the folder moved or the line was dropped",
+      "where": "arbos-kernel serve: on a lost store, a last notice into the moved folder's transcript, or the desktop's respawn telling the user"
+    }
+  ],
+  "notes": {
+    "turn_after_move_ended": false,
+    "lines_before": 4,
+    "moved_folder_lines": 4,
+    "ghost_at_old_path": false,
+    "ghost_lines": 0,
+    "second_landed_in": "nowhere",
+    "kernel_stderr_says": [
+      "Walking /tmp/arbos-qa-af-01-folder-renamed-under-a-running-kernel-uwbxo9zx/place...",
+      "Index built successfully at /tmp/arbos-qa-af-01-folder-renamed-under-a-running-kernel-uwbxo9zx/home/.cache/arbos/tgrep/308c32b9210e742b",
+      "arbos-kernel stopping: the place's .arbos store is gone (/tmp/arbos-qa-af-01-folder-renamed-under-a-running-kernel-uwbxo9zx/place/.arbos); its jobs end with this kernel"
+    ],
+    "notices": [],
+    "kernel_exited_on_purpose": true
+  },
+  "duration_s": 11.1,
+  "place": "/tmp/arbos-qa-af-01-folder-renamed-under-a-running-kernel-uwbxo9zx/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 63528126ed21 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T123955Z-af-01-folder-renamed-under-a-running-kernel",
+  "branch": "main",
+  "usd": 0.0
+}

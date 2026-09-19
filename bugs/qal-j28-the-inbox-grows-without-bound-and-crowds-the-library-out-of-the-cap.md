@@ -130,3 +130,84 @@ The control worth keeping afterwards is the budget one: assert the tracked step'
 times its measured mean fits inside the cap, so the suite goes red when it outgrows its cap
 instead of silently truncating. A truncation that prints per-scenario passes and no total is the
 failure mode this whole file is about.
+
+## Half the cap is not scenario work (measured 2026-09-19)
+
+A thing this write-up assumed and I had not checked: that the 100-minute cap is spent *running
+scenarios*. Summing the durations the loop itself records, per cycle's first step:
+
+| cycle | scenarios | measured work | outcome |
+|---|---|---|---|
+| 15:01 | 70 | 27.8 min | completed |
+| **17:01** | **33** | **49.9 min** | **TRUNCATED at 100 min** |
+| 21:01 | 80 | 49.3 min | completed |
+| 00:00 | 81 | 44.3 min | completed |
+
+Two readings come out of it.
+
+**The truncated cycle did no more work than the ones that finished** — 49.9 min against 49.3 and
+44.3. It reached 33 scenarios instead of 80 because each cost more: that hour is `qal-j45`'s
+provider slowdown (`ordinary-task` 361 s, `secrets-leak-hunt` 501 s against 21-29 s and 15-35 s).
+So the crowding-out this bug describes is not the only way the tail goes unasked; a slow hour does
+it with the same library.
+
+**And only half the window was measured work at all.** Two truncated steps, the same shape:
+
+| step | scenarios | measured work | cap |
+|---|---|---|---|
+| 17:01 | 33 | 49.9 min | 100 min |
+| 04:37 | 77 | 49.6 min | 100 min |
+
+About fifty minutes of each hundred is not scenario time. **I first blamed VM suspension and that
+is wrong**, so the correction matters more than the guess:
+
+- *Suspension is not it.* The 04:37 step spans **132 minutes of wall clock** between its first and
+  last scenario and only then hits a `timeout 100m`. If the cap counted suspended time it would
+  have fired at 100 wall-clock minutes. Both clocks pause, so the cap is not being eaten by the
+  machine being asleep — my earlier note here said it was.
+- *Snapshotting is not it.* A whole rollout is 124 files and copies in **6 ms**.
+- *The obvious tail is already counted.* `duration_s` is taken at `run.py:2067`, after
+  `cx.cleanup()`, after both provider checks and after the `state-after` snapshot — so cleanup,
+  the transcript scans and the snapshot are all inside the number, not outside it.
+
+### Per-scenario overhead, measured directly
+
+Ten deterministic scenarios in one `run.py`, timed from outside:
+
+```
+sum of reported durations: 247.4 s
+wall clock for the run:    248.0 s
+unaccounted:                 0.6 s   (0.1 s per scenario)
+```
+
+So the loop's own numbers account for essentially all of a run's wall clock when nothing else is
+going on. **Per-scenario overhead is not the missing half** — it is a tenth of a second.
+
+Nor is it a hung scenario at the end: in both truncated steps the gap between the last finished
+scenario and the next step's first is 1.2 min and 9.0 min, not fifty.
+
+### What the two numbers actually are
+
+The 04:37 step spans 132.9 min of *wall clock* and ~100 min of whatever clock `timeout` counts, and
+I was idle for about 86 min of it. 132.9 − 49.6 ≈ 83, which is close enough to the idle window to
+say the **wall-clock** gap is suspension. What I cannot square is the other side: within the
+~100 min `timeout` counted, only 49.6 min was inside scenario functions, and the direct measurement
+above says the gap is not overhead.
+
+The honest reading is that I do not know which clock `timeout 100m` is really counting on a VM that
+pauses, and the difference between the two candidate readings is the whole fifty minutes.
+
+So roughly half of each step's **running** time goes somewhere I have not found, consistently, on
+two independent measurements. I am not filing it as its own bug and not guessing again; isolating
+it needs the loop instrumented between scenarios, which is a deliberate change rather than
+something to do in passing.
+
+What is established, and is enough to matter:
+
+> Half the cap is not spent on scenarios, and it is not suspension, snapshots, or teardown. A step
+> can be truncated having done fifty minutes of work in a hundred-minute window, and the summary
+> reads as though the library was too big for the time.
+
+Anyone deciding what to do about the cap (`qal-j46` lists the options for its budget twin) should
+know that making the library more efficient cannot recover a window that was not spent on the
+library — and that there is a 50% overhead worth finding before anyone raises the cap to cover it.

@@ -1,0 +1,6 @@
+1789816250586 kernel started pid 1635243
+1789816272186 kernel SIGKILLed
+1789816272687 kernel-restart started pid 1635306
+1789816275892 BREAK wrong-output: count.txt was never written after the continuation
+1789816275896 kernel-restart stopped with code 0
+1789816275928 bugs: seen 49ede41274.md
