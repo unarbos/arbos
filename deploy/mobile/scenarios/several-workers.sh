@@ -100,8 +100,17 @@ echo
 # The row's claim is that the workers are still there after leaving and
 # coming back, so say whether they were.
 BEFORE_N=$(echo "$HIGH" | grep -oE "[0-9]+" | head -1)
-AFTER_N=$(echo "$AFTER" | grep -oE "[0-9]+" | head -1)
-if [ -z "$AFTER_N" ]; then
+# `Agents N` only. HIGH is an Agents count, and the pill reads `Working N`
+# while anything runs — the running ones, a subset. Taking the first number
+# from either form would compare a subset with a whole and call a busy
+# project a lost one, which is the mistake cycle 154 spent a cycle on in the
+# workers sheet.
+AFTER_N=$(echo "$AFTER" | grep -oE "Agents [0-9]+" | grep -oE "[0-9]+" | head -1)
+if [ -z "$AFTER_N" ] && echo "$AFTER" | grep -q "Working"; then
+  echo "VERDICT: cannot say — the pill reads '$AFTER' after reopening, which counts"
+  echo "         only what is running. Comparing that with $HIGH agents would be a"
+  echo "         subset against a whole."
+elif [ -z "$AFTER_N" ]; then
   echo "VERDICT: no pill after reopening — the workers did not survive the trip,"
   echo "         or the chat did not finish opening"
 elif [ -n "$BEFORE_N" ] && [ "$AFTER_N" -ge "$BEFORE_N" ]; then
@@ -144,6 +153,15 @@ if [ -n "$PILL" ]; then
     DONE_ROW=$(mine_row)
   done
   [ "$PAGED" = 0 ] || echo "  paged $PAGED screen(s) to reach this run's workers"
+  # Let the sheet stop moving before tapping it. A swipe leaves momentum, and
+  # tapping a label read mid-glide lands where that row *was*: cycle 185
+  # tapped one worker and opened another's chat on one run, and nothing at
+  # all on the next — the sheet was still under the finger both times.
+  if [ "$PAGED" -gt 0 ]; then
+    sleep 2
+    DONE_ROW=$(mine_row)
+    [ -n "$DONE_ROW" ] || echo "  the row moved away while the sheet settled"
+  fi
   MINE=yes
   if [ -z "$DONE_ROW" ]; then
     DONE_ROW=$(first_worker_row "$UDID" Done)
@@ -153,11 +171,26 @@ if [ -n "$PILL" ]; then
   if [ -n "$DONE_ROW" ]; then
     ui tap "$DONE_ROW" >/dev/null 2>&1; sleep 5
     shot 05-a-finished-worker
+    # Did it land on the worker that was tapped? Cycle 185 tapped
+    # "w191149 rivers, Done" and opened a chat headed "say sentence about
+    # th…" — a different worker entirely — and the check said "opening:
+    # w191149 rivers" and then reported on whatever it found, without
+    # noticing. A row you tapped and a chat you are in are two claims.
+    LANDED=$(ui dump | awk '$2+0 < 120 && $3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print; exit }')
+    WANTED=$(echo "$DONE_ROW" | sed 's/, Done$//')
+    case "$LANDED" in
+      "$WANTED"*) echo "  landed on: $LANDED";;
+      *) echo "  LANDED ELSEWHERE: tapped '$WANTED' and the header reads '$LANDED'"
+         echo "  Nothing below is about the worker this run chose."
+         MINE=elsewhere;;
+    esac
     HELD=$(ui dump | grep -cE "StaticText")
     EMPTY=$(ui dump | grep -c "Nothing on record yet")
     ui dump | awk '$3 == "StaticText" { $1="";$2="";$3=""; sub(/^ +/,""); print }' \
       | head -4 | cut -c1-64 | sed 's/^/     /'
-    if [ "$EMPTY" != 0 ]; then
+    if [ "$MINE" = elsewhere ]; then
+      echo "  VERDICT archived: cannot say — the tap opened a different worker's chat"
+    elif [ "$EMPTY" != 0 ]; then
       echo "  VERDICT archived: still 'Nothing on record yet.' — the finding from cycle 32 stands"
     elif [ "$HELD" -ge 2 ]; then
       echo "  VERDICT archived: its chat holds $HELD line(s) of what it did — cycle 32's"
