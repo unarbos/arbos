@@ -73,6 +73,46 @@ reach_the_list() {
   return 1
 }
 
+# type_line <udid> <text> — put a line in the composer and prove it arrived.
+#
+# Two traps, both silent, both of which have cost a run:
+#
+#   * `idb ui text` returns before its characters arrive, so typing and
+#     sending at once sends whatever had landed by then (M-162);
+#   * a line containing any non-ASCII character types **nothing at all**.
+#     Measured at cycle 149: "plain ascii probe one two three" lands, "with
+#     an em dash — like this" leaves the composer showing its placeholder.
+#     The scenario then sends an empty box, gets no answer, and reports a
+#     fault in whatever it was testing.
+#
+# So the text is refused before it is typed if it is not ASCII, and read
+# back after it is.
+type_line() {
+  local udid=$1 text=$2 i
+  # Counted, not pattern-matched: a `case` glob with a character range is
+  # at the mercy of the locale's collation, and the first version of this
+  # refused a line that was pure ASCII.
+  if [ "$(printf '%s' "$text" | LC_ALL=C tr -d '\040-\176' | wc -c | tr -d ' ')" != 0 ]; then
+    echo "  refusing to type a line with a character idb drops: $text" >&2
+    echo "  (non-ASCII types nothing at all and the send goes out empty)" >&2
+    return 1
+  fi
+  for i in 1 2 3; do
+    python3 "$SIM_LIB_DIR/ui.py" "$udid" focus >/dev/null 2>&1
+    sleep 0.8
+    idb ui text "$text" --udid "$udid" >/dev/null 2>&1
+    local j
+    for j in 1 2 3 4 5 6; do
+      case "$(python3 "$SIM_LIB_DIR/ui.py" "$udid" field plain 2>/dev/null)" in
+        *"$text"*) return 0;;
+      esac
+      sleep 1
+    done
+  done
+  echo "  the line never reached the composer after three tries" >&2
+  return 1
+}
+
 # pt <pixels-on-a-screenshot> -> points for idb, vertical scale.
 pt() { python3 -c "print(round($1 * $SIM_PT_H / $SIM_SHOT_H))"; }
 
