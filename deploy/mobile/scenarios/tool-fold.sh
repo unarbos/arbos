@@ -25,6 +25,15 @@ B=com.unarbos.arbos.ios
 . "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 rows() { ui dump | grep -cE "StaticText"; }
+# Counting every StaticText on screen cannot see a fold open, because opening
+# one pushes the transcript up and takes as many lines off the top as it adds
+# below. Cycle 161 read "4 → 4" that way and called it a fold that refused to
+# open. The lines themselves are compared instead: what is on screen when it
+# is open that was not there when it was closed.
+# Sorted, but not made unique: two calls that ran the same command have the
+# same label, and folding them to one would report a fold of two as hiding
+# one. That is the mistake the workers sheet made for twenty cycles.
+lines() { ui dump | awk '$3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' | sort; }
 foldline() { ui dump | grep -oE "[0-9]+ tool calls?[^\"]*" | tail -1; }
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
@@ -38,7 +47,12 @@ ui field >/dev/null 2>&1 || { echo "no composer in '$ROW'"; exit 1; }
 MARK="fold $(date -u +%H%M%S)"
 echo "== give it several tool calls to fold =="
 # Plain ASCII: a line with an em dash types nothing at all (cycle 149).
-LINE="$MARK: run these three bash commands one after another and nothing else: echo one, echo two, echo three. Then reply done."
+# "one after another" is not the same as "separately", and the model read it
+# the sensible way: one bash call holding `echo one; echo two; echo three`.
+# Two runs in a row then folded a single call, so the check declined to test
+# opening at all — a check that cannot reach its own subject most of the time
+# is barely a check. The combining is what has to be forbidden.
+LINE="$MARK: make three separate bash tool calls. Do not combine them into one command and do not use semicolons or newlines to join them. The first runs echo one, the second runs echo two, the third runs echo three. Then reply done."
 # Read the field back before sending. `idb ui text` returns before its
 # characters arrive, and the first run of this typed into an unfocused
 # composer, sent nothing, and reported "no fold line appeared" — a verdict
@@ -78,24 +92,50 @@ for _ in $(seq 1 60); do
 done
 sleep 2
 CLOSED=$(rows)
+lines > "$OUT/closed.txt"
 echo "  text rows while closed: $CLOSED"
 
 echo
 echo "== open it =="
 # Tapped by the words it shows, not by a position: the fold moves as the
 # transcript grows underneath it.
-ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
+# The tap's result was never looked at. A fold whose label carries a duration
+# — "3 tool calls · 2s" — is not found by the prefix alone, and the scenario
+# then reported an app that would not open when nothing had been tapped.
+# Read the fold again, here, rather than trusting what it said earlier. The
+# count climbs while the turn runs — this tapped "3 tool calls" at a moment
+# the screen read "6 tool calls", the tap found nothing to do, and the run
+# reported a fold that would not open.
+FOLD=$(foldline)
+echo "  the fold now reads: ${FOLD:-nothing}"
+[ -n "$FOLD" ] || { echo "  the fold is gone from the screen"; exit 1; }
+TARGET=$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")
+if ! ui tap "$TARGET" >/dev/null 2>&1; then
+  echo "  could not tap '$TARGET'. The fold on screen reads '$FOLD', so the"
+  echo "  words being tapped are not the words it shows — this is the rig."
+  echo
+  echo "VERDICT: cannot say — the fold was never opened, so nothing about"
+  echo "         opening it was measured"
+  exit 1
+fi
 sleep 3
 OPEN=$(rows)
+lines > "$OUT/open.txt"
 xcrun simctl io "$UDID" screenshot "$OUT/02-open.png" >/dev/null 2>&1
+REVEALED=$(comm -13 "$OUT/closed.txt" "$OUT/open.txt" | grep -c .)
 echo "  text rows while open:   $OPEN"
+echo "  lines opening revealed: $REVEALED"
+comm -13 "$OUT/closed.txt" "$OUT/open.txt" | cut -c1-64 | sed 's/^/      /' 
 
 echo
 echo "== close it again =="
-ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
+ui tap "$(foldline | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
 sleep 3
 AGAIN=$(rows)
+lines > "$OUT/again.txt"
+LEFT=$(comm -13 "$OUT/closed.txt" "$OUT/again.txt" | grep -c .)
 echo "  text rows closed again: $AGAIN"
+echo "  lines still showing:    $LEFT (was $REVEALED when open)"
 
 echo
 FAULTS=0
@@ -113,10 +153,11 @@ if [ "${N:-1}" -lt 2 ]; then
   echo "stills in $OUT"
   exit 0
 fi
-[ "$OPEN" -gt "$CLOSED" ] || { echo "  FAULT: opening the fold showed nothing more ($CLOSED → $OPEN)"; FAULTS=$((FAULTS + 1)); }
-[ "$AGAIN" -le "$CLOSED" ] || { echo "  FAULT: closing it left $((AGAIN - CLOSED)) row(s) behind"; FAULTS=$((FAULTS + 1)); }
+[ "${REVEALED:-0}" -gt 0 ] || { echo "  FAULT: opening the fold revealed no line that was not already there"; FAULTS=$((FAULTS + 1)); }
+[ "${LEFT:-0}" = 0 ] || { echo "  FAULT: closing it left $LEFT of those $REVEALED line(s) on screen"; FAULTS=$((FAULTS + 1)); }
 if [ "$FAULTS" = 0 ]; then
-  echo "VERDICT: '$FOLD' folds $((OPEN - CLOSED)) row(s) away and gives them back on a tap"
+  echo "VERDICT: '$FOLD' hides $REVEALED line(s) and gives them back on a tap, and"
+  echo "         takes them away again when it closes"
 else
   echo "VERDICT: $FAULTS fault(s) in the fold — named above"
 fi
