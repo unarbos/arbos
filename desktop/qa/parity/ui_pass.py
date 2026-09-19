@@ -775,6 +775,25 @@ class Pass:
             self.check("copy-turn", sc, "click copy", "clipboard holds the answer", lambda: self.app.click(ids["copy-turn"]), copied)
         else:
             self.gap("copy-turn", sc, "click", "no copy-turn-* element")
+        # F-215: a command that exits non-zero carries its exit code as a
+        # mark on its card, not as a line of output.
+        self.send("Run `ls /definitely-not-here` with bash and tell me the exact error text. Do not delegate."); self.wait_idle(90); time.sleep(1)
+        act = active(self.state()) or {}
+        ran_it = any(i.get("kind") == "tool" and "definitely-not-here" in (i.get("label") or "") for i in act.get("items", []))
+        if ran_it:
+            for w in self.ids("work-*"):
+                if self.seen(w):
+                    self.app.click(w); time.sleep(0.6); break
+            def exit_marks():
+                return [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"] if e["path"].split(".")[-1].startswith("term-exit-")]
+            for r in self.ids("run-*"):
+                if self.seen(r) and not exit_marks():
+                    self.app.click(r); time.sleep(0.6)
+            marks = exit_marks()
+            self.record("command-exit-mark", sc, "a command exits 2; open its run", "the card's header carries 'exit 2'",
+                        f"marks={marks}", "pass" if marks else "fail", self.still("exit-mark"))
+        else:
+            self.gap("command-exit-mark", sc, "run", "the model did not run the command itself")
         # F-197: ⌘K finds a chat by what was said in it, not only its title
         # and first words; the row shows the words around the match.
         before_search = self.state().get("active_session")

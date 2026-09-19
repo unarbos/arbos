@@ -3050,6 +3050,7 @@ fn terminal_card(
                 .when_some(exit_code.filter(|code| *code != 0 && !running), |row, code| {
                     row.child(
                         div()
+                            .id(("term-exit", ix))
                             .flex_none()
                             .text_size(px(MONO_SIZE))
                             .line_height(px(MONO_LEAD))
