@@ -5,11 +5,11 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 00:04 UTC.
+Last checked 2026-09-19 00:43 UTC.
 
-## Click Update. You will get build 2146. Jev is in it.
+## Click Update. You will get build 2150. Jev is in it.
 
-**2146** — signed, notarised, stapled, on the feed since 00:01 UTC.
+**2150** — signed, notarised, stapled, on the feed since 00:40 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
@@ -19,6 +19,14 @@ on the release.
 The relaunch-tab bug (mt-24) is still open. #675 aimed at it and QA still
 fails it four times out of four, so do not read any build here as closing
 it.
+
+New since 2146 (builds 2147–2150):
+
+- **#706** — the sweep runs the eight checks that were sitting out
+- **#707** — mobile: the projects-list row's status line is one VoiceOver
+  element
+
+## Before that: 2146
 
 New since 2143 (builds 2144–2146):
 
