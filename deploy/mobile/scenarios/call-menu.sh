@@ -63,21 +63,37 @@ if [ -z "$TOGGLE" ]; then
 else
   echo
   echo "== the toggle names the other route =="
-  echo "  before: $TOGGLE"
+  # The label follows the *route*, not the preference: `toggleSpeaker` flips
+  # a preference and then reads back what CoreAudio actually did. A
+  # simulator has one output and nothing to switch to, so the route cannot
+  # move and the label is right not to. The first version of this called
+  # that a fault in the app, which it is not — so the route is read too, and
+  # the label is only judged when the route it names has changed.
+  route_now() { ui dump | grep -oE "(speaker|headset|receiver|headphones) · [0-9]+%" | head -1; }
+  # Close the menu to see the badge underneath it.
+  idb ui tap 196 700 --udid "$UDID" >/dev/null 2>&1; sleep 1
+  R1=$(route_now)
+  open_menu >/dev/null 2>&1
+  echo "  before: $TOGGLE   (route: ${R1:-not shown})"
   ui tap "$TOGGLE" >/dev/null 2>&1
   sleep 2
+  R2=$(route_now)
   open_menu || echo "  the menu did not reopen"
   AFTER=$(items | grep -oE "Use (speaker|headset)" | head -1)
-  echo "  after:  ${AFTER:-nothing}"
+  echo "  after:  ${AFTER:-nothing}   (route: ${R2:-not shown})"
   if [ -z "$AFTER" ]; then
     echo "  FAULT: the toggle vanished after being used"
     FAULTS=$((FAULTS + 1))
+  elif [ -n "$R1" ] && [ "$R1" = "$R2" ]; then
+    echo "  the route did not change — there is one output on this simulator,"
+    echo "  so the label staying put is correct and the flip is untested here."
+    echo "  That half needs the phone (the AirPods row)."
   elif [ "$AFTER" = "$TOGGLE" ]; then
-    echo "  FAULT: it still offers '$AFTER' — the label does not follow the route,"
-    echo "         so it is telling the caller to switch to what they are on"
+    echo "  FAULT: the route changed to '$R2' and the menu still offers '$AFTER' —"
+    echo "         it is telling the caller to switch to what they are on"
     FAULTS=$((FAULTS + 1))
   else
-    echo "  it flipped, so the label follows the route"
+    echo "  the route moved and the label followed it"
   fi
 fi
 
