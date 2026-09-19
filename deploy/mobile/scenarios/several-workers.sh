@@ -153,6 +153,15 @@ if [ -n "$PILL" ]; then
     DONE_ROW=$(mine_row)
   done
   [ "$PAGED" = 0 ] || echo "  paged $PAGED screen(s) to reach this run's workers"
+  # Let the sheet stop moving before tapping it. A swipe leaves momentum, and
+  # tapping a label read mid-glide lands where that row *was*: cycle 185
+  # tapped one worker and opened another's chat on one run, and nothing at
+  # all on the next — the sheet was still under the finger both times.
+  if [ "$PAGED" -gt 0 ]; then
+    sleep 2
+    DONE_ROW=$(mine_row)
+    [ -n "$DONE_ROW" ] || echo "  the row moved away while the sheet settled"
+  fi
   MINE=yes
   if [ -z "$DONE_ROW" ]; then
     DONE_ROW=$(first_worker_row "$UDID" Done)
