@@ -475,6 +475,14 @@ static SCRATCH_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 /// index so the real one is not touched. The tree is in the object store
 /// unreferenced; a checkpoint hangs a commit on it, a diff reads it.
 pub fn work_tree(cwd: &Path) -> Result<String, String> {
+    work_tree_with(cwd, ADD_TRIES)
+}
+
+/// Tries `add -A` gets when a file changes under it (see `work_tree_with`):
+/// six, 50 ms apart and growing, about a second in all.
+const ADD_TRIES: u32 = 6;
+
+fn work_tree_with(cwd: &Path, add_tries: u32) -> Result<String, String> {
     let index = git_out(cwd, &["rev-parse", "--git-path", "index"])
         .ok_or_else(|| "git rev-parse --git-path index failed".to_string())?;
     let index = cwd.join(index);
@@ -560,7 +568,28 @@ pub fn work_tree(cwd: &Path) -> Result<String, String> {
         // place, `git init` run by the agent in its first turn) lost
         // every tree save to that until the next kernel start wrote the
         // exclude; found by the standing pass under load.
-        run(&["add", "-A", "--", "."])?;
+        // A file another process is rewriting while `add` reads it — a
+        // log a server appends to, a capture file a harness truncates and
+        // refills (QA's rw-10: "short read while indexing terminal-0.txt")
+        // — fails the add; a file truncated under git's mmap kills git
+        // outright (SIGBUS, exit 135, nothing on stderr, git 2.43), and
+        // the turn's checkpoint had no tree. The file is done being
+        // written a moment later: a few tries over about a second take
+        // the tree then. A crashed git leaves its index lock behind;
+        // removed so the next try is not refused for it.
+        let mut tries = 0;
+        loop {
+            match run(&["add", "-A", "--", "."]) {
+                Ok(_) => break,
+                Err(e) if tries < add_tries => {
+                    tries += 1;
+                    let _ = e;
+                    let _ = std::fs::remove_file(scratch.with_extension("lock"));
+                    std::thread::sleep(std::time::Duration::from_millis(50 * tries as u64));
+                }
+                Err(e) => return Err(e),
+            }
+        }
         // And dropped from the scratch index if an earlier plain `add`
         // had taken it.
         let _ = run(&[
@@ -575,6 +604,7 @@ pub fn work_tree(cwd: &Path) -> Result<String, String> {
         run(&["write-tree"])
     })();
     let _ = std::fs::remove_file(&scratch);
+    let _ = std::fs::remove_file(scratch.with_extension("lock"));
     let _ = std::fs::remove_file(&excludes);
     result
 }
@@ -2486,6 +2516,93 @@ mod tests {
             names.contains("g3.txt") && !names.contains("f3.txt"),
             "{names}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod churning_file_tests {
+    use super::*;
+
+    /// QA's rw-10 (draft d037f76151): 1 of 6 checkpoints had no tree
+    /// while another process rewrote a file in the repository — `add -A`
+    /// failed with "short read while indexing terminal-0.txt". A file
+    /// truncated under git's mmap kills git (SIGBUS, nothing on stderr).
+    /// Here a writer that rewrites an 8 MB file for 120 ms, then rests
+    /// 600 ms: a single `add` collides often; six tries over about a
+    /// second always find the rest. The control is the same loop with
+    /// no retries, whose failures are counted, not asserted.
+    #[test]
+    fn a_file_rewritten_under_add_does_not_cost_the_turn_its_tree() {
+        let dir = std::env::temp_dir().join(format!("arbos-churn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |a: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(a)
+                    .current_dir(&dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "x",
+        ]);
+        let churn = dir.join("terminal-0.txt");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s2, c2) = (stop.clone(), churn.clone());
+        let big = "x".repeat(8 << 20);
+        let writer = std::thread::spawn(move || {
+            use std::io::Write;
+            while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+                let burst = std::time::Instant::now();
+                while burst.elapsed() < std::time::Duration::from_millis(120) {
+                    let mut f = std::fs::File::create(&c2).unwrap();
+                    f.write_all(big.as_bytes()).unwrap();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(600));
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let mut control_fails = 0;
+        for _ in 0..12 {
+            if work_tree_with(&dir, 0).is_err() {
+                control_fails += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let mut fails = Vec::new();
+        for _ in 0..12 {
+            if let Err(e) = work_tree_with(&dir, ADD_TRIES) {
+                fails.push(e);
+            }
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        writer.join().unwrap();
+        eprintln!("control (no retries): {control_fails}/12 saves lost");
+        assert!(fails.is_empty(), "with retries: {fails:?}");
+        // No lock or scratch litter left in .arbos.
+        let litter: Vec<String> = std::fs::read_dir(dir.join(".arbos"))
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with("index-scratch"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(litter.is_empty(), "{litter:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
