@@ -4257,3 +4257,36 @@ this loop keeps having to remove, and I wrote a fresh instance of it in the
 same file that was meant to close a gap.
 
 **PR:** [#717](https://github.com/unarbos/arbos/pull/717), harness only.
+
+## Cycle 147 — four ways to accuse the app of my own bugs
+
+The call's `≡` menu had never been opened by anything, like the chat's the
+cycle before. It holds `Back to chat`, a route toggle and `Hang up`, and
+they are covered now: the menu lists all three and Back lands in a chat with
+a composer, three runs running (M-461).
+
+The route toggle is the interesting one, and the interesting part is that it
+**cannot be judged here**. `toggleSpeaker` flips a preference and then reads
+back what CoreAudio actually did; a simulator has one output and nothing to
+switch to, so the label is right not to move. That half belongs to the
+AirPods row, which needs Jacob's phone.
+
+**Getting to that took four versions, and three of them blamed the app**
+(M-462):
+
+1. the label did not flip, so — fault. It cannot flip here;
+2. judged against the route instead, but the route was unreadable, so the
+   chain fell through to `FAULT: the route changed to ''` — an accusation
+   assembled from an empty string;
+3. `offers: nothing` from a menu it had **just listed**, because it looked
+   once to decide the menu was up and a second time to read it, and the menu
+   closed in between;
+4. tapped a menu that had closed itself after the toggle, then called the
+   missing chat a fault. One run in two.
+
+Every one of those printed a confident sentence about the app. The common
+rule is small and I keep relearning it: **unknown must not fall through to
+an accusation.** Missing evidence gets its own branch, and that branch comes
+first.
+
+**PR:** [#718](https://github.com/unarbos/arbos/pull/718), harness only.

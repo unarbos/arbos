@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 02:38 UTC.
+Last checked 2026-09-19 02:55 UTC.
 
-## Click Update. You will get build 2170. Jev is in it.
+## Click Update. You will get build 2173. Jev is in it.
 
-**2170** — signed, notarised, stapled, on the feed since 02:35 UTC.
+**2173** — signed, notarised, stapled, on the feed since 02:53 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2170 (builds 2171–2173):
+
+- **#717** — `chat-overflow-menu.sh` checks what is behind the chat's ···
+  menu
+
+## Before that: 2170
 
 New since 2168 (builds 2169–2170):
 
