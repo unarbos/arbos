@@ -120,6 +120,14 @@ echo "--- 4. the same project a cold start would reopen? ---"
 if [ -z "${NAMED:-}" ] || [ "$NAMED" = "$AT_REST" ]; then
   echo "  the composer named no project at rest, so there is nothing to compare"
 else
+  # Open it first. The composer's name survives across launches, but the
+  # cold-start landing is about the chat that was in front *this* session —
+  # so with no chat opened, the app comes back to the list and there is
+  # nothing to compare. That is a real difference between the two memories,
+  # and it is not the question this step is asking.
+  ui tap "$NAMED" >/dev/null 2>&1 && sleep 4
+  OPENED_IT=$(ui dump | grep -cE "Button +Back")
+  [ "$OPENED_IT" = 0 ] && echo "  could not open '$NAMED' to put it in front"
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
   xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 11
   shot 04-after-a-cold-start
@@ -129,8 +137,8 @@ else
   if [ "$LANDED" = "$NAMED" ]; then
     echo "  VERDICT: they agree — the list offers the project the app comes back to"
   elif [ -z "$LANDED" ]; then
-    echo "  VERDICT: cannot say — the cold start landed on the list, so there is no"
-    echo "           project to compare the composer's name against"
+    echo "  VERDICT: cannot say — the cold start landed on the list even after"
+    echo "           '$NAMED' was opened, so there is nothing to compare"
   else
     echo "  VERDICT: they disagree. The list offers to message '$NAMED' and a cold"
     echo "           start opens '$LANDED'. Both features are about the project in"
