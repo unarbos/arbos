@@ -109,3 +109,11 @@ else
   echo "         it should have been."
 fi
 echo "stills in $OUT"
+
+# `-hubURL` is a launch argument, so it applies to this launch only and a
+# later one reads the real hub again. The relaunch is for the simulator's
+# sake: left as it is, the app sits in front of a hub that stops answering
+# the moment this script's trap fires, and anyone looking at the screen
+# afterwards sees a fault this check invented.
+xcrun simctl terminate "$UDID" $B 2>/dev/null
+xcrun simctl launch "$UDID" $B >/dev/null 2>&1
