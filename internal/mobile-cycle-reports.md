@@ -5868,3 +5868,116 @@ generalise to the list, which is worth knowing before anyone acts on it.
 Evidence in `media/mobile/cycle-188/`.
 
 **PR:** [#793](https://github.com/unarbos/arbos/pull/793), harness only.
+
+## Cycle 189 — two features about one idea, never checked together
+
+The queue is healthy — everything reachable is within eleven cycles — so
+instead of re-running a passing row I chased something noticed on the cycle
+181 walk and left alone: the list's composer names one project while eleven
+are on screen.
+
+**It follows the project you were last in** (M-582): `Message phone…`, then
+`Message demo…` after opening demo, then `Message const…` after const. That
+is the same project a cold start reopens, so the two features are expressing
+one idea — the project in front.
+
+**Nothing checked they agree** (M-583). `list-composer` verified the named
+project is a row on screen and survives a filter. `what-a-returning-user-sees`
+verified the cold start reopens the chat he left. Neither asked whether it is
+the *same* project, so if they ever drifted the list would offer to message
+one project while the app came back to another, and both checks would still
+pass.
+
+They agree: composer `const`, cold start `const`.
+
+**It took three runs, and the two failures were the check refusing rather
+than concluding** (M-584). The first landed on the list, because the scenario
+had only read and filtered and never opened a chat — the composer's name
+survives launches while the front-project landing is about this session,
+which is a real difference between the two memories but not the question
+being asked. The second could not open the project at all: step 2 leaves
+`sub` in the search box, so the list was showing only the rows matching it.
+
+Both times it declined and said why, which is the only reason the third run's
+answer is worth anything.
+
+Stills in `media/mobile/cycle-189/`.
+
+**PR:** [#794](https://github.com/unarbos/arbos/pull/794), harness only.
+
+## Cycle 190 — the photo flow, and a wrapper I should have written four cycles ago
+
+A recording was due and the photo flow had not been filmed since cycle 130,
+which makes it the most visible path nobody had watched lately.
+
+**It is clean** (M-585). The `+` menu offers Files and Photo Library neatly.
+The chip sits top-left inside the composer with its × and leaves the text
+field usable. The sent photo appears inside the user's own bubble with the
+typed line beneath it. The model names the picture — *Ice plant flowers,
+predominantly magenta* — and the turn closes at `Worked 5s` with the composer
+back at rest. Nothing clipped, nothing stalled.
+
+**The review's one complaint was not ours** (M-586). It flagged a two-second
+black "Loading…" screen when the picker opens. The frame shows a round ×
+top-left and a spinner in `PHPickerViewController`'s own styling, which runs
+out of process. I checked rather than asserted: the app's only "Loading"
+string is `Loading earlier lines…`, in the transcript pager. Nothing to fix,
+and nobody need chase it again.
+
+**And I finally wrote the wrapper** (M-587). Four cycles — 178, 181, 187 and
+this one — have each typed out the same three lines by hand: start
+`recordVideo` in the background, run the scenario, kill the recorder, hope
+the kill landed. They are easy to get subtly wrong, and a recorder left
+behind by an interrupted run holds the file open so the next one writes
+nothing. That is how a cycle-46 run produced no video at all and nobody
+noticed until the review asked where it was.
+
+`film.sh <cycle> <scenario>` stops any recorder still going before it starts,
+and reports the file's size rather than leaving it to be discovered. Tested
+on this cycle's scenario: 39 MB, and it prints the command for the review
+copy.
+
+Film and stills in `media/mobile/cycle-190/`.
+
+**PR:** [#795](https://github.com/unarbos/arbos/pull/795), harness only.
+
+## Cycle 191 — somewhere nobody had looked
+
+The queue is healthy and the app has been stable for many cycles, so instead
+of re-running a passing row I went looking for a place the harness had never
+been. There is one: the system text size.
+
+**The app ignores it** (M-588). Set the simulator to `large` and then to
+`accessibility-extra-extra-extra-large`, relaunching each time, and the two
+screens are the same picture — 18 of 61,854 sampled pixels differ, and those
+are the clock and a project's age ticking over. Eleven rows both times, one
+ellipsis both times. The simulator confirms it took the setting each time, so
+this is the app and not the rig.
+
+The cause is one file. `Theme.swift` builds every font from
+`Font.system(size:)`, which is a fixed size. SwiftUI's text *styles* —
+`.body`, `.callout`, `.title` — are the ones that scale, and the app uses
+none of them.
+
+**I have not changed it** (M-589), because it may well be deliberate. This
+app's geometry is tight on purpose: the list's row pitch sits within half a
+point of Cursor's as a share of screen height, measured repeatedly since
+cycle 83, and the chat's left margin likewise. Dynamic Type would move both,
+and the style-pair check rests on them holding. There is also one user, on
+one phone, and if his text size is the default this costs nothing today.
+
+Against that, it is the standard iOS accessibility setting and eyes change.
+So it is filed as a question, with the numbers, rather than guessed at — and
+if the answer is "no, fixed on purpose", that is worth writing down as a
+decision instead of leaving it an accident of how the theme was first
+written.
+
+**One thing the check had to get right** (M-590): it puts the size back to
+`large` on the way out whatever happens. A run that leaves the simulator at
+an accessibility size would quietly change what every later scenario
+measures, which is cycle 173's stale app wearing different clothes. Checked
+after the run: `large`.
+
+Stills in `media/mobile/cycle-191/` — the two sizes, indistinguishable.
+
+**PR:** [#796](https://github.com/unarbos/arbos/pull/796), harness only.
