@@ -89,6 +89,21 @@ pub fn asks(place: &Place, agent: &str) -> Vec<Waiting> {
         .collect()
 }
 
+/// Whether the transcript shows the agent woke after asking `ask_id`:
+/// an `ask` line with that id followed by a `wake` — the question's turn
+/// is over and another began, so nobody is waiting on it. False when the
+/// ask is the latest thing, or is not on the transcript at all (a
+/// question parked by a kernel whose transcript write was lost keeps
+/// standing rather than be dropped on a guess).
+pub fn ask_is_stale(events: &[crate::Event], ask_id: &str) -> bool {
+    let Some(at) = events.iter().rposition(
+        |e| matches!(&e.kind, crate::EventKind::Ask { call_id: Some(id), .. } if id == ask_id),
+    ) else {
+        return false;
+    };
+    events[at + 1..].iter().any(|e| e.is_wake())
+}
+
 pub fn remove(place: &Place, agent: &str, kind: &str, id: &str) -> bool {
     std::fs::remove_file(path_for(place, agent, kind, id)).is_ok()
 }
