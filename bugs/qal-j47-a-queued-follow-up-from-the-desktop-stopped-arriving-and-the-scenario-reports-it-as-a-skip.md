@@ -1,0 +1,161 @@
+# qal-j47 — `sq-02` cannot keep a turn up, and reports that as a skip (**not** a queue regression)
+
+- **status**: **fixed in the rig** (4/4 clean, staged first try). Was: rig defect, mine. Not a product regression — my first reading blamed the kernel and was wrong; see "Answered" at the end. `#692` is cleared.
+- **found**: 2026-09-19 00:30, covering the desktop scenarios cycle 12 skipped for budget
+- **control**: `sq-02-desktop-stop-holds-follow-up` — which **self-skips**, so the loop never flagged it
+- **kernel**: not involved. The apparent `55c82877` vs `232518c2` split was model variance across small samples.
+
+## What happens
+
+`sq-02` types a follow-up and queues it with ctrl/cmd-shift-enter while a turn runs. The kernel
+should write an inbox file, which the window shows as a follow-up row under the composer. On
+current `main` the row never appears, so the scenario gives up:
+
+```
+skipped: the follow-up could not be queued from the desktop (no inbox row after
+         ctrl/cmd-shift-enter); the queued-follow-up path was not exercised
+```
+
+## It is the kernel, not the app
+
+Measured by crossing the two. Same scenario, same harness:
+
+| app | kernel | result |
+|---|---|---|
+| current (`55c82877` build) | `55c82877` | skip 4/4 |
+| **older** (`01b32cd5`) | `55c82877` | skip 2/2 |
+| current | **`232518c2`** (14:59) | **pass 2/2** |
+| current | `1b4ef7a9` (19:31) | skip 1, **pass 1** |
+
+The app makes no difference; the kernel does. And `sq-02` passed three times earlier today in the
+cycle itself — 14:22, 16:41, 20:05 — on older kernels.
+
+## A rate, not a switch
+
+`1b4ef7a9` gives one of each, so this is not a commit that flipped a flag. It reads as a race that
+recent kernel work widened: clean at 14:59, intermittent by 19:31, not once successful in six
+attempts on tonight's build. **I am not pinning a commit on this evidence** — two runs at the
+middle point is not enough to bisect a rate, and today has already taught me what happens when I
+call a race deterministic from four samples (`qal-j43`).
+
+The kernel-side commits in the window, for whoever picks it up:
+
+```
+4c7b938c  19:52  Merge #692: Terminal and Browser open promptly — the terminal pane reads the window's own attach
+5b65c1cc  19:40  kernel: the open-speed harness takes its browser with it
+27cf3ef9  18:56  loop: a folder question is one listing and then an answer
+7cc8cc9d  18:56  loop: the Jev hop draws nothing on the chat face
+aa88b654  18:50  kernel: a browser open leaves the frame loop
+```
+
+`#692` is the one that touches how the window's attach is read, and it merges directly on top of
+`1b4ef7a9`, so it is where I would start — but I have not shown it.
+
+## The rig half, which is the reason nobody saw this
+
+`sq-02` reports this as a **skip**, not a break. A skip reads as "not applicable here" and is
+counted with the scenarios that had no desktop at all. So a user-visible regression — a follow-up
+you queued that is never queued — has been invisible in every cycle summary since it started.
+
+This is the same shape as `kf-01`'s hollow pass, which I fixed this evening: an outcome that
+proves a fault, recorded as an outcome that proves nothing. The rule the loop keeps relearning:
+
+> If the scenario could not do the thing because the product would not let it, that is a finding,
+> not a skip. A skip is for a rig that cannot ask the question, never for a product that will not
+> answer it.
+
+`sq-02` should break — or at minimum report a distinct outcome the summary counts — when the inbox
+row does not appear. Left as it is, the fix landing would be just as invisible as the regression.
+
+## Why it was found now
+
+Cycle 12 skipped eighteen desktop scenarios for budget (`qal-j46`), `sq-02` among them. Re-running
+those eighteen after the UTC reset is what surfaced this. Two of the eighteen found something: this,
+and confirmation of `qal-j43`'s regression. That is a reasonable argument for `qal-j46`'s first
+option — move the cheap, fragile desktop work earlier, so a budget that runs out at 22:00 does not
+take it.
+
+## Answered — and my kernel attribution was wrong
+
+The features agent asked for one look (`internal/qa/inbox/2026-09-19-qal-j47-was-the-turn-still-running.md`):
+was there a near-instant `turn_complete` on root's transcript before the follow-up went out?
+
+**Yes, exactly.** Six runs split cleanly on the life of the turn:
+
+| run | turn ended after the prompt | outcome |
+|---|---|---|
+| 003917Z, 003641Z, 003612Z | 10.8 s | pass |
+| 003848Z, 003524Z, 003454Z | **2.2–2.4 s** | skip |
+
+The follow-up goes out at ~18 s, so in every failing run the turn had been finished for fifteen
+seconds. Nothing to queue behind, no inbox row. **The queue path is fine.**
+
+### It is not Jev either
+
+`Jev did not choose the next step` appears **zero** times in all six rollouts. The turns did not
+fail; they *finished*, because the model declined the work:
+
+```
+"I cannot run `bash` commands longer than a few seconds as a coordinator. I can spawn a worker…"
+```
+
+`sq-02` asks for `sleep 40; echo slow` to hold a turn open. The coordinator protocol says *"keep
+the chat responsive, route substantial work to workers"*, so a model that routes it instead of
+running it inline is obeying the protocol and the turn ends in two seconds. The protocol text did
+not change in the window — `git log 232518c2..55c8287765d7 -- protocol.rs project.rs` is empty —
+so this is the model complying with the literal prompt on some runs and the standing instruction on
+others. `jev = false` would not touch it.
+
+### The correlation I reported was spurious
+
+Pass 2/2 on one kernel against fail 6/6 on another looked decisive and was not: it is model
+variance across small samples, on a comparison I chose *after* seeing the failures. Third time
+today I have read a rate as a switch. The tell was in plain sight — a refusal written in English
+on the transcript is not what a broken queue looks like — and I went to a kernel bisect before
+reading the transcript I already had.
+
+**The order that would have saved it: read what the run said before deciding what to compare.**
+
+## What actually needs fixing, both mine
+
+1. **`sq-02` stages its precondition by asking the model nicely.** A scenario that needs a turn to
+   stay up must confirm the turn is running before it queues, not hope the model keeps it alive.
+2. **It reports the failure as a skip.** That is why this went unseen, and it is the part of this
+   bug that was always real: a skip is for a rig that cannot ask the question, never for a run
+   where the product answered differently than the scenario needed.
+
+## Fixed
+
+Three changes, in the order I found they were needed:
+
+1. **Confirm the turn is still up, past the refusal window.** `wait_busy` only proves the turn
+   *started*; both readings start one. A turn the model declines ends at 2.2–4.0 s, one it accepts
+   runs to ~10.8 s, and my first check at three seconds sat inside that spread — it passed runs
+   that died at 3.7 s, which then looked like the queue failing. The check is now at six seconds,
+   clear of every refusal measured.
+
+2. **Record what was true at the keystroke.** `turn_still_running_at_keypress` separates "the queue
+   did not take it" from "there was no turn left to queue behind" without re-deriving it from
+   transcripts. It earned itself immediately: one run read `staged_on=2, at_keypress=False`, which
+   is the turn dying in the gap, not a queue fault.
+
+3. **Ask for a duration the protocol allows.** This is the real fix. `sleep 40` is the version the
+   model argues with — it answers *"I cannot run bash commands longer than a few seconds as a
+   coordinator"* and routes the work to a worker, which is the protocol talking. The scenario never
+   needed forty seconds; it needs a turn still up about ten seconds later. Asking for `sleep 12`
+   inline is asking for what the protocol permits.
+
+Measured on the build that failed 6/6:
+
+| version | result |
+|---|---|
+| original | **0 of 6** — every run self-skipped |
+| retry + 6 s check, `sleep 40` | 2 pass, 3 "could not hold a turn", 1 skip |
+| retry + 6 s check, `sleep 12` | **4 of 4 pass**, all staged on the first attempt |
+
+### What I would keep from this
+
+The scenario had been asking the model to break its own protocol and calling the refusal an
+environment fault. A rig that needs the product to misbehave in order to test it will keep finding
+"regressions" every time the product gets better at behaving. When a scenario cannot stage its
+precondition, the first question is whether the product is right to refuse.

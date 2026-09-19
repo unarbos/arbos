@@ -1,0 +1,40 @@
+{
+  "scenario": "rm-04-project-face-in-hello-and-roster",
+  "doc": "project.toml's top-level name/icon/color ride on `hello` and in the hub roster; a rewrite is announced (`changed project.toml`) and the next hello carries the new face.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "rm-04-rewrite-not-announced",
+      "detail": "no `changed project.toml` frame after the file was rewritten",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "hello_identity": {
+      "name": "QA Face",
+      "icon": "star",
+      "color": "#ff8800"
+    },
+    "roster_face": {
+      "color": "#ff8800",
+      "icon": "star",
+      "name": "QA Face"
+    },
+    "plain_get_healthz": 200,
+    "changed_frame": null,
+    "hello_identity_after_rewrite": {
+      "name": "QA Face Two",
+      "icon": "terminal",
+      "color": "#00aaff"
+    }
+  },
+  "duration_s": 31.7,
+  "place": "/tmp/arbos-qa-rm-04-project-face-in-hello-and-roster-q1fkdq2x/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 c52d0253109f protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T080825Z-rm-04-project-face-in-hello-and-roster",
+  "branch": "main",
+  "usd": 0.0
+}

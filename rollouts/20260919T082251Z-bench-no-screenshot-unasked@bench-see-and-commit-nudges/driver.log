@@ -1,0 +1,4 @@
+1789806171243 kernel started pid 1563972
+1789806174251 BREAK wrong-output: reply lacks the result: ' I need a `task` or `brief` to spawn a worker. What would you like me to do?'
+1789806174254 kernel stopped with code 0
+1789806174281 bugs: seen 253e3b5e85.md

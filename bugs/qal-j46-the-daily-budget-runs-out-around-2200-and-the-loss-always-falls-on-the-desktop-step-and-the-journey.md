@@ -100,3 +100,19 @@ Not mine to set, but the options are visible from here:
 
 The first is the cheapest and fixes the specific harm: the loss currently falls on the work least
 able to afford it.
+
+## What the re-run found (2026-09-19 00:30)
+
+Re-running the eighteen after the UTC reset was not bookkeeping. Two of them had something to say:
+
+- `kf-01`, `mt-01`, `mt-04` and `dg-01` broke on `qal-j43`'s regression — the guard that was
+  skipped for budget is the one that would have caught it in the cycle;
+- `sq-02` self-skipped with a reason never seen before, which turned out to be a **new kernel-side
+  regression** in the queued-follow-up path (`qal-j47`), invisible to every cycle summary because
+  the scenario records it as a skip.
+
+Eight of the eighteen passed; the other four breaks (`mt-14`, `mt-18`, `mt-20`, `journey-linux`)
+were already breaking earlier today and are not new.
+
+So the budget did not merely delay coverage — it hid a live regression for one cycle and would have
+hidden a second indefinitely.

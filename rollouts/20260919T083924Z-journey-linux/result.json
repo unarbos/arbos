@@ -1,0 +1,202 @@
+{
+  "scenario": "journey-linux",
+  "doc": "The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "journey-J6",
+      "detail": "away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))",
+      "where": "docs/acceptance-journeys.md"
+    },
+    {
+      "rule": "journey-J8",
+      "detail": "the in-flight command's side effect never happened (before or after the restart)",
+      "where": "docs/acceptance-journeys.md"
+    }
+  ],
+  "notes": {
+    "steps": {
+      "J1": {
+        "verdict": "pass",
+        "why": "tab present, greeting shown ('Hey \u2014 the place is ready; I found a Rust workspace with a ke'), .arbos/ created"
+      },
+      "J2": {
+        "verdict": "pass",
+        "why": "chat busy; workers ['fix-failing-test'] / 1 spawn card(s)"
+      },
+      "J3": {
+        "verdict": "pass",
+        "why": "workers finished, no duplicate lines, status shown as status, idle means the turn ended"
+      },
+      "J4": {
+        "verdict": "pass",
+        "why": "mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered"
+      },
+      "J5": {
+        "verdict": "pass",
+        "why": "steer taken, read-only question answered, Stop ended the turn and the next prompt ran"
+      },
+      "J6": {
+        "verdict": "fail",
+        "why": "away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))"
+      },
+      "J7": {
+        "verdict": "pass",
+        "why": "tests pass, CHANGELOG written (QA line taken), commit on ['fix/geometry-area-calculation']"
+      },
+      "J8": {
+        "verdict": "fail",
+        "why": "the in-flight command's side effect never happened (before or after the restart)"
+      }
+    },
+    "score": "6/8",
+    "unverified": [],
+    "failed": [
+      "J6",
+      "J8"
+    ],
+    "evidence": {
+      "J1": {
+        "items": 4,
+        "agent_lines": 1,
+        "failed_notices": [],
+        "arbos_dir": true
+      },
+      "J2": {
+        "went_busy": true,
+        "workers": [
+          "fix-failing-test"
+        ],
+        "spawn_cards": 1
+      },
+      "J3": {
+        "idle_within_600s": true,
+        "duplicate_agent_items": [],
+        "status_drawn_as_reply": [],
+        "transcript_ends": "turn_complete",
+        "workers_open": []
+      },
+      "J4": {
+        "midflight": {
+          "index": 18,
+          "reached_root_s": 0.0,
+          "task_turn_complete": 15,
+          "same_turn": false,
+          "relayed_to_worker": true,
+          "turn_tools": [
+            "plan",
+            "say"
+          ],
+          "workers": [
+            "fix-failing-test"
+          ],
+          "taken": true
+        },
+        "after": {
+          "started": true,
+          "answered": true
+        }
+      },
+      "J5": {
+        "steer_in_turn": true,
+        "readonly_answered": true,
+        "stop_error": "find: no element matches `composer-stop`",
+        "interrupt": {
+          "ended_within_20s": true,
+          "interrupted_line": false,
+          "took_s": 0.2
+        },
+        "prompt_after_stop_answered": true
+      },
+      "J6": {
+        "tab_back": true,
+        "landed_on": "/tmp/arbos-qa-journey-linux-w_iwpd45/shapes-project",
+        "landed_on_project": true,
+        "late_reply_landed_while_closed": false,
+        "notify_before_click": {
+          "tab_dot": false,
+          "unseen": 0
+        },
+        "notify_after_click": {
+          "tab_dot": false,
+          "unseen": 0
+        },
+        "touched_before_click": false,
+        "touched_after_click": true,
+        "os_posts_on_relaunch": 0,
+        "items_before": 31,
+        "items_after": 48,
+        "sessions_before": 2,
+        "sessions_after": 2,
+        "worker_rows": 2,
+        "notes_unchanged": true,
+        "notifications": "unverified: the driver exposes no unseen count",
+        "away": {
+          "nonce": "away59183",
+          "unseen_away": 0,
+          "tab_dot_away": false,
+          "posted_new": 0,
+          "posted_hit": false,
+          "post_error": null,
+          "daemon_has_it": false,
+          "daemon_entries": 0,
+          "unseen_after_click": 0,
+          "tab_dot_after_click": false,
+          "notifier": "notify-send"
+        }
+      },
+      "J7": {
+        "tests_pass": true,
+        "test_file_untouched": true,
+        "fix_verified_independently": true,
+        "last_test_line": [
+          "OK"
+        ],
+        "changelog": true,
+        "changelog_has_qa": true,
+        "branches": [
+          "fix/geometry-area-calculation",
+          "main"
+        ],
+        "ahead_of_main": {
+          "fix/geometry-area-calculation": "1"
+        },
+        "main_moved": false
+      },
+      "J8": {
+        "restart": {
+          "pid_before": 1576565,
+          "pid_after": 1581639,
+          "line_count": 1,
+          "answered": true,
+          "failed_notices": [],
+          "side_effect_runs": 0
+        },
+        "second_project": {
+          "in_second": 1,
+          "in_first": 0,
+          "in_home_store": 0
+        },
+        "dropped_connection": {
+          "verdict": "unverified",
+          "why": "phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)"
+        }
+      },
+      "liveness": {
+        "pulses": 23,
+        "slowest_ms": 96,
+        "slowest_after": "launch",
+        "limit_ms": 1000
+      }
+    }
+  },
+  "duration_s": 365.2,
+  "place": "/tmp/arbos-qa-journey-linux-w_iwpd45/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 8af868422fcb protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T083924Z-journey-linux",
+  "branch": "main",
+  "usd": 0.0
+}

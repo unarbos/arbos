@@ -1,0 +1,3 @@
+1789807774204 desktop: app pid 1585922 on :9869
+1789807794349 BREAK probe-no-transcript-element: no element whose path holds `transcript` among 30 on screen, so the column was never measured and this run says nothing about the page
+1789807794590 bugs: seen 54ffa9b4e0.md

@@ -1,0 +1,22 @@
+{
+  "scenario": "mt-04-queue-survives-window-restart",
+  "doc": "Item 4. A follow-up typed during a turn survives quitting and relaunching the desktop: it runs when the turn ends.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "driver-exception",
+      "detail": "TimeoutError_: timed out waiting for root running",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 59.2,
+  "place": "/tmp/arbos-qa-mt-04-queue-survives-window-restart-wsugc343/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 8af868422fcb protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T084732Z-mt-04-queue-survives-window-restart",
+  "branch": "main",
+  "usd": 0.02341
+}

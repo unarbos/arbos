@@ -1,0 +1,12 @@
+1789807174086 J1: pass — tab present, greeting shown ('Hey — the place is ready; I found a Rust workspace with a ke'), .arbos/ created
+1789807179799 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789807228024 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789807244216 J4: pass — mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered
+1789807254504 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789807358994 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': False, 'unseen': 0} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789807455280 J6: fail — away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))
+1789807455354 J7: pass — tests pass, CHANGELOG written (QA line taken), commit on ['fix/geometry-area-calculation']
+1789807526193 J8: fail — the in-flight command's side effect never happened (before or after the restart)
+1789807529280 BREAK journey-J6: away-tab notification: no badge while away (unseen=0, tab_dot=False); the window posted no OS notification carrying the nonce (0 landed, 0 failed of 0 attempt(s))
+1789807529280 BREAK journey-J8: the in-flight command's side effect never happened (before or after the restart)
+1789807529378 bugs: seen 9c8bf3b8ac.md, new 865c1e223b.md

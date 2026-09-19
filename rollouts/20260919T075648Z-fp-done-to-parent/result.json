@@ -1,0 +1,22 @@
+{
+  "scenario": "fp-done-to-parent",
+  "doc": "When a child's turn ends the kernel writes a kind = \"done\" inbox message to the parent (Cursor's completion notification, on disk).",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no child was spawned",
+      "where": ""
+    }
+  ],
+  "notes": {},
+  "duration_s": 3.0,
+  "place": "/tmp/arbos-qa-fp-done-to-parent-zjlv350k/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 c52d0253109f protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T075648Z-fp-done-to-parent",
+  "branch": "main",
+  "usd": 0.00545
+}

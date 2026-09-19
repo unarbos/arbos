@@ -1,0 +1,46 @@
+Walking /tmp/arbos-qa-bench-fix-commit-branch-k6cxi1gh/place...
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Found 28 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (8138 trigrams, 28 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-k6cxi1gh/home/.cache/arbos/tgrep/98a299fcbfcd798d
+tools fix-hello-py: 2 calls, wall 6ms, sum 2ms, speedup 0.3x
+tools fix-hello-py: 2 calls, wall 2ms, sum 2ms, speedup 1.0x
+tools fix-hello-py: 3 calls, wall 35ms, sum 32ms, speedup 0.9x
+tools fix-hello-py: 2 calls, wall 280ms, sum 278ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 272ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 270ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 272ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 272ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 9ms, sum 5ms, speedup 0.6x
+tools fix-hello-py: 2 calls, wall 279ms, sum 272ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 269ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 274ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 271ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 274ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 277ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 274ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 7ms, sum 1ms, speedup 0.1x
+tools fix-hello-py: 2 calls, wall 273ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 8ms, sum 1ms, speedup 0.1x
+tools fix-hello-py: 2 calls, wall 275ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 276ms, sum 273ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 278ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 273ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 277ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 275ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 278ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 275ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 275ms, sum 270ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 275ms, sum 269ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 277ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 277ms, sum 271ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 275ms, sum 270ms, speedup 1.0x
+snapshot_failed: git add: fatal: unable to stat 'agents/fix-hello-py/jobs/j11/exit': No such file or directory

@@ -1,0 +1,24 @@
+{
+  "scenario": "bench-no-screenshot-unasked",
+  "doc": "A plain 'run it and tell me the result' must not produce a screenshot or open a browser.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "reply lacks the result: ' to spawn a worker. I cannot directly run the `bash` command as the coordinator. Please provide the task for the worker.'",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "browser_calls": 0
+  },
+  "duration_s": 4.3,
+  "place": "/tmp/arbos-qa-bench-no-screenshot-unasked-pe3xp45x/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2c3d16ff9a53 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T062410Z-bench-no-screenshot-unasked",
+  "branch": "rust",
+  "usd": 0.00553
+}

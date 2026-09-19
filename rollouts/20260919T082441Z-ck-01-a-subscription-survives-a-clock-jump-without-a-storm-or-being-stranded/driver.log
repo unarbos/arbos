@@ -1,0 +1,6 @@
+1789806281012 kernel-bootstrap started pid 1564476
+1789806281066 kernel-bootstrap stopped with code 0
+1789806281067 kernel-after-jump started pid 1564522
+1789806309121 kernel-after-jump stopped with code 0
+1789806309121 BREAK driver-exception: FileNotFoundError: [Errno 2] No such file or directory: '/tmp/arbos-qa-ck-01-a-subscription-survives-a-clock-jump-without-a-storm-or-being-stranded-ncr18qyj/place/.arbos/agents/root/subscriptions/0002-overdue.toml'
+1789806309153 bugs: seen 0ab7ccab21.md

@@ -1,0 +1,28 @@
+{
+  "scenario": "mt-26-project-context-arrives-once",
+  "doc": "Item 26. The child's prompt has project-context.md injected, and the brief does not make it read the same file again.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-26-context-read-twice",
+      "detail": "the child read project-context.md again although it was injected (one wasted tool call per worker)",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "children": [
+      "ctx"
+    ],
+    "injected": true,
+    "reread": true
+  },
+  "duration_s": 18.3,
+  "place": "/tmp/arbos-qa-mt-26-project-context-arrives-once-zo2l4bcp/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 c52d0253109f protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T080734Z-mt-26-project-context-arrives-once",
+  "branch": "main",
+  "usd": 0.0056
+}
