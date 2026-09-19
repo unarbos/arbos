@@ -12,8 +12,9 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **17**, open, started 14:00:35Z |
+| current cycle | **17**, open, in the desktop step (app `443ffdc55934`) |
 | last closed | 16, closed 13:22:48Z, 262 scenarios |
+| cycle 17 so far | 278+ scenarios, 0 checkpoint noise, 0 budget skips |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
@@ -28,7 +29,7 @@ step truncates (`qal-j28`).
 | id | what | state |
 |---|---|---|
 | `qal-j39` | consistency checker validated a retired engine | fixed in rig: subscription **and** checkpoint rules, both with controls |
-| `qal-j40` | deleting both lock files lets a second kernel serve one place | **open (product)**; guarded every cycle by `lk-04` (3.1 s) |
+| `qal-j40` | deleting both lock files lets a second kernel serve one place | **open (product)**; `lk-04` asks it on **half-A cycles only** (3.1 s) |
 | `qal-j42` | the new-chat control moved a fourth time | ⌘N fix stands |
 | `qal-j43` | a chat opened during kickoff silently eats what you type | **open (product), live**; regressed by `2ea8d565` |
 | `qal-j46` | the daily budget runs out ~22:00 and the loss lands on the desktop step | open (loop design) |
@@ -72,3 +73,22 @@ Three separate places recorded "could not ask" as an answer, and each one hid so
 A fourth instance of the same shape turned up in `dg-01`, which watched `any(...)` session and so
 was satisfied by root's kickoff — the very red herring `qal-j43` documents. Fixed 13:40; the
 warning had been in that bug file long before the check stopped walking into it.
+
+## Which cycles a guard runs in is decided by its name
+
+Corrected 2026-09-19 17:30, after `lk-04` was missing from cycle 17 and I went looking for a fault.
+
+The tracked step passes `--half`, and the half is `sha1(name) % 2` (`run.py:2222`). So a scenario's
+cadence follows its **name**, invisibly:
+
+```
+half A   lk-01, lk-04, kf-01, fm-01
+half B   lk-02, lk-03
+```
+
+`lk-04` is half A, so `qal-j40` is asked every *other* cycle. The main step cannot fill the gap —
+it runs `--kernel-branch rust` and every `lk-*` is gated to `main`, so they all skip there.
+
+`kf-01` is half A too but runs **every** cycle, because it is desktop-tagged and the desktop step
+does not pass `--half`. **Only the tagged steps are unconditional.** Worth checking before anyone
+assumes a new guard runs as often as it looks like it does.

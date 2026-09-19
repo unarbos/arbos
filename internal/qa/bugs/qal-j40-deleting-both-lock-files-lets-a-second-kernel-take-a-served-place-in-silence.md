@@ -4,7 +4,7 @@
 - **found**: 2026-09-18 13:58, taking after-failure states nobody had staged
 - **kernel**: `arbos-kernel 0.2.0 cecd48e1bd76 protocol 1` (today's `main`)
 - **probe**: `deploy/af05c-runtime-and-lock-removed-probe.sh`
-- **control**: `lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in` (added 2026-09-18 17:21; breaks in 3.1 s on `fba8688d92d2`)
+- **control**: `lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in` (added 2026-09-18 17:21; breaks in 3.1 s). It **runs every other cycle**, not every cycle — see below.
 
 ## What happens
 
@@ -95,3 +95,30 @@ one line: while the holder is alive, a second kernel must not end up serving the
 Refusing out loud is the good outcome; what must not happen is two servers.
 
 Measured on `arbos-kernel 0.2.0 fba8688d92d2`: breaks in **3.1 s**, auto-draft `06c30e0315`.
+
+## The guard runs every other cycle, not every cycle
+
+I wrote that `lk-04` asks this question every cycle. It does not, and the reason is worth knowing
+for any guard anyone adds.
+
+Only the **tracked** step runs the lock family, and it passes `--half`. The half is
+`sha1(name) % 2` (`run.py:2222`), so which cycles a scenario appears in is decided by its **name**:
+
+```
+half A   lk-01, lk-04, kf-01, fm-01
+half B   lk-02, lk-03
+```
+
+`lk-04` is in half A, so it runs on half-A cycles only. Cycle 16 ran it (break, 3.1 s); cycle 17
+is half B and did not, which is correct rather than a fault — I went looking for a broken guard and
+found a working split.
+
+The main step cannot cover the gap: it runs `--kernel-branch rust` (`cycle.sh:95`), and every
+`lk-*` is gated to `main`, so all four skip there every cycle.
+
+`kf-01` is in half A too but still runs **every** cycle, because it is desktop-tagged and the
+desktop step (`cycle.sh:298`) does not pass `--half`. That is the difference: a guard's cadence
+depends on which step picks it up, and only the tagged steps are unconditional.
+
+**If this needs asking every cycle, `lk-04` wants a tag a tagless step selects — not a rename.**
+Renaming to flip its hash would work once and then rot the moment anyone renames it again.

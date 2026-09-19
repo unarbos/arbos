@@ -5468,3 +5468,44 @@ Evidence in `media/mobile/cycle-177/`, and 19 stills in
 `media/mobile/journey/0919-165418/`.
 
 **PR:** [#779](https://github.com/unarbos/arbos/pull/779), harness only.
+
+## Cycle 178 — a clean path, and the lesson from 174 made into a tool
+
+The queue named `call — first word and transcription` at cycle 165, thirteen
+cycles back.
+
+**Both halves hold** (M-549). One breath gives one transcript, one spoken
+answer and one kernel answer, three runs of three. The first word arrives
+whole: six of six kept every frame, at connects of 1408 to 1955 ms. The slow
+case stayed untested, as it does whenever the network behaves — the check says
+so rather than claiming silence.
+
+**The recording was due, and the core chat path had never been filmed**
+(M-550). It is clean. The sent line sits right in its own bubble and the reply
+arrives on the left as plain text; the reply streams rather than landing in
+one lump, pushing the status line down as it grows; the view tracks the bottom
+without jumping or overshooting; and the turn closes `Working` →
+`Thinking · 5s` → `Worked 10s`, with the stop square reverting to a microphone
+and `Follow up…` returning to the composer. Nothing clipped, nothing left
+spinning. No fault — worth recording for a path nobody had watched.
+
+**And cycle 174's lesson is a tool rather than a memory** (M-551). Every cycle
+that films something has shrunk it by hand with an ffmpeg line typed from
+memory, and 174 typed 400 px. At that width the separator dot is one pixel of
+ink and disappears — the reviewer read `Idle  home`, called the gap a missing
+character, and I spent the first part of a cycle checking an artefact of my
+own downscaling.
+
+`review-demo.sh` uses 540 px, keeps the reason beside the number, and closes
+by saying what to ask a reviewer for: motion — clipping, stalls, jumps, a
+spinner that never stops. Fine typography belongs to a still at full size.
+This cycle's demo went out at 540 px and the review came back with no
+typography complaints.
+
+Its first version reported file sizes with `stat -f`, which is *format* on BSD
+and *file system* on GNU — so on Linux the BSD form succeeded and printed
+block counts, and the fallback never ran.
+
+Film and still in `media/mobile/cycle-178/`.
+
+**PR:** [#781](https://github.com/unarbos/arbos/pull/781), harness only.
