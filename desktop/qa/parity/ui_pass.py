@@ -1988,7 +1988,10 @@ class Pass:
         # turn's headline, and the connection comes back on its own.
         self.go_main(); self.wait_idle(60)
         self.send("Spawn one sub-agent whose only task is: run `sleep 20` with bash, then reply with the word slept. Wait for it, then say done.")
-        s_busy = self.wait(lambda s: busy(s) and (active(s) or {}).get("status"), 40, what="turn with a step")
+        s_busy = self.wait(lambda s: busy(s), 30, what="turn start")
+        if s_busy:
+            time.sleep(5)
+            s_busy = busy(self.state()) or None
         pids = subprocess.run(["pgrep", "-f", f"arbos-kernel[-0-9a-z]* serve {PROJ}$"], capture_output=True, text=True).stdout.split()
         if s_busy and pids:
             for pid in pids:
