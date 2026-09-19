@@ -139,9 +139,16 @@ if [ -n "$PILL" ]; then
   # Page towards them. The newest workers sit at the end of the sheet
   # (M-482), so this run's four are never on the first screen — falling back
   # without looking meant the check always opened the oldest worker there is.
+  # Only rows a finger could actually reach. `describe-all` returns the whole
+  # scroll view, so a row paged above the top is still in the dump with a
+  # negative y — this run saw -188 and -119 — and picking by tree order took
+  # one of those. `ui tap` then refused it, quietly, because the error went
+  # to /dev/null, and the check read the screen that was already there and
+  # reported landing on the wrong worker. The screen is 852 points tall.
   mine_row() {
     python3 "$HERE/../ui.py" "$UDID" dump 2>/dev/null \
-      | grep -E "Button +$TAG.*, Done" | head -1 \
+      | grep -E "Button +$TAG.*, Done" \
+      | awk '$2 + 0 > 60 && $2 + 0 < 800' | head -1 \
       | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'
   }
   DONE_ROW=$(mine_row)
@@ -169,7 +176,11 @@ if [ -n "$PILL" ]; then
   fi
   echo "  opening: ${DONE_ROW:-no finished worker on the sheet}$([ "$MINE" = yes ] && echo "  (this run's own)" || echo "  (an older one — none of this run's are on this page)")"
   if [ -n "$DONE_ROW" ]; then
-    ui tap "$DONE_ROW" >/dev/null 2>&1; sleep 5
+    # Not silenced. A refused tap and a tap that landed wrong look identical
+    # on the screen afterwards, and this check spent cycle 195 reporting the
+    # second when it was the first.
+    TAPPED=$(ui tap "$DONE_ROW" 2>&1) || echo "  the tap was refused: $TAPPED"
+    sleep 5
     shot 05-a-finished-worker
     # Did it land on the worker that was tapped? Cycle 185 tapped
     # "w191149 rivers, Done" and opened a chat headed "say sentence about
