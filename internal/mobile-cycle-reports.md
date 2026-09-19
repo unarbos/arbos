@@ -5122,3 +5122,37 @@ showed six lines then five, which is why the count had to go.
 Evidence in `media/mobile/cycle-168/`.
 
 **PR:** [#763](https://github.com/unarbos/arbos/pull/763), harness only.
+
+## Cycle 169 — the journey holds, and the ledger sent me somewhere I had been
+
+The work queue named `journey — the phone-only steps P1, P2, P3` at cycle
+126. It was due, so I ran the journey.
+
+**It is clean** (M-522). Fifteen steps pass, two are scored by eye, four are
+unverified with a stated reason each. All four phone-only steps pass,
+including the model naming the photograph — *Ice plant flowers, predominantly
+magenta.* The kernel answered `c3247332dc4e` on the attach socket at both
+ends, and the run record names the app it drove: `main@e8613d01`. That is
+cycle 157's fix working; before it, every record said `main@unknown`.
+
+In passing, J1 tapped `phone, Idle, home, 8m` — no separator.
+
+**But the row should not have been at the top of the queue** (M-523). The
+journey covers two rows, and cycle 157 credited only one of them. So `journey
+— the phone-only steps` aged on paper from 126 while actually being exercised
+at 157, and the rotation sent this cycle to re-run something that had passed
+twelve cycles earlier.
+
+That is M-484's fault in a smaller place: a row's age is the last cycle that
+*named* it. The journey and the sweep now print the rows they cover, read
+from the scenarios' own declarations, so whoever writes the ledger credits all
+of them rather than the one they happened to be thinking about.
+
+Neither writes the ledger. That stays a person's judgement, for the reason
+cycle 158 gave: a script running near a row is not the same as someone
+looking at it.
+
+Evidence: `media/mobile/cycle-169/`, and 19 stills in
+`media/mobile/journey/0919-122406/`.
+
+**PR:** [#765](https://github.com/unarbos/arbos/pull/765), harness only.

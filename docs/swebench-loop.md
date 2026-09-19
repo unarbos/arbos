@@ -931,9 +931,34 @@ Cumulative read: **352** (340 + 9 + 3).
 
 Spend $7.51.
 
-## Next (cycle 43)
+## Cycle 43 (2026-09-19) — second draws on the once-failed instances: sixteen of sixteen repeat failures fail the same way
 
-1. The never-run pool is exhausted; the loop needs the coordinator's word on what counts as new material. Until then: read whatever new failures arrive (landed steps, re-reads asked for).
+**The new material.** The never-run pool is spent; the coordinator's word is second draws on once-failed instances. The pool: every instance with a cut-era result that failed at least once and is not a grader artefact — 64 instances, 29 failed in every draw — ordered by fewest draws first (33 have exactly two), then the loop's stratified order (`second-draw-pool.json`, `second-draw-order.json`). This cycle took the first ten: all from cycles 29–32, two draws each, 1 of 20 prior rollouts solved.
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 bec7284b8740 protocol 1`** = `main` head, built in the worktree, label proved; the engine changes since aa0f61da (checkpoint `add -A` retries, a read-only file refused with the way through) are not contract changes. Jev off. Harness d1226d8c (#734). Network cut, no cap. Pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-43-preregistration.md)). $12.00. Seventh host pause (eval log silent 11:25–12:17); walls not read. **3 of 20** solved — on a pool selected for failure, a count that compares with nothing.
+
+**What the second pair showed against the first.**
+
+- Two instances flipped: sympy-19495 (first draw 1 of 2) solved both; sympy-18211 (first draw 1 of 2) solved one of two again. These are the pool's flippy members and behave as flippy.
+- **Eight instances failed both draws again, and every one of the sixteen rollouts failed the same way as its first pair** — the same class, the same site, in several the same code:
+  - django-12325: `base.py` alone, `options.py` untouched, both times — **A, the twin**, four of four.
+  - django-14034: `MultiValueField.clean()` in `fields.py`, where the gold and the hidden test are `boundfield.py` rendering — C, four of four.
+  - django-15695: a name-equality guard in `RenameIndex.database_forwards` both times; the unnamed-index test fails — C, four of four.
+  - django-16667: `except (ValueError, OverflowError)` both times, the pinned `"0-0-0"` return not produced — C, four of four (the second draw in 9 and 14 tool calls).
+  - matplotlib-23299: the right symptom, a mechanism other than the gold's `del orig['backend']` — this time one rollout in `pyplot.switch_backend` — C, four of four.
+  - sympy-15875: an `im_I` list summing the imaginary terms — the *same construction* as cycle 30, near line for line — where the gold is a one-line condition — C, four of four.
+  - sympy-20438: `issubset.py` alone, the `Eq` handler in `comparison.py`/`relational.py` untouched — **A, the twin**, four of four.
+  - sympy-21596: the base set restricted to the roots, the gold's `_solution_union` not built — C, four of four.
+
+So the account's class for an instance is a property of the instance, not of the draw: across sixteen repeat failures the model went to the same file and made the same kind of change it made a day earlier on a different kernel. Three consequences worth stating. The account's per-instance readings from cycles 29–42 can be trusted as readings of the instance. A second draw on a twice-failed instance buys almost no new information about *where* it fails — it confirms; so the pool's remaining 54 are best spent on the 33 two-draw instances first (as ordered), and the many-draw regression members not at all. And the two twins (12325, 20438) are now four-of-four misses on sites the issue text points to (`parent_link` validation; `Eq` beside `is_subset`), which is what a twin rule with a visible step would have to reach.
+
+Cumulative read: **369**.
+
+Spend $12.00.
+
+## Next (cycle 44)
+
+1. The second-draw pool continues in order (`second-draw-order.json`, next ten: pylint-4551, django-16560, django-14170, sphinx-7985, django-16502, sympy-13852, pytest-7205, seaborn-3069, django-11433, sphinx-8056); every failure read for same-way / different-way against its first pair. Landed steps and new failures read as they arrive.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice in three, and the issue's ask is implicit (42); a recollection of upstream standing in for evidence — three instances now (35, 40/42, 42).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site, sixteen of sixteen (43).
