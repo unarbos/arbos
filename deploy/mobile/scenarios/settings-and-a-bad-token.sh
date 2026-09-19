@@ -19,7 +19,13 @@ CYCLE=${1:?cycle}
 OUT="$HOME/mobile-out/$CYCLE/settings"; mkdir -p "$OUT"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
-APP=/tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app
+# The app to reinstall is the one the loop just built, not a path some cycle
+# left in /tmp. This read a build from the previous day, so every scenario
+# after it measured yesterday's app — the source of the separator six cycles
+# chased (M-498, M-503).
+APP=${APP:-$HOME/mobile-derived/Build/Products/Debug-iphonesimulator/Arbos.app}
+[ -d "$APP" ] || { echo "no app at $APP — refusing to reinstall, because doing it"
+                   echo "wrong leaves every later scenario measuring a stale build"; exit 1; }
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 # #571 named the round buttons, so the settings disc reads `Settings` where
 # it used to read `Gear Shape` — SwiftUI's rendering of the SF Symbol. This

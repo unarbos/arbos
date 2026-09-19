@@ -101,7 +101,15 @@ sleep 2
 curl -s "http://127.0.0.1:$PORT/list" >/dev/null || { echo "the fixture hub did not start"; exit 1; }
 echo "fixture up: alpha, beta, beta-two, gamma — and arrived-late once the pull asks for it"
 
-APP=${APP:-/tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app}
+# The app to reinstall is the one the loop just built, not a path some cycle
+# left in /tmp. This read /tmp/dd/Build/Products/..., a build from the
+# previous day, so every scenario after this one in the sweep measured
+# yesterday's app — which is where the separator that six cycles chased kept
+# coming from (M-498, M-503). Proven: fresh build reads "phone, Idle, home",
+# this scenario runs, and the next read is "phone, Idle, · , home" with the
+# binary dated a day earlier.
+DERIVED=${DERIVED:-$HOME/mobile-derived/Build/Products/Debug-iphonesimulator/Arbos.app}
+APP=${APP:-$DERIVED}
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 if [ -d "$APP" ]; then
   xcrun simctl uninstall "$UDID" $B >/dev/null 2>&1

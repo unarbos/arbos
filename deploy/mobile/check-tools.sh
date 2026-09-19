@@ -148,3 +148,24 @@ for f in "$HERE"/scenarios/*.sh "$HERE"/mac-*.sh; do
   ORPHANS=$((ORPHANS + 1))
 done
 [ "$ORPHANS" = 0 ] && echo "  none — every helper called is one the file has sourced"
+
+# A build path outside the loop's own derived data. Three scenarios
+# reinstalled the app from /tmp/dd, a directory some cycle left behind, and
+# the build in it was a day old — so every scenario that ran after one of them
+# measured yesterday's app. That is where the separator six cycles chased was
+# coming from.
+echo
+echo "scenarios installing an app from outside the loop's derived data:"
+STRAYAPP=0
+for f in "$HERE"/scenarios/*.sh "$HERE"/mac-*.sh; do
+  [ -f "$f" ] || continue
+  # A literal root only. mac-cycle.sh writes "$DERIVED/Build/Products/..."
+  # and matching the tail of that reported the one file doing it correctly.
+  HIT=$(grep -vE "^[[:space:]]*#" "$f" \
+        | grep -oE "(/tmp|/Users|/var|/private)/[A-Za-z0-9_./-]*Build/Products/[A-Za-z0-9_./-]*" \
+        | grep -v "mobile-derived" | sort -u | tr '\n' ' ')
+  [ -n "$HIT" ] || continue
+  echo "  $(basename "$f") installs from: $HIT"
+  STRAYAPP=$((STRAYAPP + 1))
+done
+[ "$STRAYAPP" = 0 ] && echo "  none — every reinstall uses the build this loop just made"
