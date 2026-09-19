@@ -49,6 +49,7 @@ DEFAULT=(
   call-menu.sh
   worker-chat-open-and-back.sh
   worker-chat-shape.sh
+  style-pair.sh
   chat-overflow-menu.sh
   pill-count-vs-sheet.sh
   notifications.sh
