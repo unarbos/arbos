@@ -209,8 +209,13 @@ collect_rows() {
 # Pass Done or Running to ask for one kind.
 first_worker_row() {
   local udid=$1 want=${2:-"(Done|Running)"}
+  # On-screen rows only. The dump carries the whole scroll view, so a row
+  # paged above the top comes back with a negative y, and picking by tree
+  # order takes one of those; `ui tap` then refuses it and the caller is left
+  # reading whatever screen was already in front of it.
   python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null \
     | grep -E "Button +.+, $want" \
+    | awk '$2 + 0 > 60 && $2 + 0 < 800' \
     | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'
 }
 

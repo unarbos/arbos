@@ -108,6 +108,7 @@ SCENARIOS=("$@")
 [ ${#SCENARIOS[@]} -eq 0 ] && SCENARIOS=("${DEFAULT[@]}")
 
 OUT="$HOME/mobile-out/$CYCLE/sweep"; mkdir -p "$OUT"
+SWEEP_STARTED=$(date "+%Y-%m-%d %H:%M:%S")   # for reading refused-taps.log back at the end
 printf '%-34s %s\n' "scenario" "what it concluded"
 printf '%-34s %s\n' "--------" "------------------"
 
@@ -148,3 +149,21 @@ echo "coverage rows this sweep exercised:"
 for name in "${SCENARIOS[@]}"; do
   grep -h "^# COVERS:" "$HERE/scenarios/$name" 2>/dev/null
 done | sed 's/^# COVERS: */  /' | sort -u
+
+# Taps that were refused during this sweep. `ui tap` exits 1 and says so on
+# stderr, but sixty-four calls across the harness are written
+# `ui tap ... >/dev/null 2>&1`, so the complaint goes nowhere — and a refused
+# tap leaves exactly what a mis-landed tap leaves: the screen that was
+# already there. Cycle 195 read one as the other for a whole run. ui.py
+# writes each refusal down; this is where they are read back.
+REFUSALS="${MOBILE_OUT:-$HOME/mobile-out}/refused-taps.log"
+echo
+echo "taps refused during this sweep:"
+if [ -s "$REFUSALS" ]; then
+  awk -v since="$SWEEP_STARTED" '$0 >= since' "$REFUSALS" | sed 's/^/  /' | head -12
+  LATE=$(awk -v since="$SWEEP_STARTED" '$0 >= since' "$REFUSALS" | grep -c "")
+  [ "$LATE" = 0 ] && echo "  none — every tap found what it was aiming at"
+  [ "$LATE" = 0 ] || echo "  ($LATE in this run. Each one means a scenario carried on against a screen it had not changed.)"
+else
+  echo "  none — every tap found what it was aiming at"
+fi

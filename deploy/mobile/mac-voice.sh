@@ -64,3 +64,21 @@ echo
 echo "The two are never compared. A greeting answered by the gateway and a"
 echo "question waiting on the kernel are different measurements wearing one"
 echo "metric name."
+
+# Whether barge-in happened at all. The clip plays at a fixed offset, so a
+# short reply is over before the interruption arrives and the run measures
+# nothing — it prints `barge_in_skipped` among a hundred console lines and
+# the summary says only what the reply timings mean. Cycle 195 read a run as
+# healthy that had not exercised barge-in once, on a row the ledger then
+# aged as covered.
+echo
+BARGE=$(grep -oE "metric barge_in_(speech_started|response_done) [0-9]+ms" "$OUT/voice/console.log" | head -2 | tr '\n' ' ')
+if [ -n "$BARGE" ]; then
+  echo "barge-in was exercised: $BARGE"
+else
+  WHY=$(grep -oE "metric barge_in_[a-z_]+ .*" "$OUT/voice/console.log" | head -1)
+  echo "barge-in was NOT exercised this run — ${WHY:-no barge metric at all}."
+  echo "Nothing here says anything about interrupting a reply. The clip plays"
+  echo "at a fixed offset, so a reply shorter than that offset is over before"
+  echo "the interruption arrives."
+fi

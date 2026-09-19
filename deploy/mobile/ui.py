@@ -49,6 +49,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 
 def idb():
@@ -222,6 +223,21 @@ def main():
     el = match(els, needle)
     if el is None:
         print(f"ui: nothing matching {needle!r} on screen", file=sys.stderr)
+        # Also written down, because stderr is thrown away. Sixty-four taps
+        # across the harness are written `ui tap ... >/dev/null 2>&1`, and a
+        # refused tap then looks exactly like a tap that landed somewhere
+        # wrong: the screen afterwards is the screen before. Cycle 195 spent
+        # a run reporting "landed on the wrong worker" when nothing had been
+        # tapped at all. A line here survives the silencing, and the sweep
+        # reads the file at the end.
+        try:
+            log = os.environ.get("MOBILE_OUT") or os.path.expanduser("~/mobile-out")
+            os.makedirs(log, exist_ok=True)
+            with open(os.path.join(log, "refused-taps.log"), "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {verb} {needle!r} "
+                        f"— nothing matching it was on screen\n")
+        except OSError:
+            pass
         sys.exit(1)
 
     if verb == "value":
