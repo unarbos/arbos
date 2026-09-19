@@ -1874,6 +1874,15 @@ impl Workspace {
 
     /// Send to a session, attaching to the kernel when it has no socket —
     /// typing into a session read back from disk is what picks it up again.
+    /// A failed turn's Retry: the same words again, under the card already
+    /// on the pane (F-232).
+    pub fn retry(&mut self, id: u64, notice_ix: usize, content: Prompt, cx: &mut Context<Self>) {
+        if let Some(chat) = self.session_mut(id) {
+            chat.prepare_retry(notice_ix, &content);
+        }
+        self.send(id, content, cx);
+    }
+
     pub fn send(&mut self, id: u64, content: impl Into<Prompt>, cx: &mut Context<Self>) {
         let content = content.into();
         // Read before `chat` borrows the projects. This is the second

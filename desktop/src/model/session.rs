@@ -801,7 +801,7 @@ impl ChatSession {
             cwd: place.path,
             connection: Connection::Idle,
             kernel_build: None,
-            items: record.items,
+            items: fold_retries(record.items),
             hide_before: 0,
             plan: Vec::new(),
             answering: None,
@@ -1546,6 +1546,7 @@ impl ChatSession {
     /// Take the kernel's transcript when it is ahead: more items, or the
     /// same count with thoughts / write diffs the local cache dropped.
     pub fn adopt_history(&mut self, items: Vec<ChatItem>) {
+        let items = fold_retries(items);
         if history_beats(&items, &self.items) {
             // A view the person cleared stays cleared. The kernel's copy
             // of the same conversation is longer than the window's (it
@@ -1692,6 +1693,44 @@ impl ChatSession {
         self.queue.push_back(content);
         self.held_cards += 1;
         self.flush();
+    }
+
+    /// Retry the failed turn whose notice is at `notice_ix`, in place: the
+    /// prompt card stays where it is, the failure line and whatever
+    /// followed it in that turn go, and the resend opens the turn under
+    /// the card already on the pane (F-232, cycle 64). Cursor's *Try
+    /// again* re-runs the answer under the same message; ours drew a
+    /// second copy of the prompt under the first. Only the newest turn
+    /// retries in place — a failure under later turns is history, and its
+    /// retry is a plain send.
+    pub fn prepare_retry(&mut self, notice_ix: usize, content: &Prompt) -> bool {
+        let Some(user_ix) = self.items[..notice_ix.min(self.items.len())]
+            .iter()
+            .rposition(|item| matches!(item, ChatItem::User(_)))
+        else {
+            return false;
+        };
+        let later_turn = self.items[notice_ix.min(self.items.len())..]
+            .iter()
+            .any(|item| matches!(item, ChatItem::User(_)));
+        if later_turn || self.busy() {
+            return false;
+        }
+        self.items.truncate(user_ix + 1);
+        if let Some(ChatItem::User(message)) = self.items.last_mut() {
+            message.worked_secs = None;
+        }
+        let squashed: String = content.text.split_whitespace().collect();
+        if !squashed.is_empty() {
+            self.awaiting_echo.push_back(squashed);
+            while self.awaiting_echo.len() > 8 {
+                self.awaiting_echo.pop_front();
+            }
+        }
+        self.held_cards += 1;
+        self.updated = SystemTime::now();
+        self.flush();
+        true
     }
 
     /// The record's newest line at attach, from the kernel's replay or the
@@ -4408,6 +4447,27 @@ impl ChatSession {
     }
 }
 
+
+/// A retried turn as the kernel recorded it — the prompt, its failure, the
+/// same prompt again — read as one turn, the way the pane drew it live
+/// (F-232): the first prompt and the failure it drew go, the retry's copy
+/// stays with its answer. Only a failure alone between two copies of one
+/// line folds; anything else between them is a real second turn.
+fn fold_retries(items: Vec<ChatItem>) -> Vec<ChatItem> {
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    let mut out: Vec<ChatItem> = Vec::with_capacity(items.len());
+    for item in items {
+        if let ChatItem::User(again) = &item
+            && out.len() >= 2
+            && matches!(&out[out.len() - 1], ChatItem::Notice { failed: true, .. })
+            && matches!(&out[out.len() - 2], ChatItem::User(first) if squash(&first.text) == squash(&again.text))
+        {
+            out.truncate(out.len() - 2);
+        }
+        out.push(item);
+    }
+    out
+}
 
 fn history_beats(next: &[ChatItem], held: &[ChatItem]) -> bool {
     if next.len() > held.len() {

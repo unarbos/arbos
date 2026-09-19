@@ -760,7 +760,7 @@ fn notice(
                         el.hover(|el| el.bg(theme.element_hover))
                             .active(|el| el.bg(theme.element_active))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send(id, prompt.clone(), cx);
+                                this.retry(id, ix, prompt.clone(), cx);
                             }))
                     })
                     .opacity(if can_retry { 1. } else { 0.5 })
