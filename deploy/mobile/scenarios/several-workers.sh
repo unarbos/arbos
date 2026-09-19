@@ -162,11 +162,26 @@ if [ -n "$PILL" ]; then
   if [ -n "$DONE_ROW" ]; then
     ui tap "$DONE_ROW" >/dev/null 2>&1; sleep 5
     shot 05-a-finished-worker
+    # Did it land on the worker that was tapped? Cycle 185 tapped
+    # "w191149 rivers, Done" and opened a chat headed "say sentence about
+    # th…" — a different worker entirely — and the check said "opening:
+    # w191149 rivers" and then reported on whatever it found, without
+    # noticing. A row you tapped and a chat you are in are two claims.
+    LANDED=$(ui dump | awk '$2+0 < 120 && $3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print; exit }')
+    WANTED=$(echo "$DONE_ROW" | sed 's/, Done$//')
+    case "$LANDED" in
+      "$WANTED"*) echo "  landed on: $LANDED";;
+      *) echo "  LANDED ELSEWHERE: tapped '$WANTED' and the header reads '$LANDED'"
+         echo "  Nothing below is about the worker this run chose."
+         MINE=elsewhere;;
+    esac
     HELD=$(ui dump | grep -cE "StaticText")
     EMPTY=$(ui dump | grep -c "Nothing on record yet")
     ui dump | awk '$3 == "StaticText" { $1="";$2="";$3=""; sub(/^ +/,""); print }' \
       | head -4 | cut -c1-64 | sed 's/^/     /'
-    if [ "$EMPTY" != 0 ]; then
+    if [ "$MINE" = elsewhere ]; then
+      echo "  VERDICT archived: cannot say — the tap opened a different worker's chat"
+    elif [ "$EMPTY" != 0 ]; then
       echo "  VERDICT archived: still 'Nothing on record yet.' — the finding from cycle 32 stands"
     elif [ "$HELD" -ge 2 ]; then
       echo "  VERDICT archived: its chat holds $HELD line(s) of what it did — cycle 32's"
