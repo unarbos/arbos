@@ -1938,6 +1938,32 @@ class Pass:
                         "pass" if (a1 - a0) < 5 and not folder.exists() and not (kid_now and (kid_now.get("reconnect_attempt") or 0) > 1) else "fail", self.still("deleted-child"))
         else:
             self.gap("deleted-child", sc, "spawn", "no child session to delete")
+        # F-210: a line typed into a running worker's chat steers its turn
+        # — a steer card inside the turn, not a fresh prompt over it.
+        self.go_main(); self.wait_idle(30)
+        n0 = len(sessions(self.state()))
+        self.send("Spawn one sub-agent whose only task is: run `sleep 40` with bash, then reply with the word slept. Wait for it, then say done.")
+        worker = self.wait(lambda s: next((c for c in sessions(s) if c.get("parent") is not None and len(sessions(s)) > n0 and (c.get("status") or c.get("streaming") or c.get("turn_open"))), None), 60, what="running worker")
+        if worker:
+            if not self.seen(f"panel-agent-{worker['id']}") and self.app.exists("toggle-panel"):
+                self.app.click("toggle-panel"); time.sleep(0.8)
+            if self.seen(f"panel-agent-{worker['id']}"):
+                self.app.click(f"panel-agent-{worker['id']}"); time.sleep(1.0)
+                self.wait(lambda s: (active(s) or {}).get("id") == worker["id"] and (active(s) or {}).get("connection") == "live", 15, what="worker chat live")
+                if self.app.exists("composer-field"):
+                    self.app.click("composer-field"); self.app.type("Steer for the worker: also say hi.\n"); time.sleep(2.5)
+                    w = active(self.state()) or {}
+                    card = next((it for it in reversed(w.get("items", [])) if it.get("kind") == "user" and "Steer for the worker" in it.get("text", "")), None)
+                    self.record("worker-steer-card", sc, "type a line into a running worker's chat", "the card is a steer (inside the turn), the worker still busy",
+                                f"card={'yes' if card else 'no'} steer={card and card.get('steer')} busy={busy(self.state())}",
+                                "pass" if card and card.get("steer") else ("not-reachable" if not card else "fail"), self.still("worker-steer"))
+                else:
+                    self.gap("worker-steer-card", sc, "composer", "the worker chat has no composer")
+            else:
+                self.gap("worker-steer-card", sc, "panel row", "the worker's row is not on screen")
+            self.go_main(); self.wait_idle(120)
+        else:
+            self.gap("worker-steer-card", sc, "spawn", "no running worker appeared within 60 s")
 
     def phase_provider_offer(self, binary: str, kernel: str, xdg: Path) -> None:
         """Second launch: the kernel has no key but the desktop does."""
