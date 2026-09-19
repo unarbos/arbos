@@ -32,11 +32,16 @@ items() { ui dump | grep -oE "Button +(Back to chat|Use speaker|Use headset|Hang
 # later. The first run of this read "offers: nothing" from a menu that opens
 # perfectly well — a fixed sleep timing out is indistinguishable, in the
 # output, from a menu with nothing in it.
+# Keeps what it saw. Looking twice — once to decide the menu is up, once to
+# read it — lost a run to a menu that had closed in between, and the report
+# read "offers: nothing" from a menu that had just been listed successfully.
+MENU_ITEMS=""
 open_menu() {
   ui tap "Call menu" >/dev/null 2>&1 || return 1
   local i
   for i in 1 2 3 4 5 6; do
-    [ -n "$(items)" ] && return 0
+    MENU_ITEMS=$(items)
+    [ -n "$MENU_ITEMS" ] && return 0
     sleep 1
   done
   return 1
@@ -49,7 +54,7 @@ sleep 12
 FAULTS=0
 echo "== the menu, mid-call =="
 open_menu || { echo "  the Call menu did not open, or opened empty"; exit 1; }
-FIRST=$(items)
+FIRST=$MENU_ITEMS
 xcrun simctl io "$UDID" screenshot "$OUT/01-menu.png" >/dev/null 2>&1
 echo "  offers: ${FIRST:-nothing}"
 case "$FIRST" in
@@ -79,7 +84,7 @@ else
   sleep 2
   R2=$(route_now)
   open_menu || echo "  the menu did not reopen"
-  AFTER=$(items | grep -oE "Use (speaker|headset)" | head -1)
+  AFTER=$(echo "$MENU_ITEMS" | grep -oE "Use (speaker|headset)" | head -1)
   echo "  after:  ${AFTER:-nothing}   (route: ${R2:-not shown})"
   # Unknown must not fall through to an accusation. The first two versions
   # of this chain ended at FAULT when the route could not be read at all,
@@ -107,7 +112,7 @@ fi
 
 echo
 echo "== back to the chat =="
-case "$(items)" in *"Back to chat"*) ;; *) open_menu >/dev/null 2>&1;; esac
+case "$MENU_ITEMS" in *"Back to chat"*) ;; *) open_menu >/dev/null 2>&1;; esac
 ui tap "Back to chat" >/dev/null 2>&1
 sleep 3
 xcrun simctl io "$UDID" screenshot "$OUT/02-back.png" >/dev/null 2>&1
