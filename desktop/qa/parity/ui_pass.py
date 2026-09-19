@@ -1943,7 +1943,9 @@ class Pass:
         self.go_main(); self.wait_idle(30)
         n0 = len(sessions(self.state()))
         self.send("Spawn one sub-agent whose only task is: run `sleep 40` with bash, then reply with the word slept. Wait for it, then say done.")
-        worker = self.wait(lambda s: next((c for c in sessions(s) if c.get("parent") is not None and len(sessions(s)) > n0 and (c.get("status") or c.get("streaming") or c.get("turn_open"))), None), 60, what="running worker")
+        running_worker = lambda s: next((c for c in sessions(s) if c.get("parent") is not None and len(sessions(s)) > n0 and (c.get("status") or c.get("streaming") or c.get("turn_open"))), None)
+        ws = self.wait(lambda s: running_worker(s) is not None, 60, what="running worker")
+        worker = running_worker(ws) if ws else None
         if worker:
             if not self.seen(f"panel-agent-{worker['id']}") and self.app.exists("toggle-panel"):
                 self.app.click("toggle-panel"); time.sleep(0.8)
