@@ -21,7 +21,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 <tldr>
 - [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2266** (builds 2260–2266, [#757](https://github.com/unarbos/arbos/pull/757) [#758](https://github.com/unarbos/arbos/pull/758)); next zip carries [Jev look defaults](https://github.com/unarbos/arbos/pull/760)
 - [Cap Live session input](bc-32d10b66-6bef-50c3-9ccf-4350ba54f23a) — [Live input cap](https://github.com/unarbos/arbos/pull/758) on the gateway and in **2266**; try the call again
-- [Expand Jev pickable defaults](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — [Jev look defaults](https://github.com/unarbos/arbos/pull/760) on `main` as `2ae45bcb`; next zip carries it
+- [Expand Jev pickable defaults](bc-dcc57cf8-d8e5-575b-8c61-7a42eda2b027) — [Jev look defaults](https://github.com/unarbos/arbos/pull/760) on `main`; next cycle; [parked ask close](https://github.com/unarbos/arbos/pull/762) held
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — [call-words check](https://github.com/unarbos/arbos/pull/761) on `main` as `e8613d01`; cycle 168
 </tldr>
 

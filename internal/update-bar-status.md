@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 12:13 UTC.
+Last checked 2026-09-19 12:20 UTC.
 
-## Click Update. You will get build 2266. Jev is in it.
+## Click Update. You will get build 2271. Jev is in it.
 
-**2266** — signed, notarised, stapled, on the feed since 12:10 UTC.
+**2271** — signed, notarised, stapled, on the feed since 12:17 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2266 (builds 2267–2271):
+
+- **#759** — `call-face.sh`: two projects, one face
+- **#760** — seven more tools are pickable by Jev, because their empty
+  call is a real call
+
+## Before that: 2266
 
 New since 2259 (builds 2260–2266):
 
