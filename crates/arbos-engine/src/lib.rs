@@ -3,8 +3,8 @@
 mod access;
 pub mod apology;
 mod batch;
-mod brief;
 pub mod blocked;
+mod brief;
 pub mod compact;
 mod control;
 pub mod describe;
@@ -51,6 +51,7 @@ pub use tool::{
     BoxFuture, Param, Plan, PlanCx, Registry, RunCx, Tool, ToolOut, opt_bool, opt_strings,
     simple_schema, typed_schema,
 };
+pub use tools::fs::decode_text;
 pub use tools::git;
 pub use tools::git_guard::GitRules;
 pub use tools::{

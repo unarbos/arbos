@@ -179,8 +179,11 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, args: &Value) -> Result<ToolOut
         return Ok(ToolOut::with_paths(body, vec![file.display().to_string()]));
     }
 
-    let text = std::fs::read_to_string(&file)
-        .map_err(|_| anyhow::anyhow!("file not found: {}", file.display()))?;
+    if !file.exists() {
+        bail!("file not found: {}", file.display());
+    }
+    // Not UTF-8 is refused with what it is, not "file not found".
+    let text = fs::text_for_edit(&file)?;
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let had_trailing_nl = text.ends_with('\n');
     // The file's own line ending, kept. `lines()` drops the `\r` of a

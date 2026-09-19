@@ -1088,13 +1088,16 @@ pub fn read(
         };
         bail!("{} does not exist{hint}", file.display());
     }
-    let text =
-        std::fs::read_to_string(&file).with_context(|| format!("read {}", file.display()))?;
+    let (text, bad) = read_text(&file)?;
     let lines: Vec<&str> = text.lines().collect();
     let start = offset.unwrap_or(1).saturating_sub(1) as usize;
     let take = limit.unwrap_or(lines.len() as u64) as usize;
     let slice = lines.iter().skip(start).take(take);
     let mut body = String::new();
+    if bad > 0 {
+        body.push_str(&not_utf8_note(bad));
+        body.push('\n');
+    }
     for (i, line) in slice.enumerate() {
         let n = start + i + 1;
         body.push_str(&format!(
@@ -1103,6 +1106,69 @@ pub fn read(
         ));
     }
     Ok(ToolOut::with_paths(body, vec![file.display().to_string()]))
+}
+
+/// The text an edit works on: the file as UTF-8, or the refusal that
+/// says what it is instead.
+pub fn text_for_edit(file: &Path) -> Result<String> {
+    let (text, bad) = read_text(file)?;
+    if bad > 0 {
+        return Err(refuse_not_utf8(file, bad));
+    }
+    Ok(text)
+}
+
+/// A text file's contents, decoded. A file that is not valid UTF-8 — an
+/// old C, PHP or Java source with `é` in a comment, saved as Latin-1 or
+/// Windows-1252 — used to fail `read` with "stream did not contain valid
+/// UTF-8" and `grep` skipped it in silence (0 hits for code that is
+/// there). Decoded lossily instead, with the count of bad sequences so
+/// the caller can say so. A binary file (a NUL in its first 8 KiB) is an
+/// error naming it as such: bytes are not something to read as lines.
+pub fn read_text(file: &Path) -> Result<(String, usize)> {
+    let bytes = std::fs::read(file).with_context(|| format!("read {}", file.display()))?;
+    if bytes.iter().take(8192).any(|b| *b == 0) {
+        bail!(
+            "{} is a binary file ({} bytes), not text: read it with a tool that knows its format (bash: file, xxd, sqlite3, unzip -l …)",
+            file.display(),
+            bytes.len()
+        );
+    }
+    Ok(decode_text(&bytes))
+}
+
+/// UTF-8 when it is; otherwise the lossy decoding and how many invalid
+/// sequences were replaced (0 for a clean file).
+pub fn decode_text(bytes: &[u8]) -> (String, usize) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => (s.to_string(), 0),
+        Err(_) => {
+            let bad = bytes
+                .utf8_chunks()
+                .filter(|c| !c.invalid().is_empty())
+                .count();
+            (String::from_utf8_lossy(bytes).into_owned(), bad)
+        }
+    }
+}
+
+/// The line `read` puts above a file that is not UTF-8, and the reason
+/// `edit` gives for not writing one: an edit would re-encode every byte
+/// it touched and the diff would not be the change.
+fn not_utf8_note(bad: usize) -> String {
+    format!(
+        "[not valid UTF-8: {bad} byte sequence{} shown as �, likely Latin-1 or Windows-1252. edit will not write this file (it would change bytes it did not mean to); change it with bash, or convert it first: iconv -f latin1 -t utf-8]",
+        if bad == 1 { "" } else { "s" }
+    )
+}
+
+/// What `edit` says of a file it cannot write back byte-for-byte.
+pub fn refuse_not_utf8(file: &Path, bad: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{} is not valid UTF-8 ({bad} byte sequence{} would be re-encoded by an edit, changing bytes the edit did not mean to). Change it with bash (sed, perl), or convert it first: iconv -f latin1 -t utf-8 — then edit.",
+        file.display(),
+        if bad == 1 { "" } else { "s" }
+    )
 }
 
 /// Same stem in a different arrangement (`test_x.py` vs `x_test.py`), or
@@ -1303,7 +1369,7 @@ pub fn write(root: &Path, cwd: &Path, path: &str, contents: &str) -> Result<Tool
 
 pub fn edit(root: &Path, cwd: &Path, path: &str, old: &str, new: &str) -> Result<ToolOut> {
     let file = confine(root, cwd, path)?;
-    let text = std::fs::read_to_string(&file)?;
+    let text = text_for_edit(&file)?;
     let count = text.matches(old).count();
     if count == 0 {
         // The first line of what the model thinks is there, wherever it is
@@ -1365,7 +1431,7 @@ pub fn edit_all(root: &Path, cwd: &Path, path: &str, old: &str, new: &str) -> Re
     if old.is_empty() {
         bail!("old_string must not be empty");
     }
-    let text = std::fs::read_to_string(&file)?;
+    let text = text_for_edit(&file)?;
     let count = text.matches(old).count();
     if count == 0 {
         bail!("old_string not found in {}", file.display());
@@ -1490,9 +1556,15 @@ pub fn grep_walk_with(
                 continue;
             }
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
+        // Not UTF-8 is still text to search (a Latin-1 source); a binary
+        // is not.
+        let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
+        if bytes.iter().take(8192).any(|b| *b == 0) {
+            continue;
+        }
+        let (text, _) = decode_text(&bytes);
         for (i, line) in text.lines().enumerate() {
             if re.is_match(line) {
                 hits.push(GrepHit {
@@ -2186,6 +2258,73 @@ mod find_git_tests {
             "{}",
             named.body
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod not_utf8_tests {
+    use super::*;
+
+    /// Control on main cc369869: `read` of a Latin-1 source failed with
+    /// "stream did not contain valid UTF-8", `grep` answered 0 hits for
+    /// code that is there, and the hashline `edit` said "file not found".
+    #[test]
+    fn a_latin1_source_reads_with_a_note_greps_and_is_refused_for_edit_with_what_to_do() {
+        let dir = std::env::temp_dir().join(format!("arbos-latin1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old.c"), b"/* caf\xe9 */\nint x = 1;\n").unwrap();
+        std::fs::write(dir.join("blob.bin"), b"\x00\x01\x02binary\x00").unwrap();
+
+        let out = read(&dir, &dir, "old.c", None, None).unwrap();
+        let mut lines = out.body.lines();
+        let note = lines.next().unwrap();
+        assert!(
+            note.starts_with("[not valid UTF-8: 1 byte sequence shown as"),
+            "{note}"
+        );
+        assert!(note.contains("iconv -f latin1 -t utf-8"), "{note}");
+        assert!(
+            lines.next().unwrap().contains("/* caf\u{FFFD} */"),
+            "{}",
+            out.body
+        );
+        assert!(lines.next().unwrap().contains("int x = 1;"), "{}", out.body);
+
+        let hits = grep_walk_with(&dir, "int x", None, false, false).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].path, "old.c");
+        let hits = grep_walk_with(&dir, "binary", None, false, false).unwrap();
+        assert!(hits.is_empty(), "a binary is not searched: {hits:?}");
+
+        let err = edit(&dir, &dir, "old.c", "int x = 1;", "int x = 2;").unwrap_err();
+        assert!(err.to_string().contains("is not valid UTF-8"), "{err:#}");
+        assert!(err.to_string().contains("iconv"), "{err:#}");
+        let h = super::super::hashline::line_tag("int x = 1;");
+        let err = super::super::hashline::edit(
+            &dir,
+            &dir,
+            "old.c",
+            &serde_json::json!({"anchor": format!("2:{h}"), "content": "int x = 2;"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not valid UTF-8"), "{err:#}");
+        assert_eq!(
+            std::fs::read(dir.join("old.c")).unwrap(),
+            b"/* caf\xe9 */\nint x = 1;\n",
+            "untouched"
+        );
+
+        let err = read(&dir, &dir, "blob.bin", None, None).unwrap_err();
+        assert!(
+            err.to_string().contains("is a binary file (10 bytes)"),
+            "{err:#}"
+        );
+        // A clean file has no note.
+        std::fs::write(dir.join("new.c"), "int y = 1;\n").unwrap();
+        let out = read(&dir, &dir, "new.c", None, None).unwrap();
+        assert!(!out.body.contains("not valid UTF-8"), "{}", out.body);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
