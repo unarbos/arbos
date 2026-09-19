@@ -33,7 +33,10 @@ CLIP=${CLIP:-$HOME/mobile-clips/acceptance.wav}
 
 echo "run  connect     clip    sent    lost"
 SLOW_AND_CLEAN=0; SLOW=0; LIKE_M246=0
-RUNS=0; CLEAN=0; FASTEST=""; SLOWEST=""
+# Not RUNS: that is this scenario's own argument, the number of runs to do.
+# Reusing the name reset it to zero before the loop read it, and a six-run
+# check quietly did two.
+SEEN=0; CLEAN=0; FASTEST=""; SLOWEST=""
 for i in $(seq 1 "$RUNS"); do
   LOG="$OUT/run-$i.log"
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
@@ -55,7 +58,7 @@ for i in $(seq 1 "$RUNS"); do
     continue
   fi
   LOST=$((CLIPN - SENTN))
-  RUNS=$((RUNS + 1))
+  SEEN=$((SEEN + 1))
   [ "$LOST" -eq 0 ] && CLEAN=$((CLEAN + 1))
   [ -z "$FASTEST" ] || [ "$MS" -lt "$FASTEST" ] && FASTEST=$MS
   [ -z "$SLOWEST" ] || [ "$MS" -gt "$SLOWEST" ] && SLOWEST=$MS
@@ -81,7 +84,7 @@ if [ "$SLOW" -eq 0 ]; then
   # reading, even when none of them was slow: it is the hold working at every
   # connect time that happened. What is missing is the *slow* case, and only
   # that should be called untested.
-  echo "VERDICT: $CLEAN of $RUNS runs kept every frame, at connects of"
+  echo "VERDICT: $CLEAN of $SEEN runs kept every frame, at connects of"
   echo "         ${FASTEST}–${SLOWEST} ms. The slow case is untested — none of these"
   echo "         passed two seconds, and connect time is not something the rig"
   echo "         controls. Run it again for that half."
