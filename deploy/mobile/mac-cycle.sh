@@ -16,7 +16,25 @@ REPO="$HOME/arbos"
 # if it cannot.
 cd "$REPO" || exit 1
 git fetch -q origin "$BRANCH" || { echo "cannot fetch $BRANCH"; exit 1; }
+# Was anything discarded? It matters for the *binary*, not only the tree.
+# Cycle 151: a build from a clean checkout of `main` behaved like code from
+# before #711 — the separator it removed was back, six runs of six — and a
+# manual rebuild from the identical commit was clean, six of six. The tree
+# was right and the app was not.
+#
+# The cause is this loop's own habit: scp a modified source onto the Mac,
+# build, then `git reset --hard` it away. The restored file can land with an
+# older timestamp than the object built from the scratch version, and the
+# incremental build keeps the object. Deleting the built products when the
+# reset actually threw something away costs one full compile in that case
+# and nothing the rest of the time.
+DISCARDED=$(git status --porcelain | wc -l | tr -d ' ')
 git reset -q --hard && git clean -qfd
+if [ "$DISCARDED" != 0 ]; then
+  echo "cleared $DISCARDED local change(s) — rebuilding the app from scratch so"
+  echo "the binary cannot be older than the tree"
+  rm -rf "$HOME/mobile-derived/Build/Products" 2>/dev/null
+fi
 git checkout -q -B "$BRANCH" "origin/$BRANCH" || { echo "cannot check out $BRANCH"; exit 1; }
 HEAD_SHA=$(git rev-parse HEAD)
 [ "$HEAD_SHA" = "$(git rev-parse "origin/$BRANCH")" ] || { echo "not on origin/$BRANCH after checkout"; exit 1; }
