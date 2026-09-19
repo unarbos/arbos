@@ -178,17 +178,28 @@ done
 # cycle 192 review-demo.sh said "no ffmpeg on this machine" while ffmpeg sat
 # in /opt/homebrew/bin. This is the lesson written down where it applies.
 echo
-echo "tools calling a Homebrew program without Homebrew on PATH:"
+echo "tools calling a program the ssh PATH cannot see:"
 STRAYPATH=0
 for f in $(find "$HERE" -name "*.sh" | sort); do
-  USES=$(grep -oE "(^|[^-a-zA-Z_./])(ffmpeg|ffprobe|idb)[ \"']" "$f" 2>/dev/null \
+  # Comments stripped first. Cycle 167 learned this the hard way matching the
+  # word "pt" in prose; here the line "# idb drives the simulator's UI" in
+  # mac-setup.sh, a script that installs idb and never runs it, was named as
+  # a tool that would fail.
+  USES=$(sed 's/#.*//' "$f" | grep -oE "(^|[^-a-zA-Z_./])(ffmpeg|ffprobe|idb)[ \"']" 2>/dev/null \
     | grep -oE "ffmpeg|ffprobe|idb" | sort -u | tr '\n' ' ')
   [ -n "$USES" ] || continue
-  grep -q 'PATH="/opt/homebrew/bin' "$f" && continue
-  # Sourcing a library that sets the PATH counts: the program is found by the
-  # time it is called, which is the only thing that matters.
+  # Sourcing the library that sets the PATH counts: the program is found by
+  # the time it is called, which is the only thing that matters.
   grep -qE '\. .*sim-lib\.sh' "$f" && continue
-  echo "  $(basename "$f") calls: ${USES}— add export PATH=\"/opt/homebrew/bin:\$PATH\""
+  WANT=""
+  # ffmpeg and python3 are in Homebrew. idb is not — it is installed with pip
+  # and lands in the user bin, which cycle 193 learned by assuming otherwise
+  # and watching every idb call fail with the Homebrew path exported.
+  echo "$USES" | grep -q "ff" && ! grep -q "/opt/homebrew/bin" "$f" && WANT="/opt/homebrew/bin"
+  echo "$USES" | grep -q "idb" && ! grep -q "Library/Python" "$f" \
+    && WANT="${WANT:+$WANT and }\$HOME/Library/Python/*/bin"
+  [ -n "$WANT" ] || continue
+  echo "  $(basename "$f") calls ${USES}but has no $WANT on its PATH"
   STRAYPATH=$((STRAYPATH + 1))
 done
 [ "$STRAYPATH" = 0 ] && echo "  none — every tool that calls one asks for its directory first"
@@ -203,7 +214,7 @@ echo
 echo "python tools running a Homebrew program by bare name:"
 STRAYPY=0
 for f in $(find "$HERE" -name "*.py" | sort); do
-  BARE=$(grep -oE '\["(ffmpeg|ffprobe|idb)"' "$f" 2>/dev/null | tr -d '["' | sort -u | tr '\n' ' ')
+  BARE=$(sed 's/#.*//' "$f" | grep -oE '\["(ffmpeg|ffprobe|idb)"' 2>/dev/null | tr -d '["' | sort -u | tr '\n' ' ')
   [ -n "$BARE" ] || continue
   echo "  $(basename "$f") runs: ${BARE}by bare name — resolve it with shutil.which first"
   STRAYPY=$((STRAYPY + 1))

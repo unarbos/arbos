@@ -36,16 +36,25 @@ START=$(python3 -c 'import time;print(time.time())')
 
 # One dump per sample, and nothing else: a screenshot here would cost a
 # second each time and blur the order of what is being timed.
+# Sampled until a deadline, not for a fixed number of turns. A count was the
+# first mistake here: sixty dumps took four and a half seconds, so the run
+# ended long before the kernel answered and reported a screen that never
+# changed. The turn takes as long as the kernel takes — eight seconds on the
+# run that prompted this — so the clock decides when to stop.
 SAMPLES="$OUT/timeline.txt"; : > "$SAMPLES"
-for _ in $(seq 1 60); do
+UNTIL=${SECONDS_TO_WATCH:-30}
+while :; do
   NOW=$(python3 -c "import time;print(f'{time.time()-$START:.1f}')")
+  python3 -c "import sys;sys.exit(0 if $NOW < $UNTIL else 1)" || break
   D=$(ui dump 2>/dev/null)
-  PHASE=$(echo "$D" | grep -oE 'Call \| [A-Za-z ]+' | head -1 | sed 's/Call | //')
-  [ -z "$PHASE" ] && PHASE=$(echo "$D" | grep -A1 "Call" | grep -oE "Listening|Speaking|Thinking|Connecting|Idle" | head -1)
+  # The orb is one accessibility element: label "Call", value the phase. In
+  # the dump those are two fields of one line, so the phase is what follows
+  # the label rather than a word hunted for anywhere on screen.
+  PHASE=$(echo "$D" | grep -E "Call" | grep -oE "(Idle|Connecting|Listening|Thinking|Speaking)" | head -1)
   LINE=$(echo "$D" | grep -E "StaticText" | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' \
-    | grep -vE "^(Call|Mute|End call|Call menu|Idle|Listening|Thinking|Speaking|)$" | head -1)
+    | grep -vxE "Call|Mute|End call|Call menu|Idle|Listening|Thinking|Speaking" \
+    | grep -vE "^ *$" | head -1)
   echo "$NOW|${PHASE:-?}|${LINE:-}" >> "$SAMPLES"
-  awk -F'|' -v n="$NOW" 'END{}' /dev/null
 done
 
 xcrun simctl io "$UDID" screenshot "$OUT/at-the-end.png" >/dev/null 2>&1

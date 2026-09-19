@@ -17,10 +17,16 @@
 # and `voice-notes-wait.sh` checks the words that came back against it. With
 # the sentence written out twice, a scenario can "verify" dictation against
 # a sentence the clip no longer says.
-# idb is a Homebrew install and a non-login ssh shell cannot see it. Every
-# scenario exports this before sourcing, but a new one need not know that, so
-# the library that calls idb asks for idb's directory itself.
-export PATH="/opt/homebrew/bin:$PATH"
+# A non-login ssh shell carries a bare PATH, and the loop only ever arrives
+# over ssh. Two directories are missing from it and both are needed: ffmpeg
+# and python3 are in Homebrew, and idb is in the pip user bin — *not* in
+# Homebrew, which cycle 193 assumed and got wrong. The Python version is
+# globbed rather than written down, because it is 3.14 today and the last
+# upgrade silently took idb off the PATH of everything that had it typed in.
+for d in /opt/homebrew/bin "$HOME"/Library/Python/*/bin; do
+  [ -d "$d" ] && case ":$PATH:" in *":$d:"*) ;; *) PATH="$d:$PATH" ;; esac
+done
+export PATH
 
 NOTE_SAYS=${NOTE_SAYS:-"Please summarise what the workers did today in two sentences."}
 

@@ -42,6 +42,7 @@ first (M-162).
 A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.
 """
+import glob
 import json
 import os
 import re
@@ -62,11 +63,16 @@ def idb():
     found = shutil.which("idb")
     if found:
         return found
-    for candidate in ("/opt/homebrew/bin/idb", "/usr/local/bin/idb"):
-        if os.path.exists(candidate):
-            return candidate
-    sys.exit("ui: no idb on PATH and none in /opt/homebrew/bin — "
-             "install it, or add its directory to PATH")
+    # idb is installed with pip, so it lands in the user bin for whichever
+    # Python installed it — not in Homebrew. Globbed, because the version in
+    # that path changes and every place it was written down went stale.
+    for pattern in (os.path.expanduser("~/Library/Python/*/bin/idb"),
+                    "/opt/homebrew/bin/idb", "/usr/local/bin/idb"):
+        for candidate in sorted(glob.glob(pattern), reverse=True):
+            if os.path.exists(candidate):
+                return candidate
+    sys.exit("ui: no idb on PATH, in ~/Library/Python/*/bin, or in "
+             "/opt/homebrew/bin — install it, or add its directory to PATH")
 
 
 def elements(udid):
