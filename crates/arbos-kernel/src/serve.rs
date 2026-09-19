@@ -490,6 +490,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     let host = Host::load()?;
     host.remember_place(place.path());
     say_if_host_dir_unwritable(&place, &host);
+    say_if_login_shell_broken(&place);
     let git_present = say_if_git_missing(&place);
     let _ = GIT_PRESENT.set(git_present);
     match (host.api_key(), host.config.api_base()) {
@@ -2374,6 +2375,7 @@ static GIT_PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The marker that the missing-git notice was said for this place; in
 /// `runtime/`, so a reinstall of the machine starts the question afresh.
+const LOGIN_SHELL_BROKEN_SAID: &str = "login-shell-broken.said";
 const HOST_DIR_UNWRITABLE_SAID: &str = "host-dir-unwritable.said";
 const GIT_MISSING_SAID: &str = "git-missing.said";
 
@@ -2426,6 +2428,56 @@ fn say_if_host_dir_unwritable(place: &Place, host: &Host) {
             );
         }
         Ok(()) => {}
+    }
+}
+
+/// A login profile that replaces the shell (`exec zsh` at the end of
+/// ~/.bash_profile, the way to get zsh where chsh is not allowed) made
+/// every bash call a silent no-op: exit 0, no output, the command never
+/// run. The engine probes the login shell once and runs commands without
+/// the profile when it is broken; said here once on the main chat with
+/// what is not seen (PATH set only in the profile) and the ways out, and
+/// in the log every start. Cleared when the login shell works again.
+fn say_if_login_shell_broken(place: &Place) {
+    let marker = place.runtime_dir().join(LOGIN_SHELL_BROKEN_SAID);
+    let said = marker.exists();
+    let transcript = Layout::new(place, arbos_core::ROOT_ID).transcript();
+    match arbos_engine::login_shell_problem() {
+        Some(why) => {
+            klog::warn(
+                "login_shell_broken",
+                None,
+                format!("{why}; commands run without the login profile (bash -c)"),
+            );
+            if !said {
+                let _ = arbos_core::append_event(
+                    &transcript,
+                    &arbos_core::Event::new(EventKind::Notice {
+                        text: format!(
+                            "Commands run without your login profile: {why}. Anything the profile alone puts on PATH (a conda env, a venv, a toolchain) is not seen by the agents until it is fixed — move an `exec` behind an interactive check (`case $- in *i*) exec zsh;; esac`), or set ARBOS_NO_LOGIN_SHELL=1 where the kernel starts to keep it this way quietly."
+                        ),
+                        failed: true,
+                    }),
+                );
+                let _ = std::fs::write(&marker, "said\n");
+            }
+        }
+        None if said => {
+            let _ = std::fs::remove_file(&marker);
+            klog::info(
+                "login_shell_ok",
+                None,
+                "the login shell runs commands again",
+            );
+            let _ = arbos_core::append_event(
+                &transcript,
+                &arbos_core::Event::new(EventKind::Notice {
+                    text: "Your login profile works again: commands run as a login shell, with everything it puts on PATH.".into(),
+                    failed: false,
+                }),
+            );
+        }
+        None => {}
     }
 }
 

@@ -572,14 +572,19 @@ fn rerun_report_within(agent_dir: &Path, budget: Duration) -> Option<String> {
 
 fn run_once(command: &str, cwd: &Path, timeout: Duration) -> Option<i32> {
     let shell = crate::jobs::job_shell();
+    let flag = if crate::jobs::login_shell(shell) {
+        "-lc"
+    } else {
+        "-c"
+    };
     let secs = timeout.as_secs().max(1).to_string();
     let mut cmd = if which_timeout() {
         let mut c = Command::new("timeout");
-        c.arg(&secs).arg(shell).arg("-lc").arg(command);
+        c.arg(&secs).arg(shell).arg(flag).arg(command);
         c
     } else {
         let mut c = Command::new(shell);
-        c.arg("-lc").arg(command);
+        c.arg(flag).arg(command);
         c
     };
     cmd.current_dir(if cwd.is_dir() { cwd } else { Path::new(".") })

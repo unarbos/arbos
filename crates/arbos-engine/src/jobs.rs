@@ -1110,9 +1110,80 @@ pub(crate) fn shell_command(script: &str) -> (String, Vec<String>) {
 }
 
 pub(crate) fn shell_args(shell: &str, script: &str) -> Vec<String> {
-    let login = shell == "bash" && std::env::var_os("ARBOS_NO_LOGIN_SHELL").is_none();
-    let flag = if login { "-lc" } else { "-c" };
+    let flag = if login_shell(shell) { "-lc" } else { "-c" };
     vec![flag.to_string(), script.to_string()]
+}
+
+/// Whether `shell` is run as a login shell: bash, not turned off, and a
+/// login shell that runs what it is given (see `login_shell_problem`).
+pub fn login_shell(shell: &str) -> bool {
+    shell == "bash"
+        && std::env::var_os("ARBOS_NO_LOGIN_SHELL").is_none()
+        && login_shell_problem().is_none()
+}
+
+/// Why the login shell is not used, when it is not: probed once per
+/// process. A `~/.bash_profile` that ends in `exec zsh` (the way to get
+/// zsh where `chsh` is not allowed) replaces bash before `-c` runs; the
+/// other shell reads an empty stdin and leaves — exit 0, nothing printed,
+/// the command never ran. Every bash call was a success with no output, a
+/// reproduction re-run "passed", the environment probe found no python.
+/// So: `bash -lc 'printf <marker>'`, a few seconds; no marker back, and
+/// commands run without the profile, with the reason kept for the log
+/// and the main chat. None when the login shell works, or is off by the
+/// environment variable (nothing to probe).
+pub fn login_shell_problem() -> Option<&'static str> {
+    static PROBLEM: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PROBLEM
+        .get_or_init(|| {
+            if job_shell() != "bash" || std::env::var_os("ARBOS_NO_LOGIN_SHELL").is_some() {
+                return None;
+            }
+            probe_login_shell()
+        })
+        .as_deref()
+}
+
+const LOGIN_MARKER: &str = "__arbos_login_shell_ok__";
+
+fn probe_login_shell() -> Option<String> {
+    // std's process, not tokio's: this runs once, on whatever thread
+    // first asks, and blocks for at most the timeout.
+    let mut child = std::process::Command::new("bash")
+        .args(["-lc", &format!("printf '%s' {LOGIN_MARKER}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut stdout, &mut buf);
+        let _ = tx.send(buf);
+    });
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(out) if out.contains(LOGIN_MARKER) => {
+            let _ = child.wait();
+            None
+        }
+        Ok(_) => {
+            let status = child.wait().ok();
+            Some(format!(
+                "bash as a login shell did not run the command it was given (exit {}): the login profile (~/.bash_profile, ~/.profile) replaces the shell or exits — an `exec zsh` at its end does this",
+                status
+                    .and_then(|s| s.code())
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "?".into())
+            ))
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Some("bash as a login shell did not finish a one-line command in 5 s: the login profile waits on something (a prompt, a network call)".to_string())
+        }
+    }
 }
 
 fn sh_quote(s: &str) -> String {
