@@ -125,6 +125,12 @@ else
   # so with no chat opened, the app comes back to the list and there is
   # nothing to compare. That is a real difference between the two memories,
   # and it is not the question this step is asking.
+  # From a clean launch: step 2 leaves a filter in the search box, so the
+  # named project is not on screen and the tap found nothing — "could not
+  # open 'const'", on a list showing only the rows matching "sub".
+  xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+  xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 10
+  reach_the_list "$UDID" >/dev/null 2>&1
   ui tap "$NAMED" >/dev/null 2>&1 && sleep 4
   OPENED_IT=$(ui dump | grep -cE "Button +Back")
   [ "$OPENED_IT" = 0 ] && echo "  could not open '$NAMED' to put it in front"
