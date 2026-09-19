@@ -136,8 +136,18 @@ if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sl
   xcrun simctl launch "$UDID" $B >/dev/null 2>&1
   sleep 8
   shot 06-came-back-to-finished-work
+  # Wait for the ending rather than assuming ninety seconds is enough. A run
+  # at cycle 182 came back to a turn still going and the check called it
+  # "either the worker is slow or the chat did not catch up" — unable to say
+  # which. The kernel could: the turn had completed at 2m 9s, because it
+  # compacted 682 turns of history in the middle of it.
+  AFTER_END=""
+  for _ in $(seq 1 24); do
+    AFTER_END=$(ui dump | grep -oE "Worked [0-9]+[a-z].*|Turn ended" | head -1)
+    [ -n "$AFTER_END" ] && break
+    sleep 5
+  done
   AFTER_ROWS=$(ui dump | grep -cE "StaticText")
-  AFTER_END=$(ui dump | grep -oE "Worked [0-9]+[a-z].*|Turn ended" | head -1)
   echo "  came back to:      $AFTER_ROWS line(s) on screen"
   echo "  the turn's ending: ${AFTER_END:-none on screen}"
   if [ -n "$AFTER_END" ] && [ "$BEFORE_END" = 0 ]; then
@@ -147,8 +157,30 @@ if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sl
     echo "  VERDICT: cannot say — the turn already had an ending line before he left,"
     echo "           so coming back to one proves nothing about catching up"
   else
-    echo "  VERDICT: he came back to a turn still running after 90s away. Either the"
-    echo "           worker is slower than its 60s sleep or the chat did not catch up"
+    # Ask the one witness that is not the screen. If the kernel has finished
+    # and the chat has not said so, that is the app; if the kernel is still
+    # going, the worker is simply slow and this run says nothing about
+    # catching up.
+    # `phone` is the pod's own kernel folded into the roster (M-121), so its
+    # record is readable as `pod`. Any other project would need its
+    # machine/project target, which this scenario is not given.
+    if [ "$ROW" != phone ]; then
+      echo "  VERDICT: cannot say — no ending on screen after two minutes, and this"
+      echo "           check only knows how to ask the kernel behind 'phone'"
+      KDONE=skip
+    else
+      KDONE=$(python3 "$HERE/../kernel.py" pod history 6 2>/dev/null | grep -c "turn_complete")
+    fi
+    if [ "$KDONE" = skip ]; then
+      :
+    elif [ "${KDONE:-0}" -gt 0 ]; then
+      echo "  VERDICT: the kernel finished the turn and the chat never showed its"
+      echo "           ending in two minutes of watching — the chat did not catch up"
+    else
+      echo "  VERDICT: cannot say — the kernel is still working after two minutes, so"
+      echo "           there was no ending for the chat to miss. The worker outran its"
+      echo "           own 60s sleep (a history compaction will do it)"
+    fi
   fi
 else
   echo "  could not ask for a worker, so this half did not run"
