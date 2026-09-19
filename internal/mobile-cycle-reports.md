@@ -5981,3 +5981,67 @@ after the run: `large`.
 Stills in `media/mobile/cycle-191/` — the two sizes, indistinguishable.
 
 **PR:** [#796](https://github.com/unarbos/arbos/pull/796), harness only.
+
+## Cycle 192 — what a person sees before there is anything to see
+
+I went to the one screen nothing has ever driven: the projects list with
+nothing on it. A fixture hub answered with no machines at all, the same way
+`list-search-filter-refresh` serves its four, and the app was reinstalled
+first so that rows remembered from real runs could not fill a list this check
+needs empty.
+
+**The list is never empty** (M-591). `ProjectsView.emptyState` has three
+things it can say — "Asking the hub…", the hub's problem, or "No projects
+yet." — and the third cannot happen. `ProjectStore.refresh` appends the pod
+row whenever a kernel endpoint is configured, before the hub is asked at all:
+
+```swift
+if settings.kernelEndpoint != nil {
+    list.append(entry(target: .pod, folder: "pod", machine: "pod", place: "", live: true, remote: true))
+}
+```
+
+Every build carries a kernelURL in `Secrets.plist`, so a hub with nothing on
+it still shows `pod / Idle` and a composer offering `Message pod…`. I have
+not changed it, because it reads as the right behaviour: a person with no
+projects still has his own pod to talk to. But the line is dead in every
+build that ships, and that is worth knowing now rather than discovering it in
+a redesign.
+
+**My first verdict blamed the wrong thing** (M-592). It saw the leftover row
+and accused the reinstall of failing to clear it. No reinstall could: the row
+is built before the hub is consulted. The check quotes the line that adds it
+now, and keeps the leftover explanation for the case it actually describes.
+
+**The recording cost more than the scenario, and was worth more** (M-593,
+M-594). Cycle 192 is a third cycle, so it needed film. The footage recorded
+fine; then `review-demo.sh` refused to shrink it — *"no ffmpeg on this
+machine"*, on a machine with ffmpeg in `/opt/homebrew/bin`. The loop drives
+the Mac over ssh, a non-login ssh shell carries a bare PATH, and the tool
+never asked for Homebrew's directory. Cycle 160 hit precisely this with
+Python, fixed that one tool, and left the lesson in a comment nobody reads
+while writing the next tool. So it is a check now: `check-tools.sh` names any
+tool calling ffmpeg, ffprobe or idb without the PATH. Verified by deleting
+the export and watching the check find the file, then restoring it.
+
+`sim-lib.sh` sets the PATH itself as well, so a scenario that does not know
+the rule still finds `idb`.
+
+**Housekeeping** (M-595): the check relaunches against the real hub on the
+way out, so the next person to look at the simulator does not meet a dead
+fixture. It stays out of the sweep, documented there — its answer is a
+constant rather than a measurement, and its uninstall empties rows a later
+check wants.
+
+The demo came out better than the scenario deserved: nine rows against the
+real hub, then one against the empty one, so the point needs no caption.
+Reviewed for motion — no clipping, no stall, no endless spinner.
+
+TestFlight 2160 polled: 19 screenshots, 0 crashes, nothing new.
+
+Stills in `media/mobile/cycle-192/`:
+`empty-hub-still-shows-the-pod-row.png`, `the-real-hub-for-comparison.png`,
+`empty-hub-review-demo.mp4`.
+
+**PR:** [#797](https://github.com/unarbos/arbos/pull/797), harness only — no
+`ios/` change, so nothing here needs a TestFlight upload.

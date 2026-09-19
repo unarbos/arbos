@@ -12,9 +12,10 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **18**, open, **half A**, desktop step done (app `a129992316e9`), 272 scenarios |
-| previous | **17** closed 17:44:10Z, 292 scenarios; 16 closed 13:22:48Z, 262 |
-| clean run | cycles 15, 16, 17 all: 0 checkpoint noise, 0 budget skips |
+| current cycle | none open; **18 closed 21:02:25Z** (half A), 272 scenarios, 37 breaks |
+| previous | 17 closed 17:44:10Z, 292; 16 closed 13:22:48Z, 262 |
+| next | cycle 19 due 22:00, half B (so no `lk-04`) |
+| clean run | cycles 15-18: 0 checkpoint noise, 0 budget skips, no truncation in 16-18 |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
@@ -123,3 +124,18 @@ So the cadence rule from cycle 17 is confirmed rather than merely reasoned: `lk-
 half-B cycles and present on half-A ones. `kf-01` ran in both, being desktop-tagged.
 
 `qal-j43` is now six builds deep without drifting back. `sq-02`'s fix has held on five.
+
+## Cycle 18 closed — 272 scenarios, 37 breaks, nothing new
+
+Every break was an already-filed issue reporting itself. No truncation, no budget skips, no
+checkpoint noise: four consecutive clean cycles on both measures.
+
+The journey read `6/8 pass, 1 unverified, 1 fail` — J3 failed, J8 unverified. J8 is the stale phone
+feed (`qal-j48`), not a product failure, and the headline rate will count it as one. Worth
+remembering when reading that number: **0/10 on J8 means nobody has measured it since
+2026-09-16**, not that it fails.
+
+### What to expect next
+
+Cycle 19 is due 22:00 and will be **half B**, so `lk-04` will be absent again and `qal-j40` goes
+unasked for that cycle. `kf-01` will run, being desktop-tagged. That is the cadence, not a fault.
