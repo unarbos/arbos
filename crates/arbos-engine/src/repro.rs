@@ -24,8 +24,14 @@ use serde_json::Value;
 pub const ARG: &str = "repro";
 /// Set to `1` to refuse the first edit without a failing reproduction.
 pub const REQUIRED_ENV: &str = "ARBOS_REPRO_REQUIRED";
-/// Longest a re-run at `changes` time may take.
+/// Longest one re-run at `changes` time may take.
 const RERUN_TIMEOUT: Duration = Duration::from_secs(180);
+/// Longest the whole re-run pass may take. Seventeen recorded `runserver`
+/// commands, each run to its 180 s, held one `changes` call for 51
+/// minutes (SWE-bench cycle 36, django-13809) while the kernel's own
+/// stall notice counted the wait. Past this, the rest are listed as not
+/// re-run, with the reason; the report never lies about what it ran.
+const RERUN_BUDGET: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repro {
@@ -240,7 +246,7 @@ const INSTALLERS: &[&str] = &[
 /// code is taken — a refused `pip download`, a `grep` with no match, a
 /// `ls` of a missing path are not the bug failing.
 pub fn note_failing(place: &Place, agent: &AgentId, command: &str, cwd: &Path, exit: Option<i32>) {
-    if not_evidence(exit).is_some() || !runs_code(command) {
+    if not_evidence(exit).is_some() || !runs_code(command) || is_server(command) {
         return;
     }
     let entry = Repro {
@@ -295,6 +301,9 @@ pub fn record(
     cwd: &Path,
     exit: Option<i32>,
 ) -> String {
+    if is_server(command) {
+        return "Not recorded as a reproduction: this command runs a server or a watcher, which never exits on its own — its exit is the timeout's, not the bug's. The reproduction is the request that hits the server (curl, the test client, a script that asserts on the response); run that with repro:true.".to_string();
+    }
     match exit {
         Some(0) => "Not recorded as a reproduction: the command exited 0. A reproduction must fail before the fix (a non-zero exit: a failing assertion, an exception, a wrong value checked with a comparison). Make it fail, then run it again with repro:true.".to_string(),
         _ if not_evidence(exit).is_some() => format!(
@@ -372,17 +381,50 @@ pub fn gate(place: &Place, agent: &AgentId, tool: &str) -> Result<Option<String>
     )
 }
 
+/// A command that runs a server or a watcher never exits on its own, so
+/// its failure is the timeout's and re-running it is minutes for nothing.
+fn is_server(command: &str) -> bool {
+    crate::tools::looks_like_server(command)
+}
+
 /// Re-run every recorded reproduction (for `changes`): one line per
-/// reproduction, `pass` when it now exits 0.
+/// reproduction, `pass` when it now exits 0. The pass as a whole keeps
+/// to `RERUN_BUDGET`; reproductions it did not reach are listed as not
+/// re-run and counted as unsettled, never as passing.
 pub fn rerun_report(agent_dir: &Path) -> Option<String> {
+    rerun_report_within(agent_dir, RERUN_BUDGET)
+}
+
+fn rerun_report_within(agent_dir: &Path, budget: Duration) -> Option<String> {
     let repros = list_in(agent_dir);
     if repros.is_empty() {
         return None;
     }
+    let started = std::time::Instant::now();
     let mut lines = Vec::new();
     let mut failing = 0;
+    let mut skipped = 0;
     for (i, r) in repros.iter().enumerate() {
-        let exit = run_once(&r.command, &r.cwd);
+        let shown: String = r.command.chars().take(120).collect();
+        let left = budget.saturating_sub(started.elapsed());
+        if is_server(&r.command) {
+            skipped += 1;
+            lines.push(format!(
+                "  {}. not re-run — a server or watcher never exits on its own; the reproduction is the request that hits it — {shown}",
+                i + 1
+            ));
+            continue;
+        }
+        if left < Duration::from_secs(1) {
+            skipped += 1;
+            lines.push(format!(
+                "  {}. not re-run — the re-run pass's {} s budget is spent — {shown}",
+                i + 1,
+                budget.as_secs()
+            ));
+            continue;
+        }
+        let exit = run_once(&r.command, &r.cwd, left.min(RERUN_TIMEOUT));
         let verdict = match exit {
             Some(0) => "pass".to_string(),
             Some(c) => {
@@ -394,26 +436,36 @@ pub fn rerun_report(agent_dir: &Path) -> Option<String> {
                 "STILL FAILS (killed or timed out)".to_string()
             }
         };
-        let shown: String = r.command.chars().take(120).collect();
         lines.push(format!("  {}. {verdict} — {shown}", i + 1));
     }
-    let head = if failing == 0 {
+    let head = if failing == 0 && skipped == 0 {
         format!(
             "Reproductions ({} recorded before the fix): all pass now.",
             repros.len()
         )
+    } else if failing == 0 {
+        format!(
+            "Reproductions ({} recorded before the fix): {} pass now; {skipped} not re-run (see below) — run those yourself before calling the task done.",
+            repros.len(),
+            repros.len() - skipped
+        )
     } else {
         format!(
-            "Reproductions ({} recorded before the fix): {failing} still fail. The task is not done.",
-            repros.len()
+            "Reproductions ({} recorded before the fix): {failing} still fail{}. The task is not done.",
+            repros.len(),
+            if skipped > 0 {
+                format!(", {skipped} not re-run")
+            } else {
+                String::new()
+            }
         )
     };
     Some(format!("\n{head}\n{}\n", lines.join("\n")))
 }
 
-fn run_once(command: &str, cwd: &Path) -> Option<i32> {
+fn run_once(command: &str, cwd: &Path, timeout: Duration) -> Option<i32> {
     let shell = crate::jobs::job_shell();
-    let secs = RERUN_TIMEOUT.as_secs().to_string();
+    let secs = timeout.as_secs().max(1).to_string();
     let mut cmd = if which_timeout() {
         let mut c = Command::new("timeout");
         c.arg(&secs).arg(shell).arg("-lc").arg(command);
@@ -497,6 +549,77 @@ mod tests {
         assert!(report.contains("all pass now"), "{report}");
         reset(&place, &agent);
         assert!(rerun_report(&agent_dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SWE-bench cycle 36: seventeen `runserver` reproductions, each
+    /// re-run to its 180 s, held one `changes` call for 51 minutes. A
+    /// server is refused as a reproduction with the reason; a pass that
+    /// runs out of budget lists the rest as not re-run and never calls
+    /// the task done on their account.
+    #[test]
+    fn a_server_is_not_a_reproduction_and_the_rerun_pass_keeps_to_its_budget() {
+        let dir = std::env::temp_dir().join(format!("arbos-repro-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let place = Place::new(dir.clone());
+        let agent = AgentId::new("root");
+        let note = record(
+            &place,
+            &agent,
+            "python manage.py runserver 8000",
+            &dir,
+            Some(124),
+        );
+        assert!(
+            note.starts_with("Not recorded as a reproduction: this command runs a server"),
+            "{note}"
+        );
+        note_failing(&place, &agent, "npm run dev", &dir, Some(1));
+        assert!(
+            take_last_failing(&place, &agent).is_none(),
+            "a server is not taken as the last failing command"
+        );
+        // Three real reproductions of three seconds each; a budget of five
+        // seconds runs the first whole, cuts the second short, and never
+        // starts the third.
+        for n in 1..=3 {
+            record(&place, &agent, &format!("sleep 3; exit {n}"), &dir, Some(n));
+        }
+        // And one server recorded by an older kernel: skipped, never run.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path(&place, &agent))
+            .unwrap();
+        use std::io::Write;
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&Repro {
+                command: "python manage.py runserver".into(),
+                cwd: dir.clone(),
+                exit: Some(124),
+                ts: 1
+            })
+            .unwrap()
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let report =
+            rerun_report_within(&Layout::new(&place, "root").dir, Duration::from_secs(5)).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(9),
+            "the pass kept to its budget: {:?}",
+            started.elapsed()
+        );
+        assert!(report.contains("STILL FAILS (exit 1)"), "{report}");
+        assert!(report.contains("budget is spent"), "{report}");
+        assert!(
+            report.contains("a server or watcher never exits"),
+            "{report}"
+        );
+        assert!(report.contains("not re-run"), "{report}");
+        assert!(!report.contains("all pass now"), "{report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

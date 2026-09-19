@@ -18,7 +18,7 @@ pub mod memory;
 mod web;
 pub mod wipe;
 
-pub use bash::{is_readonly_command, kill_job, reap_by_pid};
+pub use bash::{is_readonly_command, kill_job, looks_like_server, reap_by_pid};
 pub use fs::resolve;
 
 pub use crate::tool::ToolOut;
