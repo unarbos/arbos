@@ -968,6 +968,11 @@ fn reachable(probe: &ElementProbe, window: &Window) -> bool {
 
 fn describe(probe: &ElementProbe, window: &Window) -> Value {
     let visible = probe.bounds.intersect(&probe.content_mask.bounds);
+    let frame = Bounds {
+        origin: bezel::gpui::Point::default(),
+        size: window.viewport_size(),
+    };
+    let on_screen = !probe.bounds.intersect(&frame).is_empty();
     let path = probe.id.to_string();
     let name = path.rsplit('.').next().unwrap_or(&path).to_owned();
     json!({
@@ -980,6 +985,13 @@ fn describe(probe: &ElementProbe, window: &Window) -> Value {
         "cx": f32::from(probe.bounds.center().x),
         "cy": f32::from(probe.bounds.center().y),
         "visible": !visible.is_empty(),
+        // Within the window's own frame, whatever mask the element was
+        // painted under: a row drawn from a deferred layer carries a mask
+        // that does not meet its bounds (the PRs pill under the composer,
+        // R15/R35), and read as unseen while plainly on screen. An element
+        // scrolled off has bounds off the frame, so this still says no
+        // for those.
+        "on_screen": on_screen,
         "interactive": probe.hitbox.is_some(),
         "reachable": reachable(probe, window),
     })
@@ -1381,6 +1393,7 @@ fn item_json(item: &ChatItem) -> Value {
             "feedback": message.feedback,
             "seq": message.seq,
             "reported": message.reported,
+            "steer": message.steer,
         }),
         ChatItem::From { who, text, .. } => json!({
             "kind": "from",

@@ -518,10 +518,13 @@ class Pass:
         except Exception:
             return False
         # `visible` is bounds ∩ content mask; the PRs pill read False while
-        # plainly on screen (cycle 31, `128-pill-prs.png`). `reachable` is
-        # the hit test at the element's centre — the stronger word for an
-        # interactive element. Either counts; neither is assumed (R15).
-        return bool(found.get("visible")) or bool(found.get("reachable"))
+        # plainly on screen (cycle 31, `128-pill-prs.png`; again at 1600×1000,
+        # cycle 53). `reachable` is the hit test at the element's centre —
+        # the stronger word for an interactive element. `on_screen` is the
+        # bounds against the window's frame, whatever mask the element was
+        # painted under (R35): a row scrolled off the list has bounds off
+        # the frame and still reads unseen. Any of the three counts.
+        return bool(found.get("visible")) or bool(found.get("reachable")) or bool(found.get("on_screen"))
 
     def first(self, pattern: str) -> str | None:
         found = self.ids(pattern)
@@ -775,6 +778,53 @@ class Pass:
             self.check("copy-turn", sc, "click copy", "clipboard holds the answer", lambda: self.app.click(ids["copy-turn"]), copied)
         else:
             self.gap("copy-turn", sc, "click", "no copy-turn-* element")
+        # F-215: a command that exits non-zero carries its exit code as a
+        # mark on its card, not as a line of output.
+        self.send("Run `ls /definitely-not-here` with bash and tell me the exact error text. Do not delegate."); self.wait_idle(90); time.sleep(1)
+        act = active(self.state()) or {}
+        ran_it = any(i.get("kind") == "tool" and "definitely-not-here" in (i.get("label") or "") for i in act.get("items", []))
+        if ran_it:
+            def exit_marks():
+                return [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"] if e["path"].split(".")[-1].startswith("term-exit-")]
+            # The newest turn's fold is the last `work-*`; its run the last `run-*`.
+            opened = None
+            opened_run = None
+            for w in reversed(self.ids("work-*")):
+                if self.seen(w):
+                    self.app.click(w); time.sleep(0.6); opened = w; break
+            for r in reversed(self.ids("run-*")):
+                if self.seen(r) and not exit_marks():
+                    self.app.click(r); time.sleep(0.6); opened_run = r; break
+            marks = exit_marks()
+            self.record("command-exit-mark", sc, "a command exits 2; open its run", "the card's header carries 'exit 2'",
+                        f"marks={marks}", "pass" if marks else "fail", self.still("exit-mark"))
+            # Fold both back, by state: the fold-line rows later in this
+            # phase read the pane as the turns left it (R38 — a fold-back
+            # gated on `seen` left the cards open and those rows clicked
+            # the wrong thing on `relaunch-703m`).
+            if opened_run and self.app.exists(opened_run) and exit_marks():
+                self.app.click(opened_run); time.sleep(0.5)
+            if opened and self.app.exists(opened):
+                self.app.click(opened); time.sleep(0.5)
+                if exit_marks() or any(self.seen(t) for t in self.ids("term-card-*")[-1:]):
+                    self.app.click(opened); time.sleep(0.5)
+        else:
+            self.gap("command-exit-mark", sc, "run", "the model did not run the command itself")
+        # F-197: ⌘K finds a chat by what was said in it, not only its title
+        # and first words; the row shows the words around the match.
+        before_search = self.state().get("active_session")
+        self.app.key("cmd-k"); time.sleep(0.8); self.app.type("brown fox"); time.sleep(0.8)
+        hits = [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"]
+                if re.fullmatch(r"palette-\d+", e["path"].split(".")[-1]) and e.get("visible")]
+        self.record("search-by-content", "search", "⌘K, type words said only in an answer", "at least one chat row",
+                    f"rows={hits}", "pass" if hits else "fail", self.still("search-content"))
+        if hits:
+            self.check("search-open-hit", "search", "Enter on the lit row", "the palette closes on a chat",
+                       lambda: self.app.key("enter"), lambda a, b: not self.app.exists("chat-search") and b.get("active_session") is not None, settle=1.0)
+        else:
+            self.app.key("escape"); time.sleep(0.4)
+        if self.state().get("active_session") != before_search:
+            self.go_main()
         for name in ("vote-up", "vote-down"):
             if ids[name]:
                 self.check(name, sc, "click", "message.feedback set", lambda n=name: self.app.click(ids[n]),
@@ -969,10 +1019,14 @@ class Pass:
         # The line under the turn appears once the spawn record names its
         # child, a beat after the panel row.
         t0 = time.time()
-        child = self.first("child-line-*")
-        while not child and time.time() - t0 < 20:
+        # The per-child line, not `child-line-live` — the summary drawn
+        # before the worker's session exists, which opens nothing (R37).
+        def per_child():
+            return next((c for c in self.ids("child-line-*") if not c.endswith("child-line-live")), None)
+        child = per_child()
+        while not child and time.time() - t0 < 25:
             time.sleep(0.5)
-            child = self.first("child-line-*")
+            child = per_child()
         if child:
             def click_child():
                 # The line may have scrolled off the top while the turn
@@ -1383,6 +1437,23 @@ class Pass:
         self.check("cmd-b", sc, "cmd-b", "panel_open flips back and panel_shown follows", lambda: self.app.key("cmd-b"), flips)
         if not self.state()["panel_open"]:
             self.app.key("cmd-b")
+        # F-214: a pipe table on the project page draws as a table, its
+        # separator row dropped — not as lines of pipes.
+        notes = PROJ / ".arbos" / "notes.md"
+        try:
+            before_notes = notes.read_text() if notes.exists() else None
+            notes.write_text("# Page\n\n## Decisions\n\n| Date | Decision | Owner |\n| --- | --- | --- |\n| 2026-09-19 | Ship the CLI first | Jacob |\n\n## Checklist\n\n- [ ] Write the add command\n")
+            s_tbl = self.wait(lambda s: self.app.exists("page-table-1") or any(re.fullmatch(r"page-table-\d+", e["path"].split(".")[-1]) for e in self.app.snapshot()["elements"]), 8, what="page table")
+            tables = [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"] if re.fullmatch(r"page-table-\d+", e["path"].split(".")[-1])]
+            self.record("page-table", sc, "write a pipe table into notes.md, read the Project section", "one table block (header + rows), the `| --- |` line not drawn",
+                        f"tables={tables}", "pass" if len(tables) == 1 else "fail", self.still("page-table"))
+            if before_notes is None:
+                notes.unlink(missing_ok=True)
+            else:
+                notes.write_text(before_notes)
+            time.sleep(1.0)
+        except OSError as err:
+            self.gap("page-table", sc, "write notes.md", f"{type(err).__name__}: {err}")
         if self.app.exists("panel-set-goals"):
             self.check("panel-set-goals", sc, "click Set goals…", "composer holds a goals prompt, nothing sent",
                        lambda: self.app.click("panel-set-goals"), lambda a, b: "GOALS" in b["composer"]["text"] and not busy(b))
@@ -1687,6 +1758,18 @@ class Pass:
             order = [o for o in order if o is not None]
             self.record("world-back-in-order", sc, "rename back, type a third line", "three answers, in the order typed, no duplicate prompt cards",
                         f"settled={bool(settled)} answers={order} users={len(users(c))}", "pass" if settled and order == [0, 1, 2] and len(users(c)) == 3 else "fail", self.still("world-back"))
+            # F-209: the scratch place has no `.git`; the kernel takes no
+            # checkpoint there, so no answered turn's footer offers a rewind
+            # (the footer, fork included, is drawn under an answer only).
+            turns = [i for i, it in enumerate((c or {}).get("items", [])) if it.get("kind") == "user"]
+            if c and turns and not (place / ".git").exists():
+                card = f"prompt-{c['id']}-{turns[-1]}"
+                if self.app.exists(card):
+                    f = self.app.find(card); self.app.hover(x=f["x"] + f["w"] / 2, y=f["y"] + f["h"] / 2); time.sleep(0.6)
+                has_rewind = self.app.exists(f"rewind-turn-{c['id']}-{turns[-1]}")
+                has_fork = self.app.exists(f"fork-turn-{c['id']}-{turns[-1]}")
+                self.record("no-rewind-off-repo", sc, "hover an answered turn in a place with no .git", "fork offered, rewind not (the kernel takes no checkpoint there)",
+                            f"rewind={has_rewind} fork={has_fork}", "pass" if not has_rewind and has_fork else ("not-reachable" if not has_fork else "fail"))
             # --- the kernel's file is replaced under a running turn ---
             copy_dir = Path("/tmp/parity-world-kernel"); shutil.rmtree(copy_dir, ignore_errors=True); copy_dir.mkdir()
             copy = copy_dir / "arbos-kernel"; shutil.copy(kernel, copy)
@@ -1772,6 +1855,10 @@ class Pass:
         self.go_project()
         ids = self.turn_ids()
         n0 = ((active(self.state()) or {}).get("pills") or {}).get("prs", 0)
+        # The record's baseline too: a PR from an earlier phase of the run
+        # already counted in the pill, and the row then asked the count to
+        # grow past a baseline it could not (R36).
+        lines0 = len((PROJ / ".arbos" / "prs.jsonl").read_text().splitlines()) if (PROJ / ".arbos" / "prs.jsonl").exists() else 0
         t0 = time.time()
         self.send(P_PR)
         s = self.wait(lambda s: ((active(s) or {}).get("pills") or {}).get("prs", 0) > n0 or (not busy(s) and time.time() - t0 > 20), 180, what="PRs pill")
@@ -1781,7 +1868,7 @@ class Pass:
         self.inv(sc)
         self.record("pill-prs", sc, "worker runs `gh pr create` (fake gh on PATH)", "pills.prs counts the subtree's PR; the pill-prs element shows \"PRs 1\"; .arbos/prs.jsonl has the record",
                     f"pills={json.dumps(pills)[:160]} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')}",
-                    "pass" if pills.get("prs", 0) > n0 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
+                    "pass" if (pills.get("prs", 0) > n0 or len(recorded) > lines0) and pills.get("prs", 0) >= 1 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
         if self.app.exists("pill-prs"):
             self.check("pill-prs", sc, "hover the pill", "tooltip lists the PR URLs; no state change", lambda: self.app.hover("pill-prs"), None)
 
@@ -1831,6 +1918,21 @@ class Pass:
         self.app = app
         place_window(); time.sleep(1.5)
         self.tabs = self.app.exists("tab-bar"); self.go_project()
+        # F-208: a kernel step on file at attach is the kernel's word that
+        # the turn is open; the pane must draw it as running, not as a
+        # prompt with nothing under it.
+        step_file = PROJ / ".arbos" / "agents" / "root" / "status.toml"
+        step = ""
+        try:
+            step = next((l.split("=", 1)[1].strip().strip('"') for l in step_file.read_text().splitlines() if l.startswith("step")), "")
+        except OSError:
+            pass
+        if step:
+            s_busy = self.wait(lambda s: busy(s), 6, what="busy after attach")
+            self.record("relaunch-open-turn-drawn", sc, "relaunch while the kernel's status file holds a step", "the chat reads busy within 6 s (its turn is open)",
+                        f"step={step!r} busy={bool(s_busy)}", "pass" if s_busy else "fail", self.still("relaunch-open-turn"))
+        else:
+            self.gap("relaunch-open-turn-drawn", sc, "read status.toml", "no step on file at attach (the turn had ended)")
         s2 = self.wait(lambda s: not busy(s), 120, what="idle")
         # Not `wait_idle`: its recover() presses Stop, and the kernel drops a
         # queued prompt on Stop (F-105, filed) — the row would then measure
@@ -1846,10 +1948,42 @@ class Pass:
                     "the follow-up ran (its user card is on the transcript) or is still held by the kernel",
                     f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}{' (turn still running at 120 s; Stop pressed after the read — F-105)' if stopped_by_gate else ''}",
                     "pass" if ran or (active(self.state()) or {}).get("held", 0) > 0 else ("not-reachable" if held_before == 0 else "fail"), self.still("relaunch"))
+        # F-206: after a relaunch, a nested chat whose transcript ends on a
+        # turn's end (with the kernel's after-lines behind it) reads done,
+        # not a hollow ring for as long as the window lives.
+        time.sleep(12)
+        st = self.state()
+        nested = [c for c in sessions(st) if c.get("parent") is not None and not c.get("closed") and c.get("connection") == "live" and not (c.get("streaming") or c.get("turn_open"))]
+        ended = []
+        for c in nested:
+            sid = c.get("agent_session")
+            if not sid:
+                continue
+            path = PROJ / ".arbos" / "agents" / sid / "transcript.jsonl"
+            if not path.exists():
+                continue
+            kinds = [json.loads(l).get("kind") for l in path.read_text().splitlines() if l.strip()]
+            while kinds and kinds[-1] in ("notice", "compaction", "fold", "nudge", "window_reset", "image_described"):
+                kinds.pop()
+            if kinds and kinds[-1] in ("turn_complete", "interrupted"):
+                ended.append((c["id"], c.get("child_state")))
+        if ended:
+            self.record("relaunch-ended-reads-done", sc, "relaunch, wait 12 s, read nested chats whose file ends a turn",
+                        "each reads done (or asking), none waiting", f"{ended}",
+                        "pass" if all(state in ("done", "asking") for _, state in ended) else "fail")
+        else:
+            self.gap("relaunch-ended-reads-done", sc, "read", "no nested chat with an ended transcript to read")
         # Scenario 21: typed words while a question stands are never a skip.
         self.send(P_ASK)
         s = self.wait(lambda s: (active(s) or {}).get("questions"), 90, what="question card")
         if s:
+            # F-207: a chat parked on an ask card reads *asking* to the
+            # panel, not *done*, for as long as the card stands.
+            time.sleep(1.5)
+            asking = active(self.state()) or {}
+            self.record("ask-row-state", sc, "read child_state while the question stands", "asking",
+                        f"child_state={asking.get('child_state')!r} questions={bool(asking.get('questions'))}",
+                        "pass" if asking.get("child_state") == "asking" else ("not-reachable" if not asking.get("questions") else "fail"))
             self.app.click("composer-field"); self.app.type("Unrelated thought: the answer is whichever you prefer.\n"); time.sleep(2)
             act = active(self.state()) or {}
             users = [it.get("text", "") for it in act.get("items", []) if it.get("kind") == "user"]
@@ -1879,6 +2013,58 @@ class Pass:
                         "pass" if (a1 - a0) < 5 and not folder.exists() and not (kid_now and (kid_now.get("reconnect_attempt") or 0) > 1) else "fail", self.still("deleted-child"))
         else:
             self.gap("deleted-child", sc, "spawn", "no child session to delete")
+        # F-210: a line typed into a running worker's chat steers its turn
+        # — a steer card inside the turn, not a fresh prompt over it.
+        self.go_main(); self.wait_idle(30)
+        n0 = len(sessions(self.state()))
+        self.send("Spawn one sub-agent whose only task is: run `sleep 25` with bash, then reply with the word slept. Wait for it, then say done. Do not retry or spawn again if it is slow.")
+        running_worker = lambda s: next((c for c in sessions(s) if c.get("parent") is not None and len(sessions(s)) > n0 and (c.get("status") or c.get("streaming") or c.get("turn_open"))), None)
+        ws = self.wait(lambda s: running_worker(s) is not None, 60, what="running worker")
+        worker = running_worker(ws) if ws else None
+        if worker:
+            if not self.seen(f"panel-agent-{worker['id']}") and self.app.exists("toggle-panel"):
+                self.app.click("toggle-panel"); time.sleep(0.8)
+            if self.seen(f"panel-agent-{worker['id']}"):
+                self.app.click(f"panel-agent-{worker['id']}"); time.sleep(1.0)
+                self.wait(lambda s: (active(s) or {}).get("id") == worker["id"] and (active(s) or {}).get("connection") == "live", 15, what="worker chat live")
+                if self.app.exists("composer-field"):
+                    self.app.click("composer-field"); self.app.type("Steer for the worker: also say hi.\n"); time.sleep(2.5)
+                    w = active(self.state()) or {}
+                    card = next((it for it in reversed(w.get("items", [])) if it.get("kind") == "user" and "Steer for the worker" in it.get("text", "")), None)
+                    self.record("worker-steer-card", sc, "type a line into a running worker's chat", "the card is a steer (inside the turn), the worker still busy",
+                                f"card={'yes' if card else 'no'} steer={card and card.get('steer')} busy={busy(self.state())}",
+                                "pass" if card and card.get("steer") else ("not-reachable" if not card else "fail"), self.still("worker-steer"))
+                else:
+                    self.gap("worker-steer-card", sc, "composer", "the worker chat has no composer")
+            else:
+                self.gap("worker-steer-card", sc, "panel row", "the worker's row is not on screen")
+            # A sleep-25 worker plus the model's wrap-up: give the turn its
+            # time before recover() reaches for Stop over a spawn (F-179).
+            self.go_main(); self.wait_idle(200)
+        else:
+            self.gap("worker-steer-card", sc, "spawn", "no running worker appeared within 60 s")
+        # F-212: the kernel process dies under a running turn. The line
+        # says so (not "Stopped.", a person's act), stays in view under the
+        # turn's headline, and the connection comes back on its own.
+        self.go_main(); self.wait_idle(60)
+        self.send("Spawn one sub-agent whose only task is: run `sleep 20` with bash, then reply with the word slept. Wait for it, then say done.")
+        s_busy = self.wait(lambda s: busy(s), 30, what="turn start")
+        if s_busy:
+            time.sleep(5)
+            s_busy = busy(self.state()) or None
+        pids = subprocess.run(["pgrep", "-f", f"arbos-kernel[-0-9a-z]* serve {PROJ}$"], capture_output=True, text=True).stdout.split()
+        if s_busy and pids:
+            for pid in pids:
+                subprocess.run(["kill", "-9", pid])
+            s_line = self.wait(lambda s: any("went away mid-turn" in (i.get("text") or "") for i in (active(s) or {}).get("items", []) if i.get("kind") == "notice"), 8, what="kernel-gone line")
+            s_back = self.wait(lambda s: (active(s) or {}).get("connection") == "live", 20, what="reconnect")
+            notices = [i.get("text")[:60] for i in (active(self.state()) or {}).get("items", []) if i.get("kind") == "notice"][-2:]
+            self.record("kernel-killed-mid-turn", sc, "kill -9 the place's kernel under a running turn", "a failed line 'The kernel went away mid-turn' within 8 s; no 'Stopped.'; live again within 20 s",
+                        f"line={bool(s_line)} back={bool(s_back)} notices={notices}",
+                        "pass" if s_line and s_back and not any(n.startswith("Stopped.") for n in notices) else "fail", self.still("kernel-killed"))
+            self.wait_idle(150)
+        else:
+            self.gap("kernel-killed-mid-turn", sc, "turn", f"no running turn to cut (busy={bool(s_busy)} pids={pids})")
 
     def phase_provider_offer(self, binary: str, kernel: str, xdg: Path) -> None:
         """Second launch: the kernel has no key but the desktop does."""
@@ -1955,6 +2141,20 @@ def place_window() -> None:
         if ids:
             wid = ids[0]
             subprocess.run(["xdotool", "windowactivate", "--sync", wid], env=ENV)
+            # The window opens maximized (#688, "filled screen on open"),
+            # and xfwm4 ignores a resize of a maximized window: every
+            # gate since read "window at 0,85 1920x1143" and measured
+            # the wide frame. Un-maximize by the window id first (R34);
+            # xdotool 3.2016 has no `windowstate`, wmctrl does the job.
+            for _ in range(6):
+                subprocess.run(["wmctrl", "-i", "-r", wid, "-b", "remove,maximized_vert,maximized_horz"], env=ENV)
+                time.sleep(0.4)
+                subprocess.run(["wmctrl", "-i", "-r", wid, "-e", "0,100,60,1600,1000"], env=ENV)
+                time.sleep(0.4)
+                geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
+                pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
+                if pos.get("WIDTH", 0) <= 1600:
+                    break
             subprocess.run(["xdotool", "windowsize", wid, "1600", "1000"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV)
             # Read the geometry back rather than trust the move. (Added

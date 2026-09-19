@@ -64,6 +64,15 @@ const BRIEF_LINES: f32 = 3.;
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
 
+/// The card's mono size and lead, scaled with the type ladder (F-219).
+fn mono_size() -> f32 {
+    MONO_SIZE * bezel::theme::base_text_size() / 13.
+}
+
+fn mono_lead() -> f32 {
+    MONO_LEAD * bezel::theme::base_text_size() / 13.
+}
+
 /// The TUI's braille frames, and the 80ms tick the web composer uses with them.
 // ASCII only. Braille cells fall back to a tofu or a ⋮ in the UI font,
 // which reads as a menu, not a spinner.
@@ -1066,8 +1075,8 @@ fn artifact_card(
                 .min_w(px(0.))
                 .flex_1()
                 .font_family(theme.font_mono.clone())
-                .text_size(px(MONO_SIZE))
-                .line_height(px(MONO_LEAD))
+                .text_size(px(mono_size()))
+                .line_height(px(mono_lead()))
                 .text_color(theme.text_muted)
                 .truncate()
                 .child(SharedString::from(file.name.clone())),
@@ -1479,6 +1488,18 @@ fn done_report(text: &str) -> Option<(Verdict, String)> {
         words.truncate(at);
     }
     let words = words.trim().trim_end_matches('…').trim().to_string();
+    // A report that opens with a heading ("### Outcome") put its hashes on
+    // the done line (F-218, d26): the heading's words stand, the marks go;
+    // a report that is only a heading falls to its next line.
+    let words = match words.split_once('\n') {
+        Some((first, rest)) if first.trim_start().starts_with('#') => {
+            format!("{}\n{rest}", first.trim().trim_start_matches('#').trim())
+        }
+        None if words.trim_start().starts_with('#') => {
+            words.trim().trim_start_matches('#').trim().to_string()
+        }
+        _ => words,
+    };
     // "stopped by the user (Stop)" as the last words says what the verdict
     // already says.
     let words = if verdict == Verdict::Stopped && words.to_lowercase().starts_with("stopped by the user") {
@@ -1738,7 +1759,7 @@ fn children_lines(
             .py(px(2.))
             .cursor_pointer()
             .text_style(TextStyle::Body)
-            .text_size(px(root::CURSOR_PROSE_SIZE))
+            .text_size(px(root::prose_size()))
             .child(
                 div()
                     .flex_none()
@@ -1811,7 +1832,19 @@ fn children_lines(
                     };
                     (verb, rest, theme.text_muted)
                 }
-                ChildState::Asking => ("Asking".to_string(), child.title.clone(), theme.accent),
+                // The question itself on the line, so the person in the
+                // coordinator's seat reads what is asked before opening the
+                // worker (F-216, d26); the line opens it on the press.
+                ChildState::Asking => (
+                    "Asking".to_string(),
+                    match &child.question {
+                        Some(q) if !q.trim().is_empty() => {
+                            format!("{} — {}", child.title, q.trim())
+                        }
+                        _ => child.title.clone(),
+                    },
+                    theme.accent,
+                ),
                 ChildState::Waiting => {
                     ("Waiting".to_string(), child.title.clone(), theme.text_faint)
                 }
@@ -1838,7 +1871,7 @@ fn children_lines(
                     .py(px(2.))
                     .cursor_pointer()
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .child(
                         div()
                             .flex_none()
@@ -1889,7 +1922,7 @@ fn children_lines(
                 .gap(px(6.))
                 .py(px(2.))
                 .text_style(TextStyle::Body)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_size(px(root::prose_size()))
                 .text_color(theme.text_faint)
                 .child("Done")
                 .child(SharedString::from(sentence_case(
@@ -2585,8 +2618,8 @@ fn diff_card(
                             .px(px(CARD_PAD_X))
                             .py(px(2.))
                             .font_family(theme.font_mono.clone())
-                            .text_size(px(MONO_SIZE))
-                            .line_height(px(MONO_LEAD))
+                            .text_size(px(mono_size()))
+                            .line_height(px(mono_lead()))
                             .text_color(theme.text_faint)
                             .child("⋯"),
                     )
@@ -2610,8 +2643,8 @@ fn diff_row(theme: &Theme, row: DiffRow, start: usize, spans: &Spans, num_w: f32
             .px(px(CARD_PAD_X))
             .py(px(2.))
             .font_family(theme.font_mono.clone())
-            .text_size(px(MONO_SIZE))
-            .line_height(px(MONO_LEAD))
+            .text_size(px(mono_size()))
+            .line_height(px(mono_lead()))
             .text_color(theme.text_faint)
             .child("⋯")
             .into_any_element();
@@ -2643,8 +2676,8 @@ fn diff_row(theme: &Theme, row: DiffRow, start: usize, spans: &Spans, num_w: f32
         .py(px(1.))
         .gap(px(8.))
         .font_family(theme.font_mono.clone())
-        .text_size(px(MONO_SIZE))
-        .line_height(px(MONO_LEAD))
+        .text_size(px(mono_size()))
+        .line_height(px(mono_lead()))
         .child(
             div()
                 .w(px(num_w))
@@ -2976,10 +3009,16 @@ fn terminal_card(
         cmd
     };
     let take = 12;
+    // The kernel closes a command's output with `exit <n>`, and may add a
+    // note of its own under it ("Reproduction 1 recorded (exit 2) …", for
+    // the model). Cursor's card carries the exit code as a mark, not as a
+    // line of output (F-215); the note is the model's to read, not ours.
+    let exit_code = command_exit(output);
     let lines: Vec<String> = output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && *line != cmd && *line != "(no output)")
+        .filter(|line| !is_exit_line(line) && !line.starts_with("Reproduction "))
         .take(take)
         .map(|line| {
             let short: String = line.chars().take(88).collect();
@@ -3033,13 +3072,24 @@ fn terminal_card(
                     div()
                         .min_w(px(0.))
                         .flex_1()
-                        .text_size(px(MONO_SIZE))
-                        .line_height(px(MONO_LEAD))
+                        .text_size(px(mono_size()))
+                        .line_height(px(mono_lead()))
                         .text_color(theme.text_faint)
                         .child(spaced_label(shorten(&title, 72), theme.text_faint, theme)),
                 )
                 .when(running, |row| {
                     row.child(spinner(Duration::ZERO, theme.text_faint, cx))
+                })
+                .when_some(exit_code.filter(|code| *code != 0 && !running), |row, code| {
+                    row.child(
+                        div()
+                            .id(("term-exit", ix))
+                            .flex_none()
+                            .text_size(px(mono_size()))
+                            .line_height(px(mono_lead()))
+                            .text_color(theme.danger)
+                            .child(SharedString::from(format!("exit {code}"))),
+                    )
                 }),
         )
         .when(open && (!lines.is_empty() || failed), |el| {
@@ -3061,8 +3111,8 @@ fn terminal_card(
                 .children(lines.into_iter().map(|line| {
                     div()
                         .font_family(theme.font_mono.clone())
-                        .text_size(px(MONO_SIZE))
-                        .line_height(px(MONO_LEAD))
+                        .text_size(px(mono_size()))
+                        .line_height(px(mono_lead()))
                         .text_color(theme.text)
                         .child(SharedString::from(line))
                         .into_any_element()
@@ -3070,6 +3120,22 @@ fn terminal_card(
             )
         })
         .into_any_element()
+}
+
+/// `exit <n>` as the kernel writes it after a command's output.
+fn is_exit_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("exit ")
+        .is_some_and(|code| code.trim().parse::<i64>().is_ok())
+}
+
+/// The command's exit code, from the last `exit <n>` line of its output.
+fn command_exit(output: &str) -> Option<i64> {
+    output
+        .lines()
+        .rev()
+        .filter_map(|l| l.trim().strip_prefix("exit "))
+        .find_map(|code| code.trim().parse::<i64>().ok())
 }
 
 /// One entry of a turn's timeline, in Cursor's order: a folded thought,
@@ -4297,10 +4363,17 @@ fn zone(
         // — steers — are not the agent's work to hide: they stay in view
         // under the headline (a shut live fold swallowed three "run it"
         // bubbles on the rig, cycle 23).
+        // A failed line — the kernel gone mid-turn, a refused key — is
+        // not work to fold away either: Cursor's error lines stand
+        // whatever is folded above them (F-212: "Worked 11s" over a turn
+        // the kernel's death had cut, and no word of it).
         let steers: Vec<AnyElement> = segs
             .iter()
             .filter_map(|seg| match seg {
-                Seg::Other(ix) if inline_user(&chat.items, *ix) => {
+                Seg::Other(ix)
+                    if inline_user(&chat.items, *ix)
+                        || matches!(chat.items[*ix], ChatItem::Notice { failed: true, .. }) =>
+                {
                     Some(work_other(chat, *ix, &theme, window, cx))
                 }
                 _ => None,
@@ -4695,12 +4768,18 @@ fn turn_footer(
                 theme.text_faint
             }))
     };
+    // The kernel takes a checkpoint from git when a turn starts; a place
+    // with no `.git` of its own never has one, and the control there
+    // answered every click with "Nothing to rewind to yet" (F-209, d21).
+    // Cursor draws Restore checkpoint only where a checkpoint exists. A
+    // remote place is not read from here; its control stays.
+    let can_rewind = chat.host.is_some() || chat.cwd.join(".git").exists();
     let row = row
         .child(thumb(true, cx))
         .child(thumb(false, cx))
         .child(copy)
         .child(fork)
-        .child(rewind)
+        .when(can_rewind, |row| row.child(rewind))
         .when_some(sent_at.and_then(relative_time), |row, when| {
             row.child(
                 div()
@@ -5063,7 +5142,7 @@ fn fold_row(
         .child(
             div()
                 .text_style(style)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_size(px(root::prose_size()))
                 .text_color(theme.text_muted)
                 .child(if live {
                     shimmer_label(verb, live_phase(), theme, cx)
@@ -5081,7 +5160,7 @@ fn fold_row(
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_style(style)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .text_color(theme.text_faint)
                     .child(spaced_label(rest, theme.text_faint, theme)),
             )
@@ -5385,7 +5464,7 @@ fn thought_line(
                 .child(
                     div()
                         .text_style(TextStyle::Body)
-                        .text_size(px(root::CURSOR_PROSE_SIZE))
+                        .text_size(px(root::prose_size()))
                         .text_color(theme.text_muted)
                         // Live, "Thinking" shimmers as Cursor's does; settled,
                         // the line is one faint colour.
@@ -5636,8 +5715,8 @@ fn tool_row(
                     .min_w(px(0.))
                     .flex_1()
                     .font_family(theme.font_mono.clone())
-                    .text_size(px(MONO_SIZE))
-                    .line_height(px(MONO_LEAD))
+                    .text_size(px(mono_size()))
+                    .line_height(px(mono_lead()))
                     .text_color(tone.opacity(0.8))
                     .child(mono_label(arg, tone.opacity(0.8), theme)),
             )
@@ -5996,7 +6075,7 @@ fn heartbeat(
             .child(
                 div()
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(format!(
                         "{who} is not answering — waiting · {}",
@@ -6021,7 +6100,7 @@ fn heartbeat(
             .child(
                 div()
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .text_color(theme.text_muted)
                     .child(shimmer_label(text, since, theme, cx)),
             )
@@ -6053,7 +6132,7 @@ fn heartbeat(
                 .gap(px(ROW_GAP))
                 .py(px(2.))
                 .text_style(TextStyle::Body)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_size(px(root::prose_size()))
                 .when(is_step, |el| {
                     el.child(
                         div()

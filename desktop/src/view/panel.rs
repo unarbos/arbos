@@ -21,7 +21,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, Render, SharedString,
-        Stateful, Window, div, prelude::*, px,
+        Stateful, Window, div, prelude::*, px, relative,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
@@ -36,7 +36,10 @@ pub(crate) fn file_glyph(kind: FileKind) -> &'static str {
     match kind {
         FileKind::Markdown => icons::files::DOCUMENT,
         FileKind::Image => icons::system::WIDGET,
-        FileKind::Other => icons::files::FOLDER_WITH_FILES,
+        // A `.json`, `.csv`, `.py` is a file; the open-folder glyph it
+        // wore read as a folder beside the documents (F-217). The set has
+        // no code glyph; the document is the honest one.
+        FileKind::Other => icons::files::DOCUMENT,
     }
 }
 
@@ -881,6 +884,7 @@ impl Arbos {
                 PageBlock::Item(item) => {
                     self.page_item((item_id, n as u64), item, scale, theme, cx)
                 }
+                PageBlock::Table { header, rows } => page_table(n, header, rows, scale, theme),
             });
         }
         body.into_any_element()
@@ -1358,7 +1362,10 @@ fn store_rows(resources: &[Resource], theme: &Theme) -> Vec<AnyElement> {
 fn row_summary(chat: &ChatSession) -> Option<String> {
     let text = match chat.child_state() {
         ChildState::Working => chat.current_step()?,
-        ChildState::Asking | ChildState::Waiting => return None,
+        // The question itself, so the person in another chat can read what
+        // the worker waits on without opening it (F-207).
+        ChildState::Asking => chat.questions.as_ref()?.title.clone(),
+        ChildState::Waiting => return None,
         ChildState::Done => chat.items.iter().rev().find_map(|item| match item {
             ChatItem::Agent(text) if !text.trim().is_empty() => Some(text.clone()),
             _ => None,
@@ -1398,4 +1405,55 @@ fn plain_links(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// A pipe table as a table: the header dim above a hairline, each row's
+/// cells in equal columns, long cells cut with an ellipsis (F-214).
+fn page_table(n: usize, header: &[String], rows: &[Vec<String>], scale: PageScale, theme: &Theme) -> AnyElement {
+    let cols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
+    // Columns share the width by their longest cell, a short one (a date,
+    // a name) never wider than a third of a long one.
+    let widest: Vec<f32> = (0..cols)
+        .map(|i| {
+            std::iter::once(header)
+                .chain(rows.iter().map(Vec::as_slice))
+                .filter_map(|cells| cells.get(i))
+                .map(|c| c.chars().count() as f32)
+                .fold(1., f32::max)
+                .clamp(8., 48.)
+        })
+        .collect();
+    let total: f32 = widest.iter().sum();
+    let line = |cells: &[String], head: bool| {
+        let mut row = div().flex().flex_row().gap(px(8.)).w_full();
+        for i in 0..cols {
+            let text = cells.get(i).cloned().unwrap_or_default();
+            row = row.child(
+                div()
+                    .w(relative(widest[i] / total))
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if head { theme.text_muted } else { theme.text })
+                    .when(head, |el| el.font_weight(FontWeight::SEMIBOLD))
+                    .child(SharedString::from(text)),
+            );
+        }
+        row
+    };
+    let mut table = div()
+        .id(SharedString::from(format!("page-table-{n}")))
+        .flex_none()
+        .pl(px(scale.inset()))
+        .pr(px(scale.inset()))
+        .py(px(scale.row_py()))
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .text_style(scale.text())
+        .child(line(header, true))
+        .child(div().h(px(1.)).w_full().bg(theme.border));
+    for cells in rows {
+        table = table.child(line(cells, false));
+    }
+    table.into_any_element()
 }

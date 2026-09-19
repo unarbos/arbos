@@ -110,6 +110,14 @@ fn tidy(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut blank = 0;
     for line in text.lines() {
+        // The kernel speaks to the model in lines it marks `[kernel] …`
+        // (an ask's answer, a nudge). A model that repeats one in its own
+        // reply puts a machine's aside in a person's paragraph (F-211,
+        // d20: *[kernel] The user provided the following answer to your
+        // question: red*, twice). Cursor never shows such a line.
+        if line.trim_start().starts_with("[kernel]") {
+            continue;
+        }
         if line.trim().is_empty() {
             blank += 1;
             if blank > 1 {
