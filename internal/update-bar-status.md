@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 06:37 UTC.
+Last checked 2026-09-19 07:03 UTC.
 
-## Click Update. You will get build 2213. Jev is in it.
+## Click Update. You will get build 2216. Jev is in it.
 
-**2213** — signed, notarised, stapled, on the feed since 06:35 UTC.
+**2216** — signed, notarised, stapled, on the feed since 07:01 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2213 (builds 2214–2216):
+
+- **#737** — the journey record names the app's checkout, and a target
+  that cannot be reached says so
+
+## Before that: 2213
 
 New since 2211 (builds 2212–2213):
 
