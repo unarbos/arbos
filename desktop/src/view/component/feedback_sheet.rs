@@ -862,9 +862,13 @@ impl FeedbackSheet {
                             })),
                     ),
             )
+            // `min_w_0` is what lets the sentence wrap: without it the flex
+            // cell took the words' own width and the line ran off the
+            // sheet's right edge, cut mid-word (F-243, cycle 74).
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .text_style(TextStyle::Caption)
                     .text_color(theme.text_faint)
                     .child(SharedString::from({
