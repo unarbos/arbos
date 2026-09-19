@@ -195,7 +195,25 @@ STATUS=$(grep -cE "^ *[0-9]+ assistant +status[ \"]" $O/after-challenge.txt | tr
 shot J3-done
 # J4 (cont.) — was the mid-flight line taken by the running work, not a second worker?
 SPAWNS_AFTER=$(awk -v f="$F" '$1+0 > f+0' $O/after-challenge.txt | grep -cE "tool +spawn" | tr -d ' ')
-ENDED_BEFORE=$(awk -v c="$C" -v f="$F" '$1+0 > c+0 && $1+0 < f+0' $O/after-challenge.txt | grep -c turn_complete | tr -d ' ')
+# Who actually took the follow-up. The old evidence here counted
+# `turn_complete` frames between the challenge and the follow-up and called
+# any of them "the turn had ended", which made J4 unverifiable: the kernel
+# delegates the challenge to a worker and *its own* turn completes one frame
+# later, every single run. Twenty-four runs on record, twenty-two of them
+# unverified, and not one pass — for a frame that is always there.
+#
+# The question J4 is really asking is who did the work. Three answers, and
+# the tool frames after the follow-up tell them apart: a `spawn` is a second
+# worker (wrong, and already a FAIL below); file tools mean the kernel did it
+# itself rather than hand it to the work already running; neither means the
+# running worker took it, which is what the step wants.
+# Scoped to the follow-up's own turn: the frames after it and before the
+# next thing typed. Without that bound the `bash date` run for J5's "what
+# time is it" counts as the kernel doing the CHANGELOG work.
+NEXT_USER=$(awk -v f="$F" '$1+0 > f+0 && $2 == "user" {print $1; exit}' $O/after-challenge.txt)
+DID_IT=$(awk -v f="$F" -v n="${NEXT_USER:-999999}" '$1+0 > f+0 && $1+0 < n+0' $O/after-challenge.txt \
+  | grep -E "^ *[0-9]+ +tool" | awk '{print $3}' | tr '\n' ' ')
+KERNEL_DID_IT=$(echo "$DID_IT" | grep -cE "read|edit|write|bash" | tr -d ' ')
 type_send "Summarise what you changed in two lines."
 wait_hist J4a "user +Summarise what you changed" 30 >/dev/null; S=$(seq_of "user +Summarise")
 t=0; while [ $t -lt 90 ]; do hist | awk -v s="$S" '$1+0 > s+0' | grep -qE "assistant" && break; sleep 5; t=$((t+5)); done
@@ -216,7 +234,15 @@ wait_hist J7v "user +$ID verify" 30 >/dev/null; V=$(seq_of "user +$ID verify")
 t=0; while [ $t -lt 120 ]; do hist | awk -v s="$V" '$1+0 > s+0' | grep -qiE "assistant .*(AHEAD|TESTS)" && break; sleep 5; t=$((t+5)); done
 sleep 8; python3 "$HERE/kernel.py" $TARGET history 40 2>/dev/null | awk -v s="$V" '$1+0 > s+0' | grep -E "assistant" | tail -1 > $O/verify.txt
 VR=$(cat $O/verify.txt)
-if echo "$VR" | grep -q "QA-$ID"; then [ "$ENDED_BEFORE" != "0" ] && score J4 U "CHANGELOG carries QA-$ID, but the challenge turn had ended before the line (mid-flight half unverified); answer to the summary: $ANS" || score J4 PASS "CHANGELOG carries QA-$ID, taken by the running work (spawns after: $SPAWNS_AFTER); summary answered: $ANS"; else score J4 FAIL "CHANGELOG lacks QA-$ID (spawns after: $SPAWNS_AFTER, answer: $ANS)"; fi
+if echo "$VR" | grep -q "QA-$ID"; then
+  if [ "$KERNEL_DID_IT" != "0" ]; then
+    score J4 U "CHANGELOG carries QA-$ID, but the kernel made the edit itself rather than pass it to the running worker (tools after the line: $DID_IT). The instruction was honoured; that it reached the *work* is what stays unverified. Summary answered: $ANS"
+  else
+    score J4 PASS "CHANGELOG carries QA-$ID, taken by the running work — no second spawn and no kernel-side edit (tools after the line: ${DID_IT:-none}); summary answered: $ANS"
+  fi
+else
+  score J4 FAIL "CHANGELOG lacks QA-$ID (spawns after: $SPAWNS_AFTER, answer: $ANS)"
+fi
 [ "$SPAWNS_AFTER" != "0" ] && score J4 FAIL "a second worker was spawned for the follow-up"
 # score on the fields, not the paste's shape: the root may summarise the worker's report
 if echo "$VR" | grep -qiE "changelog" && echo "$VR" | grep -qE "w *\* *h|width *\* *height|multipl" && echo "$VR" | grep -qE "\bOK\b" && echo "$VR" | grep -qiE "(fix|feat)[A-Za-z0-9_./-]*" && echo "$VR" | grep -qiE "AHEAD[^0-9]{0,40}[1-9]" ; then score J7 PASS "kernel-reported: CHANGELOG present, area = w * h, unittest OK, branch with commits — $(echo "$VR" | cut -c1-160)"; else score J7 FAIL "kernel-reported: $(echo "$VR" | cut -c1-200)"; fi
