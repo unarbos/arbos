@@ -5760,3 +5760,40 @@ spent a whole cycle on in the workers sheet, waiting in a second place.
 Stills in `media/mobile/cycle-185/`: the wrong worker, and the right one.
 
 **PR:** [#790](https://github.com/unarbos/arbos/pull/790), harness only.
+
+## Cycle 186 — a swipe returns before the scrolling does
+
+Cycle 185 found a check that tapped one worker and opened another's chat,
+and blamed momentum. This cycle measured it rather than leaving that as a
+story.
+
+**It is real and it is large** (M-573). After `page_up` returned, one page
+carried on for another **167 points** — more than two rows — and pages took
+between 1.4 and 2.2 seconds to stop. Anything reading or tapping in that
+window is looking at where a row *was*.
+
+`page_up` and `page_back` wait for stillness now: two identical reads of the
+screen. A fixed sleep is wrong in both directions — too short on a fast
+flick, wasted on a page that never moved — and waiting costs one extra read
+when the screen is already still. Measured after: all three pages report the
+same position immediately as they do two seconds later.
+
+**One live check was reading a position in that window** (M-574).
+`chat-opens-at-the-end` swiped four times with a two-second sleep after each,
+then read where the last line sat. Two seconds is usually enough and
+sometimes not — and a position is the one number that check exists to
+produce. It pages through the helper now, and reads `unused scroll: 1 pt`
+with the last line 188 pt above the pill.
+
+**The other raw swipes were looked at and left** (M-575). Eleven files swipe
+directly, but pulling the call screen down, dismissing a sheet and
+pull-to-refresh are gestures rather than paging, and each already waits for
+what it waits for. A blanket conversion would have replaced deliberate
+gestures with a pager. `several-workers` is the one remaining paging case and
+its repair sits in unmerged #790, so it was left rather than made to
+conflict — which also meant its tap failed again this cycle, exactly as that
+PR describes.
+
+Measurements and stills in `media/mobile/cycle-186/`.
+
+**PR:** [#791](https://github.com/unarbos/arbos/pull/791), harness only.
