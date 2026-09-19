@@ -5509,3 +5509,71 @@ block counts, and the fallback never ran.
 Film and still in `media/mobile/cycle-178/`.
 
 **PR:** [#781](https://github.com/unarbos/arbos/pull/781), harness only.
+
+## Cycle 179 — a verdict resting on an absence
+
+The queue named `chat — the call's words read back` at cycle 167. The rule is
+that a turn gets one row for its answer, not two — the kernel's wording and
+the spoken one both showing.
+
+**The check passed on a screen with no answer on it** (M-552). It counted how
+often the kernel's wording appeared below the last `Spoken` marker, and read
+zero as "one row, said in different words". Zero is also what an answer that
+is not on screen looks like, and on the first run this cycle that is exactly
+what it was: the marker sat last in the tree with nothing under it at all, and
+the verdict said the rule holds.
+
+The marker sits *between* a question and its answer, so rows under it are the
+thing being counted. None there means nothing was counted, and it says so.
+
+**Then counting rows called the furniture an answer** (M-553). The fix
+reported two rows under the marker and still concluded "one row". I looked at
+what they were rather than reasoning about it: `Worked 12s`, which every turn
+ends with, and the answer. So it counts answers, excludes the turn's own
+furniture, and prints the rows it counted so the number can be checked
+against the screen.
+
+**Measured properly, the row holds** (M-554): one answer row under the marker,
+the kernel's wording appearing once, and the row printed beneath the count.
+
+Still in `media/mobile/cycle-179/`.
+
+**PR:** [#782](https://github.com/unarbos/arbos/pull/782), harness only.
+
+## Cycle 180 — a shape, not four accidents
+
+Four cycles in six found the same fault in four different scenarios: a check
+that cannot tell "the thing is right" from "the thing is not there" (M-555).
+The composer that was printed and never tested. The refusal check that passed
+a helper with its guard removed. The row count that could not see a
+transcript grow, because the view scrolled as much as it gained. And last
+cycle, zero occurrences of an answer read as "one row, worded differently",
+on a screen that had no answer on it.
+
+Each cost a cycle, found by running a row and reading hard. So this cycle
+looked for the shape rather than waiting to meet it a fifth time.
+
+**The first attempt flagged twenty of twenty-five scenarios** (M-556), which
+is the same as flagging none. A pass gated on zero is usually right — zero
+faults, zero duplicates, zero rows left behind. What is suspect is a pass
+gated on a count of things *observed* being zero, because nothing observed is
+also what a broken rig produces. The two families are told apart by what the
+variable counts, which is what its name says. That took it from twenty to
+five.
+
+**All five read sound** (M-557). Three of them decline on their zero, which is
+the right thing. The fourth and fifth are one scenario passing on "no chips
+left after tapping the ×" — the wanted outcome — and it checks separately that
+a chip arrived at all before testing its removal.
+
+That reading is in the tool, with the reason for each, so a later run shows
+only what is new. A tool that reprints five known-good lines every time gets
+skimmed, and then the sixth line is skimmed too. Proven by planting the shape
+in `list-sections` and watching it named, then taking it out again.
+
+No new fault today. The shape is not currently anywhere else, and there is
+something watching for it now.
+
+Audit and still in `media/mobile/cycle-180/`.
+
+**PR:** [#783](https://github.com/unarbos/arbos/pull/783), harness only.
