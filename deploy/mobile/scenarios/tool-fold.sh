@@ -47,7 +47,12 @@ ui field >/dev/null 2>&1 || { echo "no composer in '$ROW'"; exit 1; }
 MARK="fold $(date -u +%H%M%S)"
 echo "== give it several tool calls to fold =="
 # Plain ASCII: a line with an em dash types nothing at all (cycle 149).
-LINE="$MARK: run these three bash commands one after another and nothing else: echo one, echo two, echo three. Then reply done."
+# "one after another" is not the same as "separately", and the model read it
+# the sensible way: one bash call holding `echo one; echo two; echo three`.
+# Two runs in a row then folded a single call, so the check declined to test
+# opening at all — a check that cannot reach its own subject most of the time
+# is barely a check. The combining is what has to be forbidden.
+LINE="$MARK: make three separate bash tool calls. Do not combine them into one command and do not use semicolons or newlines to join them. The first runs echo one, the second runs echo two, the third runs echo three. Then reply done."
 # Read the field back before sending. `idb ui text` returns before its
 # characters arrive, and the first run of this typed into an unfocused
 # composer, sent nothing, and reported "no fold line appeared" — a verdict
