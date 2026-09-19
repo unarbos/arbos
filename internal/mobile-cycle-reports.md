@@ -5429,3 +5429,42 @@ later by someone who has not counted.
 Still and counts in `media/mobile/cycle-176/`.
 
 **PR:** [#777](https://github.com/unarbos/arbos/pull/777), harness only.
+
+## Cycle 177 — the last two eyeballs
+
+The journey covers two coverage rows and was eight cycles old, past the
+four-cycle rule.
+
+**It is clean** (M-548) on `main@3647614d` against kernel `c3247332dc4e`,
+asked on the attach socket at both ends. All four phone-only steps pass, the
+model naming the photograph again.
+
+**Two steps were scored by eye, and now they are not** (M-546). J6 and J6k
+had done the same thing for their whole lives: background the app, relaunch
+it, take a screenshot, and record a verdict without reading anything at all.
+An acceptance run should not depend on somebody opening a picture, and the
+standing order asks for counted evidence.
+
+Both halves of each are in the tree. A chat is intact if it still has a Back
+and a transcript; it has reopened at its end if there is a composer to type
+into; and the away card says "While you were away" when something arrived
+while the phone was down. Measured:
+
+    J6  PASS chat intact on return (12 text rows) and an away card was waiting
+    J6k PASS reopened at its end: a composer to type into and no card left pending
+
+The record now reads **16 pass, 4 unverified, 0 eye**.
+
+**One distinction worth keeping** (M-547). The away card is the half that can
+legitimately be absent — nothing need arrive in forty seconds — so its absence
+is unverified with the reason, not a fault. A chat that does not come back is
+a fault, and says so.
+
+The four unverified are the standing ones: J4's mid-flight half, J5's Stop
+(exercised by `stop-a-turn.sh`, not by that step), J8's three cases the phone
+cannot cause, and PUSH until the signing key exists.
+
+Evidence in `media/mobile/cycle-177/`, and 19 stills in
+`media/mobile/journey/0919-165418/`.
+
+**PR:** [#779](https://github.com/unarbos/arbos/pull/779), harness only.
