@@ -1836,7 +1836,7 @@ impl Arbos {
                     .px(px(12.))
                     .h(px(28.))
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .child(div().flex_1().text_color(theme.text_muted).child(if live {
                         "Working"
                     } else {
@@ -2019,7 +2019,7 @@ impl Arbos {
                             .items_start()
                             .gap(px(6.))
                             .text_style(TextStyle::Body)
-                            .text_size(px(root::CURSOR_PROSE_SIZE))
+                            .text_size(px(root::prose_size()))
                             .text_color(theme.text_muted)
                             .child(transcript::shimmer_line(
                                 &shimmer_text,
@@ -2045,7 +2045,7 @@ impl Arbos {
                             .id("kickoff-greeting")
                             .pt(px(28.))
                             .text_style(TextStyle::Body)
-                            .text_size(px(root::CURSOR_PROSE_SIZE))
+                            .text_size(px(root::prose_size()))
                             .line_height(px(root::CURSOR_PROSE_LEADING))
                             .text_color(theme.text)
                             .child(markdown::markdown(&greeting, window, cx))

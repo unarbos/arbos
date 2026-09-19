@@ -167,6 +167,13 @@ pub(crate) const CHAT_MAX_WIDTH: f32 = 720.;
 /// it would be 16 and 21, almost a pixel over at 1x. The 23 px line box is
 /// kept: the line pitch is what the eye compares across the two windows.
 pub(crate) const CURSOR_PROSE_SIZE: f32 = 13.;
+/// The prose size as the type ladder stands now: `CURSOR_PROSE_SIZE` at the
+/// default body size, scaled with it. The lines drawn at a fixed pixel
+/// size — worker lines, command cards — stayed small while the person
+/// stepped the text up (F-219, cycle 56); Cursor's zoom moves everything.
+pub(crate) fn prose_size() -> f32 {
+    CURSOR_PROSE_SIZE * bezel::theme::base_text_size() / 13.
+}
 /// How often the working tree is re-read for the Changes pill.
 const CHANGES_POLL: Duration = Duration::from_secs(4);
 pub(crate) const CURSOR_PROSE_LEADING: f32 = 23.;

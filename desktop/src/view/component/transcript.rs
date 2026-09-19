@@ -64,6 +64,15 @@ const BRIEF_LINES: f32 = 3.;
 const MONO_SIZE: f32 = 11.5;
 const MONO_LEAD: f32 = 17.;
 
+/// The card's mono size and lead, scaled with the type ladder (F-219).
+fn mono_size() -> f32 {
+    MONO_SIZE * bezel::theme::base_text_size() / 13.
+}
+
+fn mono_lead() -> f32 {
+    MONO_LEAD * bezel::theme::base_text_size() / 13.
+}
+
 /// The TUI's braille frames, and the 80ms tick the web composer uses with them.
 // ASCII only. Braille cells fall back to a tofu or a ⋮ in the UI font,
 // which reads as a menu, not a spinner.
@@ -1066,8 +1075,8 @@ fn artifact_card(
                 .min_w(px(0.))
                 .flex_1()
                 .font_family(theme.font_mono.clone())
-                .text_size(px(MONO_SIZE))
-                .line_height(px(MONO_LEAD))
+                .text_size(px(mono_size()))
+                .line_height(px(mono_lead()))
                 .text_color(theme.text_muted)
                 .truncate()
                 .child(SharedString::from(file.name.clone())),
@@ -1750,7 +1759,7 @@ fn children_lines(
             .py(px(2.))
             .cursor_pointer()
             .text_style(TextStyle::Body)
-            .text_size(px(root::CURSOR_PROSE_SIZE))
+            .text_size(px(root::prose_size()))
             .child(
                 div()
                     .flex_none()
@@ -1862,7 +1871,7 @@ fn children_lines(
                     .py(px(2.))
                     .cursor_pointer()
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .child(
                         div()
                             .flex_none()
@@ -1913,7 +1922,7 @@ fn children_lines(
                 .gap(px(6.))
                 .py(px(2.))
                 .text_style(TextStyle::Body)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_size(px(root::prose_size()))
                 .text_color(theme.text_faint)
                 .child("Done")
                 .child(SharedString::from(sentence_case(
@@ -2609,8 +2618,8 @@ fn diff_card(
                             .px(px(CARD_PAD_X))
                             .py(px(2.))
                             .font_family(theme.font_mono.clone())
-                            .text_size(px(MONO_SIZE))
-                            .line_height(px(MONO_LEAD))
+                            .text_size(px(mono_size()))
+                            .line_height(px(mono_lead()))
                             .text_color(theme.text_faint)
                             .child("⋯"),
                     )
@@ -2634,8 +2643,8 @@ fn diff_row(theme: &Theme, row: DiffRow, start: usize, spans: &Spans, num_w: f32
             .px(px(CARD_PAD_X))
             .py(px(2.))
             .font_family(theme.font_mono.clone())
-            .text_size(px(MONO_SIZE))
-            .line_height(px(MONO_LEAD))
+            .text_size(px(mono_size()))
+            .line_height(px(mono_lead()))
             .text_color(theme.text_faint)
             .child("⋯")
             .into_any_element();
@@ -2667,8 +2676,8 @@ fn diff_row(theme: &Theme, row: DiffRow, start: usize, spans: &Spans, num_w: f32
         .py(px(1.))
         .gap(px(8.))
         .font_family(theme.font_mono.clone())
-        .text_size(px(MONO_SIZE))
-        .line_height(px(MONO_LEAD))
+        .text_size(px(mono_size()))
+        .line_height(px(mono_lead()))
         .child(
             div()
                 .w(px(num_w))
@@ -3063,8 +3072,8 @@ fn terminal_card(
                     div()
                         .min_w(px(0.))
                         .flex_1()
-                        .text_size(px(MONO_SIZE))
-                        .line_height(px(MONO_LEAD))
+                        .text_size(px(mono_size()))
+                        .line_height(px(mono_lead()))
                         .text_color(theme.text_faint)
                         .child(spaced_label(shorten(&title, 72), theme.text_faint, theme)),
                 )
@@ -3076,8 +3085,8 @@ fn terminal_card(
                         div()
                             .id(("term-exit", ix))
                             .flex_none()
-                            .text_size(px(MONO_SIZE))
-                            .line_height(px(MONO_LEAD))
+                            .text_size(px(mono_size()))
+                            .line_height(px(mono_lead()))
                             .text_color(theme.danger)
                             .child(SharedString::from(format!("exit {code}"))),
                     )
@@ -3102,8 +3111,8 @@ fn terminal_card(
                 .children(lines.into_iter().map(|line| {
                     div()
                         .font_family(theme.font_mono.clone())
-                        .text_size(px(MONO_SIZE))
-                        .line_height(px(MONO_LEAD))
+                        .text_size(px(mono_size()))
+                        .line_height(px(mono_lead()))
                         .text_color(theme.text)
                         .child(SharedString::from(line))
                         .into_any_element()
@@ -5133,7 +5142,7 @@ fn fold_row(
         .child(
             div()
                 .text_style(style)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_size(px(root::prose_size()))
                 .text_color(theme.text_muted)
                 .child(if live {
                     shimmer_label(verb, live_phase(), theme, cx)
@@ -5151,7 +5160,7 @@ fn fold_row(
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_style(style)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .text_color(theme.text_faint)
                     .child(spaced_label(rest, theme.text_faint, theme)),
             )
@@ -5455,7 +5464,7 @@ fn thought_line(
                 .child(
                     div()
                         .text_style(TextStyle::Body)
-                        .text_size(px(root::CURSOR_PROSE_SIZE))
+                        .text_size(px(root::prose_size()))
                         .text_color(theme.text_muted)
                         // Live, "Thinking" shimmers as Cursor's does; settled,
                         // the line is one faint colour.
@@ -5706,8 +5715,8 @@ fn tool_row(
                     .min_w(px(0.))
                     .flex_1()
                     .font_family(theme.font_mono.clone())
-                    .text_size(px(MONO_SIZE))
-                    .line_height(px(MONO_LEAD))
+                    .text_size(px(mono_size()))
+                    .line_height(px(mono_lead()))
                     .text_color(tone.opacity(0.8))
                     .child(mono_label(arg, tone.opacity(0.8), theme)),
             )
@@ -6066,7 +6075,7 @@ fn heartbeat(
             .child(
                 div()
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .text_color(theme.text_muted)
                     .child(SharedString::from(format!(
                         "{who} is not answering — waiting · {}",
@@ -6091,7 +6100,7 @@ fn heartbeat(
             .child(
                 div()
                     .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
+                    .text_size(px(root::prose_size()))
                     .text_color(theme.text_muted)
                     .child(shimmer_label(text, since, theme, cx)),
             )
@@ -6123,7 +6132,7 @@ fn heartbeat(
                 .gap(px(ROW_GAP))
                 .py(px(2.))
                 .text_style(TextStyle::Body)
-                .text_size(px(root::CURSOR_PROSE_SIZE))
+                .text_size(px(root::prose_size()))
                 .when(is_step, |el| {
                     el.child(
                         div()
