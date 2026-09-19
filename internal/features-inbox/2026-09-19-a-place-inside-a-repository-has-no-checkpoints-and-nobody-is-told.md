@@ -44,5 +44,4 @@ inside-a-repository case, said once at start on the main chat: where the
 root is, that checkpoints work there, and the two ways (open the root as
 the project, or `git init` here to make the folder its own).
 
-Fixed in the same cycle: see the PR linked from `docs/features-backlog.md`
-(row dated 2026-09-19, "inside a repository").
+Fixed in the same cycle: [#773](https://github.com/unarbos/arbos/pull/773).

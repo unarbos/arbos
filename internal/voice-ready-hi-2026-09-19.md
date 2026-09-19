@@ -5,7 +5,7 @@ cursor:
 
 # The call says "hi" when it is ready — evidence (2026-09-19)
 
-Jacob's word: GPT Live should announce it is ready to talk by saying **hi**. PR: [#772](https://github.com/unarbos/arbos/pull/772) (`cursor/live-ready-hi-f23a`, off `main` `3bccf924`). Deployment SHA: see the end of this page (filled in once #772 is on `main` and on the pod).
+Jacob's word: GPT Live should announce it is ready to talk by saying **hi**. PR: [#772](https://github.com/unarbos/arbos/pull/772) (`cursor/live-ready-hi-f23a`, off `main` `3bccf924`). Live SHA on the production gateway: **`354413e0`** (the #772 merge; deployed 15:22Z, see the end of this page).
 
 ## What "ready" means here
 
@@ -45,4 +45,8 @@ Jev is not on the gateway. GPT Live stays `--engine openai`. Orb colour is not g
 
 ## Deployment
 
-Pending: when #772 is green and on `main`, `voice-server/` is deployed to the pod as for #758 and #769, `/healthz` confirmed 200, and the live SHA recorded here.
+#772 merged as `354413e0` (2026-09-19 15:21Z). `voice-server/` from that commit was deployed to the production gateway on the Lium pod the same way as #758 and #769 (tar over ssh into `/root/arbos-voice/src`, the `voice` tmux session restarted by the supervisor). `/healthz` → **200** at 15:22:24Z; the log shows `engine=openai`. Recorded on the pod at `/root/arbos-voice/src/DEPLOYED_SHA`.
+
+**Live SHA: `354413e0`.**
+
+First session on production after the deploy (15:23:05Z, `arboslife/demo`): `narrator.say kind=ready "Hi."` at 1.57 s after the mic opened, the model's reply audio 1,614 ms after that, 1.2 s of audio, one `response.done`, no errors; the gateway log reads `ready: said 'Hi.'`.
