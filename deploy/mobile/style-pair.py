@@ -2,6 +2,7 @@
 """Compare a still of the app with a Cursor reference, in numbers.
 
     style-pair.py <arbos.png> <cursor-reference.jpg>
+    style-pair.py --chat <arbos.png> <cursor-reference.jpg>
 
 The style rows have always been read by eye, and eyes are the wrong
 instrument for the two things that actually decide whether two lists look
@@ -17,6 +18,51 @@ against each other at all.
 import sys
 
 from PIL import Image
+
+
+def content_rows(img, thresh=25):
+    """Which horizontal lines hold something other than the ground."""
+    g = img.convert("L")
+    w, h = g.size
+    base = ground(img.convert("RGB"), 0.5)
+    base = int(0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2])
+    rows = []
+    for y in range(h):
+        n = sum(1 for x in range(0, w, 3) if abs(g.getpixel((x, y)) - base) > thresh)
+        rows.append(n >= 3)
+    return rows
+
+
+def bands(img):
+    """Runs of lines that hold something, as (top, bottom) pairs."""
+    rows = content_rows(img)
+    out, start = [], None
+    for y, filled in enumerate(rows):
+        if filled and start is None:
+            start = y
+        elif not filled and start is not None:
+            if y - start > 4:          # a stray line is not a band
+                out.append((start, y))
+            start = None
+    if start is not None:
+        out.append((start, len(rows)))
+    return out
+
+
+def left_margin(img, thresh=25):
+    """The first column from the left that holds something, in pixels."""
+    g = img.convert("L")
+    w, h = g.size
+    base = ground(img.convert("RGB"), 0.5)
+    base = int(0.299 * base[0] + 0.587 * base[1] + 0.114 * base[2])
+    # The body only. A header's back arrow sits further left than the text
+    # and would answer for the whole screen.
+    top, bottom = int(h * 0.25), int(h * 0.85)
+    for x in range(w):
+        n = sum(1 for y in range(top, bottom, 3) if abs(g.getpixel((x, y)) - base) > thresh)
+        if n >= 3:
+            return x
+    return None
 
 
 def ground(img, frac):
@@ -44,7 +90,57 @@ def row_pitch(path):
     return h, len(hits), (sorted(gaps)[len(gaps) // 2] if gaps else None)
 
 
+def chat_pair(a_path, b_path):
+    """Pair two chat screens by their parts, since they have no row pitch."""
+    for name, path in (("arbos", a_path), ("cursor", b_path)):
+        img = Image.open(path).convert("RGB")
+        w, h = img.size
+        seen = bands(img)
+        margin = left_margin(img)
+        head = seen[0] if seen else None
+        air = (seen[1][0] - head[1]) if head and len(seen) > 1 else None
+        print(f"{name:7} {w}x{h}  ground {ground(img, 0.5)}")
+        print(f"        text starts    {margin}px = {margin / w * 100:.1f}% of the width"
+              if margin is not None else "        text starts    nowhere — no body content found")
+        print(f"        header ends    {head[1]}px = {head[1] / h * 100:.1f}% down"
+              if head else "        header ends    nowhere — no bands found")
+        print(f"        air under it   {air}px = {air / h * 100:.1f}% of the height"
+              if air is not None else "        air under it   cannot say — one band only")
+    print()
+    print("Ground is printed, not compared (M-202). The two comparable numbers are")
+    print("where text starts from the left and how much air sits under the header:")
+    print("both are proportions, so two phones of different sizes can be held")
+    print("against each other.")
+
+
+def self_test():
+    """Prove the measurements can fail before trusting what they say."""
+    img = Image.new("RGB", (1000, 2000), (255, 255, 255))
+    for y in range(100, 160):                      # a header band
+        for x in range(60, 940):
+            img.putpixel((x, y), (0, 0, 0))
+    for y in range(300, 800):                      # a body band, 20% in
+        for x in range(200, 900):
+            img.putpixel((x, y), (0, 0, 0))
+    seen, margin = bands(img), left_margin(img)
+    ok = (margin == 200 and len(seen) == 2
+          and abs(seen[0][1] - 160) <= 2 and abs(seen[1][0] - 300) <= 2)
+    print(f"self-test: margin {margin} (want 200), bands {seen} (want ~[(100,160),(300,800)])")
+    print("self-test: " + ("the measurements read a known picture correctly"
+                           if ok else "WRONG — do not trust the numbers below"))
+    return ok
+
+
 def main():
+    if sys.argv[1:2] == ["--self-test"]:
+        sys.exit(0 if self_test() else 1)
+    if sys.argv[1:2] == ["--chat"]:
+        if len(sys.argv) != 4:
+            sys.exit(__doc__)
+        if not self_test():
+            sys.exit(1)
+        print()
+        return chat_pair(sys.argv[2], sys.argv[3])
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     rules_seen = []
