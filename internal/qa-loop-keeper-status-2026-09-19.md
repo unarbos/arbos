@@ -12,7 +12,7 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **18**, open, started 18:00:33Z, in its main step |
+| current cycle | **18**, open, **half A**, desktop step done (app `a129992316e9`), 272 scenarios |
 | previous | **17** closed 17:44:10Z, 292 scenarios; 16 closed 13:22:48Z, 262 |
 | clean run | cycles 15, 16, 17 all: 0 checkpoint noise, 0 budget skips |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
@@ -51,6 +51,7 @@ The fault is a **rate**, so it is only meaningful within one app build:
 | `8af86842` | 5 of 5 |
 | `249ddb5f` | live (full signature) |
 | `443ffdc55934` | live (full signature) |
+| `a129992316e9` | live (full signature) |
 
 Full signature each time: `kf-01`, `mt-01`, `mt-04`, `dg-01` break together.
 
@@ -105,3 +106,20 @@ assumes a new guard runs as often as it looks like it does.
 
 `qal-j43` has now been seen on five distinct app builds without drifting back. `sq-02`'s fix has
 held on four. Three consecutive cycles (15, 16, 17) have run clean on checkpoint noise and budget.
+
+## Cycle 18 (half A) — the cadence prediction held
+
+The half-A draw meant `lk-04` should run, and it did:
+
+| scenario | result |
+|---|---|
+| `lk-01` | pass, 331.3 s |
+| `lk-04` | **break, 3.1 s** — `qal-j40`, as predicted for a half-A cycle |
+| `fm-01` | break, its own finding only (`probe-no-stale-sidecar`), nothing suppressed |
+| `kf-01`, `mt-01`, `mt-04`, `dg-01` | break — `qal-j43`'s full signature on app `a129992316e9` |
+| `sq-02` | **pass**, 31.7 s — the `qal-j47` fix on its fifth build |
+
+So the cadence rule from cycle 17 is confirmed rather than merely reasoned: `lk-04` is absent on
+half-B cycles and present on half-A ones. `kf-01` ran in both, being desktop-tagged.
+
+`qal-j43` is now six builds deep without drifting back. `sq-02`'s fix has held on five.
