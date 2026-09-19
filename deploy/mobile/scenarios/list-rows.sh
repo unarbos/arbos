@@ -124,6 +124,21 @@ if [ "$FAULTS" = 0 ]; then
   echo "VERDICT: every row names a state, ages read as ages, and nothing"
   echo "         speaks a separator"
 else
+  # What this fault is, and is not. The dot is *drawn* on every row by
+  # design — a still from cycle 163 reads "Idle · home" under the project's
+  # name — so this is only ever about whether the row *speaks* it. A reader
+  # who sets out to remove the dot from the screen has misread the fault.
+  #
+  # Eliminated, with evidence, so nobody spends another cycle on them:
+  #   a stale binary        the app was certified newer than every source
+  #   a second call site    there is one, used by both sections
+  #   `spoken` itself       it joins with ", " and nothing else
+  #   the build step        mac-cycle.sh made a clean row minutes after a
+  #                         dotted one, from an untouched tree
+  #   two sections open     a captured run had 2 headers and a Working row,
+  #                         label clean
+  #   row recycling         scrolled the row off screen and back: clean
+  #
   # Keep the scene. The separator fault comes and goes: it read six of six
   # dotted during the cycle-161 sweep and six of six clean an hour later from
   # the same commit, with the label provably in effect both times (a probe
