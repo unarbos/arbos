@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 03:37 UTC.
+Last checked 2026-09-19 03:53 UTC.
 
-## Click Update. You will get build 2183. Jev is in it.
+## Click Update. You will get build 2185. Jev is in it.
 
-**2183** — signed, notarised, stapled, on the feed since 03:34 UTC.
+**2185** — signed, notarised, stapled, on the feed since 03:51 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2183 (builds 2184–2185):
+
+- **#720** — a headless last line in the record files is read as damage,
+  not as data
+
+## Before that: 2183
 
 New since 2180 (builds 2181–2183):
 
