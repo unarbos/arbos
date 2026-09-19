@@ -187,7 +187,13 @@ fi
 # The call, which shows almost no words by design and so rests entirely on
 # the labels of its four controls.
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
-xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 >/dev/null 2>&1
+# With a clip, because the simulator has no microphone: at rest the call
+# screen says "No microphone input." and tapping the orb does nothing at all,
+# so the connected state is unreachable without one. Every other call
+# scenario here launches this way.
+CLIP=$HOME/mobile-clips/ask.wav
+xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 \
+  ${CLIP:+-injectWav "$CLIP"} >/dev/null 2>&1
 sleep 9
 ui dump | grep -qE "Button +Allow" && { ui tap "Allow" >/dev/null 2>&1; sleep 4; }
 screen "the call, at rest"
@@ -200,13 +206,14 @@ screen "the call, at rest"
 # it without saying so.
 if ui dump | grep -qE "Button +Call$"; then
   ui tap "Call" >/dev/null 2>&1
-  sleep 9
+  sleep 12
   if ui dump | grep -qE "Button +End call"; then
     screen "the call, connected"
     ui tap "End call" >/dev/null 2>&1; sleep 2
   else
     echo "== the call, connected =="
     echo "  it never connected, so End call was not examined"
+    echo "  ($(ui dump | grep -oE "No microphone input.|Tap to call" | head -1 | sed 's/^/the screen says: /'))"
     MISSED="$MISSED call-connected"
   fi
 else
