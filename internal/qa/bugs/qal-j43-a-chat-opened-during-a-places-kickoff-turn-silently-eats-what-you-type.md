@@ -192,3 +192,32 @@ So `2ea8d565`'s regression has now been scored on three separate app builds — 
 
 The retry I added is earning its place quietly: none of these five needed it, but the one that
 would have been a hollow "no window" pass is the reason the five are all conclusive.
+
+## dg-01 was measuring the red herring (fixed 2026-09-19 13:40)
+
+This file has said since the first bisect that the `streaming or turn_open` predicate is a red
+herring, because **root's kickoff turn satisfies it** while the new chat is dead. `dg-01` was
+written before that was understood and checked `any(...)` across every session, so it was watching
+the very thing this bug warns about.
+
+Cycle 16 showed the cost. Its `dg-01` ran 18.9 s instead of the usual 62.4 s and reported **one**
+break instead of two:
+
+```
+seconds_watched: 1      streaming_or_open_ever: True      transcript_lines_final: 0
+```
+
+Root was streaming at the first poll, so the watch loop exited immediately and the "no session ever
+reported a turn" assertion passed — while the chat had nothing on its transcript at all. The
+scenario still caught the bug through its other assertion, but half of what it reports was noise.
+
+Scoped to the chat's own session (`f[0] == agent`), it now reads honestly:
+
+```
+seconds_watched: 40     streaming_or_open_ever: False     transcript_lines_final: 0
+62.4 s, 2 breaks, twice
+```
+
+Worth noting for its own sake: the fix was written **in this file** weeks of cycles before the
+scenario was corrected. A finding that names a trap is not much use if the checks around it still
+walk into it.

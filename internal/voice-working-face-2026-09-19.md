@@ -23,6 +23,7 @@ Source `/home/ubuntu/.cursor/projects/workspace/assets/93bb8199-6a76-4279-a5a3-b
 
 ## What changed
 
+PR: https://github.com/unarbos/arbos/pull/769
 Branch `cursor/voice-tools-and-filler-6dcf` on `unarbos/arbos`.
 
 ### Tools and agents visible

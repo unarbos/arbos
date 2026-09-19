@@ -924,10 +924,15 @@ def register(scenario, registry, transcript, now_ms, branch):
                 ]
                 lines = len(tpath.read_text(errors="replace").splitlines()) if tpath.exists() else 0
                 timeline.append({"t": i, "lines": lines, "flags": flags})
-                if any(f[1] or f[2] for f in flags):
+                # Only this chat's own session counts. `any(...)` over every session is
+                # satisfied by **root's kickoff turn**, which is running at exactly this moment in
+                # a fresh place — the red herring qal-j43 is built on. Cycle 16 showed the cost:
+                # the loop exited after 1 s because root was streaming, so `seconds_watched` was 1
+                # and the second assertion passed while the chat had nothing on its transcript.
+                if any(f[0] == agent and (f[1] or f[2]) for f in flags):
                     break
                 time.sleep(1)
-            ever = any(any(f[1] or f[2] for f in e["flags"]) for e in timeline)
+            ever = any(any(f[0] == agent and (f[1] or f[2]) for f in e["flags"]) for e in timeline)
             cx.rec.notes.update({
                 "streaming_or_open_ever": ever,
                 "transcript_lines_final": timeline[-1]["lines"],
