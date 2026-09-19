@@ -194,11 +194,16 @@ impl Tool for GrepTool {
             let ignore_case = args
                 .get("ignore_case")
                 .is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"));
+            let scope_in_git = opt_str(&args, "path")
+                .map(|p| inside_dot_git(p.trim_start_matches("./")))
+                .unwrap_or(false);
             // The index is case-sensitive; a case-insensitive search walks.
-            let mut hits = if cx.grep.ready() && !ignore_case {
+            // So does a search the model aims into `.git/` itself, which
+            // the index does not hold.
+            let mut hits = if cx.grep.ready() && !ignore_case && !scope_in_git {
                 cx.grep.search(pattern, glob)?
             } else {
-                grep_walk_with(&cx.cwd, pattern, glob, ignore_case)?
+                grep_walk_with(&cx.cwd, pattern, glob, ignore_case, scope_in_git)?
             };
             // The index covers the whole place. A child in its own
             // worktree sees only its worktree, with paths relative to it:
@@ -248,6 +253,15 @@ impl Tool for GrepTool {
                 .unwrap_or(false);
             if !scope_in_arbos {
                 hits.retain(|h| !inside_arbos(&h.path));
+            }
+            // Nor is the repository's own machinery. A hidden walk reaches
+            // `.git/` — and a grep for a feature's name came back with the
+            // reflog (`.git/logs/HEAD`), `COMMIT_EDITMSG` and the sample
+            // hooks beside the one file that had it, as if they were the
+            // project's files. Cursor's grep never shows `.git/`. Asking
+            // for `.git/…` by path still works.
+            if !scope_in_git {
+                hits.retain(|h| !inside_dot_git(&h.path));
             }
             // Every other agent's grep takes a path; models send one. Hits
             // outside it are noise that sends the model to the wrong file.
@@ -460,6 +474,12 @@ const GREP_LINE_CHARS: usize = 400;
 /// `.arbos/…` at any depth of a relative or absolute hit path.
 fn inside_arbos(path: &str) -> bool {
     path.split('/').any(|seg| seg == ".arbos")
+}
+
+/// `.git/…` at any depth — the place's own, a nested repository's, a
+/// submodule's — or the `.git` file a worktree keeps in its stead.
+fn inside_dot_git(path: &str) -> bool {
+    path.split('/').any(|seg| seg == ".git")
 }
 
 fn format_hits(hits: &[GrepHit]) -> ToolOut {
@@ -1423,7 +1443,7 @@ pub fn syntax_note(file: &Path) -> Option<String> {
 }
 
 pub fn grep_walk(cwd: &Path, pattern: &str, glob: Option<&str>) -> Result<Vec<GrepHit>> {
-    grep_walk_with(cwd, pattern, glob, false)
+    grep_walk_with(cwd, pattern, glob, false, false)
 }
 
 /// `grep_walk`, case-insensitive when asked (the literal fallback too).
@@ -1432,6 +1452,7 @@ pub fn grep_walk_with(
     pattern: &str,
     glob: Option<&str>,
     ignore_case: bool,
+    into_dot_git: bool,
 ) -> Result<Vec<GrepHit>> {
     let re = regex::RegexBuilder::new(pattern)
         .case_insensitive(ignore_case)
@@ -1443,9 +1464,13 @@ pub fn grep_walk_with(
         })?;
     let file_glob = glob.and_then(|g| glob::Pattern::new(g).ok());
     let mut hits = Vec::new();
+    // Hidden files are the project's (`.github/`, `.env.example`); the
+    // repository's own `.git/` is not, and on a long project it is most
+    // of the files under the root. Skipped in the walk unless asked for.
     let walker = ignore::WalkBuilder::new(cwd)
         .hidden(false)
         .git_ignore(true)
+        .filter_entry(move |e| into_dot_git || e.file_name() != ".git")
         .build();
     for entry in walker.flatten() {
         let path = entry.path();
