@@ -1,0 +1,13 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-research-links-qzm8_u03/place...
+Found 10 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5247 trigrams, 10 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-research-links-qzm8_u03/home/.cache/arbos/tgrep/fd77716a191ba96c
+tools root: 2 calls, wall 2ms, sum 3ms, speedup 1.5x
+turn research-full-duplex-for-voice: Jev did not choose the next step: no answer from provider: no response headers for 1s. The turn stopped. The chat model did not run.
+tools root: 2 calls, wall 246ms, sum 2ms, speedup 0.0x
+turn research-full-duplex-for-voice: Jev did not choose the next step: no answer from provider: no response headers for 1s. The turn stopped. The chat model did not run.
+turn root: Jev did not choose the next step: no answer from provider: no response headers for 1s. The turn stopped. The chat model did not run.
+child_archive_failed research-full-duplex-for-voice: already archived
+turn root: Jev did not choose the next step: no answer from provider: no response headers for 1s. The turn stopped. The chat model did not run.

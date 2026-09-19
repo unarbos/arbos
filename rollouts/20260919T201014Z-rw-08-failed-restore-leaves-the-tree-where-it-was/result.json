@@ -1,0 +1,53 @@
+{
+  "scenario": "rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "doc": "#419's property, probed past its happy path: the checkpoint's work-tree object is made unreadable (one\n        loose object removed, a corrupt repository), then rewind with files: true. `git read-tree` fails. The person\n        must be told the restore failed, and must still have exactly what they had: the later turn's files, their\n        own uncommitted edit, their own untracked note, and HEAD where it was. Anything else is a restore that\n        destroyed before it delivered.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "no-work-checkpoint",
+      "detail": "expected a work tree on turn 3's checkpoint, got []",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "files_before": [
+      ".gitignore",
+      "f1.txt",
+      "f2.txt",
+      "f3.txt",
+      "my-notes.txt"
+    ],
+    "index_before": [
+      "100644 d11765622a85c6af68bf5ce0e7ac728a206b270e 0\t.gitignore",
+      "100644 e019be006cf33489e2d0177a3837a2384eddebc5 0\tf2.txt"
+    ],
+    "status_before": [
+      "?? f1.txt",
+      "?? f3.txt",
+      "?? my-notes.txt",
+      "!! .arbos/"
+    ],
+    "clean_dry_run_by_harness": [
+      "Would remove f1.txt",
+      "Would remove f3.txt",
+      "Would remove my-notes.txt"
+    ],
+    "excludes": [
+      "# exclude patterns (uncomment them if you want to use them):",
+      "# *.[oa]",
+      "# *~",
+      ".arbos/",
+      ".arbos.nosync/"
+    ],
+    "checkpoints": []
+  },
+  "duration_s": 16.5,
+  "place": "/tmp/arbos-qa-rw-08-failed-restore-leaves-the-tree-where-it-was-macesqlv/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 490e71bce0cf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T201014Z-rw-08-failed-restore-leaves-the-tree-where-it-was",
+  "branch": "main",
+  "usd": 0.0
+}

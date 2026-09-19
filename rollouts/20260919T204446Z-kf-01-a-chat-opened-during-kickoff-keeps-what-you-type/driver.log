@@ -1,0 +1,3 @@
+1789850688291 desktop: app pid 1965382 on :9420
+1789850750701 BREAK kf-01-accepted-line-never-arrived: the composer cleared, so the app accepted the line, but chat-1789850688394's transcript never recorded it after 45 s (qal-j43). A cleared composer must mean a delivered line.
+1789850750851 bugs: seen 05aa127160.md

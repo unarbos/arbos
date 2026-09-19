@@ -1,0 +1,35 @@
+1789844954516 kernel started pid 1885032
+1789844959879 timeout waiting for turn root idle after 5s
+1789844964889 timeout waiting for turn root idle after 5s
+1789844969900 timeout waiting for turn root idle after 5s
+1789844974911 timeout waiting for turn root idle after 5s
+1789844979921 timeout waiting for turn root idle after 5s
+1789844984932 timeout waiting for turn root idle after 5s
+1789844989943 timeout waiting for turn root idle after 5s
+1789844994954 timeout waiting for turn root idle after 5s
+1789844999964 timeout waiting for turn root idle after 5s
+1789845004975 timeout waiting for turn root idle after 5s
+1789845009986 timeout waiting for turn root idle after 5s
+1789845014997 timeout waiting for turn root idle after 5s
+1789845020008 timeout waiting for turn root idle after 5s
+1789845025019 timeout waiting for turn root idle after 5s
+1789845030030 timeout waiting for turn root idle after 5s
+1789845035041 timeout waiting for turn root idle after 5s
+1789845040052 timeout waiting for turn root idle after 5s
+1789845045062 timeout waiting for turn root idle after 5s
+1789845050073 timeout waiting for turn root idle after 5s
+1789845055083 timeout waiting for turn root idle after 5s
+1789845060095 timeout waiting for turn root idle after 5s
+1789845065105 timeout waiting for turn root idle after 5s
+1789845070115 timeout waiting for turn root idle after 5s
+1789845075126 timeout waiting for turn root idle after 5s
+1789845080137 timeout waiting for turn root idle after 5s
+1789845085148 timeout waiting for turn root idle after 5s
+1789845090158 timeout waiting for turn root idle after 5s
+1789845095169 timeout waiting for turn root idle after 5s
+1789845100179 timeout waiting for turn root idle after 5s
+1789845100430 BREAK turn-never-ended: feature jobs-leash: turn never ended — no frame for 45 s, so it had already stopped
+1789845100431 BREAK state:lock-leftover: lock file left behind after the kernel stopped (lock.rs Drop did not run)
+1789845100431 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789845100431 BREAK state:transcript-unended-turn: wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start
+1789845100470 bugs: seen f72deab15f.md, seen 285c9098a5.md, seen 83223aad69.md, seen 83223aad69.md

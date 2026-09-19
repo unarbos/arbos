@@ -1,0 +1,51 @@
+{
+  "scenario": "kill-mid-turn-restart",
+  "doc": "SIGKILL the kernel while a model turn runs, restart. The turn must continue from the transcript once, without replaying the prompt.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-contract",
+      "detail": "transcript does not end in turn_complete: ['turn_complete', 'notice', 'nudge']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "findings_after_kill": [
+      {
+        "rule": "lock-leftover",
+        "path": "/tmp/arbos-qa-kill-mid-turn-restart-ovkedidv/place/.arbos/runtime/lock",
+        "detail": "lock file left behind after the kernel stopped (lock.rs Drop did not run)"
+      },
+      {
+        "rule": "transcript-unended-turn",
+        "path": "/tmp/arbos-qa-kill-mid-turn-restart-ovkedidv/place/.arbos/agents/root/transcript.jsonl",
+        "detail": "wake at line 1 has no later turn_complete/interrupted; needs_serve() will refire it on every kernel start"
+      }
+    ],
+    "transcript_kinds": [
+      "wake",
+      "user",
+      "nudge",
+      "notice",
+      "thinking",
+      "assistant",
+      "tool",
+      "wake",
+      "assistant",
+      "tool",
+      "assistant",
+      "turn_complete",
+      "notice",
+      "nudge"
+    ]
+  },
+  "duration_s": 110.7,
+  "place": "/tmp/arbos-qa-kill-mid-turn-restart-ovkedidv/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 490e71bce0cf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T185227Z-kill-mid-turn-restart",
+  "branch": "main",
+  "usd": 0.01985
+}

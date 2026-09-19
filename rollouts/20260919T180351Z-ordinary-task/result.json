@@ -1,0 +1,45 @@
+{
+  "scenario": "ordinary-task",
+  "doc": "A small coding task through the real model: write a script, run it, report. Checks the file, the run, and the transcript shape.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "no-usage",
+      "detail": "turn_complete carries no usage",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "tools_called": [
+      "spawn",
+      "plan",
+      "read",
+      "read",
+      "read",
+      "todo",
+      "status",
+      "write",
+      "todo",
+      "status",
+      "todo",
+      "bash",
+      "todo",
+      "status",
+      "bash",
+      "write"
+    ],
+    "tool_errors": [
+      "read: no path given, and no file was touched this turn to stand in for it"
+    ],
+    "trace_files": 4
+  },
+  "duration_s": 186.4,
+  "place": "/tmp/arbos-qa-ordinary-task-3wnqtz_a/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 54ceafa2a8c4 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T180351Z-ordinary-task",
+  "branch": "rust",
+  "usd": 0.01771
+}

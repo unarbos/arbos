@@ -1,0 +1,8 @@
+{
+  "name": "spawn-storm",
+  "doc": "Ten workers spawned at once against a cap of eight. The cap must hold with clear errors, every child folder must be consistent, and the kernel must stay up.",
+  "tags": [
+    "adversarial",
+    "multi-agent"
+  ]
+}

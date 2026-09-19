@@ -1,0 +1,30 @@
+{
+  "scenario": "lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in",
+  "doc": "`qal-j40`: one place, one kernel \u2014 including after someone deletes the lock files.\n\n        The place lock is `flock` on two files, `.arbos/lock` and `.arbos/runtime/lock`\n        (`place.rs:132-148`). A lock lives on the open descriptor's **inode**, not on the path, so\n        deleting both files leaves the holder's locks on unlinked inodes, held and unreachable. The\n        arriving kernel creates fresh files at the same paths, locks those \u2014 different inodes \u2014 and\n        succeeds. Two kernels then serve one place and neither says anything.\n\n        `#450` stops the ordinary shapes: removing only `runtime/` is refused, because the lock\n        takes both files and the other one still holds. It takes removing **both**, which is what\n        someone resetting a place they believe is stuck would reach for, having read that the lock\n        lives in two places.\n\n        Staged from `deploy/af05c-runtime-and-lock-removed-probe.sh`, which reproduced this on every\n        attempt against `arbos-kernel 0.2.0 cecd48e1bd76`. The probe is a script anyone can run; this\n        is the check that runs every cycle, so a fix is noticed rather than waited for.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "lk-04-two-kernels-serve-one-place",
+      "detail": "the holder (pid 1940964) is still alive and the arriving kernel (pid 1941013) took the place anyway after both lock files were removed; it said nothing about the place being held (qal-j40)",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "holder_alive_after_removal": true,
+    "holder_pid": 1940964,
+    "arriving_pid": 1941013,
+    "arriving_wrote_its_own_kernel_json": true,
+    "both_alive": true,
+    "arriving_refused_out_loud": false,
+    "arriving_said": "nd 10 text files (0 binary skipped, 0 too large, 0 errors)\nExtracting trigrams...\nWriting index (5271 trigrams, 10 files, 0 spill segment(s))...\nIndex built successfully at /tmp/arbos-qa-lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in-ld_y5j9w/home/.cache/arbos/tgrep/65e2079cb3a5e2e3\n"
+  },
+  "duration_s": 3.1,
+  "place": "/tmp/arbos-qa-lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in-ld_y5j9w/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 490e71bce0cf protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T201705Z-lk-04-removing-both-lock-files-does-not-let-a-second-kernel-in",
+  "branch": "main",
+  "usd": 0.0
+}

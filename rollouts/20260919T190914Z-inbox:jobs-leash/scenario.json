@@ -1,0 +1,8 @@
+{
+  "name": "inbox:jobs-leash",
+  "doc": "From inbox note 2026-09-13-jobs-leash.md: exercise feature 'jobs-leash' and run every detector. Needs a kernel built from branch cursor/jobs-leash-b027.",
+  "tags": [
+    "inbox",
+    "jobs-leash"
+  ]
+}

@@ -1,0 +1,11 @@
+1789850379133 J1: pass — tab present, greeting shown ('Hey — the place is ready; I see a Rust workspace with a kern'), .arbos/ created
+1789850384845 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789850584206 J3: fail — the chat reads idle but the transcript ends in notice (dangling wake)
+1789850587327 J4: pass — mid-flight line taken in the same turn; the later one started its own turn and was answered
+1789850597871 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789850630180 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789850650240 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab; away-tab reply: badge + unseen, OS notification posted and confirmed by the daemon, cleared on click
+1789850650287 J7: pass — tests pass, CHANGELOG written (QA line taken), commit on ['fix/QA-J65863']
+1789850683797 J8: unverified — restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)
+1789850686854 BREAK journey-J3: the chat reads idle but the transcript ends in notice (dangling wake)
+1789850686884 bugs: seen dc509b215b.md

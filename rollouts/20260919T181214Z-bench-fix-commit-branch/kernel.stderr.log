@@ -1,0 +1,12 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-fix-commit-branch-_3kw0ac6/place...
+Found 10 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5248 trigrams, 10 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-fix-commit-branch-_3kw0ac6/home/.cache/arbos/tgrep/e511c35f141621f6
+tools fix-hello-py: 2 calls, wall 5ms, sum 0ms, speedup 0.0x
+tools fix-hello-py: 2 calls, wall 0ms, sum 0ms, speedup 1.0x
+tools fix-hello-py: 2 calls, wall 7ms, sum 2ms, speedup 0.3x
+tools fix-hello-py: 2 calls, wall 26ms, sum 20ms, speedup 0.8x
+tools fix-hello-py: 2 calls, wall 7ms, sum 1ms, speedup 0.1x
+tools fix-hello-py: 2 calls, wall 7ms, sum 2ms, speedup 0.3x
