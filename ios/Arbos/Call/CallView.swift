@@ -243,7 +243,15 @@ struct CallView: View {
     /// the call is scoped, else the chat's.
     private var onTheLine: ProjectIdentity {
         if let p = model.server.project {
-            var face = chat.identity ?? ProjectIdentity(name: nil, icon: "", color: "").filled(key: "\(p.machine)/\(p.project)")
+            // The key has to be the one the rest of the app uses. The list
+            // draws a project's face from `KernelTarget.stored`, which is
+            // "hub:<machine>/<project>"; this hashed "<machine>/<project>",
+            // a different string, so a project with no roster face of its
+            // own came out purple in the list and red under the orb. Same
+            // project, two faces, measured at (118, 93, 209) against
+            // (229, 83, 61).
+            let key = KernelTarget.hub(machine: p.machine, project: p.project).stored
+            var face = chat.identity ?? ProjectIdentity(name: nil, icon: "", color: "").filled(key: key)
             face.name = p.name
             face.icon = p.icon
             return face
