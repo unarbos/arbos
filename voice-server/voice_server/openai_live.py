@@ -52,6 +52,10 @@ SCREEN_BRIEF_CHARS = 8000  # the on-screen chat in the instructions; session.inp
 _ACK_WORDS = re.compile(r"\b(let me (check|look|get|see|find)|one (sec|second|moment)|checking|i'?ll (check|look|find out|get)|"
                         r"hold on|give me a (sec|second|moment)|looking (that|it) up)\b", re.I)
 ACK_GRACE_S = 2.5
+# What the call says the moment the Live session is up and the caller can speak: the ready signal
+# (Jacob's word). Spoken by the model, once, right then — not on a timer, not the working line.
+READY_LINE = "Hi."
+READY_QUIET_S = 6.0  # no quiet-context appends this long after the greeting is asked for
 # After the kernel's answer is appended while the model is mid-sentence, how long its burst may
 # run on unheard before the mute is lifted regardless.
 UNMUTE_WATCH_S = 6.0
@@ -67,7 +71,8 @@ LIVE_INSTRUCTIONS = (
     "answer it from the stores yourself, and wait for the result. The backend is the Arbos kernel; "
     "it does the work and returns the answer for you to say. Say 'one sec, let me check' only when "
     "you have actually delegated; then say the result when it arrives, even if the conversation "
-    "has moved on. Answer yourself only greetings, thanks and small talk."
+    "has moved on. Answer yourself only greetings, thanks and small talk. Lines beginning "
+    "'Project update:' are for your awareness only; never read them out unless the caller asks."
 )
 
 # Recent project-chat lines seeded into the session at start (session.input): how many, and how
@@ -266,6 +271,9 @@ class OpenAILiveSession(DuplexSession):
         self.await_words: set[str] = set()  # the kernel answer's words, awaited in the model's transcript while muted
         self.await_seen = ""
         self.working_line_said = False  # one spoken "Yeah, one sec." per work bout
+        self.ready_said = False  # the "hi" that says the Live session is up; once per call
+        self.context_hold_until = 0.0  # quiet context waits until the greeting is out of the way
+        self.ready_expect = False  # the greeting's audio has not started yet
         self.working_line_expect = False  # commentary filler is in flight
         self.working_line_open = False  # that filler's audio may play (decision is still kernel)
         self.working_line_heard = ""
@@ -329,6 +337,24 @@ class OpenAILiveSession(DuplexSession):
         log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, client delegation; brief for %s, %d history lines)",
                  self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice,
                  (self.project_info or {}).get("place") or (self.project_info or {}).get("name") or "no kernel", len(seed))
+        await self._say_ready()
+
+    async def _say_ready(self) -> None:
+        """The ready signal: once the Live session is up and the caller can be heard, the call says
+        "hi" — in the model's voice, right now, not on a timer. Two appends, as OpenAI's own recipe
+        for a greeting: the wording as an instruction (commentary may be paraphrased), then a short
+        commentary to make the model speak first. Once per session. Not the working line."""
+        if self.ready_said or self.up is None:
+            return
+        self.ready_said = True
+        self.context_hold_until = time.monotonic() + READY_QUIET_S
+        self.ready_expect = True
+        self._emit(P.NARRATOR_SAY, text=READY_LINE, kind="ready")
+        await self._append("session.instructions.append", None,
+                           f"The call is now open. Speak right now, exactly one word and nothing more: '{READY_LINE}' "
+                           "Do not add 'I'm here' or anything else. Then stay silent until the caller speaks.")
+        await self._append("session.commentary.append", None, READY_LINE)
+        log.info("[%s] ready: said %r", self.sid, READY_LINE)
 
     # ------------------------------------------------------------------ what the model knows
 
@@ -521,6 +547,11 @@ class OpenAILiveSession(DuplexSession):
 
     async def _flush_context(self) -> None:
         await asyncio.sleep(CONTEXT_MIN_GAP_S)
+        # Quiet context landing while the model is saying its opening word gets read out with it
+        # ("Hi. Quick update: all workers are finished..."). Hold it until the greeting has passed.
+        wait = self.context_hold_until - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
         lines, self.context_queue = self.context_queue, []
         if not lines or self.up is None:
             return
@@ -565,8 +596,16 @@ class OpenAILiveSession(DuplexSession):
         kind = msg.get("type", "")
         if kind == "session.output_audio.delta":
             self._on_model_audio(base64.b64decode(msg.get("delta", "")))
+            if self.ready_expect and self.response_open:
+                self.ready_expect = False  # the greeting is playing; words flow the normal way from here
         elif kind == "session.output_transcript.delta":
             delta = msg.get("delta", "")
+            if self.ready_expect and not self.response_open:
+                # The greeting's words arrive a second or more before its audio; the stash would
+                # call them stale. Stamp them ahead so they ride out with the first frame.
+                self.transcript_stash.append((time.monotonic() + READY_QUIET_S, delta))
+                self.live_output_since_final = (self.live_output_since_final + delta)[-400:]
+                return
             self.live_output_since_final = (self.live_output_since_final + delta)[-400:]
             self._heard_working_line(delta)
             self._heard_answer_words(delta)
@@ -636,6 +675,9 @@ class OpenAILiveSession(DuplexSession):
             # Allowlisted small talk: the model's own reply is the answer. Let the held first word
             # out; keep one watch for "let me check" said without a delegation behind it.
             log.info("[%s] user (small talk, %s): %r", self.sid, source, text)
+            # A barge-in (over the greeting, or over a reply) muted the model until it went quiet;
+            # its answer to *this* utterance must be heard, so the mute ends with the decision.
+            self.muted = False
             self._release_model()
             self.ack_watch = asyncio.create_task(self._ensure_delegated(self.delegations_seen, text))
             return

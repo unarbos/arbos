@@ -23,10 +23,10 @@ wait_spoken = "timed sleep command"
 wait_quiet = 1.5
 
 [expect]
-response_dones = 1
+response_dones = 2  # the ready "Hi." plus the one answer
 spoken_contains = ["one sec", "timed sleep command"]
 spoken_not_contains = ["nothing is in progress"]
 live_commentary = ["one sec", "timed sleep command"]
-live_commentaries = 2
+live_commentaries = 3  # "Hi." counted
 user_frames = 1
 inbox = [{ channel = "voice", kind = "request", device = "desktop" }]
