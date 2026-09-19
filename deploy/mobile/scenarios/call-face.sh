@@ -33,7 +33,9 @@ face() { # <png> — the most saturated pixel beside the project's name
 import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert("RGB").crop((440, 1580, 560, 1650))
-best = max(list(im.getdata()), key=lambda p: max(p) - min(p))
+w, h = im.size
+px = [im.getpixel((x, y)) for y in range(h) for x in range(w)]
+best = max(px, key=lambda p: max(p) - min(p))
 print("0x%02X%02X%02X" % best)
 PY
 }
