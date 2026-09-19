@@ -89,12 +89,14 @@ reach_the_list() {
 # back after it is.
 type_line() {
   local udid=$1 text=$2 i
-  case "$text" in
-    *[!\ -~]*)
-      echo "  refusing to type a line with a character idb drops: $text" >&2
-      echo "  (non-ASCII types nothing at all and the send goes out empty)" >&2
-      return 1;;
-  esac
+  # Counted, not pattern-matched: a `case` glob with a character range is
+  # at the mercy of the locale's collation, and the first version of this
+  # refused a line that was pure ASCII.
+  if [ "$(printf '%s' "$text" | LC_ALL=C tr -d '\040-\176' | wc -c | tr -d ' ')" != 0 ]; then
+    echo "  refusing to type a line with a character idb drops: $text" >&2
+    echo "  (non-ASCII types nothing at all and the send goes out empty)" >&2
+    return 1
+  fi
   for i in 1 2 3; do
     python3 "$SIM_LIB_DIR/ui.py" "$udid" focus >/dev/null 2>&1
     sleep 0.8
