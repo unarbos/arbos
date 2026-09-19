@@ -15,6 +15,7 @@ compared. Row pitch is comparable across themes, and is printed as a
 percentage of screen height so two phones of different sizes can be held
 against each other at all.
 """
+import os
 import sys
 
 try:
@@ -118,6 +119,16 @@ def header_band(seen, h):
 def chat_pair(a_path, b_path):
     """Pair two chat screens by their parts, since they have no row pitch."""
     for name, path in (("arbos", a_path), ("cursor", b_path)):
+        if not os.path.exists(path):
+            # The Cursor references live in the store and were never copied to
+            # the Mac, so this ran half a comparison and then threw a
+            # traceback with the arbos numbers already printed above it —
+            # which reads like the tool half-working rather than a file that
+            # is not there.
+            sys.exit(f"no {name} still at {path}.\n"
+                     "The Cursor references are not part of the checkout; they "
+                     "belong beside the mirrored ledgers, in "
+                     "~/mobile-docs/cursor-reference/.")
         img = Image.open(path).convert("RGB")
         w, h = img.size
         seen = bands(img)

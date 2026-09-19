@@ -85,6 +85,11 @@ for p in "$HOME/arbos/.git" "$HOME/mobile-out" "$HOME/mobile-docs" "$HOME/mobile
     gone "$(basename "$p")" "the loop keeps its $( [ "$p" = "$HOME/mobile-docs" ] && echo 'only surviving ledger copy' || echo 'work' ) here"
   fi
 done
+# The Cursor references are not in the checkout and not in the mirror's file
+# list, so a rebuilt Mac has no way to get them and the style pair cannot run.
+REFS=$(ls "$HOME"/mobile-docs/cursor-reference/*.jpg 2>/dev/null | wc -l | tr -d ' ')
+[ "$REFS" -gt 0 ] && ok "cursor references" "$REFS still(s)" \
+  || gone "cursor references" "the style pair has nothing to compare against"
 CLIPS=$(ls "$HOME"/mobile-clips/*.wav 2>/dev/null | wc -l | tr -d ' ')
 [ "$CLIPS" -gt 0 ] && ok "voice clips" "$CLIPS wav file(s)" || gone "voice clips" "no call or dictation scenario can speak"
 # Named, never printed: the scenarios read the hub token out of it.
