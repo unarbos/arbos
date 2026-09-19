@@ -17,7 +17,18 @@ export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$(cd "$(dirname "$0")" && pwd)/sim-lib.sh"   # tap_shot: screenshot pixels -> device points
 U=B1185668-7488-420F-B12D-4412BAAC7673; B=com.unarbos.arbos.ios
-TARGET=${1:-pod}; ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
+TARGET=${1:-pod}
+# A target is "pod" or "<machine>/<project>". Anything else is a mistake made
+# at the prompt, and the run used to accept it and fail six steps later with
+# "no 157 row on the list" — which reads like the app lost a project rather
+# than like a cycle number handed to the wrong argument.
+case "$TARGET" in
+  pod|*/*) ;;
+  *) echo "'$TARGET' cannot be a target. This one takes pod, or <machine>/<project>."
+     echo "It does not take a cycle number: the run names its own folder."
+     exit 1;;
+esac
+ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
 RUN=$(date -u +%m%d-%H%M%S); O=$HOME/mobile-out/journey/$RUN; mkdir -p $O
 T=$(plutil -extract hubToken raw -o - ~/arbos/ios/Arbos/Secrets.plist); H=$(plutil -extract hubURL raw -o - ~/arbos/ios/Arbos/Secrets.plist)
 ID=J$(date -u +%H%M%S); DIR="journey_$ID"
