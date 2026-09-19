@@ -111,4 +111,32 @@ else
   echo "  VERDICT: could not read both numbers — inconclusive"
 fi
 echo
+echo "--- 4. the same project a cold start would reopen? ---"
+# Two features promise the same thing and nothing checked they agree. The
+# composer names "the project in front"; a cold start reopens "the project
+# that was in front" (M-338). If those two ever drift apart, the list would
+# offer to message one project while the app reopens another — and each
+# feature's own check would still pass.
+if [ -z "${NAMED:-}" ] || [ "$NAMED" = "$AT_REST" ]; then
+  echo "  the composer named no project at rest, so there is nothing to compare"
+else
+  xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
+  xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 11
+  shot 04-after-a-cold-start
+  LANDED=$(ui dump | awk '$2+0 < 120 && $3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print; exit }')
+  echo "  the composer named:   $NAMED"
+  echo "  a cold start opened:  ${LANDED:-the list}"
+  if [ "$LANDED" = "$NAMED" ]; then
+    echo "  VERDICT: they agree — the list offers the project the app comes back to"
+  elif [ -z "$LANDED" ]; then
+    echo "  VERDICT: cannot say — the cold start landed on the list, so there is no"
+    echo "           project to compare the composer's name against"
+  else
+    echo "  VERDICT: they disagree. The list offers to message '$NAMED' and a cold"
+    echo "           start opens '$LANDED'. Both features are about the project in"
+    echo "           front, and each one's own check passes."
+  fi
+fi
+
+echo
 echo "stills in $OUT"
