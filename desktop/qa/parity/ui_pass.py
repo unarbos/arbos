@@ -922,7 +922,14 @@ class Pass:
                 agent = [it.get("text", "") for it in items if it.get("kind") == "agent"]
                 notices = [it.get("text", "") for it in items[-4:] if it.get("kind") == "notice"]
                 last = (agent[-1] if agent else "")[:140]
-                bad = any(w in last.lower() for w in ("empty", "blocked", "no answer", "didn't receive", "did not receive")) or any("refused" in n for n in notices)
+                # A stall reads "I didn't receive an answer" and stops; a model
+                # that says "no answer was provided, so I will choose alpha"
+                # carried on — the words that name the gap are not the fault,
+                # stopping at it is (R29: two false fails on that sentence).
+                lower = last.lower()
+                named_gap = any(w in lower for w in ("empty", "blocked", "no answer", "didn't receive", "did not receive"))
+                carried_on = any(w in lower for w in ("choose", "chose", "default", "proceed", "assume", "go with", "i will", "i'll", "picking", "selected", "using"))
+                bad = (named_gap and not carried_on) or any("refused" in n for n in notices)
                 self.record("ask-skip follow-through", sc, "read the answer after Skip", "the model is told the user skipped and carries on", f"agent: {last!r}; notices: {notices}", "fail" if bad else "pass", self.still("ask-skip-answer"))
             else:
                 self.gap("ask-skip", sc, "click", "no ask-skip element")
