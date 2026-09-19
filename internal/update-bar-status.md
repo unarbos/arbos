@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 16:21 UTC.
+Last checked 2026-09-19 17:35 UTC.
 
-## Click Update. You will get build 2301. Jev is in it.
+## Click Update. You will get build 2308. Jev is in it.
 
-**2301** — signed, notarised, stapled, on the feed since 16:18 UTC.
+**2308** — signed, notarised, stapled, on the feed since 17:33 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2301 (builds 2302–2308):
+
+- **#777** — several-workers opens a worker this run finished
+- **#776** — a fault whose fix is unmerged is still reported every run
+- **#779** — the two journey steps that were scored by eye are now read
+
+## Before that: 2301
 
 New since 2297 (builds 2298–2301):
 
