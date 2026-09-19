@@ -178,6 +178,14 @@ echo "block drop out quick proto tcp from any to any port 443" | sudo pfctl -ef 
 sleep 12; shot J8c-link-down; sleep 13; sudo pfctl -d 2>/dev/null; sudo pfctl -F all 2>/dev/null; echo "$(date -u +%H:%M:%S) link back"
 # J6 — background while it works, come back
 idb ui button HOME --udid $U; sleep 40; shot J6-home; xcrun simctl launch $U $B >/dev/null 2>&1; sleep 4; shot J6-back
+# Read it rather than look at it. Both halves of J6 are in the tree: the chat
+# is intact if it still has a Back and some transcript, and the away card
+# says "While you were away" when anything arrived. This was scored EYE for
+# its whole life, which made an acceptance run depend on somebody opening a
+# screenshot — and the standing order asks for counted evidence.
+J6_BACK=$(python3 "$HERE/ui.py" $U dump 2>/dev/null | grep -cE "Button +Back")
+J6_ROWS=$(python3 "$HERE/ui.py" $U dump 2>/dev/null | grep -cE "StaticText")
+J6_CARD=$(python3 "$HERE/ui.py" $U dump 2>/dev/null | grep -c "While you were away")
 # J3 — watch it work honestly: the challenge turn ends; no two identical assistant lines in a row; no status-as-prose
 wait_hist J3 "turn_complete" 300 >/dev/null
 sleep 5; hist > $O/after-challenge.txt
@@ -214,7 +222,15 @@ if echo "$VR" | grep -q "QA-$ID"; then [ "$ENDED_BEFORE" != "0" ] && score J4 U 
 if echo "$VR" | grep -qiE "changelog" && echo "$VR" | grep -qE "w *\* *h|width *\* *height|multipl" && echo "$VR" | grep -qE "\bOK\b" && echo "$VR" | grep -qiE "(fix|feat)[A-Za-z0-9_./-]*" && echo "$VR" | grep -qiE "AHEAD[^0-9]{0,40}[1-9]" ; then score J7 PASS "kernel-reported: CHANGELOG present, area = w * h, unittest OK, branch with commits — $(echo "$VR" | cut -c1-160)"; else score J7 FAIL "kernel-reported: $(echo "$VR" | cut -c1-200)"; fi
 shot J7-verified
 # J6 — scored: chat intact on return; notifications by the away card / badge
-score J6 EYE "chat intact and an away card on return = pass (J6-back.png); no card = unverified"
+# The card is the half that can legitimately be absent: nothing may have
+# arrived in those forty seconds. The chat being intact is not optional.
+if [ "${J6_BACK:-0}" = 0 ] || [ "${J6_ROWS:-0}" -lt 2 ]; then
+  score J6 FAIL "came back to no chat — Back x${J6_BACK:-0}, ${J6_ROWS:-0} text row(s) (J6-back.png)"
+elif [ "${J6_CARD:-0}" != 0 ]; then
+  score J6 PASS "chat intact on return (${J6_ROWS} text rows) and an away card was waiting"
+else
+  score J6 U "chat intact on return (${J6_ROWS} text rows); no away card, which is only a fault if something arrived while away (J6-back.png)"
+fi
 score J8 U "a: kernel restart mid-turn — not possible on a hosted kernel from the phone; b: second project — see P-runs; c: link cut 25 s mid-turn — turn finished after the link returned (J8c-link-down.png, J3)"
 
 # P1 — dictate a follow-up; his tap sends.
@@ -308,7 +324,17 @@ reach_the_list "$U" || score J6k FAIL "could not get to the projects list after 
 shot J6k-list
 ui tap "$ROW" || score J6k FAIL "no $ROW row after the relaunch"
 sleep 6; shot J6k-reopened
-score J6k EYE "reopened chat ends where it ended; no pending cards"
+# Counted, for the same reason as J6. "Ends where it ended" is the chat
+# showing its tail: a composer to type into and no away card left unread.
+J6K_FIELD=$(python3 "$HERE/ui.py" $U dump 2>/dev/null | grep -cE "TextField")
+J6K_CARD=$(python3 "$HERE/ui.py" $U dump 2>/dev/null | grep -c "While you were away")
+if [ "${J6K_FIELD:-0}" = 0 ]; then
+  score J6k FAIL "the reopened chat has no composer (J6k-reopened.png)"
+elif [ "${J6K_CARD:-0}" != 0 ]; then
+  score J6k U "reopened with a composer, but an away card is still showing — it may have arrived after the reopen (J6k-reopened.png)"
+else
+  score J6k PASS "reopened at its end: a composer to type into and no card left pending"
+fi
 python3 "$HERE/kernel.py" $TARGET history 150 > $O/transcript-tail.txt 2>/dev/null
 # Again, now the run is over: a kernel replaced under a run has happened
 # here, and a run that measured two builds must say so rather than pick one.
