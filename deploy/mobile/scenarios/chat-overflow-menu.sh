@@ -61,7 +61,14 @@ echo "== Reconnect, by what the chat does =="
 ui tap "Reconnect" >/dev/null 2>&1 || { echo "  could not tap Reconnect"; FAULTS=$((FAULTS + 1)); }
 MOVED=no
 for _ in $(seq 1 20); do
-  ui dump | grep -qiE "Opening $ROW…|is not answering|Reconnecting" && { MOVED=yes; break; }
+  # `${ROW}` braced, because `$ROW…` is a variable name to bash and the loop
+  # died with "ROW…: unbound variable". And the dump is captured before it
+  # is searched: `ui dump | grep -q` closes the pipe on the first match and
+  # the reader dies of a broken pipe mid-scenario.
+  D=$(ui dump)
+  case "$D" in
+    *"Opening ${ROW}"*|*"is not answering"*|*"Reconnecting"*) MOVED=yes; break;;
+  esac
   sleep 0.5
 done
 sleep 4
@@ -82,7 +89,8 @@ ui tap "More" >/dev/null 2>&1; sleep 2
 ui tap "Settings" >/dev/null 2>&1
 sleep 3
 xcrun simctl io "$UDID" screenshot "$OUT/02-settings.png" >/dev/null 2>&1
-if ui dump | grep -qE "StaticText +Settings|Heading"; then
+SHEET=$(ui dump)
+if echo "$SHEET" | grep -qE "StaticText +Settings|Heading"; then
   echo "  the settings sheet opened"
   ui tap "Done" >/dev/null 2>&1; sleep 2
 else
