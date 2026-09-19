@@ -593,6 +593,35 @@ pub fn turn_is_kickoff(place: &Place, agent: &str) -> bool {
 }
 
 pub const KICKOFF_READ_FIRST: &str = ".arbos/docs/project-context.md, then .arbos/notes.md";
+/// The default when the project context is already in the worker's
+/// prompt whole (`prompt_segment`): naming the file again sent a worker
+/// to read what it had been handed — a wasted call the brief itself
+/// asked for (QA `mt-26`). The context still names itself in the prompt,
+/// so the worker knows where it came from.
+pub const KICKOFF_READ_FIRST_INJECTED: &str =
+    ".arbos/notes.md (project-context.md is already in your prompt)";
+
+/// Whether `prompt_segment` puts the whole context file into every
+/// prompt: it has content beyond the template and fits under the cap.
+/// Over the cap only the head is shown and the file is worth a read.
+pub fn context_injected_whole(place: &Place) -> bool {
+    let Ok(text) = std::fs::read_to_string(context_path(place)) else {
+        return false;
+    };
+    if text.trim().is_empty() || text == CONTEXT_TEMPLATE {
+        return false;
+    }
+    strip_front_matter(&text).chars().count() <= PROMPT_CAP_CHARS
+}
+
+/// The `Read first` a kickoff gets when the caller named none.
+pub fn default_read_first(place: &Place) -> &'static str {
+    if context_injected_whole(place) {
+        KICKOFF_READ_FIRST_INJECTED
+    } else {
+        KICKOFF_READ_FIRST
+    }
+}
 pub const KICKOFF_RULES: &str = "Start from the base branch you are given; a code fix goes on its own branch (`git checkout -b fix/<what>`), committed and pushed there, and comes back as a draft pull request (`pr create`) against that base — never a commit on the base branch; never merge. No extra documents beyond what the task needs. Secrets come through `secret` by name, never printed; redact them in captures.";
 pub const KICKOFF_OUTPUT: &str = "Deliverables under .arbos/docs/, working notes under .arbos/internal/, captures under .arbos/media/<topic>/. Verify each file exists before you report it.";
 pub const KICKOFF_REPORT: &str = "A few lines: the outcome, a link to every file and PR you made, and open questions (at most four).";
@@ -922,6 +951,47 @@ mod tests {
             &p.path,
             &p.arbos().join("agents/root/plan.md")
         ));
+    }
+
+    /// QA `mt-26`: the brief named project-context.md as read-first while
+    /// the prompt already carried it whole, so a worker that obeyed the
+    /// brief spent a call re-reading what it had. With content under the
+    /// cap the default drops it and says why; with no context, the
+    /// template, or a file over the cap, the file is worth the read.
+    #[test]
+    fn the_default_read_first_skips_a_context_the_prompt_already_carries() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = Place::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(docs_dir(&place)).unwrap();
+        assert_eq!(default_read_first(&place), KICKOFF_READ_FIRST, "no file");
+        std::fs::write(context_path(&place), CONTEXT_TEMPLATE).unwrap();
+        assert_eq!(
+            default_read_first(&place),
+            KICKOFF_READ_FIRST,
+            "the template"
+        );
+        std::fs::write(
+            context_path(&place),
+            "+++\nowner = \"root\"\n+++\n# Project context\nGoal: ship the gate.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            default_read_first(&place),
+            KICKOFF_READ_FIRST_INJECTED,
+            "content under the cap is in every prompt"
+        );
+        assert!(!KICKOFF_READ_FIRST_INJECTED.contains("project-context.md,"));
+        assert!(KICKOFF_READ_FIRST_INJECTED.starts_with(".arbos/notes.md"));
+        std::fs::write(
+            context_path(&place),
+            format!("# Project context\n{}", "x".repeat(PROMPT_CAP_CHARS + 1)),
+        )
+        .unwrap();
+        assert_eq!(
+            default_read_first(&place),
+            KICKOFF_READ_FIRST,
+            "over the cap only the head is shown; the file is worth the read"
+        );
     }
 
     #[test]
