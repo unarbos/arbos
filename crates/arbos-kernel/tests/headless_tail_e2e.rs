@@ -134,3 +134,113 @@ fn a_whole_record_is_not_touched() {
         std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap_or_default();
     assert!(!log.contains("transcript_repaired"), "{log}");
 }
+
+/// The same crash shape on the other line-a-time records. A headless last
+/// line in `checkpoints.jsonl` used to swallow the next turn's checkpoint
+/// — so that turn's rewind was refused for want of a record — and one in
+/// `prs.jsonl`, `repro.jsonl` or `notifications.jsonl` the next PR,
+/// reproduction or notification. Cut at start, logged, and the next
+/// record reads whole.
+#[test]
+fn a_half_written_last_line_in_the_other_records_is_cut_at_start_too() {
+    let replies = "{\"agent\":\"root\",\"content\":\"after the crash\"}\n";
+    let k = start_kernel_replay_prepared("headless-records", replies, "", |place| {
+        // A repository, so the turn writes a checkpoint at all.
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(place)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        git(&["init", "-q"]);
+        std::fs::write(place.join("a.txt"), "a\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ]);
+        let dir = place.join(".arbos/agents/root");
+        std::fs::create_dir_all(&dir).unwrap();
+        arbos_core::Agent::root("root").save(&dir).unwrap();
+        // A whole checkpoint, then the head of one with no newline.
+        std::fs::write(
+            dir.join("checkpoints.jsonl"),
+            "{\"line\":1,\"ts\":1,\"head\":\"0000000000000000000000000000000000000000\",\"clean\":true}\n{\"line\":4,\"ts\":2,\"head\":\"00",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("repro.jsonl"),
+            "{\"command\":\"pytest -x\",\"cwd\":\"/p\",\"exit\":1,\"ts\":1}\n{\"command\":\"py",
+        )
+        .unwrap();
+        std::fs::write(
+            place.join(".arbos/prs.jsonl"),
+            "{\"url\":\"https://github.com/o/r/pull/1\"",
+        )
+        .unwrap();
+        std::fs::write(
+            place.join(".arbos/notifications.jsonl"),
+            "{\"id\":1,\"kind\":\"reply\"",
+        )
+        .unwrap();
+    });
+    let mut a = Attach::connect(&k.url);
+    assert!(
+        a.wait(Duration::from_secs(5), |f| f["type"] == "snapshot")
+            .is_some()
+    );
+    let root = k.place.join(".arbos/agents/root");
+    let whole = |p: &std::path::Path| {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+    };
+    for p in [
+        root.join("checkpoints.jsonl"),
+        root.join("repro.jsonl"),
+        k.place.join(".arbos/prs.jsonl"),
+        k.place.join(".arbos/notifications.jsonl"),
+    ] {
+        assert!(
+            whole(&p),
+            "{} reads whole after the cut: {:?}",
+            p.display(),
+            std::fs::read_to_string(&p)
+        );
+    }
+    let log =
+        std::fs::read_to_string(k.place.join(".arbos/runtime/kernel.log")).unwrap_or_default();
+    assert_eq!(
+        log.matches("record_repaired").count(),
+        4,
+        "each cut is logged once: {log}"
+    );
+    // The turn that runs now writes its checkpoint onto a whole file: the
+    // kept record and the new one both read.
+    a.send(serde_json::json!({"type": "user", "agent": "root", "text": "go"}));
+    assert!(a.wait_turn("root", "idle", Duration::from_secs(30)));
+    assert!(
+        common::wait_for(Duration::from_secs(10), || {
+            let t = std::fs::read_to_string(root.join("checkpoints.jsonl")).unwrap_or_default();
+            t.lines()
+                .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+                .count()
+                >= 2
+                && whole(&root.join("checkpoints.jsonl"))
+        }),
+        "{:?}",
+        std::fs::read_to_string(root.join("checkpoints.jsonl"))
+    );
+}

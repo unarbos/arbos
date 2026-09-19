@@ -380,6 +380,38 @@ fn log_line_to_place(place: &Place, level: &str, event: &str, detail: &str) {
 /// Every agent transcript whose last line a dead kernel left unfinished,
 /// cut back to its last whole line: `(agent id, bytes dropped)`. Archived
 /// agents are not touched — nothing appends to them.
+/// The other line-a-time records a dead kernel can leave headless — and
+/// whose next append would then land on the half line and be lost with
+/// it, as a transcript's was (qal-j37, #646): each agent's
+/// `checkpoints.jsonl` (the next turn's checkpoint gone, its rewind
+/// refused) and `repro.jsonl` (a reproduction gone, the done rule short),
+/// the place's `prs.jsonl` (a PR gone from the pill) and
+/// `notifications.jsonl` (a notification gone). Cut back to the last
+/// whole line at start, under the lock, with `(path, bytes)` for the log.
+fn repair_headless_records(place: &Place) -> Vec<(std::path::PathBuf, u64)> {
+    let mut paths = vec![
+        arbos_core::prs::prs_path(place),
+        arbos_core::notify::path(place),
+    ];
+    for agent in list_agents(place).unwrap_or_default() {
+        let dir = Layout::new(place, agent.id.as_str()).dir;
+        paths.push(dir.join("checkpoints.jsonl"));
+        paths.push(dir.join("repro.jsonl"));
+    }
+    let mut out = Vec::new();
+    for path in paths {
+        match arbos_core::files::drop_headless_tail(&path) {
+            Ok(Some(dropped)) => out.push((path, dropped)),
+            Ok(None) => {}
+            Err(e) => eprintln!(
+                "arbos: {}: could not check its last line: {e}",
+                path.display()
+            ),
+        }
+    }
+    out
+}
+
 fn repair_headless_tails(place: &Place) -> Vec<(String, u64)> {
     let mut out = Vec::new();
     for agent in list_agents(place).unwrap_or_default() {
@@ -410,8 +442,19 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     // first line written onto it (qal-j37). The lock is held, so no write
     // is in flight; this is the one moment the cut is safe.
     let repaired = repair_headless_tails(&place);
+    let records_repaired = repair_headless_records(&place);
     bootstrap(&place)?;
     klog::init(klog::log_path_for(&place.arbos()));
+    for (path, dropped) in records_repaired {
+        klog::warn(
+            "record_repaired",
+            None,
+            format!(
+                "{}: {dropped} bytes of a half-written last line dropped (a crash mid-write); the record it began is lost, the next one written is not",
+                path.display()
+            ),
+        );
+    }
     for (agent, dropped) in repaired {
         klog::warn(
             "transcript_repaired",
