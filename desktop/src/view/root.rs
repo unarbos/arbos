@@ -972,6 +972,11 @@ impl Arbos {
             .iter()
             .flat_map(|project| {
                 project.surfaces.iter().filter_map(|surface| {
+                    // A review is read, not edited: the scratch diff the
+                    // Files Changed card writes is nobody's document.
+                    if surface.board_kind == "diff" {
+                        return None;
+                    }
                     let path = surface.path()?;
                     let resolved = if path.is_absolute() {
                         path.to_path_buf()

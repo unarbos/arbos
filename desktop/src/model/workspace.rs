@@ -3366,7 +3366,7 @@ impl Workspace {
             owner,
             path.to_string_lossy().into_owned(),
             title,
-            "code".to_string(),
+            "diff".to_string(),
             None,
             None,
             OpenedBy::User,

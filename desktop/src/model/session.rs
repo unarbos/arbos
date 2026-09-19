@@ -860,7 +860,7 @@ impl ChatSession {
             stream_raw: HashMap::new(),
             awaiting_echo: VecDeque::new(),
             kickoff_at: None,
-            kickoff_secs: None,
+            kickoff_secs: record.kickoff_secs,
             readonly: false,
             agent_kind: None,
             unseen: Vec::new(),
@@ -1014,6 +1014,7 @@ impl ChatSession {
                 .as_secs(),
             closed: self.closed,
             rank: self.rank,
+            kickoff_secs: self.kickoff_secs,
             items: self.items.clone(),
             draft: self.draft.clone(),
         }

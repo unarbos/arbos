@@ -2596,6 +2596,172 @@ fn diff_card(
         .into_any_element()
 }
 
+/// How many rows of one file the review shows before it says there is
+/// more: a whole-tree review is read, not scrolled through line by line.
+const REVIEW_MAX_LINES: usize = 400;
+
+/// Cursor's Review: the tree's changes as a diff, one section per file —
+/// its name and `+N −M` over the rows, each row a line number, a sign, and
+/// the code with a wash on the changed lines — the same rows the edit card
+/// draws (F-222, cycle 58). The Files Changed card's Review had opened the
+/// unified diff as a text file: `diff --git`, `index`, `@@` lines in one
+/// colour, headed by the scratch file's path and *unsaved*.
+pub(crate) fn review_view(theme: &Theme, text: &str) -> AnyElement {
+    let files = split_unified_diff(text);
+    if files.is_empty() {
+        return div()
+            .p(px(16.))
+            .text_style(TextStyle::Callout)
+            .text_color(theme.text_muted)
+            .child("No changes.")
+            .into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .children(files.into_iter().map(|(name, hunk)| {
+            let rows = parse_unified_diff(&hunk);
+            let add = rows.iter().filter(|row| row.kind == DiffKind::Add).count();
+            let del = rows.iter().filter(|row| row.kind == DiffKind::Del).count();
+            let more = rows.len() > REVIEW_MAX_LINES;
+            let shown: Vec<DiffRow> = rows.into_iter().take(REVIEW_MAX_LINES).collect();
+            let source: String = shown
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let spans: Spans =
+                language_for_path(&name).and_then(|lang| syntax::highlight(&source, lang));
+            let digits = shown
+                .iter()
+                .filter_map(|row| row.num)
+                .max()
+                .unwrap_or(0)
+                .to_string()
+                .len()
+                .max(2);
+            let num_w = digits as f32 * 7.2;
+            let leaf = std::path::Path::new(&name)
+                .file_name()
+                .and_then(|leaf| leaf.to_str())
+                .unwrap_or(&name)
+                .to_owned();
+            div()
+                .w_full()
+                .rounded(px(CARD_RADIUS))
+                .bg(ink(0.04))
+                .border_1()
+                .border_color(theme.border)
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(CARD_PAD_X))
+                        .py(px(CARD_PAD_Y))
+                        .child(
+                            icons::icon(icons::files::DOCUMENT)
+                                .size(px(13.))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .flex_1()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(theme.text)
+                                .child(spaced_label(leaf.clone(), theme.text, theme)),
+                        )
+                        .when(name != leaf, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(name.clone())),
+                            )
+                        })
+                        .when(add + del > 0, |row| row.child(diff_badge(theme, add, del))),
+                )
+                .child(
+                    div()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .py(px(4.))
+                        .flex()
+                        .flex_col()
+                        .bg(diff_editor_bg(theme))
+                        .children({
+                            let mut offset = 0usize;
+                            shown
+                                .into_iter()
+                                .map(|row| {
+                                    let start = offset;
+                                    offset += row.text.len() + 1;
+                                    diff_row(theme, row, start, &spans, num_w)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .when(more, |body| {
+                            body.child(
+                                div()
+                                    .px(px(CARD_PAD_X))
+                                    .py(px(2.))
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(px(MONO_SIZE))
+                                    .line_height(px(MONO_LEAD))
+                                    .text_color(theme.text_faint)
+                                    .child("⋯"),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+/// A unified diff's file sections: the path each `diff --git` header names
+/// (the new side, `+++ b/…`, when it has one) and the hunks under it.
+fn split_unified_diff(text: &str) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut body = String::new();
+    let flush = |name: &mut Option<String>, body: &mut String, files: &mut Vec<(String, String)>| {
+        if let Some(name) = name.take() {
+            files.push((name, std::mem::take(body)));
+        }
+        body.clear();
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            flush(&mut name, &mut body, &mut files);
+            // `a/path b/path`; the `b/` side is the file as it is now.
+            name = Some(
+                rest.rsplit_once(" b/")
+                    .map(|(_, path)| path.to_owned())
+                    .unwrap_or_else(|| rest.to_owned()),
+            );
+            continue;
+        }
+        if name.is_none() {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            name = Some(path.to_owned());
+        }
+        // The hunk parser skips the `index`, `---`, `+++` lines itself.
+        body.push_str(line);
+        body.push('\n');
+    }
+    flush(&mut name, &mut body, &mut files);
+    files
+}
+
 fn diff_editor_bg(theme: &Theme) -> Hsla {
     if theme.appearance.is_light() {
         theme.bg
