@@ -81,10 +81,18 @@ else
   open_menu || echo "  the menu did not reopen"
   AFTER=$(items | grep -oE "Use (speaker|headset)" | head -1)
   echo "  after:  ${AFTER:-nothing}   (route: ${R2:-not shown})"
-  if [ -z "$AFTER" ]; then
+  # Unknown must not fall through to an accusation. The first two versions
+  # of this chain ended at FAULT when the route could not be read at all,
+  # and printed "the route changed to ''" — a fault reported from an empty
+  # string. Missing evidence is its own branch, and it comes first.
+  if [ -z "$R1" ] || [ -z "$R2" ]; then
+    echo "  the route is not on screen, so the label cannot be judged against"
+    echo "  it here. The menu offers a toggle; whether it names the right way"
+    echo "  needs the phone (the AirPods row)."
+  elif [ -z "$AFTER" ]; then
     echo "  FAULT: the toggle vanished after being used"
     FAULTS=$((FAULTS + 1))
-  elif [ -n "$R1" ] && [ "$R1" = "$R2" ]; then
+  elif [ "$R1" = "$R2" ]; then
     echo "  the route did not change — there is one output on this simulator,"
     echo "  so the label staying put is correct and the flip is untested here."
     echo "  That half needs the phone (the AirPods row)."
