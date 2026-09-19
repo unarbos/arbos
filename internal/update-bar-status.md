@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 11:43 UTC.
+Last checked 2026-09-19 12:13 UTC.
 
-## Click Update. You will get build 2259. Jev is in it.
+## Click Update. You will get build 2266. Jev is in it.
 
-**2259** — signed, notarised, stapled, on the feed since 11:41 UTC.
+**2266** — signed, notarised, stapled, on the feed since 12:10 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2259 (builds 2260–2266):
+
+- **#757** — the call row's first-word check holds, and a fix taken back
+- **#758** — voice: `session.input` never exceeds GPT-Live's 128
+
+## Before that: 2259
 
 New since 2250 (builds 2251–2259):
 
