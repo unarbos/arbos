@@ -489,6 +489,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
     let host = Host::load()?;
     host.remember_place(place.path());
+    say_if_host_dir_is_a_last_resort(&place, &host);
     say_if_host_dir_unwritable(&place, &host);
     let git_present = say_if_git_missing(&place);
     let _ = GIT_PRESENT.set(git_present);
@@ -2374,6 +2375,7 @@ static GIT_PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The marker that the missing-git notice was said for this place; in
 /// `runtime/`, so a reinstall of the machine starts the question afresh.
+const HOST_DIR_LAST_RESORT_SAID: &str = "host-dir-last-resort.said";
 const HOST_DIR_UNWRITABLE_SAID: &str = "host-dir-unwritable.said";
 const GIT_MISSING_SAID: &str = "git-missing.said";
 
@@ -2389,6 +2391,36 @@ const GIT_MISSING_SAID: &str = "git-missing.said";
 /// error 13)": no path, no what. The config reads, so it serves; what is
 /// not kept meanwhile is said once on the main chat and in the log, and
 /// the marker is cleared when the folder takes writes again.
+/// Neither `XDG_CONFIG_HOME` nor `HOME` in the kernel's environment and no
+/// passwd home for its uid: the config folder is `.arbos-host` under the
+/// working directory — the project, when the kernel was started from it,
+/// where `setup` would write the API key outside `.git/info/exclude`.
+/// Said once on the main chat with the folder it landed in and the way
+/// out (HOME in the service's environment); in the log every start.
+fn say_if_host_dir_is_a_last_resort(place: &Place, host: &Host) {
+    let (_, from) = arbos_core::host_dir_from();
+    if from != arbos_core::HostDirFrom::Cwd {
+        return;
+    }
+    let why = format!(
+        "no HOME or XDG_CONFIG_HOME in this kernel's environment and no home for its account: the config folder is {} — the API key from `setup` would be written there. Set HOME (or XDG_CONFIG_HOME) where the kernel is started",
+        host.dir.display()
+    );
+    klog::warn("host_dir_last_resort", None, &why);
+    let marker = place.runtime_dir().join(HOST_DIR_LAST_RESORT_SAID);
+    if marker.exists() {
+        return;
+    }
+    let _ = arbos_core::append_event(
+        &Layout::new(place, arbos_core::ROOT_ID).transcript(),
+        &arbos_core::Event::new(EventKind::Notice {
+            text: format!("This kernel serves, but there is {why}."),
+            failed: true,
+        }),
+    );
+    let _ = std::fs::write(&marker, "said\n");
+}
+
 fn say_if_host_dir_unwritable(place: &Place, host: &Host) {
     let marker = place.runtime_dir().join(HOST_DIR_UNWRITABLE_SAID);
     let said = marker.exists();

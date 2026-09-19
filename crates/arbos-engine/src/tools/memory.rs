@@ -144,14 +144,7 @@ pub fn user_memory() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|b| !b.is_empty()) {
         return Some(PathBuf::from(base).join("arbos").join("memory.md"));
     }
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("arbos")
-                .join("memory.md")
-        })
+    arbos_core::home_dir().map(|home| home.join(".config").join("arbos").join("memory.md"))
 }
 
 impl Tool for Remember {
