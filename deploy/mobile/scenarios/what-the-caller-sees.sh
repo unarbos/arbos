@@ -46,11 +46,13 @@ UNTIL=${SECONDS_TO_WATCH:-30}
 while :; do
   NOW=$(python3 -c "import time;print(f'{time.time()-$START:.1f}')")
   python3 -c "import sys;sys.exit(0 if $NOW < $UNTIL else 1)" || break
-  D=$(ui dump 2>/dev/null)
+  D=$(ui values 2>/dev/null)
   # The orb is one accessibility element: label "Call", value the phase. In
   # the dump those are two fields of one line, so the phase is what follows
   # the label rather than a word hunted for anywhere on screen.
-  PHASE=$(echo "$D" | grep -E "Call" | grep -oE "(Idle|Connecting|Listening|Thinking|Speaking)" | head -1)
+  # The orb is one element: label "Call", value the phase. `ui values` is
+  # what prints the second of those — `dump` shows the label and stops.
+  PHASE=$(echo "$D" | grep -E "Button +Call \|" | sed 's/.*Call | //' | head -1)
   LINE=$(echo "$D" | grep -E "StaticText" | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' \
     | grep -vxE "Call|Mute|End call|Call menu|Idle|Listening|Thinking|Speaking" \
     | grep -vE "^ *$" | head -1)

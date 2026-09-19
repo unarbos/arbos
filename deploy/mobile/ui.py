@@ -196,6 +196,26 @@ def main():
             print(f"{x:>4} {y:>4}  {e.get('type',''):<12} {label}")
         return
 
+    if verb == "values":
+        # `dump` prints the label *or* the value, so an element carrying both
+        # shows only the label and the value cannot be read at all. The call
+        # orb is the case that matters: cycle 84 put the phase in the
+        # accessibility value so the screen would say whether it is listening,
+        # thinking or speaking — and no check has ever been able to see it,
+        # because the orb's label is "Call" and the `or` stops there.
+        #
+        # It is a separate verb rather than a wider `dump` because scenarios
+        # match dump lines exactly. A text field would grow from "Message pod…"
+        # to "Message pod… | what was typed", and every one of those greps
+        # would quietly stop matching.
+        for e in els:
+            x, y = centre(e)
+            label = e.get("AXLabel") or ""
+            value = e.get("AXValue") or ""
+            both = f"{label} | {value}" if label and value and label != value else (label or value)
+            print(f"{x:>4} {y:>4}  {e.get('type',''):<12} {both}")
+        return
+
     needle = " ".join(sys.argv[3:])
     if not needle:
         sys.exit(__doc__)
