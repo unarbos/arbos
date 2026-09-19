@@ -3436,7 +3436,17 @@ impl ChatSession {
                 }
                 self.flush();
             }
-            Event::Nudge(text) => {
+            Event::Nudge { text, reason } => {
+                // A nudge about the model's own output — an empty or a
+                // repeated reply, files it owes — is the kernel steering the
+                // model, not the person's news: Cursor's pane shows nothing
+                // of the kind, and "Your reply was empty. Continue the task…"
+                // sat over a kickoff greeting (F-195, cycle 44 f1). The page
+                // and correction nudges concern the person's own words and
+                // stay.
+                if matches!(reason.as_str(), "empty reply" | "repeated reply" | "output owed") {
+                    return;
+                }
                 // Once per idle period from the kernel; the same line twice
                 // in a row (a tail replay) is not two rows.
                 let dup = matches!(self.items.last(), Some(ChatItem::Nudge(t)) if *t == text);

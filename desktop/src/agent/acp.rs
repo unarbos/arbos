@@ -82,7 +82,9 @@ pub enum Event {
     Aside(String),
     /// A kernel reminder for the model ("project page not updated"): a
     /// dim aside in the transcript, never a failure or a strip.
-    Nudge(String),
+    /// The kernel's reminder to the model, and its reason in a few words
+    /// (`project page not updated`, `correction not kept`, `empty reply`…).
+    Nudge { text: String, reason: String },
     /// An attached image the turn's model could not see was described in
     /// words by `model`. Belongs to the user card that carried the image.
     ImageDescribed {
@@ -1223,7 +1225,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         EventKind::ImageDescribed { path, model, text } => {
             vec![Event::ImageDescribed { path, model, text }]
         }
-        EventKind::Nudge { text, .. } => vec![Event::Nudge(text)],
+        EventKind::Nudge { text, reason } => vec![Event::Nudge { text, reason }],
         // The turn was cut short; the pane says by whom (the fold line
         // picks the same text up).
         EventKind::Interrupted { detail } => vec![Event::Aside(
