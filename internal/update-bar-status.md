@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 03:53 UTC.
+Last checked 2026-09-19 04:11 UTC.
 
-## Click Update. You will get build 2185. Jev is in it.
+## Click Update. You will get build 2194. Jev is in it.
 
-**2185** — signed, notarised, stapled, on the feed since 03:51 UTC.
+**2194** — signed, notarised, stapled, on the feed since 04:09 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2185 (builds 2186–2194):
+
+- **#721** — `files::append_line` cuts a line-a-time append that fails
+  part-way
+- **#722** — `tool-fold.sh` checks the tool fold
+
+## Before that: 2185
 
 New since 2183 (builds 2184–2185):
 

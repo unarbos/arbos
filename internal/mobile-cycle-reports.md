@@ -4357,3 +4357,38 @@ fault in the app:
   because collation is not content.
 
 **PR:** [#722](https://github.com/unarbos/arbos/pull/722), harness only.
+
+## Cycle 150 — a lesson that stayed in one file
+
+Cycle 149 lost a run because `idb ui text` types nothing for a line
+containing a non-ASCII character. Today I went looking for who else does it.
+
+**Nobody types a literal em dash** — the audit of every `idb ui text` in the
+harness came back clean. But eight scenarios type a **variable**, so the
+protection has to be at runtime, not at review.
+
+And the lesson was already written down (M-466). `call-pulled-down.sh` has
+carried this since it was written:
+
+> Plain ASCII only. `idb ui text` maps characters to key codes and throws
+> "No keycode found" on anything outside the keyboard — an em dash in this
+> very line cost a run.
+
+It sat in that file and protected that file. A comment is read by whoever
+opens the file it is in, and the next scenario is written by somebody who
+has not.
+
+**Worse, the scenario I wrote yesterday typed and sent blind** (M-467).
+`stop-a-turn.sh` had no read-back at all — the fault M-162 named, which
+every other scenario had already fixed inside its own body. It was written
+the day before `type_line` existed and not revisited when it did.
+
+Both are on the helper now, and both still pass: Stop closes the turn
+(`3484 user → 3485 interrupted → 3486 turn_complete`, transcript flat across
+thirty seconds), and the pulled-down call still types, mutes and closes back
+to the chat it came from.
+
+The pattern is worth stating once: **a lesson kept as prose protects one
+file; a lesson kept as a function protects the ones not written yet.**
+
+**PR:** [#723](https://github.com/unarbos/arbos/pull/723), harness only.
