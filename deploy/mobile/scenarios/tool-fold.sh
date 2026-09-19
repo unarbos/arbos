@@ -99,7 +99,25 @@ echo
 echo "== open it =="
 # Tapped by the words it shows, not by a position: the fold moves as the
 # transcript grows underneath it.
-ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
+# The tap's result was never looked at. A fold whose label carries a duration
+# — "3 tool calls · 2s" — is not found by the prefix alone, and the scenario
+# then reported an app that would not open when nothing had been tapped.
+# Read the fold again, here, rather than trusting what it said earlier. The
+# count climbs while the turn runs — this tapped "3 tool calls" at a moment
+# the screen read "6 tool calls", the tap found nothing to do, and the run
+# reported a fold that would not open.
+FOLD=$(foldline)
+echo "  the fold now reads: ${FOLD:-nothing}"
+[ -n "$FOLD" ] || { echo "  the fold is gone from the screen"; exit 1; }
+TARGET=$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")
+if ! ui tap "$TARGET" >/dev/null 2>&1; then
+  echo "  could not tap '$TARGET'. The fold on screen reads '$FOLD', so the"
+  echo "  words being tapped are not the words it shows — this is the rig."
+  echo
+  echo "VERDICT: cannot say — the fold was never opened, so nothing about"
+  echo "         opening it was measured"
+  exit 1
+fi
 sleep 3
 OPEN=$(rows)
 lines > "$OUT/open.txt"
@@ -111,7 +129,7 @@ comm -13 "$OUT/closed.txt" "$OUT/open.txt" | cut -c1-64 | sed 's/^/      /'
 
 echo
 echo "== close it again =="
-ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
+ui tap "$(foldline | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
 sleep 3
 AGAIN=$(rows)
 lines > "$OUT/again.txt"
