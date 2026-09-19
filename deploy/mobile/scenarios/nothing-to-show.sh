@@ -80,9 +80,24 @@ echo "  chrome offered:    ${CHROME:-none}"
 echo "  the composer says: ${COMPOSER:-nothing}"
 
 echo
-if [ "$ROWS" != 0 ]; then
-  echo "VERDICT: cannot say — $ROWS row(s) are on the list, so this is not the empty"
-  echo "         case. The reinstall did not clear what an earlier run remembered."
+ONLY_POD=$(echo "$DUMP" | grep -cE "Button +pod,")
+if [ "$ROWS" = 1 ] && [ "$ONLY_POD" = 1 ]; then
+  # Not a leftover. `ProjectStore.refresh` adds the pod row whenever a kernel
+  # endpoint is configured, before the hub is asked at all:
+  #
+  #   if settings.kernelEndpoint != nil { list.append(entry(target: .pod, …)) }
+  #
+  # Secrets.plist carries a kernelURL in every build this loop makes, so the
+  # list can never be empty and `No projects yet.` cannot be reached. The
+  # first version of this check blamed the reinstall for the row, which was
+  # the wrong thing entirely.
+  echo "VERDICT: the list is never empty. A hub with nothing on it still leaves the"
+  echo "         pod row, which is added whenever a kernel endpoint is configured —"
+  echo "         before the hub is asked. So 'No projects yet.' is unreachable in any"
+  echo "         build carrying a kernelURL, which is every build made here."
+elif [ "$ROWS" != 0 ]; then
+  echo "VERDICT: cannot say — $ROWS row(s) are on the list and they are not just the"
+  echo "         pod, so an earlier run's remembered rows are still here."
 elif echo "$SAYS" | grep -q "No projects yet"; then
   echo "VERDICT: an empty hub says 'No projects yet.' — the plain case, said plainly"
 elif echo "$SAYS" | grep -qi "asking the hub"; then
