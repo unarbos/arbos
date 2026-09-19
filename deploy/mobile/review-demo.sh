@@ -19,6 +19,12 @@
 # never stops, a transition that flickers. Fine typography belongs to a
 # still, at full size. Ask a reviewer for the first and not the second.
 set -uo pipefail
+# ffmpeg lives in Homebrew and a non-login ssh shell does not have that
+# directory on PATH — which is the only way this loop ever runs. Without this
+# line the tool built to make recordings reviewable answers "no ffmpeg on this
+# machine" on a machine that has it. Cycle 160 learned this about Python and
+# the lesson did not travel; check-tools.sh now enforces it.
+export PATH="/opt/homebrew/bin:$PATH"
 IN=${1:?a recording to shrink}
 OUT=${2:-${IN%.mp4}-demo.mp4}
 WIDTH=${REVIEW_WIDTH:-540}

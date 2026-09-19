@@ -84,6 +84,11 @@ DEFAULT=(
 #     calls is three to four minutes, and the question it measures is filed
 #     as a decision rather than a fault, so it runs when that decision is
 #     being made.
+#   nothing-to-show.sh
+#     the answer does not vary: the list is never empty, because the pod row
+#     is added before the hub is asked. Worth re-asking after any change to
+#     how the roster is built, but a constant in a suite that looks for
+#     change — and it uninstalls the app, emptying rows a later check wants.
 #   call-text-in-chat.sh, first-words-on-a-slow-connect.sh
 #     both drive a real call, like the three above. Named here because they
 #     were out with no reason written down, which is the state this list

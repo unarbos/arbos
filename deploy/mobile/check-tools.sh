@@ -169,3 +169,26 @@ for f in "$HERE"/scenarios/*.sh "$HERE"/mac-*.sh; do
   STRAYAPP=$((STRAYAPP + 1))
 done
 [ "$STRAYAPP" = 0 ] && echo "  none — every reinstall uses the build this loop just made"
+
+# Tools that reach for a Homebrew program without asking for Homebrew's
+# directory. The loop drives this Mac over ssh, and a non-login ssh shell has
+# a bare PATH: /usr/bin and no more. So `ffmpeg` and `idb` are invisible, and
+# the tool reports the machine lacks a program the machine has. Cycle 160 hit
+# this with Python, fixed that one tool, and the lesson did not travel — at
+# cycle 192 review-demo.sh said "no ffmpeg on this machine" while ffmpeg sat
+# in /opt/homebrew/bin. This is the lesson written down where it applies.
+echo
+echo "tools calling a Homebrew program without Homebrew on PATH:"
+STRAYPATH=0
+for f in $(find "$HERE" -name "*.sh" | sort); do
+  USES=$(grep -oE "(^|[^-a-zA-Z_./])(ffmpeg|ffprobe|idb)[ \"']" "$f" 2>/dev/null \
+    | grep -oE "ffmpeg|ffprobe|idb" | sort -u | tr '\n' ' ')
+  [ -n "$USES" ] || continue
+  grep -q 'PATH="/opt/homebrew/bin' "$f" && continue
+  # Sourcing a library that sets the PATH counts: the program is found by the
+  # time it is called, which is the only thing that matters.
+  grep -qE '\. .*sim-lib\.sh' "$f" && continue
+  echo "  $(basename "$f") calls: ${USES}— add export PATH=\"/opt/homebrew/bin:\$PATH\""
+  STRAYPATH=$((STRAYPATH + 1))
+done
+[ "$STRAYPATH" = 0 ] && echo "  none — every tool that calls one asks for its directory first"
