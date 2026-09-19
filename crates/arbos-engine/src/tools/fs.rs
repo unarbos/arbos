@@ -1107,13 +1107,22 @@ pub fn read(
         ),
         None => {
             let (text, bad) = read_text(&file)?;
-            let lines: Vec<String> = text.lines().skip(start).map(str::to_string).collect();
+            let lines: Vec<String> = text
+                .lines()
+                .enumerate()
+                .skip(start)
+                .map(|(i, l)| if i == 0 { without_bom(l) } else { l }.to_string())
+                .collect();
             (lines, bad, false)
         }
     };
     let mut body = String::new();
     if bad > 0 {
         body.push_str(&not_utf8_note(bad));
+        body.push('\n');
+    }
+    if start == 0 && has_bom(&file) {
+        body.push_str(BOM_NOTE);
         body.push('\n');
     }
     for (i, line) in lines.iter().enumerate() {
@@ -1135,6 +1144,27 @@ pub fn read(
 /// The most `read` takes in whole. Past it the model is told the size
 /// and how to read a part.
 pub const READ_MAX_BYTES: u64 = 64 << 20;
+
+/// The line `read` puts above a file that starts with a UTF-8 byte-order
+/// mark (a PowerShell script, a .NET source, a file Notepad saved).
+pub const BOM_NOTE: &str =
+    "[the file starts with a UTF-8 byte-order mark; it is not shown here and every edit keeps it]";
+
+/// `s` without a leading U+FEFF. The mark is a file's, not its first
+/// line's: shown, it put an invisible character in front of line 1 for
+/// the model to copy; hashed, it made line 1's anchor differ from the
+/// text the model sees; matched, `^param` found no line 1.
+pub fn without_bom(s: &str) -> &str {
+    s.strip_prefix('\u{FEFF}').unwrap_or(s)
+}
+
+fn has_bom(file: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 3];
+    std::fs::File::open(file)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|_| head == [0xEF, 0xBB, 0xBF])
+}
 /// The most one streamed line may hold before it is cut (a minified
 /// bundle, a one-line JSON dump).
 const READ_MAX_LINE: usize = 4 << 20;
@@ -1188,7 +1218,11 @@ fn read_lines_from(file: &Path, start: usize, take: usize) -> Result<(Vec<String
         if n >= start {
             let (text, b) = decode_text(std::mem::take(&mut buf));
             bad += b;
-            lines.push(text);
+            lines.push(if n == 0 {
+                without_bom(&text).to_string()
+            } else {
+                text
+            });
         }
         n += 1;
     }
@@ -1695,6 +1729,7 @@ pub fn grep_walk_with(
         }
         let (text, _) = decode_text(bytes);
         for (i, line) in text.lines().enumerate() {
+            let line = if i == 0 { without_bom(line) } else { line };
             if re.is_match(line) {
                 hits.push(GrepHit {
                     path: rel.to_string_lossy().into_owned(),
@@ -2599,6 +2634,76 @@ mod read_only_tests {
         assert_eq!(
             std::fs::read_to_string(dir.join("new/deep/file.txt")).unwrap(),
             "hi"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod bom_tests {
+    use super::*;
+
+    /// Control on main 1ac1526b with a PowerShell file saved with a BOM:
+    /// `read` showed line 1 as `\u{feff}param($x)` and hashed it with the
+    /// mark; the hash of the text as the model sees it did not resolve
+    /// ("anchor not found"); `grep ^param` answered 0 hits. Now the mark
+    /// is said once, not shown, not hashed, not matched — and kept
+    /// through an edit of line 1.
+    #[test]
+    fn a_byte_order_mark_is_said_not_shown_and_kept_through_an_edit() {
+        let dir = std::env::temp_dir().join(format!("arbos-bom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.ps1"), "\u{FEFF}param($x)\nWrite-Host $x\n").unwrap();
+        let whole = read(&dir, &dir, "a.ps1", None, None).unwrap().body;
+        let mut lines = whole.lines();
+        assert_eq!(lines.next().unwrap(), BOM_NOTE);
+        let first = lines.next().unwrap();
+        assert!(!first.contains('\u{FEFF}'), "{first:?}");
+        assert!(first.ends_with("|param($x)"), "{first}");
+        let tag = super::super::hashline::line_tag("param($x)");
+        assert!(
+            first.contains(&format!(":{tag}|")),
+            "the anchor is the visible text's: {first}"
+        );
+        // A page from line 2 has no note; a page from line 1 does, and
+        // the same anchor.
+        let page = read(&dir, &dir, "a.ps1", Some(2), Some(1)).unwrap().body;
+        assert!(!page.contains(BOM_NOTE), "{page}");
+        let page = read(&dir, &dir, "a.ps1", Some(1), Some(1)).unwrap().body;
+        assert!(page.starts_with(BOM_NOTE), "{page}");
+        assert!(page.contains(&format!(":{tag}|param($x)")), "{page}");
+        // grep matches line 1 as the model sees it.
+        let hits = grep_walk_with(&dir, "^param", None, false, false).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].text, "param($x)");
+        // The anchor from read edits line 1; the mark stays in front.
+        super::super::hashline::edit(
+            &dir,
+            &dir,
+            "a.ps1",
+            &serde_json::json!({"anchor": format!("1:{tag}"), "content": "param($x, $y)"}),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.ps1")).unwrap(),
+            "\u{FEFF}param($x, $y)\nWrite-Host $x\n"
+        );
+        // A file without a mark gets no note and no mark.
+        std::fs::write(dir.join("b.ps1"), "param($x)\n").unwrap();
+        let out = read(&dir, &dir, "b.ps1", None, None).unwrap().body;
+        assert!(!out.contains("byte-order mark"), "{out}");
+        let tag = super::super::hashline::line_tag("param($x)");
+        super::super::hashline::edit(
+            &dir,
+            &dir,
+            "b.ps1",
+            &serde_json::json!({"anchor": format!("1:{tag}"), "content": "param($y)"}),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("b.ps1")).unwrap(),
+            "param($y)\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

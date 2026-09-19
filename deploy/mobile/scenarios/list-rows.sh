@@ -124,6 +124,28 @@ if [ "$FAULTS" = 0 ]; then
   echo "VERDICT: every row names a state, ages read as ages, and nothing"
   echo "         speaks a separator"
 else
+  # Keep the scene. The separator fault comes and goes: it read six of six
+  # dotted during the cycle-161 sweep and six of six clean an hour later from
+  # the same commit, with the label provably in effect both times (a probe
+  # string reached the tree). Three fixes have each held once. What has been
+  # missing every time is what the screen looked like at the moment it fired,
+  # so the next occurrence is guessed at from a one-line flag.
+  WHEN=$OUT/fault-$(date -u +%H%M%S)
+  mkdir -p "$WHEN"
+  python3 "$HERE/../ui.py" "$UDID" dump > "$WHEN/tree.txt" 2>&1
+  xcrun simctl io "$UDID" screenshot "$WHEN/screen.png" >/dev/null 2>&1
+  {
+    echo "rows on screen:   $(grep -cE 'Button +[a-z0-9-]+, ' "$WHEN/tree.txt")"
+    echo "section headers:  $(grep -cE 'Button +(Working|Read)$' "$WHEN/tree.txt")"
+    echo "rows reading Working: $(grep -cE 'Button +[a-z0-9-]+, Working' "$WHEN/tree.txt")"
+    echo "the app on the device:"
+    ls -l "$(xcrun simctl get_app_container "$UDID" com.unarbos.arbos.ios app 2>/dev/null)/Arbos" 2>/dev/null
+    echo "the tree's project rows:"
+    grep -E 'Button +[a-z0-9-]+, ' "$WHEN/tree.txt"
+  } > "$WHEN/state.txt" 2>&1
+  echo "  the screen at the moment it fired is in $WHEN"
+  echo "  ($(sed -n 2p "$WHEN/state.txt"), $(sed -n 3p "$WHEN/state.txt"))"
+  echo
   echo "VERDICT: $FAULTS fault(s) above — a row that says nothing, a separator"
   echo "         that reached the ear, or an age that claims 'now'"
 fi

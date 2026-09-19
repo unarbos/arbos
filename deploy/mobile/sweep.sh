@@ -27,6 +27,10 @@ CYCLE=${1:?cycle}; shift || true
 # nobody had for seventeen cycles — three passed and one had been broken the
 # whole time.
 DEFAULT=(
+  # First, because every scenario below that sends anything goes through the
+  # helper this one checks. If typing is broken, the rest of the sweep reports
+  # on lines that were never typed.
+  typing-into-the-composer.sh
   list-composer.sh
   list-search-filter-refresh.sh
   list-rows.sh
@@ -40,7 +44,9 @@ DEFAULT=(
   voice-notes-wait.sh
   the-core-chat-path.sh
   stop-a-turn.sh
+  tool-fold.sh
   call-pulled-down.sh
+  call-menu.sh
   worker-chat-open-and-back.sh
   worker-chat-shape.sh
   chat-overflow-menu.sh
@@ -64,6 +70,18 @@ DEFAULT=(
 #   photo-reaches-the-model.sh
 #     drives the system photo picker by coordinate, which is the one thing
 #     here that a different simulator would break silently.
+#   call-text-in-chat.sh, first-words-on-a-slow-connect.sh
+#     both drive a real call, like the three above. Named here because they
+#     were out with no reason written down, which is the state this list
+#     exists to prevent — cycle 161 found four such, and two of them
+#     (tool-fold, call-menu) turned out to be plain oversights.
+#   everything named after a cycle — set37*, rec37*, c39, call37, fold37,
+#   mac-cycle7*, mac-cycle8*, mac-cycle13, mac-cycle37, mac-c37b, j7check,
+#   fixj7 — and the two mac-ask-restart scripts, mac-stall and mac-stop
+#     one-offs written for a particular cycle, several reading paths that
+#     cycle wrote. They are kept as a record of how something was measured
+#     once, not as checks. If one of them is worth running again it needs
+#     rewriting to stand on its own first.
 #   connect-times-by-engine.sh
 #     reads the whole log history rather than the app; run it when the
 #     question is about trend, not about today.

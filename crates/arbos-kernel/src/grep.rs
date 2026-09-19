@@ -91,6 +91,11 @@ impl Grep for PlaceGrep {
             };
             let (text, _) = arbos_engine::decode_text(bytes);
             for (i, line) in text.lines().enumerate() {
+                let line = if i == 0 {
+                    arbos_engine::without_bom(line)
+                } else {
+                    line
+                };
                 if re.is_match(line) {
                     hits.push(GrepHit {
                         path: rel.clone(),
