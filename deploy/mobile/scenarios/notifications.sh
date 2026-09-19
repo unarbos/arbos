@@ -134,7 +134,12 @@ if [ -z "$BANNER" ]; then
   # So ask how long the kernel took. Quick and silent is the app's fault;
   # slow is the limitation this check has always known about.
   KSECS=$(python3 "$HERE/../kernel.py" pod history 4 2>/dev/null | grep -c "turn_complete")
-  NOTIFIES=$(grep -ci "notify" "$OUT/console.log" 2>/dev/null || echo 0)
+  # grep -c prints 0 *and* exits non-zero when it matches nothing, so an
+  # "|| echo 0" appends a second zero and the count becomes "0\n0" — which is
+  # not equal to 0, so the branch below accused the app of swallowing a frame
+  # it never received.
+  NOTIFIES=$(grep -ci "notify" "$OUT/console.log" 2>/dev/null | head -1 | tr -d ' \n')
+  NOTIFIES=${NOTIFIES:-0}
   echo "  the kernel finished the turn: $([ "${KSECS:-0}" -gt 0 ] && echo yes || echo "not in its last 4 lines")"
   echo "  notify frames the app received: ${NOTIFIES:-0}"
   if [ "${NOTIFIES:-0}" = 0 ]; then
