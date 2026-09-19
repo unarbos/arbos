@@ -30,8 +30,12 @@ impl PlaceGrep {
         let boot = Arc::clone(&this);
         std::thread::spawn(move || {
             let _ = std::fs::create_dir_all(&index_dir);
+            // Hidden files are in (`.github/`, dotfiles); the repository's
+            // own `.git/` is not: its loose objects are most of the files
+            // under an old project's root and none of them the project.
             let opts = BuildOptions {
                 include_hidden: true,
+                exclude_dirs: vec![".git".to_string()],
                 ..Default::default()
             };
             let _ = builder::build_index_with_options(&root, Some(&index_dir), &opts);
