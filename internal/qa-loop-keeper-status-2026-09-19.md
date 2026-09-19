@@ -12,9 +12,9 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | none open; **17 closed 17:44:10Z**, 292 scenarios |
-| previous | 16, closed 13:22:48Z, 262 scenarios |
-| cycle 17 | 292 scenarios, 0 checkpoint noise, 0 budget skips, main step **completed** |
+| current cycle | **18**, open, started 18:00:33Z, in its main step |
+| previous | **17** closed 17:44:10Z, 292 scenarios; 16 closed 13:22:48Z, 262 |
+| clean run | cycles 15, 16, 17 all: 0 checkpoint noise, 0 budget skips |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
