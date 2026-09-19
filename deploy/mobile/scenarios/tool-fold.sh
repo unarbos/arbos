@@ -25,6 +25,12 @@ B=com.unarbos.arbos.ios
 . "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 rows() { ui dump | grep -cE "StaticText"; }
+# Counting every StaticText on screen cannot see a fold open, because opening
+# one pushes the transcript up and takes as many lines off the top as it adds
+# below. Cycle 161 read "4 → 4" that way and called it a fold that refused to
+# open. The lines themselves are compared instead: what is on screen when it
+# is open that was not there when it was closed.
+lines() { ui dump | awk '$3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' | sort -u; }
 foldline() { ui dump | grep -oE "[0-9]+ tool calls?[^\"]*" | tail -1; }
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
@@ -78,6 +84,7 @@ for _ in $(seq 1 60); do
 done
 sleep 2
 CLOSED=$(rows)
+lines > "$OUT/closed.txt"
 echo "  text rows while closed: $CLOSED"
 
 echo
@@ -87,15 +94,22 @@ echo "== open it =="
 ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
 sleep 3
 OPEN=$(rows)
+lines > "$OUT/open.txt"
 xcrun simctl io "$UDID" screenshot "$OUT/02-open.png" >/dev/null 2>&1
+REVEALED=$(comm -13 "$OUT/closed.txt" "$OUT/open.txt" | grep -c .)
 echo "  text rows while open:   $OPEN"
+echo "  lines opening revealed: $REVEALED"
+comm -13 "$OUT/closed.txt" "$OUT/open.txt" | cut -c1-64 | sed 's/^/      /' 
 
 echo
 echo "== close it again =="
 ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
 sleep 3
 AGAIN=$(rows)
+lines > "$OUT/again.txt"
+LEFT=$(comm -13 "$OUT/closed.txt" "$OUT/again.txt" | grep -c .)
 echo "  text rows closed again: $AGAIN"
+echo "  lines still showing:    $LEFT (was $REVEALED when open)"
 
 echo
 FAULTS=0
@@ -113,10 +127,11 @@ if [ "${N:-1}" -lt 2 ]; then
   echo "stills in $OUT"
   exit 0
 fi
-[ "$OPEN" -gt "$CLOSED" ] || { echo "  FAULT: opening the fold showed nothing more ($CLOSED → $OPEN)"; FAULTS=$((FAULTS + 1)); }
-[ "$AGAIN" -le "$CLOSED" ] || { echo "  FAULT: closing it left $((AGAIN - CLOSED)) row(s) behind"; FAULTS=$((FAULTS + 1)); }
+[ "${REVEALED:-0}" -gt 0 ] || { echo "  FAULT: opening the fold revealed no line that was not already there"; FAULTS=$((FAULTS + 1)); }
+[ "${LEFT:-0}" = 0 ] || { echo "  FAULT: closing it left $LEFT of those $REVEALED line(s) on screen"; FAULTS=$((FAULTS + 1)); }
 if [ "$FAULTS" = 0 ]; then
-  echo "VERDICT: '$FOLD' folds $((OPEN - CLOSED)) row(s) away and gives them back on a tap"
+  echo "VERDICT: '$FOLD' hides $REVEALED line(s) and gives them back on a tap, and"
+  echo "         takes them away again when it closes"
 else
   echo "VERDICT: $FAULTS fault(s) in the fold — named above"
 fi
