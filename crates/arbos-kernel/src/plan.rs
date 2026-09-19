@@ -43,9 +43,49 @@ pub fn reclaim(hooks: &KernelHooks) {
         }
         while close_turn_folder(hooks, id, Some("kernel restarted before this turn ended")) {}
         // A blocking allow/deny prompt does not outlive its turn; a parked
-        // question does, and stays.
+        // question does, and stays — unless the transcript shows the agent
+        // already woke after it (a kernel before this one left the file).
         arbos_core::waiting::clear_approves(&hooks.place, id);
+        sweep_stale_asks(hooks, id);
         hooks.broadcast(hooks.plan_frame(id));
+    }
+}
+
+/// Remove every parked question of `agent`; `why` names the wake that
+/// made them moot, for the log.
+fn close_parked_asks(hooks: &KernelHooks, agent: &str, why: &str) {
+    for w in hooks.pending_asks(agent) {
+        if arbos_core::waiting::remove(&hooks.place, agent, "ask", &w.id) {
+            crate::klog::info(
+                "ask_closed",
+                Some(agent),
+                format!("{}: the agent woke on {why}; nobody is waiting on it", w.id),
+            );
+        }
+    }
+}
+
+/// At start: a parked question whose `ask` line is followed by a `wake`
+/// on the transcript belongs to a turn the agent already left behind.
+fn sweep_stale_asks(hooks: &KernelHooks, agent: &str) {
+    let asks = hooks.pending_asks(agent);
+    if asks.is_empty() {
+        return;
+    }
+    let events = load_transcript(&hooks.layout(agent).transcript()).unwrap_or_default();
+    for w in asks {
+        if arbos_core::waiting::ask_is_stale(&events, &w.id)
+            && arbos_core::waiting::remove(&hooks.place, agent, "ask", &w.id)
+        {
+            crate::klog::info(
+                "ask_closed",
+                Some(agent),
+                format!(
+                    "{}: the transcript shows a wake after it (a kernel before this one)",
+                    w.id
+                ),
+            );
+        }
     }
 }
 
@@ -99,6 +139,15 @@ pub fn scan(hooks: &Arc<KernelHooks>) -> Vec<Wake> {
         keyless_forget(id);
         match inbox::claim(&hooks.place, id, &filed) {
             Ok(turn_dir) => {
+                // A turn that starts on anything but the answer closes the
+                // parked question: the agent has been answered another way
+                // (a parent's `say`) or moves on without one, and nobody is
+                // waiting. Left standing, the waiting/ file was replayed as
+                // a live card at every attach over a finished transcript
+                // (desktop cycle 58).
+                if filed.msg.kind != "answer" {
+                    close_parked_asks(hooks, id, &format!("{} {}", filed.msg.kind, filed.msg.from));
+                }
                 if let Some(mut wake) = wake_from_message(hooks, &agent, &filed.msg, &turn_dir) {
                     // Every other finished worker's done file joins this
                     // turn: one wake, one model call, one message to the
