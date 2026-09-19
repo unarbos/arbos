@@ -896,9 +896,24 @@ One hundred and nineteen fresh instances across cycles 29–40, forty-six failur
 
 Spend $7.67.
 
-## Next (cycle 41)
+## Cycle 41 (2026-09-19) — the tree-moving-reproduction step where it was found; ten more fresh instances
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 18f397cb34ab protocol 1`** = `main` head, built in the worktree, label proved. The engine changes since 3784c20d: **42753ae5**, Features' step on the cycle-39 finding (read from this document; nothing was filed) — a reproduction whose command moves the working tree, index or HEAD is refused with what it would do to the fix, never taken as the last failing command, never re-run, and a re-run that moved the tree anyway is said under its verdict; plus non-UTF-8 files read with a note and refused for edit with what to do, and `read` streaming pages under a cap. Jev off. Harness d1226d8c (#734). Network cut, no cap. Two reads, concurrent, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-41-preregistration.md)). $14.69. The host paused a fifth time (eval log silent 08:55:44–09:43:06); walls not read.
+
+**Read 1 — 42753ae5 on pytest-10356, three rollouts: the step was not exercised, and the loss did not recur.** None of the three offered a tree-moving command as a reproduction (seven offers, all plain pytest runs on a scratch file), so the refusal had nothing to refuse and no "CHANGED THE WORKING TREE" line appeared. One rollout ran `git stash` three times by hand, outside the gate, and its tree at exit still carried its fix. All three patches were non-empty (3.3–4.2 KB) and matched what their last `changes` showed. One of three solved; the two that did not are C, consistent — the MRO walk built differently from the gold's and the hidden test pinning the result. So the loop can say the cycle-39 shape did not recur in three draws and cannot say it saw the refusal; the step's own unit test is the evidence for the refusal, not this read.
+
+**Read 2 — ten never-run instances at `-r 2`: 17 of 20** (a count). Three failures:
+
+- django-13401 ×1 — **A, the twin, evident from the issue.** The issue's symptom is a `set` of fields de-duplicating across models — equality *and hashing*. The agent changed `__eq__` (line for line the gold's) and `__lt__`, and left `__hash__` on `creation_counter` alone; the hidden test's `assertNotEqual(hash(a), hash(b))` fails, `1172 == 1172`. Fourteen tool calls.
+- matplotlib-20676 ×2 — C, consistent: right file, right class; the agent freezes and restores `dataLim`/`viewLim` around the handle lines (one rollout) or moves the placeholder rectangle inside the data limits (the other), where the gold seeds the handles from the axis bounds; both hidden tests fail on the bound the gold preserves.
+
+One hundred and twenty-nine fresh instances across cycles 29–41, forty-nine failures, none outside the account. Cumulative read: **340** (335 + 3 + the two C in read 1).
+
+Spend $14.69.
+
+## Next (cycle 42)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read. The verifier report is part of every read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); a `git stash` reproduction re-run by `changes` removes the fix (39); a no-change verdict on "the wrong output is gone" rather than "the right output is there" (40).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); a no-change verdict on "the wrong output is gone" rather than "the right output is there" (40).

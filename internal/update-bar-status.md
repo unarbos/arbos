@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 09:57 UTC.
+Last checked 2026-09-19 10:17 UTC.
 
-## Click Update. You will get build 2235. Jev is in it.
+## Click Update. You will get build 2242. Jev is in it.
 
-**2235** — signed, notarised, stapled, on the feed since 09:55 UTC.
+**2242** — signed, notarised, stapled, on the feed since 10:15 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2235 (builds 2236–2242):
+
+- **#747** — `check-machine.sh` asks whether the machine can run the
+  harness
+- **#748** — a UTF-8 byte-order mark is the file's, not line 1's
+
+## Before that: 2235
 
 New since 2230 (builds 2231–2235):
 

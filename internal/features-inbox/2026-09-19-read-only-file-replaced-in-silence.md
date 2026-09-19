@@ -36,5 +36,4 @@ file usually is, and the way through: `chmod u+w <file>` in bash first
 (and a word on why), or change its source. `write` under a file names the
 parent that is a file.
 
-Fixed in the same cycle: see the PR linked from `docs/features-backlog.md`
-(row dated 2026-09-19, "read-only file").
+Fixed in the same cycle: [#749](https://github.com/unarbos/arbos/pull/749).
