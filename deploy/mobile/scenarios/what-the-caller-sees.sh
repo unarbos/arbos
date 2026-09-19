@@ -25,6 +25,7 @@ UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(n
 B=com.unarbos.arbos.ios
 CLIPS="$HOME/mobile-clips"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
+shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; }
 
 [ -f "$CLIPS/ask.wav" ] || { echo "no ask.wav in $CLIPS — run mac-voice.sh once to make the clips"; exit 1; }
 
@@ -34,8 +35,9 @@ xcrun simctl launch --console-pty "$UDID" $B -previewCall 1 -injectWav "$CLIPS/a
   > "$OUT/console.log" 2>&1 &
 START=$(python3 -c 'import time;print(time.time())')
 
-# One dump per sample, and nothing else: a screenshot here would cost a
-# second each time and blur the order of what is being timed.
+# One dump per sample, and a screenshot only when the phase changes. Shooting
+# every sample would cost about a second each time and blur the order of what
+# is being timed; shooting on change is four or five for the whole run.
 # Sampled until a deadline, not for a fixed number of turns. A count was the
 # first mistake here: sixty dumps took four and a half seconds, so the run
 # ended long before the kernel answered and reported a screen that never
@@ -57,6 +59,16 @@ while :; do
     | grep -vxE "Call|Mute|End call|Call menu|Idle|Listening|Thinking|Speaking" \
     | grep -vE "^ *$" | head -1)
   echo "$NOW|${PHASE:-?}|${LINE:-}" >> "$SAMPLES"
+  # One still per phase, the moment it changes. The orb's colour is the whole
+  # of what this screen says, and a timeline of phase *names* cannot show
+  # whether those colours are actually distinguishable. Shooting on change
+  # costs four or five screenshots a run instead of a hundred, and each one
+  # is labelled with the phase it belongs to — so the colours can be measured
+  # rather than described.
+  if [ "${PHASE:-?}" != "${LAST_PHASE:-}" ] && [ -n "${PHASE:-}" ] && [ "$PHASE" != "?" ]; then
+    shot "phase-$PHASE"
+    LAST_PHASE=$PHASE
+  fi
 done
 
 xcrun simctl io "$UDID" screenshot "$OUT/at-the-end.png" >/dev/null 2>&1
