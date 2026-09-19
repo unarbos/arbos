@@ -781,6 +781,13 @@ class Pass:
                            lambda a, b: json.dumps([m.get("feedback") for m in active(b)["items"] if m.get("feedback")]) )
             else:
                 self.gap(name, sc, "click", f"no {name}-* element")
+        # The thumbs-down opens the report sheet over the transcript; left
+        # open, the fork click below lands on the sheet when the sheet's box
+        # happens to cover the footer (R41, cycle 75: fork-turn read "no
+        # state change" with the sheet in the still).
+        if self.app.exists("feedback-sheet"):
+            self.check("feedback-sheet-close", sc, "Close on the report sheet", "the sheet goes; the transcript is back under the pointer",
+                       lambda: self.app.click("feedback-close"), lambda a, b: not self.app.exists("feedback-sheet"), settle=0.8)
         if ids["turn-time"]:
             self.check("turn-time", sc, "hover", "tooltip; no state change", lambda: self.app.hover(ids["turn-time"]), None)
         if ids["fork-turn"]:
