@@ -40,16 +40,53 @@ for f in $FILES; do
     rm -f "$TMP"; COPIED=$((COPIED + 1)); continue
   fi
 
-  # Every mirror line the source does not have verbatim. Each one is then
-  # asked the softer question: does it survive inside a longer source line?
-  LOST=0
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
-    grep -qxF -- "$line" "$SRC" && continue
-    grep -qF -- "$line" "$SRC" && continue   # edited in place, still carried
-    LOST=$((LOST + 1))
-    [ "$LOST" -le 3 ] && echo "      only in the mirror: $(echo "$line" | cut -c1-90)"
-  done < "$TMP"
+  # Every mirror line the source does not carry. "Carry" is the whole
+  # question, and the first version of this got it wrong in a way that would
+  # have made the tool useless: it asked whether the mirror line survived as
+  # a substring, which covers text appended to the end of a line and nothing
+  # else. A coverage row is updated by *prepending* the new cycle into the
+  # middle — `| row | 179 (…)` becomes `| row | 193 (…), 179 (…)` — so the
+  # old line is no longer contiguous anywhere, and the tool refused every
+  # coverage update it was written to wave through.
+  #
+  # So a table row is read as a table row: same first cell, and everything
+  # after it still present. Anything else is compared whole.
+  LOST=$(python3 - "$SRC" "$TMP" <<'PY'
+import sys
+src = open(sys.argv[1]).read().splitlines()
+mirror = open(sys.argv[2]).read().splitlines()
+verbatim = set(src)
+
+
+def key_and_rest(line):
+    if not line.startswith("|") or line.count("|") < 3:
+        return None, None
+    cells = line.split("|")
+    return cells[1].strip(), "|".join(cells[2:])
+
+
+by_key = {}
+for line in src:
+    k, rest = key_and_rest(line)
+    if k is not None:
+        by_key.setdefault(k, []).append(rest)
+
+lost = []
+for line in mirror:
+    if not line.strip() or line in verbatim:
+        continue
+    if line in "\n".join(src):          # appended to, still whole
+        continue
+    k, rest = key_and_rest(line)
+    if k is not None and any(rest.strip() in r for r in by_key.get(k, [])):
+        continue                        # same row, added to in the middle
+    lost.append(line)
+
+for line in lost[:3]:
+    print(f"      only in the mirror: {line[:90]}", file=sys.stderr)
+print(len(lost))
+PY
+)
 
   SB=$(wc -c < "$SRC"); MB=$(wc -c < "$TMP")
   if [ "$LOST" -gt 0 ]; then
