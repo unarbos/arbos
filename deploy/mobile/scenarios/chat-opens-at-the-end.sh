@@ -49,7 +49,12 @@ for ROW in $ROWS; do
   # Page to the true end by hand. Four pages, because one swipe is not the
   # end of a long transcript and calling it one is how cycle 110 got 93 pt
   # for a shortfall that was really 501.
-  for _ in 1 2 3 4; do idb ui swipe 196 700 196 300 --duration 0.5 --udid "$UDID" >/dev/null 2>&1; sleep 2; done
+  # Through the shared pager, which waits for the scrolling to stop. The two
+  # seconds here were usually enough and sometimes not: cycle 186 measured
+  # pages still moving between 1.4 and 2.2 s after the swipe returned, and
+  # this reads a *position* the moment the loop ends. A position read off a
+  # moving screen is the one number this check exists to produce.
+  for _ in 1 2 3 4; do page_up "$UDID" >/dev/null 2>&1; done
   ENDED=$(last_y)
 
   CHECKED=$((CHECKED + 1))
