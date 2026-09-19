@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use fs4::fs_std::FileExt;
 use std::{
     fs::{File, OpenOptions},
+    io::Write,
     path::PathBuf,
 };
 
@@ -50,7 +51,6 @@ impl PlaceLock {
         let pid = std::process::id();
         for file in &mut files {
             file.set_len(0)?;
-            use std::io::Write;
             writeln!(file, "{pid}")?;
             file.sync_all()?;
         }
@@ -73,6 +73,64 @@ impl PlaceLock {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+
+    /// Whether every lock file at `place`'s paths is still the very file
+    /// this holder has open. A flock lives on the inode, not the path:
+    /// `rm -rf .arbos/runtime .arbos/lock` under a running kernel leaves
+    /// its locks on unlinked inodes — held, unreachable, and protecting
+    /// nothing — and the next kernel creates fresh files at the same
+    /// paths, locks those, and serves the same place (qal-j40). The
+    /// holder is the one that can notice, on the tick it already uses to
+    /// look at its store.
+    pub fn still_at(&self, place: &Place) -> bool {
+        self._files
+            .iter()
+            .zip(place.lock_paths())
+            .all(|(file, path)| same_file(file, &path))
+    }
+
+    /// Take back every lock file that is no longer ours at `place`'s
+    /// paths — fresh file, fresh flock, our pid — keeping the ones still
+    /// held. `Err` when another kernel already holds a fresh file: the
+    /// place has two kernels, and the caller must not serve on.
+    pub fn retake(&mut self, place: &Place) -> Result<()> {
+        std::fs::create_dir_all(place.runtime_dir())?;
+        let pid = std::process::id();
+        for (i, path) in place.lock_paths().into_iter().enumerate() {
+            if same_file(&self._files[i], &path) {
+                continue;
+            }
+            let mut file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&path)
+                .with_context(|| format!("open {}", path.display()))?;
+            match file.try_lock_exclusive() {
+                Ok(true) => {}
+                Ok(false) => bail!(
+                    "another kernel holds {} (pid {})",
+                    path.display(),
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|t| t.trim().parse::<u32>().ok())
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "unknown".into())
+                ),
+                Err(err) => return Err(err).with_context(|| format!("lock {}", path.display())),
+            }
+            file.set_len(0)?;
+            writeln!(file, "{pid}")?;
+            file.sync_all()?;
+            // The old descriptor's flock is on an unlinked inode; letting
+            // it go frees nothing anyone can reach.
+            let _ = FileExt::unlock(&self._files[i]);
+            self._files[i] = file;
+            self.paths[i] = path;
+        }
+        Ok(())
     }
 
     /// The pid written in whichever lock file names one — the holder, for a
