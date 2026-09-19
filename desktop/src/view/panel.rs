@@ -21,7 +21,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, Render, SharedString,
-        Stateful, Window, div, prelude::*, px,
+        Stateful, Window, div, prelude::*, px, relative,
     },
     theme::{TextStyle, Theme, Typeset},
     ui::{icons, popover, tooltip::Tooltip, widgets::Buttons},
@@ -881,6 +881,7 @@ impl Arbos {
                 PageBlock::Item(item) => {
                     self.page_item((item_id, n as u64), item, scale, theme, cx)
                 }
+                PageBlock::Table { header, rows } => page_table(n, header, rows, scale, theme),
             });
         }
         body.into_any_element()
@@ -1401,4 +1402,55 @@ fn plain_links(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// A pipe table as a table: the header dim above a hairline, each row's
+/// cells in equal columns, long cells cut with an ellipsis (F-214).
+fn page_table(n: usize, header: &[String], rows: &[Vec<String>], scale: PageScale, theme: &Theme) -> AnyElement {
+    let cols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
+    // Columns share the width by their longest cell, a short one (a date,
+    // a name) never wider than a third of a long one.
+    let widest: Vec<f32> = (0..cols)
+        .map(|i| {
+            std::iter::once(header)
+                .chain(rows.iter().map(Vec::as_slice))
+                .filter_map(|cells| cells.get(i))
+                .map(|c| c.chars().count() as f32)
+                .fold(1., f32::max)
+                .clamp(8., 48.)
+        })
+        .collect();
+    let total: f32 = widest.iter().sum();
+    let line = |cells: &[String], head: bool| {
+        let mut row = div().flex().flex_row().gap(px(8.)).w_full();
+        for i in 0..cols {
+            let text = cells.get(i).cloned().unwrap_or_default();
+            row = row.child(
+                div()
+                    .w(relative(widest[i] / total))
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if head { theme.text_muted } else { theme.text })
+                    .when(head, |el| el.font_weight(FontWeight::SEMIBOLD))
+                    .child(SharedString::from(text)),
+            );
+        }
+        row
+    };
+    let mut table = div()
+        .id(SharedString::from(format!("page-table-{n}")))
+        .flex_none()
+        .pl(px(scale.inset()))
+        .pr(px(scale.inset()))
+        .py(px(scale.row_py()))
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .text_style(scale.text())
+        .child(line(header, true))
+        .child(div().h(px(1.)).w_full().bg(theme.border));
+    for cells in rows {
+        table = table.child(line(cells, false));
+    }
+    table.into_any_element()
 }

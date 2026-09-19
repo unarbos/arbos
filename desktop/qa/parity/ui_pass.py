@@ -1398,6 +1398,23 @@ class Pass:
         self.check("cmd-b", sc, "cmd-b", "panel_open flips back and panel_shown follows", lambda: self.app.key("cmd-b"), flips)
         if not self.state()["panel_open"]:
             self.app.key("cmd-b")
+        # F-214: a pipe table on the project page draws as a table, its
+        # separator row dropped — not as lines of pipes.
+        notes = PROJ / ".arbos" / "notes.md"
+        try:
+            before_notes = notes.read_text() if notes.exists() else None
+            notes.write_text("# Page\n\n## Decisions\n\n| Date | Decision | Owner |\n| --- | --- | --- |\n| 2026-09-19 | Ship the CLI first | Jacob |\n\n## Checklist\n\n- [ ] Write the add command\n")
+            s_tbl = self.wait(lambda s: self.app.exists("page-table-1") or any(re.fullmatch(r"page-table-\d+", e["path"].split(".")[-1]) for e in self.app.snapshot()["elements"]), 8, what="page table")
+            tables = [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"] if re.fullmatch(r"page-table-\d+", e["path"].split(".")[-1])]
+            self.record("page-table", sc, "write a pipe table into notes.md, read the Project section", "one table block (header + rows), the `| --- |` line not drawn",
+                        f"tables={tables}", "pass" if len(tables) == 1 else "fail", self.still("page-table"))
+            if before_notes is None:
+                notes.unlink(missing_ok=True)
+            else:
+                notes.write_text(before_notes)
+            time.sleep(1.0)
+        except OSError as err:
+            self.gap("page-table", sc, "write notes.md", f"{type(err).__name__}: {err}")
         if self.app.exists("panel-set-goals"):
             self.check("panel-set-goals", sc, "click Set goals…", "composer holds a goals prompt, nothing sent",
                        lambda: self.app.click("panel-set-goals"), lambda a, b: "GOALS" in b["composer"]["text"] and not busy(b))

@@ -72,6 +72,13 @@ pub enum PageBlock {
         text: String,
     },
     Item(PageItem),
+    /// A pipe table: its header cells and its rows, the `| --- |` line
+    /// read and dropped. Cursor draws a table as a table; the pipes drawn
+    /// as prose were F-214.
+    Table {
+        header: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
 }
 
 /// `notes.md`, parsed.
@@ -529,6 +536,21 @@ impl ProjectPage {
                 });
                 continue;
             }
+            // A pipe table's row. Consecutive rows join the same table; the
+            // separator row (`| --- | --- |`) is read and dropped.
+            if let Some(cells) = table_cells(trimmed) {
+                if cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')) {
+                    continue;
+                }
+                match page.blocks.last_mut() {
+                    Some(PageBlock::Table { rows, .. }) => rows.push(cells),
+                    _ => page.blocks.push(PageBlock::Table {
+                        header: cells,
+                        rows: Vec::new(),
+                    }),
+                }
+                continue;
+            }
             let Some(rest) = bullet(trimmed) else {
                 // Prose above the first heading is the template's link line
                 // to the context document, which the Context row already
@@ -582,6 +604,14 @@ fn first_of(store: &Path, names: &[&str]) -> Option<PathBuf> {
         .iter()
         .map(|name| store.join(name))
         .find(|path| path.is_file())
+}
+
+/// `| a | b |` → `["a", "b"]`; `None` for a line that is not a table row.
+fn table_cells(trimmed: &str) -> Option<Vec<String>> {
+    let inner = trimmed.strip_prefix('|')?;
+    let inner = inner.strip_suffix('|').unwrap_or(inner);
+    let cells: Vec<String> = inner.split('|').map(|c| unbold(c.trim())).collect();
+    (cells.len() >= 2).then_some(cells)
 }
 
 fn bullet(trimmed: &str) -> Option<&str> {
