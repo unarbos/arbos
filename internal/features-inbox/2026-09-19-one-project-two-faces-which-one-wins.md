@@ -59,6 +59,48 @@ it falls through to the first colour in the palette.
 The list, which hashes each project's own key, is the one telling them apart.
 The call screen's face identifies the kernel you are talking to, or nothing.
 
+## It is not only the call screen (cycle 181)
+
+Walking the app for the purpose check, the **chat header** draws it too.
+Measured on the same build, same project:
+
+| screen | glyph |
+|---|---|
+| projects list | `0x9A7AFE` purple |
+| chat header | `0xE5533D` red |
+| call screen | `0xE5533D` red |
+
+The chat header is the screen you see every time you open a project. The
+call screen is not. This matters more than it looked when it was filed.
+
+## The cause is one line, and it was written on purpose
+
+Cycle 166 said the fix needed two halves and that the first was missing —
+the chat writing the kernel's face into the cache the list reads. **It is not
+missing.** `MainChatView` already does it:
+
+    .onChange(of: chat.identity) { _, face in
+        if let face { projects.remember(face, for: target) }
+    }
+
+So the list is told. It is then untold, on the next roster refresh, by
+`ProjectStore`:
+
+    // The roster's face (#233) beats the cache and the default.
+    if let face = project.identity?.filled(key: target.stored) {
+        row.identity = face
+        remember(face, for: target)
+    }
+
+`filled(key:)` substitutes a colour **only when the roster's is empty**, and
+what it substitutes is the hash of `hub:<machine>/<project>`. So a roster
+entry that carries no colour of its own still overwrites the colour the
+project's own kernel supplied — and overwrites the remembered copy with it,
+so the next cold start reads the hash too.
+
+That is one line, and its comment says it is deliberate: #233 decided the
+roster wins.
+
 ## Why this is a decision and not a patch
 
 The obvious repair — have the chat remember what the kernel said, so the list
@@ -76,7 +118,15 @@ Making it stick needs both halves:
 That is a change across two stores, and it rests on a choice nobody has
 made yet:
 
-**Should the call screen draw the project's face, or the kernel's?**
+**Should a roster face with no colour of its own beat a colour the project's
+own kernel supplied?**
+
+That is the whole question now, and it is one line. #233 made the roster win
+over "the cache and the default" — and when the roster's colour is empty,
+what wins is not the roster, it is a hash. The kernel's answer is the
+project's configured identity, the same one the desktop uses.
+
+The old framing, kept because it is the same decision seen from the orb:
 
 It currently draws the kernel's, which means two projects on one kernel are
 indistinguishable there, and a project whose kernel sent no identity is drawn

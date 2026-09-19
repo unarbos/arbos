@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 17:35 UTC.
+Last checked 2026-09-19 17:56 UTC.
 
-## Click Update. You will get build 2308. Jev is in it.
+## Click Update. You will get build 2312. Jev is in it.
 
-**2308** — signed, notarised, stapled, on the feed since 17:33 UTC.
+**2312** — signed, notarised, stapled, on the feed since 17:54 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2308 (builds 2309–2312):
+
+- **#780** — a dev-channel run stays and asks again while something may
+  still go green, so a build cannot sit unpublished waiting for an event
+  that never arrives
+- **#781** — `review-demo.sh` makes a review copy at a readable width
+
+## Before that: 2308
 
 New since 2301 (builds 2302–2308):
 

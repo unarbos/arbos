@@ -5577,3 +5577,45 @@ something watching for it now.
 Audit and still in `media/mobile/cycle-180/`.
 
 **PR:** [#783](https://github.com/unarbos/arbos/pull/783), harness only.
+
+## Cycle 181 — a walk, and the two faces are bigger than filed
+
+Several cycles running have been check repairs, so this one did the standing
+order's purpose check directly: walk the app, film it, and look at it as a
+product rather than as a set of measurements.
+
+The list reads calmly — eleven projects, a folded `Read` section, ages where
+the hub supplies them. The chat is legible, the composer clear, settings
+plain.
+
+**And the two-faces finding is on the chat header** (M-558). The same project
+is `0x9A7AFE` purple in the list and `0xE5533D` red in the header — the same
+red the orb shows. Confirmed on two projects.
+
+That changes its weight. The call screen is seen rarely. The chat header is
+seen every single time a project is opened.
+
+**Reading the code for it corrected cycle 166** (M-559). I wrote then that a
+fix would need two halves, the first being the chat writing the kernel's face
+into the cache the list reads. That half already exists — `MainChatView` does
+it on every identity change. The list *is* told.
+
+It is then untold. `ProjectStore` overwrites it on the next roster refresh
+with the roster's face, and `filled(key:)` substitutes a hash of
+`hub:<machine>/<project>` when the roster carries no colour. It writes that
+back into the cache as well, so a cold start reads the hash too.
+
+**So the question is one line** (M-560), and the line has a comment saying it
+is deliberate: "The roster's face (#233) beats the cache and the default."
+When the roster's colour is empty, what beats the kernel's answer is not the
+roster — it is a hash.
+
+The inbox note asks that now: should a roster face with no colour of its own
+beat a colour the project's own kernel supplied? No app change; it stays a
+decision, and `call-face.sh` measures the list, the header and the orb every
+run so it is not noticed by accident again.
+
+Film and stills in `media/mobile/cycle-181/`; the note is at
+`internal/features-inbox/2026-09-19-one-project-two-faces-which-one-wins.md`.
+
+**PR:** [#784](https://github.com/unarbos/arbos/pull/784), harness only.

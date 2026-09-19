@@ -995,9 +995,28 @@ Cumulative read: **395**.
 
 Spend $10.30.
 
-## Next (cycle 46)
+## Cycle 46 (2026-09-19) — second draws, the pool's next ten: the regression-era instances
 
-1. The second-draw pool continues in order if the coordinator wants reachability counted further (`second_draw_pool.next` in `loop-state.json`); the loop's own reading is that the remaining pool will not change the account. Landed steps and new failures read as they arrive.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 249ddb5f9f1e protocol 1`** (cycles 44–45's; `main` at 354413e0 with no engine or host change since). Jev off. Harness d1226d8c (#734). Network cut, no cap. The pool's next ten (`second10d.txt`: three two-draw instances from the cycle 12–28 reads and seven four-draw instances from the regression sets) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-46-preregistration.md)). Tenth host pause (eval log silent 16:13–17:01, and 17:18–17:33); one rollout died in it — the model stream came back dead after the pause, "did not answer (2 tries)", turn failed at step 12 with no patch — and was re-run alone. 21 rollouts, $25.98. **9 of 21** solved — a count on a pool selected for failure.
+
+**Against the earlier draws.** The four instances with any earlier solve (django-11133, django-14017, django-14771, sympy-13878) solved both this time. Of the six that had never solved, one flipped: **django-14792**, 0000 then B (the consumers in four backends' `operations.py` fixed instead of `timezone._get_timezone_name`) in the first rollout, and on the re-run the gold's file and a full pass — its first solve in six draws. The other five stayed at zero. **All eleven read failures fail at the same site and in the same class as their earlier draws:**
+
+- astropy-13398 ×2 — the direct ITRS↔AltAz/HADec module written as the issue asks, 10–15 KB; the hidden tests want refraction and the topocentric path the accepted PR grew into; C, the scope-grew shape, six of six.
+- xarray-6992 ×2 — the same one-line `coord_names` fix, 477 bytes, 12 tool calls each; twelve hidden tests want the `indexes.py` redesign; C, four of four.
+- sphinx-7590 ×2 — user-defined literals parsed in `cpp.py`/`cfamily.py`, `c.py` untouched and the AST shape not the gold's; `test_expressions` fails; C, four of four.
+- django-15732 ×2 — **A, two halves of one fix**: the gold passes `primary_key: False` to `_delete_composed_index` *and* filters the primary-key constraint out in `_constraint_names`; one rollout did the first half, the other the second, each alone; the hidden test needs both. Six of six.
+- django-16877 ×2 — `escapeseq` written; two of four hidden tests fail on how a non-string element is escaped; C, six of six.
+- django-14792 ×1 — B, five of six (the sixth solved).
+
+Across cycles 43–46: **53 repeat failures, 52 at the same site and class.** Reachability on twice-failed instances: four flips in twenty-five (43: 0/8, 44: 3/5, 45: 0/7, 46: 1/6).
+
+Cumulative read: **406**.
+
+Spend $25.98.
+
+## Next (cycle 47)
+
+1. The second-draw pool continues in order if the coordinator wants reachability counted further (`second_draw_pool.next` in `loop-state.json`, 24 remaining — the many-draw regression members). The loop's reading stands: the remaining pool will not change the account. Landed steps and new failures read as they arrive.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 41 of 42 (43–45); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 52 of 53 (43–46); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45); two halves of one fix, each rollout doing one (46).
