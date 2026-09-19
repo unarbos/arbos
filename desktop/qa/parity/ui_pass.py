@@ -2098,6 +2098,14 @@ def place_window() -> None:
         if ids:
             wid = ids[0]
             subprocess.run(["xdotool", "windowactivate", "--sync", wid], env=ENV)
+            # The window opens maximized (#688, "filled screen on open"),
+            # and xfwm4 ignores a resize of a maximized window: every
+            # gate since read "window at 0,85 1920x1143" and measured
+            # the wide frame. Un-maximize by the window id first (R34);
+            # xdotool 3.2016 has no `windowstate`, wmctrl does the job.
+            subprocess.run(["wmctrl", "-i", "-r", wid, "-b", "remove,maximized_vert,maximized_horz"], env=ENV)
+            time.sleep(0.3)
+            subprocess.run(["wmctrl", "-i", "-r", wid, "-e", "0,100,60,1600,1000"], env=ENV)
             subprocess.run(["xdotool", "windowsize", wid, "1600", "1000"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV)
             # Read the geometry back rather than trust the move. (Added
