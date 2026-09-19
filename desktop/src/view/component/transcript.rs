@@ -1456,6 +1456,12 @@ enum Verdict {
     /// kernel's advice to the coordinator on how to resume is not for the
     /// user's eyes.
     Stopped,
+    /// Stopped by another agent — the coordinator's own `stop` on a worker
+    /// it was done with. The kernel files it under *ended badly* (its
+    /// `turn_outcome` counts any stop but the user's as not ok); the
+    /// person asked for it, so it is a stop, not a failure (F-249,
+    /// cycle 77).
+    Halted,
 }
 
 /// The kernel's done file for a worker, as it lands in the parent's chat:
@@ -1468,6 +1474,9 @@ fn done_report(text: &str) -> Option<(Verdict, String)> {
     let (prefix, rest) = arbos_core::inbox::done_report(text)?;
     let verdict = match prefix {
         arbos_core::inbox::DONE_ENDED => Verdict::Done,
+        arbos_core::inbox::DONE_ENDED_BADLY if rest.trim_start().starts_with("stopped:") => {
+            Verdict::Halted
+        }
         arbos_core::inbox::DONE_ENDED_BADLY => Verdict::Failed,
         // The user's Stop, or the per-turn cap closing the turn: a pause
         // the rule made, not the worker failing.
@@ -1483,6 +1492,14 @@ fn done_report(text: &str) -> Option<(Verdict, String)> {
     // already says.
     let words = if verdict == Verdict::Stopped && words.to_lowercase().starts_with("stopped by the user") {
         String::new()
+    } else if verdict == Verdict::Halted {
+        // "stopped: stopped by root: Stop" — the head says stopped twice
+        // over; the line's verb says it once, the words say by whom.
+        words
+            .trim_start_matches("stopped:")
+            .trim_start()
+            .trim_start_matches("stopped ")
+            .to_string()
     } else {
         words
     };
@@ -1514,6 +1531,7 @@ fn worker_card(
         Verdict::Done => "done",
         Verdict::Failed => "ended badly",
         Verdict::Stopped => "stopped by you",
+        Verdict::Halted => "stopped",
     };
     let head = format!("[{name}](agents/{who}) {said}");
     let ok = verdict != Verdict::Failed;
