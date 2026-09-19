@@ -111,6 +111,11 @@ pub struct Opener {
     field: Entity<TextField>,
     hosts: Vec<String>,
     recent_hosts: Vec<String>,
+    /// Recently opened local folders, newest first: the rows under *This
+    /// machine* that reopen a closed tab in one click (F-240, cycle 71).
+    /// Cursor's opener leads with its recent workspaces; ours offered a
+    /// closed place only by its path typed again.
+    recent_places: Vec<String>,
     stage: Stage,
     cursor: usize,
     /// Last query the field handler acted on. The field notifies on caret
@@ -153,6 +158,7 @@ impl Opener {
             field,
             hosts: Vec::new(),
             recent_hosts: Vec::new(),
+            recent_places: Vec::new(),
             stage: Stage::Machine,
             cursor: 0,
             last_query: String::new(),
@@ -172,6 +178,12 @@ impl Opener {
         self.grip = None;
         self.hosts = place::ssh_hosts();
         let mut seen = std::collections::HashSet::new();
+        self.recent_places = recents
+            .iter()
+            .filter(|place| !place.is_remote() && place.path.is_dir())
+            .map(|place| place.path.display().to_string())
+            .take(RECENT_PLACES)
+            .collect();
         self.recent_hosts = recents
             .into_iter()
             .filter_map(|place| place.host)
@@ -279,6 +291,9 @@ impl Opener {
         for host in &self.hosts {
             push(&mut out, &mut seen, host);
         }
+        for path in &self.recent_places {
+            out.push(Offer::Here(path.clone()));
+        }
         out.push(Offer::Browse);
         out
     }
@@ -299,7 +314,10 @@ impl Opener {
                                 .is_some_and(|h| h.to_lowercase().contains(&needle))
                     }
                     Offer::Browse => q.is_empty() || "browse".contains(&needle),
-                    Offer::Here(_) | Offer::Dir(_) | Offer::Create(_) => false,
+                    // A recent folder answers to its name or any part of
+                    // its path.
+                    Offer::Here(path) => q.is_empty() || path.to_lowercase().contains(&needle),
+                    Offer::Dir(_) | Offer::Create(_) => false,
                 })
                 .collect(),
             Stage::Folder { host } => {
@@ -756,6 +774,9 @@ impl Opener {
 
 /// Where the folder step opens on any machine: the home folder, listed.
 const HOME_START: &str = "~/";
+
+/// How many recent local folders the machine stage offers.
+const RECENT_PLACES: usize = 5;
 
 /// The last name in a path, for "Open <name>": `/` for the root, the home
 /// folder's own name for `~`.
