@@ -126,11 +126,22 @@ echo "  the composer afterwards: ${AFTER:-nothing}"
 # compared. A send that left the typed line sitting in the box would have
 # read "and the composer cleared" all the same. It is cleared when it holds
 # a placeholder rather than the words that were sent.
-CLEARED=no
-case "$AFTER" in
-  *"$MARK"*) ;;
-  ""|*"Follow up"*|*"Plan, ask, build"*|*"Answer"*|*"Message "*) CLEARED=yes;;
-esac
+cleared_verdict() { # <what the composer holds> <the mark that was sent>
+  case "$1" in
+    *"$2"*) echo no;;
+    ""|*"Follow up"*|*"Plan, ask, build"*|*"Answer"*|*"Message "*) echo yes;;
+    *) echo no;;
+  esac
+}
+# Prove the judgement can say no before trusting it to say yes. A branch
+# that has never fired is a branch nobody has read.
+if [ "$(cleared_verdict "Follow up…" "$MARK")" != yes ] \
+   || [ "$(cleared_verdict "$MARK: reply with three short sentences" "$MARK")" != no ]; then
+  echo "  the cleared-composer test cannot tell the two apart — not judging it"
+  CLEARED=unknown
+else
+  CLEARED=$(cleared_verdict "$AFTER" "$MARK")
+fi
 echo "  and the kernel's record:"
 python3 "$HERE/../kernel.py" pod history 4 2>/dev/null | tail -3 | cut -c1-110 | sed 's/^/    /'
 echo "stills in $OUT"
@@ -143,6 +154,9 @@ MISSING=""
 [ -z "${WORKED:-}" ] && MISSING="$MISSING Worked-line"
 if [ -n "$MISSING" ]; then
   echo "VERDICT: the turn never produced:$MISSING"
+elif [ "$CLEARED" = unknown ]; then
+  echo "VERDICT: send → card ${CARD}s → reply ${FIRST}s → Worked ${WORKED}s; the"
+  echo "         composer was not judged — see the line above"
 elif [ "$CLEARED" != yes ]; then
   echo "VERDICT: send → card ${CARD}s → reply ${FIRST}s → Worked ${WORKED}s, but the"
   echo "         composer still holds '$AFTER' — the line was sent and not cleared"
