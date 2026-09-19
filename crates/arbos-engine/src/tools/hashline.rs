@@ -185,6 +185,13 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, args: &Value) -> Result<ToolOut
     // Not UTF-8 is refused with what it is, not "file not found".
     let text = fs::text_for_edit(&file)?;
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    // A byte-order mark is the file's, not line 1's: `read` shows and
+    // hashes line 1 without it, so the anchors resolve against the same
+    // text; the mark goes back in front of whatever line 1 becomes.
+    let bom = text.starts_with('\u{FEFF}');
+    if bom && let Some(first) = lines.first_mut() {
+        *first = fs::without_bom(first).to_string();
+    }
     let had_trailing_nl = text.ends_with('\n');
     // The file's own line ending, kept. `lines()` drops the `\r` of a
     // CRLF file (a Windows checkout, `eol=crlf` in .gitattributes) and a
@@ -234,6 +241,9 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, args: &Value) -> Result<ToolOut
     let mut out = lines.join(eol);
     if had_trailing_nl && !out.is_empty() && !out.ends_with('\n') {
         out.push_str(eol);
+    }
+    if bom {
+        out.insert(0, '\u{FEFF}');
     }
     if out == text {
         return Err(fs::unchanged(&file));
