@@ -36,7 +36,10 @@ pub(crate) fn file_glyph(kind: FileKind) -> &'static str {
     match kind {
         FileKind::Markdown => icons::files::DOCUMENT,
         FileKind::Image => icons::system::WIDGET,
-        FileKind::Other => icons::files::FOLDER_WITH_FILES,
+        // A `.json`, `.csv`, `.py` is a file; the open-folder glyph it
+        // wore read as a folder beside the documents (F-217). The set has
+        // no code glyph; the document is the honest one.
+        FileKind::Other => icons::files::DOCUMENT,
     }
 }
 

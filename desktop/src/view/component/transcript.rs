@@ -1479,6 +1479,18 @@ fn done_report(text: &str) -> Option<(Verdict, String)> {
         words.truncate(at);
     }
     let words = words.trim().trim_end_matches('…').trim().to_string();
+    // A report that opens with a heading ("### Outcome") put its hashes on
+    // the done line (F-218, d26): the heading's words stand, the marks go;
+    // a report that is only a heading falls to its next line.
+    let words = match words.split_once('\n') {
+        Some((first, rest)) if first.trim_start().starts_with('#') => {
+            format!("{}\n{rest}", first.trim().trim_start_matches('#').trim())
+        }
+        None if words.trim_start().starts_with('#') => {
+            words.trim().trim_start_matches('#').trim().to_string()
+        }
+        _ => words,
+    };
     // "stopped by the user (Stop)" as the last words says what the verdict
     // already says.
     let words = if verdict == Verdict::Stopped && words.to_lowercase().starts_with("stopped by the user") {
