@@ -36,9 +36,29 @@ ui field >/dev/null 2>&1 || { echo "no composer in '$ROW'"; exit 1; }
 
 MARK="fold $(date -u +%H%M%S)"
 echo "== give it several tool calls to fold =="
-ui focus >/dev/null; sleep 0.7
-idb ui text "$MARK: run these three bash commands one after another and nothing else — echo one, echo two, echo three — then reply done." --udid "$UDID" >/dev/null 2>&1
-sleep 3
+LINE="$MARK: run these three bash commands one after another and nothing else — echo one, echo two, echo three — then reply done."
+# Read the field back before sending. `idb ui text` returns before its
+# characters arrive, and the first run of this typed into an unfocused
+# composer, sent nothing, and reported "no fold line appeared" — a verdict
+# about the app from a turn that never left the phone. M-162 is exactly
+# this, and the loop has a file about it.
+LANDED=no
+for _ in 1 2 3; do
+  ui focus >/dev/null 2>&1; sleep 0.8
+  idb ui text "$LINE" --udid "$UDID" >/dev/null 2>&1
+  for _ in 1 2 3 4 5 6; do
+    case "$(ui field plain 2>/dev/null)" in *"$MARK"*) LANDED=yes; break;; esac
+    sleep 1
+  done
+  [ "$LANDED" = yes ] && break
+done
+if [ "$LANDED" != yes ]; then
+  echo "  the line never reached the composer — nothing was sent"
+  echo
+  echo "VERDICT: none — nothing was asked, so nothing folded and this says"
+  echo "         nothing about folding"
+  exit 1
+fi
 ui tap "Send" >/dev/null 2>&1
 
 FOLD=""
