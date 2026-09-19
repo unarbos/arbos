@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 04:11 UTC.
+Last checked 2026-09-19 04:49 UTC.
 
-## Click Update. You will get build 2194. Jev is in it.
+## Click Update. You will get build 2198. Jev is in it.
 
-**2194** — signed, notarised, stapled, on the feed since 04:09 UTC.
+**2198** — signed, notarised, stapled, on the feed since 04:46 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2194 (builds 2195–2198):
+
+- **#724** — a config folder the user cannot write no longer kills the
+  kernel
+- **#723** — typed lines go through `type_line`
+
+## Before that: 2194
 
 New since 2185 (builds 2186–2194):
 
