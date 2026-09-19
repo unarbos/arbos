@@ -66,6 +66,16 @@ if [ -z "$FOLD" ]; then
   exit 1
 fi
 echo "  the fold reads: $FOLD"
+# Wait for the turn to finish before counting anything. The first working
+# run compared rows across the toggle while the reply was still arriving and
+# reported "closing it left 1 row behind" — that row was the model's answer
+# landing, not the fold failing to close. Counts are only comparable over a
+# transcript that has stopped moving.
+for _ in $(seq 1 60); do
+  case "$(ui dump)" in *"Worked "*) break;; esac
+  sleep 2
+done
+sleep 2
 CLOSED=$(rows)
 echo "  text rows while closed: $CLOSED"
 
