@@ -4930,3 +4930,42 @@ change.
 Film and still in `media/mobile/cycle-163/`.
 
 **PR:** [#752](https://github.com/unarbos/arbos/pull/752), harness only.
+
+## Cycle 164 — an answer that had been waiting since cycle 32
+
+The rotation's top six were nearly all rows the sweep runs every time. The
+oldest row the sweep never touches was `several workers at once, archived
+children`, last driven at cycle 88.
+
+**Its first half holds**: four of four workers named on the sheet, and the
+pill reading `Agents 40` after going back into the list and reopening.
+
+**Its second half had never been driven at all** (M-506). "Archived children"
+was filed as an open question at cycle 32 — a finished worker's chat read
+*"Nothing on record yet."*, because the kernel answered `total: 0` for an
+archived agent — and left there for 132 cycles.
+
+It is answered. A Done worker's chat now holds its goal as the header and
+five lines of what it did: `read · project-context.md`, `read · notes.md`,
+`status`, and its closing message. The scenario opens a finished worker every
+run now and names which of the three possible answers it got, so this cannot
+quietly regress.
+
+**Getting there caught a trap for the third time** (M-507). Picking "the first
+Button below some y" taps the sheet's own drag handle — a Button called
+`Sheet Grabber`, sitting exactly where a first row is looked for. The run then
+stays on the sheet and reports on whatever it finds. Three scenarios have done
+this. `first_worker_row` in `sim-lib.sh` picks by what a row says instead.
+
+**And the rotation itself needed fixing** (M-508). It kept nominating rows the
+sweep had run an hour earlier, because a row's age is the last cycle that
+*named* it and the sweep names nothing. The map prints the actionable list
+now — rows the sweep does not reach, oldest first — and its first honest
+answer named this cycle's row at 88. Building it turned up a quieter fault:
+finding ids look exactly like cycle numbers once the `M-` is gone, so `M-285`
+had "the microphone path" reading as cycle 285 and sank rows that are
+genuinely older.
+
+Evidence in `media/mobile/cycle-164/`.
+
+**PR:** [#754](https://github.com/unarbos/arbos/pull/754), harness only.

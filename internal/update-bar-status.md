@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 10:57 UTC.
+Last checked 2026-09-19 11:10 UTC.
 
-## Click Update. You will get build 2245. Jev is in it.
+## Click Update. You will get build 2250. Jev is in it.
 
-**2245** — signed, notarised, stapled, on the feed since 10:55 UTC.
+**2250** — signed, notarised, stapled, on the feed since 11:07 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2245 (builds 2246–2250):
+
+- **#749** — a read-only file is refused with the path rather than failing
+  obscurely
+
+## Before that: 2245
 
 New since 2242 (builds 2243–2245):
 

@@ -911,9 +911,29 @@ One hundred and twenty-nine fresh instances across cycles 29–41, forty-nine fa
 
 Spend $14.69.
 
-## Next (cycle 42)
+## Cycle 42 (2026-09-19) — the no-change rule's new predicate on its own example; the last never-run instances
 
-1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read. The verifier report is part of every read.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 aa0f61da94a2 protocol 1`** = `main` head, built in the worktree, label proved. Engine changes since 18f397cb: **d8344ff2**, Features' step on the cycle-40 finding (read from this document; nothing was filed) — the no-change rule now says "already behaves as asked" is the asked output present, "not that the wrong output the request reports is gone … the symptom moved, not the fix present"; and 2ad607b8 (a BOM is the file's, not line 1's). Jev off. Harness d1226d8c (#734). Network cut, no cap. Two reads, concurrent, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-42-preregistration.md)). $7.51. The host paused a sixth time (eval log silent 10:24:51–11:00:53); walls not read.
+
+**Read 1 — d8344ff2 on sympy-23950, three rollouts: the choice did not move.** Three of three declare no change with a 0-byte patch, in 14, 16 and 21 tool calls, on exactly the predicate the new text forbids: "`as_set()` already raises `NotImplementedError` (not `Contains(x, Reals)`)", "no `AttributeError` any more", "already fixed in the current checkout". One writes the rule's mark in form — "No change: `<command>` — already raises NotImplementedError" — with the forbidden content inside it. Five of five across cycles 40 and 42, two kernels. Two things to say plainly. The prose did not reach the choice: the agent reads "as asked" as "not as reported" whatever the rule says, so if this is wanted it is a check, not a sentence — the no-change verdict would have to name the asked output and show it, and a verdict that names only the reported output's absence would be refused. And the instance is a hard one for the rule: the issue never states the asked output — it says "Contains is not a set", and the set is what the hidden test wants; a `NotImplementedError` is a defensible reading of "not a set". So the account holds it as E2 in the no-change path with a share of C. Recorded, not filed.
+
+**Read 2 — the last eight never-run instances at `-r 2`: 7 of 16** (a count). Nine failures:
+
+- django-14315 ×2 — **A, the twin**: the gold fixes the postgres client (`env or None`) *and* the base client (merge `os.environ` when an env is given); both rollouts fix the postgres client alone, in 12 and 13 tool calls, and the two failing hidden tests are the base client's. Identical 554-byte patches.
+- django-12193 ×2 — **B, the producer**: the issue says `CheckboxInput` mutates the `attrs` dict it is handed; both rollouts make the caller (`SplitArrayWidget`) pass a copy; the gold stops `CheckboxInput.get_context` mutating; the hidden test is `CheckboxInput…not_mutate_attrs`.
+- django-11141 ×2 — **E1 invoked on a recollection**: the FAIL_TO_PASS test passes; one PASS_TO_PASS test (`test_load_empty_dir`) fails in both. The first rollout ran the loader tests, saw it fail, and reasoned: *"This test asserts the old, incorrect behavior … I recall the actual Django fix for this ticket did remove `test_load_empty_dir`"* — and shipped. Upstream kept it; the gold keeps an empty migrations directory unmigrated with a `migration_names` check. The existing-test exception was taken on memory of upstream, not on a read of the test. Third time this cycle-35 shape appears (16560's `__repr__`, 23950's git history, here) — **a recollection of upstream standing in for evidence** is now the account's most specific G-decline.
+- django-13837 ×1 — C: the `-m` detection is the gold's, with extra changes around it that break two neighbouring tests.
+- scikit-learn-25747 ×2 — C, consistent: skip the index when lengths differ, where the gold ignores it whenever the output is already a DataFrame; the hidden test pins the gold's rule.
+
+**The never-run pool is spent.** Every instance in the loop's order has now been drawn at least once: 137 fresh instances across cycles 29–42, 58 failures, none outside the account. "A fresh ten when there is nothing else to read" has nothing left to draw from. What fresh material means next — second draws on once-failed instances, a re-read of an early cycle's set on the current kernel, or waiting on new failures only — is the coordinator's call; the loop will not pick for itself.
+
+Cumulative read: **352** (340 + 9 + 3).
+
+Spend $7.51.
+
+## Next (cycle 43)
+
+1. The never-run pool is exhausted; the loop needs the coordinator's word on what counts as new material. Until then: read whatever new failures arrive (landed steps, re-reads asked for).
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); a no-change verdict on "the wrong output is gone" rather than "the right output is there" (40).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice in three, and the issue's ask is implicit (42); a recollection of upstream standing in for evidence — three instances now (35, 40/42, 42).
