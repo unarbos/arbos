@@ -52,10 +52,11 @@ echo "== typing on the call =="
 # "No keycode found" on anything outside the keyboard — an em dash in this
 # very line cost a run.
 LINE="typed on the call at $(date -u +%H%M%S), reply with the single word heard"
-ui focus >/dev/null 2>&1 || { echo "  no composer on the pulled-down call"; }
-sleep 0.7
-idb ui text "$LINE" --udid "$UDID"
-for _ in $(seq 1 60); do [ "$(ui field plain 2>/dev/null)" = "$LINE" ] && break; sleep 0.25; done
+# This file's own comment above has carried the em-dash lesson since it was
+# written, and the knowledge stayed in it — which is how cycle 149 walked
+# into the same trap in a new scenario. It is `type_line` now, so the next
+# file gets it without reading this one.
+type_line "$UDID" "$LINE" || echo "  the line never reached the call's composer"
 ui tap "Send" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID"
 sleep 12; shot 03-typed-and-answered
 echo "  did it reach the kernel: $(hist | awk -v a="${BEFORE:-0}" '$1+0 > a+0' | grep -c "typed on the call")"
