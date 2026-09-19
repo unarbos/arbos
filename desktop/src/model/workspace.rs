@@ -1813,8 +1813,14 @@ impl Workspace {
             let Some(sid) = chat.agent_session.as_deref() else {
                 continue;
             };
+            // A chat a person opened under the main one (⌘N, a fork) is
+            // nested by this window alone; the kernel's record names no
+            // parent for it and says nothing against the nest. Emptying it
+            // here put every ⌘N chat beside the main one on relaunch
+            // (F-204).
             if let Some(kernel_parent) = kernel::agent_parent(&place, sid)
                 && chat.parent_kernel != kernel_parent
+                && !(kernel_parent.is_none() && chat.person_opened())
             {
                 eprintln!(
                     "session {} ({sid}): filed parent {:?}, the kernel's record says {:?}; the record wins",
@@ -2308,7 +2314,7 @@ impl Workspace {
                 .spawn(async move { kernel::clone_session(&place, &sid) })
                 .await;
             let _ = this.update(cx, |workspace, cx| match cloned {
-                Ok(new_sid) => workspace.adopt_clone(ix, &new_sid, &title, source_busy, cx),
+                Ok(new_sid) => workspace.adopt_clone(ix, id, &new_sid, &title, source_busy, cx),
                 Err(err) => {
                     workspace.with_session(id, cx, |chat| {
                         chat.notice(true, &format!("could not fork: {err:#}"));
@@ -2322,6 +2328,7 @@ impl Workspace {
     fn adopt_clone(
         &mut self,
         ix: usize,
+        source: u64,
         kernel_id: &str,
         source_title: &str,
         source_busy: bool,
@@ -2372,7 +2379,18 @@ impl Workspace {
         if source_busy && unanswered_tail {
             chat.notice(false, FORKED_MID_TURN);
         }
-        chat.rank = self.projects[ix].front_rank(None);
+        // The copy sits beside its source: under the same parent, or under
+        // the source itself when that is a root. At the front of the roots
+        // it outranked the main chat and the panel crowned it "main", the
+        // real one reading as a finished worker under it (F-203).
+        let (parent, parent_kernel) = match self.projects[ix].session(source) {
+            Some(src) if src.parent.is_some() => (src.parent, src.parent_kernel.clone()),
+            Some(src) => (Some(src.id), src.agent_session.clone()),
+            None => (None, None),
+        };
+        chat.parent = parent;
+        chat.parent_kernel = parent_kernel;
+        chat.rank = self.projects[ix].front_rank(parent);
         chat.flush();
         self.projects[ix].sessions.push(chat);
         self.select_session(local, cx);
