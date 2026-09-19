@@ -222,7 +222,37 @@ pub fn bash_writes_protected(command: &str) -> Option<&'static str> {
                 .contains("instructions.md")
                 .then_some(".arbos/agents/<id>/instructions.md")
         });
-    let named = named?;
+    bash_writes_into(command, named?, true)
+}
+
+/// The root-owned files, as a shell command would spell them.
+pub const ROOT_OWNED: &[&str] = &[
+    ".arbos/notes.md",
+    ".arbos/archived.md",
+    ".arbos/docs/project-context.md",
+    ".arbos/GOALS.md",
+];
+
+/// Does a shell command look like it writes into a root-owned file (the
+/// project page, the context, archived.md)? The write tools refuse a
+/// child's write there in `resolve_write`; bash did not look, and a
+/// worker's `cat > .arbos/notes.md` overwrote the page (QA mt-11).
+pub fn bash_writes_root_owned(command: &str) -> Option<&'static str> {
+    // By the store spelling only: `docs/notes.md` in the project and a
+    // worker's own `agents/w1/notes.md` are not the page.
+    let named = ROOT_OWNED
+        .iter()
+        .copied()
+        .find(|rel| command.contains(rel))?;
+    bash_writes_into(command, named, false)
+}
+
+/// `named` when the command carries something that writes into it: a
+/// redirection, `tee`, `sed -i`, `cp`, `mv`, `rm`, `truncate`, `install`,
+/// `git checkout --`, `patch`, an in-place perl or python. `bare_name`
+/// lets the file's name alone stand for it (the protected files, whose
+/// names are theirs alone); off, only the full relative spelling does.
+fn bash_writes_into(command: &str, named: &'static str, bare_name: bool) -> Option<&'static str> {
     let name = named
         .trim_end_matches('/')
         .rsplit('/')
@@ -233,7 +263,8 @@ pub fn bash_writes_protected(command: &str) -> Option<&'static str> {
     // 2>/dev/null` also holds a `>`, and that read drew an allow card on a
     // "what is in this repo" question (Jacob's Mac, 2026-09-15).
     let words: Vec<&str> = command.split_whitespace().collect();
-    let names_it = |w: &str| w.contains(named.trim_end_matches('/')) || w.contains(name);
+    let names_it =
+        |w: &str| w.contains(named.trim_end_matches('/')) || (bare_name && w.contains(name));
     let redirected_in = words.iter().enumerate().any(|(i, w)| {
         let arrow = w.trim_start_matches(['1', '2', '&']);
         if arrow == ">" || arrow == ">>" {
@@ -1178,6 +1209,38 @@ mod protected_tests {
             assert_eq!(protected_by(root, &dir.join(plain)), None, "{plain}");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// QA mt-11 (draft 52c296a5ec, kernel d644bdf0): a worker overwrote
+    /// .arbos/notes.md. The write tools refuse a child's write to the
+    /// page in resolve_write; bash did not look. The shell spellings of a
+    /// write into a root-owned file are caught; reads and other files
+    /// are not.
+    #[test]
+    fn a_shell_command_that_writes_a_root_owned_file_is_caught_and_a_read_is_not() {
+        for (cmd, want) in [
+            (
+                "cat > .arbos/notes.md <<'EOF'\n# mine\nEOF",
+                Some(".arbos/notes.md"),
+            ),
+            ("echo '- [ ] x' >> .arbos/notes.md", Some(".arbos/notes.md")),
+            ("printf 'x' | tee .arbos/notes.md", Some(".arbos/notes.md")),
+            (
+                "sed -i 's/a/b/' .arbos/docs/project-context.md",
+                Some(".arbos/docs/project-context.md"),
+            ),
+            ("cp /tmp/page.md .arbos/notes.md", Some(".arbos/notes.md")),
+            (
+                "python3 -c \"open('.arbos/archived.md','w').write('')\"",
+                Some(".arbos/archived.md"),
+            ),
+            ("cat .arbos/notes.md", None),
+            ("grep -n worker .arbos/notes.md 2>/dev/null | head", None),
+            ("echo hi > docs/notes.md", None),
+            ("cat > .arbos/agents/w1/notes.md", None),
+        ] {
+            assert_eq!(bash_writes_root_owned(cmd), want, "{cmd}");
+        }
     }
 
     #[test]
