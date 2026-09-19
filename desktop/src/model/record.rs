@@ -48,6 +48,14 @@ pub struct Record {
     /// the run's own words after it (F-223, cycle 58).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kickoff_secs: Option<u32>,
+    /// When the kickoff turn was asked for, in milliseconds since the
+    /// epoch. The turn is known by this and not by its shape: without it a
+    /// relaunch took the kickoff's first call for the turn's opener and
+    /// drew the fold over the calls after it — a one-call kickoff lost its
+    /// *Worked 4s* line altogether — and the day line over the turn went
+    /// with it (F-244, cycle 75).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kickoff_at: Option<u64>,
     pub items: Vec<ChatItem>,
     /// What was sitting in the composer when the file was last written.
     /// Empty is the common case and stays off the wire.

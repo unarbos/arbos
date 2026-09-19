@@ -859,7 +859,12 @@ impl ChatSession {
             probe_at: Cell::new(None),
             stream_raw: HashMap::new(),
             awaiting_echo: VecDeque::new(),
-            kickoff_at: None,
+            // Only with its end stamped: an ask with no end would read as a
+            // kickoff still setting up, however long ago the window quit.
+            kickoff_at: record
+                .kickoff_secs
+                .and(record.kickoff_at)
+                .map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
             kickoff_secs: record.kickoff_secs,
             readonly: false,
             agent_kind: None,
@@ -1015,6 +1020,10 @@ impl ChatSession {
             closed: self.closed,
             rank: self.rank,
             kickoff_secs: self.kickoff_secs,
+            kickoff_at: self
+                .kickoff_at
+                .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64),
             items: self.items.clone(),
             draft: self.draft.clone(),
         }
@@ -1165,12 +1174,17 @@ impl ChatSession {
             return;
         };
         // The kickoff turn has no prompt: its time is the chat's, measured
-        // from the ask to the last turn end before the user's first line.
+        // from the ask to the last turn end before any opener — a line of
+        // the user's, a wake, a peer's message. A wake after a relaunch
+        // must not restamp it from an ask hours old (the ask time is on
+        // the record now, F-244).
         if let Some(at) = self.kickoff_at
-            && !self
-                .items
-                .iter()
-                .any(|item| matches!(item, ChatItem::User(_)))
+            && !self.items.iter().any(|item| {
+                matches!(
+                    item,
+                    ChatItem::User(_) | ChatItem::Wake { .. } | ChatItem::From { .. }
+                )
+            })
         {
             self.kickoff_secs = Some(at.elapsed().map(|d| d.as_secs() as u32).unwrap_or(0));
             return;

@@ -4384,8 +4384,11 @@ fn zone(
     // The kickoff turn (Cursor's "Setting up environment") opens the
     // transcript with no prompt: its first item is work, not a card, and
     // it folds to "Worked Ns" once settled — Cursor shows no detail of it.
+    // Known by the ask this window made or the stamp a relaunch read back:
+    // taken for an ordinary turn, its first call stood as the opener and
+    // the fold covered the calls after it (F-244, cycle 75).
     let kickoff_turn = first == 0
-        && chat.kickoff_at.is_some()
+        && (chat.kickoff_at.is_some() || chat.kickoff_secs.is_some())
         && !matches!(
             chat.items.first(),
             Some(ChatItem::User(_) | ChatItem::From { .. })
