@@ -2976,10 +2976,16 @@ fn terminal_card(
         cmd
     };
     let take = 12;
+    // The kernel closes a command's output with `exit <n>`, and may add a
+    // note of its own under it ("Reproduction 1 recorded (exit 2) …", for
+    // the model). Cursor's card carries the exit code as a mark, not as a
+    // line of output (F-215); the note is the model's to read, not ours.
+    let exit_code = command_exit(output);
     let lines: Vec<String> = output
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && *line != cmd && *line != "(no output)")
+        .filter(|line| !is_exit_line(line) && !line.starts_with("Reproduction "))
         .take(take)
         .map(|line| {
             let short: String = line.chars().take(88).collect();
@@ -3040,6 +3046,16 @@ fn terminal_card(
                 )
                 .when(running, |row| {
                     row.child(spinner(Duration::ZERO, theme.text_faint, cx))
+                })
+                .when_some(exit_code.filter(|code| *code != 0 && !running), |row, code| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(MONO_SIZE))
+                            .line_height(px(MONO_LEAD))
+                            .text_color(theme.danger)
+                            .child(SharedString::from(format!("exit {code}"))),
+                    )
                 }),
         )
         .when(open && (!lines.is_empty() || failed), |el| {
@@ -3070,6 +3086,22 @@ fn terminal_card(
             )
         })
         .into_any_element()
+}
+
+/// `exit <n>` as the kernel writes it after a command's output.
+fn is_exit_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("exit ")
+        .is_some_and(|code| code.trim().parse::<i64>().is_ok())
+}
+
+/// The command's exit code, from the last `exit <n>` line of its output.
+fn command_exit(output: &str) -> Option<i64> {
+    output
+        .lines()
+        .rev()
+        .filter_map(|l| l.trim().strip_prefix("exit "))
+        .find_map(|code| code.trim().parse::<i64>().ok())
 }
 
 /// One entry of a turn's timeline, in Cursor's order: a folded thought,
