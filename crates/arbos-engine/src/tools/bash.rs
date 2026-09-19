@@ -95,6 +95,19 @@ impl Tool for Bash {
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
         let cmd = req(args, "command")?;
+        // The project page and the other root-owned files: `write`,
+        // `edit` and `apply_patch` refuse a child's write in
+        // `resolve_write`; a `cat > .arbos/notes.md` went round them and
+        // a worker overwrote the page (QA mt-11). Refused the same way,
+        // before any card.
+        if !arbos_core::store::may_write(cx.agent)
+            && let Some(file) = arbos_core::store::bash_writes_root_owned(cmd)
+        {
+            bail!(
+                "bash: refused — this command writes {file}: {}",
+                arbos_core::store::REFUSAL
+            );
+        }
         let dir = opt_str(args, "cwd")
             .map(|c| cx.resolve_unconfined(c))
             .unwrap_or_else(|| cx.cwd.to_path_buf());
@@ -1544,5 +1557,60 @@ mod background_tests {
         ] {
             assert!(looks_like_server(cmd), "{cmd}");
         }
+    }
+}
+
+#[cfg(test)]
+mod page_write_tests {
+    use super::*;
+    use crate::tool::{PlanCx, Tool};
+
+    /// QA mt-11 (draft 52c296a5ec): a worker overwrote .arbos/notes.md.
+    /// `write`/`edit`/`apply_patch` refuse a child's write to the page in
+    /// `resolve_write`; bash did not look. Now a child's shell write into
+    /// a root-owned file is refused at plan time, before any card, with
+    /// the store's refusal; root's goes through; a child's read does.
+    #[test]
+    fn a_childs_shell_write_into_the_page_is_refused_before_it_runs() {
+        let dir = std::env::temp_dir().join(format!("arbos-page-bash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".arbos")).unwrap();
+        let mut worker = arbos_core::Agent::root("w1");
+        worker.parent = Some(arbos_core::AgentId::new("root"));
+        let root = arbos_core::Agent::root("root");
+        let plan = |agent: &arbos_core::Agent, cmd: &str| {
+            Bash.plan(
+                &PlanCx {
+                    root: &dir,
+                    cwd: &dir,
+                    agent,
+                },
+                &serde_json::json!({"command": cmd}),
+            )
+        };
+        let err = plan(&worker, "cat > .arbos/notes.md <<'EOF'\n# mine\nEOF")
+            .err()
+            .expect("refused")
+            .to_string();
+        assert!(
+            err.starts_with("bash: refused — this command writes .arbos/notes.md:"),
+            "{err}"
+        );
+        assert!(err.contains("owned by the main chat (root)"), "{err}");
+        assert!(err.contains("say to=root"), "{err}");
+        assert!(plan(&worker, "echo x >> .arbos/docs/project-context.md").is_err());
+        assert!(
+            plan(&worker, "cat .arbos/notes.md").is_ok(),
+            "a read is not a write"
+        );
+        assert!(
+            plan(&worker, "echo hi > docs/notes.md").is_ok(),
+            "the project's own notes.md"
+        );
+        assert!(
+            plan(&root, "cat > .arbos/notes.md <<'EOF'\n# page\nEOF").is_ok(),
+            "root's page"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
