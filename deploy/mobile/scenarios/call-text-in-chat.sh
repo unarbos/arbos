@@ -100,14 +100,33 @@ else
   # text once spoken rows are gone (M-279), and reported two occurrences for
   # a turn that had one.
   LAST_SPOKEN_Y=$(echo "$DUMP" | awk '$4=="Spoken" {y=$2} END {print y+0}')
+  # Rows under the marker, minus the turn's own furniture. On this run there
+  # were two: "Worked 12s", which every turn ends with, and the answer. A
+  # count of rows would have called that two answers.
+  UNDER=$(echo "$DUMP" | awk -v y="$LAST_SPOKEN_Y" '$3=="StaticText" && $2+0 > y+0 { $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  AFTER=$(echo "$UNDER" | grep -vE "^(Worked [0-9]|Turn ended$|Spoken$)" | grep -c . | tr -d ' ')
   TIMES=$(echo "$DUMP" | awk -v y="$LAST_SPOKEN_Y" '$3=="StaticText" && $2+0 > y+0' | grep -cF "$PHRASE" | tr -d ' ')
-  echo "  rows marked Spoken: $SPOKEN; in this turn the answer appears $TIMES time(s)"
+  echo "  rows marked Spoken: $SPOKEN; answer rows below the last marker: $AFTER; the kernel's wording appears $TIMES time(s)"
+  echo "$UNDER" | grep -vE "^(Worked [0-9]|Turn ended$|Spoken$)" | cut -c1-72 | sed 's/^/      /' 
   if [ "$SPOKEN" = 0 ]; then
     echo "  VERDICT: nothing on screen is marked Spoken — inconclusive, the chat may not be at the tail"
+  elif [ "$AFTER" = 0 ]; then
+    # Zero occurrences was being read as "one row, worded differently". It is
+    # also what an answer that is not on the screen looks like, and on the
+    # cycle-179 run that is exactly what it was: the marker sat last in the
+    # tree with nothing under it, and the check called the rule held. The
+    # marker sits *between* a question and its answer, so an answer below it
+    # is the thing being counted; no rows there means nothing was counted.
+    echo "  VERDICT: inconclusive — the last Spoken marker has no row under it, so"
+    echo "           this turn's answer is not on the screen and nothing was counted"
+  elif [ "$AFTER" -gt 1 ]; then
+    echo "  VERDICT: this turn shows $AFTER answer rows under one marker — both"
+    echo "           wordings are on screen, which is the thing the rule forbids"
   elif [ "$TIMES" -le 1 ]; then
     echo "  VERDICT: this turn has one row for its answer — the rule holds"
-    echo "  (0 means the spoken wording differs from the kernel's; 1 means they"
-    echo "   coincide, which the gateway now often does. Either is one row.)"
+    echo "  ($AFTER answer row(s) under the marker, of which $TIMES match the kernel's"
+    echo "   wording. 0 means the spoken words differ, 1 that they coincide,"
+    echo "   which the gateway now often does. Either is one row.)"
   else
     echo "  VERDICT: this turn shows the answer $TIMES times — both wordings are showing"
   fi
