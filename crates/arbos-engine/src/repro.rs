@@ -246,7 +246,11 @@ const INSTALLERS: &[&str] = &[
 /// code is taken — a refused `pip download`, a `grep` with no match, a
 /// `ls` of a missing path are not the bug failing.
 pub fn note_failing(place: &Place, agent: &AgentId, command: &str, cwd: &Path, exit: Option<i32>) {
-    if not_evidence(exit).is_some() || !runs_code(command) || is_server(command) {
+    if not_evidence(exit).is_some()
+        || !runs_code(command)
+        || is_server(command)
+        || moves_tree(command).is_some()
+    {
         return;
     }
     let entry = Repro {
@@ -303,6 +307,11 @@ pub fn record(
 ) -> String {
     if is_server(command) {
         return "Not recorded as a reproduction: this command runs a server or a watcher, which never exits on its own — its exit is the timeout's, not the bug's. The reproduction is the request that hits the server (curl, the test client, a script that asserts on the response); run that with repro:true.".to_string();
+    }
+    if let Some(what) = moves_tree(command) {
+        return format!(
+            "Not recorded as a reproduction: `{what}` changes the working tree, and changes re-runs every reproduction after your edits — this one would {what} your fix each time it ran. A reproduction only runs the code and fails; run the failing test or script itself with repro:true."
+        );
     }
     match exit {
         Some(0) => "Not recorded as a reproduction: the command exited 0. A reproduction must fail before the fix (a non-zero exit: a failing assertion, an exception, a wrong value checked with a comparison). Make it fail, then run it again with repro:true.".to_string(),
@@ -384,6 +393,87 @@ fn is_server(command: &str) -> bool {
     crate::tools::looks_like_server(command)
 }
 
+/// Git subcommands that move the working tree, the index or HEAD.
+const TREE_MOVING_GIT: &[&str] = &[
+    "stash",
+    "checkout",
+    "switch",
+    "restore",
+    "reset",
+    "clean",
+    "commit",
+    "add",
+    "rm",
+    "mv",
+    "apply",
+    "am",
+    "revert",
+    "cherry-pick",
+    "rebase",
+    "merge",
+    "pull",
+    "worktree",
+];
+
+/// The `git <sub>` in `command` that would move the working tree, if
+/// any — in any segment (`git stash && pytest …`), through `git -C dir`
+/// and `git -c k=v`. A reproduction is re-run by `changes` after every
+/// edit; one that stashes, checks out or resets undoes the fix each time
+/// it runs. SWE-bench cycle 39, pytest-10356: `git stash && python -m
+/// pytest …` was recorded, each `changes` call stashed the fix, and the
+/// patch at exit was 0 bytes with the gold's design in the stash.
+pub fn moves_tree(command: &str) -> Option<String> {
+    for seg in crate::tools::git_guard::segments(command) {
+        let words = crate::tools::git_guard::shell_words(&seg);
+        let mut it = words.iter().map(String::as_str);
+        // `env X=1 git …`, `sudo git …` are the same command.
+        let mut head = it.next()?;
+        while matches!(head, "env" | "sudo" | "command") || head.contains('=') {
+            head = it.next()?;
+        }
+        if head != "git" && !head.ends_with("/git") {
+            continue;
+        }
+        let mut sub = None;
+        while let Some(w) = it.next() {
+            if w == "-C" || w == "-c" || w == "--git-dir" || w == "--work-tree" {
+                it.next();
+                continue;
+            }
+            if w.starts_with('-') {
+                continue;
+            }
+            sub = Some(w);
+            break;
+        }
+        if let Some(sub) = sub
+            && TREE_MOVING_GIT.contains(&sub)
+        {
+            return Some(format!("git {sub}"));
+        }
+    }
+    None
+}
+
+/// What the tree looks like, for telling a re-run that moved it: HEAD,
+/// the stash count, and the status lines. None outside a repository.
+fn tree_mark(cwd: &Path) -> Option<String> {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let head = git(&["rev-parse", "HEAD"])?;
+    let stash = git(&["stash", "list"]).unwrap_or_default();
+    let status = git(&["status", "--porcelain"]).unwrap_or_default();
+    Some(format!("{head}\n{}\n{status}", stash.lines().count()))
+}
+
 /// Re-run every recorded reproduction (for `changes`): one line per
 /// reproduction, `pass` when it now exits 0. The pass as a whole keeps
 /// to `RERUN_BUDGET`; reproductions it did not reach are listed as not
@@ -412,6 +502,15 @@ fn rerun_report_within(agent_dir: &Path, budget: Duration) -> Option<String> {
             ));
             continue;
         }
+        if let Some(what) = moves_tree(&r.command) {
+            // Recorded by an older kernel: not run — it would undo the fix.
+            skipped += 1;
+            lines.push(format!(
+                "  {}. not re-run — `{what}` changes the working tree and would undo your fix; run the failing test itself with repro:true — {shown}",
+                i + 1
+            ));
+            continue;
+        }
         if left < Duration::from_secs(1) {
             skipped += 1;
             lines.push(format!(
@@ -421,7 +520,9 @@ fn rerun_report_within(agent_dir: &Path, budget: Duration) -> Option<String> {
             ));
             continue;
         }
+        let before = tree_mark(&r.cwd);
         let exit = run_once(&r.command, &r.cwd, left.min(RERUN_TIMEOUT));
+        let moved = before.is_some() && tree_mark(&r.cwd) != before;
         let verdict = match exit {
             Some(0) => "pass".to_string(),
             Some(c) => {
@@ -434,6 +535,15 @@ fn rerun_report_within(agent_dir: &Path, budget: Duration) -> Option<String> {
             }
         };
         lines.push(format!("  {}. {verdict} — {shown}", i + 1));
+        if moved {
+            // Said, whatever the exit: a reproduction that leaves the tree
+            // different from how it found it is not a reproduction, and
+            // the person checks their work before trusting the verdict.
+            lines.push(
+                "     this reproduction CHANGED THE WORKING TREE (HEAD, the stash or the status differ from before it ran). Check `git status` and `git stash list` before going on; a reproduction must only run the code."
+                    .to_string(),
+            );
+        }
     }
     let head = if failing == 0 && skipped == 0 {
         format!(
@@ -554,6 +664,139 @@ mod tests {
     /// server is refused as a reproduction with the reason; a pass that
     /// runs out of budget lists the rest as not re-run and never calls
     /// the task done on their account.
+    /// SWE-bench cycle 39, pytest-10356: `git stash && python -m pytest …`
+    /// recorded as the reproduction; every `changes` re-run stashed the
+    /// fix; the patch at exit was 0 bytes. A command that moves the tree
+    /// is refused at record, not taken as the last failing command, and
+    /// one an older kernel recorded is not re-run — the fix stays where
+    /// it is. A re-run that moves the tree anyway is said.
+    #[test]
+    fn a_reproduction_that_moves_the_tree_is_refused_and_never_re_run() {
+        for (cmd, want) in [
+            (
+                "git stash && python -m pytest testing/test_x.py",
+                Some("git stash"),
+            ),
+            (
+                "cd sub; git -C . checkout -- . && pytest",
+                Some("git checkout"),
+            ),
+            (
+                "git -c core.autocrlf=false reset --hard HEAD~1; make test",
+                Some("git reset"),
+            ),
+            ("env FOO=1 git clean -fdx", Some("git clean")),
+            ("git status && pytest tests/test_git.py", None),
+            ("git diff --stat; git log -1", None),
+            ("python -m pytest -k 'stash and checkout'", None),
+            ("pytest tests/test_git_stash.py", None),
+        ] {
+            assert_eq!(moves_tree(cmd).as_deref(), want, "{cmd}");
+        }
+        let dir = std::env::temp_dir().join(format!("arbos-repro-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |a: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(a)
+                    .current_dir(&dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.py"), "x = 1\n").unwrap();
+        git(&["add", "a.py"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "start",
+        ]);
+        // The fix, uncommitted.
+        std::fs::write(dir.join("a.py"), "x = 2\n").unwrap();
+        let place = Place::new(dir.clone());
+        let agent = AgentId::new("root");
+        let note = record(
+            &place,
+            &agent,
+            "git stash && python3 -c 'exit(1)'",
+            &dir,
+            Some(1),
+        );
+        assert!(
+            note.contains("`git stash` changes the working tree"),
+            "{note}"
+        );
+        assert_eq!(list(&place, &agent).len(), 0);
+        note_failing(
+            &place,
+            &agent,
+            "git stash && python3 -c 'exit(1)'",
+            &dir,
+            Some(1),
+        );
+        assert!(take_last_failing(&place, &agent).is_none());
+        // Recorded by an older kernel, beside a real one and one that
+        // moves the tree without git.
+        std::fs::create_dir_all(path(&place, &agent).parent().unwrap()).unwrap();
+        let mut text = String::new();
+        for (cmd, exit) in [
+            ("git stash && python3 -c 'exit(1)'", 1),
+            ("python3 -c 'exit(1)'", 1),
+            ("touch stray.txt; exit 1", 1),
+        ] {
+            text.push_str(
+                &serde_json::to_string(&Repro {
+                    command: cmd.into(),
+                    cwd: dir.clone(),
+                    exit: Some(exit),
+                    ts: 1,
+                })
+                .unwrap(),
+            );
+            text.push('\n');
+        }
+        std::fs::write(path(&place, &agent), text).unwrap();
+        let report = rerun_report(&Layout::new(&place, "root").dir).unwrap();
+        assert!(
+            report.contains("1. not re-run — `git stash` changes the working tree"),
+            "{report}"
+        );
+        assert!(report.contains("2. STILL FAILS (exit 1)"), "{report}");
+        assert_eq!(
+            report.matches("CHANGED THE WORKING TREE").count(),
+            1,
+            "only the third moved it: {report}"
+        );
+        assert!(
+            report.lines().any(|l| l.starts_with("  3. STILL FAILS")),
+            "{report}"
+        );
+        // The fix is where it was: nothing stashed, a.py still edited.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.py")).unwrap(),
+            "x = 2\n"
+        );
+        let stashes = Command::new("git")
+            .args(["stash", "list"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            stashes.stdout.is_empty(),
+            "{:?}",
+            String::from_utf8_lossy(&stashes.stdout)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_server_is_not_a_reproduction_and_the_rerun_pass_keeps_to_its_budget() {
         let dir = std::env::temp_dir().join(format!("arbos-repro-budget-{}", std::process::id()));

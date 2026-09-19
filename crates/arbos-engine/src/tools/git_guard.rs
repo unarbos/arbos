@@ -482,7 +482,7 @@ impl GitCall {
 }
 
 /// Cut at `&&`, `||`, `;`, `|`, and newlines, outside quotes.
-fn segments(command: &str) -> Vec<String> {
+pub(crate) fn segments(command: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
@@ -527,7 +527,7 @@ fn segments(command: &str) -> Vec<String> {
 }
 
 /// Whitespace split that keeps quoted spans as one word, quotes removed.
-fn shell_words(segment: &str) -> Vec<String> {
+pub(crate) fn shell_words(segment: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_word = false;
