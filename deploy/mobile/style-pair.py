@@ -90,6 +90,19 @@ def row_pitch(path):
     return h, len(hits), (sorted(gaps)[len(gaps) // 2] if gaps else None)
 
 
+def header_band(seen, h):
+    """The app's header, which is not the first thing on the screen.
+
+    The clock and the battery are a band of their own across the top of
+    every iOS screenshot. Read naively, that band answers for the header
+    and the reported numbers describe the status bar instead — on the first
+    run here it said the header ended 4.3% down, which is the clock.
+    Anything finishing in the top 6% is the system's, not the app's.
+    """
+    rest = [b for b in seen if b[1] > h * 0.06]
+    return (rest[0] if rest else None), rest
+
+
 def chat_pair(a_path, b_path):
     """Pair two chat screens by their parts, since they have no row pitch."""
     for name, path in (("arbos", a_path), ("cursor", b_path)):
@@ -97,35 +110,49 @@ def chat_pair(a_path, b_path):
         w, h = img.size
         seen = bands(img)
         margin = left_margin(img)
-        head = seen[0] if seen else None
-        air = (seen[1][0] - head[1]) if head and len(seen) > 1 else None
+        head, rest = header_band(seen, h)
+        air = (rest[1][0] - head[1]) if head and len(rest) > 1 else None
         print(f"{name:7} {w}x{h}  ground {ground(img, 0.5)}")
         print(f"        text starts    {margin}px = {margin / w * 100:.1f}% of the width"
               if margin is not None else "        text starts    nowhere — no body content found")
-        print(f"        header ends    {head[1]}px = {head[1] / h * 100:.1f}% down"
-              if head else "        header ends    nowhere — no bands found")
-        print(f"        air under it   {air}px = {air / h * 100:.1f}% of the height"
-              if air is not None else "        air under it   cannot say — one band only")
+        print(f"        content bands  {len(rest)} below the status bar "
+              f"(first {head[0]}-{head[1]}px)" if head else "        content bands  none")
     print()
-    print("Ground is printed, not compared (M-202). The two comparable numbers are")
-    print("where text starts from the left and how much air sits under the header:")
-    print("both are proportions, so two phones of different sizes can be held")
-    print("against each other.")
+    print("Ground is printed, not compared (M-202).")
+    print()
+    print("The compared number is where text starts from the left. It is a")
+    print("proportion, so two phones of different sizes can be held against each")
+    print("other, and it is the leftmost ink in the body — robust to what the ink")
+    print("happens to be.")
+    print()
+    print("The band count is printed and NOT compared. A band ends wherever contrast")
+    print("drops below the threshold, so a header with a dim round button and bright")
+    print("text splits into two while a flat one stays whole. Read this way the same")
+    print("header measured 4.3% down, then 8.3%, then would have said the app's header")
+    print("is a quarter the height of Cursor's — all three from one picture. Where a")
+    print("header ends is a question for the accessibility tree, which names its")
+    print("parts, or for eyes on the crop. Not for this.")
 
 
 def self_test():
     """Prove the measurements can fail before trusting what they say."""
     img = Image.new("RGB", (1000, 2000), (255, 255, 255))
-    for y in range(100, 160):                      # a header band
+    for y in range(20, 60):                        # a status bar, 1%-3% down
+        for x in range(60, 940):
+            img.putpixel((x, y), (0, 0, 0))
+    for y in range(100, 160):                      # the app's header
         for x in range(60, 940):
             img.putpixel((x, y), (0, 0, 0))
     for y in range(300, 800):                      # a body band, 20% in
         for x in range(200, 900):
             img.putpixel((x, y), (0, 0, 0))
     seen, margin = bands(img), left_margin(img)
-    ok = (margin == 200 and len(seen) == 2
-          and abs(seen[0][1] - 160) <= 2 and abs(seen[1][0] - 300) <= 2)
-    print(f"self-test: margin {margin} (want 200), bands {seen} (want ~[(100,160),(300,800)])")
+    head, rest = header_band(seen, 2000)
+    ok = (margin == 200 and len(seen) == 3 and head is not None
+          and abs(head[0] - 100) <= 2 and abs(head[1] - 160) <= 2
+          and len(rest) > 1 and abs(rest[1][0] - 300) <= 2)
+    print(f"self-test: margin {margin} (want 200), header {head} (want ~(100,160) —")
+    print(f"self-test: the status bar at {seen[0] if seen else None} must not answer for it)")
     print("self-test: " + ("the measurements read a known picture correctly"
                            if ok else "WRONG — do not trust the numbers below"))
     return ok
