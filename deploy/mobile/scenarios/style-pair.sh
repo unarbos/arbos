@@ -68,7 +68,7 @@ python3 "$HERE/../style-pair.py" "$OUT/list.png" "$REF/02-all-agents-list.jpg" >
 python3 "$HERE/../style-pair.py" --chat "$OUT/chat.png" "$REF/01-chat-view.jpg" > "$OUT/chat.txt" 2>&1
 grep -E "^(arbos|cursor)" "$OUT/list.txt" | sed 's/^/  /'
 echo
-grep -E "^(arbos|cursor)|text starts" "$OUT/chat.txt" | sed 's/^/  /'
+grep -E "^(arbos|cursor)|^ +text starts" "$OUT/chat.txt" | sed 's/^/  /'
 
 pcts() { grep -oE "= *[0-9]+\.[0-9]+%" "$1" | grep -oE "[0-9]+\.[0-9]+" | tr '\n' ' '; }
 LIST=($(grep -oE "[0-9]+\.[0-9]+% of the screen" "$OUT/list.txt" | grep -oE "^[0-9]+\.[0-9]+"))
