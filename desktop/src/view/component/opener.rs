@@ -930,6 +930,10 @@ impl Render for Opener {
                 let label = Self::row_label(offer);
                 let detail = Self::row_detail(offer);
                 let opens = matches!(offer, Offer::Here(_));
+                // A machine elsewhere wears the remote glyph the tab strip
+                // has for a remote place; it wore a folder like the rows
+                // under it (F-235, cycle 67).
+                let remote = matches!(offer, Offer::Machine { host: Some(_), .. });
                 let offer = offer.clone();
                 list.child(
                     div()
@@ -945,7 +949,13 @@ impl Render for Opener {
                         .cursor_pointer()
                         .when(ix == lit, |el| el.bg(theme.surface_raised))
                         .hover(|el| el.bg(theme.surface_raised))
-                        .child(
+                        .child(if remote {
+                            gpui::svg()
+                                .path(crate::assets::REMOTE_ICON)
+                                .size(px(14.))
+                                .text_color(theme.text_faint)
+                                .into_any_element()
+                        } else {
                             icons::icon(if opens {
                                 icons::files::FOLDER_WITH_FILES
                             } else {
@@ -956,8 +966,9 @@ impl Render for Opener {
                                 theme.accent
                             } else {
                                 theme.text_faint
-                            }),
-                        )
+                            })
+                            .into_any_element()
+                        })
                         .child(
                             div()
                                 .flex_none()
