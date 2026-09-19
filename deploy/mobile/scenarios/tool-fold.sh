@@ -98,6 +98,20 @@ echo "  text rows closed again: $AGAIN"
 
 echo
 FAULTS=0
+# A fold of one call has nothing under it to reveal: the summary line *is*
+# the call, and an opened fold shows labels rather than output (F14). So the
+# open/close comparison only means something with two or more, and saying
+# otherwise turns the model's choice of how many commands to run into a
+# fault in the app.
+N=$(echo "$FOLD" | grep -oE "^[0-9]+")
+if [ "${N:-1}" -lt 2 ]; then
+  echo "  the model made $N tool call this run, so the fold has nothing to"
+  echo "  reveal and opening it is untested. Run again for two or more."
+  echo
+  echo "VERDICT: the calls folded into '$FOLD'; opening was not exercised"
+  echo "stills in $OUT"
+  exit 0
+fi
 [ "$OPEN" -gt "$CLOSED" ] || { echo "  FAULT: opening the fold showed nothing more ($CLOSED → $OPEN)"; FAULTS=$((FAULTS + 1)); }
 [ "$AGAIN" -le "$CLOSED" ] || { echo "  FAULT: closing it left $((AGAIN - CLOSED)) row(s) behind"; FAULTS=$((FAULTS + 1)); }
 if [ "$FAULTS" = 0 ]; then
