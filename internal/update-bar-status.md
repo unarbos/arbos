@@ -5,16 +5,23 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 02:00 UTC.
+Last checked 2026-09-19 02:21 UTC.
 
-## Click Update. You will get build 2163. Jev is in it.
+## Click Update. You will get build 2168. Jev is in it.
 
-**2163** — signed, notarised, stapled, on the feed since 01:58 UTC.
+**2168** — signed, notarised, stapled, on the feed since 02:18 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2163 (builds 2164–2168):
+
+- **#713** — two verdicts that claimed what they had only printed
+- **#714** — an empty `agent.md` is not an agent with every default
+
+## Before that: 2163
 
 New since 2160 (builds 2161–2163):
 

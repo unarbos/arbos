@@ -4226,3 +4226,34 @@ a display bug rested on never having asked what the call was waiting *for*.
 
 **PR:** [#715](https://github.com/unarbos/arbos/pull/715) — the `ios/`
 branch, now empty of behaviour change, kept for the record of the attempt.
+
+## Cycle 146 — the menu nothing had opened
+
+Three items have sat behind the chat's `···` since it was built: `Call
+<project>`, `Reconnect`, `Settings`. The button's own name was checked at
+cycle 108; what is under it never was (M-459).
+
+It offers what it should, and the call item names its project — `Call
+phone`, not a bare "Call", which is the difference that matters when
+somebody with several projects open is about to talk to one of them.
+Settings from that menu opens the sheet.
+
+Reconnect is judged by **what the chat does**, because a reconnect that
+changes nothing and a menu item that does nothing are the same tap. The
+transition was not caught this run, and the check says that says nothing
+either way — a reconnect over a live link can finish inside one sample. A
+chat that never comes back is the fault, and it came back.
+
+**Two bugs of mine, both loud and both silent** (M-460):
+
+- `"Opening $ROW…"` — bash reads `$ROW…` as a variable name, so the loop
+  died with `ROW…: unbound variable` twenty times over **while the verdict
+  printed as though it had watched**;
+- `ui dump | grep -q` closes the pipe on its first match, and the reader
+  died of `BrokenPipeError` mid-scenario.
+
+Errors in the output and confidence in the conclusion is the combination
+this loop keeps having to remove, and I wrote a fresh instance of it in the
+same file that was meant to close a gap.
+
+**PR:** [#716](https://github.com/unarbos/arbos/pull/716), harness only.
