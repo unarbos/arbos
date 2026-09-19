@@ -4666,3 +4666,43 @@ Evidence: `media/mobile/cycle-157/` and the 19 stills in
 `media/mobile/journey/0919-062153/`.
 
 **PR:** [#737](https://github.com/unarbos/arbos/pull/737), harness only.
+
+## Cycle 158 — measuring the thing that picks the work
+
+Cycle 156 found the rotation rule pointing at the wrong rows. `list composer`
+read as last checked at cycle 81 and `cold start` at 86, and both had gone
+through the cycle-151 sweep. A row the sweep covers ages on paper while being
+tested every run, so the loop's own scheduler was sending each cycle to
+places that did not need it.
+
+This cycle made that measurable (M-488). Every scenario declares the row it
+serves, as a `# COVERS:` line, and `coverage-map.sh` reads those against the
+table:
+
+    coverage rows:             33
+    rows some scenario claims: 24
+    rows the sweep reaches every run: 18
+
+The nine rows nothing claims are the genuinely untested ones: AirPods/CallKit
+and the TestFlight build, both of which need Jacob's phone; the microphone
+path; the two journey rows; `recording`, whose scenario is sitting in
+unmerged #732; the whole-app style pair; typing into the composer; and the
+loop's own machine.
+
+**The tool caught its own fault before it caught anything else** (M-489). It
+read the sweep's list from `SCENARIOS=`, which is the argument array, rather
+than `DEFAULT=`, which is the default list — and printed an empty section
+under a verdict that said everything matched. It now refuses to report at all
+when it has read no scenarios, which is the difference between an empty
+answer and a false one. Proven the other way as well: one mistyped
+declaration turns the verdict and exits 1.
+
+**It reads and does not write** (M-490). Having it stamp the current cycle
+onto every row the sweep touches would be one line, and it would be wrong:
+the rows would age correctly while saying nothing true about whether anybody
+looked at them. The ledger's worth is that a cycle *named* a row.
+
+Still: `media/mobile/cycle-158/01-the-list.png` — ten rows, the separator
+still gone. The map's output is beside it as `coverage-map.txt`.
+
+**PR:** [#741](https://github.com/unarbos/arbos/pull/741), harness only.
