@@ -151,20 +151,36 @@ provider slowdown (`ordinary-task` 361 s, `secrets-leak-hunt` 501 s against 21-2
 So the crowding-out this bug describes is not the only way the tail goes unasked; a slow hour does
 it with the same library.
 
-**And only half the window was measured work at all.** 49.9 min of scenario time inside a 100-min
-cap leaves ~50 min unaccounted. The two clocks differ by design: `run.py` times scenarios with
-`time.monotonic()` *specifically so a paused VM does not inflate them* (`run_one`, citing
-`qal-j26`), while `timeout 100m` is wall clock and keeps counting while the machine is suspended.
-This VM is suspended whenever the agent is idle.
+**And only half the window was measured work at all.** Two truncated steps, the same shape:
 
-I have **not** isolated the 50 minutes — per-scenario snapshotting sits outside the timed region
-too, and I have not measured it — so I am not filing this as its own bug. What is established is
-narrower and still worth knowing:
+| step | scenarios | measured work | cap |
+|---|---|---|---|
+| 17:01 | 33 | 49.9 min | 100 min |
+| 04:37 | 77 | 49.6 min | 100 min |
 
-> The cap and the work are measured on different clocks. A step can be truncated having spent half
-> its window doing nothing the loop counts, and the summary will read as though the library was
-> too big for the time.
+About fifty minutes of each hundred is not scenario time. **I first blamed VM suspension and that
+is wrong**, so the correction matters more than the guess:
+
+- *Suspension is not it.* The 04:37 step spans **132 minutes of wall clock** between its first and
+  last scenario and only then hits a `timeout 100m`. If the cap counted suspended time it would
+  have fired at 100 wall-clock minutes. Both clocks pause, so the cap is not being eaten by the
+  machine being asleep — my earlier note here said it was.
+- *Snapshotting is not it.* A whole rollout is 124 files and copies in **6 ms**.
+- *The obvious tail is already counted.* `duration_s` is taken at `run.py:2067`, after
+  `cx.cleanup()`, after both provider checks and after the `state-after` snapshot — so cleanup,
+  the transcript scans and the snapshot are all inside the number, not outside it.
+
+So roughly half of each step's **running** time goes somewhere I have not found, consistently, on
+two independent measurements. I am not filing it as its own bug and not guessing again; isolating
+it needs the loop instrumented between scenarios, which is a deliberate change rather than
+something to do in passing.
+
+What is established, and is enough to matter:
+
+> Half the cap is not spent on scenarios, and it is not suspension, snapshots, or teardown. A step
+> can be truncated having done fifty minutes of work in a hundred-minute window, and the summary
+> reads as though the library was too big for the time.
 
 Anyone deciding what to do about the cap (`qal-j46` lists the options for its budget twin) should
-know that raising the library's efficiency cannot recover a window that was not spent on the
-library.
+know that making the library more efficient cannot recover a window that was not spent on the
+library — and that there is a 50% overhead worth finding before anyone raises the cap to cover it.

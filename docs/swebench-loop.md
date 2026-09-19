@@ -866,10 +866,25 @@ Ninety-nine fresh instances across cycles 29–38 (100 drawn, one instance's sec
 
 Spend $23.21.
 
-## Next (cycle 39)
+## Cycle 39 (2026-09-19) — the harness keeps the verifier's log; requests-6028 explained; a correct fix stashed away by its own reproduction
 
-1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
-2. Harness: keep the in-run verifier log (`/logs/verifier/`) with the artefacts, so an in-run/offline grading disagreement like requests-6028 can be read rather than reasoned about. Loop's own work.
-3. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
-4. Jev stays off on this harness (coordinator, cycle 32).
-5. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word and is dodgeable by writing the script to a file (38).
+**Harness change ([#734](https://github.com/unarbos/arbos/pull/734), branch `cursor/swebench-verifier-log-7c9c`).** `cleanup` — which verifiers runs after the task's score — now copies the in-run verifier's output (`/logs/verifier/report.json`, `reward.txt`, and the test script's mktemp log) into the rollout's artefact folder under `verifier/`. Checked on requests-6028, two rollouts, $4.44: both present, and the report answers cycle 38 at once. **In-run, both FAIL_TO_PASS tests pass and seven PASS_TO_PASS tests fail** — `TestGetEnvironProxies.test_bypass[…]` ×5, `test_set_environ[no_proxy-None]`, `test_zipped_paths_extracted` — because they read the process's proxy environment, and the verifiers runtime sets `http_proxy`/`https_proxy`/`no_proxy` for its egress proxy in every process it runs, the grader included. Offline, in a fresh container with the network open, no proxy is set and they pass. requests-6028 is ungradeable under this harness; the cycle-38 discrepancy is closed and it moves from "unexplained" to the grader-artefact list with its cause. (The credential in that log is the run's own local proxy secret; the harness keeps it as-is because it is dead the moment the run ends.)
+
+**Conditions for the fresh read.** Kernel **`arbos-kernel 0.2.0 04345f70e141 protocol 1`** = `main` head, built in the worktree, label proved; the engine changes since 1ec3de64 (grep skips `.git/`, a part-written record is cut back, an unwritable config folder no longer kills the kernel) are not contract changes. Jev off. Network cut, no cap. Ten never-run instances (`fresh10k.txt`) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-39-preregistration.md)). $11.32; **16 of 20** solved (a count). The host paused a third time (06:01–06:49; three rollouts each "nothing has happened for 48m", PID 1 seconds old in 48-minute-old containers); walls are not read.
+
+**Four failures, now read with the verifier's own report beside the transcript.**
+
+- django-14534 ×1 — C, a detail: `self.data['attrs']['id']` where the gold has `.get('id')`; one of two hidden tests raises `KeyError`. The report says so directly: FAIL_TO_PASS 1 of 2, PASS_TO_PASS 118 of 118.
+- pylint-4604 ×2 — C, the hidden tests grade a thing the issue never names: **the agent's change to `variables.py` is the gold's, line for line** (`isinstance(type_annotation, astroid.Attribute)` → recurse on `.expr`). The gold also adds `IS_PYPY` to `pylint/constants.py`; the hidden test module imports it; without it the module fails to import and all 21 tests fail — FAIL_TO_PASS 0 of 21, the log's first line `ImportError … from pylint.constants import IS_PYPY`. Not reachable from the issue.
+- **pytest-10356 ×1 — a correct fix lost to the kernel, outside the agent account.** The agent wrote the gold's design (`get_unpacked_marks(obj, *, consider_mro=True)` walking `__mro__`, each class's own `pytestmark`), verified it — `changes` at step 65 shows both files modified and 89 tests passing — and the patch at exit was **0 bytes**; the verifier saw the base tree. Cause: reproduction 2, recorded at step 42, was `cd /testbed && git stash && python -m pytest /tmp/verify_markers2.py …`. The gate accepted it (it runs code). `changes` re-runs every recorded reproduction, so every `changes` call ran `git stash` and moved the fix into the stash. The agent found the stash after the first `changes` (step 61: `git stash list` → `stash@{0}`), popped it, wrote "my earlier bash call with repro:true auto-stashed changes via the baseline snapshot mechanism" — the right observation with the wrong actor — and called `changes` once more before finishing, which stashed the fix again; 20 s later the turn ended with a clean tree. **A reproduction re-run must not change the tree**: a recorded command that stashes, checks out, resets or restores is not a reproduction of the bug, it is a manoeuvre around the fix, and re-running it at the done check undoes the work it is meant to check. This is the third gate finding in four cycles (servers, cycle 36; the word-match, cycle 38; tree side-effects here). Recorded, not filed.
+
+Cumulative read: **331** (325 + the two 6028 rollouts that settled the artefact + these four).
+
+Spend $15.76.
+
+## Next (cycle 40)
+
+1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read. The verifier report is now part of every read.
+2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
+3. Jev stays off on this harness (coordinator, cycle 32).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word and is dodgeable (38); a reproduction that runs `git stash` is re-run by `changes` and removes the fix from the tree (39).
