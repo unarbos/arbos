@@ -187,10 +187,48 @@ fi
 # The call, which shows almost no words by design and so rests entirely on
 # the labels of its four controls.
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
-xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 >/dev/null 2>&1
+# With a clip, because the simulator has no microphone: at rest the call
+# screen says "No microphone input." and tapping the orb does nothing at all,
+# so the connected state is unreachable without one. Every other call
+# scenario here launches this way.
+CLIP=$HOME/mobile-clips/ask.wav
+xcrun simctl launch "$UDID" $B -noAskNotifications 1 -previewCall 1 \
+  ${CLIP:+-injectWav "$CLIP"} >/dev/null 2>&1
 sleep 9
 ui dump | grep -qE "Button +Allow" && { ui tap "Allow" >/dev/null 2>&1; sleep 4; }
-screen "the call"
+screen "the call, at rest"
+
+# At rest the call screen has three controls: the menu, Settings, and the orb
+# — which reads "Call", because tapping it starts one. The comment above says
+# four, and the fourth is `End call`, which does not exist until a call is
+# running. So the screen was examined in the one state where its end control
+# is absent, and "every control here is named" was true of three quarters of
+# it without saying so.
+if ui dump | grep -qE "Button +Call$"; then
+  ui tap "Call" >/dev/null 2>&1
+  sleep 12
+  if ui dump | grep -qE "Button +End call"; then
+    screen "the call, connected"
+    ui tap "End call" >/dev/null 2>&1; sleep 2
+  else
+    # A preview call on this simulator does not reach a running call: with no
+    # clip the screen says "No microphone input." and the orb does nothing;
+    # with one it accepts the tap and stays where it is. `End call` belongs to
+    # a call that is actually up, which call-text-in-chat.sh drives and taps
+    # by name — so the label is exercised, just not from here.
+    #
+    # This is named rather than counted as a miss. A check that can never be
+    # complete is a check people stop reading, and the screens this one does
+    # open are still cleared.
+    echo "== the call, connected =="
+    echo "  not reached from a preview call, so End call was not examined here."
+    echo "  It is tapped by name in call-text-in-chat.sh, on a call that is up."
+  fi
+else
+  echo "== the call, connected =="
+  echo "  no orb on the call screen at all — that is worth a look"
+  MISSED="$MISSED call-connected"
+fi
 
 # Leave the app where the next run expects it. Ending inside the preview
 # call sent the following steps tapping at a screen that has no composer,
@@ -201,13 +239,13 @@ sleep 8
 ui dump | grep -qE "Button +Back" && { ui tap "Back" >/dev/null 2>&1; sleep 2; }
 
 echo
-echo "screens looked at: $VISITED of 5"
+echo "screens looked at: $VISITED of 5, plus the connected call where it can be reached"
 if [ -n "$MISSED" ]; then
   echo "VERDICT: incomplete — never reached:$MISSED. A screen this did not open"
   echo "         is not a screen it cleared, whatever the rest of it found"
   exit 1
 elif [ "$FOUND" = 0 ]; then
-  echo "VERDICT: no control reads as a symbol name across all 5 screens"
+  echo "VERDICT: no control reads as a symbol name across all $VISITED screens"
 else
   echo "VERDICT: $FOUND screen(s) carry a control named after its symbol — each is a"
   echo "         label nobody wrote, and a name a scenario must not tap"
