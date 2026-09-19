@@ -4706,3 +4706,47 @@ Still: `media/mobile/cycle-158/01-the-list.png` — ten rows, the separator
 still gone. The map's output is beside it as `coverage-map.txt`.
 
 **PR:** [#741](https://github.com/unarbos/arbos/pull/741), harness only.
+
+## Cycle 159 — the map was reading a quarter of the harness
+
+Cycle 158's map named nine rows as untested. Four of them were not (M-491).
+It read `# COVERS:` declarations out of `scenarios/` only, so it missed the
+journey, the style pair and the name check — and reported **both journey
+rows as uncovered on the morning after a journey run**.
+
+Those entry points declare their rows now. 29 of 33 claimed, against 24. The
+four left are real: AirPods/CallKit and the TestFlight build, which both need
+Jacob's phone; `recording`, whose scenario is in unmerged #732; and the loop's
+own machine.
+
+That left one uncovered row I could take today, and it was the right one
+(M-492). Every scenario that sends anything goes through `type_line`, and
+more silent passes in this loop have come from typing than from anything
+else — `idb` types nothing at all for a line holding non-ASCII and reports
+success, and iOS turns a typed quote into a curly one so no read-back
+matches. The row had no check of its own.
+
+It has one now, asking the three ways typing fails: a plain line arrives
+whole, a long line arrives whole (207 characters, ending intact), and a line
+the rig cannot type is refused with the composer left as it was. All three
+hold.
+
+**And the third question could not fail** (M-493). I removed the ASCII guard
+from `type_line` to watch the check catch it, and the check passed. Without
+the guard, `idb` types nothing, the read-back loop gives up, and `type_line`
+returns failure regardless — so "it refused" proved only that something
+refused, not that the guard existed.
+
+The two differ in time. The guard answers before typing anything; the
+read-back spends three attempts of six waits each first. Measured: **0.0s
+with the guard, 31.1s without**, and anything over three seconds is now
+called what it is.
+
+That is the second time this week a check of mine passed a sabotaged
+subject. Both were found the same way, by breaking the thing on purpose, and
+neither would have been found by reading the code.
+
+Still: `media/mobile/cycle-159/01-a-line-typed-whole.png`, with the map's
+output beside it.
+
+**PR:** [#746](https://github.com/unarbos/arbos/pull/746), harness only.
