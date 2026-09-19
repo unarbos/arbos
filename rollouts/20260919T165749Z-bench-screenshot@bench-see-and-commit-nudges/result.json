@@ -1,0 +1,27 @@
+{
+  "scenario": "bench-screenshot@bench-see-and-commit-nudges",
+  "doc": "Checklist item 3: run something and send back a screenshot the user can see (browser tool -> image file). (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "no screenshot image produced; browser errors: []",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "bench-see-and-commit-nudges",
+    "images": [],
+    "tool_images": [],
+    "browser_errors": []
+  },
+  "duration_s": 45.7,
+  "place": "/tmp/arbos-qa-bench-screenshot@bench-see-and-commit-nudges-nsk7z287/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 354413e00df5 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T165749Z-bench-screenshot@bench-see-and-commit-nudges",
+  "branch": "main",
+  "usd": 0.02395
+}

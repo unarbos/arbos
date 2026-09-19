@@ -1,0 +1,9 @@
+{
+  "name": "rp-02-sigchld-blocked-by-the-launcher",
+  "doc": "The kernel is exec'd with SIGCHLD blocked in its inherited signal mask (what a launcher can do; the shape behind Jacob's five hung workers on macOS). The kernel must unblock it and say so on stderr, and a job must still end with its result. On Linux the pidfd reaper would have masked the fault, which is why a week of green cycles never saw it.",
+  "tags": [
+    "landing",
+    "jobs",
+    "platform"
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "scenario": "inbox:attach-bind-token",
+  "doc": "From inbox note 2026-09-13-attach-bind-token.md: exercise feature 'attach-bind-token' and run every detector. Needs a kernel built from branch cursor/attach-bind-token-b027.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-looping",
+      "detail": "feature attach-bind-token: the same tool (await) was called the last 6 times running at the 300 s ceiling; the turn is going round rather than getting on",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "feature": "attach-bind-token",
+    "inbox_note": "/home/ubuntu/arbos-qa/loop/inbox/2026-09-13-attach-bind-token.md",
+    "turn_wait": {
+      "ended": false,
+      "quiet_for_s": 0.0,
+      "frames": 252,
+      "tool_calls": 42,
+      "distinct_tools": 8,
+      "last_six_tools": [
+        "await",
+        "await",
+        "await",
+        "await",
+        "await",
+        "await"
+      ]
+    }
+  },
+  "duration_s": 301.1,
+  "place": "/tmp/arbos-qa-inbox:attach-bind-token-_y0lqy6w/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 354413e00df5 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T155724Z-inbox:attach-bind-token",
+  "branch": "main",
+  "usd": 0.09623
+}

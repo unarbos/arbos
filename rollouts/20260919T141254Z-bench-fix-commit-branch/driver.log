@@ -1,0 +1,8 @@
+1789827174844 kernel started pid 1739760
+1789827222831 BREAK wrong-output: no branch other than main was created
+1789827222831 BREAK wrong-output: no commit on the fix branch ahead of main: {}
+1789827222832 BREAK wrong-output: main was changed
+1789827222832 BREAK wrong-output: hello.py on the branch is still broken: ''
+1789827222832 BREAK wrong-output: the reply does not name the PR base branch
+1789827222836 kernel stopped with code 0
+1789827222879 bugs: seen e17a9ed707.md, seen e17a9ed707.md, seen e17a9ed707.md, seen e17a9ed707.md, seen e17a9ed707.md

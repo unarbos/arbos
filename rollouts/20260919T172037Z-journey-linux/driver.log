@@ -1,0 +1,14 @@
+1789838449257 J1: pass — tab present, greeting shown ("Hey — this place is ready; it's a Rust workspace with a `sha"), .arbos/ created
+1789838454969 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789838514331 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789838520716 J4: fail — the mid-flight follow-up was not taken into the running work (no same-turn line, no relay to the live worker, or a second worker): {'index': 19, 'reached_root_s': 0.0, 'task_turn_complete': 16, 'same_turn': False, 'relayed_to_worker': True, 'turn_tools': ['plan', 'say'], 'workers': ['commit-and-pr-fix', 'fix-failing-test'], 'taken': False}
+1789838531308 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789838635679 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789838731835 J6: fail — away-tab notification: the window posted no OS notification carrying the nonce (1 landed, 0 failed of 1 attempt(s))
+1789838731880 J7: fail — no branch with a commit ahead of main (['main'])
+1789838790669 J8: fail — the in-flight command's side effect never happened (before or after the restart)
+1789838793732 BREAK journey-J4: the mid-flight follow-up was not taken into the running work (no same-turn line, no relay to the live worker, or a second worker): {'index': 19, 'reached_root_s': 0.0, 'task_turn_complete': 16, 'same_turn': False, 'relayed_to_worker': True, 'turn_tools': ['plan', 'say'], 'workers': ['commit-and-pr-fix', 'fix-failing-test'], 'taken': False}
+1789838793732 BREAK journey-J6: away-tab notification: the window posted no OS notification carrying the nonce (1 landed, 0 failed of 1 attempt(s))
+1789838793732 BREAK journey-J7: no branch with a commit ahead of main (['main'])
+1789838793732 BREAK journey-J8: the in-flight command's side effect never happened (before or after the restart)
+1789838793761 bugs: seen 711f60690b.md, seen 9c8bf3b8ac.md, seen c247225fbb.md, seen 865c1e223b.md

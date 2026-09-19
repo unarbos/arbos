@@ -1,0 +1,25 @@
+{
+  "scenario": "bench-research-links",
+  "doc": "Checklist item 4: research from primary sources ends in a document with working links to each source.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "wrong-output",
+      "detail": "research.md has 0 markdown links to sources",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "fetch_calls": 4,
+    "links": []
+  },
+  "duration_s": 51.2,
+  "place": "/tmp/arbos-qa-bench-research-links-7tlpz159/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 354413e00df5 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260919T154438Z-bench-research-links",
+  "branch": "main",
+  "usd": 0.05385
+}

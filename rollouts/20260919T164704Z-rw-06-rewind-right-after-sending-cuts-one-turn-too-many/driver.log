@@ -1,0 +1,16 @@
+1789836424891 kernel started pid 1811549
+1789836445484 timeout waiting for rewound after 20s
+1789836480713 timeout waiting for rewound after 20s
+1789836515896 timeout waiting for rewound after 20s
+1789836551185 timeout waiting for rewound after 20s
+1789836586426 timeout waiting for rewound after 20s
+1789836621669 timeout waiting for rewound after 20s
+1789836656917 timeout waiting for rewound after 20s
+1789836692165 timeout waiting for rewound after 20s
+1789836727370 timeout waiting for rewound after 20s
+1789836762680 timeout waiting for rewound after 20s
+1789836797942 timeout waiting for rewound after 20s
+1789836833254 timeout waiting for rewound after 20s
+1789836848331 kernel stopped with code 0
+1789836848331 BREAK rw-06-rewind-did-nothing: 12 rewind(s) left the third message in place
+1789836848398 bugs: seen e5c6ca412c.md

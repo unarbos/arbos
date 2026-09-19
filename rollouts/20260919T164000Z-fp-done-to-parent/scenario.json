@@ -1,0 +1,7 @@
+{
+  "name": "fp-done-to-parent",
+  "doc": "When a child's turn ends the kernel writes a kind = \"done\" inbox message to the parent (Cursor's completion notification, on disk).",
+  "tags": [
+    "file-plan"
+  ]
+}
