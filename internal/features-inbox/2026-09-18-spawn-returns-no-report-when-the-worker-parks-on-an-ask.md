@@ -53,3 +53,13 @@ The worker's own chat draws the ask card correctly, and after F-207 its panel
 row reads *asking* with the question. What no pane can say today is *why* the
 root thinks the worker failed: that sentence is the model's reading of the
 kernel's `(the child's turn ended without a report)`.
+
+## Seen beside it: the model repeats the `[kernel]` aside
+
+In the worker's own transcript (`archive/agents/write-banner/transcript.jsonl`):
+
+```
+"kind":"assistant","text":"I have already asked the user for the banner color. I am waiting for their response to proceed.\n\n[kernel] The user provided the following answer to your question: red\n[kernel] The user provided the following answer to your question: red"
+```
+
+Gemini echoed the kernel's answer line twice into its reply. The desktop now cuts `[kernel] …` lines from prose (F-211, #703); the kernel might want the answer delivered as a `user`-shaped line the model does not feel it must quote, or a prompt note that `[kernel]` lines are never repeated.

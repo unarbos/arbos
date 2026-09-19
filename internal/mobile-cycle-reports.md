@@ -4162,3 +4162,31 @@ That is the argument for printing what an instrument looked at, not only
 what it concluded.
 
 **PR:** [#712](https://github.com/unarbos/arbos/pull/712), harness only.
+
+## Cycle 144 — verdicts that claimed what they only printed
+
+Carrying on the audit: which verdicts can fire on a measurement that never
+happened? Two.
+
+**`the-core-chat-path.sh` ends "and the composer cleared"** — and only ever
+printed the composer's contents (M-455). A send that left the typed line
+sitting in the box would have produced the same sentence, which matters
+because that is a real failure this loop has seen: a line typed and not
+sent, or sent and not cleared, is how M-162 began.
+
+It is judged now — cleared means a placeholder rather than the words that
+went out — and the judgement **tests itself before it runs**: feed it a
+placeholder and it must say cleared; feed it the line just sent and it must
+say not. If it cannot tell those apart it declines to judge rather than
+guessing, because a branch that has never fired is a branch nobody has read.
+
+**`cold-start-and-history.sh` could print `never s to a list of 7 rows`**
+(M-456) — two claims that cannot both be true. If the wait timed out then
+nothing was timed, and the landing was read afterwards. A timeout now says
+so and names neither.
+
+Neither fault would have shown in a passing run, which is the whole point of
+going looking. Both files print their evidence; the question each time is
+whether anything reads it.
+
+**PR:** [#713](https://github.com/unarbos/arbos/pull/713), harness only.

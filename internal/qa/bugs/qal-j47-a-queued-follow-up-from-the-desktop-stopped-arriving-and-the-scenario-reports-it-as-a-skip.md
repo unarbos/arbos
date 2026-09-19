@@ -1,6 +1,6 @@
 # qal-j47 — `sq-02` cannot keep a turn up, and reports that as a skip (**not** a queue regression)
 
-- **status**: **rig defect, mine.** Not a product regression — my first reading blamed the kernel and was wrong; see "Answered" at the end. `#692` is cleared.
+- **status**: **fixed in the rig** (4/4 clean, staged first try). Was: rig defect, mine. Not a product regression — my first reading blamed the kernel and was wrong; see "Answered" at the end. `#692` is cleared.
 - **found**: 2026-09-19 00:30, covering the desktop scenarios cycle 12 skipped for budget
 - **control**: `sq-02-desktop-stop-holds-follow-up` — which **self-skips**, so the loop never flagged it
 - **kernel**: not involved. The apparent `55c82877` vs `232518c2` split was model variance across small samples.
@@ -123,3 +123,39 @@ reading the transcript I already had.
 2. **It reports the failure as a skip.** That is why this went unseen, and it is the part of this
    bug that was always real: a skip is for a rig that cannot ask the question, never for a run
    where the product answered differently than the scenario needed.
+
+## Fixed
+
+Three changes, in the order I found they were needed:
+
+1. **Confirm the turn is still up, past the refusal window.** `wait_busy` only proves the turn
+   *started*; both readings start one. A turn the model declines ends at 2.2–4.0 s, one it accepts
+   runs to ~10.8 s, and my first check at three seconds sat inside that spread — it passed runs
+   that died at 3.7 s, which then looked like the queue failing. The check is now at six seconds,
+   clear of every refusal measured.
+
+2. **Record what was true at the keystroke.** `turn_still_running_at_keypress` separates "the queue
+   did not take it" from "there was no turn left to queue behind" without re-deriving it from
+   transcripts. It earned itself immediately: one run read `staged_on=2, at_keypress=False`, which
+   is the turn dying in the gap, not a queue fault.
+
+3. **Ask for a duration the protocol allows.** This is the real fix. `sleep 40` is the version the
+   model argues with — it answers *"I cannot run bash commands longer than a few seconds as a
+   coordinator"* and routes the work to a worker, which is the protocol talking. The scenario never
+   needed forty seconds; it needs a turn still up about ten seconds later. Asking for `sleep 12`
+   inline is asking for what the protocol permits.
+
+Measured on the build that failed 6/6:
+
+| version | result |
+|---|---|
+| original | **0 of 6** — every run self-skipped |
+| retry + 6 s check, `sleep 40` | 2 pass, 3 "could not hold a turn", 1 skip |
+| retry + 6 s check, `sleep 12` | **4 of 4 pass**, all staged on the first attempt |
+
+### What I would keep from this
+
+The scenario had been asking the model to break its own protocol and calling the refusal an
+environment fault. A rig that needs the product to misbehave in order to test it will keep finding
+"regressions" every time the product gets better at behaving. When a scenario cannot stage its
+precondition, the first question is whether the product is right to refuse.
