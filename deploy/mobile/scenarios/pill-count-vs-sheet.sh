@@ -8,8 +8,19 @@
 # its end, held 12 rows — so one of the two is wrong, and a worker that has
 # only just started is a plausible one to be missing (M-272, M-275).
 #
-# This exists so the question can be re-asked in one command rather than
-# reconstructed. It diagnoses nothing; it puts the two numbers side by side.
+# Side by side is all this ever was, and cycle 154 read its own comment and
+# saw the problem: the pill is `chat.workers.count` and the sheet is a
+# `ForEach` over that same array. Two drawings of one number cannot disagree
+# about the app. Every "cannot say" it has ever printed was about the rig
+# failing to reach the end of a scrolling sheet, or failing to tell two
+# workers apart when their goals truncate alike — and the one disagreement it
+# did file, at cycle 74, turned out to be exactly that (M-272, M-275).
+#
+# So the numbers stay, as context, and the verdict moves to a question that
+# can come out either way: **workers this run put there itself**. Three goals
+# carrying a tag no earlier run used. The pill must rise by three and the
+# sheet must show all three. A row dropped in the drawing fails it; a rig that
+# cannot reach the end of the sheet fails it too, and says which.
 #
 # Two traps it avoids, both of which this loop has already fallen into:
 #
@@ -50,9 +61,37 @@ while [ "$WAITED" -lt 180 ]; do
   sleep 10
   WAITED=$((WAITED + 10))
 done
-COUNT=$(echo "$PILL" | grep -oE "[0-9]+")
-[ -n "$COUNT" ] || { echo "no pill in this chat — nothing to compare"; exit 1; }
+BEFORE=$(echo "$PILL" | grep -oE "[0-9]+")
+[ -n "$BEFORE" ] || { echo "no pill in this chat — nothing to compare"; exit 1; }
 echo "the pill says:  $PILL$([ "$WAITED" -gt 0 ] && echo "   (after $WAITED s)")"
+
+# Three workers of this run's own, tagged so no earlier run's goal can be
+# mistaken for one of them. The tag leads each goal because the sheet
+# truncates a long name at the end (M-305).
+TAG=p$(date -u +%H%M%S)
+echo
+echo "asking for three workers tagged $TAG"
+type_line "$UDID" "Start three workers at once, each waiting for none of the others. Their goals are exactly $TAG one, $TAG two and $TAG three. Each says one short sentence about its number." || exit 1
+ui tap "Send" >/dev/null || { echo "  no send button"; exit 1; }
+
+# Wait for the pill to account for them. It reads `Working N` while they run,
+# which is the same N.
+SEEN=0
+for _ in $(seq 1 60); do
+  NOW=$(ui dump | grep -oE "(Agents|Working) [0-9]+" | head -1 | grep -oE "[0-9]+")
+  [ -n "$NOW" ] && [ "$NOW" -ge $((BEFORE + 3)) ] && { SEEN=$NOW; break; }
+  sleep 5
+done
+if [ "$SEEN" = 0 ]; then
+  echo "  the pill never reached $((BEFORE + 3)) — it says $(ui dump | grep -oE '(Agents|Working) [0-9]+' | head -1)."
+  echo
+  echo "VERDICT: cannot say. The three workers this run asked for never showed in"
+  echo "         the pill, so there is nothing of this run's own to look for in"
+  echo "         the sheet. That is the kernel or the ask, not the drawing."
+  exit 1
+fi
+echo "  the pill now says: $SEEN   (was $BEFORE)"
+COUNT=$SEEN
 # The pill counts two different things: `Agents N` is every agent, `Working
 # N` is only the ones running. The sheet always lists them all, so comparing
 # against the Working form is comparing a subset with a whole — it reported
@@ -84,18 +123,44 @@ DUPES=$(ui dump | grep -E "Button +.+, " \
         | sort | uniq -d | wc -l | tr -d ' ')
 echo "labels sharing a name on one screen (each would hide a row): $DUPES"
 
-# Rows are counted by their label, so two workers with the same goal text
-# count once. That is fine while labels are unique and worthless the moment
-# they are not — and with enough runs behind it this project has repeats.
-# A tool that cannot measure should say so rather than produce a number and
-# a verdict, which is how cycle 74 filed a disagreement that did not exist.
+# The part that can come out either way.
+MINE=$(grep -c "$TAG" "$LABELS")
+echo "rows carrying this run's tag $TAG: $MINE of 3"
+grep "$TAG" "$LABELS" | cut -c1-70 | sed 's/^/    /' 
+
+# The verdict. It rests on the three workers this run put there, because
+# those are the only rows whose number is known independently of what the app
+# says about itself. The totals follow as context.
+TOTALS="the totals read: pill $COUNT, sheet $ROWS"
+if [ "$ROWS" -lt "$COUNT" ]; then
+  PAGES=$(echo "$HOW" | grep -oE "[0-9]+" | head -1)
+  TOTALS="$TOTALS — the sheet's paging fell short over $PAGES page(s), which is"
+  TOTALS="$TOTALS this rig, not the app: both come from one array"
+fi
+
+if [ "$MINE" = 3 ]; then
+  echo "VERDICT: the sheet shows all three workers this run started. $TOTALS."
+elif [ "$MINE" -gt 3 ]; then
+  echo "VERDICT: cannot say. $MINE rows carry a tag only three workers were given,"
+  echo "         so the tag is not doing its job. $TOTALS."
+else
+  echo "VERDICT: the pill counted three new workers and the sheet shows $MINE of them."
+  echo "         $TOTALS."
+  if [ "${DUPES:-0}" -gt 0 ]; then
+    echo "         $DUPES label(s) are shared on one screen, so a tagged row could be"
+    echo "         hidden behind an identical one — read the rows above before filing."
+  fi
+fi
+
+# The old comparison, kept below the verdict because it cannot answer anything
+# about the app: the pill is `chat.workers.count` and the sheet is a `ForEach`
+# over that same array. It is printed as a reading on this rig.
+echo
 if [ "$DUPES" -gt 0 ]; then
-  echo "VERDICT: cannot say. $DUPES label(s) are shared on a single screen, and rows are"
+  echo "on the totals: $DUPES label(s) are shared on a single screen, and rows are"
   echo "         counted by label, so the sheet's $ROWS is a floor and not a count."
-  echo "         Pill $COUNT. Compare these two only on a project whose goals are distinct —"
-  echo "         qa-cycle-11-demo was one at cycle 92, where the two agreed on 12."
 elif [ "$ROWS" = "$COUNT" ]; then
-  echo "VERDICT: the two agree on $COUNT."
+  echo "on the totals: the two agree on $COUNT, so the rig reached the end."
 elif [ "$ROWS" -lt "$COUNT" ]; then
   # The app cannot disagree with itself here. The pill is `chat.workers.count`
   # and the sheet is a `ForEach` over that same array, and `workers` is a
@@ -108,7 +173,7 @@ elif [ "$ROWS" -lt "$COUNT" ]; then
   # cannot disagree with itself. Which of the two rig faults it is depends
   # on whether the sheet scrolled at all.
   PAGES=$(echo "$HOW" | grep -oE "[0-9]+" | head -1)
-  echo "VERDICT: cannot say. The sheet's paging found $ROWS of the pill's $COUNT."
+  echo "on the totals: the sheet's paging found $ROWS of the pill's $COUNT."
   echo "         The app draws both from one array, so the two cannot disagree;"
   if [ "${PAGES:-1}" -le 1 ]; then
     echo "         and the sheet converged on its first page, so it never scrolled."
