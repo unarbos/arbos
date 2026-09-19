@@ -112,9 +112,16 @@ fi
 
 echo
 echo "== back to the chat =="
-case "$MENU_ITEMS" in *"Back to chat"*) ;; *) open_menu >/dev/null 2>&1;; esac
+# Always reopen: the menu closes itself after the toggle, and the previous
+# read of MENU_ITEMS says what it *held*, not whether it is still up. One
+# run in two tapped a menu that had gone and then called the missing chat a
+# fault.
+open_menu >/dev/null 2>&1
 ui tap "Back to chat" >/dev/null 2>&1
-sleep 3
+for _ in 1 2 3 4 5 6; do
+  ui field >/dev/null 2>&1 && break
+  sleep 1
+done
 xcrun simctl io "$UDID" screenshot "$OUT/02-back.png" >/dev/null 2>&1
 if ui field >/dev/null 2>&1; then
   echo "  landed in a chat, composer and all"
