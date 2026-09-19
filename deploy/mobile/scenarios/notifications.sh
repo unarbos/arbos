@@ -124,7 +124,32 @@ UNSEEN=$(grep -oE "unseen=[0-9]+" "$OUT/console.log" 2>/dev/null | tail -1)
 INPROJECT=no
 echo "$LANDED" | grep -qE "Button +Back" && INPROJECT=yes
 if [ -z "$BANNER" ]; then
-  echo "VERDICT: no banner was posted within the window — the rest says nothing"
+  # No banner has two causes and they are not the same fault. The comment at
+  # the top of this file names the benign one: iOS keeps a backgrounded app
+  # alive for about half a minute, so a reply slower than that never reaches
+  # the socket to be announced. Earlier in cycle 183 the kernel spent 2m 9s
+  # on a turn because it compacted 682 turns of history — nothing the app
+  # could have posted.
+  #
+  # So ask how long the kernel took. Quick and silent is the app's fault;
+  # slow is the limitation this check has always known about.
+  KSECS=$(python3 "$HERE/../kernel.py" pod history 4 2>/dev/null | grep -c "turn_complete")
+  # grep -c prints 0 *and* exits non-zero when it matches nothing, so an
+  # "|| echo 0" appends a second zero and the count becomes "0\n0" — which is
+  # not equal to 0, so the branch below accused the app of swallowing a frame
+  # it never received.
+  NOTIFIES=$(grep -ci "notify" "$OUT/console.log" 2>/dev/null | head -1 | tr -d ' \n')
+  NOTIFIES=${NOTIFIES:-0}
+  echo "  the kernel finished the turn: $([ "${KSECS:-0}" -gt 0 ] && echo yes || echo "not in its last 4 lines")"
+  echo "  notify frames the app received: ${NOTIFIES:-0}"
+  if [ "${NOTIFIES:-0}" = 0 ]; then
+    echo "VERDICT: no banner, and no notify frame ever reached the app — the reply"
+    echo "         outran the half-minute iOS gives a backgrounded app, which is"
+    echo "         this check's known limit until push is on. Not the app."
+  else
+    echo "VERDICT: the app received $NOTIFIES notify frame(s) and posted no banner —"
+    echo "         that is the app, and the one this check exists to catch"
+  fi
 elif [ "$INPROJECT" = yes ]; then
   echo "VERDICT: banner ~${BANNER}s after going away (${UNSEEN:-no badge count}), and the tap landed in the project"
 else
