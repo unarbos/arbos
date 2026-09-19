@@ -1541,9 +1541,17 @@ class Pass:
                         weighted = prose_pixels()
                         if plain is not None and weighted is not None and plain.size == weighted.size:
                             diff = ImageChops.difference(plain, weighted).tobytes()
-                            changed = sum(1 for v in diff if v > 40); total = max(1, plain.size[0] * plain.size[1])
-                            self.record("weight-visible", "settings", "compare the chat before/after the toggle (⌘1 out, the pill back in)", "the rig sees the weight change (> 0.2 % of the window's pixels differ)",
-                                        f"{changed}/{total} pixels differ ({100.0 * changed / total:.2f} %)", "pass" if changed > 0.002 * total else "fail", self.still("weight-visible"))
+                            changed = sum(1 for v in diff if v > 40)
+                            # Against the ink on screen, not the window: a
+                            # fixed share of the window read the chat's
+                            # length (0.12 % with three short turns, 0.3 %
+                            # with a list) rather than the toggle.
+                            raw = plain.tobytes(); hist = [0] * 256
+                            for v in raw: hist[v] += 1
+                            bg = max(range(256), key=lambda i: hist[i])
+                            ink = max(1, sum(1 for v in raw if abs(v - bg) > 40))
+                            self.record("weight-visible", "settings", "compare the chat before/after the toggle (⌘1 out, the pill back in)", "the rig sees the weight change (> 8 % of the ink pixels on screen differ)",
+                                        f"{changed} of {ink} ink pixels differ ({100.0 * changed / ink:.1f} %)", "pass" if changed > 0.08 * ink and changed > 200 else "fail", self.still("weight-visible"))
                         else:
                             self.record("weight-visible", "settings", "compare prose before/after the toggle", "-", "no prose paragraph on screen to compare", "unverified")
                         self.app.click(el); time.sleep(0.6); off = flag()
