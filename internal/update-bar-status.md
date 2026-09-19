@@ -5,16 +5,22 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 06:12 UTC.
+Last checked 2026-09-19 06:37 UTC.
 
-## Click Update. You will get build 2211. Jev is in it.
+## Click Update. You will get build 2213. Jev is in it.
 
-**2211** — signed, notarised, stapled, on the feed since 06:10 UTC.
+**2213** — signed, notarised, stapled, on the feed since 06:35 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2211 (builds 2212–2213):
+
+- **#736** — a CRLF file keeps its line endings through a hashline edit
+
+## Before that: 2211
 
 New since 2209 (builds 2210–2211):
 
