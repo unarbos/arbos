@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: recording
 # Run a scenario with the camera on.
 #
 #   film.sh <cycle> <scenario.sh> [args…]
