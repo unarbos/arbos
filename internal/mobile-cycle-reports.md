@@ -5086,3 +5086,39 @@ one scenario not using the list helper.
 Still: `media/mobile/cycle-167/01-the-calls-words-in-the-chat.png`.
 
 **PR:** [#761](https://github.com/unarbos/arbos/pull/761), harness only.
+
+## Cycle 168 — the chat caught up, and my ruler did not
+
+The work queue named `background minutes/hours → resume`, last driven at
+cycle 120.
+
+**Both of its old cases hold** (M-519). Suspended for two minutes: the same
+screen, the same last three lines. Process reclaimed, which is what a night
+actually does: back in the chat he left, not the list.
+
+**But every case in it left the project idle** (M-520), so "the same last
+three lines" was always the right answer — and a chat that had reconnected
+was indistinguishable from one merely still showing what it showed before.
+The case a person meets after a night is the other one: work finishing while
+the phone is in a pocket. Nothing exercised it.
+
+It does now. Start a worker, go Home for ninety seconds, come back and ask
+whether the chat knows. It does: left a turn running, returned to `Worked
+1m 44s`.
+
+**Getting that answer took two goes, because I used the wrong ruler** (M-521).
+The first run said "the turn reads as over but the transcript did not grow",
+seven lines then six — and told me to read the still before filing, which is
+the one thing it got right. The still read `Worked 1m 44s`. Coming back
+raises the keyboard and the view scrolls, so the row count falls while the
+content grows. That is exactly the mistake the tool fold made at cycle 162,
+six cycles ago, in a new place.
+
+It reads the turn's ending line now — absent while the worker runs, present
+on return — and declines when an ending line was already there before he
+left, because then coming back to one proves nothing. The corrected run still
+showed six lines then five, which is why the count had to go.
+
+Evidence in `media/mobile/cycle-168/`.
+
+**PR:** [#763](https://github.com/unarbos/arbos/pull/763), harness only.
