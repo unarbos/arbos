@@ -82,6 +82,22 @@ for _ in $(seq 1 200); do
   fi
   # Stop when the turn ends rather than after a fixed count: a reply still
   # growing must not be cut off by the sampler.
+  # While the turn runs, three things on this screen claim to know whether
+  # the project is busy, and cycle 187 caught them disagreeing: the composer
+  # showed Stop and the transcript showed "Working" while the pill read
+  # "✓ Agents 48" — a tick, which reads as everything finished.
+  #
+  # The pill counts running *workers* (`chat.running`), and a root turn with
+  # no sub-agents is not one. Correct by its own definition, and still a
+  # screen saying two things. Recorded here, not judged: whether the pill
+  # should follow the root turn is a design decision, filed rather than
+  # guessed at.
+  if [ -z "${BUSY_SEEN:-}" ]; then
+    D=$(ui dump)
+    case "$(echo "$D" | grep -oE "Button +(Stop)$" | head -1)" in
+      *Stop*) BUSY_SEEN=$(echo "$D" | grep -oE "(Agents|Working) [0-9]+" | head -1);;
+    esac
+  fi
   ui dump | grep -qE "Worked [0-9]+[sm]" && break
   sleep 0.3
 done
@@ -95,6 +111,11 @@ shot 02-streaming
 # the answer.
 STEPS=$(echo $LENGTHS | wc -w | tr -d ' ')
 SPAN=$(echo $LENGTHS | awk '{print $1 " → " $NF}')
+[ -n "${BUSY_SEEN:-}" ] && case "$BUSY_SEEN" in
+  Working*) echo "  while the composer said Stop, the pill said: $BUSY_SEEN  (they agree)";;
+  *)        echo "  while the composer said Stop, the pill said: $BUSY_SEEN  — the pill counts"
+            echo "                           running workers, so a root turn alone leaves its tick showing";;
+esac
 echo "  the transcript grows in: ${STEPS:-0} step(s)   ${SPAN:-—} characters on screen"
 
 # 2b. streaming — the row's third word, and this file has taken a still
