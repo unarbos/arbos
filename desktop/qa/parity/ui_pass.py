@@ -1875,6 +1875,36 @@ class Pass:
         still_busy = busy(self.state())
         self.record("steer-within-1s", sc, "type a line at +3 s of a long turn", "the kernel has it (steer inbox file, or already in the running turn's transcript) within 1.5 s; user card on the transcript; queued == 0; turn still running",
                     f"kernel had it after {seen}s; landed={landed}; queued={act.get('queued')}; busy={still_busy}", "pass" if (seen is not None and seen <= 1.5 and landed and act.get("queued", 0) == 0) else "fail", self.still("steer"))
+        # F-244: a scratch place's kickoff turn, read live and again after
+        # the relaunch below — the fold and the rows under it must agree.
+        # Before the fix the relaunch took the kickoff's first call for the
+        # turn's opener: its fold covered the calls after it, and a one-call
+        # kickoff had no fold at all.
+        kick = Path.home() / "parity-kickoff-tmp" / f"k{int(time.time()) % 100000}"
+        shutil.rmtree(kick.parent, ignore_errors=True); kick.mkdir(parents=True); (kick / "README.md").write_text("# kickoff\n")
+        def kick_tab() -> int | None:
+            return next((p["index"] for p in self.state()["projects"] if p["path"].rstrip("/") == str(kick)), None)
+        def kick_root() -> dict | None:
+            for p in self.state()["projects"]:
+                if p["path"].rstrip("/") == str(kick):
+                    return next((c for c in p["sessions"] if c.get("parent") is None), None)
+            return None
+        def fold_rows() -> list[str] | None:
+            """The kickoff fold's rows, opened and shut again; None when no fold is on screen."""
+            if not self.seen("work-0"):
+                return None
+            self.app.click("work-0"); time.sleep(0.8)
+            rows = sorted(e["id"] for e in self.app.snapshot()["elements"] if e.get("visible") and e["id"].startswith(("run-", "tool-", "term-card")))
+            self.app.click("work-0"); time.sleep(0.3)
+            return rows
+        self.app.key("cmd-t"); time.sleep(0.8); self.app.type(str(kick)); time.sleep(1.2); self.app.key("enter"); time.sleep(2.5)
+        if self.app.exists("tab-sheet-done"):
+            self.app.key("escape"); time.sleep(0.6)
+        settled = self.wait(lambda s: (lambda c: c and not (c.get("streaming") or c.get("turn_open")) and any(i.get("kind") == "agent" for i in c.get("items", [])))(kick_root()), 90, what="scratch kickoff settled")
+        time.sleep(1.5)
+        kick_live = fold_rows() if settled else None
+        kick_items = [i.get("kind") for i in (kick_root() or {}).get("items", [])]
+        self.go_project()
         # Scenario 4: a queued follow-up survives a window relaunch.
         self.app.click("composer-field"); self.app.type("RESTART-TEST reply with the word restart."); self.app.key("cmd-shift-enter"); time.sleep(1.5)
         held_before = (active(self.state()) or {}).get("held", 0)
@@ -1903,6 +1933,22 @@ class Pass:
                     "the follow-up ran (its user card is on the transcript) or is still held by the kernel",
                     f"held_before={held_before} ran={ran} held_now={(active(self.state()) or {}).get('held')}{' (turn still running at 120 s; Stop pressed after the read — F-105)' if stopped_by_gate else ''}",
                     "pass" if ran or (active(self.state()) or {}).get("held", 0) > 0 else ("not-reachable" if held_before == 0 else "fail"), self.still("relaunch"))
+        # F-244, the read-back: the scratch place's tab after the relaunch.
+        ix = kick_tab()
+        if kick_live is None or ix is None:
+            self.gap("kickoff-fold-after-relaunch", sc, "scratch place's kickoff, live then relaunched",
+                     f"no fold read live (settled={bool(settled)} items={kick_items})" if kick_live is None else "the scratch tab did not come back")
+        else:
+            self.app.click(f"tab-{ix}"); time.sleep(1.5)
+            back = fold_rows()
+            root = kick_root() or {}
+            self.record("kickoff-fold-after-relaunch", sc, "open a fresh folder, let its kickoff settle, open the fold, quit, relaunch, open it again",
+                        "the same Worked fold with the same rows under it after the relaunch (its first call is a row, not the turn's opener; a one-call kickoff keeps its fold)",
+                        f"live={kick_live} relaunch={back} items={[i.get('kind') for i in root.get('items', [])]}",
+                        "pass" if back == kick_live else "fail", self.still("kickoff-fold-relaunch"))
+            self.app.hover(f"tab-{ix}"); self.app.click(f"tab-close-{ix}"); time.sleep(1.0)
+            self.go_project()
+        shutil.rmtree(kick.parent, ignore_errors=True)
         # Scenario 21: typed words while a question stands are never a skip.
         self.send(P_ASK)
         s = self.wait(lambda s: (active(s) or {}).get("questions"), 90, what="question card")
