@@ -72,9 +72,13 @@ shot 01-card
 FIRST=""
 LENGTHS=""
 BASE=""
-total_chars() { ui dump | grep -E "StaticText" | awk '{ n += length($0) } END { print n+0 }'; }
+chars_in() { echo "$1" | grep -E "StaticText" | awk '{ n += length($0) } END { print n+0 }'; }
 for _ in $(seq 1 200); do
-  N=$(total_chars)
+  # One dump, used for all three readings. Taking a second one for the busy
+  # comparison halved the sampling rate and missed the Stop phase of a
+  # 4.7-second turn entirely.
+  DUMP=$(ui dump)
+  N=$(chars_in "$DUMP")
   [ -n "$BASE" ] || BASE=$N
   if [ "$N" -gt "$BASE" ]; then
     [ -n "$FIRST" ] || FIRST=$(since "$T0")
@@ -92,13 +96,11 @@ for _ in $(seq 1 200); do
   # screen saying two things. Recorded here, not judged: whether the pill
   # should follow the root turn is a design decision, filed rather than
   # guessed at.
-  if [ -z "${BUSY_SEEN:-}" ]; then
-    D=$(ui dump)
-    case "$(echo "$D" | grep -oE "Button +(Stop)$" | head -1)" in
-      *Stop*) BUSY_SEEN=$(echo "$D" | grep -oE "(Agents|Working) [0-9]+" | head -1);;
-    esac
+  if [ -z "${BUSY_SEEN:-}" ] && echo "$DUMP" | grep -qE "Button +Stop$"; then
+    BUSY_SEEN=$(echo "$DUMP" | grep -oE "(Agents|Working) [0-9]+" | head -1)
+    BUSY_SEEN=${BUSY_SEEN:-no pill}
   fi
-  ui dump | grep -qE "Worked [0-9]+[sm]" && break
+  echo "$DUMP" | grep -qE "Worked [0-9]+[sm]" && break
   sleep 0.3
 done
 echo "  the reply starts:        ${FIRST:-never}s"
