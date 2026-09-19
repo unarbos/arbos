@@ -33,6 +33,7 @@ CLIP=${CLIP:-$HOME/mobile-clips/acceptance.wav}
 
 echo "run  connect     clip    sent    lost"
 SLOW_AND_CLEAN=0; SLOW=0; LIKE_M246=0
+RUNS=0; CLEAN=0; FASTEST=""; SLOWEST=""
 for i in $(seq 1 "$RUNS"); do
   LOG="$OUT/run-$i.log"
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
@@ -54,6 +55,10 @@ for i in $(seq 1 "$RUNS"); do
     continue
   fi
   LOST=$((CLIPN - SENTN))
+  RUNS=$((RUNS + 1))
+  [ "$LOST" -eq 0 ] && CLEAN=$((CLEAN + 1))
+  [ -z "$FASTEST" ] || [ "$MS" -lt "$FASTEST" ] && FASTEST=$MS
+  [ -z "$SLOWEST" ] || [ "$MS" -gt "$SLOWEST" ] && SLOWEST=$MS
   printf "%-4s %-11s %-7s %-7s %s\n" "$i" "${MS}ms" "$CLIPN" "$SENTN" "$LOST"
   # Two seconds was the old window; anything above it is a run that would
   # have lost frames before #557, and so is the case worth seeing pass.
@@ -72,8 +77,14 @@ echo
 echo "runs above the old two-second window: $SLOW, of which lost nothing: $SLOW_AND_CLEAN"
 echo "runs at M-246's own size (over 2500 ms):  $LIKE_M246"
 if [ "$SLOW" -eq 0 ]; then
-  echo "VERDICT: no slow connect occurred, so this run says nothing about the case in question."
-  echo "         Run it again — connect time is not something the rig controls."
+  # "Says nothing" was too hard on itself. Six runs that lost no frames is a
+  # reading, even when none of them was slow: it is the hold working at every
+  # connect time that happened. What is missing is the *slow* case, and only
+  # that should be called untested.
+  echo "VERDICT: $CLEAN of $RUNS runs kept every frame, at connects of"
+  echo "         ${FASTEST}–${SLOWEST} ms. The slow case is untested — none of these"
+  echo "         passed two seconds, and connect time is not something the rig"
+  echo "         controls. Run it again for that half."
 elif [ "$SLOW_AND_CLEAN" -ne "$SLOW" ]; then
   echo "VERDICT: a slow connect still lost frames. The hold is not covering it."
 elif [ "$LIKE_M246" -gt 0 ]; then
