@@ -82,10 +82,23 @@ echo "== a line it cannot type =="
 # An em-dash. idb drops the whole line for this and reports success.
 BAD="this line has an em dash — right here"
 BEFORE=$(field)
+# Refusing is not enough to prove the guard is there. With the guard removed
+# this still refuses, because idb types nothing and the read-back loop gives
+# up — so the check passed a sabotaged helper. The two are told apart by how
+# long they take: the guard answers before typing anything, the read-back
+# spends three attempts of six waits each first.
+T0=$(date +%s.%N)
 if type_line "$UDID" "$BAD" 2>/dev/null; then
   say "WRONG" "claimed to type a line with a character idb drops"; FAULTS=$((FAULTS + 1))
 else
-  say "refused" "as it should"
+  TOOK=$(python3 -c "import time;print(f'{time.time()-$T0:.1f}')")
+  if [ "$(python3 -c "print(1 if $TOOK < 3 else 0)")" = 1 ]; then
+    say "refused" "in ${TOOK}s, before typing anything"
+  else
+    say "WRONG" "refused, but only after ${TOOK}s — that is the read-back giving up,"
+    say "" "not the guard. The line was handed to idb, which drops it silently."
+    FAULTS=$((FAULTS + 1))
+  fi
 fi
 AFTER=$(field)
 if [ "$AFTER" = "$BEFORE" ]; then
