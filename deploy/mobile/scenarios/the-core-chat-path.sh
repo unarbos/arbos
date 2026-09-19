@@ -120,7 +120,17 @@ if [ "${STEPS:-0}" -le 1 ]; then
 fi
 shot 03-worked
 
-echo "  the composer afterwards: $(ui dump | awk '$3 == "TextField" { $1="";$2="";$3=""; print }')"
+AFTER=$(ui dump | awk '$3 == "TextField" { $1="";$2="";$3=""; sub(/^ +/, ""); print }' | head -1)
+echo "  the composer afterwards: ${AFTER:-nothing}"
+# Printed since this file was written, and claimed in the verdict, and never
+# compared. A send that left the typed line sitting in the box would have
+# read "and the composer cleared" all the same. It is cleared when it holds
+# a placeholder rather than the words that were sent.
+CLEARED=no
+case "$AFTER" in
+  *"$MARK"*) ;;
+  ""|*"Follow up"*|*"Plan, ask, build"*|*"Answer"*|*"Message "*) CLEARED=yes;;
+esac
 echo "  and the kernel's record:"
 python3 "$HERE/../kernel.py" pod history 4 2>/dev/null | tail -3 | cut -c1-110 | sed 's/^/    /'
 echo "stills in $OUT"
@@ -133,6 +143,9 @@ MISSING=""
 [ -z "${WORKED:-}" ] && MISSING="$MISSING Worked-line"
 if [ -n "$MISSING" ]; then
   echo "VERDICT: the turn never produced:$MISSING"
+elif [ "$CLEARED" != yes ]; then
+  echo "VERDICT: send → card ${CARD}s → reply ${FIRST}s → Worked ${WORKED}s, but the"
+  echo "         composer still holds '$AFTER' — the line was sent and not cleared"
 else
   echo "VERDICT: send → card ${CARD}s → reply ${FIRST}s → Worked ${WORKED}s, and the composer cleared"
 fi

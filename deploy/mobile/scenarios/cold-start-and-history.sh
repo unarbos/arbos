@@ -114,7 +114,14 @@ echo "stills in $OUT"
 # Four claims, four lines — a single verdict would flatten them, and each is
 # a separate row in the coverage table.
 echo
-echo "VERDICT cold start:   ${FIRST:-never}s to ${LANDED:-nothing}"
+# "never s to a list of 7 rows" is two claims that cannot both be true: if
+# the wait timed out, nothing was timed and the landing was read afterwards.
+if [ -z "${FIRST:-}" ] || [ "${FIRST:-}" = never ]; then
+  echo "VERDICT cold start:   never — nothing appeared within 40s, so there is"
+  echo "                      no time to report and no landing to name"
+else
+  echo "VERDICT cold start:   ${FIRST}s to ${LANDED:-nothing}"
+fi
 echo "VERDICT long history: chat in ${OPEN:-never}s, pager ${PAGER:-never appeared}"
 if [ "${BEFORE:-0}" = "${AFTER:-1}" ]; then
   echo "VERDICT away and back: the chat is as it was — $BEFORE text rows both sides"
