@@ -4190,3 +4190,39 @@ going looking. Both files print their evidence; the question each time is
 whether anything reads it.
 
 **PR:** [#713](https://github.com/unarbos/arbos/pull/713), harness only.
+
+## Cycle 145 — twenty cycles of blaming the wrong thing
+
+M-407 has sat open since cycle 124: after a barge-in the orb reads
+`thinking` until the caller speaks again. I filed it as a display fault —
+the app promising a reply that will never come — and left it for a decision
+that never arrived.
+
+It still reproduces on `main`: barge at 288 ms, confirmed at 330, then
+`thinking` for sixteen seconds with no frames in between.
+
+**So I changed the phase handling to settle back to listening, and it
+changed nothing** (M-458). Same phases, same sixteen seconds. The one-line
+change sat behind `settle()`'s own guards, which is why it was safe — and
+why it did nothing: the guard was blocking, because a turn really is
+pending.
+
+**The orb is telling the truth** (M-457). After the interrupt the app
+forwards the interrupting speech, sets `kernelBusy`, and waits. The phase
+returns to `thinking` *after* my settle runs. The kernel's record shows
+nothing from the call at all, and the app's log ends at
+`response.done reason=interrupted` with no frame after it.
+
+So the fault is a **turn that never completes** after a barge-in — a
+gateway question, not a label. And the comment I overrode,
+
+> a reply that reached nobody must not take the screen back to listening
+
+was right. Whoever wrote it had understood the state better than I had.
+
+The change is reverted in the same cycle it was made, and the finding is
+rewritten to describe what is actually wrong. Twenty cycles of calling this
+a display bug rested on never having asked what the call was waiting *for*.
+
+**PR:** [#714](https://github.com/unarbos/arbos/pull/714) — the `ios/`
+branch, now empty of behaviour change, kept for the record of the attempt.
