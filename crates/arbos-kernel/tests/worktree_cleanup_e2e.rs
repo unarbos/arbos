@@ -52,7 +52,10 @@ fn an_archived_workers_clean_worktree_is_removed() {
     let replies = concat!(
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"w1\",\"task\":\"say one word\",\"isolate\":\"worktree\"}}]}\n",
         "{\"agent\":\"root\",\"content\":\"started\"}\n",
-        "{\"content\":\"word\"}\n",
+        // After root's dispatch turn closes, so the report opens the done
+        // turn that archives w1 (the fold-race family's pin; the worktree
+        // add bought this test time but promised none).
+        "{\"content\":\"word\",\"delay_ms\":2500}\n",
         "{\"agent\":\"root\",\"content\":\"noted\"}\n",
     );
     let mut k = start_kernel_replay_prepared("wt-archive", replies, "", |place| {
