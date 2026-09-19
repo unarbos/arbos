@@ -1698,6 +1698,16 @@ class Pass:
             self.send("Run `sleep 120` yourself with bash right now, attached, no workers.")
             self.wait(lambda s: (lambda c: c and (c.get("streaming") or c.get("turn_open")))(root_of(place)), 30, what="world long turn")
             time.sleep(3)
+            # The command's card runs while the command does (F-220): the
+            # kernel's call-start event drew a finished card, empty, folded
+            # under "Running 1 command" for the whole of the run.
+            def live_sleep(c):
+                return [i for i in (c or {}).get("items", []) if i.get("kind") == "tool" and i.get("status") == "running" and "sleep" in (i.get("label") or "")]
+            self.wait(lambda s: bool(live_sleep(root_of(place))), 20, what="running sleep card")
+            running = live_sleep(root_of(place))
+            cards = [p for p in self.ids("term-card-*") if self.seen(p)]
+            self.record("command-live-card", sc, "a `sleep 120` holds the turn", "the command's card is on the pane while it runs: a running tool item with the command in its label, its term-card on screen",
+                        f"running={[(i.get('label') or '')[:40] for i in (running or [])]} cards={cards[:2]}", "pass" if running and cards else "fail", self.still("command-live-card"))
             tmp = copy_dir / "arbos-kernel.new"; shutil.copy(kernel, tmp); os.replace(tmp, copy)
             control = self.wait(lambda s: bool(self.ids("status-bar-stranger-kernel")) or None, 75, every=2, what="stranger plate")
             ids = self.ids("status-bar-stranger-kernel")
