@@ -4124,3 +4124,41 @@ Re-run with both in: **11 rows** counted on each of three runs, all clean.
 
 **PRs:** [#710](https://github.com/unarbos/arbos/pull/710) the check,
 [#711](https://github.com/unarbos/arbos/pull/711) the `ios/` batch.
+
+## Cycle 143 — where the undone fixes live, and a screen examined one control deep
+
+Two fixes inside the projects row came undone; two of the same shape
+elsewhere have held since cycle 109 and 117. The difference is what they sit
+inside (M-453): a `Button` builds its label by walking its children, and
+that walk varies between runs. The chat's worker line and the away card's
+bullet are not composed button labels, so a modifier on them stays put.
+
+I re-checked those two properly — three runs, with **two worker lines and an
+away card provably on screen** — because clearing a chat that lacks the
+thing being cleared is exactly how cycle 117 fooled me. They hold. The rule
+is written into `check-names.sh`: when it flags something under a button,
+say it on the button.
+
+**Then the count I added an hour ago earned itself.** `check-names.sh` now
+prints how many controls it examined, because "every control here is named"
+over three elements is a different sentence from the same words over thirty.
+The settings sheet read:
+
+```
+== the settings sheet ==
+  every control here is named   (1 examined)
+```
+
+One. That screen is six text fields, five headings and a button, and the
+detector looked only at buttons, images and pop-ups (M-454). Fields and
+headings carry names too — a field labelled by a symbol would be exactly the
+fault this file exists for.
+
+Widened, the same screen now reads **(12 examined)**, and the list 18, the
+sheet 13, the chat 7, the call 3.
+
+The count was added for one reason and found something else within the hour.
+That is the argument for printing what an instrument looked at, not only
+what it concluded.
+
+**PR:** [#712](https://github.com/unarbos/arbos/pull/712), harness only.

@@ -5,11 +5,11 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 01:08 UTC.
+Last checked 2026-09-19 01:24 UTC.
 
-## Click Update. You will get build 2155. Jev is in it.
+## Click Update. You will get build 2160. Jev is in it.
 
-**2155** — signed, notarised, stapled, on the feed since 01:05 UTC.
+**2160** — signed, notarised, stapled, on the feed since 01:21 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
@@ -19,6 +19,14 @@ on the release.
 The relaunch-tab bug (mt-24) is still open. #675 aimed at it and QA still
 fails it four times out of four, so do not read any build here as closing
 it.
+
+New since 2155 (builds 2156–2160):
+
+- **#710** — `list-rows.sh` refuses a pass on zero rows: "0 of 0" is not
+  "every one"
+- **#711** — mobile: the projects-list row says its sentence on the button
+
+## Before that: 2155
 
 New since 2150 (builds 2151–2155):
 

@@ -1,9 +1,9 @@
-# qal-j47 — a queued follow-up from the desktop stopped arriving, and the scenario reports it as a skip
+# qal-j47 — `sq-02` cannot keep a turn up, and reports that as a skip (**not** a queue regression)
 
-- **status**: open (product), new on current `main`; a widening rate rather than a clean switch
+- **status**: **rig defect, mine.** Not a product regression — my first reading blamed the kernel and was wrong; see "Answered" at the end. `#692` is cleared.
 - **found**: 2026-09-19 00:30, covering the desktop scenarios cycle 12 skipped for budget
 - **control**: `sq-02-desktop-stop-holds-follow-up` — which **self-skips**, so the loop never flagged it
-- **kernel**: fails on `55c8287765d7`; passes on `232518c26c1f`
+- **kernel**: not involved. The apparent `55c82877` vs `232518c2` split was model variance across small samples.
 
 ## What happens
 
@@ -74,3 +74,52 @@ those eighteen after the UTC reset is what surfaced this. Two of the eighteen fo
 and confirmation of `qal-j43`'s regression. That is a reasonable argument for `qal-j46`'s first
 option — move the cheap, fragile desktop work earlier, so a budget that runs out at 22:00 does not
 take it.
+
+## Answered — and my kernel attribution was wrong
+
+The features agent asked for one look (`internal/qa/inbox/2026-09-19-qal-j47-was-the-turn-still-running.md`):
+was there a near-instant `turn_complete` on root's transcript before the follow-up went out?
+
+**Yes, exactly.** Six runs split cleanly on the life of the turn:
+
+| run | turn ended after the prompt | outcome |
+|---|---|---|
+| 003917Z, 003641Z, 003612Z | 10.8 s | pass |
+| 003848Z, 003524Z, 003454Z | **2.2–2.4 s** | skip |
+
+The follow-up goes out at ~18 s, so in every failing run the turn had been finished for fifteen
+seconds. Nothing to queue behind, no inbox row. **The queue path is fine.**
+
+### It is not Jev either
+
+`Jev did not choose the next step` appears **zero** times in all six rollouts. The turns did not
+fail; they *finished*, because the model declined the work:
+
+```
+"I cannot run `bash` commands longer than a few seconds as a coordinator. I can spawn a worker…"
+```
+
+`sq-02` asks for `sleep 40; echo slow` to hold a turn open. The coordinator protocol says *"keep
+the chat responsive, route substantial work to workers"*, so a model that routes it instead of
+running it inline is obeying the protocol and the turn ends in two seconds. The protocol text did
+not change in the window — `git log 232518c2..55c8287765d7 -- protocol.rs project.rs` is empty —
+so this is the model complying with the literal prompt on some runs and the standing instruction on
+others. `jev = false` would not touch it.
+
+### The correlation I reported was spurious
+
+Pass 2/2 on one kernel against fail 6/6 on another looked decisive and was not: it is model
+variance across small samples, on a comparison I chose *after* seeing the failures. Third time
+today I have read a rate as a switch. The tell was in plain sight — a refusal written in English
+on the transcript is not what a broken queue looks like — and I went to a kernel bisect before
+reading the transcript I already had.
+
+**The order that would have saved it: read what the run said before deciding what to compare.**
+
+## What actually needs fixing, both mine
+
+1. **`sq-02` stages its precondition by asking the model nicely.** A scenario that needs a turn to
+   stay up must confirm the turn is running before it queues, not hope the model keeps it alive.
+2. **It reports the failure as a skip.** That is why this went unseen, and it is the part of this
+   bug that was always real: a skip is for a rig that cannot ask the question, never for a run
+   where the product answered differently than the scenario needed.

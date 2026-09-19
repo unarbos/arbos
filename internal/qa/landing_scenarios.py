@@ -500,16 +500,57 @@ def register(scenario, registry, transcript, now_ms, branch):
         try:
             time.sleep(3)
             rig.focus(folder)
-            rig.wait_idle(folder, 60)
-            rig.send("Run `sleep 40; echo slow` with bash, then say done.")
-            cx.rec.expect(rig.wait_busy(folder, 20), "sq-02-turn-never-started", "the slow turn never started")
-            time.sleep(3)
+            # Staging this needs a turn that is *still running* when the follow-up is typed, and
+            # the model decides whether that happens. Asked to `sleep 40` inline, it sometimes
+            # obeys and sometimes routes the work to a worker — which the coordinator protocol
+            # tells it to do ("keep the chat responsive, route substantial work to workers"), so
+            # the turn is over in two seconds. Measured 2026-09-19 across six runs: three held the
+            # turn 10.8 s, three ended it in 2.2-2.4 s with "I cannot run bash commands longer
+            # than a few seconds as a coordinator" (qal-j47).
+            #
+            # `wait_busy` is not enough on its own: the turn *starts* in both cases. What matters
+            # is that it is still up a moment later, when the line is typed. So check that, and
+            # try again when the model chose the other reading — three tries turns a coin-flip
+            # into something the cycle can rely on.
+            inbox = folder / ".arbos" / "agents" / "root" / "inbox"
+            staged = False
+            for attempt in range(1, 4):
+                rig.wait_idle(folder, 60)
+                rig.send("Run `sleep 40; echo slow` with bash, then say done.")
+                if not rig.wait_busy(folder, 20):
+                    cx.rec.notes.setdefault("staging", []).append(f"attempt {attempt}: the turn never started")
+                    continue
+                # Past the refusal window, not just past the start. Measured: a turn the model
+                # declines ends at 2.2-4.0 s, one it accepts runs to ~10.8 s. A three-second check
+                # sat inside that spread and passed runs that died at 3.7 s, which then looked like
+                # the queue failing. Six seconds is clear of every refusal seen and still leaves
+                # the best part of five seconds to type and press.
+                time.sleep(6)
+                if rig.busy(folder):
+                    staged = True
+                    cx.rec.notes["staged_on_attempt"] = attempt
+                    break
+                cx.rec.notes.setdefault("staging", []).append(
+                    f"attempt {attempt}: the turn ended before the follow-up could be typed (the model routed the work to a worker)"
+                )
+            cx.rec.expect(
+                staged,
+                "sq-02-could-not-hold-a-turn",
+                "three tries and the model never held a turn open long enough to queue behind, so the "
+                "queued-follow-up path could not be reached (qal-j47 — a staging failure, not a product fault)",
+            )
+            if not staged:
+                return
             # Enter during a turn steers (#362 makes the command yield to it); the QUEUED follow-up is
             # cmd/ctrl-shift-enter — "queue next" — the row under the composer that Stop used to delete.
-            inbox = folder / ".arbos" / "agents" / "root" / "inbox"
             rig.app.wait_element("composer-field", reachable=True)
             rig.app.click("composer-field")
             rig.app.type("Then reply with the single word FOLLOWUP.")
+            # The turn can still end between staging and the keystroke, and a line queued into a
+            # finished turn opens its own turn instead — no inbox row, and it reads as the queue
+            # failing. Record what was true at the moment the keys went down, so a future failure
+            # can be told apart from this one without re-deriving it (qal-j47).
+            cx.rec.notes["turn_still_running_at_keypress"] = rig.busy(folder)
             queued_files = []
             for combo in ("ctrl-shift-enter", "cmd-shift-enter"):
                 try:

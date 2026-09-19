@@ -818,9 +818,25 @@ Seventy fresh instances across cycles 29–35, twenty-five failures, none outsid
 
 Spend $13.90.
 
-## Next (cycle 36)
+## Cycle 36 (2026-09-19) — ten more fresh instances; `changes` blocked 51 minutes re-running a server
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 a8678ac16636 protocol 1`** (cycles 30–35's; `main` at 11e991cc, no engine or host change since). Jev off. Network cut, no stall, no cap. Ten never-run instances (`fresh10h.txt`) at `-r 2`, images pre-pulled so no pull race, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-36-preregistration.md)). $14.55; **16 of 20** solved (a count).
+
+**Four failures, all inside the account.**
+
+*django-14170 ×2 — C, and a case where the issue's own proposal is graded wrong.* The issue says the `BETWEEN` optimisation in `YearLookup` "should not be used for `__iso_year`". Both rollouts do exactly that — skip the optimisation when the lookup is not `year` — and the two FAIL_TO_PASS boundary tests pass. What fails are six *existing* tests (`test_extract_year_*_lookup [iso_year]`) that assert the SQL contains `between` and no `extract` for `iso_year`: the existing tests pin the mechanism, and the gold keeps them green by computing ISO-week bounds in `operations.py` instead. The existing tests encoded the bug's mechanism (E1's shape), the agent went the way the issue said and E1 allows, and the grade wanted the mechanism kept. The account holds it as C: the hidden tests grade a thing the issue does not determine, here the opposite of what it proposes.
+
+*sphinx-7985 ×2 — C, consistent.* Both rollouts add a local-link check to `linkcheck` and report broken local links; the hidden test counts output lines and wants a *working* local link silent (`'working'`), where the agent kept the existing `[local]` line for it — one reply says so in words, "working local links are unaffected (still reported as `[local]`)". Seven lines against six.
+
+**A kernel finding from a rollout that solved.** django-13809 rollout `dab2e1ba` solved in 80 tool calls and $2.89 — and took 7,749 s of wall, of which 7,257 s was tool time. Three `changes` calls took 3,086 s, 361 s and 3,070 s; the kernel's own notice said "nothing has happened for 46m: waiting on `changes`". The cause is in the reproduction gate: `changes` **re-runs every recorded reproduction, serially, each under `timeout 180`, with no total cap**, and the gate records *every* failing code-running command before the first edit as a reproduction. The agent's reproductions were `runserver` invocations — a server that never exits — so each re-run ran the full 180 s; seventeen recorded, 17 × 180 ≈ 3,060 s, twice. The container showed the re-runs: a fresh `timeout 180 bash -lc … runserver` every three minutes while the kernel waited. Two things follow. First, a reproduction that is a long-running server cannot be re-run as evidence; the re-run should either cap the whole pass or skip a command that timed out on first run (its exit was `None`, which `not_evidence` already names as saying nothing about the code). Second, `arbos-kernel run --timeout 2400` did not end this run at 2,400 s: the run timeout does not interrupt a blocking tool. Both are observations recorded here, not filed (coordinator, cycles 33–35).
+
+Eighty fresh instances across cycles 29–36, twenty-nine failures, none outside the account. Cumulative read: **314**.
+
+Spend $14.55.
+
+## Next (cycle 37)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32).
-4. Observations recorded here, not filed anywhere (coordinator, cycles 33–34): the quoted-reference mark is read as "test the example", not "test the quote" (31); a generated artefact recreated by the final test run rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `changes` re-runs a never-exiting reproduction N × 180 s with no total cap, and `run --timeout` does not interrupt a blocking tool (36).
