@@ -28,7 +28,18 @@ shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo 
 say() { echo "$(date -u +%H:%M:%S) $*"; }
 
 xcrun simctl uninstall "$UDID" $B 2>/dev/null
-xcrun simctl install "$UDID" /tmp/dd/Build/Products/Debug-iphonesimulator/Arbos.app
+# The app to reinstall is the one the loop just built, not a path some cycle
+# left in /tmp. This read /tmp/dd/Build/Products/..., a build from the
+# previous day, so every scenario after this one in the sweep measured
+# yesterday's app — which is where the separator that six cycles chased kept
+# coming from (M-498, M-503). Proven: fresh build reads "phone, Idle, home",
+# this scenario runs, and the next read is "phone, Idle, · , home" with the
+# binary dated a day earlier.
+DERIVED=${DERIVED:-$HOME/mobile-derived/Build/Products/Debug-iphonesimulator/Arbos.app}
+APP=${APP:-$DERIVED}
+[ -d "$APP" ] || { echo "no app at $APP — refusing to run against whatever is"
+                   echo "already installed, which is how a stale build gets measured"; exit 1; }
+xcrun simctl install "$UDID" "$APP"
 xcrun simctl launch --console-pty "$UDID" $B > "$OUT/console.log" 2>&1 &
 sleep 8
 reach_the_list "$UDID" || exit 1
