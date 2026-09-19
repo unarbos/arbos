@@ -3,8 +3,9 @@
 # the caller stops, as the real model did ("nothing's in progress"). Our transcript lands, says
 # "work", and the turn goes to the kernel: the model's held first word is dropped, the kernel is
 # asked at once, and the only reply the caller hears is the kernel's words, spoken by the model
-# from the commentary append. Exactly one completed reply; the model's own words never play.
-title = "GPT-Live: a work question gets one spoken answer, and it is the kernel's"
+# from the commentary append. The running state also speaks "Yeah, one sec."
+# once, then the kernel's answer. The model's own store-guess never plays.
+title = "GPT-Live: a work question gets a working line, then the kernel's answer"
 engine = "openai"
 path = "own"
 asr_script = ["What are we working on right now?"]
@@ -23,9 +24,9 @@ wait_quiet = 1.5
 
 [expect]
 response_dones = 1
-spoken_contains = ["timed sleep command"]
+spoken_contains = ["one sec", "timed sleep command"]
 spoken_not_contains = ["nothing is in progress"]
-live_commentary = ["timed sleep command"]
-live_commentaries = 1
+live_commentary = ["one sec", "timed sleep command"]
+live_commentaries = 2
 user_frames = 1
 inbox = [{ channel = "voice", kind = "request", device = "desktop" }]

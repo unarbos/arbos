@@ -265,6 +265,10 @@ class OpenAILiveSession(DuplexSession):
         self.unmute_watch: asyncio.Task | None = None
         self.await_words: set[str] = set()  # the kernel answer's words, awaited in the model's transcript while muted
         self.await_seen = ""
+        self.working_line_said = False  # one spoken "Yeah, one sec." per work bout
+        self.working_line_expect = False  # commentary filler is in flight
+        self.working_line_open = False  # that filler's audio may play (decision is still kernel)
+        self.working_line_heard = ""
 
     # ------------------------------------------------------------------ upstream
 
@@ -564,6 +568,7 @@ class OpenAILiveSession(DuplexSession):
         elif kind == "session.output_transcript.delta":
             delta = msg.get("delta", "")
             self.live_output_since_final = (self.live_output_since_final + delta)[-400:]
+            self._heard_working_line(delta)
             self._heard_answer_words(delta)
             if self.response_open:
                 self._emit_for_gen(self.gen, P.RESPONSE_TRANSCRIPT, text=delta)
@@ -609,6 +614,10 @@ class OpenAILiveSession(DuplexSession):
             return
         self.user_turns += 1
         self.last_final, self.last_final_at = text, time.monotonic()
+        self.working_line_said = False
+        self.working_line_expect = False
+        self.working_line_open = False
+        self.working_line_heard = ""
         if self.live_input.strip():
             log.info("[%s] GPT-Live heard: %r", self.sid, self.live_input.strip()[-160:])
         self.live_input = ""
@@ -724,11 +733,11 @@ class OpenAILiveSession(DuplexSession):
         if not question:
             question = self.live_input.strip() or self.last_final
         if not question:
-            await self._append("session.commentary.append", did or self.forced_did, "I did not catch what you asked. Could you say it again?")
+            await self._append("session.commentary.append", did or self.forced_did, "I did not catch what you asked. Could you say it again?", answer=True)
             return
         kernel = self.kernel
         if kernel is None or not kernel.connected:
-            await self._append("session.commentary.append", did or self.forced_did, "The Arbos kernel is not reachable right now.")
+            await self._append("session.commentary.append", did or self.forced_did, "The Arbos kernel is not reachable right now.", answer=True)
             return
         tag = (did or "forced")[-8:]
         log.info("[%s] delegation %s -> kernel: %r", self.sid, tag, question)
@@ -736,6 +745,7 @@ class OpenAILiveSession(DuplexSession):
         if self.activity is not None:
             self.activity.mark_working()  # the working sound starts now, before the kernel's own turn frame
         self.kernel_launched_at = t0
+        await self._say_working_line(did)
         await self._append("session.thinking.append", did, "Arbos is working on it.")
         answer = ""
         try:
@@ -745,17 +755,46 @@ class OpenAILiveSession(DuplexSession):
                 answer += delta
         except Exception as exc:
             log.exception("[%s] delegation failed", self.sid)
-            await self._append("session.commentary.append", did or self.forced_did, f"The kernel failed: {_ascii(str(exc))[:200]}")
+            await self._append("session.commentary.append", did or self.forced_did, f"The kernel failed: {_ascii(str(exc))[:200]}", answer=True)
             return
         spoken = speakable(answer).replace("\n", " ").strip() or "Arbos had no answer."
         self._emit(P.TOOL_RESULT, name="delegate", output=spoken[:400])
         self.last_answer_at = time.monotonic()
+        self.working_line_open = False
+        self.working_line_expect = False
         # the model's own delegation for this question, if it made one meanwhile, names the answer
-        await self._append("session.commentary.append", did or self.forced_did, spoken[:MAX_APPEND_CHARS])
+        await self._append("session.commentary.append", did or self.forced_did, spoken[:MAX_APPEND_CHARS], answer=True)
         log.info("[%s] delegation %s answered in %.1fs (%d chars)", self.sid, tag, time.monotonic() - t0, len(spoken))
 
-    async def _append(self, kind: str, did: str | None, content: str) -> None:
-        if kind == "session.commentary.append":
+    async def _say_working_line(self, did: str | None) -> None:
+        """A short spoken line once the kernel is actually running — not on a timer.
+
+        GPT-Live speaks it (commentary). Decision stays `kernel`, so any other
+        model words stay unheard. Barge-in ducks this line and does not cancel
+        the delegation.
+        """
+        if self.working_line_said:
+            return
+        if _ACK_WORDS.search(self.live_output_since_final) and self.decision != "kernel":
+            return  # the model already said it and the caller heard it
+        self.working_line_said = True
+        self.working_line_expect = True
+        self.working_line_heard = ""
+        self._emit(P.NARRATOR_SAY, text="Yeah, one sec.", kind="working")
+        await self._append("session.commentary.append", did, "Yeah, one sec.")
+
+    def _heard_working_line(self, delta: str) -> None:
+        """The filler's words in the model's transcript: its audio may play now."""
+        if not self.working_line_expect or self.working_line_open:
+            return
+        self.working_line_heard = (self.working_line_heard + delta.lower())[-80:]
+        if "one sec" in self.working_line_heard or (
+            "yeah" in self.working_line_heard and "sec" in self.working_line_heard
+        ):
+            self.working_line_open = True
+
+    async def _append(self, kind: str, did: str | None, content: str, *, answer: bool = False) -> None:
+        if kind == "session.commentary.append" and answer:
             self._kernel_spoke(content)  # from here on the model's voice carries the kernel's words
         if self.up is None:
             return
@@ -768,7 +807,7 @@ class OpenAILiveSession(DuplexSession):
         """Kernel asks and approvals, child reports: GPT-Live says them (its voice), else Kokoro."""
         if self.up is not None:
             self._emit(P.RESPONSE_TRANSCRIPT, text=text)
-            await self._append("session.commentary.append", None, text)
+            await self._append("session.commentary.append", None, text, answer=True)
         else:
             await super().speak_narration(text)
 
@@ -839,7 +878,7 @@ class OpenAILiveSession(DuplexSession):
     async def on_report_speech(self, text: str) -> None:
         """An agent finished: let GPT-Live say it in its own voice."""
         if self.up is not None:
-            await self._append("session.commentary.append", None, text)
+            await self._append("session.commentary.append", None, text, answer=True)
         else:
             await super().on_report_speech(text)
 
@@ -848,6 +887,8 @@ class OpenAILiveSession(DuplexSession):
         # already in flight are dropped until it goes quiet, like the hosted engine.
         self.gen += 1
         self.muted = True
+        self.working_line_open = False
+        self.working_line_expect = False
         self._emit(P.RESPONSE_DONE, interrupted=True, reason="interrupted")
         self.transcript_stash.clear()
         self._close_response()

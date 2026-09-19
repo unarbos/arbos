@@ -2587,6 +2587,9 @@ impl Arbos {
                                 for m in &lines {
                                     if m.kind == "caller.said" {
                                         chat.voice_prompt(&m.text);
+                                    } else if chat.apply_call_work(&m.kind, &m.agent, &m.text) {
+                                        // Tool and agent rows: spoken-row-only
+                                        // used to drop them. Display only.
                                     } else if let Some(line) = call_line(m) {
                                         chat.notice(false, &line);
                                     }
@@ -3469,9 +3472,9 @@ fn sync_macos_chrome(cx: &App) {
 fn sync_macos_chrome(_cx: &App) {}
 
 /// One `voice ·` line for the chat during a call: what the narrator said,
-/// marked by kind so a question or a failure reads as one. Everything else
-/// the mirror carries (the agent bridge) is already in the chat, which is
-/// attached to the same kernel: nothing.
+/// marked by kind so a question or a failure reads as one. Tool and agent
+/// frames are applied as real rows (`apply_call_work`); they must not be
+/// hidden behind spoken-row-only.
 fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
     let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
     match m.kind.as_str() {

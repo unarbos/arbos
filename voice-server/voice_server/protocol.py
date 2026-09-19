@@ -197,10 +197,11 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
     openai (GPT-Live, --engine openai, env OPENAI_API_KEY): OpenAI's full-duplex model handles
         listening, speaking and *deciding when to hand off*; the Arbos kernel is the backend
         (client delegation). Small talk is answered by the model at once; anything about the
-        user's work is delegated: the model says "one sec, let me check" only once a delegation
-        exists (the gateway delegates itself if it says so without one), the kernel's answer is
-        appended as commentary and spoken unprompted when it arrives, even after a barge-in;
-        barge-ins never cancel kernel work (a new question does, via stop). Approvals and asks
+        user's work is delegated: the gateway speaks "Yeah, one sec." once the kernel is
+        actually running (not on a timer; the model's own "let me check" is muted while the
+        kernel works). The kernel's answer is appended as commentary and spoken unprompted
+        when it arrives, even after a barge-in; barge-ins duck the working line and never
+        cancel kernel work (a new question does, via stop). Approvals and asks
         are still ours: spoken in the model's voice, answered by the caller's yes or no. Our VAD +
         Whisper still produce transcript.final. Billing: $0.05 per minute of session, per second,
         plus the kernel's own model calls.

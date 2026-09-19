@@ -1311,14 +1311,17 @@ impl ChatSession {
             .iter()
             .rposition(|item| matches!(item, ChatItem::User(_)))
             .unwrap_or(0);
-        self.items[start..].iter().rev().find_map(|item| match item {
-            ChatItem::Tool {
-                label,
-                status: ToolStatus::Running,
-                ..
-            } => Some(label.as_str()),
-            _ => None,
-        })
+        self.items[start..]
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ChatItem::Tool {
+                    label,
+                    status: ToolStatus::Running,
+                    ..
+                } => Some(label.as_str()),
+                _ => None,
+            })
     }
 
     /// Push local bubbles the kernel never stored, then title from them.
@@ -1349,9 +1352,10 @@ impl ChatSession {
         };
         let known_words = squash(&known.text);
         let known_at = match known.seq {
-            Some(seq) => replay.items.iter().rposition(
-                |item| matches!(item, ChatItem::User(m) if m.seq == Some(seq)),
-            ),
+            Some(seq) => replay
+                .items
+                .iter()
+                .rposition(|item| matches!(item, ChatItem::User(m) if m.seq == Some(seq))),
             None => replay.items.iter().rposition(
                 |item| matches!(item, ChatItem::User(m) if squash(&m.text) == known_words),
             ),
@@ -2246,16 +2250,30 @@ impl ChatSession {
             .position(|sent| *sent == squash(&text))
         {
             self.awaiting_echo.remove(at);
-            if let Some(card) = self.items.iter_mut().rev().find_map(|item| match item {
-                ChatItem::User(message) if squash(&message.text) == squash(&text) => Some(message),
-                _ => None,
-            }) {
+            let voice = if let Some(card) =
+                self.items.iter_mut().rev().find_map(|item| match item {
+                    ChatItem::User(message) if squash(&message.text) == squash(&text) => {
+                        Some(message)
+                    }
+                    _ => None,
+                }) {
                 if ts > 0 {
                     card.sent_at = Some(ts);
                 }
                 if seq > 0 {
                     card.seq = Some(seq);
                 }
+                card.channel == "voice"
+            } else {
+                false
+            };
+            // A spoken card we already drew: the kernel's record is this
+            // line. Small talk never reaches the kernel, so this path is
+            // a voice-delegated turn. Open it so tool and agent rows are
+            // not hidden behind a display-only spoken row.
+            if voice {
+                self.open_turn();
+            } else {
                 self.flush();
             }
             return;
@@ -2341,6 +2359,119 @@ impl ChatSession {
                 .unwrap_or(0),
         );
         self.items.push(ChatItem::User(message));
+        self.updated = SystemTime::now();
+        self.flush();
+    }
+
+    /// A tool or agent frame from the call mirror, into this chat as a
+    /// real row. Display only: nothing is sent to the kernel. Spoken-row
+    /// filtering used to drop these; a voice-delegated turn must show
+    /// them. A row the kernel already drew is skipped.
+    pub fn apply_call_work(&mut self, kind: &str, agent: &str, text: &str) -> bool {
+        match kind {
+            "tool.call" => {
+                let name = text.split_whitespace().next().unwrap_or("");
+                let detail = text[name.len()..].trim();
+                self.voice_tool_row(name, detail);
+                true
+            }
+            "agent.event/tool" => {
+                let name = text.split_whitespace().next().unwrap_or(text);
+                let detail = text[name.len()..].trim();
+                self.voice_tool_row(name, detail);
+                true
+            }
+            "agent.event/say" | "agent.done" => {
+                let (who, body) = call_work_speaker(agent, text);
+                self.voice_from_row(&who, &body);
+                true
+            }
+            "agent.turn" if text.trim() == "running" => {
+                if !self.busy() {
+                    self.open_turn();
+                } else {
+                    self.turn_alive();
+                }
+                true
+            }
+            "agent.turn" => true,
+            _ => false,
+        }
+    }
+
+    fn voice_tool_row(&mut self, name: &str, detail: &str) {
+        let name = name.trim();
+        if name.is_empty() || name == "delegate" {
+            return;
+        }
+        let hint = detail
+            .trim()
+            .trim_matches(|c: char| c == '{' || c == '}')
+            .trim();
+        let hint = (!hint.is_empty()).then_some(hint);
+        let label = crate::agent::acp::tool_title(name, hint);
+        if self.items.iter().rev().take(16).any(|item| {
+            matches!(
+                item,
+                ChatItem::Tool { label: held, .. }
+                    if held == &label
+                        || held.split_whitespace().next() == Some(name)
+            )
+        }) {
+            return;
+        }
+        if !self.busy() {
+            self.open_turn();
+        } else {
+            self.turn_alive();
+        }
+        let id = format!("voice-{name}-{}", self.items.len());
+        self.tool_started.insert(id.clone(), Instant::now());
+        let child = (name == "spawn")
+            .then(|| hint.unwrap_or("").to_string())
+            .filter(|s| !s.is_empty());
+        self.items.push(ChatItem::Tool {
+            id,
+            kind: crate::agent::acp::tool_kind(name),
+            label,
+            status: ToolStatus::Running,
+            output: String::new(),
+            diff: None,
+            child_session: child,
+            secs: None,
+            desc: hint.map(str::to_string),
+        });
+        self.updated = SystemTime::now();
+        self.flush();
+    }
+
+    fn voice_from_row(&mut self, who: &str, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let who = if who.is_empty() || who == "root" {
+            String::new()
+        } else {
+            who.to_string()
+        };
+        if self.items.iter().rev().take(8).any(|item| {
+            matches!(
+                item,
+                ChatItem::From { who: held_who, text: held, .. }
+                    if held.trim() == text && (who.is_empty() || held_who == &who)
+            )
+        }) {
+            return;
+        }
+        if !self.busy() {
+            self.open_turn();
+        }
+        self.items.push(ChatItem::From {
+            who,
+            text: text.to_string(),
+            images: Vec::new(),
+        });
         self.updated = SystemTime::now();
         self.flush();
     }
@@ -3055,9 +3186,7 @@ impl ChatSession {
                 ts,
                 seq,
                 channel,
-            } => {
-                self.foreign_prompt(text, attachments, ts, seq, channel)
-            }
+            } => self.foreign_prompt(text, attachments, ts, seq, channel),
             Event::Provider {
                 provider,
                 model,
@@ -3942,9 +4071,12 @@ impl ChatSession {
         }
         let mut words = rest.split_whitespace();
         let op = words.next().unwrap_or("");
-        let node = words
-            .next()
-            .and_then(|w| w.trim_start_matches('#').trim_end_matches(':').parse::<u64>().ok());
+        let node = words.next().and_then(|w| {
+            w.trim_start_matches('#')
+                .trim_end_matches(':')
+                .parse::<u64>()
+                .ok()
+        });
         if let Some(id) = node {
             self.plan.retain(|n| n.id != id);
         }
@@ -4023,9 +4155,34 @@ impl ChatSession {
                 let id = call.tool_call_id.to_string();
                 let output = tool_content_text(&call.content);
                 let diff = tool_diff_text(&call.content);
-                if let Some(ix) = self.items.iter().rposition(
-                    |item| matches!(item, ChatItem::Tool { id: tool, .. } if *tool == id),
-                ) {
+                let existing = self
+                    .items
+                    .iter()
+                    .rposition(
+                        |item| matches!(item, ChatItem::Tool { id: tool, .. } if *tool == id),
+                    )
+                    .or_else(|| {
+                        // A call-mirror placeholder for this command: take
+                        // the kernel's id so the next update lands here.
+                        self.items.iter().rposition(|item| {
+                            matches!(
+                                item,
+                                ChatItem::Tool {
+                                    id: held_id,
+                                    label,
+                                    status: ToolStatus::Running,
+                                    ..
+                                } if held_id.starts_with("voice-")
+                                    && (label == &call.title
+                                        || label.split_whitespace().next()
+                                            == call.title.split_whitespace().next())
+                            )
+                        })
+                    });
+                if let Some(ix) = existing {
+                    if let ChatItem::Tool { id: held, .. } = &mut self.items[ix] {
+                        *held = id.clone();
+                    }
                     let ChatItem::Tool {
                         kind,
                         label,
@@ -4278,7 +4435,6 @@ impl ChatSession {
         }
     }
 }
-
 
 fn history_beats(next: &[ChatItem], held: &[ChatItem]) -> bool {
     if next.len() > held.len() {
@@ -4717,7 +4873,11 @@ pub fn is_page_nudge(text: &str) -> bool {
 /// " is not available to this key".
 pub fn unavailable_model_in(text: &str) -> Option<String> {
     let (head, _) = text.split_once(" is not available to this key")?;
-    let model = head.trim().rsplit(' ').next()?.trim_matches(|c| c == '`' || c == '"');
+    let model = head
+        .trim()
+        .rsplit(' ')
+        .next()?
+        .trim_matches(|c| c == '`' || c == '"');
     (!model.is_empty() && model.contains('/')).then(|| model.to_string())
 }
 
@@ -4914,6 +5074,20 @@ pub(crate) fn first_user_text(items: &[ChatItem]) -> Option<&str> {
         }
         _ => None,
     })
+}
+
+/// Who spoke a call-mirror agent row, and the words. `agent.event/say`
+/// arrives as `from: text` when the kernel named a worker.
+fn call_work_speaker(agent: &str, text: &str) -> (String, String) {
+    let text = text.trim();
+    if let Some((who, body)) = text.split_once(':') {
+        let who = who.trim();
+        let body = body.trim();
+        if !who.is_empty() && !body.is_empty() && !who.contains(' ') {
+            return (who.to_string(), body.to_string());
+        }
+    }
+    (agent.trim().to_string(), text.to_string())
 }
 
 /// Fold a transcript into a key that two copies of the same chat share:
