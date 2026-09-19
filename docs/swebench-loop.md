@@ -882,9 +882,23 @@ Cumulative read: **331** (325 + the two 6028 rollouts that settled the artefact 
 
 Spend $15.76.
 
-## Next (cycle 40)
+## Cycle 40 (2026-09-19) — ten more fresh instances; "no change needed" when the wrong output is gone but the right one is not there
 
-1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read. The verifier report is now part of every read.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 3784c20d6516 protocol 1`** = `main` head, built in the worktree, label proved; the engine changes since 04345f70 (`find` skips `.git/`, CRLF kept through an edit, a model fallback held for the turn) are not contract changes. Jev off. Harness d1226d8c (#734). Network cut, no cap. Ten never-run instances (`fresh10l.txt`) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-40-preregistration.md)). $7.67; **16 of 20** solved (a count). The host paused a fourth time (eval log silent 07:39:43–08:27:38; three rollouts affected); walls not read.
+
+**Four failures, two instances, both consistent across their pair.**
+
+*pylint-4661 ×2 — C, a dependency the issue does not name.* Both rollouts make `PYLINT_HOME` follow XDG (`$XDG_DATA_HOME/pylint`, the spec the issue cites). The gold uses `appdirs.user_cache_dir("pylint")` and adds `appdirs` to `setup.cfg`; the hidden test module does `import appdirs`, which is not installed, so the module fails to import — the verifier report: FAIL_TO_PASS 0 of 1 on `ModuleNotFoundError: No module named 'appdirs'`. Not reachable from the issue.
+
+*sympy-23950 ×2 — the no-change verdict on a checkout that has moved past the issue's text: E2 inside the no-change path, with G-decline as the argument.* The issue says `Contains(x, Reals).as_set()` returns `Contains(x, Reals)` and shows `Piecewise` crashing on `as_relational`. In this checkout `as_set` already `raise NotImplementedError()`, and the `Piecewise` example no longer crashes. Both rollouts ran the example, saw neither the reported output nor the reported crash, traced the change to an ancestor commit ("confirmed via `git merge-base --is-ancestor`"), and finished with **"no change needed"** and a 0-byte patch — 16 and 27 tool calls. The hidden test asks `Contains(x, S.Reals).as_set() == S.Reals`: the gold is one line, `return self.args[1]`. So the request's example does not do the *wrong* thing any more, and the agent took that for doing the *right* thing. The request said what right is — "Contains is not a set", so `as_set` should give the set — and a `NotImplementedError` is not a set. This is E2's shape (the reproduction proves the crash is gone, not that the behaviour is there) arriving through the no-change-needed exit, which asks the agent to run the request's example before declaring no change: the example was run, and what it showed was read as "fixed" because it was not the reported failure. If the no-change rule wanted to hold here it would have to say: the example must do what the request asks, not merely stop doing what the request reports. Two of two rollouts, so not a coin. Recorded, not filed.
+
+One hundred and nineteen fresh instances across cycles 29–40, forty-six failures, none outside the account. Cumulative read: **335**.
+
+Spend $7.67.
+
+## Next (cycle 41)
+
+1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read. The verifier report is part of every read.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
-3. Jev stays off on this harness (coordinator, cycle 32).
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word and is dodgeable (38); a reproduction that runs `git stash` is re-run by `changes` and removes the fix from the tree (39).
+3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); a `git stash` reproduction re-run by `changes` removes the fix (39); a no-change verdict on "the wrong output is gone" rather than "the right output is there" (40).
