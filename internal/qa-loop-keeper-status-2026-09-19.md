@@ -12,9 +12,9 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **17**, open, in the desktop step (app `443ffdc55934`) |
-| last closed | 16, closed 13:22:48Z, 262 scenarios |
-| cycle 17 so far | 278+ scenarios, 0 checkpoint noise, 0 budget skips |
+| current cycle | none open; **17 closed 17:44:10Z**, 292 scenarios |
+| previous | 16, closed 13:22:48Z, 262 scenarios |
+| cycle 17 | 292 scenarios, 0 checkpoint noise, 0 budget skips, main step **completed** |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
@@ -50,6 +50,7 @@ The fault is a **rate**, so it is only meaningful within one app build:
 | `1b4ef7a9` | 3 of 3 |
 | `8af86842` | 5 of 5 |
 | `249ddb5f` | live (full signature) |
+| `443ffdc55934` | live (full signature) |
 
 Full signature each time: `kf-01`, `mt-01`, `mt-04`, `dg-01` break together.
 
@@ -92,3 +93,15 @@ it runs `--kernel-branch rust` and every `lk-*` is gated to `main`, so they all 
 `kf-01` is half A too but runs **every** cycle, because it is desktop-tagged and the desktop step
 does not pass `--half`. **Only the tagged steps are unconditional.** Worth checking before anyone
 assumes a new guard runs as often as it looks like it does.
+
+## Cycle 17's desktop step (app `443ffdc55934`)
+
+| scenario | result |
+|---|---|
+| `kf-01` | break, 63.9 s — `qal-j43` |
+| `mt-01`, `mt-04` | break — same signature |
+| `dg-01` | break, 62.4 s, **both** assertions firing (the scoped predicate holding) |
+| `sq-02` | **pass**, 35.0 s — the `qal-j47` fix on its fourth build |
+
+`qal-j43` has now been seen on five distinct app builds without drifting back. `sq-02`'s fix has
+held on four. Three consecutive cycles (15, 16, 17) have run clean on checkpoint noise and budget.
