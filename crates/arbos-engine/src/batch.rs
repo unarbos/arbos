@@ -619,6 +619,15 @@ async fn run_with_hooks(prepared: Prepared, cx: &RunCx, call: &ToolCall) -> Resu
             }
             out
         });
+    // Anything that may have changed the tree makes the grep index stale
+    // until it is rebuilt: the written tools by their paths, a shell
+    // command that was not read-only whatever it printed.
+    if matches!(name.as_str(), "write" | "edit" | "apply_patch" | "delete")
+        || (name == "bash"
+            && !crate::tool::opt_str(&args, "command").is_some_and(tools::is_readonly_command))
+    {
+        cx.grep.touched();
+    }
     let (body, error, paths) = match &result {
         Ok(out) => (out.body.clone(), None, out.paths.clone()),
         Err(e) => (String::new(), Some(e.to_string()), Vec::new()),

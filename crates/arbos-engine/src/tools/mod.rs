@@ -33,9 +33,18 @@ pub struct GrepHit {
 
 pub trait Grep: Send + Sync {
     fn search(&self, pattern: &str, glob: Option<&str>) -> Result<Vec<GrepHit>>;
+    /// Whether `search` answers from a fresh index. False while the index
+    /// is being built — or is stale because the tree changed since — and
+    /// the caller walks the tree instead, slower and right.
     fn ready(&self) -> bool {
         true
     }
+    /// The tree changed: a tool wrote, edited or deleted files, or ran a
+    /// shell command that may have. The index built at start never
+    /// learned of a file written after it, and the agent's own edits
+    /// were invisible to its own grep. The implementation marks itself
+    /// stale and refreshes in the background.
+    fn touched(&self) {}
 }
 
 /// What the engine needs from whoever runs it. Agents, the user, and the
