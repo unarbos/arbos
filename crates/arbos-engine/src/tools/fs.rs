@@ -1202,14 +1202,21 @@ pub fn find(cwd: &Path, pattern: &str) -> Result<ToolOut> {
 /// `find`, by name or by modification time (newest first).
 pub fn find_sorted(cwd: &Path, pattern: &str, by_mtime: bool) -> Result<ToolOut> {
     let glob = glob::Pattern::new(pattern).unwrap_or_else(|_| glob::Pattern::new("**/*").unwrap());
-    // The kernel's own folder is not the project (see grep). A pattern that
-    // names `.arbos` still reaches it.
+    // The kernel's own folder is not the project (see grep), nor is the
+    // repository's `.git/`: a hidden walk reached it, and `find **/*`
+    // newest-first on a one-file repository answered 27 paths, 26 of them
+    // `.git/…` with the reflog first (#731's shape). A pattern that names
+    // `.arbos` or `.git` still reaches it.
     let want_arbos = pattern.contains(".arbos");
+    let want_git = pattern.contains(".git");
     let mut paths = Vec::new();
     let walker = ignore::WalkBuilder::new(cwd)
         .hidden(false)
         .git_ignore(true)
-        .filter_entry(move |e| want_arbos || e.file_name() != ".arbos")
+        .filter_entry(move |e| {
+            let name = e.file_name();
+            (want_arbos || name != ".arbos") && (want_git || name != ".git")
+        })
         .build();
     for entry in walker.flatten() {
         let path = entry.path();
@@ -2120,6 +2127,64 @@ mod store_address_tests {
             m.files.lock().unwrap().get(DOC).map(String::as_str),
             Some("someone else\n"),
             "the other writer's text stands"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod find_git_tests {
+    use super::*;
+
+    fn repo(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("arbos-find-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".github")).unwrap();
+        let git = |a: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .args(a)
+                    .current_dir(&dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "a\n").unwrap();
+        std::fs::write(dir.join(".github/ci.yml"), "name: ci\n").unwrap();
+        git(&["add", "-A"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "x",
+        ]);
+        dir
+    }
+
+    /// Control on main 04345f70: `**/*` newest-first answered 27 paths, 26
+    /// of them `.git/…`, `.git/logs/HEAD` first. Now the project's two
+    /// files, hidden ones included; `.git` reached only when named.
+    #[test]
+    fn find_lists_the_project_not_the_repositorys_machinery() {
+        let dir = repo("git");
+        let newest = find_sorted(&dir, "**/*", true).unwrap();
+        let lines: Vec<&str> = newest.body.lines().collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines.contains(&"a.txt") && lines.contains(&".github/ci.yml"),
+            "{lines:?}"
+        );
+        let named = find(&dir, ".git/logs/*").unwrap();
+        assert!(
+            named.body.lines().any(|l| l == ".git/logs/HEAD"),
+            "{}",
+            named.body
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
