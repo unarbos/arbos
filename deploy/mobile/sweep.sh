@@ -15,6 +15,14 @@
 # so the way to find the next one is to run them all and read the verdicts
 # together rather than wait to trip over them.
 #
+# Before chasing a fault: check whether its fix is already written and simply
+# unmerged. The sweep runs whatever is checked out, which is `main` unless a
+# cycle says otherwise, and a scenario whose repair sits in an open PR keeps
+# reporting the thing that was fixed. `tool-fold` did exactly that for
+# thirteen cycles — cycle 162 rewrote it four ways over, that work stayed in
+# an open PR, and every sweep since printed the fault it had already
+# disproved. Cycle 173 then blamed the wrong cause for it.
+#
 # This does not judge pass or fail. It prints each scenario's own verdict
 # line, and flags the ones that produced none — a scenario that reached no
 # conclusion is the shape a rotted check takes.
