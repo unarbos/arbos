@@ -72,9 +72,13 @@ shot 01-card
 FIRST=""
 LENGTHS=""
 BASE=""
-total_chars() { ui dump | grep -E "StaticText" | awk '{ n += length($0) } END { print n+0 }'; }
+chars_in() { echo "$1" | grep -E "StaticText" | awk '{ n += length($0) } END { print n+0 }'; }
 for _ in $(seq 1 200); do
-  N=$(total_chars)
+  # One dump, used for all three readings. Taking a second one for the busy
+  # comparison halved the sampling rate and missed the Stop phase of a
+  # 4.7-second turn entirely.
+  DUMP=$(ui dump)
+  N=$(chars_in "$DUMP")
   [ -n "$BASE" ] || BASE=$N
   if [ "$N" -gt "$BASE" ]; then
     [ -n "$FIRST" ] || FIRST=$(since "$T0")
@@ -82,7 +86,21 @@ for _ in $(seq 1 200); do
   fi
   # Stop when the turn ends rather than after a fixed count: a reply still
   # growing must not be cut off by the sampler.
-  ui dump | grep -qE "Worked [0-9]+[sm]" && break
+  # While the turn runs, three things on this screen claim to know whether
+  # the project is busy, and cycle 187 caught them disagreeing: the composer
+  # showed Stop and the transcript showed "Working" while the pill read
+  # "✓ Agents 48" — a tick, which reads as everything finished.
+  #
+  # The pill counts running *workers* (`chat.running`), and a root turn with
+  # no sub-agents is not one. Correct by its own definition, and still a
+  # screen saying two things. Recorded here, not judged: whether the pill
+  # should follow the root turn is a design decision, filed rather than
+  # guessed at.
+  if [ -z "${BUSY_SEEN:-}" ] && echo "$DUMP" | grep -qE "Button +Stop$"; then
+    BUSY_SEEN=$(echo "$DUMP" | grep -oE "(Agents|Working) [0-9]+" | head -1)
+    BUSY_SEEN=${BUSY_SEEN:-no pill}
+  fi
+  echo "$DUMP" | grep -qE "Worked [0-9]+[sm]" && break
   sleep 0.3
 done
 echo "  the reply starts:        ${FIRST:-never}s"
@@ -95,6 +113,11 @@ shot 02-streaming
 # the answer.
 STEPS=$(echo $LENGTHS | wc -w | tr -d ' ')
 SPAN=$(echo $LENGTHS | awk '{print $1 " → " $NF}')
+[ -n "${BUSY_SEEN:-}" ] && case "$BUSY_SEEN" in
+  Working*) echo "  while the composer said Stop, the pill said: $BUSY_SEEN  (they agree)";;
+  *)        echo "  while the composer said Stop, the pill said: $BUSY_SEEN  — the pill counts"
+            echo "                           running workers, so a root turn alone leaves its tick showing";;
+esac
 echo "  the transcript grows in: ${STEPS:-0} step(s)   ${SPAN:-—} characters on screen"
 
 # 2b. streaming — the row's third word, and this file has taken a still
