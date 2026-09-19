@@ -25,7 +25,21 @@ B=com.unarbos.arbos.ios
 . "$HERE/../sim-lib.sh"
 ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 rows() { ui dump | grep -cE "StaticText"; }
-foldline() { ui dump | grep -oE "[0-9]+ tool calls?[^\"]*" | tail -1; }
+# The fold line, and only if a finger could reach it. The transcript grows
+# under the fold while the reply streams, so by the time this is tapped the
+# line has often scrolled above the top of the screen — and the dump carries
+# it anyway, with a negative y. `ui tap` then refuses, quietly, and cycle 197
+# read that refusal as "opening the fold showed nothing more (4 → 4)" and
+# called it a fault in the app. The refusal log added at 195 is what gave it
+# away: `tap '1 tool call' — nothing matching it was on screen`, twice.
+foldline() {
+  ui dump | awk '$2 + 0 > 60 && $2 + 0 < 800' \
+    | grep -oE "[0-9]+ tool calls?[^\"]*" | tail -1
+}
+# Where it is, for when it is nowhere: reported rather than left to guess.
+foldwhere() {
+  ui dump | grep -E "[0-9]+ tool calls?" | awk '{print "y=" $2}' | tr '\n' ' '
+}
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
 xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1
@@ -50,12 +64,24 @@ if ! type_line "$UDID" "$LINE"; then
   echo "         nothing about folding"
   exit 1
 fi
+# Counted before the send, because everything this check waits for is
+# already on the screen from the run before it. Cycle 197 watched it read
+# the *previous* run's fold — "3 tool calls" — and the previous run's
+# "Worked" line, both satisfied the instant they were asked for, and then
+# compare row counts across two overlapping turns. The verdict it produced,
+# "opening the fold showed nothing more", was about a fold it never tapped
+# belonging to a turn it never sent.
+FOLDS_BEFORE=$(ui dump | grep -cE "[0-9]+ tool calls?" | tr -d ' ')
+WORKED_BEFORE=$(ui dump | grep -c "Worked " | tr -d ' ')
 ui tap "Send" >/dev/null 2>&1
 
 FOLD=""
 for _ in $(seq 1 60); do
-  FOLD=$(foldline)
-  [ -n "$FOLD" ] && break
+  NOW_FOLDS=$(ui dump | grep -cE "[0-9]+ tool calls?" | tr -d ' ')
+  if [ "$NOW_FOLDS" -gt "$FOLDS_BEFORE" ]; then
+    FOLD=$(foldline)
+    [ -n "$FOLD" ] && break
+  fi
   sleep 2
 done
 xcrun simctl io "$UDID" screenshot "$OUT/01-folded.png" >/dev/null 2>&1
@@ -72,8 +98,10 @@ echo "  the fold reads: $FOLD"
 # reported "closing it left 1 row behind" — that row was the model's answer
 # landing, not the fold failing to close. Counts are only comparable over a
 # transcript that has stopped moving.
+# This run's ending, not the one already on screen when it started.
 for _ in $(seq 1 60); do
-  case "$(ui dump)" in *"Worked "*) break;; esac
+  NOW_WORKED=$(ui dump | grep -c "Worked " | tr -d ' ')
+  [ "$NOW_WORKED" -gt "$WORKED_BEFORE" ] && break
   sleep 2
 done
 sleep 2
@@ -83,8 +111,20 @@ echo "  text rows while closed: $CLOSED"
 echo
 echo "== open it =="
 # Tapped by the words it shows, not by a position: the fold moves as the
-# transcript grows underneath it.
-ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
+# transcript grows underneath it. The refusal is not swallowed — a tap that
+# never landed and a fold that revealed nothing leave the same screen, and
+# telling them apart afterwards is impossible.
+FOLDTAP=$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")
+if ! OUT_TAP=$(ui tap "$FOLDTAP" 2>&1); then
+  echo "  the tap was refused: $OUT_TAP"
+  echo "  the fold line sits at $(foldwhere)— the screen is 852 points tall,"
+  echo "  so anything at a negative y has scrolled above the top."
+  echo
+  echo "VERDICT: cannot say — the fold was never opened, so nothing about"
+  echo "         opening it was measured. This is not a fault in the fold."
+  echo "stills in $OUT"
+  exit 0
+fi
 sleep 3
 OPEN=$(rows)
 xcrun simctl io "$UDID" screenshot "$OUT/02-open.png" >/dev/null 2>&1
@@ -92,7 +132,7 @@ echo "  text rows while open:   $OPEN"
 
 echo
 echo "== close it again =="
-ui tap "$(echo "$FOLD" | grep -oE "^[0-9]+ tool calls?")" >/dev/null 2>&1
+ui tap "$FOLDTAP" >/dev/null 2>&1
 sleep 3
 AGAIN=$(rows)
 echo "  text rows closed again: $AGAIN"

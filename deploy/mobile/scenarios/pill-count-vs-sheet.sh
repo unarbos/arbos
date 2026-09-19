@@ -135,8 +135,13 @@ grep "$TAG" "$LABELS" | cut -c1-70 | sed 's/^/    /'
 TOTALS="the totals read: pill $COUNT, sheet $ROWS"
 if [ "$ROWS" -lt "$COUNT" ]; then
   PAGES=$(echo "$HOW" | grep -oE "[0-9]+" | head -1)
-  TOTALS="$TOTALS — the sheet's paging fell short over $PAGES page(s), which is"
-  TOTALS="$TOTALS this rig, not the app: both come from one array"
+  # Worded as what it is. "Fell short" in the headline read as a finding
+  # every run, and the paragraph underneath then spent five lines explaining
+  # that it was not one — which is the wrong way round. A reader who takes
+  # the verdict line at its word should not be misled by it.
+  TOTALS="$TOTALS — not comparable on this project, because rows are counted"
+  TOTALS="$TOTALS by their label and it has more agents than distinct goals"
+  TOTALS="$TOTALS (paged $PAGES time(s), so the swipe works)"
 fi
 
 if [ "$MINE" = 3 ]; then
