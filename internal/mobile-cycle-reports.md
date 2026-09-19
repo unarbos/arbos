@@ -4629,3 +4629,40 @@ time. The genuinely untested thing here was the timing, not the coverage.
 Still: `media/mobile/cycle-156/01-back-from-away.png`.
 
 **PR:** [#733](https://github.com/unarbos/arbos/pull/733), harness only.
+
+## Cycle 157 — the journey, and the build it could not name
+
+Oldest-first put the journey row at cycle 96, and the last run was 21 hours
+back, so this cycle ran it.
+
+**It runs clean** (M-485). Fifteen steps pass, two are scored by eye, and
+four are unverified with a stated reason each: J4's mid-flight half, J5's
+Stop not being exercised by that step, J8 needing a kernel restart the phone
+cannot cause, and PUSH being off until the key exists. The kernel was asked
+on the attach socket at both ends and answered `c3247332dc4e` both times. All
+three phone-only steps pass, with the model naming the photograph: *Ice plant
+flowers, predominantly magenta.*
+
+Worth noting in passing: the list row read `phone, Idle, home, now`. The
+separator stays gone on a build the loop made itself.
+
+**Two faults, both in the journey rather than the app.**
+
+The run record has always said `"branch": "main@unknown"` (M-486). `APP_BUILD`
+was read with a default at the single place it is used and set nowhere, so
+every journey record ever written names the kernel it talked to and not the
+app it drove. It now carries the checkout's branch and sha — `main@959e5960`.
+That is only the app's build while the installed binary is not older than the
+sources, so the run asks that question, the same one `mac-cycle.sh` asks
+after installing, and writes the doubt into the record when the answer is no.
+
+And I started the run by handing it `157` (M-487). The journey takes a target
+— `pod` or `<machine>/<project>` — not a cycle. It accepted the number,
+walked six steps, and failed with `J1 FAIL no 157 row on the list`, which
+reads like the app lost a project. It now refuses a target that cannot be
+one, the same guard `connect-times-by-engine.sh` already carries.
+
+Evidence: `media/mobile/cycle-157/` and the 19 stills in
+`media/mobile/journey/0919-062153/`.
+
+**PR:** [#737](https://github.com/unarbos/arbos/pull/737), harness only.
