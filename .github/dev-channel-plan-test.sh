@@ -53,6 +53,18 @@ case "$(awk -v s="$sha" '$1==s{print $2}' "$TABLE")" in
   pending) json="{\"workflow_runs\":[{\"status\":\"in_progress\",\"conclusion\":null,\"run_started_at\":\"$(now_iso 30)\"}]}" ;;
   # Started half an hour ago: past any patience.
   stuck)   json="{\"workflow_runs\":[{\"status\":\"in_progress\",\"conclusion\":null,\"run_started_at\":\"$(now_iso 1800)\"}]}" ;;
+  # Running when first asked, green when asked again: a commit whose green
+  # lands while a run is still here to see it. The marker makes the second
+  # answer differ from the first, which is the whole of the case.
+  late)
+    marker="$(dirname "$TABLE")/late-$sha"
+    if [ -e "$marker" ]; then
+      json="{\"workflow_runs\":[{\"status\":\"completed\",\"conclusion\":\"success\",\"updated_at\":\"$(now_iso 5)\"}]}"
+    else
+      : > "$marker"
+      json="{\"workflow_runs\":[{\"status\":\"in_progress\",\"conclusion\":null,\"run_started_at\":\"$(now_iso 30)\"}]}"
+    fi
+    ;;
   *)       json='{"workflow_runs":[]}' ;;
 esac
 printf '%s' "$json" | jq -r "$jqexpr"
@@ -128,6 +140,10 @@ check() {
   local name="$1" tip="$2" here="$3" feed="$4" expect="$5"; shift 5
   local EVENT_CONCLUSION_OVERRIDE="${EVENT_CONCLUSION_OVERRIDE-}"
   : > "$tmp/table"
+  # `late` remembers that it has been asked once. That memory belongs to
+  # one case; left lying about, the next case's first ask is answered as
+  # though it were the second, and a case meant to fail passes.
+  rm -f "$tmp"/late-*
   while [ $# -gt 0 ]; do printf '%s %s\n' "$1" "$2" >> "$tmp/table"; shift 2; done
   # The event that started the run is the commit it is about, and its
   # conclusion follows what the table says CI did — except that "pending"
@@ -150,6 +166,7 @@ check() {
   local why
   why="$( cd "$repo" && \
     PATH="$tmp/bin:$PATH" TABLE="$tmp/table" FEED="$feed" PATIENCE=600 TIP="$tip" \
+    WATCH="${WATCH_OVERRIDE:-0}" BEAT=0 \
     EVENT_SHA="$EVENT_SHA" EVENT_CONCLUSION="$EVENT_CONCLUSION" \
     HAVE_KEY=true SCAN=40 TAG=dev GITHUB_REPOSITORY=o/r \
     GITHUB_OUTPUT="$out" GITHUB_STEP_SUMMARY=/dev/null \
@@ -335,6 +352,36 @@ EVENT_SHA_OVERRIDE=none check \
   "a run with no event of its own still goes back past a red tip" \
   "${SHA[4]}" "${SHA[4]}" 0 3 \
   "${SHA[4]}" failed "${SHA[3]}" success
+
+# --- staying, rather than ending on a promise -----------------------------
+# Every ending here used to be "somebody will come back and ask again".
+# On 2026-09-19 nobody did, three times: a commit's failing CI run
+# finished first and fired this workflow, which correctly published
+# nothing, and then the green sibling completed and fired no event at all.
+#
+# So a run that would have ended on that promise stays and asks again. The
+# cases below set WATCH above zero; every case above leaves it at zero,
+# which is the old behaviour exactly, so they pin what staying must not
+# change.
+WATCH_OVERRIDE=5 EVENT_SHA_OVERRIDE=none check \
+  "a run stays, and sees the green that lands while it waits" \
+  "${SHA[4]}" "${SHA[3]}" 0 4 \
+  "${SHA[4]}" late "${SHA[3]}" success
+
+# Nothing green *yet* is not nothing green, so long as something is still
+# running. This is the 14:08 shape: the tip's failing run has fired, its
+# green sibling has not finished, and there is nothing behind it.
+WATCH_OVERRIDE=5 EVENT_SHA_OVERRIDE=none check \
+  "a run with nothing green yet stays for the one still running" \
+  "${SHA[4]}" "${SHA[4]}" 0 4 \
+  "${SHA[4]}" late
+
+# And the opposite: nothing running means no amount of waiting helps, so
+# the run must not sit there burning a runner.
+WATCH_OVERRIDE=5 EVENT_SHA_OVERRIDE=none check \
+  "a run with nothing running does not wait for what cannot come" \
+  "${SHA[4]}" "${SHA[4]}" 0 none \
+  "${SHA[4]}" failed "${SHA[3]}" failed "${SHA[2]}" failed "${SHA[1]}" failed
 
 echo
 if [ "$failures" -eq 0 ]; then
