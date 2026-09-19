@@ -183,6 +183,13 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, args: &Value) -> Result<ToolOut
         .map_err(|_| anyhow::anyhow!("file not found: {}", file.display()))?;
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let had_trailing_nl = text.ends_with('\n');
+    // The file's own line ending, kept. `lines()` drops the `\r` of a
+    // CRLF file (a Windows checkout, `eol=crlf` in .gitattributes) and a
+    // join on "\n" wrote every line back LF: one edited line, and the
+    // diff was the whole file — blame gone, the review a wall of
+    // line-ending churn, `changes` reporting a rewrite the model never
+    // meant. A file with more CRLF than bare LF is CRLF.
+    let eol = line_ending(&text);
 
     let mut resolved = Vec::new();
     for op in &ops {
@@ -221,9 +228,9 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, args: &Value) -> Result<ToolOut
         }
     }
 
-    let mut out = lines.join("\n");
+    let mut out = lines.join(eol);
     if had_trailing_nl && !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
+        out.push_str(eol);
     }
     if out == text {
         return Err(fs::unchanged(&file));
@@ -524,6 +531,13 @@ fn check_overlap(ops: &[(usize, usize, OpKind, String, Option<String>)]) -> Resu
     Ok(())
 }
 
+/// "\r\n" when the text has more CRLF endings than bare LF, else "\n".
+pub fn line_ending(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    if crlf > 0 && crlf >= lf { "\r\n" } else { "\n" }
+}
+
 fn content_lines(content: &str) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();
@@ -576,6 +590,49 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Control on main 02564618: one line edited in a five-line CRLF
+    /// file, and the file came back with 0 CRLF endings and 5 LF — the
+    /// whole file in the diff. Now 5 CRLF, the edited line and the
+    /// inserted one included, and a LF file stays LF.
+    #[test]
+    fn a_crlf_file_keeps_its_line_endings_through_an_edit() {
+        let dir = tmp();
+        let crlf = "fn a() {}\r\nfn b() {}\r\nfn c() {}\r\nfn d() {}\r\nfn e() {}\r\n";
+        fs::write(dir.join("a.rs"), crlf).unwrap();
+        let h = line_tag("fn c() {}");
+        edit(
+            &dir,
+            &dir,
+            "a.rs",
+            &json!({"anchor": format!("3:{h}"), "content": "fn c() { 1 }\nfn c2() {}"}),
+        )
+        .unwrap();
+        let text = fs::read_to_string(dir.join("a.rs")).unwrap();
+        assert_eq!(
+            text,
+            "fn a() {}\r\nfn b() {}\r\nfn c() { 1 }\r\nfn c2() {}\r\nfn d() {}\r\nfn e() {}\r\n"
+        );
+        assert_eq!(text.matches("\r\n").count(), 6);
+        assert_eq!(text.matches('\n').count(), 6, "no bare LF");
+        // A LF file is untouched by the rule.
+        fs::write(dir.join("b.rs"), "x\ny\n").unwrap();
+        let h = line_tag("y");
+        edit(
+            &dir,
+            &dir,
+            "b.rs",
+            &json!({"anchor": format!("2:{h}"), "content": "z"}),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(dir.join("b.rs")).unwrap(), "x\nz\n");
+        assert_eq!(
+            line_ending("a\r\nb\nc\n"),
+            "\n",
+            "a stray CR in a LF file is not the rule"
+        );
+        assert_eq!(line_ending("a\r\nb\r\nc\n"), "\r\n");
     }
 
     #[test]
