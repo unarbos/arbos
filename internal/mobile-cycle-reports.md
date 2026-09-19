@@ -5833,3 +5833,38 @@ Film, still and score in `media/mobile/cycle-187/`; 19 journey stills in
 `media/mobile/journey/0919-193749/`.
 
 **PR:** [#792](https://github.com/unarbos/arbos/pull/792), harness only.
+
+## Cycle 188 — the list does know, and I nearly said otherwise
+
+Cycle 186 put a stillness wait into every pager, so this cycle swept to see
+what that broke. Nothing (M-579): 25 scenarios, none silent, none without a
+verdict. The only fault is `tool-fold`, whose repair has been open since
+cycle 162. Cycle 183's notifications fix is visibly working in the summary
+too.
+
+**Then I followed cycle 187's thread and got it wrong** (M-580). That cycle
+found a chat's pill showing a tick while its own composer showed Stop, and
+the obvious next question is whether the *list* — the screen you scan to see
+what is busy — has the same blind spot. I sent a short task, waited six
+seconds, walked out to the list and read `phone, Idle, home, now`.
+
+That looked like a finding. It was a slow hand and a short task: the turn had
+almost certainly finished before I looked.
+
+The check I wrote to measure it properly says the opposite. It confirms the
+turn is still running from the chat side immediately before and immediately
+after reading the row, and it reads **`Working`**.
+
+**Its first run refused to tell me that** (M-581), which is the part worth
+keeping. It saw `Working` during, then found the composer back on
+`Microphone`, and declined — because a row saying Working might simply have
+been right about a turn that had ended. Counting to forty ends too soon to
+ask the question at all. A worker sleeping 45 seconds outlasts the walk out
+and back, and the second run answered cleanly.
+
+So the list knows. Cycle 187's pill finding stands on its own and does not
+generalise to the list, which is worth knowing before anyone acts on it.
+
+Evidence in `media/mobile/cycle-188/`.
+
+**PR:** [#793](https://github.com/unarbos/arbos/pull/793), harness only.
