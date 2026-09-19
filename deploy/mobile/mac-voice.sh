@@ -37,6 +37,30 @@ ffmpeg -v error -y -i "$OUT/voice/call.mp4" -vf "scale=786:-2,fps=30" -c:v libx2
 grep -E "^metric|phase|transcript:|reply:" "$OUT/voice/console.log" | head -60 | tee "$OUT/voice/metrics.txt"
 
 echo
-echo "reply_first_audio above is for a question the kernel answers, not a"
-echo "greeting the gateway answers itself. On one build those were 12223 ms"
-echo "and 1244 ms in the same call, so the two are never compared."
+# One run produces two of these, and the note used to sit under the wrong
+# one. The clip asks a question the kernel must answer; the barge that
+# follows is small talk the gateway answers itself. Cycle 184 measured
+# 6422 ms and 1240 ms in the same run, and a reader seeing only the second
+# with a note about the first would call the next delegated reading a
+# tenfold regression — which is the confusion cycle 170 wrote the note to
+# prevent.
+#
+# So pair each number with the question it followed.
+echo "what each reply timing answered:"
+python3 - "$OUT/voice/console.log" <<'PY'
+import re, sys
+said = None
+for line in open(sys.argv[1], errors="ignore"):
+    if line.startswith("transcript:"):
+        said = line.split(":", 1)[1].strip()
+    m = re.match(r"metric reply_first_audio (\d+)ms", line)
+    if m and said:
+        kind = "the kernel had to answer" if len(said) > 40 else "the gateway answered it itself"
+        print(f"  {m.group(1):>6} ms   after \"{said[:52]}\"")
+        print(f"            {kind}")
+        said = None
+PY
+echo
+echo "The two are never compared. A greeting answered by the gateway and a"
+echo "question waiting on the kernel are different measurements wearing one"
+echo "metric name."
