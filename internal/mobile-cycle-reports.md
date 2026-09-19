@@ -6115,3 +6115,65 @@ Stills in `media/mobile/cycle-193/`:
 No recording this cycle — 192 carried the third-cycle film.
 
 **PR:** [#798](https://github.com/unarbos/arbos/pull/798), harness only.
+
+## Cycle 194 — a journey step that could never pass
+
+The two oldest rows: the returning user, untouched since 182, and the
+journey, untouched since 187.
+
+**The returning user is clean on all three cases** (M-607). Suspended two
+minutes and brought back: the same screen, the same last three lines.
+Reclaimed with the process killed, as it would be after a night: put back in
+the chat he left. And the case where the project moved on while the phone was
+away — 2 lines on screen going away, 6 coming back, and the turn's ending,
+`Worked 1m 21s`.
+
+**The journey is clean and matches cycle 187** (M-606): 16 pass, 4
+unverified, on `main@4e44f4de`, with the kernel's own build in the record —
+`arbos-kernel 0.2.0 c3247332dc4e protocol 1`. Run twice, seven minutes apart,
+identical.
+
+**But one of those four could never have passed** (M-603). J4 asks whether an
+instruction typed while work is running is taken by the running work. Its
+verdict counted `turn_complete` frames between the challenge and the
+follow-up and called any of them "the turn had ended". The kernel delegates
+the challenge to a worker and its own turn completes one frame later:
+
+```
+ 4979 tool          spawn fix J213738 mathlib challenge
+ 4981 turn_complete
+ 4983 user          Also add a line to the CHANGELOG saying who asked...
+```
+
+The frame is always there, so the step was unverifiable by construction. The
+history says so plainly — twenty-four runs on record, 22 unverified, 1 fail,
+1 unexercised, **no passes**. Every one of those runs reads as fine.
+
+**What J4 is really asking is who did the work** (M-604). Three answers, told
+apart by the tool frames in the follow-up's own turn: a `spawn` is a second
+worker and already fails; file tools mean the kernel did it itself; neither
+means the running worker took it. Scoped to that turn, or the `bash date`
+from J5's clock question counts as CHANGELOG work.
+
+Replayed against the first run's transcript: follow-up at 4983, next user
+frame at 4991, tools between them `read edit`. Then a second full journey on
+a fresh challenge id said the same thing out loud (M-605):
+
+> J4 U — CHANGELOG carries QA-J215053, but the kernel made the edit itself
+> rather than pass it to the running worker (tools after the line: read edit)
+
+Two independent runs, one reading.
+
+**The behaviour underneath is filed, not guessed at.** The outcome is right
+every time — J7 finds the tag on the worker's branch — but two writers on one
+file is a conflict waiting for a slower worker, and a follow-up typed while
+work runs reads as "tell whoever is doing this".
+`features-inbox/2026-09-19-a-mid-flight-instruction-does-not-reach-the-worker.md`
+puts the decision plainly: route it to the worker and J4 starts passing, or
+retire J4's pass case rather than leave a target nobody hits.
+
+Stills in `media/mobile/cycle-194/` — the returning user's five, and two from
+the journey. The journey's own evidence is in
+`media/mobile/journey/0919-215053/`.
+
+**PR:** [#799](https://github.com/unarbos/arbos/pull/799), harness only.

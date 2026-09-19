@@ -1032,9 +1032,31 @@ Cumulative read: **416**.
 
 Spend $15.28.
 
-## Next (cycle 48)
+## Cycle 48 (2026-09-19) — the second-draw pool's last fourteen: the regression members hold their shapes; the pool is spent
 
-1. The second-draw pool has 14 left (`second_draw_pool.next`), all many-draw regression members; the loop's reading stands that they will not change the account. It runs them if the coordinator says so. Landed steps and new failures read as they arrive.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 bd50ec58eddc protocol 1`** = `main` head, built in the worktree, label proved; the one engine change since 249ddb5f (7ccaa99a: the third `await` ceiling in a row says the job is not finishing) is a tool behaviour, not a contract change. Jev off. Harness d1226d8c (#734). Network cut, no cap hit. The pool's last fourteen (`second14f.txt`, 14–33 draws each) at `-r 2`, 28 rollouts, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-48-preregistration.md)). $27.44. Two host pauses (19:36–20:35, 20:41–21:31); one rollout died in the second — the model stream came back dead mid-fix, "did not answer (2 tries)", a half-applied patch left in the tree (matplotlib-24870 `d87bab3b`, 53 PASS_TO_PASS failures from the partial edit) — not read as an agent failure. Walls not read. **18 of 28** solved — a count on a pool selected for failure; these members' long histories say what to expect and this pair matched them.
+
+**Against the earlier readings.** The seven high-rate members (astropy-13236, astropy-14182, django-11728, django-16454, pytest-6197, scikit-learn-14629, sphinx-8035) solved both. The flippy ones flipped (xarray-6938, pylint-6386, pylint-8898, django-15252: one of two each; matplotlib-24870: 0 of 1 read). The two near-floor members stayed there (django-15022 now 1 of 26, sympy-17318 now 4 of 23). Nine failures read, all at the same site and class as their earlier readings:
+
+- django-15022 ×2 — per-word `Exists`/lookup application in `get_search_results`, where the gold restructures the join; the three hidden tests still fail; C.
+- sympy-17318 ×2 — `split_surds` guarded in `radsimp.py`, `sqrtdenest.py` untouched: **B, the producer**, the cycle-27 instance, nineteen of twenty-three now.
+- xarray-6938 ×1 — `swap_dims` in `dataset.py`, `variable.py`'s `to_index_variable` returning `self` untouched: **B**, the other cycle-27 instance.
+- django-15252 ×1 — `recorder.py` (where the table is made) rather than `executor.py` (where migration is decided): B, as read before.
+- pylint-6386 ×1 — `nargs=0` on `verbose` alone against a four-file gold; the `-v` instance of cycle 20's E2 reading; C.
+- pylint-8898 ×1 — the twin `_regexp_paths_csv_transfomer` named in the reply, `utils.py` untouched; C.
+- matplotlib-24870 ×1 — both files, a `levels_are_default` flag where the gold checks dtype; `test_bool_autolevel` fails; C.
+
+Across cycles 43–48: **72 repeat failures, 71 at the same site and class.**
+
+**The second-draw pool is spent.** Sixty-four instances, 112 rollouts, $115 across cycles 43–48. What it gave: the per-instance reading of the account holds across draws and kernels (71 of 72), and reachability moved on four of twenty-eight twice-failed instances. What it did not give: any failure outside the account, on any draw. The loop has now read every instance in its order at least twice and every once-failed instance at least four times.
+
+Cumulative read: **425**.
+
+Spend $27.44.
+
+## Next (cycle 49)
+
+1. Both pools are spent (never-run: cycle 42; once-failed second draws: cycle 48). New material now comes only from landed steps and new failures. Until the coordinator names another source, the loop reads those as they arrive and otherwise holds.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice — seven of seven (42, 47); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 62 of 63 (43–47); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45); two halves of one fix, each rollout doing one (46); a no-change verdict with the rule's evidence honestly met and the hidden test beyond the issue (47).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice — seven of seven (42, 47); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 71 of 72 (43–48); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45); two halves of one fix, each rollout doing one (46); a no-change verdict with the rule's evidence honestly met and the hidden test beyond the issue (47).
