@@ -71,6 +71,11 @@ DEFAULT=(
 #   photo-reaches-the-model.sh
 #     drives the system photo picker by coordinate, which is the one thing
 #     here that a different simulator would break silently.
+#   call-face.sh
+#     opens a call per project and samples the glyph under the orb; three
+#     calls is three to four minutes, and the question it measures is filed
+#     as a decision rather than a fault, so it runs when that decision is
+#     being made.
 #   call-text-in-chat.sh, first-words-on-a-slow-connect.sh
 #     both drive a real call, like the three above. Named here because they
 #     were out with no reason written down, which is the state this list
