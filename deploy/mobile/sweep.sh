@@ -119,3 +119,13 @@ echo "$SILENT of ${#SCENARIOS[@]} printed nothing at all."
 echo "$NOVERDICT of ${#SCENARIOS[@]} printed output but reached no verdict — read those first."
 echo "logs in $OUT — read any scenario whose verdict surprises you, especially a"
 echo "confident one, since a rotted check is confident by construction."
+
+# The rows this sweep just exercised, read from the scenarios themselves. The
+# ledger ages a row by the last cycle that named it, and a sweep names
+# nothing — so anything it covers grows old on paper while being run every
+# time (M-484).
+echo
+echo "coverage rows this sweep exercised:"
+for name in "${SCENARIOS[@]}"; do
+  grep -h "^# COVERS:" "$HERE/scenarios/$name" 2>/dev/null
+done | sed 's/^# COVERS: */  /' | sort -u

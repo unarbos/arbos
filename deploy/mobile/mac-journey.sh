@@ -337,3 +337,12 @@ if [ -z "${APP_BUILD:-}" ]; then
 fi
 echo "--- app   $APP_BUILD"
 python3 "$HERE/journey-record.py" "$O" "$TARGET" "$APP_BUILD" "${RUN_NOTES:-}"
+
+# What this run covers, named from its own declaration, so whoever writes the
+# ledger credits every row it exercised. Cycle 157 ran this and credited one
+# of its two rows; the rotation then sent cycle 169 to re-run a row that had
+# passed twelve cycles earlier, because a row's age is the last cycle that
+# *named* it.
+echo
+echo "coverage rows this run exercised:"
+grep "^# COVERS:" "$0" | sed 's/^# COVERS: */  /'
