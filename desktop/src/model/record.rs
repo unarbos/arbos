@@ -43,6 +43,11 @@ pub struct Record {
     /// running turn must not.
     #[serde(default)]
     pub rank: i64,
+    /// How long the kickoff turn took. That turn has no prompt to stamp,
+    /// so without this the fold read *Worked 7s* until the relaunch and
+    /// the run's own words after it (F-223, cycle 58).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kickoff_secs: Option<u32>,
     pub items: Vec<ChatItem>,
     /// What was sitting in the composer when the file was last written.
     /// Empty is the common case and stays off the wire.

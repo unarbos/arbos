@@ -1268,8 +1268,15 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
                 meta.insert("label".into(), serde_json::Value::String(label.to_string()));
                 tool.meta = Some(meta);
             }
+            // The kernel emits the call once as it starts — no `ended`, no
+            // body — and again when it returns. The first is a running
+            // card, not a finished one: read as complete it drew a green
+            // "Ran …" with nothing in it for the whole of a 34 s command
+            // (F-220, cycle 58). A recorded line always has its end.
             tool.status = if rec.error.is_some() {
                 ToolCallStatus::Failed
+            } else if rec.ended.is_none() && !recorded {
+                ToolCallStatus::InProgress
             } else {
                 ToolCallStatus::Completed
             };

@@ -2596,6 +2596,241 @@ fn diff_card(
         .into_any_element()
 }
 
+/// How many rows of one file the review shows before it says there is
+/// more: a whole-tree review is read, not scrolled through line by line.
+const REVIEW_MAX_LINES: usize = 400;
+
+/// Cursor's Review: the tree's changes as a diff, one section per file —
+/// its name and `+N −M` over the rows, each row a line number, a sign, and
+/// the code with a wash on the changed lines — the same rows the edit card
+/// draws (F-222, cycle 58). The Files Changed card's Review had opened the
+/// unified diff as a text file: `diff --git`, `index`, `@@` lines in one
+/// colour, headed by the scratch file's path and *unsaved*.
+pub(crate) fn review_view(theme: &Theme, text: &str) -> AnyElement {
+    let files = split_unified_diff(text);
+    if files.is_empty() {
+        return div()
+            .p(px(16.))
+            .text_style(TextStyle::Callout)
+            .text_color(theme.text_muted)
+            .child("No changes.")
+            .into_any_element();
+    }
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(12.))
+        .children(files.into_iter().map(|(name, hunk)| {
+            let rows = parse_unified_diff(&hunk);
+            let add = rows.iter().filter(|row| row.kind == DiffKind::Add).count();
+            let del = rows.iter().filter(|row| row.kind == DiffKind::Del).count();
+            let more = rows.len() > REVIEW_MAX_LINES;
+            let shown: Vec<DiffRow> = rows.into_iter().take(REVIEW_MAX_LINES).collect();
+            let source: String = shown
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let spans: Spans =
+                language_for_path(&name).and_then(|lang| syntax::highlight(&source, lang));
+            let digits = shown
+                .iter()
+                .filter_map(|row| row.num)
+                .max()
+                .unwrap_or(0)
+                .to_string()
+                .len()
+                .max(2);
+            let num_w = digits as f32 * 7.2;
+            let leaf = std::path::Path::new(&name)
+                .file_name()
+                .and_then(|leaf| leaf.to_str())
+                .unwrap_or(&name)
+                .to_owned();
+            div()
+                .w_full()
+                .rounded(px(CARD_RADIUS))
+                .bg(ink(0.04))
+                .border_1()
+                .border_color(theme.border)
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.))
+                        .px(px(CARD_PAD_X))
+                        .py(px(CARD_PAD_Y))
+                        .child(
+                            icons::icon(icons::files::DOCUMENT)
+                                .size(px(13.))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(0.))
+                                .flex_1()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(theme.text)
+                                .child(spaced_label(leaf.clone(), theme.text, theme)),
+                        )
+                        .when(name != leaf, |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.text_faint)
+                                    .child(SharedString::from(name.clone())),
+                            )
+                        })
+                        .when(add + del > 0, |row| row.child(diff_badge(theme, add, del))),
+                )
+                .child(
+                    div()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .py(px(4.))
+                        .flex()
+                        .flex_col()
+                        .bg(diff_editor_bg(theme))
+                        .children({
+                            let mut offset = 0usize;
+                            shown
+                                .into_iter()
+                                .map(|row| {
+                                    let start = offset;
+                                    offset += row.text.len() + 1;
+                                    diff_row(theme, row, start, &spans, num_w)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .when(more, |body| {
+                            body.child(
+                                div()
+                                    .px(px(CARD_PAD_X))
+                                    .py(px(2.))
+                                    .font_family(theme.font_mono.clone())
+                                    .text_size(px(MONO_SIZE))
+                                    .line_height(px(MONO_LEAD))
+                                    .text_color(theme.text_faint)
+                                    .child("⋯"),
+                            )
+                        }),
+                )
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
+/// A worker's own edits as one unified diff, for its Review (F-228): each
+/// successful edit call's recorded diff (the kernel's numbered form, or a
+/// unified one) becomes a `diff --git` section with one hunk. The hunk's
+/// starts come from the first numbered row; the review's parser counts
+/// from there.
+pub(crate) fn worker_unified_diff(items: &[ChatItem]) -> String {
+    // One section per file, its edits as hunks in order: a file the worker
+    // touched twice is one card with two hunks, as the card's row counts
+    // it once.
+    let mut files: Vec<(String, String)> = Vec::new();
+    for item in items {
+        let ChatItem::Tool {
+            kind,
+            label,
+            output,
+            diff,
+            status: ToolStatus::Success,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if coalesce_kind(*kind, label).unwrap_or(*kind) != ToolKind::Edit {
+            continue;
+        }
+        let path = tool_rest(label)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let source = diff
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(output);
+        let rows: Vec<DiffRow> = parse_diff(source)
+            .into_iter()
+            .filter(|row| row.kind != DiffKind::Gap)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let start = rows.iter().find_map(|row| row.num).unwrap_or(1);
+        let mut hunk = format!("@@ -{start} +{start} @@\n");
+        for row in rows {
+            let sign = match row.kind {
+                DiffKind::Add => '+',
+                DiffKind::Del => '-',
+                DiffKind::Ctx | DiffKind::Gap => ' ',
+            };
+            hunk.push(sign);
+            hunk.push_str(&row.text);
+            hunk.push('\n');
+        }
+        match files.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, body)) => body.push_str(&hunk),
+            None => files.push((path, hunk)),
+        }
+    }
+    files
+        .into_iter()
+        .map(|(path, body)| {
+            format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body}")
+        })
+        .collect()
+}
+
+/// A unified diff's file sections: the path each `diff --git` header names
+/// (the new side, `+++ b/…`, when it has one) and the hunks under it.
+fn split_unified_diff(text: &str) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut name: Option<String> = None;
+    let mut body = String::new();
+    let flush = |name: &mut Option<String>, body: &mut String, files: &mut Vec<(String, String)>| {
+        if let Some(name) = name.take() {
+            files.push((name, std::mem::take(body)));
+        }
+        body.clear();
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            flush(&mut name, &mut body, &mut files);
+            // `a/path b/path`; the `b/` side is the file as it is now.
+            name = Some(
+                rest.rsplit_once(" b/")
+                    .map(|(_, path)| path.to_owned())
+                    .unwrap_or_else(|| rest.to_owned()),
+            );
+            continue;
+        }
+        if name.is_none() {
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            name = Some(path.to_owned());
+        }
+        // The hunk parser skips the `index`, `---`, `+++` lines itself.
+        body.push_str(line);
+        body.push('\n');
+    }
+    flush(&mut name, &mut body, &mut files);
+    files
+}
+
 fn diff_editor_bg(theme: &Theme) -> Hsla {
     if theme.appearance.is_light() {
         theme.bg
@@ -2876,6 +3111,15 @@ fn parse_hashline_diff(src: &str) -> Vec<DiffRow> {
             })
         })
         .collect()
+}
+
+/// A line said `n` times over one turn, once: `text · ×n`.
+fn times(text: &str, n: usize) -> String {
+    if n > 1 {
+        format!("{text} · ×{n}")
+    } else {
+        text.to_owned()
+    }
 }
 
 /// Cursor's file view: a short snippet under "Read foo.rs L40-69".
@@ -3493,7 +3737,13 @@ pub fn render(
                 .w_full()
                 .max_w(px(column))
                 .self_center()
-                .child(files_changed_card(chat.cwd.clone(), changes, &theme, cx))
+                .child(files_changed_card(
+                    chat.cwd.clone(),
+                    changes,
+                    own_edits.as_ref().map(|_| chat.id),
+                    &theme,
+                    cx,
+                ))
                 .into_any_element(),
         );
     }
@@ -4378,9 +4628,29 @@ fn zone(
     // they were the answer to it (his report 2026-09-17-8). Taken here at
     // the first steer card; otherwise after the tail.
     let mut workers = workers;
+    // The same kernel line again and again — a fallback notice and the
+    // empty-reply nudge alternating twelve times over one turn (cycle 58,
+    // a worker on a model that kept returning nothing) — is one line with
+    // a count, not a column of them. Cursor never shows such a run; ours
+    // says it once and says how often.
+    let mut repeats: HashMap<&str, usize> = HashMap::new();
+    for item in &chat.items[turn.answer_from.max(body_start)..turn.range.end] {
+        match item {
+            ChatItem::Notice { text, .. } | ChatItem::Nudge(text) => {
+                *repeats.entry(text.as_str()).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+    let mut said: HashSet<&str> = HashSet::new();
     // The tail starts where the body ended: the report line under a wake
     // segment's header is drawn above, not again here.
     for ix in turn.answer_from.max(body_start)..turn.range.end {
+        if let ChatItem::Notice { text, .. } | ChatItem::Nudge(text) = &chat.items[ix]
+            && !said.insert(text.as_str())
+        {
+            continue;
+        }
         if inline_user(&chat.items, ix)
             && matches!(chat.items[ix], ChatItem::User(_))
             && let Some((lines, _)) = workers.take()
@@ -4450,8 +4720,10 @@ fn zone(
             ChatItem::From { who, text, images } => {
                 from_block(chat, ix, who, text, images, &theme, window, cx)
             }
-            ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
-            ChatItem::Nudge(text) => page_nudge(text, &theme),
+            ChatItem::Notice { text, failed } => {
+                notice(chat, ix, &times(text, repeats[text.as_str()]), *failed, &theme, cx)
+            }
+            ChatItem::Nudge(text) => page_nudge(&times(text, repeats[text.as_str()]), &theme),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
             // A steer typed after the answer began streaming: its bubble,
@@ -4972,7 +5244,7 @@ fn run_fold(
                     .flex()
                     .flex_col()
                     .gap(px(ITEM_GAP))
-                    .children(range.map(|ix| match &chat.items[ix] {
+                    .children(range.clone().map(|ix| match &chat.items[ix] {
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
                         // A `status` call is the live step, not a row (#185).
                         ChatItem::Tool { label, .. } if is_status_call(label) => {
@@ -5001,6 +5273,26 @@ fn run_fold(
                         ChatItem::Tool { .. } => tool(chat, ix, false, cx),
                         _ => div().into_any_element(),
                     })),
+            )
+        })
+        // A command still running is not history to fold: Cursor keeps the
+        // in-flight terminal card on screen, its output moving, and groups
+        // only the runs that have returned (F-220). The card stands under
+        // the shut line until it settles.
+        .when(!open, |el| {
+            el.children(
+                range
+                    .filter(|ix| {
+                        matches!(
+                            &chat.items[*ix],
+                            ChatItem::Tool {
+                                kind: ToolKind::Execute,
+                                status: ToolStatus::Running,
+                                ..
+                            }
+                        )
+                    })
+                    .map(|ix| tool(chat, ix, false, cx)),
             )
         })
         .into_any_element()
@@ -6431,6 +6723,9 @@ mod selection_tests {
 fn files_changed_card(
     root: std::path::PathBuf,
     changes: &crate::model::changes::GitChanges,
+    // The worker chat whose own edits the card lists (F-111): its Review
+    // shows those edits, not the tree's diff (F-228).
+    worker: Option<u64>,
     theme: &Theme,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -6474,7 +6769,10 @@ fn files_changed_card(
                             bezel::gpui::MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.review_changes(&review_root, None, cx);
+                                match worker {
+                                    Some(chat) => this.review_worker_edits(chat, cx),
+                                    None => this.review_changes(&review_root, None, cx),
+                                }
                             }),
                         ),
                 ),
@@ -6516,8 +6814,9 @@ fn files_changed_card(
                 .child(crate::view::detail::diff_marks(theme, file.add, file.del))
                 .on_mouse_down(
                     bezel::gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.review_changes(&review_root, Some(&path), cx);
+                    cx.listener(move |this, _, _, cx| match worker {
+                        Some(chat) => this.review_worker_edits(chat, cx),
+                        None => this.review_changes(&review_root, Some(&path), cx),
                     }),
                 ),
         );
@@ -6537,7 +6836,10 @@ fn files_changed_card(
                 .child(SharedString::from(format!("+{more} more")))
                 .on_mouse_down(
                     bezel::gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| this.review_changes(&review_root, None, cx)),
+                    cx.listener(move |this, _, _, cx| match worker {
+                        Some(chat) => this.review_worker_edits(chat, cx),
+                        None => this.review_changes(&review_root, None, cx),
+                    }),
                 ),
         );
     }

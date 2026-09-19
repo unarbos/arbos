@@ -49,6 +49,11 @@ const TAIL_LAG: Duration = Duration::from_millis(1000);
 
 /// How often the poll may read a transcript tail for one chat.
 const PROBE_EVERY: Duration = Duration::from_secs(10);
+
+/// How many lines of a running command's output its card holds while the
+/// command runs — what Cursor's running terminal card shows before it
+/// scrolls. The kernel's record brings the whole body when it returns.
+const LIVE_JOB_TAIL: usize = 8;
 /// The tail of the rewind notice while the kernel is still restoring files.
 const RESTORING: &str = "restoring files\u{2026}";
 /// The window's line for a turn that ended with nothing under the prompt.
@@ -855,7 +860,7 @@ impl ChatSession {
             stream_raw: HashMap::new(),
             awaiting_echo: VecDeque::new(),
             kickoff_at: None,
-            kickoff_secs: None,
+            kickoff_secs: record.kickoff_secs,
             readonly: false,
             agent_kind: None,
             unseen: Vec::new(),
@@ -1009,8 +1014,68 @@ impl ChatSession {
                 .as_secs(),
             closed: self.closed,
             rank: self.rank,
+            kickoff_secs: self.kickoff_secs,
             items: self.items.clone(),
             draft: self.draft.clone(),
+        }
+    }
+
+    /// The kernel streamed a piece of an attached command's output while
+    /// the command still holds the tool call (F-220, cycle 58). The call's
+    /// card is on the pane from the kernel's call-start event, running and
+    /// empty; the output goes into it as it arrives, so the card moves the
+    /// way Cursor's does. The frame names the job, not the call: the card
+    /// is the newest running command whose label carries the job's
+    /// command — or the only running command, when the window cannot read
+    /// the command (a remote place). The kernel's record replaces the tail
+    /// with the whole body when the command returns.
+    pub(crate) fn job_streamed(&mut self, command: Option<&str>, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let running: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                matches!(
+                    item,
+                    ChatItem::Tool {
+                        kind: ToolKind::Execute,
+                        status: ToolStatus::Running,
+                        ..
+                    }
+                )
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        let squeeze = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let ix = match command {
+            Some(command) => running.iter().rev().copied().find(|ix| match &self.items[*ix] {
+                ChatItem::Tool { label, .. } => squeeze(label).contains(&squeeze(command)),
+                _ => false,
+            }),
+            None if running.len() == 1 => running.first().copied(),
+            None => None,
+        };
+        let Some(ix) = ix else {
+            return;
+        };
+        let ChatItem::Tool { output, .. } = &mut self.items[ix] else {
+            return;
+        };
+        output.push_str(delta);
+        // The card shows a tail. Keep only what it can show, so a chatty
+        // command does not grow the pane for output the record brings
+        // whole when the command returns.
+        let lines = output.lines().count();
+        if lines > LIVE_JOB_TAIL {
+            let cut = output
+                .match_indices('\n')
+                .nth(lines - LIVE_JOB_TAIL - 1)
+                .map(|(at, _)| at + 1)
+                .unwrap_or(0);
+            output.replace_range(..cut, "");
         }
     }
 
@@ -1267,6 +1332,25 @@ impl ChatSession {
             self.fail_running_tools();
             self.flush();
         }
+    }
+
+    /// Whether the agent has been woken since it asked `request_id`: a
+    /// line from another agent, a person's line, or a wake after the
+    /// ask's own record. The question is then nobody's to answer.
+    pub(crate) fn question_superseded(&self, request_id: &str) -> bool {
+        let Some(asked) = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, ChatItem::Tool { id, .. } if id == request_id))
+        else {
+            return false;
+        };
+        self.items[asked + 1..].iter().any(|item| {
+            matches!(
+                item,
+                ChatItem::From { .. } | ChatItem::User(_) | ChatItem::Wake { .. }
+            )
+        })
     }
 
     /// Whether the UI should treat this chat as in flight: a streamed
@@ -1676,6 +1760,14 @@ impl ChatSession {
         if self.status_over_workers && !any_working && !self.children.is_empty() {
             self.status = None;
             self.status_over_workers = false;
+        }
+        // "waiting on Outer" is about a worker that is working. The kernel
+        // clears its line when the wait ends, but not when the worker it
+        // named was archived on its way out: the row read *waiting on
+        // Outer* over *2 archived* after Outer had reported (F-229, cycle
+        // 62). No worker working, nothing waited on.
+        if !any_working && !self.children.is_empty() && self.waiting.is_some() {
+            self.waiting = None;
         }
     }
 
@@ -3173,6 +3265,11 @@ impl ChatSession {
             }
             Event::Update(update) => self.apply_update(update),
             Event::Incoming { who, text } => {
+                // Another agent's line wakes this one: a question parked
+                // here has been answered by it (the parent's `say` after
+                // a worker's ask), live or in the tail read at a relaunch
+                // (F-221).
+                self.questions = None;
                 self.items.push(ChatItem::From {
                     who,
                     text,
@@ -3665,6 +3762,13 @@ impl ChatSession {
                 title,
                 questions,
             } => {
+                // The kernel offers a parked question again at every
+                // attach, and keeps one the agent has since moved past
+                // (a parent's `say` woke it and it finished): the pane
+                // knows the turn moved on from its own record (F-221).
+                if self.question_superseded(&request_id) {
+                    return;
+                }
                 self.turn_alive();
                 // The transcript tail repeats a question the user already
                 // answered or skipped a moment ago: not a new card (ui-004).
@@ -3705,6 +3809,14 @@ impl ChatSession {
                 // rewinding" and drew no footer (F-122, cycle 24 gate).
                 // Same lag rule as `turn_alive`.
                 if !self.turn_ended.is_some_and(|at| at.elapsed() < TAIL_LAG) {
+                    // A turn starting over a parked question: the answer
+                    // came from elsewhere — the parent's `say`, another
+                    // window — and the agent is working again. The card
+                    // stood on under the running command, Skip and
+                    // Continue still offered (F-221, cycle 58).
+                    if !self.turn_open && self.questions.is_some() {
+                        self.questions = None;
+                    }
                     self.turn_open = true;
                     self.turn_ended = None;
                 }
@@ -3766,6 +3878,8 @@ impl ChatSession {
             Event::TurnDone(result) => {
                 self.working = None;
                 self.status = None;
+                // The turn is over: it waits on nobody now (F-229).
+                self.waiting = None;
                 self.stamp_worked();
                 self.voice_answer();
                 // A question parks the turn: the kernel ends it and waits
@@ -4199,6 +4313,9 @@ impl ChatSession {
                         *label = call.title;
                     }
                     *status = tool_status(call.status);
+                    if *status != ToolStatus::Running {
+                        self.tool_started.remove(&id);
+                    }
                     if !output.is_empty() {
                         *held = output;
                     }
@@ -4368,6 +4485,18 @@ impl ChatSession {
             self.items.retain(|item| {
                 !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
             });
+        }
+        // "compacted 2 turn(s): ~32k → ~21k tokens" is the end of the story
+        // "compacting 2 turn(s), ~32k tokens…" began: one line, the result,
+        // where the progress line stood (F-226, cycle 59). Cursor marks a
+        // compaction once, after the fact.
+        if !failed
+            && text.trim_start().starts_with("compacted ")
+            && let Some(ix) = self.items.iter().rposition(
+                |item| matches!(item, ChatItem::Notice { text: t, failed: false } if t.trim_start().starts_with("compacting ")),
+            )
+        {
+            self.items.remove(ix);
         }
         // A retry replaces the retry before it: "retrying in 2.4s (attempt
         // 4/5)" is the same story one step on, and five copies with the

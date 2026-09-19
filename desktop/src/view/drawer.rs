@@ -367,7 +367,9 @@ impl Arbos {
                     {
                         return Some(self.file_tree_body(&resolved, window, cx));
                     }
-                    if crate::view::file_editor::is_editable(&resolved) {
+                    if shown.board_kind != "diff"
+                        && crate::view::file_editor::is_editable(&resolved)
+                    {
                         if let Some(editor) = self.file_editors.get(&resolved) {
                             return Some(
                                 div()

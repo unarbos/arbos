@@ -1698,6 +1698,28 @@ class Pass:
             self.send("Run `sleep 120` yourself with bash right now, attached, no workers.")
             self.wait(lambda s: (lambda c: c and (c.get("streaming") or c.get("turn_open")))(root_of(place)), 30, what="world long turn")
             time.sleep(3)
+            # The command's card runs while the command does (F-220): the
+            # kernel's call-start event drew a finished card, empty, folded
+            # under "Running 1 command" for the whole of the run.
+            def live_sleep(c):
+                return [i for i in (c or {}).get("items", []) if i.get("kind") == "tool" and i.get("status") == "running" and "sleep" in (i.get("label") or "")]
+            self.wait(lambda s: bool(live_sleep(root_of(place))), 20, what="running sleep card")
+            running = live_sleep(root_of(place))
+            # The Project chat's live fold starts shut (F-115, as Cursor's):
+            # the card is behind the headline there, one click away; a
+            # worker's chat streams it open.
+            cards = [p for p in self.ids("term-card-*") if self.seen(p)]
+            opened = ""
+            if running and not cards:
+                heads = [w for w in self.ids("work-*") if "work-bare-" not in w and self.seen(w)]
+                head = heads[-1] if heads else None
+                if head:
+                    self.app.click(head); time.sleep(1.0); opened = " (headline opened)"
+                    cards = [p for p in self.ids("term-card-*") if self.seen(p)]
+            self.record("command-live-card", sc, "a `sleep 120` holds the turn", "the command's card runs on the pane: a running tool item with the command in its label, its term-card on screen under the live headline",
+                        f"running={[(i.get('label') or '')[:40] for i in (running or [])]} cards={cards[:2]}{opened}", "pass" if running and cards else "fail", self.still("command-live-card"))
+            if opened and head:
+                self.app.click(head); time.sleep(0.5)
             tmp = copy_dir / "arbos-kernel.new"; shutil.copy(kernel, tmp); os.replace(tmp, copy)
             control = self.wait(lambda s: bool(self.ids("status-bar-stranger-kernel")) or None, 75, every=2, what="stranger plate")
             ids = self.ids("status-bar-stranger-kernel")

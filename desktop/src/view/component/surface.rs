@@ -441,6 +441,9 @@ fn path_body(
     match read_text(&resolved) {
         TextFile::Missing => quiet(&theme, "This file is gone."),
         TextFile::Binary => quiet(&theme, "Can't preview this file."),
+        TextFile::Text { text, .. } if matches!(kind, Present::Diff) => {
+            review(&theme, &text)
+        }
         TextFile::Text { text, truncated } => {
             let source = match kind {
                 // The kernel's documents open on TOML or YAML front matter
@@ -471,6 +474,8 @@ enum Present {
     Image,
     Markdown,
     Code,
+    /// A unified diff, drawn as one: the tree's Review, or a patch file.
+    Diff,
     Sheet,
     Files,
     Canvas,
@@ -482,6 +487,7 @@ fn present(board_kind: &str, path: Option<&Path>) -> Present {
         "image" => Present::Image,
         "doc" | "prompt" => Present::Markdown,
         "code" => Present::Code,
+        "diff" => Present::Diff,
         "sheet" => Present::Sheet,
         "files" | "dir" => Present::Files,
         "canvas" => Present::Canvas,
@@ -503,6 +509,7 @@ fn infer(_kind: &str, path: Option<&Path>) -> Present {
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "ico" | "bmp" | "avif" => Present::Image,
         "pdf" => Present::External,
         "csv" | "tsv" | "tab" => Present::Sheet,
+        "diff" | "patch" => Present::Diff,
         _ => Present::Code,
     }
 }
@@ -647,6 +654,28 @@ fn frame_image(image: impl IntoElement) -> AnyElement {
         .px(px(32.))
         .py(px(28.))
         .child(image)
+        .into_any_element()
+}
+
+/// Cursor's Review: the diff as a diff, in the document's column.
+fn review(theme: &Theme, text: &str) -> AnyElement {
+    div()
+        .flex_1()
+        .min_h_0()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id("surface-review")
+                .h_full()
+                .w_full()
+                .max_w(px(DOCUMENT_MAX))
+                .overflow_y_scroll()
+                .px(px(28.))
+                .pt(px(24.))
+                .pb(px(48.))
+                .child(crate::view::component::transcript::review_view(theme, text)),
+        )
         .into_any_element()
 }
 

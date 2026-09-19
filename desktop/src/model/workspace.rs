@@ -2759,6 +2759,11 @@ impl Workspace {
             // wrote while no window was attached comes in before anything
             // live does (F-105).
             chat.adopt_kernel_tail();
+            if let Some(ask) = chat.questions.as_ref().map(|q| q.request_id.clone())
+                && chat.question_superseded(&ask)
+            {
+                chat.questions = None;
+            }
             chat.sync_kernel_history();
             // No "reconnected" line on the transcript: the machine pill
             // said "reconnecting" and now says nothing, which is the
@@ -3349,16 +3354,48 @@ impl Workspace {
     ) {
         let text = crate::model::changes::GitChanges::diff_text(root, file);
         let path = crate::model::changes::GitChanges::review_path(root, file);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::write(&path, text).is_err() {
-            return;
-        }
         let title = match file {
             Some(f) => format!("{f} · changes"),
             None => "Changes".to_string(),
         };
+        self.review_text(root, &path, &title, text, cx);
+    }
+
+    /// A worker chat's Review: the diffs its own edits recorded, not the
+    /// tree's (F-228, cycle 62). The card under a worker's answer lists the
+    /// files the worker wrote (F-111); its Review opened `git diff HEAD`
+    /// for the whole place — other workers' files, and nothing of its own
+    /// once it had committed.
+    pub fn review_worker_edits(&mut self, chat: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session(chat) else {
+            return;
+        };
+        let root = session.cwd.clone();
+        let text = crate::view::component::transcript::worker_unified_diff(&session.items);
+        let path = crate::model::changes::GitChanges::review_path(&root, Some(&format!(
+            "worker-{chat}"
+        )));
+        let title = format!("{} · changes", session.label());
+        self.review_text(&root, &path, &title, text, cx);
+    }
+
+    /// Write `text` as the scratch diff at `path` and open it as a diff
+    /// tab of the panel.
+    fn review_text(
+        &mut self,
+        _root: &std::path::Path,
+        path: &std::path::Path,
+        title: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(path, text).is_err() {
+            return;
+        }
+        let title = title.to_string();
         let Some(owner) = self.active_id() else {
             return;
         };
@@ -3366,7 +3403,7 @@ impl Workspace {
             owner,
             path.to_string_lossy().into_owned(),
             title,
-            "code".to_string(),
+            "diff".to_string(),
             None,
             None,
             OpenedBy::User,
@@ -3579,6 +3616,17 @@ impl Workspace {
         let Some(ix) = self.project_of(owner) else {
             return;
         };
+        // The output also goes into the command's running card in the
+        // chat (F-220): an attached command has no process row until the
+        // kernel's long-command threshold, and the card is where Cursor
+        // shows a command's output as it comes.
+        if running && !delta.is_empty() {
+            let command = job_command(&self.job_log(ix, owner, &job));
+            if let Some(chat) = self.session_mut(owner) {
+                chat.job_streamed(command.as_deref(), &delta);
+                cx.notify();
+            }
+        }
         let held = self.projects[ix]
             .surfaces
             .iter_mut()
@@ -4939,6 +4987,17 @@ fn decode_query(s: &str) -> String {
 /// the agent is done. A worker that finished is archived: a probe that
 /// read only the live path found nothing there and said "not ended", and
 /// the worker's tab stayed Working until a relaunch (F-179).
+/// The command a job runs, from the `meta.json` beside its journal at
+/// `log`. `None` when the file is not here (a remote place) or says nothing.
+fn job_command(log: &Path) -> Option<String> {
+    let meta = std::fs::read_to_string(log.with_file_name("meta.json")).ok()?;
+    let meta: serde_json::Value = serde_json::from_str(&meta).ok()?;
+    meta.get("command")?
+        .as_str()
+        .map(|cmd| cmd.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|cmd| !cmd.is_empty())
+}
+
 fn transcript_paths(workspace: &Path, sid: &str) -> [PathBuf; 2] {
     let store = workspace.join(".arbos");
     [
