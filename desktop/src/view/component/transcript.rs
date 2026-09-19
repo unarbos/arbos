@@ -5043,12 +5043,20 @@ fn turn_footer(
                 theme.text_faint
             }))
     };
+    // Rewind goes back to before a prompt; the kickoff turn has none, so
+    // its footer offered a control whose press did nothing and said
+    // nothing (F-246, cycle 76). Cursor's restore lives on prompt cards.
+    let has_prompt = chat
+        .items
+        .iter()
+        .take(turn + 1)
+        .any(|item| matches!(item, ChatItem::User(_)));
     let row = row
         .child(thumb(true, cx))
         .child(thumb(false, cx))
         .child(copy)
         .child(fork)
-        .child(rewind)
+        .when(has_prompt, |row| row.child(rewind))
         .when_some(sent_at.and_then(relative_time), |row, when| {
             row.child(
                 div()
