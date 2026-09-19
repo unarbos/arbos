@@ -568,11 +568,20 @@ struct WorkerLine: View {
             BrailleSpinner(tint: ArbosTheme.textMuted)
                 .font(.system(size: 14, design: .monospaced))
                 .frame(width: 14)
+            // The line reads "<count> Working <name> · <step>", so the middle
+            // is the worker's name — the one part that tells two workers
+            // apart, and the only part a person is looking for. Truncating
+            // there cut it out and kept the step, which every worker repeats:
+            // "2 Working t155034…· Reading notes.md". Two reviews called it
+            // out before the frame was looked at properly.
+            //
+            // The step is what should yield. It is transient, it is the same
+            // few words across workers, and losing its tail costs nothing.
             Text(text)
                 .font(ArbosTheme.body)
                 .foregroundStyle(ArbosTheme.textMuted)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                .truncationMode(.tail)
             Spacer(minLength: 0)
             Image(systemName: "chevron.right")
                 .font(.system(size: 10, weight: .semibold))
