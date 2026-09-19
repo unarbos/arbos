@@ -477,6 +477,38 @@ impl Tool for Bash {
     }
 }
 
+/// How many `await` calls on `job` ended this turn, one after another,
+/// before this one: the tool records since the last wake, from the end,
+/// while they are awaits of this job.
+fn awaits_before(place: &arbos_core::Place, agent: &arbos_core::AgentId, job: &str) -> u32 {
+    let layout = arbos_core::files::Layout::new(place, agent.as_str());
+    let Ok(events) = arbos_core::load_transcript(&layout.transcript()) else {
+        return 0;
+    };
+    let mut n = 0;
+    for ev in events.iter().rev() {
+        match &ev.kind {
+            arbos_core::EventKind::Tool(rec) if rec.name == "await" => {
+                let same = rec
+                    .args
+                    .as_ref()
+                    .and_then(|a| a.get("id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .is_none_or(|i| i.is_empty() || i == job);
+                if !same {
+                    break;
+                }
+                n += 1;
+            }
+            arbos_core::EventKind::Tool(_) => break,
+            arbos_core::EventKind::Wake { .. } | arbos_core::EventKind::User { .. } => break,
+            _ => {}
+        }
+    }
+    n
+}
+
 impl Tool for Await {
     fn name(&self) -> &'static str {
         "await"
@@ -543,11 +575,28 @@ impl Tool for Await {
                     }
                 }
                 if tokio::time::Instant::now() >= deadline {
-                    break format!(
-                        "Still waiting: job {id} is {}. Await again, or stop it with bash `kill -- -{}`.",
-                        job.status_line(),
-                        job.meta.pid
-                    );
+                    // The third ceiling in a row on the same job, and the
+                    // waits before it brought nothing new: this is a server
+                    // or a hang, not a run that is finishing. "Await again"
+                    // as the only suggestion sent a model round six times
+                    // at the 300 s ceiling (QA draft 6e9ce33ec3).
+                    let before = awaits_before(&cx.place, &cx.agent.id, &id);
+                    let quiet = acc.trim().is_empty();
+                    break if before >= 2 {
+                        format!(
+                            "Job {id} is {} after {} awaits in a row this turn{}: it is not finishing on its own — a server, a watcher, or a hang. Do not await it again. Stop it with bash `kill -- -{}` if it was meant to end, or leave it running and go on: its exit wakes you as a message.",
+                            job.status_line(),
+                            before + 1,
+                            if quiet { " with no new output" } else { "" },
+                            job.meta.pid
+                        )
+                    } else {
+                        format!(
+                            "Still waiting: job {id} is {}. Await again, or stop it with bash `kill -- -{}`.",
+                            job.status_line(),
+                            job.meta.pid
+                        )
+                    };
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(AWAIT_POLL) => {}

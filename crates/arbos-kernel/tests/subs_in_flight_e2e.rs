@@ -70,13 +70,22 @@ fn a_subscription_run_in_flight_holds_the_gate_by_name_and_a_cut_run_is_said_at_
         "{reason}"
     );
     assert!(reason.contains("s)"), "with how long it has run: {reason}");
+    // The gate says "in flight" the moment the run is claimed; the job
+    // folder and its marker land a beat later (CI, 2026-09-19: the marker
+    // asked for before it was written). Give them the beat.
     let jobs = k.place.join(".arbos/agents/root/jobs");
-    let job_dir = std::fs::read_dir(&jobs)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.join("subscription").exists())
-        .expect("the run's job carries the subscription marker");
+    let find_marked = || {
+        std::fs::read_dir(&jobs)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.join("subscription").exists())
+    };
+    assert!(
+        common::wait_for(Duration::from_secs(5), || find_marked().is_some()),
+        "the run's job carries the subscription marker"
+    );
+    let job_dir = find_marked().unwrap();
     assert_eq!(
         std::fs::read_to_string(job_dir.join("subscription"))
             .unwrap()
