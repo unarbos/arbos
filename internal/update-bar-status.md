@@ -5,16 +5,25 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 05:45 UTC.
+Last checked 2026-09-19 05:55 UTC.
 
-## Click Update. You will get build 2205. Jev is in it.
+## Click Update. You will get build 2209. Jev is in it.
 
-**2205** — signed, notarised, stapled, on the feed since 05:42 UTC.
+**2209** — signed, notarised, stapled, on the feed since 05:53 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2205 (builds 2206–2209):
+
+- **#730** — pill-count-vs-sheet starts three tagged workers and checks
+  the pill against them
+- **#731** — the repository's own `.git/` is not the project: skipped by
+  the index and the walk, reachable only by an explicit path
+
+## Before that: 2205
 
 New since 2198 (builds 2199–2205):
 
