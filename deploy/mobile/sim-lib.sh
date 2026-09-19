@@ -17,6 +17,11 @@
 # and `voice-notes-wait.sh` checks the words that came back against it. With
 # the sentence written out twice, a scenario can "verify" dictation against
 # a sentence the clip no longer says.
+# idb is a Homebrew install and a non-login ssh shell cannot see it. Every
+# scenario exports this before sourcing, but a new one need not know that, so
+# the library that calls idb asks for idb's directory itself.
+export PATH="/opt/homebrew/bin:$PATH"
+
 NOTE_SAYS=${NOTE_SAYS:-"Please summarise what the workers did today in two sentences."}
 
 # The simulator's screenshot size and the device's point size. Both are the
