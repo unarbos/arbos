@@ -4141,8 +4141,13 @@ fn zone(
     // Cursor's Project chat (the root) shows no tool calls at all — the
     // coordinator's quick reads and commands are hidden work; its checklist
     // (`plan`, Cursor's TodoWrite) shows as a card. A worker's chat shows
-    // every call.
-    let project_style = chat.parent.is_none();
+    // every call. A voice-delegated turn is the exception: spoken-row-only
+    // hid the commands and the agents; they stay visible here.
+    let voice_delegated = matches!(
+        chat.items.get(first),
+        Some(ChatItem::User(message)) if message.channel == "voice"
+    );
+    let project_style = chat.parent.is_none() && !voice_delegated;
     let body_prose = segs.iter().filter(|seg| matches!(seg, Seg::Prose(_))).count();
     let hide_tentative = running && project_style && (kickoff_turn || body_prose >= 2);
     // Whether the body draws rows a headline could fold: a thought, a run

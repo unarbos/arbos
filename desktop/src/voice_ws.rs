@@ -1006,6 +1006,9 @@ async fn run(
         start["channel"] = json!("voice");
         start["device"] = json!("desktop");
         start["screen"] = json!("on your screen");
+        // Tool and agent frames for the project chat, even when
+        // `voice_mirror` is off (that flag is the dictation notices).
+        start["agents"] = json!(true);
         // The tab's identity, whole: the gateway binds by `path` (its own
         // kernel, a kernel on its host, or the hub by the roster's place) and
         // refuses with the path in its message when nothing serves it.

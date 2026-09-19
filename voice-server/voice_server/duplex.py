@@ -245,9 +245,12 @@ class DuplexSession(BaseSession):
         loud = float(np.sqrt(np.mean(samples * samples))) > LOUD_RMS
         now = time.monotonic()
         if self.kernel_turn or self.decision == "kernel":
-            if loud:
-                self.last_loud_at = now
-            return  # this turn belongs to the kernel; the model's own reply stays unheard
+            if not getattr(self, "working_line_open", False):
+                if loud:
+                    self.last_loud_at = now
+                return  # this turn belongs to the kernel; the model's own reply stays unheard
+            # A spoken working line ("Yeah, one sec.") while the kernel runs:
+            # play it. Barge-in ducks it; the kernel is not cancelled.
         if self.decision == "pending":
             # The user just spoke and Whisper is still deciding who answers. Hold the model's
             # reply (it starts ~0.5 s after the endpoint) so small talk stays whole and a
@@ -326,6 +329,10 @@ class DuplexSession(BaseSession):
 
     def _close_response(self) -> None:
         self.transcript_stash.clear()
+        if getattr(self, "working_line_open", False) and self.decision == "kernel":
+            self.working_line_open = False
+            if hasattr(self, "working_line_expect"):
+                self.working_line_expect = False
         if not self.response_open:
             return
         self.response_open = False
