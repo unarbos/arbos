@@ -784,15 +784,20 @@ class Pass:
             def exit_marks():
                 return [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"] if e["path"].split(".")[-1].startswith("term-exit-")]
             # The newest turn's fold is the last `work-*`; its run the last `run-*`.
+            opened = None
             for w in reversed(self.ids("work-*")):
                 if self.seen(w):
-                    self.app.click(w); time.sleep(0.6); break
+                    self.app.click(w); time.sleep(0.6); opened = w; break
             for r in reversed(self.ids("run-*")):
                 if self.seen(r) and not exit_marks():
                     self.app.click(r); time.sleep(0.6); break
             marks = exit_marks()
             self.record("command-exit-mark", sc, "a command exits 2; open its run", "the card's header carries 'exit 2'",
                         f"marks={marks}", "pass" if marks else "fail", self.still("exit-mark"))
+            # Fold it back: the fold-line rows later in this phase read the
+            # pane as the turns left it.
+            if opened and self.seen(opened):
+                self.app.click(opened); time.sleep(0.5)
         else:
             self.gap("command-exit-mark", sc, "run", "the model did not run the command itself")
         # F-197: ⌘K finds a chat by what was said in it, not only its title
