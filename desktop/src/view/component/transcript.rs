@@ -4629,8 +4629,23 @@ fn zone(
     let mut spawned = spawned_in(&chat.items, body.clone());
     // A `spawn wait=true` names its child only when it returns; until then
     // the worker is running under this turn with no record to hang from.
-    // The running turn takes every child no turn has named yet.
-    if running {
+    // The running turn takes every child no turn has named yet — and so
+    // does a settled turn whose spawn never returned: the person's Stop
+    // cut the call before the worker's id came back, and the worker's
+    // line went with it while the worker itself stood in the panel
+    // (F-245, cycle 75; Cursor keeps the sub-agent row after a Stop).
+    let unreturned_spawn = |item: &ChatItem| {
+        matches!(
+            item,
+            ChatItem::Tool { label, child_session: None, .. }
+                if label.split_whitespace().next() == Some("spawn")
+        )
+    };
+    // The newest such turn takes them, so two cut spawns do not both list
+    // the same workers.
+    let spawn_unreturned = chat.items[body.clone()].iter().any(unreturned_spawn)
+        && !chat.items[body.end..].iter().any(unreturned_spawn);
+    if running || spawn_unreturned {
         let named = spawned_in(&chat.items, 0..chat.items.len());
         for child in &chat.children {
             if let Some(id) = &child.kernel_id
