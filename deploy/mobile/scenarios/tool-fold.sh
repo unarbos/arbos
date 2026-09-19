@@ -30,7 +30,10 @@ rows() { ui dump | grep -cE "StaticText"; }
 # below. Cycle 161 read "4 → 4" that way and called it a fold that refused to
 # open. The lines themselves are compared instead: what is on screen when it
 # is open that was not there when it was closed.
-lines() { ui dump | awk '$3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' | sort -u; }
+# Sorted, but not made unique: two calls that ran the same command have the
+# same label, and folding them to one would report a fold of two as hiding
+# one. That is the mistake the workers sheet made for twenty cycles.
+lines() { ui dump | awk '$3 == "StaticText" { $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' | sort; }
 foldline() { ui dump | grep -oE "[0-9]+ tool calls?[^\"]*" | tail -1; }
 
 xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
