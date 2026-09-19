@@ -54,9 +54,9 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | area | last | how | due? |
 | --- | --- | --- | --- |
 | chat: Project style (root) | 68 (d38: one run across a nudge — F-236) | `journey.py` beside `cycle-23/` | — |
-| chat: classic style (worker) | 70 (a stopped worker reads Stopped — F-238) | `worker_live.py`, `cycle-47/worker-live/` vs `cycle-24/cursor-worker-chat-open.png` | — |
+| chat: classic style (worker) | 75 (d41: a failing command's card — F-215's state, held in #703; the worker reports the error and ends Done) | `worker_live.py`, `cycle-47/worker-live/` vs `cycle-24/cursor-worker-chat-open.png` | — |
 | long-form project (many turns, notes restructure, workers come and go, archived, context re-found, scroll) | 63 (d33: nine turns, F-230 list markers; the scroll-up read not held) | l1–l13, d1–d19 | — |
-| kickoff / new-project landing — the first thirty seconds, refused and silent providers | 64 (d34: the dead-key line paired again; F-232 Retry in place) | `cold.py` f1/f2, `new-project-kickoff` gate row | every cycle from now |
+| kickoff / new-project landing — the first thirty seconds, refused and silent providers | 75 (a fresh Home's kickoff fold after a relaunch: F-244) | `cold.py` f1/f2, `new-project-kickoff` gate row | every cycle from now |
 | launch, first run, permissions sheet | 63 (fresh XDG at 1440×900 — holds; F-231 renamed place dropped at launch) | gate `launch` phase (Linux rows only) | — |
 | tabs: cycle, close, reopen, colours, spinner | 73 (drag: none by design; reopen via recents F-240) | `tabs_drive.py`, gate `tabs` phase | — |
 | opener: ~, partial, create, prefix sibling, remote host, recents | 71 (F-240 recent folders) | #258, gate opener rows | — |
@@ -64,14 +64,14 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | panel: agents tree, archived row, Project section, Files, Standing | 69 (Files → a rendered page; F-237 ⌘W) | gate `panel` phase, `cycle-40/panel/` | — |
 | settings: every section, ⌘, / Escape / ⌘W, typography stepper, bionic toggle + eyesight check | 56 (stepper on cards: F-219; F-198 interior numbers for the tab's owner) | gate `settings` phase (`weight-visible`), `cycle-45/settings/` | — |
 | mode chip, /mode, approval + ask cards per mode | 65 (d35: a second ask superseded by the root's say — F-221's rule, the kernel's wake) | `askmode41.py`, gate `ask-*` rows | — |
-| under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 67 (Changes and Commit & Push retired by design, Jacob 09-18; the rest are the gate's) | gate `pills` rows | — |
-| bottom bar (version, Update) | 61 (the dev-channel offer on a tree copy: F-227) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
+| under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 75 (Working → Agents + Continue Working after a Stop; the pill's send resumes the worker) | gate `pills` rows | — |
+| bottom bar (version, Update) | 75 (the *is out* plate in light: #525252 on white, white words — holds) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
 | search (⌘K chat search palette) | 62 (keys only: ↓ ↵ open the second hit — holds) | gate `search-by-content`, `search-open-hit` | — |
-| themes: light, dark; tint | 62 (light on the Files Changed card and Review — holds) | cycle-11 `13-light`; gate `appearance-*` | 15 |
+| themes: light, dark; tint | 75 (the *is out* plate and its tooltip in light — holds) | cycle-11 `13-light`; gate `appearance-*` | 15 |
 | window sizes: 900×600, panel fold, 1600×1000 | 72 (the fold at 1000/999 holds; F-241 the long draft's wrap — owner's) | `cycle-43/sizes/` | — |
 | remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 38 (F-178 local drop/recovery; faults in 35; the real remote untouched) | remote track scenarios 1–2; 3–4 open | 16 |
 | voice / dictation entry points (Fn, mic button, call strip) | 60 (mac-only lines and the faint handset — by design on Linux; listening still unpaired) | gate `composer-voice` row; Fn via driver | **15** |
-| relaunch / replay (root + worker read like live) | 61 (d31 relaunch mid-way: two live worker lines read right) | `journey.py` J11 | — |
+| relaunch / replay (root + worker read like live) | 75 (the kickoff fold F-244; a stopped worker's line F-245 — both hold across a relaunch now) | `journey.py` J11 | — |
 | rewind / fork / checkpoint | 58 (d28: rewind of turn 2 restores the file, card recounts) | `rf.py`, `fork_sub.py`, gate `fork-beside-source` | — |
 | notices, nudges, refused-answer shape | 64 (the 401 line with Details and Retry; F-232) | refused `write` on the att place | — |
 | composer attachments: file chip, image thumb, hover ×, mid-send bubble | 60 (file token, image thumb, ✕, bubble — holds) | `attach_drive.py`, `cycle-39/attachments/` | — |

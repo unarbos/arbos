@@ -6229,3 +6229,60 @@ Stills in `media/mobile/cycle-195/`:
 `before-the-fix-a-different-workers-chat.png`.
 
 **PR:** [#800](https://github.com/unarbos/arbos/pull/800), harness only.
+
+## Cycle 196 — the film I owed, and what it showed
+
+Cycle 195 was a third cycle and carried no recording (M-615). The coverage
+row still read 190, which is how I noticed. This is the film, and it earned
+its keep: everything below came out of it.
+
+**Connecting and thinking are the same picture** (M-616). The check now
+shoots a still the moment the phase changes, four or five a run, so the
+colours can be measured instead of described:
+
+| phase | orb colour | pulse swing |
+| --- | --- | --- |
+| connecting | (174, 174, 174) | 4.5% |
+| listening | (222, 222, 222) | 8.5% |
+| thinking | **(174, 174, 174)** | **4.5%** |
+| speaking | (125, 162, 212) | 5.9% |
+
+Zero difference in every channel. It is deliberate — both switches in
+`VoiceOrb` group them:
+
+```swift
+case .thinking, .connecting: return 0.90 + 0.04 * CGFloat(pulse)   // scale
+case .thinking, .connecting: return ArbosTheme.textMuted           // colour
+```
+
+**The pulse is real and reads as static** (M-617). The swings above were
+measured off the film at five frames a second across the orb's widest row,
+and thinking's 4.5% matches the `0.04` coefficient exactly — which is a good
+sign the measurement is reading the right thing. But an independent review,
+asked specifically whether motion separates the states:
+
+> There is absolutely no visible difference between the early connecting
+> period and the long middle thinking period… the app visually appears as
+> though it has frozen, stalled, or dropped the connection during this
+> 9-second window.
+
+**And thinking is the long one** (M-618). Across four runs it has held 7.4,
+7.8, 9.4 and 9.8 seconds, against about 2 seconds of connecting. So the state
+that holds the screen longest is drawn like the briefest — and cycle 193
+established the screen carries no words at any point, so there is nothing
+else to read.
+
+Filed rather than fixed:
+`features-inbox/2026-09-19-connecting-and-thinking-look-the-same.md`. Which
+way it should go is a design call, and this loop does not ship product
+guesses.
+
+**A fourth agreement between the screen and the console** (M-619): `thinking`
+held 9.4 s against `reply_first_audio` 9284 ms, after 7.8/7822 and 7.4/7585.
+Three cycles, four runs, still holding.
+
+Stills and the film in `media/mobile/cycle-196/`: the four phase stills, and
+`the-call-orb-through-four-phases.mp4`.
+
+**PR:** [#801](https://github.com/unarbos/arbos/pull/801), harness and an
+inbox note; no `ios/` change.
