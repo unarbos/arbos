@@ -975,9 +975,29 @@ Cumulative read: **380**.
 
 Spend $25.30.
 
-## Next (cycle 45)
+## Cycle 45 (2026-09-19) — second draws, the pool's next ten: fifteen of fifteen the same way
 
-1. The second-draw pool continues in order (`second-draw-order.json`, next ten: the remaining two-draw instances from cycles 38–42 — `second_draw_pool.next` in `loop-state.json`); every failure read same-way / different-way. Landed steps and new failures read as they arrive.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 249ddb5f9f1e protocol 1`** (cycle 44's; `main` at 3bccf924 with no engine or host change since). Jev off. Harness d1226d8c (#734). Network cut, no cap. The pool's next ten (`second10c.txt`, all from cycles 39–42) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-45-preregistration.md)). $10.30. Ninth host pause (14:48–15:39); walls not read. **5 of 20** solved — a count on a pool selected for failure.
+
+**Against the first pairs.** Like cycle 43's set and unlike cycle 44's, nothing twice-failed moved: seven instances that failed both first draws failed both again (0 of 7), and the two flippy ones (django-13401, django-13837: 10 → 11) and django-14534 (10 → 01) behaved as flippy. **All fifteen failures fail at the same site and in the same class as their first pair:**
+
+- django-14315 ×2 — the postgres client alone, `env or None`, 14 and 16 tool calls, the base client untouched: **A, the twin**, four of four with near-identical 550-byte patches. One rollout saw the two base-client tests fail and wrote *"Only the two expected pre-existing tests fail (they assert the exact buggy behavior)"* — the existing-test exception applied to the tests that encode the fix. That sentence is the twin miss and E1's misuse in one line.
+- django-12193 ×2 — the caller copies the dict, `CheckboxInput` still mutates: **B**, four of four.
+- django-11141 ×2 — the `__file__` guard removed and nothing put in its place; `test_load_empty_dir` fails; four of four (C, with cycle 42's recollection reading).
+- pylint-4604 ×2 — `variables.py` the gold's again, `IS_PYPY` never added; C, four of four.
+- pylint-4661 ×2 — XDG data dir where the gold and the hidden test want `appdirs`; C, four of four.
+- matplotlib-20676 ×2, scikit-learn-25747 ×2 — right file, other mechanism; C, four of four each.
+- django-14534 ×1 — `self.data['attrs']['id']`, the same `KeyError` detail as cycle 39's failure; C.
+
+Across cycles 43–45: **42 repeat failures, 41 at the same site and class**, one (cycle 44's 14170) in the same class at a different site. The per-instance reading is settled; the second-draw pool's remaining 34 are the many-draw regression members and the flippy tail, and the loop expects nothing new from them about *how* an instance fails. The pool's value now is reachability only, and cycles 43–45 put that at three flips in nineteen twice-failed instances.
+
+Cumulative read: **395**.
+
+Spend $10.30.
+
+## Next (cycle 46)
+
+1. The second-draw pool continues in order if the coordinator wants reachability counted further (`second_draw_pool.next` in `loop-state.json`); the loop's own reading is that the remaining pool will not change the account. Landed steps and new failures read as they arrive.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 26 of 27 (43, 44).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 41 of 42 (43–45); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45).

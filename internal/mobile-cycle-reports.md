@@ -5272,3 +5272,90 @@ explanations; the second is a plain repair and is not.
 Still and full report in `media/mobile/cycle-172/`.
 
 **PR:** [#770](https://github.com/unarbos/arbos/pull/770), harness only.
+
+## Cycle 173 — the separator, solved
+
+The sweep had not run for twelve cycles, so I ran it: twenty-five scenarios,
+all reaching a verdict, none silent. Two faults. `list-rows` reported the
+separator again, and this time the capture built at cycle 161 was armed.
+
+It recorded one line nobody had ever had before:
+
+    the app on the device: ... Sep 18 10:27 ... Arbos.app/Arbos
+
+The installed binary was from the previous day — twelve hours older than the
+commits it was supposed to contain.
+
+**Three scenarios reinstall the app** to clear remembered projects, and all
+three installed from `/tmp/dd/Build/Products`, a directory some earlier cycle
+left behind, holding a day-old build. One of them,
+`list-search-filter-refresh`, runs **immediately before `list-rows`** in the
+sweep (M-533).
+
+Proven end to end:
+
+| | binary | the row |
+|---|---|---|
+| the build the loop just made | `2026-09-19 11:37` | `phone, Idle, home, 10m` |
+| after that one scenario runs | `2026-09-18 10:27` | `phone, Idle,  · , home, 11m` |
+| with the fix | `2026-09-19 11:37` | `phone, Idle, home, 14m` |
+
+**Cycle 151 was right and cycle 153 withdrew it** (M-534). 151 called this a
+stale binary. 153 could not reproduce one and withdrew the claim — correctly,
+because a remedy for a cause you cannot reproduce is a guess. Neither found
+the mechanism, because both of us were looking at the *build*, and the swap
+happens in a *scenario*. Six explanations were eliminated by experiment over
+six cycles; the seventh was simply written down by a check, the first time it
+fired.
+
+All three scenarios now install the build this loop made and refuse rather
+than run against whatever is on the device. `check-tools` flags any install
+from a literal path outside the loop's derived data (M-535) — its first
+version also flagged `mac-cycle.sh`, which assembles the same tail from a
+variable and does it correctly, so it matches literal roots only. Proven by
+putting `/tmp/dd` back and watching it named.
+
+The other fault, `tool-fold`, was measuring that same stale app.
+
+Evidence in `media/mobile/cycle-173/`: the sweep, the capture that named the
+date, and the screen it named it on.
+
+**PR:** [#774](https://github.com/unarbos/arbos/pull/774), harness only.
+
+## Cycle 174 — the film I owed, and the name it cost
+
+The recording was overdue from cycle 173. Made, reviewed, and it earned its
+place: it found a real fault, and two of its other three observations were
+artefacts of the instrument.
+
+**The worker line was cutting out the worker's name** (M-537). The running
+line reads `<count> Working <name> · <step>` on one line with
+`.truncationMode(.middle)` — so the middle goes, and the middle is the name:
+
+    2 Working t155034…· Reading notes.md
+
+The step it preserved is the same few words on every worker. The name is the
+only part that tells two apart, and it is what a person is looking for. The
+step yields now, and the same capture reads `1 Working t155602 alpha`.
+Batched with `ios/`; no upload.
+
+**Two reviews reported this and cycle 155 dismissed both** (M-538). I checked
+`line()`, which draws the transcript's subagent rows and is `.tail`, and
+declared the report a transcription artefact. The live worker rows are a
+different view — `WorkerLine` — and that one is `.middle`. The frame I
+checked had short steps, so nothing in it was truncated; the claim needed a
+long step and never got one.
+
+**And the instrument lost the separator** (M-539). This cycle's reviewer read
+the list row as `Idle  home`, with a gap and no dot, and called the gap a
+missing character. At full resolution it is `Idle · home`. The demo sent for
+review is 400 px wide and a one-pixel dot does not survive the scaling. Fine
+typography belongs to the still; the film is for motion, clipping and stalls.
+
+It also reported both worker rows carrying the count. The frame shows one:
+`2 Working … alpha` above `Working … beta`.
+
+Stills in `media/mobile/cycle-174/`, film beside them.
+
+**PR:** [#775](https://github.com/unarbos/arbos/pull/775) — the first `ios/`
+change in twenty cycles, batched.
