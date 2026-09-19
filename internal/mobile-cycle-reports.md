@@ -5650,3 +5650,43 @@ kernel and reporting whatever it happened to be doing.
 Evidence in `media/mobile/cycle-182/`.
 
 **PR:** [#785](https://github.com/unarbos/arbos/pull/785), harness only.
+
+## Cycle 183 — two causes wearing one verdict
+
+The sweep had not run in eight cycles, with five of its scenarios changed
+since. Twenty-five ran, none silent, none without a verdict (M-564). The app
+held everywhere: rows clean, both surfaces within a point of Cursor's, the
+core path at card 1.0s / reply 5.7s / Worked 7.2s.
+
+Two faults. `tool-fold` is the check whose repair has sat in an unmerged PR
+since cycle 162, already documented. The other was new.
+
+**`notifications` said "no banner was posted within the window — the rest
+says nothing"** (M-565), which names no cause at all. This file's own header
+names the benign one: iOS keeps a backgrounded app alive for about half a
+minute, so a reply slower than that never reaches the socket to be announced.
+Earlier in this same cycle the kernel spent 2m 9s on a turn after compacting
+682 turns of history.
+
+The console can say which. No notify frame reaching the app means the reply
+outran the window — the known limit until push is on. A frame received with
+no banner shown is the app, and is the thing this check exists to catch.
+Measured on the re-run: zero frames, so not the app.
+
+**Writing that, I filed a false app fault for one run** (M-566).
+`grep -c` prints `0` *and* exits non-zero when it matches nothing, so my
+`|| echo 0` ran as well and the count became `0\n0` — which is not equal to
+`0`, so the branch below announced "the app received 0\n0 notify frame(s) and
+posted no banner — that is the app". A line written to avoid an empty
+variable produced an accusation. Caught by reading the output instead of
+believing it.
+
+**And the verdict audit cried wolf** (M-567). It keyed known-good hits on file
+and line, and cycle 179's edit moved one guard from line 105 to 111, so a hit
+cleared three cycles earlier reported as new. Keyed on the file and the
+variable now — which then surfaced a genuinely new one, cycle 179's own
+guard, read and found sound.
+
+Evidence in `media/mobile/cycle-183/`.
+
+**PR:** [#788](https://github.com/unarbos/arbos/pull/788), harness only.
