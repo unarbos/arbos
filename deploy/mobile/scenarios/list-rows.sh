@@ -38,7 +38,19 @@ xcrun simctl io "$UDID" screenshot "$OUT/01-list.png" >/dev/null 2>&1
 # A row is a Button whose label is `<name>, <state>…`. The chrome — Search,
 # Settings, Read — carries no comma, which is what separates them here.
 grep -E "Button +[A-Za-z.][A-Za-z0-9._-]*," "$OUT/tree.txt" > "$OUT/rows.txt"
-echo "rows on screen: $(wc -l < "$OUT/rows.txt" | tr -d ' ')"
+ROWCOUNT=$(wc -l < "$OUT/rows.txt" | tr -d ' ')
+echo "rows on screen: $ROWCOUNT"
+# "0 of 0 rows name a state" is not a pass, it is a check that found no
+# rows. Cycle 142 made the rows GenericElements instead of Buttons, this
+# grep matched none of them, and five runs in a row reported every row
+# clean while measuring nothing at all.
+if [ "$ROWCOUNT" = 0 ]; then
+  echo
+  echo "VERDICT: none — no project rows matched at all. Either the list is"
+  echo "         empty or rows stopped being Buttons; either way nothing"
+  echo "         below would have been about a row."
+  exit 1
+fi
 echo
 cat "$OUT/rows.txt" | sed 's/^/  /'
 echo
