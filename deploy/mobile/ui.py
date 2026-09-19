@@ -42,14 +42,41 @@ first (M-162).
 A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.
 """
+import glob
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 
 
+def idb():
+    """The path to idb, found rather than assumed.
+
+    This is called over ssh, and a non-login ssh shell carries a bare PATH
+    with no Homebrew on it, so a plain "idb" raises FileNotFoundError and the
+    traceback blames the tool rather than the PATH. Cycle 192 fixed this for
+    the shell scripts and added a check for it; cycle 193 tripped over the
+    same thing here, because that check reads *.sh and this is Python.
+    """
+    found = shutil.which("idb")
+    if found:
+        return found
+    # idb is installed with pip, so it lands in the user bin for whichever
+    # Python installed it — not in Homebrew. Globbed, because the version in
+    # that path changes and every place it was written down went stale.
+    for pattern in (os.path.expanduser("~/Library/Python/*/bin/idb"),
+                    "/opt/homebrew/bin/idb", "/usr/local/bin/idb"):
+        for candidate in sorted(glob.glob(pattern), reverse=True):
+            if os.path.exists(candidate):
+                return candidate
+    sys.exit("ui: no idb on PATH, in ~/Library/Python/*/bin, or in "
+             "/opt/homebrew/bin — install it, or add its directory to PATH")
+
+
 def elements(udid):
-    out = subprocess.run(["idb", "ui", "describe-all", "--udid", udid],
+    out = subprocess.run([idb(), "ui", "describe-all", "--udid", udid],
                          capture_output=True, text=True, timeout=60)
     if out.returncode != 0:
         sys.exit(f"ui: idb describe-all failed: {out.stderr.strip()[:200]}")
@@ -123,7 +150,7 @@ def main():
             print(f"ui: want one pop-up button in the top bar, found {len(bar)}", file=sys.stderr)
             sys.exit(1)
         x, y = centre(bar[0])
-        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"opened the top-bar menu at {x},{y}")
         return
 
@@ -158,7 +185,7 @@ def main():
         f = fields[0].get("frame") or {}
         x = round(f.get("x", 0) + f.get("width", 0) - 12)
         y = round(f.get("y", 0) + f.get("height", 0) - 12)
-        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"caret at the end of the text field, {x},{y}")
         return
 
@@ -167,6 +194,26 @@ def main():
             x, y = centre(e)
             label = e.get("AXLabel") or e.get("AXValue") or e.get("AXUniqueId") or e.get("type")
             print(f"{x:>4} {y:>4}  {e.get('type',''):<12} {label}")
+        return
+
+    if verb == "values":
+        # `dump` prints the label *or* the value, so an element carrying both
+        # shows only the label and the value cannot be read at all. The call
+        # orb is the case that matters: cycle 84 put the phase in the
+        # accessibility value so the screen would say whether it is listening,
+        # thinking or speaking — and no check has ever been able to see it,
+        # because the orb's label is "Call" and the `or` stops there.
+        #
+        # It is a separate verb rather than a wider `dump` because scenarios
+        # match dump lines exactly. A text field would grow from "Message pod…"
+        # to "Message pod… | what was typed", and every one of those greps
+        # would quietly stop matching.
+        for e in els:
+            x, y = centre(e)
+            label = e.get("AXLabel") or ""
+            value = e.get("AXValue") or ""
+            both = f"{label} | {value}" if label and value and label != value else (label or value)
+            print(f"{x:>4} {y:>4}  {e.get('type',''):<12} {both}")
         return
 
     needle = " ".join(sys.argv[3:])
@@ -185,7 +232,7 @@ def main():
         print(f"{x} {y}")
         return
     if verb == "tap":
-        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"tapped {el.get('AXLabel') or needle!r} at {x},{y}")
         return
     sys.exit(__doc__)
