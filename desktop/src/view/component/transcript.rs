@@ -3340,10 +3340,17 @@ fn segments(items: &[ChatItem], body: Range<usize>) -> Vec<Seg> {
                 }
                 ix += 1;
             }
-            ChatItem::Thinking { .. } | ChatItem::Tool { .. } => {
+            // A kernel nudge to the model between two calls ("Your reply
+            // was empty…") is not a row and must not cut the run in two:
+            // *Explored 2 files* over *Explored c.py* for one turn's three
+            // reads (F-236, cycle 68). Cursor's is one *Explored 3 files*.
+            ChatItem::Thinking { .. } | ChatItem::Tool { .. } | ChatItem::Nudge(_) => {
                 let start = ix;
                 while ix < body.end
-                    && matches!(items[ix], ChatItem::Thinking { .. } | ChatItem::Tool { .. })
+                    && matches!(
+                        items[ix],
+                        ChatItem::Thinking { .. } | ChatItem::Tool { .. } | ChatItem::Nudge(_)
+                    )
                 {
                     ix += 1;
                 }
@@ -3352,7 +3359,11 @@ fn segments(items: &[ChatItem], body: Range<usize>) -> Vec<Seg> {
                     segs.push(Seg::Thought(head));
                     head += 1;
                 }
-                if head < ix {
+                if head < ix
+                    && items[head..ix]
+                        .iter()
+                        .any(|item| matches!(item, ChatItem::Tool { .. }))
+                {
                     segs.push(Seg::Run(head..ix));
                 }
             }
