@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 07:46 UTC.
+Last checked 2026-09-19 08:30 UTC.
 
-## Click Update. You will get build 2220. Jev is in it.
+## Click Update. You will get build 2226. Jev is in it.
 
-**2220** — signed, notarised, stapled, on the feed since 07:44 UTC.
+**2226** — signed, notarised, stapled, on the feed since 08:27 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2220 (builds 2221–2226):
+
+- **#740** — a source that is not UTF-8 reads with a note rather than
+  failing
+- **#741** — `coverage-map.sh` says which coverage rows the sweep actually
+  claims
+- **#742** — a CRLF file keeps its line endings through a patch
+
+## Before that: 2220
 
 New since 2218 (builds 2219–2220):
 
