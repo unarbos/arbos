@@ -1014,9 +1014,27 @@ Cumulative read: **406**.
 
 Spend $25.98.
 
-## Next (cycle 47)
+## Cycle 47 (2026-09-19) — second draws, the pool's next ten: the many-draw members, and a no-change verdict that follows the rule and still fails
 
-1. The second-draw pool continues in order if the coordinator wants reachability counted further (`second_draw_pool.next` in `loop-state.json`, 24 remaining — the many-draw regression members). The loop's reading stands: the remaining pool will not change the account. Landed steps and new failures read as they arrive.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 249ddb5f9f1e protocol 1`** (cycles 44–46's; `main` at 262044ee with no engine or host change since). Jev off. Harness d1226d8c (#734). Network cut, no cap. The pool's next ten (`second10e.txt`: four- to eleven-draw instances) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-47-preregistration.md)). $15.28. Eleventh host pause (18:04–18:57); walls not read. **10 of 20** solved — a count on a pool selected for failure.
+
+**Against the earlier draws.** The instances with a prior solve behaved as their histories said: astropy-12907 (000011 → 11), django-11099, django-13449, sphinx-8265 solved both; pytest-10356 (01010 → 10) and sympy-18698 (010001 → 01) stayed flippy; sympy-15017 (7 of 11 → 00) went down. Of the three never-solved, none flipped (0 of 3; across cycles 43–47, four of twenty-eight). Ten failures, all at the same site and class as before:
+
+- **django-13513 ×2 — a no-change verdict that meets the rule's predicate and is still wrong for the grade.** The issue says `explicit_or_implicit_cause()` ignores `__suppress_context__`; in this checkout it already reads it, and both rollouts **ran the issue's own example** (`raise ValueError from None` inside an `except RuntimeError`) against the unmodified tree and showed the rendered debug page no longer names `RuntimeError` — the asked output present, as d8344ff2 asks. They declared no change in 4 and 6 tool calls; the hidden test is `test_suppress_context_without_traceback`, an exception with no traceback, which the issue never mentions and which the gold reaches by restructuring frame assembly. Eleven of eleven draws fail on this instance, and this pair is the first the loop has read closely: **C, a case beyond the issue, with the no-change rule honestly satisfied.** It is the contrast to sympy-23950 — same verdict, opposite evidence — and it puts a ceiling on what the no-change rule can ever fix: when the asked output is present for the request's example and the hidden test wants a case the request does not name, no rule about evidence reaches it.
+- sympy-23950 ×2 — no change on "already raises `NotImplementedError` (not `Contains`)", the "No change:" line written in form; **seven of seven** across three kernels. Recorded, not filed.
+- django-15503 ×2 — the ambiguous-key JSON path built differently from the gold's; ten of ten; C.
+- sympy-15017 ×2 — `__len__` in `ndim_array.py` in one, `_loop_size` across three files in the other, where the gold is one line in `dense_ndim_array.py`; C.
+- pytest-10356 ×1, sympy-18698 ×1 — the same designs as their earlier failures; C.
+
+Across cycles 43–47: **63 repeat failures, 62 at the same site and class.**
+
+Cumulative read: **416**.
+
+Spend $15.28.
+
+## Next (cycle 48)
+
+1. The second-draw pool has 14 left (`second_draw_pool.next`), all many-draw regression members; the loop's reading stands that they will not change the account. It runs them if the coordinator says so. Landed steps and new failures read as they arrive.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 52 of 53 (43–46); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45); two halves of one fix, each rollout doing one (46).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice — seven of seven (42, 47); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 62 of 63 (43–47); a failing test that encodes the fix dismissed as "asserts the buggy behavior" (45); two halves of one fix, each rollout doing one (46); a no-change verdict with the rule's evidence honestly met and the hidden test beyond the issue (47).

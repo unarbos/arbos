@@ -5726,3 +5726,37 @@ whatever happens to be printed above it.
 Evidence in `media/mobile/cycle-184/`.
 
 **PR:** [#789](https://github.com/unarbos/arbos/pull/789), harness only.
+
+## Cycle 185 — tapped one worker, opened another
+
+The queue put `several workers at once` at cycle 176. Both halves passed, and
+then the detail underneath did not.
+
+**The check opened a different worker than it tapped** (M-570). It tapped
+`w191149 rivers, Done`, printed "opening: w191149 rivers", and the chat that
+opened was headed `say sentence about th…` — a different worker entirely. It
+then reported that worker's record as though it were the one this run chose,
+and gave a clean verdict.
+
+A row you tapped and a chat you are in are two claims. Only the first was
+being made. It reads the header now and refuses a verdict when the two
+disagree — which immediately caught a second, different failure on the next
+run: the header read `Agents`, meaning the tap had opened nothing at all and
+the sheet was still up.
+
+**The cause is momentum** (M-571). Paging leaves the sheet gliding, and a
+label read mid-glide gets tapped where that row *was*. Two seconds to settle
+and a fresh read of the row fixed it: tapped `w191748 rivers`, landed on
+`w191748 rivers`, confirmed by the check rather than by me.
+
+**And a subset was about to be compared with a whole** (M-572). The highest
+pill seen is an `Agents` count, but the after-reopen reading came from a
+helper matching `Agents N` *and* `Working N` and took the first number. A
+project still working after the reopen would have had its running count
+compared against the total and been called a lost one. It reads `Agents`
+only, and declines when the pill shows nothing else — the mistake cycle 154
+spent a whole cycle on in the workers sheet, waiting in a second place.
+
+Stills in `media/mobile/cycle-185/`: the wrong worker, and the right one.
+
+**PR:** [#790](https://github.com/unarbos/arbos/pull/790), harness only.
