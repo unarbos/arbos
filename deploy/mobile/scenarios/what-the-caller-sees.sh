@@ -91,6 +91,33 @@ print(f"  phases in order: {' → '.join(phases)}")
 if silent:
     print(f"  wordless for {len(silent)} of {len(rows)} samples,"
           f" first at {silent[0]:.1f}s, last at {silent[-1]:.1f}s")
+
+# How long each phase held, which is the part a person feels. The wait on
+# "thinking" is the one to watch: the screen carries no words at all, so
+# those seconds are a coloured orb and nothing else.
+held, start_t, cur = [], rows[0][0], rows[0][1]
+for t, p, _ in rows[1:]:
+    if p != cur:
+        held.append((cur, t - start_t))
+        cur, start_t = p, t
+held.append((cur, rows[-1][0] - start_t))
+print()
+for p, d in held:
+    print(f"  {p:<11} held {d:4.1f}s")
+
+names = [p for p, _ in held]
+print()
+if "?" in names and len(set(names)) == 1:
+    print("VERDICT: cannot say — the orb never reported a phase. Either the call")
+    print("         did not start, or `ui values` is not reading the value.")
+elif "thinking" not in names or "speaking" not in names:
+    print(f"VERDICT: cannot say — the turn did not complete on screen. Phases seen:")
+    print(f"         {' → '.join(names)}. Nothing was waited for, so nothing is measured.")
+else:
+    wait = next(d for p, d in held if p == "thinking")
+    print(f"VERDICT: the orb told the whole turn — {' → '.join(n for n in names if n != '?')}.")
+    print(f"         The wait on 'thinking' was {wait:.1f}s, and the screen carried no")
+    print("         words for any of it: the identity under the orb is all there is.")
 PY
 
 echo
