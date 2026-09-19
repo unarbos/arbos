@@ -614,6 +614,29 @@ pub fn append_events(path: &Path, events: &[Event]) -> Result<usize> {
     Ok(events.len())
 }
 
+/// Append one JSON record as a line, and if the write fails part-way
+/// (disk full, a size limit) cut the file back to its last whole line, as
+/// `append_event` does for a transcript. Every line-a-time record the
+/// kernel keeps beside the transcript (checkpoints, reproductions, PRs,
+/// notifications) goes through here: without the cut, a half line stays
+/// until the next kernel start and the next record written lands on it,
+/// both lost.
+pub fn append_line(path: &Path, record: &impl serde::Serialize) -> Result<()> {
+    let mut buf = serde_json::to_vec(record)?;
+    buf.push(b'\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    if let Err(e) = file.write_all(&buf) {
+        drop_partial_line(&mut file, buf.len());
+        return Err(e).with_context(|| format!("append {}", path.display()));
+    }
+    Ok(())
+}
+
 /// A write that failed part-way (disk full, size limit) leaves the head of
 /// a line with no newline. Every reader skips it, but it also swallows the
 /// next successful append into one damaged line. Cut the file back to the
@@ -1378,5 +1401,53 @@ mod headless_tail_tests {
 
         let _ = std::fs::remove_file(&p);
         assert_eq!(drop_headless_tail(&p).unwrap(), None, "absent is fine");
+    }
+}
+
+#[cfg(test)]
+mod append_line_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// `append_line` writes whole records that read back one per line, and
+    /// the cut it makes after a failed write (`drop_partial_line`, with the
+    /// bytes it tried as the bound) takes the file back to the last whole
+    /// line — so the record written next is not lost with the half one.
+    #[test]
+    fn a_half_line_is_cut_back_to_the_last_whole_record() {
+        let dir = std::env::temp_dir().join(format!("arbos-append-line-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("r.jsonl");
+        append_line(&path, &serde_json::json!({"n": 1})).unwrap();
+        append_line(&path, &serde_json::json!({"n": 2})).unwrap();
+        let whole = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(whole, "{\"n\":1}\n{\"n\":2}\n");
+        // What a write that failed part-way leaves: the head of a record.
+        let attempted = serde_json::to_vec(&serde_json::json!({"n": 3, "long": "x".repeat(40)}))
+            .unwrap()
+            .len()
+            + 1;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"{\"n\":3,\"lo").unwrap();
+        drop_partial_line(&mut file, attempted);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            whole,
+            "back to the last whole line"
+        );
+        append_line(&path, &serde_json::json!({"n": 4})).unwrap();
+        let lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3, "every line reads: {lines:?}");
+        assert_eq!(lines[2]["n"], 4);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

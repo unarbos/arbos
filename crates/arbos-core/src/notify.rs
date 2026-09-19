@@ -87,12 +87,7 @@ pub fn record(
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, path(place))?;
     } else {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path(place))?;
-        writeln!(f, "{}", serde_json::to_string(&n)?)?;
+        crate::files::append_line(&path(place), &n)?;
     }
     Ok(n)
 }

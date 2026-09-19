@@ -329,11 +329,8 @@ pub fn record(
             };
             // Appended, not read-then-rewritten: a failed read must not
             // shrink the record to this one line (arbos_core::record).
-            let mut line = serde_json::to_string(&entry).unwrap_or_default();
-            line.push('\n');
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
-                let _ = f.write_all(line.as_bytes());
+            if let Err(e) = arbos_core::files::append_line(&file, &entry) {
+                eprintln!("repro {}: {e:#}", file.display());
             }
             let n = list(place, agent).len();
             format!(
