@@ -4085,3 +4085,42 @@ one-element form has not.
 
 **PRs:** [#706](https://github.com/unarbos/arbos/pull/706) the sweep,
 [#707](https://github.com/unarbos/arbos/pull/707) the `ios/` batch.
+
+## Cycle 142 — five clean runs over nothing
+
+The sweep on `main` still showed `list-rows` failing on `phone: '·'`, with
+[#707](https://github.com/unarbos/arbos/pull/707) merged and in the build.
+That is twice now a fix **inside** the row has read clean once and come
+undone with the code untouched (M-451): `accessibilityHidden` on the
+separator at 128, then one element with a label at 141b. A `Button` composes
+its label by walking what is under it, and the walk is what varies.
+
+So the sentence is stated on the button itself, built from the row's own
+parts: `phone, Idle, home, 13m`. Nothing underneath can compose a different
+one.
+
+**Then I proved it five times over nothing** (M-452).
+
+`.accessibilityElement(children: .ignore)` takes the button's *traits* along
+with its children, so the rows stopped being Buttons. `list-rows.sh` finds
+rows by looking for Buttons, matched none, and printed:
+
+```
+rows on screen: 0
+  rows:            0
+  with a state:    0 of 0
+VERDICT: every row names a state, ages read as ages, and nothing
+```
+
+Five runs of that, and I read them as five confirmations. The verdict is
+true of an empty set and says nothing about the app.
+
+Both halves are fixed. The row keeps `.isButton`, so a row you can tap
+announces itself as one. And the check refuses an empty set outright —
+`VERDICT: none — no project rows matched at all` — because a check that
+passes on nothing is worse than no check: it is evidence.
+
+Re-run with both in: **11 rows** counted on each of three runs, all clean.
+
+**PRs:** [#710](https://github.com/unarbos/arbos/pull/710) the check,
+[#711](https://github.com/unarbos/arbos/pull/711) the `ios/` batch.
