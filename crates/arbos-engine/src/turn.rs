@@ -40,6 +40,14 @@ const MAX_CUTS: u32 = 2;
 /// repository takes seconds; minutes means the folder is not one a
 /// checkpoint can keep up with, and a person's command should not wait
 /// on it. `ARBOS_TREE_WAIT_MS` overrides it (tests).
+/// The turn's answer when Jev ruled "done, no change" and the chat model,
+/// asked once to say so, said nothing.
+pub const NO_CHANGE_ANSWER: &str = "No change needed: the tree already does what the request asks.";
+
+/// Empty replies a turn takes in all, every model counted, before it
+/// ends with the failed notice whatever models remain.
+pub const EMPTY_REPLIES_PER_TURN: u32 = 6;
+
 fn tree_wait() -> std::time::Duration {
     std::env::var("ARBOS_TREE_WAIT_MS")
         .ok()
@@ -1007,6 +1015,20 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     // does not count): the second one is the model failing, not
     // answering — another model takes the turn, or the user is told.
     let mut empty_in_a_row = 0u32;
+    // Empty replies over the whole turn, every model counted: the ceiling
+    // ends the turn however the models behave. Jev's "no change, done"
+    // sent the chat model a request it answered with nothing; the nudge
+    // asked again, the second empty went to the fallback, and the next
+    // Jev hop's model pick put the first model back — 50 nudges and 37
+    // fallbacks in two minutes, no end (desktop cycle 53).
+    let mut empties_this_turn = 0u32;
+    // A model fell back this turn: a later Jev pick does not undo it.
+    let mut fell_back = false;
+    // Jev said the turn is done and nothing changed, and no sentence has
+    // been said yet: the chat model gets one call to say it. If that call
+    // is empty, the verdict itself is the answer and the turn ends —
+    // never a nudge, which asks the same question of the same silence.
+    let mut no_change_say = false;
     let mut cuts = 0u32;
     // Dollars over every model call of this turn, when the provider prices them.
     let mut turn_cost: Option<f64> = None;
@@ -1218,6 +1240,9 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                     }
                     let model_choice = decision.model.clone();
                     let apply_model = |models: &mut Models, provider: &mut Provider| {
+                        if fell_back {
+                            return;
+                        }
                         if let Some(choice) = model_choice.as_deref() {
                             models.prefer(choice);
                             provider.model = models.current().to_string();
@@ -1243,6 +1268,7 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                             jev_no_change = no_change;
                             if need_say {
                                 tools = &[];
+                                no_change_say = no_change;
                                 apply_model(&mut models, &mut provider);
                             } else {
                                 jev_end = true;
@@ -1279,13 +1305,14 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             hooks.kernel_step("");
         }
         if jev_no_change {
-            append_event(
-                &transcript,
-                &Event::new(EventKind::Notice {
-                    text: "no change: the tree already does what the request asks.".into(),
-                    failed: false,
-                }),
-            )?;
+            // Jev's word to the engine, not a sentence for the person: as a
+            // notice it sat in the chat between the command card and the
+            // answer (F-199's shape). The log has it; the chat gets the
+            // answer, or the verdict as the answer when there is none.
+            eprintln!(
+                "turn {}: jev: no change, the tree already does what the request asks",
+                agent.id
+            );
         }
         if jev_end {
             return end(
@@ -1510,8 +1537,28 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             && !spoke_only
             && wake.kind != WakeKind::Done
             && wake.kind != WakeKind::Serve;
+        if empty_reply && std::mem::take(&mut no_change_say) {
+            append_event(
+                &transcript,
+                &Event::new(EventKind::Assistant {
+                    text: NO_CHANGE_ANSWER.to_string(),
+                    step: cx.step,
+                    reasoning_details: None,
+                }),
+            )?;
+            return end(
+                usage.map(|mut u| {
+                    u.cost = turn_cost;
+                    u.cached = turn_cached;
+                    u
+                }),
+                None,
+            );
+        }
+        no_change_say = false;
         if empty_reply {
             empty_in_a_row += 1;
+            empties_this_turn += 1;
         } else {
             empty_in_a_row = 0;
         }
@@ -1521,7 +1568,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
             // 403 or a silent first byte; alone, the user hears what
             // happened and what to do — not a blank chat (qal-040).
             let failed = models.current().to_string();
-            if let Some(next) = models.next().map(str::to_string) {
+            if let Some(next) = (empties_this_turn < EMPTY_REPLIES_PER_TURN)
+                .then(|| models.next().map(str::to_string))
+                .flatten()
+            {
+                fell_back = true;
                 eprintln!("provider: {failed}: two empty replies in a row; switching to {next}");
                 append_event(
                     &transcript,
