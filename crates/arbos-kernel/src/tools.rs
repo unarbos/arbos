@@ -1002,8 +1002,18 @@ fn checklist_op(
             }
         }
         "check" => {
-            let k = n()?;
+            let mut k = n()?;
             let done = args.get("done").and_then(|v| v.as_bool()).unwrap_or(true);
+            // A number from a list the kernel has since rearranged: the
+            // row that links the worker the request names is the one
+            // meant (desktop cycle 53: readouts crossed between workers).
+            let mut moved = None;
+            if let Some((row, why)) =
+                opt_str(&args, "target").and_then(|t| notes.resolve_worker_row(k, t))
+            {
+                k = row;
+                moved = Some(why);
+            }
             let item = notes.check_with_target(
                 k,
                 done,
@@ -1012,17 +1022,29 @@ fn checklist_op(
             )?;
             list.save(&hooks, agent, &notes)?;
             format!(
-                "{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",
+                "{}{} {}: {}. Items are renumbered after a check (done ones sink); use the numbers in this list.",
+                moved.map(|w| format!("{w} ")).unwrap_or_default(),
                 if done { "Checked" } else { "Reopened" },
                 k,
                 item.text
             )
         }
         "update" => {
-            let k = n()?;
-            notes.update(k, req(&args, "text")?)?;
+            let mut k = n()?;
+            let text = req(&args, "text")?;
+            let mut moved = None;
+            if let Some((row, why)) =
+                arbos_core::notes::link_target_of(text).and_then(|t| notes.resolve_worker_row(k, t))
+            {
+                k = row;
+                moved = Some(why);
+            }
+            notes.update(k, text)?;
             list.save(&hooks, agent, &notes)?;
-            format!("Updated item {k}.")
+            format!(
+                "{}Updated item {k}.",
+                moved.map(|w| format!("{w} ")).unwrap_or_default()
+            )
         }
         "remove" => {
             let k = n()?;

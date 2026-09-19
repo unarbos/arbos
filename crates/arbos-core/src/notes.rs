@@ -280,6 +280,11 @@ fn link_label(s: &str) -> Option<&str> {
 }
 
 /// `[label](target) …` → `target`.
+/// The `(target)` of a leading `[label](target)` in an item's text.
+pub fn link_target_of(s: &str) -> Option<&str> {
+    link_target(s)
+}
+
 fn link_target(s: &str) -> Option<&str> {
     let rest = s.trim_start().strip_prefix('[')?;
     let close = rest.find("](")?;
@@ -316,6 +321,19 @@ fn norm_target(t: &str) -> String {
 
 fn same_target(a: &str, b: &str) -> bool {
     norm_target(a) == norm_target(b)
+}
+
+/// The worker a target names: `agents/<id>` or `archive/agents/<id>`,
+/// with or without a file under it. None for a PR, a doc, a plain path.
+pub fn worker_of_target(target: &str) -> Option<String> {
+    let t = norm_target(target);
+    let rest = t
+        .strip_prefix("agents/")
+        .or_else(|| t.strip_prefix("archive/agents/"))?;
+    let id = rest.split('/').next()?.trim();
+    // Root is the main chat, not a worker: its subscription files sit
+    // under `agents/root/…` and a standing check's row links them.
+    (!id.is_empty() && id != crate::ROOT_ID).then(|| id.to_string())
 }
 
 /// Does `target` point into worker `agent`'s folder (`agents/<id>`, or a
@@ -536,6 +554,39 @@ impl Notes {
             .filter(|i| !i.done)
             .filter(|i| link_target(&i.text).is_some_and(|t| targets_worker(t, agent)))
             .collect()
+    }
+
+    /// The item a `check n` or `update n` means, when its number may be
+    /// stale. Rows sink when checked, and the kernel checks a worker's
+    /// row the moment the worker is archived — so a parent that listed
+    /// the page, awaited three workers and then wrote by number found
+    /// the numbers moved under it: *Worker B*'s readout and archive link
+    /// landed on *Worker A*'s row and A's on B's (desktop cycle 53). When
+    /// the request names a worker (`target`, or the link in `text`) and
+    /// item `n` links a different worker, the row that links the named
+    /// worker is the one meant; `Some((k, why))` says which and why. None
+    /// when `n` is the row meant, or nothing names a worker.
+    pub fn resolve_worker_row(&self, n: usize, wanted: &str) -> Option<(usize, String)> {
+        let want = worker_of_target(wanted)?;
+        let items = self.items();
+        let at_n = items.iter().find(|i| i.n == n)?;
+        let has = link_target(&at_n.text).and_then(worker_of_target);
+        if has.as_deref() == Some(want.as_str()) {
+            return None;
+        }
+        has.as_ref()?;
+        let row = items.iter().find(|i| {
+            link_target(&i.text).and_then(worker_of_target).as_deref() == Some(want.as_str())
+        })?;
+        Some((
+            row.n,
+            format!(
+                "Item {n} is now «{}»: rows sink when checked and a worker's row is checked the moment it is archived, so the numbers moved since your list. Item {} is the row that links {}; that one was taken.",
+                at_n.text,
+                row.n,
+                wanted.trim()
+            ),
+        ))
     }
 
     fn append(&mut self, section: &str, text: &str) -> usize {
@@ -1317,5 +1368,97 @@ mod tests {
         let mine = n.worker_items("math-docstrings");
         assert_eq!(mine.len(), 2, "{mine:?}");
         assert!(n.worker_items("nobody").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod stale_number_tests {
+    use super::*;
+
+    /// Desktop cycle 53: root listed the page (1 A, 2 B, 3 C), awaited
+    /// three workers, and wrote by number; meanwhile the kernel had
+    /// checked A's row as A was archived, and A sank — so `check 2` hit C
+    /// and `check 1` hit B, and the page read *Worker B — A's report*.
+    /// The worker the request names decides the row.
+    #[test]
+    fn a_stale_number_resolves_to_the_row_that_links_the_named_worker() {
+        let mut page = Notes::parse(
+            "## Running Workers\n- [ ] [Worker A](agents/worker-a) — running\n- [ ] [Worker B](agents/worker-b) — running\n- [ ] [Worker C](agents/worker-c) — running\n",
+        );
+        // The kernel retires A: checked, sinks to the end of the section.
+        let a = page.worker_items("worker-a")[0].n;
+        page.check_with_target(
+            a,
+            true,
+            Some("worker finished: the table"),
+            Some("archive/agents/worker-a"),
+        )
+        .unwrap();
+        let texts: Vec<String> = page.items().iter().map(|i| i.text.clone()).collect();
+        assert!(texts[0].starts_with("[Worker B]"), "{texts:?}");
+        assert!(texts[2].starts_with("[Worker A]"), "{texts:?}");
+        // Root's `check 2 target:agents/worker-b`, 2 being B in its list.
+        // Item 2 is now C: the row that links worker-b is taken instead.
+        let (row, why) = page
+            .resolve_worker_row(2, "agents/worker-b")
+            .expect("redirected");
+        assert_eq!(row, 1, "{why}");
+        assert!(why.contains("Item 2 is now «[Worker C]"), "{why}");
+        assert!(
+            why.contains("Item 1 is the row that links agents/worker-b"),
+            "{why}"
+        );
+        page.check_with_target(
+            row,
+            true,
+            Some("the ls error"),
+            Some("archive/agents/worker-b"),
+        )
+        .unwrap();
+        // `check 1 target:agents/worker-a` from the stale list: 1 is C now;
+        // A's row is done already — still the one that links A.
+        let (row, _) = page
+            .resolve_worker_row(1, "agents/worker-a")
+            .expect("redirected");
+        let items = page.items();
+        assert!(items[row - 1].text.starts_with("[Worker A]"), "{items:?}");
+        // No redirect when the number is right, when the request names
+        // no worker (a PR, a doc), or when item n is not a worker row.
+        assert!(page.resolve_worker_row(row, "agents/worker-a").is_none());
+        assert!(page.resolve_worker_row(1, "docs/x.md").is_none());
+        assert!(
+            page.resolve_worker_row(1, "https://github.com/o/r/pull/1")
+                .is_none()
+        );
+        let mut page2 =
+            Notes::parse("## S\n- [ ] [Plain](docs/a.md) — x\n- [ ] [W](agents/w) — running\n");
+        assert!(
+            page2.resolve_worker_row(1, "agents/w").is_none(),
+            "item 1 is a doc row: the model may repoint it"
+        );
+        page2.update(1, "[Plain](docs/a.md) — y").unwrap();
+        // Every label sits with its own worker's readout.
+        let final_texts: Vec<String> = page.items().iter().map(|i| i.text.clone()).collect();
+        assert!(
+            final_texts.iter().any(|t| t
+                .starts_with("[Worker A](archive/agents/worker-a) — worker finished: the table")),
+            "{final_texts:?}"
+        );
+        assert!(
+            final_texts
+                .iter()
+                .any(|t| t.starts_with("[Worker B](archive/agents/worker-b) — the ls error")),
+            "{final_texts:?}"
+        );
+        assert_eq!(
+            worker_of_target(".arbos/archive/agents/x/transcript.jsonl").as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            worker_of_target("agents/root/subscriptions/0001.toml"),
+            None,
+            "root is not a worker"
+        );
+        assert_eq!(worker_of_target("docs/agents/plan.md"), None);
     }
 }
