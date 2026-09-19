@@ -1088,24 +1088,111 @@ pub fn read(
         };
         bail!("{} does not exist{hint}", file.display());
     }
-    let (text, bad) = read_text(&file)?;
-    let lines: Vec<&str> = text.lines().collect();
+    let size = std::fs::metadata(&file)
+        .with_context(|| format!("read {}", file.display()))?
+        .len();
     let start = offset.unwrap_or(1).saturating_sub(1) as usize;
-    let take = limit.unwrap_or(lines.len() as u64) as usize;
-    let slice = lines.iter().skip(start).take(take);
+    // A page of a file streams: `offset`/`limit` on a 200 MB log read
+    // the whole file into memory and hashed every line to show twenty.
+    // A whole read is bounded: over READ_MAX_BYTES it is refused with
+    // the size and the ways in, rather than a 2 GB dump that a laptop
+    // swaps for and the transcript spills.
+    let (lines, bad, cut) = match limit {
+        Some(take) => read_lines_from(&file, start, take as usize)?,
+        None if size > READ_MAX_BYTES => bail!(
+            "{} is {} MB, over the {} MB read limit. Read a part with offset and limit, grep it for a pattern, or use bash (head, tail, sed -n 'A,Bp').",
+            file.display(),
+            size >> 20,
+            READ_MAX_BYTES >> 20
+        ),
+        None => {
+            let (text, bad) = read_text(&file)?;
+            let lines: Vec<String> = text.lines().skip(start).map(str::to_string).collect();
+            (lines, bad, false)
+        }
+    };
     let mut body = String::new();
     if bad > 0 {
         body.push_str(&not_utf8_note(bad));
         body.push('\n');
     }
-    for (i, line) in slice.enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let n = start + i + 1;
         body.push_str(&format!(
             "{n:>6}:{h}|{line}\n",
             h = super::hashline::line_tag(line)
         ));
     }
+    if cut {
+        body.push_str(&format!(
+            "[a line was longer than {} MB and was cut]\n",
+            READ_MAX_LINE >> 20
+        ));
+    }
     Ok(ToolOut::with_paths(body, vec![file.display().to_string()]))
+}
+
+/// The most `read` takes in whole. Past it the model is told the size
+/// and how to read a part.
+pub const READ_MAX_BYTES: u64 = 64 << 20;
+/// The most one streamed line may hold before it is cut (a minified
+/// bundle, a one-line JSON dump).
+const READ_MAX_LINE: usize = 4 << 20;
+
+/// `take` lines of `file` from 0-based line `start`, streamed: the bytes
+/// before `start` are skipped, not kept, and the read stops at the last
+/// wanted line. Each line decoded on its own (lossily when it is not
+/// UTF-8, counted). A binary file is refused as `read_text` refuses it.
+/// The flag says whether a line was cut at READ_MAX_LINE.
+fn read_lines_from(file: &Path, start: usize, take: usize) -> Result<(Vec<String>, usize, bool)> {
+    use std::io::{BufRead, Read};
+    let f = std::fs::File::open(file).with_context(|| format!("read {}", file.display()))?;
+    let mut reader = std::io::BufReader::with_capacity(1 << 16, f);
+    let head = reader.fill_buf().map(|b| b[..b.len().min(8192)].to_vec())?;
+    if head.contains(&0) {
+        let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+        bail!(
+            "{} is a binary file ({size} bytes), not text: read it with a tool that knows its format (bash: file, xxd, sqlite3, unzip -l …)",
+            file.display()
+        );
+    }
+    let mut lines = Vec::with_capacity(take.min(4096));
+    let mut bad = 0;
+    let mut cut = false;
+    let mut buf = Vec::new();
+    let mut n = 0usize;
+    while lines.len() < take {
+        buf.clear();
+        let got = reader
+            .by_ref()
+            .take(READ_MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut buf)?;
+        if got == 0 {
+            break;
+        }
+        if buf.len() > READ_MAX_LINE {
+            // Past the cap: drop the rest of this line.
+            cut = true;
+            buf.truncate(READ_MAX_LINE);
+            let mut rest = Vec::new();
+            reader.read_until(b'\n', &mut rest)?;
+        }
+        // As `str::lines` cuts: `\n`, or `\r\n`; a bare `\r` at the end
+        // of the last line stays, so the anchors match a whole read's.
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+        }
+        if n >= start {
+            let (text, b) = decode_text(std::mem::take(&mut buf));
+            bad += b;
+            lines.push(text);
+        }
+        n += 1;
+    }
+    Ok((lines, bad, cut))
 }
 
 /// The text an edit works on: the file as UTF-8, or the refusal that
@@ -1134,20 +1221,23 @@ pub fn read_text(file: &Path) -> Result<(String, usize)> {
             bytes.len()
         );
     }
-    Ok(decode_text(&bytes))
+    Ok(decode_text(bytes))
 }
 
 /// UTF-8 when it is; otherwise the lossy decoding and how many invalid
 /// sequences were replaced (0 for a clean file).
-pub fn decode_text(bytes: &[u8]) -> (String, usize) {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => (s.to_string(), 0),
-        Err(_) => {
+pub fn decode_text(bytes: Vec<u8>) -> (String, usize) {
+    // Valid UTF-8 takes the buffer as it is: no second copy of a large
+    // file.
+    match String::from_utf8(bytes) {
+        Ok(s) => (s, 0),
+        Err(e) => {
+            let bytes = e.into_bytes();
             let bad = bytes
                 .utf8_chunks()
                 .filter(|c| !c.invalid().is_empty())
                 .count();
-            (String::from_utf8_lossy(bytes).into_owned(), bad)
+            (String::from_utf8_lossy(&bytes).into_owned(), bad)
         }
     }
 }
@@ -1564,7 +1654,7 @@ pub fn grep_walk_with(
         if bytes.iter().take(8192).any(|b| *b == 0) {
             continue;
         }
-        let (text, _) = decode_text(&bytes);
+        let (text, _) = decode_text(bytes);
         for (i, line) in text.lines().enumerate() {
             if re.is_match(line) {
                 hits.push(GrepHit {
@@ -2325,6 +2415,70 @@ mod not_utf8_tests {
         std::fs::write(dir.join("new.c"), "int y = 1;\n").unwrap();
         let out = read(&dir, &dir, "new.c", None, None).unwrap();
         assert!(!out.body.contains("not valid UTF-8"), "{}", out.body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod read_paged_tests {
+    use super::*;
+
+    /// Control on main 8af86842 (release): `read` with offset/limit of a
+    /// 200 MB log read the whole file and hashed every line to show
+    /// twenty (0.47 s, ~400 MB); a whole read of it built a 237 MB body.
+    /// Now the page streams (0.12 ms) with the same anchors as a whole
+    /// read, and a whole read over READ_MAX_BYTES is refused with the
+    /// size and the ways in.
+    #[test]
+    fn a_page_streams_with_the_same_anchors_and_a_whole_read_has_a_cap() {
+        let dir = std::env::temp_dir().join(format!("arbos-read-paged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String = (1..=50)
+            .map(|i| format!("line {i} of the file\r\n"))
+            .collect();
+        std::fs::write(dir.join("f.txt"), &text).unwrap();
+        let whole = read(&dir, &dir, "f.txt", None, None).unwrap().body;
+        let page = read(&dir, &dir, "f.txt", Some(5), Some(4)).unwrap().body;
+        let whole_lines: Vec<&str> = whole.lines().collect();
+        assert_eq!(
+            page.lines().collect::<Vec<_>>(),
+            &whole_lines[4..8],
+            "{page}"
+        );
+        assert!(
+            page.lines().next().unwrap().starts_with("     5:"),
+            "{page}"
+        );
+        assert!(!page.contains('\r'), "{page:?}");
+        // Past the end: nothing, not an error.
+        assert_eq!(
+            read(&dir, &dir, "f.txt", Some(60), Some(4)).unwrap().body,
+            ""
+        );
+        // A Latin-1 byte on the page is counted on the page.
+        std::fs::write(dir.join("old.c"), b"ok\n/* caf\xe9 */\nint x;\n").unwrap();
+        let page = read(&dir, &dir, "old.c", Some(2), Some(1)).unwrap().body;
+        assert!(
+            page.starts_with("[not valid UTF-8: 1 byte sequence"),
+            "{page}"
+        );
+        let page = read(&dir, &dir, "old.c", Some(1), Some(1)).unwrap().body;
+        assert!(!page.contains("not valid UTF-8"), "{page}");
+        // Over the cap: refused whole, with the size; a page of it still
+        // answers (here: a sparse file, so a binary — said as such).
+        let f = std::fs::File::create(dir.join("huge.log")).unwrap();
+        f.set_len(READ_MAX_BYTES + (1 << 20)).unwrap();
+        drop(f);
+        let err = read(&dir, &dir, "huge.log", None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is 65 MB, over the 64 MB read limit"), "{err}");
+        assert!(err.contains("offset and limit"), "{err}");
+        let err = read(&dir, &dir, "huge.log", Some(1), Some(5))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a binary file"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
