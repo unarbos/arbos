@@ -5,11 +5,11 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 00:43 UTC.
+Last checked 2026-09-19 01:08 UTC.
 
-## Click Update. You will get build 2150. Jev is in it.
+## Click Update. You will get build 2155. Jev is in it.
 
-**2150** — signed, notarised, stapled, on the feed since 00:40 UTC.
+**2155** — signed, notarised, stapled, on the feed since 01:05 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
@@ -19,6 +19,14 @@ on the release.
 The relaunch-tab bug (mt-24) is still open. #675 aimed at it and QA still
 fails it four times out of four, so do not read any build here as closing
 it.
+
+New since 2150 (builds 2151–2155):
+
+- **#708** — a `sleep` in a `for` loop over a literal list is that many
+  passes, not a poll
+- **#709** — two end-to-end tests wait for the worker's report
+
+## Before that: 2150
 
 New since 2146 (builds 2147–2150):
 
