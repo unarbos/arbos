@@ -5690,3 +5690,39 @@ guard, read and found sound.
 Evidence in `media/mobile/cycle-183/`.
 
 **PR:** [#788](https://github.com/unarbos/arbos/pull/788), harness only.
+
+## Cycle 184 — a note under the wrong number
+
+The queue put `call — the microphone path` at cycle 170, fourteen cycles
+back.
+
+**It holds** (M-568). Barge-in cuts playback at 287 ms and is done at 332 ms,
+both clips transcribe correctly, and the call returns to listening.
+
+**But cycle 170's own fix had drifted** (M-569). That cycle nearly filed a
+tenfold regression, discovered that `reply_first_audio` measures two
+different things — a greeting the gateway answers itself, and a question the
+kernel must think about — and added a note saying so.
+
+One run produces both. This cycle measured 6416 ms after the clip's delegated
+question and 1240 ms after the barge. The note explaining the delegated kind
+printed at the end of the run, underneath the barge's number. A reader seeing
+1240 ms with that note would take a delegated reply to be about a second, and
+call the next honest 12-second reading a tenfold regression — which is
+exactly the mistake cycle 170 wrote the note to prevent, reintroduced by
+where the note sat.
+
+Each number now prints with the words it answered and which side answered
+them:
+
+      6416 ms   after "Hello Arbus. What are we working on right now? Give "
+                the kernel had to answer
+      1240 ms   after "Stop. Wait. One more thing."
+                the gateway answered it itself
+
+A lesson written as prose at the bottom of a run is a lesson attached to
+whatever happens to be printed above it.
+
+Evidence in `media/mobile/cycle-184/`.
+
+**PR:** [#789](https://github.com/unarbos/arbos/pull/789), harness only.
