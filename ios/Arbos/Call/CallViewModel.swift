@@ -444,24 +444,15 @@ final class CallViewModel: ObservableObject {
                 chat.spoke(spokenReply, byUser: false)
             }
             spokenReply = ""
-            // Only a reply the caller could have heard is an answer ending,
-            // so the words are kept behind that test. The *phase* is a
-            // different question, and staying put was the wrong answer to
-            // it: after a barge-in the orb read `thinking` for sixteen
-            // seconds with no further frames, promising a reply that was
-            // never coming, until the caller spoke again (M-407, measured
-            // again at cycle 145 — barge at 288 ms, confirmed at 330, then
-            // `thinking` to the end of the run).
-            //
-            // "Not pretending a lost reply arrived" was right; "therefore
-            // keep saying one is coming" does not follow. `listening` is
-            // about the microphone, which is on, and it is the one state
-            // the caller can act on. `settle()` keeps its own guards, so
-            // this cannot cut across a reply that is genuinely still due.
-            if !(end.reachedTheCaller && responseHadAudio) {
-                trace("response.done \(end.rawValue), nothing heard")
+            // Only a reply the caller could have heard is an answer ending.
+            // The server says which now; the silence check stays behind it,
+            // because a reply that reached nobody must not take the screen
+            // back to listening whatever the frame calls itself.
+            if end.reachedTheCaller, responseHadAudio {
+                settle()
+            } else {
+                trace("response.done \(end.rawValue), nothing heard — staying in \(phase.label)")
             }
-            settle()
             responseHadAudio = false
         case .toolCall(let name, let summary):
             appendSystem("\(name)\(summary.isEmpty ? "" : " · \(summary)")")
