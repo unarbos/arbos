@@ -2103,9 +2103,15 @@ def place_window() -> None:
             # gate since read "window at 0,85 1920x1143" and measured
             # the wide frame. Un-maximize by the window id first (R34);
             # xdotool 3.2016 has no `windowstate`, wmctrl does the job.
-            subprocess.run(["wmctrl", "-i", "-r", wid, "-b", "remove,maximized_vert,maximized_horz"], env=ENV)
-            time.sleep(0.3)
-            subprocess.run(["wmctrl", "-i", "-r", wid, "-e", "0,100,60,1600,1000"], env=ENV)
+            for _ in range(6):
+                subprocess.run(["wmctrl", "-i", "-r", wid, "-b", "remove,maximized_vert,maximized_horz"], env=ENV)
+                time.sleep(0.4)
+                subprocess.run(["wmctrl", "-i", "-r", wid, "-e", "0,100,60,1600,1000"], env=ENV)
+                time.sleep(0.4)
+                geo = subprocess.run(["xdotool", "getwindowgeometry", "--shell", wid], capture_output=True, text=True, env=ENV).stdout
+                pos = {k: int(v) for k, v in (line.split("=") for line in geo.split() if "=" in line)}
+                if pos.get("WIDTH", 0) <= 1600:
+                    break
             subprocess.run(["xdotool", "windowsize", wid, "1600", "1000"], env=ENV)
             subprocess.run(["xdotool", "windowmove", wid, "100", "60"], env=ENV)
             # Read the geometry back rather than trust the move. (Added
