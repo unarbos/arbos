@@ -781,14 +781,15 @@ class Pass:
         act = active(self.state()) or {}
         ran_it = any(i.get("kind") == "tool" and "definitely-not-here" in (i.get("label") or "") for i in act.get("items", []))
         if ran_it:
-            for w in self.ids("work-*"):
-                if self.seen(w):
-                    self.app.click(w); time.sleep(0.6); break
             def exit_marks():
                 return [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"] if e["path"].split(".")[-1].startswith("term-exit-")]
-            for r in self.ids("run-*"):
+            # The newest turn's fold is the last `work-*`; its run the last `run-*`.
+            for w in reversed(self.ids("work-*")):
+                if self.seen(w):
+                    self.app.click(w); time.sleep(0.6); break
+            for r in reversed(self.ids("run-*")):
                 if self.seen(r) and not exit_marks():
-                    self.app.click(r); time.sleep(0.6)
+                    self.app.click(r); time.sleep(0.6); break
             marks = exit_marks()
             self.record("command-exit-mark", sc, "a command exits 2; open its run", "the card's header carries 'exit 2'",
                         f"marks={marks}", "pass" if marks else "fail", self.still("exit-mark"))
