@@ -516,7 +516,14 @@ def register(scenario, registry, transcript, now_ms, branch):
             staged = False
             for attempt in range(1, 4):
                 rig.wait_idle(folder, 60)
-                rig.send("Run `sleep 40; echo slow` with bash, then say done.")
+                # `sleep 40` is the version the model argues with: it answers "I cannot run bash
+                # commands longer than a few seconds as a coordinator" and routes the work to a
+                # worker, which is the protocol talking ("keep the chat responsive, route
+                # substantial work to workers"). The scenario does not need forty seconds — it
+                # needs a turn that is still up about ten seconds later, which is the most a
+                # coordinator will hold. Asking for what the protocol allows is more honest than
+                # asking for more and retrying until the model gives in (qal-j47).
+                rig.send("Run `sleep 12; echo slow` with one bash call — it is quick, do it yourself rather than spawning — then say done.")
                 if not rig.wait_busy(folder, 20):
                     cx.rec.notes.setdefault("staging", []).append(f"attempt {attempt}: the turn never started")
                     continue
