@@ -1779,6 +1779,8 @@ pub struct ChildSummary {
     /// What the worker is on right now: its `status` line from the kernel
     /// when it sent one, else the tool it is running or last ran.
     pub step: Option<String>,
+    /// The question a worker parked on, for the parent's line (F-216).
+    pub question: Option<String>,
 }
 
 impl ChatSession {
@@ -1906,7 +1908,13 @@ impl ChatSession {
         let stepping = self.status.is_some() && self.live();
         if (self.busy() || stepping) && evidence {
             ChildState::Working
-        } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
+        } else if self.answering.is_some()
+            || self.questions.is_some()
+            || self.plan_open().any(|n| n.do_kind == "ask")
+        {
+            // A worker parked on an `ask` card is asking, whatever its plan
+            // says; without the card counted here it read *done* in the
+            // panel while its question stood (F-207, d20).
             ChildState::Asking
         } else if self.closed || self.turn_ended.is_some() || self.agent_gone() {
             ChildState::Done
@@ -2027,7 +2035,12 @@ impl ChatSession {
             self.flush();
             return;
         }
-        if self.streaming || self.has_running_tool() {
+        // An open turn is steered whether or not a token or a tool row has
+        // reached this window: a worker's chat opened mid-run has neither
+        // (the kernel files a tool when it ends), and the line typed there
+        // went as a plain prompt with no steer mark (F-210). The kernel
+        // takes a steer frame as a plain line when no turn runs.
+        if self.streaming || self.has_running_tool() || self.turn_open {
             self.steer(content);
             return;
         }
@@ -2115,6 +2128,36 @@ impl ChatSession {
             return;
         }
         if let Some(next) = self.queue.pop_front() {
+            // A line kept while the socket came up joins the turn the
+            // kernel is on, as it would have typed live: a worker's chat
+            // opened mid-run had its first line go as a plain prompt with
+            // no steer mark (F-210). The card is already on the pane; it
+            // takes the mark. The kernel reads a steer frame as a plain
+            // line when no turn runs.
+            if self.pending_wire && (self.turn_open || self.streaming || self.has_running_tool()) {
+                let sent = match &self.connection {
+                    Connection::Live(session) if !session.is_closed() => {
+                        session.steer(&next).is_ok()
+                    }
+                    _ => false,
+                };
+                if sent {
+                    self.pending_wire = false;
+                    let squash = |s: &str| s.split_whitespace().collect::<String>();
+                    let words = squash(&next.text);
+                    if let Some(card) = self.items.iter_mut().rev().find_map(|item| match item {
+                        ChatItem::User(message) if squash(&message.text) == words => Some(message),
+                        _ => None,
+                    }) {
+                        card.steer = true;
+                    }
+                    self.flush();
+                    return;
+                }
+                self.queue.push_front(next);
+                self.reap_dead_socket();
+                return;
+            }
             self.prompt(next);
         }
     }
@@ -3828,8 +3871,13 @@ impl ChatSession {
                 let busy = self.streaming || self.has_running_tool();
                 let queued = !self.queue.is_empty();
                 self.forget_socket();
+                // The socket closed under a running turn: the kernel went
+                // away (killed, crashed, replaced), not a stop anyone asked
+                // for. "Stopped." read as a person's act (F-212, d22); the
+                // line names what happened, and the reconnect that follows
+                // says nothing more (F-162).
                 if busy && !queued {
-                    self.notice(false, "Stopped.");
+                    self.notice(true, KERNEL_DROPPED_MID_TURN);
                 }
                 self.flush();
             }
@@ -4832,7 +4880,9 @@ fn pump(
                         }
                         chat.flush();
                     } else if busy && !queued {
-                        chat.notice(false, "Stopped.");
+                        // The stream ended under a running turn with the
+                        // kernel still in place: it went away (F-212).
+                        chat.notice(true, KERNEL_DROPPED_MID_TURN);
                         chat.flush();
                     }
                     chat.resumable() && (queued || busy)
@@ -5127,6 +5177,8 @@ pub fn interrupt_label(detail: &str) -> String {
 
 /// The notice text for a turn the user stopped; the fold line keys on it.
 pub const STOPPED_BY_YOU: &str = "Stopped by you";
+/// The kernel's socket closed under a running turn (F-212).
+pub const KERNEL_DROPPED_MID_TURN: &str = "The kernel went away mid-turn";
 /// The head of the notice for a place whose folder moved under the window
 /// (QA `af-03`); the path it expected follows.
 pub const PLACE_GONE: &str = "This project's folder is gone or was moved";
