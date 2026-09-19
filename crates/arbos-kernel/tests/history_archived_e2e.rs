@@ -13,7 +13,12 @@ use std::time::{Duration, Instant};
 const REPLIES: &str = concat!(
     "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"w1\",\"task\":\"say the codeword\"}}]}\n",
     "{\"agent\":\"root\",\"content\":\"started\"}\n",
-    "{\"content\":\"the codeword is xylophone\"}\n",
+    // The worker's report lands after root's dispatch turn has closed, so
+    // it opens the done turn that archives the worker. An instant report
+    // folds into the running turn as a say, nothing archives, and the
+    // 30 s wait below runs out (the fold-race family — #585, #606, #630,
+    // #637; red on main at d644bdf0).
+    "{\"content\":\"the codeword is xylophone\",\"delay_ms\":2500}\n",
     "{\"agent\":\"root\",\"content\":\"noted\"}\n",
 );
 
@@ -107,7 +112,7 @@ fn history_by_the_workers_name_finds_its_archived_record_and_an_unknown_name_say
         "{\"agent\":\"root\",\"content\":\"one worker\",\"calls\":[{\"name\":\"spawn\",\"arguments\":{\"name\":\"Run J152618 verification command\",\"task\":\"say the codeword\"}}]}\n",
         // Pinned to the worker's id (the name's slug): unpinned, root's
         // step after the spawn took this line first on a loaded runner.
-        "{\"agent\":\"run-j152618-verification-command\",\"content\":\"the codeword is marimba\"}\n",
+        "{\"agent\":\"run-j152618-verification-command\",\"content\":\"the codeword is marimba\",\"delay_ms\":2500}\n",
         "{\"agent\":\"root\",\"content\":\"the worker says marimba\"}\n",
     );
     let mut k = start_kernel_replay("history-by-name", replies);
