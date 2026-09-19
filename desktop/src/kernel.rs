@@ -2028,7 +2028,12 @@ fn event_to_item(ev: &arbos_core::Event) -> Option<crate::model::session::ChatIt
             })
         }
         arbos_core::EventKind::Assistant { text, .. } if text.trim().is_empty() => None,
-        arbos_core::EventKind::Assistant { text, .. } => Some(ChatItem::Agent(text.clone())),
+        // The same cut the live line gets: a `[kernel] …` aside the model
+        // repeated is not a paragraph of the reply (F-211).
+        arbos_core::EventKind::Assistant { text, .. } => {
+            let shown = crate::markup::strip_live(text);
+            (!shown.trim().is_empty()).then(|| ChatItem::Agent(shown))
+        }
         arbos_core::EventKind::Say { from, text } => Some(ChatItem::From {
             who: from.clone(),
             text: text.clone(),
