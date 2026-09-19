@@ -62,14 +62,23 @@ impl Tool for Read {
             "read",
             "Read a file (text or image). Text lines are LINE:HASH|body. Pass LINE:HASH to edit. A store address (arbos://<machine>/<project>/<path>, see .arbos/machines.md) reads a file in another node's .arbos/ — the parent project's notes.md or docs/ from a remote worker.",
             &[
-                ("path", "A path, or a store address.", true, "string"),
+                (
+                    "path",
+                    "A path, or a store address (default: the last file you touched this turn).",
+                    false,
+                    "string",
+                ),
                 ("offset", "Start line (1-based).", false, "integer"),
                 ("limit", "Max lines.", false, "integer"),
             ],
         )
     }
     fn plan(&self, cx: &PlanCx, args: &Value) -> Result<Plan> {
-        let path = req(args, "path")?;
+        // No path: the last file touched this turn was put in by
+        // `prepare`, as for edit and write; none touched is said in `run`.
+        let Some(path) = opt_str(args, "path") else {
+            return Ok(Plan::access(Access::none()));
+        };
         if StoreAddress::looks_like(path) {
             return Ok(Plan::access(Access::read_store(
                 StoreAddress::parse(path)?.to_string(),
@@ -84,13 +93,17 @@ impl Tool for Read {
             return Box::pin(async move { remote_read(&cx, &addr, offset, limit).await });
         }
         blocking(move || {
-            read(
+            let Some(path) = opt_str(&args, "path") else {
+                bail!("read: no path given, and no file was touched this turn to stand in for it");
+            };
+            let out = read(
                 cx.root(),
                 &cx.cwd,
-                req(&args, "path")?,
+                path,
                 opt_u64(&args, "offset"),
                 opt_u64(&args, "limit"),
-            )
+            );
+            note_inferred_path(out, &args, path)
         })
     }
 }

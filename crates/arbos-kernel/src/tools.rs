@@ -238,8 +238,8 @@ impl Tool for Transcript {
             &[
                 (
                     "agent",
-                    "A worker of yours (id or name), or yourself.",
-                    true,
+                    "A worker of yours (id or name), or yourself. Default: your newest worker, else yourself.",
+                    false,
                     "string",
                 ),
                 ("mode", "tail (default) or full.", false, "string"),
@@ -259,15 +259,32 @@ impl Tool for Transcript {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
             let me = cx.agent.id.as_str();
-            let who = req(&args, "agent")?.trim().to_string();
             let all = arbos_core::list_agents(&hooks.place).unwrap_or_default();
+            // No agent named (a Jev pick): the newest worker of mine — the
+            // one whose report is most likely wanted — else myself.
+            let who = match opt_str(&args, "agent")
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+            {
+                Some(a) => a.to_string(),
+                None => hooks
+                    .descendants(me)
+                    .into_iter()
+                    .filter(|id| id != me)
+                    .max_by_key(|id| {
+                        std::fs::metadata(hooks.place.agent_dir(id).join("agent.md"))
+                            .and_then(|m| m.modified())
+                            .ok()
+                    })
+                    .unwrap_or_else(|| me.to_string()),
+            };
             let id = all
                 .iter()
                 .find(|a| a.id.as_str() == who || a.name == who)
                 .map(|a| a.id.to_string())
                 .unwrap_or(who.clone());
             let mine = hooks.descendants(me);
-            let dir = if mine.iter().any(|m| *m == id) {
+            let dir = if mine.contains(&id) {
                 hooks.place.agent_dir(&id)
             } else if hooks
                 .place
@@ -1134,7 +1151,7 @@ impl Tool for TodoTool {
                         "n": {"type": "integer", "description": "check/update/remove."},
                         "readout": {"type": "string", "description": "check: what came of it."}
                     },
-                    "required": ["op"]
+                    "required": []
                 }
             }
         })
@@ -1184,7 +1201,7 @@ impl Tool for SubscribeTool {
                         "thread": {"type": "string", "description": "chat: only replies in this Slack thread (its ts)."},
                         "match": {"type": "string", "description": "chat: only messages containing this text."}
                     },
-                    "required": ["op"]
+                    "required": []
                 }
             }
         })
@@ -1196,7 +1213,20 @@ impl Tool for SubscribeTool {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
             let agent = cx.agent.id.as_str();
-            let op = opt_str(&args, "op").unwrap_or("add");
+            // No op: `list` when nothing else is given (a Jev pick sends
+            // `{}`); `add` when the fields of one are.
+            let op = opt_str(&args, "op").unwrap_or_else(|| {
+                if [
+                    "kind", "prompt", "cmd", "every", "after", "repo", "path", "channel",
+                ]
+                .iter()
+                .any(|k| args.get(*k).is_some_and(|v| !v.is_null()))
+                {
+                    "add"
+                } else {
+                    "list"
+                }
+            });
             let id = || -> Result<u32> {
                 args.get("id")
                     .and_then(|v| v.as_u64())
@@ -1471,8 +1501,8 @@ impl Tool for Browser {
             &[
                 (
                     "action",
-                    "navigate|snapshot|screenshot|click|type|fill|press|hover|select|scroll|back|forward|wait|eval|console|close",
-                    true,
+                    "navigate|snapshot|screenshot|click|type|fill|press|hover|select|scroll|back|forward|wait|eval|console|close (default snapshot)",
+                    false,
                 ),
                 ("url", "navigate", false),
                 ("ref", "[n] from snapshot", false),
@@ -1492,7 +1522,13 @@ impl Tool for Browser {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         let hooks = Arc::clone(&self.0);
         Box::pin(async move {
-            let action = req(&args, "action")?.to_ascii_lowercase();
+            // No action is a look at the page: a Jev pick carries no
+            // arguments, and `snapshot` is the read that costs nothing.
+            let action = opt_str(&args, "action")
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .unwrap_or("snapshot")
+                .to_ascii_lowercase();
             let owner = cx.agent.id.to_string();
             if action == "close" {
                 let had = hooks.browsers.close(&owner);

@@ -486,7 +486,7 @@ impl Tool for Await {
             "await",
             "Wait on a bash job: new output when it exits, matches pattern, or wait_ms elapses.",
             &[
-                ("id", "e.g. j3", true),
+                ("id", "e.g. j3 (default: your newest job)", false),
                 ("pattern", "Regex: return on match.", false),
                 ("wait_ms", "ms (30000, max 3600000).", false),
             ],
@@ -498,7 +498,17 @@ impl Tool for Await {
     fn run(&self, cx: RunCx, args: Value) -> BoxFuture<'static, Result<ToolOut>> {
         Box::pin(async move {
             let root = JobsRoot::for_agent(&cx.place, &cx.agent.id);
-            let id = req(&args, "id")?.trim().to_string();
+            // No id (a Jev pick): the newest job is the one being waited
+            // on; no job at all is said, not guessed.
+            let id = match opt_str(&args, "id")
+                .map(str::trim)
+                .filter(|i| !i.is_empty())
+            {
+                Some(id) => id.to_string(),
+                None => root.list().last().map(|j| j.id.clone()).ok_or_else(|| {
+                    anyhow::anyhow!("await: no id given and no job of yours to wait on")
+                })?,
+            };
             let mut job = root.load(&id)?;
             let pattern = match opt_str(&args, "pattern") {
                 Some(p) => Some(
