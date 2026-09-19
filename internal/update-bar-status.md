@@ -5,16 +5,24 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 09:08 UTC.
+Last checked 2026-09-19 09:57 UTC.
 
-## Click Update. You will get build 2230. Jev is in it.
+## Click Update. You will get build 2235. Jev is in it.
 
-**2230** — signed, notarised, stapled, on the feed since 09:05 UTC.
+**2235** — signed, notarised, stapled, on the feed since 09:55 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2230 (builds 2231–2235):
+
+- **#745** — a check or update by a number the kernel has since moved goes
+  to the right place
+- **#746** — `coverage-map.sh` reads the whole harness, not a quarter of it
+
+## Before that: 2230
 
 New since 2228 (builds 2229–2230):
 
