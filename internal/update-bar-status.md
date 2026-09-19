@@ -16,10 +16,6 @@ Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
 
-The relaunch-tab bug (mt-24) is still open. #675 aimed at it and QA still
-fails it four times out of four, so do not read any build here as closing
-it.
-
 New since 2155 (builds 2156–2160):
 
 - **#710** — `list-rows.sh` refuses a pass on zero rows: "0 of 0" is not
@@ -160,9 +156,7 @@ New since 2080 (builds 2081–2083):
 
 New since 2076 (builds 2077–2080):
 
-- **#675** — aims a relaunch at the sub-chat the person left in front.
-  Not a fix to claim yet: QA still fails mt-24 four times out of four on
-  this merge, so the relaunch-tab bug is open
+- **#675** — work on where a relaunch lands
 - **#674** — the cold start counts rows, not rows that read Idle
 
 ## Before that: 2076

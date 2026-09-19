@@ -66,7 +66,7 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | mode chip, /mode, approval + ask cards per mode | 41 (approval card paired via a worker; F-187, F-188) | `askmode41.py`, gate `ask-*` rows | — |
 | under-composer pills: repo vs non-repo, Changes, Commit & Push, PRs, Working/Agents | 48 (re-read; #629/#688 design stands) | gate `pills` rows | — |
 | bottom bar (version, Update) | 43 (28 px at every size; F-161 stands) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
-| search (⌘K chat search palette) | 38 (F-176) | gate `search` row | — |
+| search (⌘K chat search palette) | 50 (F-197 content index closed in #703) | gate `search-by-content`, `search-open-hit` | — |
 | themes: light, dark; tint | 35 (F-163 light page/rail numbers; tint not paired) | cycle-11 `13-light`; gate `appearance-*` | 15 |
 | window sizes: 900×600, panel fold, 1600×1000 | 43 (F-161 unchanged) | `cycle-43/sizes/` | — |
 | remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 38 (F-178 local drop/recovery; faults in 35; the real remote untouched) | remote track scenarios 1–2; 3–4 open | 16 |
