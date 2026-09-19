@@ -238,6 +238,19 @@ impl Agent {
     }
 
     pub fn parse(id: AgentId, text: &str) -> Result<Self> {
+        // An empty file is not an agent with every default. A zero-byte
+        // agent.md is what a file-provider placeholder (iCloud, a synced
+        // folder), an interrupted copy, or a truncating writer leaves —
+        // and every default means unpaused, writable, full allowlist,
+        // no parent: a paused read-only worker would come back as a
+        // free-running writer, in silence. Refused here; the folder is
+        // named at boot (`unlisted_agent_dirs`) and the transcript beside
+        // it is left exactly as it is.
+        if text.trim().is_empty() {
+            anyhow::bail!(
+                "agent.md is empty (a zero-byte placeholder or an interrupted copy): not served until it is restored; the transcript beside it is intact"
+            );
+        }
         let mut agent = Agent::root(id.0.clone());
         agent.id = id;
         for raw in text.lines() {
@@ -328,8 +341,8 @@ impl Agent {
     }
 
     /// Write `agent.md` atomically. The kernel and the desktop both save
-    /// this file; a reader must never see it truncated (an empty file parses
-    /// as an agent with every default: unpaused, full allowlist).
+    /// this file; a reader must never see it truncated (an empty file is
+    /// refused by `parse`, and the agent is not served until restored).
     pub fn save(&self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("pages"))?;
@@ -458,4 +471,27 @@ pub fn validate_id(id: &str) -> Result<()> {
         bail!("agent id must be [A-Za-z0-9_-]");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    /// An empty agent.md is refused, not read as an agent with every
+    /// default: unpaused, writable, full allowlist, no parent. A file with
+    /// content parses as before, unknown lines and all.
+    #[test]
+    fn an_empty_agent_md_is_refused_and_a_written_one_parses() {
+        for empty in ["", "\n", "   \n\t\n"] {
+            let err = Agent::parse(AgentId::new("w1"), empty).unwrap_err();
+            assert!(err.to_string().contains("agent.md is empty"), "{err:#}");
+        }
+        let a = Agent::parse(
+            AgentId::new("w1"),
+            "name: w1\nparent: root\npaused: true\nreadonly: true\nsome-future-key: x\n",
+        )
+        .unwrap();
+        assert_eq!(a.parent.as_ref().map(|p| p.as_str()), Some("root"));
+        assert!(a.paused && a.readonly);
+    }
 }

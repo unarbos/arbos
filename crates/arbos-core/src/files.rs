@@ -267,12 +267,41 @@ pub fn bootstrap(place: &Place) -> Result<Agent> {
         let _ = crate::project::write_for_new_place(place, name);
     }
     let agent = if root.agent_md().exists() {
-        let mut agent = Agent::load(&root.dir)?;
-        if agent.cwd.is_none() {
-            agent.cwd = Some(place.path.clone());
-            let _ = agent.save(&root.dir);
+        match Agent::load(&root.dir) {
+            Ok(mut agent) => {
+                if agent.cwd.is_none() {
+                    agent.cwd = Some(place.path.clone());
+                    let _ = agent.save(&root.dir);
+                }
+                agent
+            }
+            // Root is the place's main chat: a place with no root is a
+            // dead place, so an agent.md of root's that cannot be read
+            // (empty, a placeholder) is rewritten with defaults — and the
+            // rewrite is said on root's own transcript, since the model
+            // pin, mode and title it carried are gone with the old file.
+            // A worker in the same state is left alone and named at boot.
+            Err(e) => {
+                let mut agent = Agent::root(ROOT_ID);
+                agent.cwd = Some(place.path.clone());
+                let kept = root.dir.join("agent.md.unreadable");
+                let _ = std::fs::rename(root.agent_md(), &kept);
+                agent.save(&root.dir)?;
+                touch(&root.transcript())?;
+                std::fs::create_dir_all(root.jobs())?;
+                let notice = Event::new(EventKind::Notice {
+                    text: format!(
+                        "The main chat's agent.md could not be read ({e:#}). It was written again with defaults — model, mode and title may need setting again — and the old file is kept beside it as agent.md.unreadable. The transcript was not touched."
+                    ),
+                    failed: true,
+                });
+                let _ = append_event(&root.transcript(), &notice);
+                eprintln!(
+                    "arbos: root's agent.md could not be read ({e:#}); rewritten with defaults"
+                );
+                agent
+            }
         }
-        agent
     } else {
         let mut agent = Agent::root(ROOT_ID);
         agent.cwd = Some(place.path.clone());
