@@ -330,10 +330,19 @@ pub fn run(args: Args) -> Result<i32> {
     let events = load_transcript(&layout.transcript()).unwrap_or_default();
     let cps = checkpoints(&layout.dir);
     if cps.is_empty() {
-        bail!(
-            "{} has no checkpoints yet (they are written when a turn starts, from this version on)",
-            args.agent
-        );
+        // The folder may be one that never gets a checkpoint (inside a
+        // repository, no repository, no commit): that is the reason, not
+        // the kernel's version.
+        let cwd = arbos_core::load_agent(&place, &arbos_core::AgentId::new(&args.agent))
+            .map(|a| a.work_dir(&place.path))
+            .unwrap_or_else(|_| place.path.clone());
+        match arbos_engine::git::why_no_checkpoints(&cwd) {
+            Some(why) => bail!("{} has no checkpoints: {why}", args.agent),
+            None => bail!(
+                "{} has no checkpoints yet (they are written when a turn starts, from this version on)",
+                args.agent
+            ),
+        }
     }
     // The turns as a table: the checkpoint's line, when, and the words
     // that started the turn.

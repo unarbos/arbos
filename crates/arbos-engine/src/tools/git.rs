@@ -141,6 +141,62 @@ pub fn snapshot_turn_record(
 /// `snapshot_turn_record`, and beside the record the reason the old undo
 /// mark could not be cleared, when it could not — for the turn to say on
 /// the transcript that this turn has no undo point.
+/// What kind of folder a place is, as far as checkpoints go. A subfolder
+/// of a repository (`repo/packages/app` opened as the project — the
+/// monorepo shape) has no `.git` of its own, so no checkpoint is written
+/// and rewind and undo are off there — rightly: a rewind that reset the
+/// repository would reach the person's uncommitted work in a sibling
+/// package. What was wrong was the silence: rewind said "no checkpoints
+/// yet (they are written when a turn starts, from this version on)" and
+/// the start said nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointHome {
+    /// A repository with a commit: checkpoints are written.
+    Repository,
+    /// `.git` here, no commit yet.
+    NoCommit,
+    /// Inside a repository whose root is elsewhere.
+    InsideRepository(std::path::PathBuf),
+    /// No repository at all.
+    NotARepository,
+}
+
+pub fn checkpoint_home(cwd: &Path) -> CheckpointHome {
+    if cwd.join(".git").exists() {
+        return if git_out(cwd, &["rev-parse", "HEAD"]).is_some_and(|h| !h.is_empty()) {
+            CheckpointHome::Repository
+        } else {
+            CheckpointHome::NoCommit
+        };
+    }
+    match git_out(cwd, &["rev-parse", "--show-toplevel"]) {
+        Some(root) if !root.is_empty() => CheckpointHome::InsideRepository(root.into()),
+        _ => CheckpointHome::NotARepository,
+    }
+}
+
+/// Why this folder has no checkpoints, for the person — None when it has
+/// them (or would: a repository with a commit).
+pub fn why_no_checkpoints(cwd: &Path) -> Option<String> {
+    match checkpoint_home(cwd) {
+        CheckpointHome::Repository => None,
+        CheckpointHome::NoCommit => Some(format!(
+            "{} has a .git but no commit yet: checkpoints, rewind and undo start after the first commit",
+            cwd.display()
+        )),
+        CheckpointHome::InsideRepository(root) => Some(format!(
+            "{} is inside the repository at {}, not its root: checkpoints, rewind and undo work at the repository's root. Open {} as the project to have them (a rewind here would reach the whole repository), or `git init` in this folder to make it its own",
+            cwd.display(),
+            root.display(),
+            root.display()
+        )),
+        CheckpointHome::NotARepository => Some(format!(
+            "{} is not a git repository: checkpoints, rewind and undo are off here; `git init` in this folder turns them on",
+            cwd.display()
+        )),
+    }
+}
+
 pub fn snapshot_turn_record_with_mark(
     cwd: &Path,
     agent_dir: &Path,
@@ -1448,9 +1504,15 @@ pub fn undo(cwd: &Path, turn_line: u64, turn_ts: Option<i64>) -> Result<ToolOut>
     let text = match arbos_core::record::read_text(&mark).confirmed() {
         Ok(Some(t)) => t,
         Ok(None) => {
-            return Ok(ToolOut::text(
-                "no checkpoint for this turn (its mark was never written, or its write failed and was said on the transcript); nothing reset",
-            ));
+            // No mark at all: the folder may be one that never gets a
+            // checkpoint — say which, not "its write failed".
+            let why = why_no_checkpoints(cwd).unwrap_or_else(|| {
+                "its mark was never written, or its write failed and was said on the transcript"
+                    .to_string()
+            });
+            return Ok(ToolOut::text(format!(
+                "no checkpoint for this turn ({why}); nothing reset"
+            )));
         }
         Err(e) => anyhow::bail!("undo: {e}"),
     };
@@ -2604,5 +2666,90 @@ mod churning_file_tests {
             .unwrap_or_default();
         assert!(litter.is_empty(), "{litter:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_home_tests {
+    use super::*;
+
+    /// Probe on main 249ddb5f: a place at `repo/packages/a` got no
+    /// checkpoint record (None) and no word why; undo said "its mark was
+    /// never written, or its write failed". Each folder kind names itself.
+    #[test]
+    fn each_folder_kind_says_why_it_has_no_checkpoints() {
+        let base = std::env::temp_dir().join(format!("arbos-cp-home-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("packages/a")).unwrap();
+        let git = |dir: &Path, a: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(a)
+                    .current_dir(dir)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&repo, &["init", "-q"]);
+        // No commit yet.
+        assert_eq!(checkpoint_home(&repo), CheckpointHome::NoCommit);
+        assert!(why_no_checkpoints(&repo).unwrap().contains("no commit yet"));
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "x",
+            ],
+        );
+        assert_eq!(checkpoint_home(&repo), CheckpointHome::Repository);
+        assert!(why_no_checkpoints(&repo).is_none());
+        // Inside the repository: the root is named, and both ways.
+        let inside = repo.join("packages/a");
+        let real_root = std::fs::canonicalize(&repo).unwrap();
+        match checkpoint_home(&inside) {
+            CheckpointHome::InsideRepository(root) => {
+                assert_eq!(std::fs::canonicalize(root).unwrap(), real_root)
+            }
+            other => panic!("{other:?}"),
+        }
+        let why = why_no_checkpoints(&inside).unwrap();
+        assert!(why.contains("is inside the repository at"), "{why}");
+        assert!(why.contains("would reach the whole repository"), "{why}");
+        assert!(why.contains("`git init` in this folder"), "{why}");
+        // And no record is written there, as before.
+        let agent_dir = inside.join(".arbos/agents/root");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        assert!(
+            snapshot_turn_record(&inside, &agent_dir, "root", 1)
+                .unwrap()
+                .is_none()
+        );
+        // undo there says the folder, not a failed write.
+        let out = undo(&inside, 1, None).unwrap();
+        assert!(
+            out.body.contains("is inside the repository at"),
+            "{}",
+            out.body
+        );
+        // No repository at all.
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(checkpoint_home(&plain), CheckpointHome::NotARepository);
+        assert!(
+            why_no_checkpoints(&plain)
+                .unwrap()
+                .contains("is not a git repository")
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
