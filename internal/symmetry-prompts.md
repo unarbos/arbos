@@ -62,19 +62,19 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | opener: ~, partial, create, prefix sibling, remote host, recents | 71 (F-240 recent folders) | #258, gate opener rows | — |
 | Project page: in/out, back, Escape, ⌘1, files grid, notes render | 69 (the gate's panel-project rows pass every run; F-214 tables held in #703) | gate `project-page` rows | — |
 | panel: agents tree, archived row, Project section, Files, Standing | 69 (Files → a rendered page; F-237 ⌘W) | gate `panel` phase, `cycle-40/panel/` | — |
-| settings: every section, ⌘, / Escape / ⌘W, typography stepper, bionic toggle + eyesight check | 56 (stepper on cards: F-219; F-198 interior numbers for the tab's owner) | gate `settings` phase (`weight-visible`), `cycle-45/settings/` | — |
+| settings: every section, ⌘, / Escape / ⌘W, typography stepper, bionic toggle + eyesight check | 77 (five sections walked at 1440×900; F-198's numbers stand — rail 200 vs 255, column left-aligned, no group surface; Escape/⌘,/⌘W as before) | gate `settings` phase (`weight-visible`), `cycle-45/settings/` | — |
 | mode chip, /mode, approval + ask cards per mode | 65 (d35: a second ask superseded by the root's say — F-221's rule, the kernel's wake) | `askmode41.py`, gate `ask-*` rows | — |
 | under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 75 (Working → Agents + Continue Working after a Stop; the pill's send resumes the worker) | gate `pills` rows | — |
 | bottom bar (version, Update) | 75 (the *is out* plate in light: #525252 on white, white words — holds) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
-| search (⌘K chat search palette) | 62 (keys only: ↓ ↵ open the second hit — holds) | gate `search-by-content`, `search-open-hit` | — |
+| search (⌘K chat search palette) | 77 (a worker hit's row: title, brief, tab, age; a desktop-closed chat is filtered out by design — Cursor's archived-in-search unverified) | gate `search-by-content`, `search-open-hit` | — |
 | themes: light, dark; tint | 75 (the *is out* plate and its tooltip in light — holds) | cycle-11 `13-light`; gate `appearance-*` | 15 |
-| window sizes: 900×600, panel fold, 1600×1000 | 72 (the fold at 1000/999 holds; F-241 the long draft's wrap — owner's) | `cycle-43/sizes/` | — |
+| window sizes: 900×600, panel fold, 1600×1000 | 77 (⌘B under the fold: *Hide panel* over no panel — F-248, owner's) | `cycle-43/sizes/` | — |
 | remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 76 (a host that does not resolve: the retry countdown holds; F-247 the *ready* greeting over it; the real remote untouched) | remote track scenarios 1–2; 3–4 open | 16 |
 | voice / dictation entry points (Fn, mic button, call strip) | 60 (mac-only lines and the faint handset — by design on Linux; listening still unpaired) | gate `composer-voice` row; Fn via driver | **15** |
 | relaunch / replay (root + worker read like live) | 75 (the kickoff fold F-244; a stopped worker's line F-245 — both hold across a relaunch now) | `journey.py` J11 | — |
 | rewind / fork / checkpoint | 76 (F-246 no Rewind on the kickoff turn; a fork of a stopped chat keeps Continue Working; the fork's say reaches the original's worker — kernel, filed) | `rf.py`, `fork_sub.py`, gate `fork-beside-source` | — |
 | notices, nudges, refused-answer shape | 76 (the 401 line reads *No working model key on this kernel.* with Details › — holds) | refused `write` on the att place | — |
-| composer attachments: file chip, image thumb, hover ×, mid-send bubble | 60 (file token, image thumb, ✕, bubble — holds) | `attach_drive.py`, `cycle-39/attachments/` | — |
+| composer attachments: file chip, image thumb, hover ×, mid-send bubble | 77 (thumb and token ride the next card; the composer's × goes with the send — holds; a true mid-turn steer not reached: the model would not run the long command) | `attach_drive.py`, `cycle-39/attachments/` | — |
 | **after-failure states — what the window says when the world outside it changed**: folder moved or renamed under a running kernel (QA `af-03`), kernel binary replaced or deleted under a running process (#372/#385 stranger control), key removed mid-session, disk full, tunnel cut (F-81), hub gone | 33 (phase D: folder moved, deleted build — F-134, F-136; key removed / disk full / hub gone still no row) | a `phase_world` in the gate: rename the place, replace the kernel binary, cut the socket — then read the notice, the typed line, the bar, side by side with Cursor's equivalents where it has one (Cursor: a removed workspace shows "folder not found" on the project row) | **33** |
 
 ## Kinds and their state
