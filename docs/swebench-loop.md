@@ -956,9 +956,28 @@ Cumulative read: **369**.
 
 Spend $12.00.
 
-## Next (cycle 44)
+## Cycle 44 (2026-09-19) — second draws, the pool's next ten: this set flips more, and still fails the same way
 
-1. The second-draw pool continues in order (`second-draw-order.json`, next ten: pylint-4551, django-16560, django-14170, sphinx-7985, django-16502, sympy-13852, pytest-7205, seaborn-3069, django-11433, sphinx-8056); every failure read for same-way / different-way against its first pair. Landed steps and new failures read as they arrive.
+**Conditions.** Kernel **`arbos-kernel 0.2.0 249ddb5f9f1e protocol 1`** = `main` head, built in the worktree, label proved; the engine changes since bec7284b (Jev's pickable tools; a child agent's shell write into a root-owned file refused) do not reach a root agent under this harness. Jev off. Harness d1226d8c (#734). Network cut, no cap hit per turn. The pool's next ten (`second10b.txt`, all from cycles 33–38) at `-r 2`, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-44-preregistration.md)). The cycle's $22 cap stopped the run at seventeen rollouts (these instances are dear: 16560 and 3069 run long); the two incomplete pairs (sympy-13852, sphinx-8056) were finished alone, so the set has 21 rollouts. $25.30. Eighth host pause (12:59–13:53, and a short one 13:55–14:04); walls not read. **10 of 21** solved — a count on a pool selected for failure.
+
+**Against the first pairs.** Unlike cycle 43's set (0 of 8 twice-failed instances flipped), this set moved: django-16560 (01 → 11) and seaborn-3069 (01 → 11) solved both; django-14170 (00 → 10), django-11433 (00 → 01) and sphinx-7985 (00 → 10) each got a solve; pytest-7205 went the other way (10 → 00); sympy-13852 stayed flippy (01 → 10). Three of five twice-failed instances produced a solve on the second pair — so on this set a second draw did add information about *whether* the instance is reachable, where cycle 43's did not. What did not change is *how* the failures fail: of the eleven failed rollouts, ten fail at the same site and in the same class as their first pair, and the eleventh (14170 `ff4ace98`) in the same class at a different site:
+
+- django-16502 ×2 — the `write()` override again, four of four (five with cycle 38's re-run); C.
+- pylint-4551 ×2 — `inspector.py` alone against a four-file gold and ten `.dot`-output tests, four of four; C, the redesign shape.
+- pytest-7205 ×2 — the bytes-only branch again where the gold quotes every value with `saferepr`; nine of ten hidden tests fail on the quoting; C, pinned format. Cycle 33's solved rollout used `saferepr` for all; this pair's both did not.
+- sphinx-8056 ×1 — `docfields.py`, the consumer, again; B.
+- django-11433 ×1, sphinx-7985 ×1, sympy-13852 ×1 — the same sites as their first failures; C.
+- django-14170 ×1 — a new site: the `BETWEEN` lookups un-registered from `ExtractIsoYear` in `functions/datetime.py` rather than skipped in `lookups.py`; the same nine existing tests that pin `between` fail; C, the class cycle 36 gave it.
+
+So across cycles 43–44: 27 repeat failures, 26 at the same site and class, one at a different site in the same class. The account's reading of an instance holds across draws and kernels; whether an instance is *reachable* is what a second draw can still tell, and it told it for three of five here.
+
+Cumulative read: **380**.
+
+Spend $25.30.
+
+## Next (cycle 45)
+
+1. The second-draw pool continues in order (`second-draw-order.json`, next ten: the remaining two-draw instances from cycles 38–42 — `second_draw_pool.next` in `loop-state.json`); every failure read same-way / different-way. Landed steps and new failures read as they arrive.
 2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
 3. Jev stays off on this harness (coordinator, cycle 32). #734 stays as it is.
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site, sixteen of sixteen (43).
+4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word (38); the no-change predicate change did not move the choice (42); a recollection of upstream standing in for evidence (35, 40/42, 42); repeat failures repeat their class and site — 26 of 27 (43, 44).
