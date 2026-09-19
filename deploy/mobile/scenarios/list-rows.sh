@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: projects list — faces, rows, sections
 # What each row of the projects list actually says.
 #
 #   list-rows.sh <cycle>

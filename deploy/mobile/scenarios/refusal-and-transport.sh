@@ -1,4 +1,6 @@
 #!/bin/bash
+# COVERS: hub refusals — what the phone says
+# COVERS: network drop → reconnect
 # A refusal and a transport failure are opposite cases. Does the phone say so?
 #
 #   refusal-and-transport.sh <cycle>

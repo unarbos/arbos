@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: projects list — faces, rows, sections
 # The list's two sections: do they appear, fold, and hold the right rows?
 #
 #   list-sections.sh <cycle>

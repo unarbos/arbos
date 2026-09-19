@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: project chat — several workers at once, archived children
 # Several workers at once, and what the chat and the sheet say about them.
 #
 #   several-workers.sh <cycle> [project]

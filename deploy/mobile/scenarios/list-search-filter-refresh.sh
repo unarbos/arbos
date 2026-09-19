@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: projects list — search, filter, refresh
 # The projects list's three ways of changing what it shows.
 #
 #   list-search-filter-refresh.sh <cycle>

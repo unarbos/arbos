@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: style pair vs Cursor stills — worker chat
 # What a worker's chat is made of, counted rather than looked at.
 #
 #   worker-chat-shape.sh <cycle> [project]

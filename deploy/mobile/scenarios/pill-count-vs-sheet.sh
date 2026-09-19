@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: project chat — worker lines, Working pill, workers sheet
 # Two counts of the same thing, from the same app, at the same moment.
 #
 #   pill-count-vs-sheet.sh <cycle> [project]

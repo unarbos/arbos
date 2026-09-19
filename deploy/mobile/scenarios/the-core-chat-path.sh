@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: project chat — send, prompt card, streaming, Worked line
 # The chat path a person uses every time, timed.
 #
 #   the-core-chat-path.sh <cycle> [project]

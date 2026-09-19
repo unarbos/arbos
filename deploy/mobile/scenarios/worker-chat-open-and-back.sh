@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: worker chat — open from line / sheet, back
 # A worker's chat: reached from the sheet, reached from its line, and left.
 #
 #   worker-chat-open-and-back.sh <cycle> [project]

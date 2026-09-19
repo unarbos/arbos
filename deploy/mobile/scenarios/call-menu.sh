@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — pulled down: type, mute, close, `+`
 # The call's menu: what it offers, and whether the toggle names the right way.
 #
 #   call-menu.sh <cycle>

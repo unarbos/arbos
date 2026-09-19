@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: background minutes/hours → resume; what a returning user sees first
 # Put the phone down in a chat. Pick it up later. Where are you?
 #
 #   what-a-returning-user-sees.sh <cycle> [project] [pause seconds] [second project]

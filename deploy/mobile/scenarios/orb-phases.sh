@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — voice first, orb, colours
 # What the orb goes through during a call, in order and with timings.
 #
 #   orb-phases.sh <cycle> [clip]

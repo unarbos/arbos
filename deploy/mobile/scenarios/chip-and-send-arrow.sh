@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: attachments (`+`), photos, files
 # The attachment chip, its ×, and the mic that becomes a send arrow.
 #
 #   chip-and-send-arrow.sh <cycle> [project]

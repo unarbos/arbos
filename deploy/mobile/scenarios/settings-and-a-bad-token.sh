@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: settings sheet
 # The settings sheet, and what the app says when its hub token is wrong.
 #
 #   settings-and-a-bad-token.sh <cycle>

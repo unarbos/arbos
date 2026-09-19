@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — first word and transcription
 # A question with a breath in the middle: one transcript, or two?
 #
 #   one-breath-one-answer.sh <cycle> [runs]

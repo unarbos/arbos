@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: project chat — long history, scroll, older lines
 # Opening a chat: does it land at the end, and is the last line clear?
 #
 #   chat-opens-at-the-end.sh <cycle> [project...]

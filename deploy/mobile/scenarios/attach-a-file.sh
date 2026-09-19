@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: attachments (`+`), photos, files
 # The other half of the attachments row: files, not photos.
 #
 #   attach-a-file.sh <cycle> [project]

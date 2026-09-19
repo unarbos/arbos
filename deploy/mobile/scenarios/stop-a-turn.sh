@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: project chat — send, prompt card, streaming, Worked line
 # Stop: does the square end the turn, or only the screen?
 #
 #   stop-a-turn.sh <cycle> [project]

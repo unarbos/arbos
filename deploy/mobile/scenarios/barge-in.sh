@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — barge-in
 # Speaking over Arbos while it talks: does it stop, and how fast?
 #
 #   barge-in.sh <cycle> [runs]

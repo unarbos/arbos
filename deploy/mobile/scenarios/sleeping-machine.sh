@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: hub refusals — what the phone says
 # What the list says about a machine the hub is holding open (#545).
 #
 #   sleeping-machine.sh <cycle>

@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: attachments (`+`), photos, files
 # Does an attached photo actually reach the model?
 #
 #   photo-reaches-the-model.sh <cycle> [project]
