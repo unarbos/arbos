@@ -38,6 +38,7 @@ mod turn;
 pub use access::{Access, Resource};
 pub use control::TurnControl;
 pub use host::{Host, HostConfig, KeySource, ProviderKind};
+pub use jobs::login_shell_problem;
 pub use jobs::{
     JOB_TTL, JOURNAL_WINDOW, Job, JobsRoot, LEASH_POINTERS, Meta as JobMeta, PidIdentity, Reaped,
     Status as JobStatus, kill_reason, parent_pid, repoint_leash, set_kill_reason,
