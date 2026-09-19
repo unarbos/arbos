@@ -841,6 +841,33 @@ class Pass:
         el = self.first("jump-to-end-*")
         if el:
             self.check("jump-to-end", sc, "scroll up then click", "no error", lambda: (self.app.scroll("composer-field", dy=800), self.app.click(el)), None)
+        # The disc while the answer streams (F-233): a click on it called
+        # `request_animation_frame` from the handler and closed the app; the
+        # row above clicks on a settled pane and never met it.
+        self.send("Write a numbered list of thirty short facts about rivers, one sentence each, no preamble.")
+        self.wait(lambda s: busy(s), 15, what="stream start")
+        # Scroll once the list has grown past the window: a wheel over a pane
+        # that does not yet scroll changes nothing, and the follow stays
+        # pinned when the content then grows.
+        def grown(s):
+            c = active(s) or {}
+            last = (c.get("items") or [{}])[-1]
+            return last.get("kind") == "agent" and len(last.get("text") or "") > 600
+        self.wait(grown, 12, every=0.2, what="stream grown")
+        pane = self.first("transcript-*") or "composer-field"
+        for _ in range(3):
+            self.app.scroll(pane, dy=900); time.sleep(0.15)
+        disc = self.wait(lambda s: bool(self.first("jump-to-end-*")), 8, what="disc while streaming")
+        disc = self.first("jump-to-end-*") if disc else None
+        if disc:
+            def clicked():
+                self.app.click(disc)
+                time.sleep(1.0)
+            self.check("jump-to-end-streaming", sc, "scroll up while the answer streams, click the disc", "the app stays up; the pane is at the end (no disc)",
+                       clicked, lambda a, b: (not self.first("jump-to-end-*")) and "disc gone, app up", settle=0.5)
+        else:
+            self.gap("jump-to-end-streaming", sc, "scroll up while the answer streams", "no disc within 8 s of the stream (the answer ended first, or the scroll did not hold)")
+        self.wait_idle(120)
         ids = self.turn_ids()
         if ids["rewind-turn"]:
             # A worker's late report can wake the root into a new turn right
