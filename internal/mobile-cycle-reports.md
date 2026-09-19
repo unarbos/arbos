@@ -5050,3 +5050,39 @@ is a check waiting for it. Its first run: three projects, two faces.
 Stills in `media/mobile/cycle-166/`.
 
 **PR:** [#759](https://github.com/unarbos/arbos/pull/759), harness only.
+
+## Cycle 167 — a check that had been dead for sixty-five cycles
+
+The work queue named `chat — the call's words read back`, last driven at
+cycle 102. It did not run: it stopped at `project row not on screen`.
+
+**The check had rotted** (M-516). It tapped `<project>, Idle`, which was the
+entire row label when it was written. The row has since gained its machine
+and an age — `phone, Idle, home, 5m` — so the string never matched again, and
+every run since has stopped at that line. That is M-314's fault a second
+time: a script tapping words the app no longer says.
+
+It reaches the list and taps the project by name now, like everything else.
+Re-driven, the row holds: `rows marked Spoken: 9; in this turn the answer
+appears 1 time(s)` — one row for the spoken answer, which is the rule.
+
+**Fixing it nearly broke something else** (M-517). I gave `list-rows.sh` a
+`reach_the_list` call and it had no `sim-lib` line. The shell would have said
+command not found, the helper would have returned 127, and the `|| exit 1`
+beside it would have ended the run before it measured anything — while
+`check-tools`, which looked only for the words, cheerfully reported that
+every scenario reaches the list first.
+
+It now lists any scenario calling a shared helper it has not sourced. It
+matches calls rather than bare words, because `pt` appears in a comment about
+pt coordinates in two old files and had them reported as callers. Proven by
+removing the line again and watching it name `list-rows.sh`.
+
+**And `list-rows.sh` had been hand-rolling the helper** (M-518): one `Back`
+tap and carry on regardless, where `reach_the_list` tries four times and
+confirms it can see rows. The scenario that guards the list's rows was the
+one scenario not using the list helper.
+
+Still: `media/mobile/cycle-167/01-the-calls-words-in-the-chat.png`.
+
+**PR:** [#761](https://github.com/unarbos/arbos/pull/761), harness only.
