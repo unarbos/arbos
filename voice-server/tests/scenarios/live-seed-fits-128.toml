@@ -1,0 +1,546 @@
+# Jacob's Mac call, 2026-09-19 11:29Z: GPT-Live refused the session — "Invalid 'session.input':
+# array too long ... maximum length 128, but got 135". A full screen (more rows than the history
+# cap) made `extra[-0:]` pull every older kernel line in behind it. The seed must stay within the
+# cap (40 lines + the developer preamble) and never exceed OpenAI's 128 whatever the inputs; the
+# newest rows are the ones kept.
+title = "GPT-Live seed: a full screen plus a long kernel history still starts the session (<= 128 items)"
+engine = "openai"
+path = "own"
+context = { recent = [
+  { role = "user", text = "screen row 1: question number 1" },
+  { role = "assistant", text = "screen row 2: answer number 2" },
+  { role = "user", text = "screen row 3: question number 3" },
+  { role = "assistant", text = "screen row 4: answer number 4" },
+  { role = "user", text = "screen row 5: question number 5" },
+  { role = "assistant", text = "screen row 6: answer number 6" },
+  { role = "user", text = "screen row 7: question number 7" },
+  { role = "assistant", text = "screen row 8: answer number 8" },
+  { role = "user", text = "screen row 9: question number 9" },
+  { role = "assistant", text = "screen row 10: answer number 10" },
+  { role = "user", text = "screen row 11: question number 11" },
+  { role = "assistant", text = "screen row 12: answer number 12" },
+  { role = "user", text = "screen row 13: question number 13" },
+  { role = "assistant", text = "screen row 14: answer number 14" },
+  { role = "user", text = "screen row 15: question number 15" },
+  { role = "assistant", text = "screen row 16: answer number 16" },
+  { role = "user", text = "screen row 17: question number 17" },
+  { role = "assistant", text = "screen row 18: answer number 18" },
+  { role = "user", text = "screen row 19: question number 19" },
+  { role = "assistant", text = "screen row 20: answer number 20" },
+  { role = "user", text = "screen row 21: question number 21" },
+  { role = "assistant", text = "screen row 22: answer number 22" },
+  { role = "user", text = "screen row 23: question number 23" },
+  { role = "assistant", text = "screen row 24: answer number 24" },
+  { role = "user", text = "screen row 25: question number 25" },
+  { role = "assistant", text = "screen row 26: answer number 26" },
+  { role = "user", text = "screen row 27: question number 27" },
+  { role = "assistant", text = "screen row 28: answer number 28" },
+  { role = "user", text = "screen row 29: question number 29" },
+  { role = "assistant", text = "screen row 30: answer number 30" },
+  { role = "user", text = "screen row 31: question number 31" },
+  { role = "assistant", text = "screen row 32: answer number 32" },
+  { role = "user", text = "screen row 33: question number 33" },
+  { role = "assistant", text = "screen row 34: answer number 34" },
+  { role = "user", text = "screen row 35: question number 35" },
+  { role = "assistant", text = "screen row 36: answer number 36" },
+  { role = "user", text = "screen row 37: question number 37" },
+  { role = "assistant", text = "screen row 38: answer number 38" },
+  { role = "user", text = "screen row 39: question number 39" },
+  { role = "assistant", text = "screen row 40: answer number 40" },
+  { role = "user", text = "screen row 41: question number 41" },
+  { role = "assistant", text = "screen row 42: answer number 42" },
+  { role = "user", text = "screen row 43: question number 43" },
+  { role = "assistant", text = "screen row 44: answer number 44" },
+  { role = "user", text = "screen row 45: question number 45" },
+  { role = "assistant", text = "screen row 46: answer number 46" },
+], agents = [], running = false }
+
+[[history]]
+kind = "user"
+text = "older kernel line 1"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 2"
+
+[[history]]
+kind = "user"
+text = "older kernel line 3"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 4"
+
+[[history]]
+kind = "user"
+text = "older kernel line 5"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 6"
+
+[[history]]
+kind = "user"
+text = "older kernel line 7"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 8"
+
+[[history]]
+kind = "user"
+text = "older kernel line 9"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 10"
+
+[[history]]
+kind = "user"
+text = "older kernel line 11"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 12"
+
+[[history]]
+kind = "user"
+text = "older kernel line 13"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 14"
+
+[[history]]
+kind = "user"
+text = "older kernel line 15"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 16"
+
+[[history]]
+kind = "user"
+text = "older kernel line 17"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 18"
+
+[[history]]
+kind = "user"
+text = "older kernel line 19"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 20"
+
+[[history]]
+kind = "user"
+text = "older kernel line 21"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 22"
+
+[[history]]
+kind = "user"
+text = "older kernel line 23"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 24"
+
+[[history]]
+kind = "user"
+text = "older kernel line 25"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 26"
+
+[[history]]
+kind = "user"
+text = "older kernel line 27"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 28"
+
+[[history]]
+kind = "user"
+text = "older kernel line 29"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 30"
+
+[[history]]
+kind = "user"
+text = "older kernel line 31"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 32"
+
+[[history]]
+kind = "user"
+text = "older kernel line 33"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 34"
+
+[[history]]
+kind = "user"
+text = "older kernel line 35"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 36"
+
+[[history]]
+kind = "user"
+text = "older kernel line 37"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 38"
+
+[[history]]
+kind = "user"
+text = "older kernel line 39"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 40"
+
+[[history]]
+kind = "user"
+text = "older kernel line 41"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 42"
+
+[[history]]
+kind = "user"
+text = "older kernel line 43"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 44"
+
+[[history]]
+kind = "user"
+text = "older kernel line 45"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 46"
+
+[[history]]
+kind = "user"
+text = "older kernel line 47"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 48"
+
+[[history]]
+kind = "user"
+text = "older kernel line 49"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 50"
+
+[[history]]
+kind = "user"
+text = "older kernel line 51"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 52"
+
+[[history]]
+kind = "user"
+text = "older kernel line 53"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 54"
+
+[[history]]
+kind = "user"
+text = "older kernel line 55"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 56"
+
+[[history]]
+kind = "user"
+text = "older kernel line 57"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 58"
+
+[[history]]
+kind = "user"
+text = "older kernel line 59"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 60"
+
+[[history]]
+kind = "user"
+text = "older kernel line 61"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 62"
+
+[[history]]
+kind = "user"
+text = "older kernel line 63"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 64"
+
+[[history]]
+kind = "user"
+text = "older kernel line 65"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 66"
+
+[[history]]
+kind = "user"
+text = "older kernel line 67"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 68"
+
+[[history]]
+kind = "user"
+text = "older kernel line 69"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 70"
+
+[[history]]
+kind = "user"
+text = "older kernel line 71"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 72"
+
+[[history]]
+kind = "user"
+text = "older kernel line 73"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 74"
+
+[[history]]
+kind = "user"
+text = "older kernel line 75"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 76"
+
+[[history]]
+kind = "user"
+text = "older kernel line 77"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 78"
+
+[[history]]
+kind = "user"
+text = "older kernel line 79"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 80"
+
+[[history]]
+kind = "user"
+text = "older kernel line 81"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 82"
+
+[[history]]
+kind = "user"
+text = "older kernel line 83"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 84"
+
+[[history]]
+kind = "user"
+text = "older kernel line 85"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 86"
+
+[[history]]
+kind = "user"
+text = "older kernel line 87"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 88"
+
+[[history]]
+kind = "user"
+text = "older kernel line 89"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 90"
+
+[[history]]
+kind = "user"
+text = "older kernel line 91"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 92"
+
+[[history]]
+kind = "user"
+text = "older kernel line 93"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 94"
+
+[[history]]
+kind = "user"
+text = "older kernel line 95"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 96"
+
+[[history]]
+kind = "user"
+text = "older kernel line 97"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 98"
+
+[[history]]
+kind = "user"
+text = "older kernel line 99"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 100"
+
+[[history]]
+kind = "user"
+text = "older kernel line 101"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 102"
+
+[[history]]
+kind = "user"
+text = "older kernel line 103"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 104"
+
+[[history]]
+kind = "user"
+text = "older kernel line 105"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 106"
+
+[[history]]
+kind = "user"
+text = "older kernel line 107"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 108"
+
+[[history]]
+kind = "user"
+text = "older kernel line 109"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 110"
+
+[[history]]
+kind = "user"
+text = "older kernel line 111"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 112"
+
+[[history]]
+kind = "user"
+text = "older kernel line 113"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 114"
+
+[[history]]
+kind = "user"
+text = "older kernel line 115"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 116"
+
+[[history]]
+kind = "user"
+text = "older kernel line 117"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 118"
+
+[[history]]
+kind = "user"
+text = "older kernel line 119"
+
+[[history]]
+kind = "assistant"
+text = "older kernel line 120"
+
+[[steps]]
+pause = 2.5
+
+[expect]
+live_started = true
+live_input_max = 41
+live_sees = ["screen row 46", "screen row 7"]
+live_not_sees = ["older kernel line 1:", "screen row 6:"]
+user_frames = 0
