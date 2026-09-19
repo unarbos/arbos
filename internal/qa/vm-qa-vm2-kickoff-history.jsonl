@@ -56,3 +56,5 @@
 {"ts": 1789768662538, "rollout": "20260918T215558Z-kickoff-session", "branch": "main", "passed": 10, "total": 12, "pass_ids": [1, 2, 3, 5, 6, 7, 9, 10, 11, 12]}
 {"ts": 1789777327158, "rollout": "20260919T002038Z-kickoff-session", "branch": "rust", "passed": 9, "total": 12, "pass_ids": [1, 2, 5, 6, 7, 9, 10, 11, 12]}
 {"ts": 1789780368246, "rollout": "20260919T005433Z-kickoff-session", "branch": "main", "passed": 9, "total": 12, "pass_ids": [2, 3, 5, 6, 7, 8, 9, 10, 11]}
+{"ts": 1789799221830, "rollout": "20260919T062415Z-kickoff-session", "branch": "rust", "passed": 8, "total": 12, "pass_ids": [1, 2, 5, 6, 7, 9, 10, 11]}
+{"ts": 1789801574232, "rollout": "20260919T065932Z-kickoff-session", "branch": "main", "passed": 7, "total": 12, "pass_ids": [2, 5, 6, 7, 9, 10, 11]}
