@@ -17,6 +17,14 @@
 #
 # So this walks the screens and flags anything whose name looks like a
 # rendered symbol rather than a decision.
+#
+# Where these faults live, learned the hard way at cycles 141 and 142: a
+# fix applied *inside* a `Button`'s label does not hold. A button builds its
+# label by walking its children, and that walk varies between runs — the
+# projects row's separator was hidden, read clean, and came back twice. A
+# fix in a view that is not a composed button label (the chat's worker line,
+# the away card's bullet) has held since it was made. When this check flags
+# something under a button, say it on the button.
 set -uo pipefail
 export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -70,7 +78,12 @@ for line in sys.stdin.read().splitlines():
     if len(parts) < 4:
         continue
     kind, label = parts[2], parts[3].strip()
-    if kind not in ("Button", "Image", "PopUpButton"):
+    # Text fields and section headings carry names too, and the settings
+    # sheet is made almost entirely of them: with only buttons and images
+    # examined, that screen reported "every control here is named" over a
+    # single element. Six fields and five headings were never looked at.
+    if kind not in ("Button", "Image", "PopUpButton", "TextField",
+                    "SecureTextField", "Heading"):
         continue
     if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in OURS):
         print(f"  {kind:12} {label}")
@@ -81,11 +94,17 @@ suspect() { python3 "$SUSPECT_PY"; }
 screen() {
   local what=$1
   echo "== $what =="
-  local bad
-  bad=$(ui dump | suspect)
+  local bad tree looked
+  tree=$(ui dump)
+  # How many things were examined, not only how many were wrong. "Every
+  # control here is named" over three elements is a different sentence from
+  # the same words over thirty, and cycle 142 spent five runs believing a
+  # verdict that was true of an empty set.
+  looked=$(echo "$tree" | grep -cE "^ *[0-9-]+ +[0-9-]+ +(Button|Image|PopUpButton|TextField|SecureTextField|Heading) ")
+  bad=$(echo "$tree" | suspect)
   VISITED=$((VISITED + 1))
   if [ -z "$bad" ]; then
-    echo "  every control here is named"
+    echo "  every control here is named   ($looked examined)"
   else
     echo "$bad"
     FOUND=$((FOUND + 1))
