@@ -107,5 +107,51 @@ if [ -n "$ROW2" ]; then
   elif [ "$SECOND_COLD" = "$BEFORE_WHERE" ]; then echo "  VERDICT: FAULT — the first project, the one he had left"
   else echo "  VERDICT: somewhere else: $SECOND_COLD"; fi
 fi
+
+echo
+echo "--- the project moved on while he was away ---"
+# Every case above leaves the project idle, so "the same last three lines" is
+# the right answer and the check cannot tell a chat that reconnected from one
+# that is merely still showing what it showed before. The case a person
+# actually meets after a night is the other one: work finished while the
+# phone was in a pocket. Does the chat he returns to know about it?
+reach_the_list "$UDID" || exit 1
+ui tap "$ROW" >/dev/null 2>&1 || { echo "  no $ROW row"; exit 1; }
+sleep 5
+TAG=b$(date -u +%H%M%S)
+if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sleeps 60 seconds and then says the word finished. Wait for it and tell me when it is done."; then
+  ui tap "Send" >/dev/null 2>&1
+  sleep 12
+  # Not a count of rows on screen. Coming back raises the keyboard and the
+  # view scrolls, so the count fell from 7 to 6 on a run where the work had
+  # plainly finished — the same mistake the tool fold made at cycle 162. What
+  # proves the chat caught up is a line that was not there before: the turn's
+  # "Worked <time>". While the worker runs there is none.
+  BEFORE_ROWS=$(ui dump | grep -cE "StaticText")
+  BEFORE_END=$(ui dump | grep -cE "Worked [0-9]+[a-z]|Turn ended")
+  echo "  left with:         $BEFORE_ROWS line(s) on screen, $BEFORE_END ending line(s)"
+  shot 05-left-it-working
+  idb ui button HOME --udid "$UDID"
+  sleep 90
+  xcrun simctl launch "$UDID" $B >/dev/null 2>&1
+  sleep 8
+  shot 06-came-back-to-finished-work
+  AFTER_ROWS=$(ui dump | grep -cE "StaticText")
+  AFTER_END=$(ui dump | grep -oE "Worked [0-9]+[a-z].*|Turn ended" | head -1)
+  echo "  came back to:      $AFTER_ROWS line(s) on screen"
+  echo "  the turn's ending: ${AFTER_END:-none on screen}"
+  if [ -n "$AFTER_END" ] && [ "$BEFORE_END" = 0 ]; then
+    echo "  VERDICT: the chat caught up while the phone was away — he left a turn"
+    echo "           running and came back to '$AFTER_END'"
+  elif [ -n "$AFTER_END" ]; then
+    echo "  VERDICT: cannot say — the turn already had an ending line before he left,"
+    echo "           so coming back to one proves nothing about catching up"
+  else
+    echo "  VERDICT: he came back to a turn still running after 90s away. Either the"
+    echo "           worker is slower than its 60s sleep or the chat did not catch up"
+  fi
+else
+  echo "  could not ask for a worker, so this half did not run"
+fi
 echo
 echo "still in $OUT"
