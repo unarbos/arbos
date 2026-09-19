@@ -1952,6 +1952,21 @@ impl Arbos {
         match self.front() {
             Front::Settings => self.close_settings(window, cx),
             Front::Project => {
+                // ⌘W in the drawer, on a file or surface tab, closes that
+                // tab — not the project behind it. A file opened from the
+                // Files section and closed by reflex took the whole chat
+                // with it (F-237, cycle 69). The Project tab is not a
+                // thing to close: on it, ⌘W is the project's as before.
+                let panel_tab = self
+                    .panel_focused(window, cx)
+                    .then(|| self.workspace.read(cx).panel().map(|panel| panel.active()))
+                    .flatten()
+                    .filter(|at| *at > 0);
+                if let Some(at) = panel_tab {
+                    self.workspace
+                        .update(cx, |workspace, cx| workspace.close_panel_tab(at, cx));
+                    return;
+                }
                 let Some(ix) = self.workspace.read(cx).active else {
                     return;
                 };
