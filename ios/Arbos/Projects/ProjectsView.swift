@@ -103,6 +103,15 @@ struct ProjectsView: View {
         entry.target == settings.kernelTarget && chat.mode == .live && (chat.busy || chat.running > 0)
     }
 
+    /// What a row says, in the order a person reads it: the project, what it
+    /// is doing, where it lives, and how long since it last did anything.
+    /// Punctuation drawn between those parts is not part of any of them.
+    private func rowWords(_ entry: ProjectEntry) -> String {
+        let row = ProjectRow(entry: entry, working: isWorking(entry),
+                             step: step(for: entry), nameShared: isShared(entry))
+        return row.spoken
+    }
+
     private func section(_ title: String, open: Binding<Bool>, rows: [ProjectEntry]) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             Button {
@@ -130,6 +139,16 @@ struct ProjectsView: View {
                         ProjectRow(entry: entry, working: isWorking(entry), step: step(for: entry), nameShared: isShared(entry))
                     }
                     .buttonStyle(.plain)
+                    // Said here, on the button, and not inside the row.
+                    // A Button builds its label by walking what is under it,
+                    // and twice a fix applied to one of those children —
+                    // `accessibilityHidden` on the separator (#642), then
+                    // one element with a label on the status line (#707) —
+                    // read cleanly once and was back to "phone, Idle, dot,
+                    // home, 23m" a run later, with the code untouched. The
+                    // walk is what varies; the button's own label does not.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(rowWords(entry))
                 }
             }
         }
@@ -297,14 +316,6 @@ struct ProjectRow: View {
                 .font(ArbosTheme.callout)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                // `accessibilityHidden` on the separator alone did not hold:
-                // #642 put it there and the row read cleanly at cycle 128,
-                // and by 141 it was saying "phone, Idle, dot, home, 39m"
-                // again with the modifier still in the source. Same as the
-                // worker line at cycle 117 — the reliable form is one
-                // element with the words written out.
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(([stateWord] + details).joined(separator: ", "))
             }
             Spacer(minLength: 0)
             if let ago {
@@ -330,6 +341,15 @@ struct ProjectRow: View {
     /// that says nothing — and until #538 no row could say anything at all,
     /// so seven projects reading `Idle` in alphabetical order told a person
     /// which came first in the alphabet and nothing else.
+    /// The row as one sentence, for the button above it to carry. Built from
+    /// the same three parts the row draws, so the ear gets what the eye does
+    /// without the punctuation between them.
+    var spoken: String {
+        ([entry.title, stateWord] + details + [ago].compactMap { $0 })
+            .filter { !$0.isEmpty }
+            .joined(separator: ", ")
+    }
+
     private var ago: String? {
         guard let at = entry.lastActivity else { return nil }
         let seconds = Int(Date().timeIntervalSince(at))
