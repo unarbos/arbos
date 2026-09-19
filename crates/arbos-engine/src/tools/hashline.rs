@@ -164,6 +164,7 @@ pub fn edit(root: &Path, cwd: &Path, path: &str, args: &Value) -> Result<ToolOut
             bail!("write op must be the only edit");
         }
         let contents = &ops[0].content;
+        fs::refuse_if_read_only(&file)?;
         if let Some(parent) = file.parent() {
             std::fs::create_dir_all(parent)?;
         }
