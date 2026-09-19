@@ -63,3 +63,13 @@ In the worker's own transcript (`archive/agents/write-banner/transcript.jsonl`):
 ```
 
 Gemini echoed the kernel's answer line twice into its reply. The desktop now cuts `[kernel] …` lines from prose (F-211, #703); the kernel might want the answer delivered as a `user`-shaped line the model does not feel it must quote, or a prompt note that `[kernel]` lines are never repeated.
+
+## Seen again (cycle 57, d27, `media/cursor-reference/cycle-57/d27/`)
+
+Two workers with `wait=false`, then `await`: the asking worker came back to the
+root as a **done wake** with the words *Turn ended. Last words: (no reply)*,
+so the root's pane drew *Worker Ask done — (no reply)* one line under
+*Asking Worker Ask — Which greeting would you like to use?* — the same worker
+said to be done and asking at once. When the person answered, a second wake
+brought *Worker Ask done — written*. The first wake is the one that should
+not exist as a *done*: the child's turn did not end, it parked.

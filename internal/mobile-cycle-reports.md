@@ -4750,3 +4750,52 @@ Still: `media/mobile/cycle-159/01-a-line-typed-whole.png`, with the map's
 output beside it.
 
 **PR:** [#746](https://github.com/unarbos/arbos/pull/746), harness only.
+
+## Cycle 160 — the machine, and a diagnosis that cost eight cycles
+
+The last reachable uncovered row was the loop's own machine. `check-tools.sh`
+asks whether the scripts reach for tools inside the checkout; nothing asked
+whether the machine under them has what those tools need.
+
+I wrote that check expecting it to confirm a known gap — cycle 152 recorded
+that the Mac had no PIL, which is why `style-pair.py` has been run on this VM
+ever since, with screenshots copied across. **The check said PIL was
+importable** (M-494).
+
+The Mac has two interpreters. A command that sets no PATH gets Xcode's
+python or `/usr/bin/python3`, which has neither PIL nor `websocket`. Anything
+setting the harness PATH gets homebrew's, which has both. The module was
+installed the whole time; cycle 152 ran the wrong python, read the traceback
+as a property of the machine, and moved a coverage row onto another machine
+for eight cycles.
+
+So the check asks both interpreters, because a report from the good one alone
+looks clean and hides precisely that failure. It names the six files that
+break under a bare command. And `style-pair.py` now catches the import and
+says which interpreter is running, so the next reader gets a sentence rather
+than a traceback.
+
+**Then it failed again, for a different reason** (M-495). With the right
+python it printed the arbos numbers and threw a traceback: the Cursor
+reference stills live in the store and had never been copied to the Mac. They
+are in neither the checkout nor the mirror's file list, so a rebuilt Mac
+would hit the same wall with no way to know. The tool now names the missing
+still and where it belongs, the machine check counts the references, and they
+are copied across. The pair runs on the Mac: **5.3% against 4.9%**, the same
+numbers cycle 152 obtained by shipping screenshots elsewhere.
+
+**One self-inflicted wrinkle** (M-496). The dependency scan anchored imports
+at the line start, so wrapping style-pair's PIL import in a `try` — done in
+this same cycle to improve the error — took that file off its own
+dependency's list, and the report blamed `find_row.py` alone. Indentation is
+allowed now. The file that handles a missing module gracefully is the last
+one you want dropped from the list.
+
+The machine reports clean: every command, every module under both
+interpreters, every folder, 12 voice clips, 2 references, 179G free, one
+booted simulator.
+
+Stills: `media/mobile/cycle-160/01-the-list.png`, with the machine report
+beside it as `check-machine.txt`.
+
+**PR:** [#747](https://github.com/unarbos/arbos/pull/747), harness only.
