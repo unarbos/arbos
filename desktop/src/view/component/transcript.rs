@@ -4137,11 +4137,15 @@ fn jump_to_end(
                     .justify_center()
                     .cursor_pointer()
                     .hover(|el| el.bg(theme.surface_raised_hover))
-                    .on_click(cx.listener(move |_, _, window, cx| {
+                    // `cx.notify()` is the repaint; `request_animation_frame`
+                    // may only be asked for from layout or paint, and asked
+                    // for here it took the window down — a click on this
+                    // disc while the answer streamed closed the app (F-233,
+                    // cycle 65).
+                    .on_click(cx.listener(move |_, _, _, cx| {
                         let max = handle.max_offset().y;
                         handle.set_offset(point(handle.offset().x, -max));
                         follow.0.set((true, max));
-                        window.request_animation_frame();
                         cx.notify();
                     }))
                     .child(
