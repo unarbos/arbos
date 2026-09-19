@@ -107,11 +107,28 @@ for png in sorted(out.glob("phase-*.png")):
 if len(seen) < 2:
     print("  only one phase was seen, so nothing could be compared")
 else:
+    # Distance in RGB is not the question a caller asks. Cycle 170 measured
+    # listening at (133,132,132) rising to (173,173,173) with the voice, and
+    # thinking at (75,74,74): far apart as numbers, the same grey to the eye,
+    # and within a range listening already travels on its own. A reviewer
+    # watching the film said the two were identical. Speaking, at
+    # (98,124,162), is the only one that changes hue.
+    #
+    # So two phases count as sharing a face when neither has a colour — a
+    # grey is a grey however bright — as well as when their RGB is close.
+    def grey(c):
+        return max(c) - min(c) <= 12
     pairs = [(a, b) for a in seen for b in seen if a < b]
     same = [f"{a} and {b}" for a, b in pairs
-            if max(abs(x - y) for x, y in zip(seen[a], seen[b])) <= 8]
+            if max(abs(x - y) for x, y in zip(seen[a], seen[b])) <= 8
+            or (grey(seen[a]) and grey(seen[b]))]
     if same:
         print("  LOOK THE SAME: " + "; ".join(same))
+        for a, b in pairs:
+            if grey(seen[a]) and grey(seen[b]):
+                print(f"  ({a} {seen[a]} and {b} {seen[b]} are both grey — a"
+                      f" difference in brightness only, and listening's own"
+                      f" brightness moves with the voice)")
         # Not every pair matters equally. `connecting` happens once, before
         # the call is under way; a caller is never choosing between it and
         # `thinking`. Two *mid-call* states sharing a face is the one that
