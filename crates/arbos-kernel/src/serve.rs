@@ -489,6 +489,7 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     }
     let host = Host::load()?;
     host.remember_place(place.path());
+    say_if_host_dir_unwritable(&place, &host);
     let git_present = say_if_git_missing(&place);
     let _ = GIT_PRESENT.set(git_present);
     match (host.api_key(), host.config.api_base()) {
@@ -2373,6 +2374,7 @@ static GIT_PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The marker that the missing-git notice was said for this place; in
 /// `runtime/`, so a reinstall of the machine starts the question afresh.
+const HOST_DIR_UNWRITABLE_SAID: &str = "host-dir-unwritable.said";
 const GIT_MISSING_SAID: &str = "git-missing.said";
 
 /// A fresh machine without git (a Mac before the command line tools, a
@@ -2381,6 +2383,52 @@ const GIT_MISSING_SAID: &str = "git-missing.said";
 /// person met it as a refused rewind with no cause. Said once on root's
 /// transcript, and once more when git appears; `kernel.json` carries
 /// `git: false` meanwhile so a window can show it.
+/// The host folder (`~/.config/arbos`) that cannot be written — a managed
+/// machine, a home on a read-only mount, a folder another user made. The
+/// kernel used to die at `Host::load` with a bare "Permission denied (os
+/// error 13)": no path, no what. The config reads, so it serves; what is
+/// not kept meanwhile is said once on the main chat and in the log, and
+/// the marker is cleared when the folder takes writes again.
+fn say_if_host_dir_unwritable(place: &Place, host: &Host) {
+    let marker = place.runtime_dir().join(HOST_DIR_UNWRITABLE_SAID);
+    let said = marker.exists();
+    let transcript = Layout::new(place, arbos_core::ROOT_ID).transcript();
+    match host.writable() {
+        Err(why) => {
+            klog::warn("host_dir_unwritable", None, &why);
+            if !said {
+                let _ = arbos_core::append_event(
+                    &transcript,
+                    &arbos_core::Event::new(EventKind::Notice {
+                        text: format!("This kernel serves, but {why}."),
+                        failed: true,
+                    }),
+                );
+                let _ = std::fs::write(&marker, "said\n");
+            }
+        }
+        Ok(()) if said => {
+            let _ = std::fs::remove_file(&marker);
+            klog::info(
+                "host_dir_writable",
+                None,
+                format!("{} takes writes again", host.dir.display()),
+            );
+            let _ = arbos_core::append_event(
+                &transcript,
+                &arbos_core::Event::new(EventKind::Notice {
+                    text: format!(
+                        "The config folder {} can be written again: setup, the places opened and remote keys are kept from now.",
+                        host.dir.display()
+                    ),
+                    failed: false,
+                }),
+            );
+        }
+        Ok(()) => {}
+    }
+}
+
 fn say_if_git_missing(place: &Place) -> bool {
     let present = std::process::Command::new("git")
         .arg("--version")
