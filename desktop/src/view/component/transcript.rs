@@ -1823,7 +1823,20 @@ fn children_lines(
                     {
                         return None;
                     }
-                    ("Done".to_string(), child.title.clone(), theme.text_faint)
+                    // A worker awaited by `spawn` reports inside the call's
+                    // return ("<id> reports: all done"), not as a line of
+                    // its own — the Done row then said only the name while
+                    // Cursor's shows the subagent's last words (cycle 73,
+                    // d40). Take them from the spawn's output.
+                    let rest = match child
+                        .kernel_id
+                        .as_deref()
+                        .and_then(|k| spawn_report(&chat.items, k))
+                    {
+                        Some(words) => format!("{} — {words}", child.title),
+                        None => child.title.clone(),
+                    };
+                    ("Done".to_string(), rest, theme.text_faint)
                 }
                 ChildState::Stopped => {
                     if child
@@ -2802,6 +2815,26 @@ pub(crate) fn worker_unified_diff(items: &[ChatItem]) -> String {
             format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body}")
         })
         .collect()
+}
+
+/// The words a `spawn` call returned for worker `kernel_id` — "<id>
+/// reports: <words>" — cut to their first line, or None when the return
+/// carried no report ("(the child's turn ended without a report)").
+fn spawn_report(items: &[ChatItem], kernel_id: &str) -> Option<String> {
+    let lead = format!("{kernel_id} reports:");
+    items.iter().rev().find_map(|item| match item {
+        ChatItem::Tool { label, output, .. }
+            if label.split_whitespace().next() == Some("spawn") =>
+        {
+            let words = output.trim_start().strip_prefix(lead.as_str())?;
+            let line = words
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())?;
+            (!line.starts_with('(')).then(|| shorten(line, 96))
+        }
+        _ => None,
+    })
 }
 
 /// A unified diff's file sections: the path each `diff --git` header names
