@@ -5619,3 +5619,34 @@ Film and stills in `media/mobile/cycle-181/`; the note is at
 `internal/features-inbox/2026-09-19-one-project-two-faces-which-one-wins.md`.
 
 **PR:** [#784](https://github.com/unarbos/arbos/pull/784), harness only.
+
+## Cycle 182 — a verdict that named both answers and chose neither
+
+The queue put the returning-user row at cycle 168, fourteen cycles back.
+
+**The first two cases hold** (M-562). Suspended two minutes: the same screen,
+the same last three lines. Process reclaimed, which is what a night does:
+back in the chat he left.
+
+**The third failed, and its verdict was useless** (M-561). It came back to a
+turn still running after ninety seconds and said "either the worker is slower
+than its 60s sleep or the chat did not catch up" — naming both possibilities
+and choosing neither, which is the same as saying nothing.
+
+The kernel could choose. It had finished the turn at **2m 9s**, having
+compacted 682 turns of history in the middle of it. So the ninety-second
+window was too tight, and the app was never at fault.
+
+It waits up to two minutes for the ending now, and when there is none it asks
+the kernel: finished there and not here means the chat did not catch up;
+still working there means there was no ending to miss. Re-run, the wait alone
+settled it — `Worked 1m 43s`, the chat caught up.
+
+**The kernel question is scoped** (M-563). Only `phone` is asked, because that
+is the pod's own kernel folded into the roster and the only one this scenario
+knows how to reach. Any other project says so rather than asking the wrong
+kernel and reporting whatever it happened to be doing.
+
+Evidence in `media/mobile/cycle-182/`.
+
+**PR:** [#785](https://github.com/unarbos/arbos/pull/785), harness only.
