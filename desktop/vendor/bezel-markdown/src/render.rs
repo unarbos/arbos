@@ -732,10 +732,14 @@ fn block_element(
         BlockKind::Bullet(text) => {
             marker_row(disc(typography, theme), text, body, typography, theme)
         }
+        // ARBOS PATCH: the marker column grows with the number's digits —
+        // at 14 px "10." wrapped to "1" over "0." and every item past nine
+        // took two lines (F-230).
         BlockKind::Ordered { number, text } => marker_row(
             div()
                 .flex_none()
-                .w(px(MARKER_WIDTH))
+                .w(px(MARKER_WIDTH + 7.0 * (number.to_string().len().saturating_sub(1)) as f32))
+                .whitespace_nowrap()
                 .text_size(px(typography.body.size()))
                 .line_height(px(typography.body.line_height()))
                 .text_color(theme.text)
