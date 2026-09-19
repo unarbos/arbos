@@ -140,6 +140,7 @@ page_up() {
   local from=$(( SIM_PT_H * 80 / 100 ))   # 682 on this device
   local to=$(( SIM_PT_H * 40 / 100 ))     # 341
   idb ui swipe "$(( SIM_PT_W / 2 ))" "$from" "$(( SIM_PT_W / 2 ))" "$to" --duration 0.5 --udid "$1"
+  settle "$1"
 }
 
 # page_back <udid> — the other direction: toward the older end of a
@@ -151,6 +152,7 @@ page_back() {
   local from=$(( SIM_PT_H * 35 / 100 ))
   local to=$(( SIM_PT_H * 85 / 100 ))
   idb ui swipe "$(( SIM_PT_W / 2 ))" "$from" "$(( SIM_PT_W / 2 ))" "$to" --duration 0.5 --udid "$1"
+  settle "$1"
 }
 
 # collect_rows <udid> <grep-pattern> <outfile> [ui-script]
@@ -199,4 +201,26 @@ first_worker_row() {
   python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null \
     | grep -E "Button +.+, $want" \
     | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'
+}
+
+# settle <udid> [tries] — wait until the screen stops moving.
+#
+# A swipe returns before the scrolling does. Measured at cycle 186: after
+# page_up returned, one page carried on for another **167 points** — more
+# than two rows — and took between 1.4 and 2.2 seconds to stop. A label read
+# in that window is tapped where its row *was*, which is how cycle 185 tapped
+# one worker and opened another's chat, then opened nothing at all.
+#
+# A fixed sleep is wrong in both directions: too short on a fast flick, and
+# wasted on a page that never moved. This waits for two identical reads, so
+# it costs one extra dump when the screen is already still.
+settle() {
+  local udid=$1 tries=${2:-8} prev="" now=""
+  while [ "$tries" -gt 0 ]; do
+    now=$(python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null | md5)
+    [ -n "$prev" ] && [ "$now" = "$prev" ] && return 0
+    prev=$now
+    tries=$((tries - 1))
+  done
+  return 0   # never block a run on this; the caller re-reads anyway
 }
