@@ -100,8 +100,17 @@ echo
 # The row's claim is that the workers are still there after leaving and
 # coming back, so say whether they were.
 BEFORE_N=$(echo "$HIGH" | grep -oE "[0-9]+" | head -1)
-AFTER_N=$(echo "$AFTER" | grep -oE "[0-9]+" | head -1)
-if [ -z "$AFTER_N" ]; then
+# `Agents N` only. HIGH is an Agents count, and the pill reads `Working N`
+# while anything runs — the running ones, a subset. Taking the first number
+# from either form would compare a subset with a whole and call a busy
+# project a lost one, which is the mistake cycle 154 spent a cycle on in the
+# workers sheet.
+AFTER_N=$(echo "$AFTER" | grep -oE "Agents [0-9]+" | grep -oE "[0-9]+" | head -1)
+if [ -z "$AFTER_N" ] && echo "$AFTER" | grep -q "Working"; then
+  echo "VERDICT: cannot say — the pill reads '$AFTER' after reopening, which counts"
+  echo "         only what is running. Comparing that with $HIGH agents would be a"
+  echo "         subset against a whole."
+elif [ -z "$AFTER_N" ]; then
   echo "VERDICT: no pill after reopening — the workers did not survive the trip,"
   echo "         or the chat did not finish opening"
 elif [ -n "$BEFORE_N" ] && [ "$AFTER_N" -ge "$BEFORE_N" ]; then
