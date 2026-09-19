@@ -170,6 +170,33 @@ is wrong**, so the correction matters more than the guess:
   `cx.cleanup()`, after both provider checks and after the `state-after` snapshot — so cleanup,
   the transcript scans and the snapshot are all inside the number, not outside it.
 
+### Per-scenario overhead, measured directly
+
+Ten deterministic scenarios in one `run.py`, timed from outside:
+
+```
+sum of reported durations: 247.4 s
+wall clock for the run:    248.0 s
+unaccounted:                 0.6 s   (0.1 s per scenario)
+```
+
+So the loop's own numbers account for essentially all of a run's wall clock when nothing else is
+going on. **Per-scenario overhead is not the missing half** — it is a tenth of a second.
+
+Nor is it a hung scenario at the end: in both truncated steps the gap between the last finished
+scenario and the next step's first is 1.2 min and 9.0 min, not fifty.
+
+### What the two numbers actually are
+
+The 04:37 step spans 132.9 min of *wall clock* and ~100 min of whatever clock `timeout` counts, and
+I was idle for about 86 min of it. 132.9 − 49.6 ≈ 83, which is close enough to the idle window to
+say the **wall-clock** gap is suspension. What I cannot square is the other side: within the
+~100 min `timeout` counted, only 49.6 min was inside scenario functions, and the direct measurement
+above says the gap is not overhead.
+
+The honest reading is that I do not know which clock `timeout 100m` is really counting on a VM that
+pauses, and the difference between the two candidate readings is the whole fifty minutes.
+
 So roughly half of each step's **running** time goes somewhere I have not found, consistently, on
 two independent measurements. I am not filing it as its own bug and not guessing again; isolating
 it needs the loop instrumented between scenarios, which is a deliberate change rather than
