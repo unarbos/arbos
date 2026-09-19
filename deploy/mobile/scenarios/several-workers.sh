@@ -127,9 +127,23 @@ if [ -n "$PILL" ]; then
   # slowly one to forty", from some cycle long past — so the check proved
   # that a months-old record survives and said nothing about the four
   # workers it had just watched finish.
-  DONE_ROW=$(python3 "$HERE/../ui.py" "$UDID" dump 2>/dev/null \
-             | grep -E "Button +$TAG.*, Done" | head -1 \
-             | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  # Page towards them. The newest workers sit at the end of the sheet
+  # (M-482), so this run's four are never on the first screen — falling back
+  # without looking meant the check always opened the oldest worker there is.
+  mine_row() {
+    python3 "$HERE/../ui.py" "$UDID" dump 2>/dev/null \
+      | grep -E "Button +$TAG.*, Done" | head -1 \
+      | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'
+  }
+  DONE_ROW=$(mine_row)
+  PAGED=0
+  while [ -z "$DONE_ROW" ] && [ "$PAGED" -lt 8 ]; do
+    idb ui swipe 196 700 196 250 --duration 0.3 --udid "$UDID" >/dev/null 2>&1
+    sleep 1.5
+    PAGED=$((PAGED + 1))
+    DONE_ROW=$(mine_row)
+  done
+  [ "$PAGED" = 0 ] || echo "  paged $PAGED screen(s) to reach this run's workers"
   MINE=yes
   if [ -z "$DONE_ROW" ]; then
     DONE_ROW=$(first_worker_row "$UDID" Done)
