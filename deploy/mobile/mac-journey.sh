@@ -17,7 +17,18 @@ export PATH="/opt/homebrew/bin:$HOME/Library/Python/3.14/bin:$PATH"
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$(cd "$(dirname "$0")" && pwd)/sim-lib.sh"   # tap_shot: screenshot pixels -> device points
 U=B1185668-7488-420F-B12D-4412BAAC7673; B=com.unarbos.arbos.ios
-TARGET=${1:-pod}; ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
+TARGET=${1:-pod}
+# A target is "pod" or "<machine>/<project>". Anything else is a mistake made
+# at the prompt, and the run used to accept it and fail six steps later with
+# "no 157 row on the list" — which reads like the app lost a project rather
+# than like a cycle number handed to the wrong argument.
+case "$TARGET" in
+  pod|*/*) ;;
+  *) echo "'$TARGET' cannot be a target. This one takes pod, or <machine>/<project>."
+     echo "It does not take a cycle number: the run names its own folder."
+     exit 1;;
+esac
+ROW=${TARGET##*/}; [ "$ROW" = pod ] && ROW=phone   # M-121: the pod row folds into its roster twin
 RUN=$(date -u +%m%d-%H%M%S); O=$HOME/mobile-out/journey/$RUN; mkdir -p $O
 T=$(plutil -extract hubToken raw -o - ~/arbos/ios/Arbos/Secrets.plist); H=$(plutil -extract hubURL raw -o - ~/arbos/ios/Arbos/Secrets.plist)
 ID=J$(date -u +%H%M%S); DIR="journey_$ID"
@@ -302,4 +313,25 @@ python3 "$HERE/kernel.py" $TARGET history 150 > $O/transcript-tail.txt 2>/dev/nu
 python3 "$HERE/kernel.py" $TARGET hello > $O/kernel-version-end.txt 2>&1 || true
 echo "--- score"; cat $O/score.txt
 echo "--- kernel"; head -1 $O/kernel-version.txt
-python3 "$HERE/journey-record.py" "$O" "$TARGET" "${APP_BUILD:-main@unknown}" "${RUN_NOTES:-}"
+# The app's own build. This was never set, so every run record ever written
+# says "main@unknown": the journey named the kernel it tested and could not
+# name the app. The checkout's HEAD is the app's build only while the
+# installed binary is not older than the sources, so that is asked too,
+# rather than assumed — the same question mac-cycle.sh asks after it installs.
+if [ -z "${APP_BUILD:-}" ]; then
+  REPO=$(cd "$HERE/../.." && pwd)
+  BR=$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+  SHA=$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
+  APP_BUILD="$BR@$SHA"
+  INSTALLED=$(xcrun simctl get_app_container "$U" "$B" app 2>/dev/null)
+  if [ -n "$INSTALLED" ]; then
+    REF=$(mktemp) && touch -r "$INSTALLED/Arbos" "$REF"
+    NEWER=$(find "$REPO/ios" -name '*.swift' -newer "$REF" -print -quit 2>/dev/null)
+    rm -f "$REF"
+    [ -n "$NEWER" ] && APP_BUILD="$APP_BUILD (the app on the device is older than $(basename "$NEWER"))"
+  else
+    APP_BUILD="$APP_BUILD (could not date the installed app)"
+  fi
+fi
+echo "--- app   $APP_BUILD"
+python3 "$HERE/journey-record.py" "$O" "$TARGET" "$APP_BUILD" "${RUN_NOTES:-}"
