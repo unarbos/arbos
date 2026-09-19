@@ -1196,13 +1196,41 @@ fn read_lines_from(file: &Path, start: usize, take: usize) -> Result<(Vec<String
 }
 
 /// The text an edit works on: the file as UTF-8, or the refusal that
-/// says what it is instead.
+/// says what it is instead. A read-only file is refused first.
 pub fn text_for_edit(file: &Path) -> Result<String> {
+    refuse_if_read_only(file)?;
     let (text, bad) = read_text(file)?;
     if bad > 0 {
         return Err(refuse_not_utf8(file, bad));
     }
     Ok(text)
+}
+
+/// A file whose owner cannot write it (`chmod 444`: generated code, a
+/// vendored tree, a lock file — marked so that editors refuse) is not
+/// edited. Three of the four editors replaced such a file in silence
+/// (a temp file renamed over it keeps the mode and drops the content);
+/// the fourth failed with a bare "Permission denied". Refused with the
+/// path, the mode and the way through; a file that does not exist yet
+/// passes (a write creates it).
+pub fn refuse_if_read_only(file: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(file)
+            && meta.is_file()
+            && meta.permissions().mode() & 0o200 == 0
+        {
+            bail!(
+                "{} is read-only (mode {:o}): a generated, vendored or protected file, by the look of it, marked so that editors refuse. If it must change, run `chmod u+w {}` in bash first and say why, or change its source instead.",
+                file.display(),
+                meta.permissions().mode() & 0o777,
+                file.display()
+            );
+        }
+    }
+    let _ = file;
+    Ok(())
 }
 
 /// A text file's contents, decoded. A file that is not valid UTF-8 — an
@@ -1425,8 +1453,19 @@ pub fn unchanged(file: &Path) -> anyhow::Error {
 
 pub fn write(root: &Path, cwd: &Path, path: &str, contents: &str) -> Result<ToolOut> {
     let file = confine(root, cwd, path)?;
+    refuse_if_read_only(&file)?;
     if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent)?;
+        // A parent that is a file: "File exists (os error 17)" named
+        // nothing; the folder that cannot be made is the answer.
+        if parent.is_file() {
+            bail!(
+                "cannot write {}: {} is a file, not a folder",
+                file.display(),
+                parent.display()
+            );
+        }
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create folder {}", parent.display()))?;
     }
     let old = std::fs::read_to_string(&file).ok();
     if old.as_deref() == Some(contents) {
@@ -2479,6 +2518,88 @@ mod read_paged_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("is a binary file"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// Control on main 5501a2f6, `ro.py` mode 444: edit, edit_all, write
+    /// and apply_patch replaced it (content gone, mode kept); the hashline
+    /// edit failed with "Permission denied (os error 13)". Now every
+    /// editor refuses with the path, the mode and the way through, and
+    /// the file is untouched; a write under a file names the parent.
+    #[test]
+    fn a_read_only_file_is_refused_by_every_editor_with_the_way_through() {
+        let dir = std::env::temp_dir().join(format!("arbos-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ro = dir.join("ro.py");
+        std::fs::write(&ro, "x = 1\n").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let check = |what: &str, r: Result<ToolOut>| {
+            let err = r
+                .err()
+                .unwrap_or_else(|| panic!("{what}: went through"))
+                .to_string();
+            assert!(err.contains("is read-only (mode 444)"), "{what}: {err}");
+            assert!(err.contains("chmod u+w"), "{what}: {err}");
+        };
+        check("edit", edit(&dir, &dir, "ro.py", "x = 1", "x = 2"));
+        check("edit_all", edit_all(&dir, &dir, "ro.py", "x = 1", "x = 2"));
+        check("write", write(&dir, &dir, "ro.py", "x = 3\n"));
+        let h = super::super::hashline::line_tag("x = 1");
+        check(
+            "hashline",
+            super::super::hashline::edit(
+                &dir,
+                &dir,
+                "ro.py",
+                &serde_json::json!({"anchor": format!("1:{h}"), "content": "x = 2"}),
+            ),
+        );
+        check(
+            "hashline write op",
+            super::super::hashline::edit(
+                &dir,
+                &dir,
+                "ro.py",
+                &serde_json::json!({"op": "write", "content": "x = 9\n"}),
+            ),
+        );
+        check(
+            "apply_patch",
+            super::super::apply_patch::apply(
+                &dir,
+                &dir,
+                "*** Begin Patch\n*** Update File: ro.py\n@@\n-x = 1\n+x = 2\n*** End Patch",
+            ),
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ro).unwrap(),
+            "x = 1\n",
+            "untouched"
+        );
+        assert_eq!(
+            std::fs::metadata(&ro).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+        // A parent that is a file is named.
+        let err = write(&dir, &dir, "ro.py/child.txt", "hi")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ro.py is a file, not a folder"), "{err}");
+        // A writable file and a new file go through as before.
+        std::fs::write(dir.join("rw.py"), "y = 1\n").unwrap();
+        edit(&dir, &dir, "rw.py", "y = 1", "y = 2").unwrap();
+        write(&dir, &dir, "new/deep/file.txt", "hi").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("new/deep/file.txt")).unwrap(),
+            "hi"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
