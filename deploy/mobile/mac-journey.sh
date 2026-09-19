@@ -1,4 +1,6 @@
 #!/bin/bash
+# COVERS: journey — the kernel's own build in the record
+# COVERS: journey — the phone-only steps P1, P2, P3
 # The phone's version of docs/acceptance-journeys.md (QA's step ids J1–J8),
 # plus the phone-only steps P1–P3 (dictate, photo, call). One run = one
 # folder under ~/mobile-out/journey/<run>/ with a still per step, the app

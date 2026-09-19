@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# COVERS: style pair vs Cursor stills
 """Compare a still of the app with a Cursor reference, in numbers.
 
     style-pair.py <arbos.png> <cursor-reference.jpg>

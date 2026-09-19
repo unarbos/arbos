@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: the chrome — what each control is called
 # Does every control on screen have a name a person would recognise?
 #
 #   check-names.sh <cycle> [project]

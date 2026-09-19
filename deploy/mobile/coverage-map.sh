@@ -14,7 +14,7 @@
 # top. This reads those declarations against the table and answers three
 # questions:
 #
-#   * which rows no scenario claims — the genuinely untested ones;
+#   * which rows nothing claims — the genuinely untested ones;
 #   * which declarations name a row the table does not have — a typo, which
 #     would otherwise make a row look covered when nothing covers it;
 #   * which rows the sweep in particular reaches, since that is the set the
@@ -35,7 +35,12 @@ trap 'rm -f "$ROWS" "$CLAIMS" "$SWEEPERS"' EXIT
 grep "^|" "$TABLE" | awk -F'|' '{ gsub(/^ +| +$/, "", $2); print $2 }' \
   | grep -vE "^(aspect|-+)?$" | sort -u > "$ROWS"
 
-grep -h "^# COVERS:" "$HERE"/scenarios/*.sh 2>/dev/null \
+# Scenarios are not the only thing that covers a row. The journey, the style
+# pair and the name check are entry points of their own, and reading only
+# `scenarios/` reported five rows as untested that this harness tests every
+# time it runs them — including the two journey rows, on the morning after a
+# journey run.
+grep -h "^# COVERS:" "$HERE"/scenarios/*.sh "$HERE"/*.sh "$HERE"/*.py 2>/dev/null \
   | sed 's/^# COVERS: *//' | sed 's/ *$//' | sort -u > "$CLAIMS"
 
 # Which scenarios the sweep runs, read from the sweep rather than restated.
@@ -49,10 +54,10 @@ sed -n '/^DEFAULT=(/,/^)/p' "$HERE/sweep.sh" | grep -oE "[a-z0-9-]+\.sh" | sort 
                         exit 1; }
 
 echo "coverage rows:            $(wc -l < "$ROWS" | tr -d ' ')"
-echo "rows some scenario claims: $(comm -12 "$ROWS" "$CLAIMS" | wc -l | tr -d ' ')"
+echo "rows something claims:     $(comm -12 "$ROWS" "$CLAIMS" | wc -l | tr -d ' ')"
 echo
 
-echo "rows no scenario claims — these are the genuinely untested ones:"
+echo "rows nothing in the harness claims — the genuinely untested ones:"
 UNCLAIMED=$(comm -23 "$ROWS" "$CLAIMS")
 if [ -z "$UNCLAIMED" ]; then echo "  none"; else echo "$UNCLAIMED" | sed 's/^/  /'; fi
 
@@ -75,4 +80,4 @@ if [ -n "$STRAY" ]; then
   echo "         hides a row that still has nothing covering it."
   exit 1
 fi
-echo "VERDICT: every declaration matches a row, and $(echo "$UNCLAIMED" | grep -c .) row(s) have no scenario."
+echo "VERDICT: every declaration matches a row, and $(echo "$UNCLAIMED" | grep -c .) row(s) have nothing covering them."

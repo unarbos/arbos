@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — the microphone path
 # Voice measurements on the simulator (runs on the Mac). Two clips made
 # with `say` stand in for the mic; the app's DEBUG metrics print to the
 # console: reply_first_audio (speech end → first reply audio),
