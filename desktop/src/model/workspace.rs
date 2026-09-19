@@ -3354,16 +3354,48 @@ impl Workspace {
     ) {
         let text = crate::model::changes::GitChanges::diff_text(root, file);
         let path = crate::model::changes::GitChanges::review_path(root, file);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::write(&path, text).is_err() {
-            return;
-        }
         let title = match file {
             Some(f) => format!("{f} · changes"),
             None => "Changes".to_string(),
         };
+        self.review_text(root, &path, &title, text, cx);
+    }
+
+    /// A worker chat's Review: the diffs its own edits recorded, not the
+    /// tree's (F-228, cycle 62). The card under a worker's answer lists the
+    /// files the worker wrote (F-111); its Review opened `git diff HEAD`
+    /// for the whole place — other workers' files, and nothing of its own
+    /// once it had committed.
+    pub fn review_worker_edits(&mut self, chat: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session(chat) else {
+            return;
+        };
+        let root = session.cwd.clone();
+        let text = crate::view::component::transcript::worker_unified_diff(&session.items);
+        let path = crate::model::changes::GitChanges::review_path(&root, Some(&format!(
+            "worker-{chat}"
+        )));
+        let title = format!("{} · changes", session.label());
+        self.review_text(&root, &path, &title, text, cx);
+    }
+
+    /// Write `text` as the scratch diff at `path` and open it as a diff
+    /// tab of the panel.
+    fn review_text(
+        &mut self,
+        _root: &std::path::Path,
+        path: &std::path::Path,
+        title: &str,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(path, text).is_err() {
+            return;
+        }
+        let title = title.to_string();
         let Some(owner) = self.active_id() else {
             return;
         };

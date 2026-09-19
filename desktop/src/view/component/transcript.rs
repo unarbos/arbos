@@ -2725,6 +2725,75 @@ pub(crate) fn review_view(theme: &Theme, text: &str) -> AnyElement {
         .into_any_element()
 }
 
+/// A worker's own edits as one unified diff, for its Review (F-228): each
+/// successful edit call's recorded diff (the kernel's numbered form, or a
+/// unified one) becomes a `diff --git` section with one hunk. The hunk's
+/// starts come from the first numbered row; the review's parser counts
+/// from there.
+pub(crate) fn worker_unified_diff(items: &[ChatItem]) -> String {
+    // One section per file, its edits as hunks in order: a file the worker
+    // touched twice is one card with two hunks, as the card's row counts
+    // it once.
+    let mut files: Vec<(String, String)> = Vec::new();
+    for item in items {
+        let ChatItem::Tool {
+            kind,
+            label,
+            output,
+            diff,
+            status: ToolStatus::Success,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if coalesce_kind(*kind, label).unwrap_or(*kind) != ToolKind::Edit {
+            continue;
+        }
+        let path = tool_rest(label)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let source = diff
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or(output);
+        let rows: Vec<DiffRow> = parse_diff(source)
+            .into_iter()
+            .filter(|row| row.kind != DiffKind::Gap)
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        let start = rows.iter().find_map(|row| row.num).unwrap_or(1);
+        let mut hunk = format!("@@ -{start} +{start} @@\n");
+        for row in rows {
+            let sign = match row.kind {
+                DiffKind::Add => '+',
+                DiffKind::Del => '-',
+                DiffKind::Ctx | DiffKind::Gap => ' ',
+            };
+            hunk.push(sign);
+            hunk.push_str(&row.text);
+            hunk.push('\n');
+        }
+        match files.iter_mut().find(|(p, _)| *p == path) {
+            Some((_, body)) => body.push_str(&hunk),
+            None => files.push((path, hunk)),
+        }
+    }
+    files
+        .into_iter()
+        .map(|(path, body)| {
+            format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body}")
+        })
+        .collect()
+}
+
 /// A unified diff's file sections: the path each `diff --git` header names
 /// (the new side, `+++ b/…`, when it has one) and the hunks under it.
 fn split_unified_diff(text: &str) -> Vec<(String, String)> {
@@ -3668,7 +3737,13 @@ pub fn render(
                 .w_full()
                 .max_w(px(column))
                 .self_center()
-                .child(files_changed_card(chat.cwd.clone(), changes, &theme, cx))
+                .child(files_changed_card(
+                    chat.cwd.clone(),
+                    changes,
+                    own_edits.as_ref().map(|_| chat.id),
+                    &theme,
+                    cx,
+                ))
                 .into_any_element(),
         );
     }
@@ -6643,6 +6718,9 @@ mod selection_tests {
 fn files_changed_card(
     root: std::path::PathBuf,
     changes: &crate::model::changes::GitChanges,
+    // The worker chat whose own edits the card lists (F-111): its Review
+    // shows those edits, not the tree's diff (F-228).
+    worker: Option<u64>,
     theme: &Theme,
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
@@ -6686,7 +6764,10 @@ fn files_changed_card(
                             bezel::gpui::MouseButton::Left,
                             cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
-                                this.review_changes(&review_root, None, cx);
+                                match worker {
+                                    Some(chat) => this.review_worker_edits(chat, cx),
+                                    None => this.review_changes(&review_root, None, cx),
+                                }
                             }),
                         ),
                 ),
@@ -6728,8 +6809,9 @@ fn files_changed_card(
                 .child(crate::view::detail::diff_marks(theme, file.add, file.del))
                 .on_mouse_down(
                     bezel::gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| {
-                        this.review_changes(&review_root, Some(&path), cx);
+                    cx.listener(move |this, _, _, cx| match worker {
+                        Some(chat) => this.review_worker_edits(chat, cx),
+                        None => this.review_changes(&review_root, Some(&path), cx),
                     }),
                 ),
         );
@@ -6749,7 +6831,10 @@ fn files_changed_card(
                 .child(SharedString::from(format!("+{more} more")))
                 .on_mouse_down(
                     bezel::gpui::MouseButton::Left,
-                    cx.listener(move |this, _, _, cx| this.review_changes(&review_root, None, cx)),
+                    cx.listener(move |this, _, _, cx| match worker {
+                        Some(chat) => this.review_worker_edits(chat, cx),
+                        None => this.review_changes(&review_root, None, cx),
+                    }),
                 ),
         );
     }
