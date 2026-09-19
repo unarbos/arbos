@@ -4799,3 +4799,54 @@ Stills: `media/mobile/cycle-160/01-the-list.png`, with the machine report
 beside it as `check-machine.txt`.
 
 **PR:** [#747](https://github.com/unarbos/arbos/pull/747), harness only.
+
+## Cycle 161 — the sweep of twenty-four, and a fault that keeps its secret
+
+Four checks were outside the sweep with no reason written down, which is the
+state the sweep's own header exists to prevent (M-497). Two were plain
+oversights — `tool-fold` from cycle 149 and `call-menu` from 147. Two drive a
+real call and belong out, but nobody had said so. Every scenario in the
+folder is now either in the sweep or named as out, including the one-offs
+from cycles 37 to 39 that are kept as a record of how something was measured
+once rather than as checks.
+
+`typing-into-the-composer` runs first of all, because everything after it
+that sends anything goes through the helper it checks.
+
+**Twenty-four ran, none silent, none without a verdict.** `pill-count-vs-sheet`
+gave a real answer rather than declining, which is the cycle-154 rewrite
+working in place.
+
+**Two faults. The separator is the interesting one** (M-498). Six of six
+dotted during the sweep, on a build the new freshness check certified as
+current — and six of six clean an hour later from the same commit. A probe
+label reached the tree intact in the clean runs, so the explicit label is in
+effect then.
+
+This cycle eliminated every explanation I had:
+
+* a stale binary — the app was certified newer than every source file;
+* a second row call site — there is exactly one, used by both sections;
+* `spoken` inserting the dot — it joins with `", "` and nothing else;
+* the build step — `mac-cycle.sh` produced a clean row minutes after
+  producing a dotted one, from an untouched tree;
+* two sections being open — a captured run had two headers and a row reading
+  Working, with a clean label.
+
+So there is no fourth fix this cycle. What every report of this has lacked is
+the screen it happened on: three fixes have each held once and each was
+judged on a one-line flag. `list-rows.sh` now keeps the tree, a screenshot,
+the row and section counts, and the date of the binary, into a folder, when
+it fires. Proven by forcing the judge to report a fault.
+
+**The second fault is the tool fold** (M-499), which showed nothing more when
+opened — four rows closed, four open — on a turn with two tool calls, one
+failed. Filed rather than chased: a fold with two calls may have nothing
+further to show, and the check cannot yet tell that from one that refuses to
+open. Its label also reads `2 tool calls, · 1 failed`, which is the same
+stray separator in a second place.
+
+Evidence in `media/mobile/cycle-161/`: the sweep summary, the clean list, and
+an example of what the new capture keeps.
+
+**PR:** [#750](https://github.com/unarbos/arbos/pull/750), harness only.
