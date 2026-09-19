@@ -1012,10 +1012,14 @@ class Pass:
         # The line under the turn appears once the spawn record names its
         # child, a beat after the panel row.
         t0 = time.time()
-        child = self.first("child-line-*")
-        while not child and time.time() - t0 < 20:
+        # The per-child line, not `child-line-live` — the summary drawn
+        # before the worker's session exists, which opens nothing (R37).
+        def per_child():
+            return next((c for c in self.ids("child-line-*") if not c.endswith("child-line-live")), None)
+        child = per_child()
+        while not child and time.time() - t0 < 25:
             time.sleep(0.5)
-            child = self.first("child-line-*")
+            child = per_child()
         if child:
             def click_child():
                 # The line may have scrolled off the top while the turn
@@ -1844,6 +1848,10 @@ class Pass:
         self.go_project()
         ids = self.turn_ids()
         n0 = ((active(self.state()) or {}).get("pills") or {}).get("prs", 0)
+        # The record's baseline too: a PR from an earlier phase of the run
+        # already counted in the pill, and the row then asked the count to
+        # grow past a baseline it could not (R36).
+        lines0 = len((PROJ / ".arbos" / "prs.jsonl").read_text().splitlines()) if (PROJ / ".arbos" / "prs.jsonl").exists() else 0
         t0 = time.time()
         self.send(P_PR)
         s = self.wait(lambda s: ((active(s) or {}).get("pills") or {}).get("prs", 0) > n0 or (not busy(s) and time.time() - t0 > 20), 180, what="PRs pill")
@@ -1853,7 +1861,7 @@ class Pass:
         self.inv(sc)
         self.record("pill-prs", sc, "worker runs `gh pr create` (fake gh on PATH)", "pills.prs counts the subtree's PR; the pill-prs element shows \"PRs 1\"; .arbos/prs.jsonl has the record",
                     f"pills={json.dumps(pills)[:160]} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')}",
-                    "pass" if pills.get("prs", 0) > n0 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
+                    "pass" if (pills.get("prs", 0) > n0 or len(recorded) > lines0) and pills.get("prs", 0) >= 1 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
         if self.app.exists("pill-prs"):
             self.check("pill-prs", sc, "hover the pill", "tooltip lists the PR URLs; no state change", lambda: self.app.hover("pill-prs"), None)
 
