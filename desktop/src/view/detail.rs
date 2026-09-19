@@ -1993,6 +1993,14 @@ impl Arbos {
         let greeting = format!(
             "{name} is ready. Drag in files, or just tell me what you want to build and I'll get it moving.\n\nAnytime you want me to work differently, say so and I'll remember."
         );
+        // A place whose machine cannot be reached is not ready: the line
+        // under the composer says what failed and when the next try is,
+        // and the pane above it says nothing rather than the greeting
+        // (F-247, cycle 76: *remote76-place is ready* over *nohost76 is
+        // not a name this machine can resolve — retry in 7s*).
+        let unreachable = workspace.active_session().is_some_and(|chat| {
+            chat.connect_fault.is_some() && !matches!(chat.connection, Connection::Live(_))
+        });
         if setting_up {
             Painter::of(cx).lease(2.0, Duration::from_millis(1100), cx);
         }
@@ -2041,6 +2049,8 @@ impl Arbos {
                                 )
                             })
                             .into_any_element()
+                    } else if unreachable {
+                        div().id("kickoff-unreachable").into_any_element()
                     } else {
                         div()
                             .id("kickoff-greeting")
