@@ -122,9 +122,14 @@ TAG=b$(date -u +%H%M%S)
 if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sleeps 60 seconds and then says the word finished. Wait for it and tell me when it is done."; then
   ui tap "Send" >/dev/null 2>&1
   sleep 12
+  # Not a count of rows on screen. Coming back raises the keyboard and the
+  # view scrolls, so the count fell from 7 to 6 on a run where the work had
+  # plainly finished — the same mistake the tool fold made at cycle 162. What
+  # proves the chat caught up is a line that was not there before: the turn's
+  # "Worked <time>". While the worker runs there is none.
   BEFORE_ROWS=$(ui dump | grep -cE "StaticText")
-  BEFORE_TAG=$(ui dump | grep -c "$TAG")
-  echo "  left with:         $BEFORE_ROWS line(s), $BEFORE_TAG mentioning $TAG"
+  BEFORE_END=$(ui dump | grep -cE "Worked [0-9]+[a-z]|Turn ended")
+  echo "  left with:         $BEFORE_ROWS line(s) on screen, $BEFORE_END ending line(s)"
   shot 05-left-it-working
   idb ui button HOME --udid "$UDID"
   sleep 90
@@ -132,17 +137,15 @@ if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sl
   sleep 8
   shot 06-came-back-to-finished-work
   AFTER_ROWS=$(ui dump | grep -cE "StaticText")
-  AFTER_TAG=$(ui dump | grep -c "$TAG")
-  WORKED=$(ui dump | grep -cE "Worked [0-9]+[sm]|Turn ended")
-  echo "  came back to:      $AFTER_ROWS line(s), $AFTER_TAG mentioning $TAG"
-  echo "  the turn is over:  $([ "$WORKED" -gt 0 ] && echo yes || echo "not according to the screen")"
-  if [ "$AFTER_ROWS" -gt "$BEFORE_ROWS" ] && [ "$WORKED" -gt 0 ]; then
-    echo "  VERDICT: the chat he came back to had caught up — $((AFTER_ROWS - BEFORE_ROWS)) line(s)"
-    echo "           arrived while the phone was away, and the turn reads as over"
-  elif [ "$WORKED" -gt 0 ]; then
-    echo "  VERDICT: the turn reads as over but the transcript did not grow"
-    echo "           ($BEFORE_ROWS then $AFTER_ROWS) — read 06- before filing, the"
-    echo "           lines may have scrolled rather than been missed"
+  AFTER_END=$(ui dump | grep -oE "Worked [0-9]+[a-z].*|Turn ended" | head -1)
+  echo "  came back to:      $AFTER_ROWS line(s) on screen"
+  echo "  the turn's ending: ${AFTER_END:-none on screen}"
+  if [ -n "$AFTER_END" ] && [ "$BEFORE_END" = 0 ]; then
+    echo "  VERDICT: the chat caught up while the phone was away — he left a turn"
+    echo "           running and came back to '$AFTER_END'"
+  elif [ -n "$AFTER_END" ]; then
+    echo "  VERDICT: cannot say — the turn already had an ending line before he left,"
+    echo "           so coming back to one proves nothing about catching up"
   else
     echo "  VERDICT: he came back to a turn still running after 90s away. Either the"
     echo "           worker is slower than its 60s sleep or the chat did not catch up"
