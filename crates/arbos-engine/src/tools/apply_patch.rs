@@ -216,8 +216,11 @@ fn plan_hunk(
             let original = if let Some(text) = pending.get(&file) {
                 text.clone()
             } else {
-                std::fs::read_to_string(&file)
-                    .map_err(|_| anyhow::anyhow!("update failed; missing {}", file.display()))?
+                if !file.exists() {
+                    bail!("update failed; missing {}", file.display());
+                }
+                // Not UTF-8 is refused with what it is, not "missing".
+                fs::text_for_edit(&file)?
             };
             let next = derive_new_contents(&original, &file, chunks)?;
             if let Some(dest) = move_to {
@@ -442,7 +445,16 @@ fn parse_chunk(lines: &[&str], lineno: usize, allow_bare: bool) -> Result<(Chunk
 }
 
 fn derive_new_contents(original: &str, path: &Path, chunks: &[Chunk]) -> Result<String> {
-    let mut lines: Vec<String> = original.split('\n').map(str::to_string).collect();
+    // The file's own line ending, kept (hashline's rule, #736). Lines are
+    // matched and stored without their `\r`: with it, a CRLF file's
+    // context matched only through the trimmed pass and came back from
+    // the patch as LF — three lines, two flipped, a mixed file whose diff
+    // showed the context as changed.
+    let eol = super::hashline::line_ending(original);
+    let mut lines: Vec<String> = original
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect();
     if lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
@@ -497,7 +509,7 @@ fn derive_new_contents(original: &str, path: &Path, chunks: &[Chunk]) -> Result<
     if !lines.last().is_some_and(String::is_empty) {
         lines.push(String::new());
     }
-    Ok(lines.join("\n"))
+    Ok(lines.join(eol))
 }
 
 fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) -> Option<usize> {
@@ -582,6 +594,39 @@ mod tests {
 
     fn wrap(body: &str) -> String {
         format!("*** Begin Patch\n{body}\n*** End Patch")
+    }
+
+    /// Control on main cc369869: a three-line CRLF file, one hunk with one
+    /// context line and one replaced line, came back "foo\nqux\nbaz\r\n" —
+    /// two of three endings flipped, the context line in the diff. Now
+    /// every line keeps CRLF, the new one included; a Latin-1 file is
+    /// refused with what it is.
+    #[test]
+    fn a_crlf_file_keeps_its_endings_through_a_patch() {
+        let dir = tmp();
+        fs::write(dir.join("a.txt"), "foo\r\nbar\r\nbaz\r\n").unwrap();
+        apply(
+            &dir,
+            &dir,
+            &wrap("*** Update File: a.txt\n@@\n foo\n-bar\n+qux\n+quux\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "foo\r\nqux\r\nquux\r\nbaz\r\n"
+        );
+        fs::write(dir.join("old.c"), b"/* caf\xe9 */\nint x = 1;\n").unwrap();
+        let err = apply(
+            &dir,
+            &dir,
+            &wrap("*** Update File: old.c\n@@\n-int x = 1;\n+int x = 2;\n"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("is not valid UTF-8"), "{err:#}");
+        assert_eq!(
+            fs::read(dir.join("old.c")).unwrap(),
+            b"/* caf\xe9 */\nint x = 1;\n"
+        );
     }
 
     #[test]
