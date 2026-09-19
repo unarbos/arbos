@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: list composer → names its project, rides above the keyboard
 # The composer on the projects list: whose project is it, and where does it sit?
 #
 #   list-composer.sh <cycle>

@@ -1,4 +1,7 @@
 #!/bin/bash
+# COVERS: cold start
+# COVERS: background 8 s → foreground
+# COVERS: project chat — long history, scroll, older lines
 # The four rows that had been sitting at cycle 37, measured rather than
 # eyeballed:
 #

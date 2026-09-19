@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: chat — the call's words read back
 # The call's words, read back in the project chat.
 #
 #   call-text-in-chat.sh <cycle> [clip]

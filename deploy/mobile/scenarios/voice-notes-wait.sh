@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: voice notes in the composer
 # Dictation puts words in the composer and sends nothing until he does.
 #
 #   voice-notes-wait.sh <cycle> [row] [kernel target]

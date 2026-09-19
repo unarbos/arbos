@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — pulled down: type, mute, close, `+`
 # The call screen pulled down: type, mute, close — and where close lands.
 #
 #   call-pulled-down.sh <cycle> [project]

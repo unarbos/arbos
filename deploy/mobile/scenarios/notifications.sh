@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: notifications (`notify`, push)
 # The notification path, end to end: a reply that arrives while the phone is
 # elsewhere.
 #

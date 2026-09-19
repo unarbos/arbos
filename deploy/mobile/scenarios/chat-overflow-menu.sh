@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: the chrome — what each control is called
 # The chat's ··· menu: what it offers, and whether the offers work.
 #
 #   chat-overflow-menu.sh <cycle> [project]

@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: project chat — send, prompt card, streaming, Worked line
 # Tool calls fold into one line, and the line opens.
 #
 #   tool-fold.sh <cycle> [project]

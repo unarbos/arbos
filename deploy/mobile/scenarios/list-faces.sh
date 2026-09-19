@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: projects list — faces, rows, sections
 # Every project's face, against the rule that chooses it.
 #
 #   list-faces.sh <cycle>

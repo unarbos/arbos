@@ -1,0 +1,78 @@
+#!/bin/bash
+# Which coverage rows does the harness actually exercise?
+#
+#   coverage-map.sh [path to mobile-coverage.md]
+#
+# The rotation rule says take the oldest row first, and a row's age is the
+# last cycle that *named* it. Cycle 156 found the rule pointing at rows the
+# sweep had run days earlier: `list composer` read as cycle 81 and `cold
+# start` as 86, and both had gone through the cycle-151 sweep. A row covered
+# by the sweep ages on paper while being tested every time, so the loop's own
+# scheduler sends it to the wrong place (M-484).
+#
+# Each scenario now declares the row it serves, as `# COVERS: <row>` near the
+# top. This reads those declarations against the table and answers three
+# questions:
+#
+#   * which rows no scenario claims — the genuinely untested ones;
+#   * which declarations name a row the table does not have — a typo, which
+#     would otherwise make a row look covered when nothing covers it;
+#   * which rows the sweep in particular reaches, since that is the set the
+#     rotation keeps mis-ageing.
+#
+# It is deliberately a reader, not a writer. Nothing here edits the ledger:
+# a tool that silently marks rows as checked would age them correctly and
+# say nothing true about whether anyone looked.
+set -uo pipefail
+HERE=$(cd "$(dirname "$0")" && pwd)
+TABLE=${1:-$HOME/mobile-docs/mobile-coverage.md}
+[ -f "$TABLE" ] || { echo "no coverage table at $TABLE"; echo "pass its path as the argument"; exit 1; }
+
+ROWS=$(mktemp); CLAIMS=$(mktemp); SWEEPERS=$(mktemp)
+trap 'rm -f "$ROWS" "$CLAIMS" "$SWEEPERS"' EXIT
+
+# The table's first column, minus the header and the rule line.
+grep "^|" "$TABLE" | awk -F'|' '{ gsub(/^ +| +$/, "", $2); print $2 }' \
+  | grep -vE "^(aspect|-+)?$" | sort -u > "$ROWS"
+
+grep -h "^# COVERS:" "$HERE"/scenarios/*.sh 2>/dev/null \
+  | sed 's/^# COVERS: *//' | sed 's/ *$//' | sort -u > "$CLAIMS"
+
+# Which scenarios the sweep runs, read from the sweep rather than restated.
+# Its default list is DEFAULT=( ... ), not SCENARIOS=( ... ); SCENARIOS is the
+# argument list. Reading the wrong name printed an empty section and a verdict
+# that did not notice, which is the fault this whole file exists to catch.
+sed -n '/^DEFAULT=(/,/^)/p' "$HERE/sweep.sh" | grep -oE "[a-z0-9-]+\.sh" | sort -u > "$SWEEPERS"
+[ -s "$SWEEPERS" ] || { echo "read no scenarios out of sweep.sh — its list is not where this"
+                        echo "expects it, and every line below about the sweep would be empty"
+                        echo "rather than false. Fix the reader before trusting the report."
+                        exit 1; }
+
+echo "coverage rows:            $(wc -l < "$ROWS" | tr -d ' ')"
+echo "rows some scenario claims: $(comm -12 "$ROWS" "$CLAIMS" | wc -l | tr -d ' ')"
+echo
+
+echo "rows no scenario claims — these are the genuinely untested ones:"
+UNCLAIMED=$(comm -23 "$ROWS" "$CLAIMS")
+if [ -z "$UNCLAIMED" ]; then echo "  none"; else echo "$UNCLAIMED" | sed 's/^/  /'; fi
+
+echo
+echo "declarations naming a row the table does not have:"
+# A typo here is worse than a missing declaration: the row it meant to claim
+# still reads as unclaimed, and the claim itself points at nothing.
+STRAY=$(comm -13 "$ROWS" "$CLAIMS")
+if [ -z "$STRAY" ]; then echo "  none — every declaration matches a row"; else echo "$STRAY" | sed 's/^/  /'; fi
+
+echo
+echo "rows the sweep reaches every run (these age wrongly in the ledger):"
+while read -r s; do
+  grep -h "^# COVERS:" "$HERE/scenarios/$s" 2>/dev/null | sed 's/^# COVERS: *//'
+done < "$SWEEPERS" | sort -u | sed 's/^/  /'
+
+echo
+if [ -n "$STRAY" ]; then
+  echo "VERDICT: $(echo "$STRAY" | wc -l | tr -d ' ') declaration(s) name no row. Fix those first — each one"
+  echo "         hides a row that still has nothing covering it."
+  exit 1
+fi
+echo "VERDICT: every declaration matches a row, and $(echo "$UNCLAIMED" | grep -c .) row(s) have no scenario."

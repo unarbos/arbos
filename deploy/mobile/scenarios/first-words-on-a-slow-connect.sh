@@ -1,4 +1,5 @@
 #!/bin/bash
+# COVERS: call — first word and transcription
 # Does a slow connect still cost the caller their opening words?
 #
 #   first-words-on-a-slow-connect.sh <cycle> [runs]
