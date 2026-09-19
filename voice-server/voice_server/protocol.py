@@ -168,10 +168,13 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
                                    the current state again every 5 s with heartbeat:true while any is not idle.
                                    Play the sound of work on this and nothing else; when the beats stop, the
                                    state is unknown. session.ready says "activity":true when these come.
-    {"type":"narrator.say","text":"...","kind":"highlight"|"report"|"ask"|"error"|"detail","ref":"transcript:1181"}
+    {"type":"narrator.say","text":"...","kind":"highlight"|"report"|"ask"|"error"|"detail"|"working"|"ready","ref":"transcript:1181"}
                                    the narrator is about to voice this line (as a normal reply turn:
                                    response.started, response.transcript, audio, response.done). Write it
                                    into the chat as a `voice ·` line so the record is complete.
+                                   kind "ready" (--engine openai): the Live session is up and the caller can
+                                   speak; the call says "Hi." right then, once — the ready signal. Not a timer.
+                                   kind "working": "Yeah, one sec." once the kernel is actually running.
     Every finished caller utterance is sent to the project's main agent as a user message with
     channel = "voice" (the kernel files it in the agent's inbox with that key; a running turn takes
     it as a steer). text.input during a call goes the same way with channel = "text" and is answered

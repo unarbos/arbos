@@ -1,0 +1,19 @@
+# Jacob's word: the call announces it is ready to talk by saying "hi". The ready signal is the
+# Live session being up (session.started) with the caller's audio flowing — not a timer, and not
+# the working line. GPT-Live (mock) speaks the commentary; the client sees narrator.say kind
+# "ready" then response.started/transcript/done. Nothing goes to the kernel for it.
+title = "GPT-Live: the call says hi when the Live session is up — the ready signal"
+engine = "openai"
+path = "own"
+
+[[steps]]
+pause = 3.5
+
+[expect]
+live_started = true
+live_spoke = ["Hi."]
+live_commentaries = 1
+narrated_contains = ["Hi."]
+spoken_contains = ["hi"]
+response_dones = 1
+user_frames = 0

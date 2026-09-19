@@ -52,6 +52,9 @@ SCREEN_BRIEF_CHARS = 8000  # the on-screen chat in the instructions; session.inp
 _ACK_WORDS = re.compile(r"\b(let me (check|look|get|see|find)|one (sec|second|moment)|checking|i'?ll (check|look|find out|get)|"
                         r"hold on|give me a (sec|second|moment)|looking (that|it) up)\b", re.I)
 ACK_GRACE_S = 2.5
+# What the call says the moment the Live session is up and the caller can speak: the ready signal
+# (Jacob's word). Spoken by the model, once, right then — not on a timer, not the working line.
+READY_LINE = "Hi."
 # After the kernel's answer is appended while the model is mid-sentence, how long its burst may
 # run on unheard before the mute is lifted regardless.
 UNMUTE_WATCH_S = 6.0
@@ -266,6 +269,7 @@ class OpenAILiveSession(DuplexSession):
         self.await_words: set[str] = set()  # the kernel answer's words, awaited in the model's transcript while muted
         self.await_seen = ""
         self.working_line_said = False  # one spoken "Yeah, one sec." per work bout
+        self.ready_said = False  # the "hi" that says the Live session is up; once per call
         self.working_line_expect = False  # commentary filler is in flight
         self.working_line_open = False  # that filler's audio may play (decision is still kernel)
         self.working_line_heard = ""
@@ -329,6 +333,22 @@ class OpenAILiveSession(DuplexSession):
         log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, client delegation; brief for %s, %d history lines)",
                  self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice,
                  (self.project_info or {}).get("place") or (self.project_info or {}).get("name") or "no kernel", len(seed))
+        await self._say_ready()
+
+    async def _say_ready(self) -> None:
+        """The ready signal: once the Live session is up and the caller can be heard, the call says
+        "hi" — in the model's voice, right now, not on a timer. Two appends, as OpenAI's own recipe
+        for a greeting: the wording as an instruction (commentary may be paraphrased), then a short
+        commentary to make the model speak first. Once per session. Not the working line."""
+        if self.ready_said or self.up is None:
+            return
+        self.ready_said = True
+        self._emit(P.NARRATOR_SAY, text=READY_LINE, kind="ready")
+        await self._append("session.instructions.append", None,
+                           f"The call is now open. Your first spoken words, right now and exactly, are: '{READY_LINE}' "
+                           "Say nothing else until the caller speaks.")
+        await self._append("session.commentary.append", None, READY_LINE)
+        log.info("[%s] ready: said %r", self.sid, READY_LINE)
 
     # ------------------------------------------------------------------ what the model knows
 
@@ -636,6 +656,9 @@ class OpenAILiveSession(DuplexSession):
             # Allowlisted small talk: the model's own reply is the answer. Let the held first word
             # out; keep one watch for "let me check" said without a delegation behind it.
             log.info("[%s] user (small talk, %s): %r", self.sid, source, text)
+            # A barge-in (over the greeting, or over a reply) muted the model until it went quiet;
+            # its answer to *this* utterance must be heard, so the mute ends with the decision.
+            self.muted = False
             self._release_model()
             self.ack_watch = asyncio.create_task(self._ensure_delegated(self.delegations_seen, text))
             return

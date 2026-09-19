@@ -16,7 +16,7 @@ wait_spoken = "very welcome"
 wait_quiet = 1.5
 
 [expect]
-response_dones = 1
+response_dones = 2  # the ready "Hi." plus the one answer
 spoken_contains = ["very welcome"]
-live_commentaries = 0
+live_commentaries = 1  # "Hi." counted
 user_frames = 0
