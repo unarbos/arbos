@@ -39,7 +39,10 @@ shot 01-before
 ui tap "$ROW" >/dev/null 2>&1 || { echo "no $ROW row"; exit 1; }
 sleep 5
 # Long enough that it is still going while the list is read and looked at.
-type_line "$UDID" "Count slowly from one to forty, one number on each line, and say done at the end." || exit 1
+# A worker that sleeps, because counting to forty finished before the list
+# could be read and the check rightly refused to draw a conclusion. The turn
+# has to outlast a walk out to the list and back.
+type_line "$UDID" "Start one worker that sleeps 45 seconds and then says the word finished. Wait for it and tell me when it is done." || exit 1
 ui tap "Send" >/dev/null 2>&1
 for _ in $(seq 1 20); do [ "$(composer)" = Stop ] && break; sleep 1; done
 [ "$(composer)" = Stop ] || { echo "the turn never started — nothing to ask about"; exit 1; }
