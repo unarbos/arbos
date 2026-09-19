@@ -5797,3 +5797,39 @@ PR describes.
 Measurements and stills in `media/mobile/cycle-186/`.
 
 **PR:** [#791](https://github.com/unarbos/arbos/pull/791), harness only.
+
+## Cycle 187 — one screen, two stories about being busy
+
+The journey was ten cycles old, covers two rows, and films itself, so it
+served as the overdue recording too.
+
+**It is clean** (M-576): 16 pass, 4 unverified, nothing failed and nothing
+scored by eye — the first run since J6 and J6k stopped being eyeballed. Kernel
+`c3247332dc4e` at both ends, app `main@ff582e75`.
+
+**Reviewing its footage found something the checks do not look at** (M-577).
+At the end of the challenge the screen showed `Done fix … mathlib challenge`,
+then a bare `Working`, with the composer on **Stop** — and the pill reading
+**`✓ Agents 48`**. A tick, which reads as everything finished.
+
+I measured it live rather than trusting one frame: six readings, two of them
+while the turn ran, both `Agents 48` with the composer showing Stop.
+
+The pill is right by its own definition. It counts running *workers*, and a
+root turn with no sub-agents is not one. But three things on that screen
+claim to know whether the project is busy and they do not agree, and the
+tick is the one a person reads as "done".
+
+Whether the pill should follow the root turn is a design decision, so it is
+recorded where a turn is already being watched rather than guessed at — the
+same treatment the two-faces question gets.
+
+**The reading did not print on its first run** (M-578). It took its own dump
+each time round the sampling loop, halved the rate, and missed the Stop phase
+of a 4.7-second turn entirely. One dump per sample now, used for all three
+readings.
+
+Film, still and score in `media/mobile/cycle-187/`; 19 journey stills in
+`media/mobile/journey/0919-193749/`.
+
+**PR:** [#792](https://github.com/unarbos/arbos/pull/792), harness only.
