@@ -122,8 +122,20 @@ echo "== what a finished worker keeps =="
 PILL=$(ui dump | grep -E "Button +([^,]+, )?(Agents|Working) [0-9]+" | head -1 | awk '{print $1, $2}')
 if [ -n "$PILL" ]; then
   idb ui tap $PILL --udid "$UDID"; sleep 4
-  DONE_ROW=$(first_worker_row "$UDID" Done)
-  echo "  opening: ${DONE_ROW:-no finished worker on the sheet}"
+  # One of this run's own workers, if the sheet is showing one. Taking the
+  # first Done row meant always opening the same ancient worker — "count
+  # slowly one to forty", from some cycle long past — so the check proved
+  # that a months-old record survives and said nothing about the four
+  # workers it had just watched finish.
+  DONE_ROW=$(python3 "$HERE/../ui.py" "$UDID" dump 2>/dev/null \
+             | grep -E "Button +$TAG.*, Done" | head -1 \
+             | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }')
+  MINE=yes
+  if [ -z "$DONE_ROW" ]; then
+    DONE_ROW=$(first_worker_row "$UDID" Done)
+    MINE=no
+  fi
+  echo "  opening: ${DONE_ROW:-no finished worker on the sheet}$([ "$MINE" = yes ] && echo "  (this run's own)" || echo "  (an older one — none of this run's are on this page)")"
   if [ -n "$DONE_ROW" ]; then
     ui tap "$DONE_ROW" >/dev/null 2>&1; sleep 5
     shot 05-a-finished-worker
@@ -136,6 +148,7 @@ if [ -n "$PILL" ]; then
     elif [ "$HELD" -ge 2 ]; then
       echo "  VERDICT archived: its chat holds $HELD line(s) of what it did — cycle 32's"
       echo "                    'Nothing on record yet' no longer reproduces"
+      [ "$MINE" = no ] && echo "                    (on an older worker; this run's were not on the page)"
     else
       echo "  VERDICT archived: cannot say — $HELD line(s) and no empty-state text either"
     fi
