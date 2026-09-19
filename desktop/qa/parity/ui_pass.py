@@ -518,10 +518,13 @@ class Pass:
         except Exception:
             return False
         # `visible` is bounds ∩ content mask; the PRs pill read False while
-        # plainly on screen (cycle 31, `128-pill-prs.png`). `reachable` is
-        # the hit test at the element's centre — the stronger word for an
-        # interactive element. Either counts; neither is assumed (R15).
-        return bool(found.get("visible")) or bool(found.get("reachable"))
+        # plainly on screen (cycle 31, `128-pill-prs.png`; again at 1600×1000,
+        # cycle 53). `reachable` is the hit test at the element's centre —
+        # the stronger word for an interactive element. `on_screen` is the
+        # bounds against the window's frame, whatever mask the element was
+        # painted under (R35): a row scrolled off the list has bounds off
+        # the frame and still reads unseen. Any of the three counts.
+        return bool(found.get("visible")) or bool(found.get("reachable")) or bool(found.get("on_screen"))
 
     def first(self, pattern: str) -> str | None:
         found = self.ids(pattern)
