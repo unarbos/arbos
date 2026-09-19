@@ -38,6 +38,11 @@ CLIP=${2:-$HOME/mobile-clips/pause.wav}
 # "one question baked in" error as M-301, for the third time.
 SAYS=${SAYS:-1}
 OUT="$HOME/mobile-out/$CYCLE/orb-phases"; mkdir -p "$OUT"
+# A run must not read the last run's answer. The two python blocks below
+# talk to each other through this file, and a stale one would put a fault
+# from an earlier call into a clean call's verdict.
+export ORB_SHARED="$OUT/colours-shared"
+rm -f "$ORB_SHARED"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
 [ -f "$CLIP" ] || { echo "no clip at $CLIP"; exit 1; }
@@ -84,7 +89,7 @@ echo
 echo "what each phase looked like:"
 python3 - "$OUT" <<'PY'
 from pathlib import Path
-import sys
+import os, sys
 try:
     from PIL import Image
 except ImportError:
@@ -107,11 +112,28 @@ for png in sorted(out.glob("phase-*.png")):
 if len(seen) < 2:
     print("  only one phase was seen, so nothing could be compared")
 else:
+    # Distance in RGB is not the question a caller asks. Cycle 170 measured
+    # listening at (133,132,132) rising to (173,173,173) with the voice, and
+    # thinking at (75,74,74): far apart as numbers, the same grey to the eye,
+    # and within a range listening already travels on its own. A reviewer
+    # watching the film said the two were identical. Speaking, at
+    # (98,124,162), is the only one that changes hue.
+    #
+    # So two phases count as sharing a face when neither has a colour — a
+    # grey is a grey however bright — as well as when their RGB is close.
+    def grey(c):
+        return max(c) - min(c) <= 12
     pairs = [(a, b) for a in seen for b in seen if a < b]
     same = [f"{a} and {b}" for a, b in pairs
-            if max(abs(x - y) for x, y in zip(seen[a], seen[b])) <= 8]
+            if max(abs(x - y) for x, y in zip(seen[a], seen[b])) <= 8
+            or (grey(seen[a]) and grey(seen[b]))]
     if same:
         print("  LOOK THE SAME: " + "; ".join(same))
+        for a, b in pairs:
+            if grey(seen[a]) and grey(seen[b]):
+                print(f"  ({a} {seen[a]} and {b} {seen[b]} are both grey — a"
+                      f" difference in brightness only, and listening's own"
+                      f" brightness moves with the voice)")
         # Not every pair matters equally. `connecting` happens once, before
         # the call is under way; a caller is never choosing between it and
         # `thinking`. Two *mid-call* states sharing a face is the one that
@@ -121,6 +143,11 @@ else:
         if bad:
             print("  and both of these happen mid-call: " + "; ".join(bad))
             print("  A caller in a quiet room has only the colour to go on.")
+            # Say it where a skimmer reads. The colour section printed this
+            # plainly and the closing verdict said "one pass through the
+            # phases, no flapping" — a clean line under a real fault, which
+            # is how a reader comes away thinking the orb is fine.
+            open(os.environ["ORB_SHARED"], "w").write("; ".join(bad))
         else:
             print("  each pair involves a state that happens once, before the call"
                   " is under way,")
@@ -134,7 +161,7 @@ echo
 # entered again inside one turn is what M-145 described, and what a caller
 # sees as the orb twitching.
 python3 - "$SEQ" "$SAYS" <<'PY'
-import sys
+import os, sys
 seq = sys.argv[1].split()
 if not seq:
     print("VERDICT: the orb never reported a phase — nothing to read")
@@ -153,6 +180,16 @@ elif spoke > says:
     print(f"VERDICT: {spoke} spoken answers to {says} question(s) — either a reply in "
           f"parts or the double answer of M-146")
 else:
-    print("VERDICT: one pass through the phases per question, in order, no flapping")
+    shared = ""
+    try:
+        shared = open(os.environ["ORB_SHARED"]).read().strip()
+    except OSError:
+        pass
+    if shared:
+        print("VERDICT: the phases run in order, one pass per question, no flapping —")
+        print(f"         but {shared} wear the same face mid-call, so the order is")
+        print("         only readable to something that can read the label")
+    else:
+        print("VERDICT: one pass through the phases per question, in order, no flapping")
 PY
 echo "console in $OUT"
