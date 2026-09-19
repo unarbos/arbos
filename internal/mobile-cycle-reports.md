@@ -6286,3 +6286,135 @@ Stills and the film in `media/mobile/cycle-196/`: the four phase stills, and
 
 **PR:** [#801](https://github.com/unarbos/arbos/pull/801), harness and an
 inbox note; no `ios/` change.
+
+## Cycle 197 — the sweep, and a fault that was the harness twice over
+
+The work queue had nothing older than 192 apart from the TestFlight row I
+cannot act on, so this was the cycle for the full suite. Twenty-five
+scenarios, twenty-four minutes.
+
+**The suite is clean** (M-620):
+
+```
+0 of 25 printed nothing at all.
+0 of 25 printed output but reached no verdict — read those first.
+```
+
+Twenty-one coverage rows exercised in one run. One fault reported, and it was
+not one.
+
+**`tool-fold` was measuring the run before it** (M-621). Everything it waits
+for is already on the screen when it starts: the previous run leaves its
+prompt card, its fold and its `Worked` line in the chat. So *wait for a fold*
+and *wait for Worked* were both satisfied the instant they were asked, by the
+earlier turn.
+
+Caught in the act: it read `3 tool calls` from the run before, counted rows
+while its own turn was still running, and by the time it shot the open state
+the fold underneath had become `6 tool calls`. Two different turns, compared.
+The `FAULT: opening the fold showed nothing more (4 → 4)` was about a fold it
+never tapped, belonging to a turn it never sent (M-622).
+
+Folds and `Worked` lines are counted before the send now, and the waits
+require the count to rise. Reran back-to-back — the case that used to fail:
+
+```
+  the fold reads: 6 tool calls
+  text rows while closed: 8
+  text rows while open:   12
+  text rows closed again: 8
+VERDICT: '6 tool calls' folds 4 row(s) away and gives them back on a tap
+```
+
+The fold was always fine.
+
+**The refusal log from cycle 195 paid for itself in one cycle** (M-623). The
+first rerun printed:
+
+```
+tap '1 tool call' — nothing matching it was on screen
+```
+
+twice. The transcript grows under the fold while the reply streams, so by tap
+time the line had scrolled above the top of the screen, and the dump carries
+it anyway with a negative y. That is the same shape as `several-workers` at
+195, in a second scenario, one cycle later. Without the log it would have
+been read as an app fault again.
+
+**A headline that argued with its own paragraph** (M-624).
+`pill-count-vs-sheet` said *the sheet's paging fell short over 8 page(s)* and
+then spent five lines explaining that this is the rig: rows are counted by
+label, and this project has more agents than distinct goals, so twins on
+different pages count once. Worded as what it is now — not comparable on this
+project, and why. A number presented as a shortfall every run teaches the
+reader to skip it.
+
+Stills in `media/mobile/cycle-197/`: `fold-closed-8-rows.png`,
+`fold-open-12-rows.png`, and the whole run in `sweep-197.log`.
+
+**PR:** [#802](https://github.com/unarbos/arbos/pull/802), harness only.
+
+## Cycle 198 — the last rows nothing was checking
+
+The queue had nothing older than five cycles, so I went after a line
+`coverage-map` has printed every run for the life of the loop:
+
+```
+rows nothing in the harness claims — the genuinely untested ones:
+  call — AirPods / speaker route, screen off, CallKit
+  recording
+  TestFlight build on Jacob's phone
+```
+
+Two of those are closed here (M-625). `recording` needed one line: `film.sh`
+has done exactly that since cycle 190 and simply never declared it. The third
+is Jacob's TestFlight build, which this machine cannot reach.
+
+**The app knows where the sound goes and never says** (M-626).
+`where-the-sound-goes.sh` establishes what this machine can establish:
+
+```
+  the connect metric reports: route=speaker
+  elements naming a route or a volume: 0
+  files importing CallKit: 0
+```
+
+`CallViewModel.updateNote()` assembles the engine, a route badge, the kernel
+state, the reply latency and the work detail into a `@Published` string on
+every route change and every turn. Nothing reads it. A search of the whole
+app for any use of `.note` outside the view model that defines it returns
+nothing at all.
+
+**It is the doc comment that does the damage** (M-627):
+
+```swift
+/// `speaker · 100%`: where the sound goes and the system volume there.
+```
+
+That describes a screen which does not exist. Anyone reading the view model
+to learn what the call tells a user is misled — and cycle 193 had to
+establish by measurement that the screen carries no words at any point.
+
+Filed rather than decided:
+`features-inbox/2026-09-19-the-call-builds-a-status-line-nothing-shows.md`.
+Showing the line needs a designer's eye; deleting it is equally a decision,
+and this loop does not ship product guesses.
+
+**Half the row cannot be tested here, and the check says which half** (M-628).
+AirPods need a real device with a real pair, and a simulator has no screen to
+switch off. Said plainly in the verdict, because a row with nothing covering
+it turns into a quiet pass otherwise.
+
+Afterwards:
+
+```
+rows nothing in the harness claims — the genuinely untested ones:
+  TestFlight build on Jacob's phone
+```
+
+Stills in `media/mobile/cycle-198/`: `no-route-on-the-call-screen.png` and
+`every-element-on-the-call-screen.txt`, which is the whole screen's labels
+and values, so the zero above can be checked rather than believed.
+
+**PR:** [#803](https://github.com/unarbos/arbos/pull/803), harness and an
+inbox note; no `ios/` change.
