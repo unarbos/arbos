@@ -5231,3 +5231,44 @@ Proven it can fail: tightened to a tenth of a point, the verdict turns.
 Stills and numbers in `media/mobile/cycle-171/`.
 
 **PR:** [#767](https://github.com/unarbos/arbos/pull/767), harness only.
+
+## Cycle 172 — three clean checks, and one that was flattering itself
+
+The queue named `the loop's own machine` at cycle 160, so I ran the three
+integrity checks.
+
+**All three pass** (M-529). The machine can run the whole harness. Every tool
+resolves inside the checkout, every scenario reaches the list first, and none
+calls a helper it has not sourced. No control on any screen reads as a symbol
+name.
+
+**But the names check was flattering itself** (M-530). Its own comment says
+the call "rests entirely on the labels of its four controls", and it examined
+three: `Call menu`, `Settings`, and the orb — which reads `Call`, because
+tapping it starts one. The fourth is `End call`, and it does not exist until a
+call is up. So the screen was examined in the one state where its end control
+is absent, and "every control here is named" was true of three quarters of it
+without saying so.
+
+A preview call on this simulator will not connect. With no clip the screen
+says "No microphone input." and the orb does nothing at all; with an injected
+clip it accepts the tap and stays where it is. `End call` is tapped by name in
+`call-text-in-chat.sh`, on a call that is actually running, so the label is
+covered — just not from here. The check now examines both states and names the
+one it cannot reach.
+
+**My first version of that was worse than the problem** (M-531): it counted
+the unreachable state as a missed screen, so every run ended "incomplete". A
+check that can never be complete is a check people stop reading. Withdrawn
+inside the cycle.
+
+**And the `ios/` batch, for whoever decides the next upload** (M-532): it holds
+exactly two commits. One moved the project row's label onto the button; the
+other put back the `.isButton` trait that move removed. Nothing else has
+touched `ios/` since the 2160 build. The first is the separator work, whose
+effect this loop has measured as intermittent across six eliminated
+explanations; the second is a plain repair and is not.
+
+Still and full report in `media/mobile/cycle-172/`.
+
+**PR:** [#770](https://github.com/unarbos/arbos/pull/770), harness only.
