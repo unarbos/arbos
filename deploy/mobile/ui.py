@@ -43,13 +43,34 @@ A label that matches nothing exits 1 and prints nothing, so a scenario
 fails where it went wrong rather than touching something else.
 """
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 
 
+def idb():
+    """The path to idb, found rather than assumed.
+
+    This is called over ssh, and a non-login ssh shell carries a bare PATH
+    with no Homebrew on it, so a plain "idb" raises FileNotFoundError and the
+    traceback blames the tool rather than the PATH. Cycle 192 fixed this for
+    the shell scripts and added a check for it; cycle 193 tripped over the
+    same thing here, because that check reads *.sh and this is Python.
+    """
+    found = shutil.which("idb")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/idb", "/usr/local/bin/idb"):
+        if os.path.exists(candidate):
+            return candidate
+    sys.exit("ui: no idb on PATH and none in /opt/homebrew/bin — "
+             "install it, or add its directory to PATH")
+
+
 def elements(udid):
-    out = subprocess.run(["idb", "ui", "describe-all", "--udid", udid],
+    out = subprocess.run([idb(), "ui", "describe-all", "--udid", udid],
                          capture_output=True, text=True, timeout=60)
     if out.returncode != 0:
         sys.exit(f"ui: idb describe-all failed: {out.stderr.strip()[:200]}")
@@ -123,7 +144,7 @@ def main():
             print(f"ui: want one pop-up button in the top bar, found {len(bar)}", file=sys.stderr)
             sys.exit(1)
         x, y = centre(bar[0])
-        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"opened the top-bar menu at {x},{y}")
         return
 
@@ -158,7 +179,7 @@ def main():
         f = fields[0].get("frame") or {}
         x = round(f.get("x", 0) + f.get("width", 0) - 12)
         y = round(f.get("y", 0) + f.get("height", 0) - 12)
-        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"caret at the end of the text field, {x},{y}")
         return
 
@@ -185,7 +206,7 @@ def main():
         print(f"{x} {y}")
         return
     if verb == "tap":
-        subprocess.run(["idb", "ui", "tap", str(x), str(y), "--udid", udid], check=True)
+        subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"tapped {el.get('AXLabel') or needle!r} at {x},{y}")
         return
     sys.exit(__doc__)

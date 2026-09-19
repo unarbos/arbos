@@ -192,3 +192,20 @@ for f in $(find "$HERE" -name "*.sh" | sort); do
   STRAYPATH=$((STRAYPATH + 1))
 done
 [ "$STRAYPATH" = 0 ] && echo "  none — every tool that calls one asks for its directory first"
+
+# The same question of the Python tools, because the check above reads *.sh
+# and cycle 193 tripped over ui.py for exactly that reason: it ran `idb` by
+# bare name, inherited a bare ssh PATH, and raised FileNotFoundError blaming
+# the program rather than the PATH. A Python tool cannot fix this with an
+# export — it is one process — so what is wanted is that it *finds* the
+# program: shutil.which, or an absolute path, not a bare name in the argv.
+echo
+echo "python tools running a Homebrew program by bare name:"
+STRAYPY=0
+for f in $(find "$HERE" -name "*.py" | sort); do
+  BARE=$(grep -oE '\["(ffmpeg|ffprobe|idb)"' "$f" 2>/dev/null | tr -d '["' | sort -u | tr '\n' ' ')
+  [ -n "$BARE" ] || continue
+  echo "  $(basename "$f") runs: ${BARE}by bare name — resolve it with shutil.which first"
+  STRAYPY=$((STRAYPY + 1))
+done
+[ "$STRAYPY" = 0 ] && echo "  none — every one resolves the program before running it"
