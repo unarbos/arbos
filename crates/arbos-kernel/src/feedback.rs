@@ -724,7 +724,14 @@ mod tests {
         vec![
             wake(1, 10, "user"),
             tool(2, 11, "c1", None, "spawned w1"),
-            line(3, 12, EventKind::TurnComplete { usage: None }),
+            line(
+                3,
+                12,
+                EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                },
+            ),
             wake(4, 20, "done"),
             tool(5, 21, "c2", Some("exit 1"), &"line\n".repeat(3000)),
             line(
@@ -736,12 +743,33 @@ mod tests {
                     reasoning_details: None,
                 },
             ),
-            line(7, 23, EventKind::TurnComplete { usage: None }),
+            line(
+                7,
+                23,
+                EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                },
+            ),
             wake(8, 30, "serve"),
-            line(9, 31, EventKind::TurnComplete { usage: None }),
+            line(
+                9,
+                31,
+                EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                },
+            ),
             wake(10, 40, "user"),
             tool(11, 41, "c3", None, "ok"),
-            line(12, 42, EventKind::TurnComplete { usage: None }),
+            line(
+                12,
+                42,
+                EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                },
+            ),
         ]
     }
 

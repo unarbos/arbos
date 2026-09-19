@@ -502,7 +502,10 @@ fn refuse(
                 text: message,
                 failed: true,
             }),
-            Event::new(EventKind::TurnComplete { usage: None }),
+            Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            }),
         ],
     )?;
     tools::file_hooks::after_turn(place, agent);
@@ -968,6 +971,11 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
     let replay = provider.replay.is_some();
     let jev_off = host.config.jev == Some(false);
 
+    // The model that answered the last chat step: on `turn_complete` for
+    // the window's chip and the record (a fallback makes it differ from
+    // the configured one; the chip read the configuration and named a
+    // dead model while another did every turn, desktop cycle 54).
+    let answered: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let end = |usage: Option<Usage>, interrupted: Option<&str>| -> Result<()> {
         if gone() {
             eprintln!(
@@ -982,7 +990,10 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 detail: detail.into(),
             }));
         }
-        batch.push(Event::new(EventKind::TurnComplete { usage }));
+        batch.push(Event::new(EventKind::TurnComplete {
+            usage,
+            model: answered.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        }));
         append_events(&transcript, &batch)?;
         tools::file_hooks::after_turn(&place, &agent);
         if !replay {
@@ -1336,7 +1347,15 @@ pub async fn turn(opts: TurnOpts) -> Result<()> {
                 usage,
                 outcomes,
                 reasoning_details,
-            } => (content, calls, usage, outcomes, reasoning_details),
+            } => {
+                // A chat model answered (Jev's own tool steps carry no
+                // usage): the one the step ended on, fallback included.
+                if usage.is_some() {
+                    *answered.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(provider.model.clone());
+                }
+                (content, calls, usage, outcomes, reasoning_details)
+            }
             Step::Interrupted => {
                 return end(
                     spent(last_usage, turn_cost, turn_cached),

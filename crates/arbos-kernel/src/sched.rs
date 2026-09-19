@@ -221,6 +221,7 @@ impl Scheduler {
                             notice.clone(),
                             arbos_core::Event::new(arbos_core::EventKind::TurnComplete {
                                 usage: None,
+                                model: None,
                             }),
                         ],
                     ) {
@@ -300,7 +301,10 @@ fn turn_error_said(
         );
     }
     let notice = Event::new(EventKind::Notice { text, failed: true });
-    let close = Event::new(EventKind::TurnComplete { usage: None });
+    let close = Event::new(EventKind::TurnComplete {
+        usage: None,
+        model: None,
+    });
     if let Err(write_err) = arbos_core::append_events(transcript, &[notice.clone(), close]) {
         crate::klog::error(
             "turn_error_unrecorded",

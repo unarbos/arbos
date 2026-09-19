@@ -988,7 +988,7 @@ fn record_spend(hooks: &KernelHooks, agent: &str) {
         .filter(|e| e.seq >= lo)
         .rev()
         .find_map(|e| match &e.kind {
-            EventKind::TurnComplete { usage } => usage.as_ref().and_then(|u| u.cost),
+            EventKind::TurnComplete { usage, .. } => usage.as_ref().and_then(|u| u.cost),
             _ => None,
         })
         .unwrap_or(0.0);

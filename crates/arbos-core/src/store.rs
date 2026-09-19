@@ -1113,7 +1113,10 @@ mod show_tests {
                     brief: None,
                 }),
                 user("show me the old thing"),
-                Event::new(EventKind::TurnComplete { usage: None }),
+                Event::new(EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                }),
                 Event::new(EventKind::Wake {
                     wake: "user".into(),
                     text: Some("now just fix it".into()),

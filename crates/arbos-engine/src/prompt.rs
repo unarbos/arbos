@@ -874,7 +874,10 @@ mod archived_section_tests {
                 reasoning_details: None,
             });
             a.ts = ts;
-            let mut done = Event::new(EventKind::TurnComplete { usage: None });
+            let mut done = Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            });
             done.ts = ts + 1;
             arbos_core::append_events(&d.join("transcript.jsonl"), &[a, done]).unwrap();
         }

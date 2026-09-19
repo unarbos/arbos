@@ -1259,7 +1259,14 @@ mod roll_tests {
         }
         // Not between turns: nothing happens.
         assert!(roll_transcript(&place, "root", 20).unwrap().is_none());
-        append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        append_event(
+            &path,
+            &Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            }),
+        )
+        .unwrap();
         // Under the cap: nothing happens.
         assert!(roll_transcript(&place, "root", 100).unwrap().is_none());
         // Checkpoints index the file by line: they roll with it.

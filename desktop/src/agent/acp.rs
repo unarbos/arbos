@@ -1310,7 +1310,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
         // per job by the scheduler; the tailed `TurnComplete` arrives up to
         // 200 ms later and a second TurnDone would drain a queued follow-up
         // into a turn that is already running.
-        EventKind::TurnComplete { usage } if recorded => usage
+        EventKind::TurnComplete { usage, .. } if recorded => usage
             .map(|u| {
                 vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {
                     used: u.used,
@@ -1327,7 +1327,7 @@ fn kernel_event(agent: &str, event: arbos_core::Event) -> Vec<Event> {
             .into_iter()
             .chain(std::iter::once(Event::TurnEndedAt(ts)))
             .collect(),
-        EventKind::TurnComplete { usage } => usage
+        EventKind::TurnComplete { usage, .. } => usage
             .map(|u| {
                 vec![Event::Update(SessionUpdate::UsageUpdate(UsageUpdate {
                     used: u.used,

@@ -573,7 +573,14 @@ mod roll_tests {
                 }),
             )
             .unwrap();
-            append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+            append_event(
+                &path,
+                &Event::new(EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                }),
+            )
+            .unwrap();
         }
         std::fs::write(layout.dir.join("checkpoints.jsonl"), &cps).unwrap();
         assert_eq!(checkpoints(&layout.dir).len(), 6);
@@ -609,7 +616,14 @@ mod roll_tests {
             }),
         )
         .unwrap();
-        append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        append_event(
+            &path,
+            &Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            }),
+        )
+        .unwrap();
         let events = load_transcript(&path).unwrap();
         let cps = checkpoints(&layout.dir);
         assert_eq!(cps.len(), 1, "only the post-roll checkpoint: {cps:?}");
@@ -654,7 +668,10 @@ mod roll_tests {
                     channel: String::new(),
                     device: String::new(),
                 },
-                EventKind::TurnComplete { usage: None },
+                EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                },
             ] {
                 append_event(&path, &Event::new(kind)).unwrap();
             }
