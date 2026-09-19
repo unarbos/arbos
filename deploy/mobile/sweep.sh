@@ -42,6 +42,7 @@ DEFAULT=(
   call-pulled-down.sh
   worker-chat-open-and-back.sh
   worker-chat-shape.sh
+  chat-overflow-menu.sh
   pill-count-vs-sheet.sh
   notifications.sh
   sleeping-machine.sh
