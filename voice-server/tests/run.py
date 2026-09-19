@@ -541,6 +541,8 @@ def check(exp: dict, res: Result, caller: Caller, duplex: MockDuplex, kernel: Mo
         commentary = [str(a.get("content") or "") for a in live.appends if a.get("type") == "session.commentary.append"]
         for needle in exp.get("live_commentary", []):
             add(any(needle.lower() in c.lower() for c in commentary), f"the kernel's answer reached the model as commentary: {needle!r} ({[c[:50] for c in commentary]})")
+        if "live_input_max" in exp:
+            add(len(live.input) <= int(exp["live_input_max"]), f"session.input has at most {exp['live_input_max']} items ({len(live.input)})")
         if "live_commentaries" in exp:
             add(len(commentary) == int(exp["live_commentaries"]), f"{exp['live_commentaries']} commentary append(s) ({len(commentary)})")
     if live is not None and (exp.get("live_sees") or exp.get("live_not_sees") or exp.get("live_started")):

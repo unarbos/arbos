@@ -73,6 +73,7 @@ LIVE_INSTRUCTIONS = (
 # Recent project-chat lines seeded into the session at start (session.input): how many, and how
 # much of each. The API takes 128 messages / 8,192 tokens; this stays far under.
 HISTORY_LINES = int(os.environ.get("VOICE_LIVE_HISTORY", "40"))
+SESSION_INPUT_MAX = 128  # OpenAI's cap on session.input; one over and the session is refused
 HISTORY_LINE_CHARS = 600
 HISTORY_TOTAL_CHARS = 12000
 # Live context appends (typed lines, chat replies, what workers do) are coalesced to this rate.
@@ -144,7 +145,10 @@ def _merge_chat_lines(screen: list[dict], kernel: list[dict], *, cap: int) -> li
     extra = [line for line in kernel if _squash_line(line["text"]) not in seen]
     screen = screen[-cap:]
     room = max(0, cap - len(screen))
-    return extra[-room:] + screen
+    # `extra[-0:]` is the whole list, not none of it: a full screen used to pull every kernel
+    # line in behind it (135 items for a 128 cap; GPT-Live refused the session).
+    older = extra[-room:] if room else []
+    return older + screen
 
 
 def _seed_messages(lines: list[dict]) -> list[dict]:
@@ -167,7 +171,18 @@ def _seed_messages(lines: list[dict]) -> list[dict]:
             "The following messages are this project's on-screen chat and recent history, oldest first, "
             "as the caller sees them. Worker and tool lines are names and short labels only — not diffs "
             "or file contents. They are context; the caller may refer to them.")}]})
-    return seed
+    return cap_session_input(seed)
+
+
+def cap_session_input(items: list[dict], limit: int = SESSION_INPUT_MAX) -> list[dict]:
+    """GPT-Live takes at most `limit` startup messages. Keep the first (the developer line that
+    says what the rest is) and the newest items; drop the oldest of the overflow."""
+    if len(items) <= limit:
+        return items
+    head, body = items[:1], items[1:]
+    body = body[-(limit - 1):]
+    log.warning("session.input trimmed to %d items (dropped %d oldest)", limit, len(items) - limit)
+    return head + body
 
 
 def standing_brief_block(state: str | None, *, kernel_attached: bool) -> str:
