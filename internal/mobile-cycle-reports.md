@@ -4320,3 +4320,40 @@ thirty seconds is what rules out a turn that merely looks stopped.
 In the sweep, so it stays pressed.
 
 **PR:** [#719](https://github.com/unarbos/arbos/pull/719), harness only.
+
+## Cycle 149 — a character the rig drops
+
+The tool fold came from Jacob at build 956 — "I don't want to see these tool
+calls unless maybe I expand" — and nothing had checked it since.
+`fold37.sh` is cycle-37 scratch: it reads `~/mobile-out/cycle-37` and takes
+its tools from `$HOME`, so it cannot run today.
+
+The new check found the fold holds: consecutive calls collapse to
+`2 tool calls, · 1 failed`, and opening it adds two rows (M-465).
+
+**Getting there turned up a rig fact worth more than the check** (M-464).
+The first run reported "no fold line appeared" — and the kernel's record
+showed my request had never arrived at all. `idb ui text` types **nothing**
+for a line containing any non-ASCII character:
+
+```
+  "plain ascii line"        -> non-ascii bytes: 0   … lands
+  "with an em dash — here"  -> non-ascii bytes: 3   … composer still empty
+```
+
+My line had an em dash. The scenario sent an empty box, got no answer, and
+blamed the fold. That is now guarded for every scenario: `type_line` in
+`sim-lib.sh` refuses a non-ASCII line before typing and reads the field back
+after, so M-162's lesson and this one are one helper rather than a habit.
+
+**Three more of my own faults came off on the way**, each of which read as a
+fault in the app:
+
+- counting rows across the toggle while the reply was still arriving — the
+  "extra row left behind" was the model's answer landing;
+- calling a **one-call** fold's empty expansion a fault, when the summary
+  line *is* that call and an opened fold shows labels rather than output;
+- a `case` pattern with a character range that refused a pure-ASCII line,
+  because collation is not content.
+
+**PR:** [#722](https://github.com/unarbos/arbos/pull/722), harness only.
