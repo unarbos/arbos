@@ -64,12 +64,24 @@ if ! type_line "$UDID" "$LINE"; then
   echo "         nothing about folding"
   exit 1
 fi
+# Counted before the send, because everything this check waits for is
+# already on the screen from the run before it. Cycle 197 watched it read
+# the *previous* run's fold — "3 tool calls" — and the previous run's
+# "Worked" line, both satisfied the instant they were asked for, and then
+# compare row counts across two overlapping turns. The verdict it produced,
+# "opening the fold showed nothing more", was about a fold it never tapped
+# belonging to a turn it never sent.
+FOLDS_BEFORE=$(ui dump | grep -cE "[0-9]+ tool calls?" | tr -d ' ')
+WORKED_BEFORE=$(ui dump | grep -c "Worked " | tr -d ' ')
 ui tap "Send" >/dev/null 2>&1
 
 FOLD=""
 for _ in $(seq 1 60); do
-  FOLD=$(foldline)
-  [ -n "$FOLD" ] && break
+  NOW_FOLDS=$(ui dump | grep -cE "[0-9]+ tool calls?" | tr -d ' ')
+  if [ "$NOW_FOLDS" -gt "$FOLDS_BEFORE" ]; then
+    FOLD=$(foldline)
+    [ -n "$FOLD" ] && break
+  fi
   sleep 2
 done
 xcrun simctl io "$UDID" screenshot "$OUT/01-folded.png" >/dev/null 2>&1
@@ -86,8 +98,10 @@ echo "  the fold reads: $FOLD"
 # reported "closing it left 1 row behind" — that row was the model's answer
 # landing, not the fold failing to close. Counts are only comparable over a
 # transcript that has stopped moving.
+# This run's ending, not the one already on screen when it started.
 for _ in $(seq 1 60); do
-  case "$(ui dump)" in *"Worked "*) break;; esac
+  NOW_WORKED=$(ui dump | grep -c "Worked " | tr -d ' ')
+  [ "$NOW_WORKED" -gt "$WORKED_BEFORE" ] && break
   sleep 2
 done
 sleep 2
