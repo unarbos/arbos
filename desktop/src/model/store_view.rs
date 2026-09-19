@@ -529,7 +529,16 @@ impl ProjectPage {
                 });
                 continue;
             }
-            let Some(rest) = bullet(trimmed) else {
+            // `[ ] 1 [Kickoff](docs/…) — ready`: the plan tool's own
+            // listing, pasted back into the page by a model asked to
+            // restructure it — a box and an ordinal, no dash. It is an
+            // item; read as prose it drew raw (F-194, cycle 44 d18).
+            let boxed = trimmed
+                .starts_with("[ ]")
+                .then_some(trimmed)
+                .or_else(|| trimmed.starts_with("[x]").then_some(trimmed))
+                .or_else(|| trimmed.starts_with("[X]").then_some(trimmed));
+            let Some(rest) = bullet(trimmed).or(boxed) else {
                 // Prose above the first heading is the template's link line
                 // to the context document, which the Context row already
                 // carries. Prose under a heading is the agent's — Cursor's
@@ -545,6 +554,7 @@ impl ProjectPage {
             };
             let depth = indent_depth(line);
             let (done, rest) = checkbox(rest);
+            let rest = strip_ordinal(rest);
             // `- [ ] ## Goal`: a heading the agent pushed through the plan
             // tool as an item (F-71). It is a heading; a checkbox in front
             // of "## Goal" is not something Cursor's page would show.
@@ -602,6 +612,19 @@ fn checkbox(rest: &str) -> (Option<bool>, &str) {
         return (Some(true), done.trim_start());
     }
     (None, r)
+}
+
+/// `1 [Kickoff](…)` → `[Kickoff](…)`: the number the plan tool prints
+/// before each item is its listing's, not the item's words.
+fn strip_ordinal(rest: &str) -> &str {
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits == 0 {
+        return rest;
+    }
+    match rest[digits..].strip_prefix(' ') {
+        Some(after) if after.starts_with('[') => after,
+        _ => rest,
+    }
 }
 
 fn indent_depth(line: &str) -> u8 {
