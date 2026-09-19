@@ -39,9 +39,16 @@ BEFORE=$(total)
 case $BEFORE in ''|*[!0-9]*) echo "cannot read $TARGET's transcript — stopping rather than guessing"; exit 1;; esac
 
 echo "== send something long enough to stop =="
-ui focus >/dev/null; sleep 0.7
-idb ui text "$LINE" --udid "$UDID" >/dev/null 2>&1
-sleep 3
+# Written yesterday, and it typed and sent blind — the fault every other
+# scenario here had already fixed in its own body, which is precisely why it
+# came back in a new file. `type_line` refuses what idb drops and reads the
+# field back, in one place.
+type_line "$UDID" "$LINE" || {
+  echo
+  echo "VERDICT: none — the line never reached the composer, so no turn was"
+  echo "         started and nothing could be stopped"
+  exit 1
+}
 ui tap "Send" >/dev/null 2>&1
 SAW_STOP=no
 for _ in $(seq 1 30); do
