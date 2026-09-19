@@ -4392,3 +4392,240 @@ The pattern is worth stating once: **a lesson kept as prose protects one
 file; a lesson kept as a function protects the ones not written yet.**
 
 **PR:** [#723](https://github.com/unarbos/arbos/pull/723), harness only.
+
+## Cycle 151 — the tree was right and the app was not
+
+The sweep ran all twenty-one scenarios and every one reached a conclusion.
+One failed: `list-rows`, on `phone: '·'` — the separator #711 removed, on a
+`main` that contains #711.
+
+I measured it rather than guessing: **6 of 6 dotted**. Then rebuilt from the
+*identical commit* by hand: **6 of 6 clean** (M-468).
+
+**The binary was stale.** The cause is this loop's own habit — scp a
+modified source to the Mac, build, then `git reset --hard` it away. The
+restored file can land with an older timestamp than the object built from
+the scratch version, and the incremental build keeps the object. So
+`mac-cycle.sh` checked out the right commit, reported the right sha, and
+compiled an app from something else.
+
+`mac-cycle.sh` deletes the built products whenever the reset discards
+anything. One full compile in that case and nothing the rest of the time.
+Verified end to end: `cleared 2 local change(s)`, rebuild, 6 of 6 clean.
+
+**And it rewrites three findings** (M-469). M-451 said two fixes inside the
+row "held once and came undone"; M-452 was the third attempt after them.
+Every one of those was measured on a build taken straight after a
+scp-and-reset, and a stale binary produces exactly that story. A probe label
+reached the tree intact — `PROBE-phone, Idle, home, 8m` — which is the
+evidence the modifiers were working the whole time.
+
+The app fixes stand. The account of them was wrong, and any measurement from
+cycles 141–150 taken right after a scp-and-reset is suspect until re-taken.
+
+That is the most expensive kind of fault this loop can have: not a wrong
+answer, but a wrong answer that looks like the app misbehaving, three times
+over.
+
+**PR:** [#726](https://github.com/unarbos/arbos/pull/726), harness only.
+
+## Cycle 152 — the worker chat, paired in numbers
+
+The row had been read by eye since cycle 74. Cycle 83 built `style-pair.py`
+to retire the eyeball for the list, and the tool itself said row pitch means
+nothing on a chat and told the reader to "pair chats by their parts." This
+cycle gave it those parts.
+
+**The pair holds** (M-471). Text starts **5.3%** of the width in against
+Cursor's **4.9%** — within half a point, on phones of different sizes. Both
+headers open with the same round left chevron. Ground is printed and never
+compared, dark-only being deliberate on both sides (M-202).
+
+**The headers carry different things, on purpose** (M-472). Cursor centres
+the project title and puts a `···` on the right. The worker chat puts a tick
+and the worker's *goal*, left-aligned, with no right-hand control. Neither
+is a defect: a worker chat has no actions to offer, so a `···` would open
+onto nothing, and the goal is the only thing that tells one worker from
+another — a centred project name cannot.
+
+**And the tool nearly told me a lie** (M-473). Its first reading put the
+header 4.3% down; that was the status bar. Skipping the status bar it said
+8.3%, which would have made Arbos's header a quarter the height of Cursor's.
+One picture, two confident answers, both wrong — because a band ends
+wherever contrast drops, and a header with a dim round button beside bright
+text splits into two while a flat one stays whole.
+
+So the header numbers are gone. The tool prints the band count, refuses to
+compare it, and names the instrument that *can* answer — the accessibility
+tree, which knows a header's parts by name. What is compared is the left
+margin, which is the leftmost ink in the body and does not care what the ink
+is. The measurements will not run at all until they have read a picture
+whose answers are known, and that check has been shown to fail when the
+measurement is wrong.
+
+Stills and crops in `media/mobile/cycle-152/`.
+
+**PR:** [#728](https://github.com/unarbos/arbos/pull/728), harness only.
+
+## Cycle 153 — re-measure, and the thing I got wrong yesterday
+
+Cycle 151 found a real symptom: a clean checkout of `main` produced an app
+that behaved like code from before a fix that checkout contained, six runs of
+six, while a rebuild from the identical commit read clean. I named a cause —
+timestamps surviving a `git reset --hard` — and shipped a remedy for it.
+
+**The cause does not reproduce** (M-474). Put a visible marker in
+`ProjectsView.swift`, build: twelve rows carry it. `git reset --hard`,
+rebuild with nothing deleted: zero rows carry it. The reset is picked up
+correctly, every time I ask. Worse, deleting `Build/Products` — the remedy
+itself — recompiled nothing, so what "verified" it at cycle 151 was the
+manual full rebuild that happened just before.
+
+The remedy is withdrawn from #726 before it merged. The symptom was real. Its
+cause is still unknown.
+
+**What replaces it is a question rather than a cure** (M-475). Two things
+were never asked. `simctl install`'s result was never checked, and an install
+that fails leaves every later run measuring whatever was already on the
+device — which fits cycle 151 exactly. And nothing ever asked whether the app
+on the device *was* the code that was checked out. Now both are asked: the
+install must succeed, and the installed binary is dated against the newest
+`.swift` file. Whatever makes the device disagree with the tree leaves an app
+older than the code, and the run stops there.
+
+Proven both ways: a clean run says "the app on the device is newer than every
+source file"; touch one source and it says "CAUGHT — app older than
+ProjectsView.swift".
+
+**My first test of that check was wrong twice** (M-476). It read as passing
+when it should have caught, because `find -newermt "@<epoch>"` does not parse
+on BSD find — it matches nothing, which looks exactly like a pass. And I was
+testing by scp-ing `mac-cycle.sh` onto the Mac and running it, which cannot
+work: the script's own `git reset --hard` restores the script from git
+partway through. Both fixed; the branch is pushed and checked out before it
+is tested.
+
+**On the re-measure**, the rest of cycles 141–150 stands. Those findings were
+positive results about long-standing behaviour — the `···` menu opens, Stop
+ends a turn, the tool fold folds — and a stale binary invents no such thing.
+The two that a stale binary would explain are the separator findings, already
+rewritten. M-458 would need the post-barge orb phase changed again, which is
+under standing orders not to touch.
+
+**PR:** [#729](https://github.com/unarbos/arbos/pull/729). #726 merged at 05:08,
+before the correction was ready, so the withdrawal is its own change rather
+than an edit to that branch.
+
+## Cycle 154 — a check that could only ever decline
+
+The sweep has carried one standing "cannot say" for many cycles:
+`pill-count-vs-sheet`, last reading "the sheet's paging found 26 of the
+pill's 34."
+
+I read the check's own comment and it had already answered itself (M-477).
+The pill is `chat.workers.count`. The sheet is a `ForEach` over that same
+array. They are two drawings of one number, so they cannot disagree about the
+app — every "cannot say" it ever printed was about the rig failing to page a
+scrolling sheet or failing to tell two workers apart, and the single
+disagreement it filed at cycle 74 turned out to be exactly that.
+
+I looked for an independent referee first. The kernel has no roster verb —
+`history`, `read`, `frames`, `hello`, `feedback` — and the app builds its
+worker list from the same frames, so counting them would reproduce the app's
+own logic rather than check it.
+
+**So the verdict moved to something the run knows independently: three
+workers it starts itself**, each goal led by a tag no earlier run used. The
+pill must rise by three and the sheet must show all three. A row dropped in
+the drawing fails it; a rig that cannot reach the end fails it too, and says
+which.
+
+First run: **3 of 3**. `p051856 one`, `p051856 two`, `p051856 three`, all
+present, where the old check declined.
+
+**And the totals gap finally has an exact explanation** (M-478). Pill 38,
+sheet 30, paging converged over five pages, zero duplicates on any single
+screen. The difference is eight, and the project holds eight more agents than
+it has distinct goals — twins on *different* pages, which a per-screen
+duplicate check cannot see by construction. That reads the rig honestly, so
+the numbers stay; they are simply no longer asked to judge the app.
+
+**PR:** [#730](https://github.com/unarbos/arbos/pull/730), harness only.
+
+## Cycle 155 — the recording, and what it got wrong
+
+The standing order asks for a recording every third cycle. The last was cycle
+130, so this one was long overdue.
+
+I filmed the workers flow: ask for three workers, watch them start, open the
+sheet, open one. Then had it reviewed.
+
+**The review reported a bug that was mine** (M-479). It said the three
+workers appeared in the chat, the pill rose from 38 to 41, and none of them
+were in the agents sheet. That is exactly what the footage shows — because my
+recording script scrolled the sheet once. Paged properly, both workers from a
+second run are there: `s052622 alpha, Done` and `s052622 beta, Done`, six
+pages down.
+
+A recording that scrolls less than a check does will accuse the app of
+whatever it failed to reach. So the recording is now a committed scenario
+that pages to the end the way the checks do, and prints what it found before
+anyone watches the film. Its run: two asked for, two running in the chat, two
+in the sheet, 35 MB of footage.
+
+**Two more things the review raised, both checked before filing.** The first
+worker line carries a number the others lack — `2 Working <name>` against
+`Working <name>`. That is deliberate and the code says so: "as the desktop
+draws them: the first carries the count" (M-480). And it read a line as
+middle-truncated with the worker's name lost; the frame at that moment shows
+all three lines whole, and these lines are `.tail`, not `.middle` (M-481). A
+model reading compressed footage is one more instrument that needs checking
+against the source.
+
+**One thing worth someone's attention** (M-482): the two workers started
+seconds earlier sat six pages into a 35-row sheet, which is ordered oldest
+first. On a phone, the worker you just started is the one you want and the
+furthest to reach. Recorded as an observation, not sent anywhere.
+
+Film and stills in `media/mobile/cycle-155/`.
+
+**PR:** [#732](https://github.com/unarbos/arbos/pull/732), harness only.
+
+## Cycle 156 — the number the row was named after
+
+Oldest-first put `background 8 s → foreground` at cycle 86, seventy cycles
+back. A check for it does exist, inside `cold-start-and-history.sh`, so the
+row was not untested — but reading it showed the row's own question had never
+been asked (M-483).
+
+It pressed Home, waited eight seconds, relaunched, **slept a fixed three
+seconds**, and compared transcript rows. How long the app takes to be usable
+again — the thing the row is named for — was never measured. Worse, the
+comparison happened at an arbitrary moment: a screen still being drawn at
+three seconds would read as "the chat changed while away", and one that took
+ten seconds would read as a pass.
+
+It now waits for a composer and a transcript, times that, and compares once
+the screen has settled. A resume that never finishes says so rather than
+comparing nothing.
+
+Measured on this build:
+
+    back to a chat you can type in: 0.9s   (after 8s away)
+    text rows before: 21, after: 21
+    VERDICT cold start:   3.1s to a list of 10 rows (6 live)
+    VERDICT long history: chat in 1.1s, pager Show 200 earlier lines
+    VERDICT away and back: usable again in 0.9s and the chat is as it was
+
+The fixed sleep was more than three times longer than the app needs, so it
+was hiding the number and padding every run that used it.
+
+**One thing to watch in the ledger** (M-484). Oldest-first named `list
+composer` (81) and `cold start` (86) as the most stale rows, and both had run
+in the cycle-151 sweep. Coverage cells are only written when a cycle names a
+row, so anything the sweep covers ages on paper while being tested every
+time. The genuinely untested thing here was the timing, not the coverage.
+
+Still: `media/mobile/cycle-156/01-back-from-away.png`.
+
+**PR:** [#733](https://github.com/unarbos/arbos/pull/733), harness only.

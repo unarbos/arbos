@@ -844,9 +844,32 @@ Ninety fresh instances across cycles 29–37, twenty-nine failures, none outside
 
 Spend $7.06.
 
-## Next (cycle 38)
+## Cycle 38 (2026-09-19) — the server-reproduction step read where it was found; ten more fresh instances; an in-run grading discrepancy
+
+**Conditions.** Kernel **`arbos-kernel 0.2.0 1ec3de643d79 protocol 1`** = `main` head, built in the worktree, label proved. The engine change since e5e66f71 is bcf11b67 — Features' step on the cycle-36 finding (read from this document; nothing was filed): a command that runs a server is refused as a reproduction with the reason, and `changes`' re-run pass keeps to a 300 s budget. Jev off. Network cut, no cap. Two reads, concurrent, pre-registered ([preregistration](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/internal/swebench-cycle-38-preregistration.md)). $23.21 in all.
+
+**Read 1 — bcf11b67 on django-13809, three rollouts.** The step is visible and does what it says. Eleven `runserver`-shaped commands were offered with `repro:true` across the three; every one was refused in one second with the reason ("runs a server or a watcher, which never exits on its own — its exit is the timeout's, not the bug's; the reproduction is the request that hits the server"); the agents then recorded a parser-level script (`parse_args(['--skip-checks'])` failing) as the reproduction, and no `changes` call re-ran anything for long. Walls 292 s, 372 s, 457 s against cycle 36's 7,760 s; all three solved. One edge worth recording: the refusal keys on the word — a script that only *imports* `commands.runserver` and exits at once with an argparse error (a true reproduction) was refused too; one agent split the string (`'commands.' + 'runserver'`), was refused again, then wrote the same code to a file and ran it by path, which was accepted. The mark is textual, so it over-matches and is dodgeable; the behaviour it wants — a command that exits on its own — is not what it checks. Recorded, not filed.
+
+**Read 2 — ten never-run instances at `-r 2`: 10 of 20** (a count), the lowest fresh draw since cycle 29, and nine failures read plus two re-runs:
+
+- django-11433 ×2 — C, consistent: right function, a different condition than the gold's `in empty_values`.
+- django-16502 ×2 (+1) — C, consistent: `write()` skips the body for HEAD; the gold reworks `finish_response` and `Content-Length`. One of the two rollouts never finished — killed at exit 143 by the 2,400 s harness timeout after the host pause below; re-run alone: the same shape, 0.
+- seaborn-3069 ×1 — C: the fix put into the scale (`Nominal._setup`) where the gold puts it into the plotter's finalize; the hidden test grades the axis after `plot()`.
+- pytest-7205 ×1 — C, pinned format: a bytes-only branch where the gold uses `saferepr` for every value, and ten hidden tests grade the quoting.
+- sphinx-8056 ×1 — **B, the producer**: the agent fixed `docfields.py`, where the `:param x1, x2:` field is *consumed* and split; the gold fixes napoleon, which *produces* it; the hidden test is napoleon's.
+- sympy-13852 ×1 — C, consistent: the closed forms differ from the gold's.
+- **psf-requests-6028 ×2 — an in-run grading discrepancy the loop cannot yet explain.** Both rollouts produced the gold's change line for line (`netloc = '@'.join([auth, netloc])`, differing only in the comment). The run graded both 0 in ~7 s of scoring. The task's own `tests/test.sh` in a fresh container, network on, grades the agent's patch **1** and the gold **1**. With no network at all the tests still pass (195 passed, the two FAIL_TO_PASS among them; only `uv` for the parser is missing). Proxy variables in the environment change nothing. Nothing in either transcript touches the tree beyond `utils.py`. A third rollout, run alone, chose a different function and failed honestly (C). So: a right patch graded wrong twice inside the run and right outside it, cause not found. Not counted as agent failures; listed as a grader artefact of a new kind — in-run only — and the harness does not keep the in-run verifier log, which is what would settle it. That is the loop's own gap to close before the next such case.
+
+**The host paused again.** The second pause in two cycles: containers created 55 minutes earlier whose PID 1 had ten minutes of process time; the kernel's notices "nothing has happened for 46m" from 03:38 on three rollouts; the eval log silent from 03:32 to 04:28. Wall times from this cycle are not to be read. One rollout was lost to it (the 143 above).
+
+Ninety-nine fresh instances across cycles 29–38 (100 drawn, one instance's second rollout lost and re-run), thirty-eight failures, none outside the account. Cumulative read: **325**.
+
+Spend $23.21.
+
+## Next (cycle 39)
 
 1. Reading continues on whatever new failures arrive; fresh tens at `-r 2` when there is budget and nothing else to read.
-2. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
-3. Jev stays off on this harness (coordinator, cycle 32).
-4. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `changes` re-runs a never-exiting reproduction N × 180 s with no total cap, and `run --timeout` does not interrupt a blocking tool (36).
+2. Harness: keep the in-run verifier log (`/logs/verifier/`) with the artefacts, so an in-run/offline grading disagreement like requests-6028 can be read rather than reasoned about. Loop's own work.
+3. Any measured comparison: ceiling on its set stated first, at or above the band, or it does not run.
+4. Jev stays off on this harness (coordinator, cycle 32).
+5. Observations recorded here, not filed anywhere: the quoted-reference mark is read as "test the example" (31); a generated artefact rode into a patch after the agent removed it (33); a named twin dropped on a recollection of upstream (35); `run --timeout` does not interrupt a blocking tool (36); the server-reproduction refusal keys on a word and is dodgeable by writing the script to a file (38).
