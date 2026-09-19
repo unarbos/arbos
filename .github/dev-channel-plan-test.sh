@@ -318,6 +318,24 @@ check "a failed trigger with nothing green on it falls back" \
   "${SHA[4]}" "${SHA[4]}" 0 3 \
   "${SHA[4]}" failed "${SHA[3]}" success
 
+# --- the timer's shape ----------------------------------------------------
+# A run on the timer has no triggering commit, so nothing it looks at is
+# its own and every candidate is asked of the API. That is the whole of the
+# difference, and it has to still find the green — because the case the
+# timer exists for is a green whose own event never arrived. On 2026-09-19
+# that happened twice in an hour: a commit's failing CI run finished first
+# and fired this workflow, which correctly published nothing, and then the
+# green sibling completed and fired nothing at all.
+EVENT_SHA_OVERRIDE=none check \
+  "a run with no event of its own still finds the green" \
+  "${SHA[4]}" "${SHA[4]}" 0 4 \
+  "${SHA[4]}" success
+
+EVENT_SHA_OVERRIDE=none check \
+  "a run with no event of its own still goes back past a red tip" \
+  "${SHA[4]}" "${SHA[4]}" 0 3 \
+  "${SHA[4]}" failed "${SHA[3]}" success
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all good"
