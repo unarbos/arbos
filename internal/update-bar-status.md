@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 22:21 UTC.
+Last checked 2026-09-19 23:48 UTC.
 
-## Click Update. You will get build 2369. Jev is in it.
+## Click Update. You will get build 2382. Jev is in it.
 
-**2369** — signed, notarised, stapled, on the feed since 22:19 UTC.
+**2382** — signed, notarised, stapled, on the feed since 23:45 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2369 (builds 2370–2382):
+
+- **#800**, **#801**, **#802**, **#803** — four mobile loop cycles
+
+The gap before this one was a red `main`, not a stuck channel: the tip
+failed a churn test in the kernel for about an hour, a re-run went green,
+and the channel published at once.
+
+## Before that: 2369
 
 New since 2367 (builds 2368–2369):
 
