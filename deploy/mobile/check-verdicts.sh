@@ -40,12 +40,19 @@ NOTHING='ROWS|TIMES|COUNT|SEEN|LINES|FOUND|HELD|AFTER|REVEALED|ANSWERS|TOTAL|SPO
 # gets skimmed, and then the sixth line is skimmed too.
 #
 #   call-text-in-chat  SPOKEN=0  declines: "nothing is marked Spoken"
+#   call-text-in-chat  AFTER=0   declines: no answer row under the marker,
+#                                which is the guard cycle 179 added after the
+#                                check passed on a screen with no answer
 #   chip-and-send-arrow AFTER=0  the desired outcome, and a chip arriving is
 #                                checked separately: "[ $N -gt 0 ] || exit 1"
 #   chip-and-send-arrow AFTER=0  the same guard, second branch
 #   pill-count-vs-sheet SEEN=0   declines: the pill never counted the workers
 #   worker-while-it-works ROWS=0 declines: "the sheet did not open"
-READ_ALREADY="call-text-in-chat.sh:105 chip-and-send-arrow.sh:75 chip-and-send-arrow.sh:77 pill-count-vs-sheet.sh:86 worker-while-it-works.sh:117"
+# Keyed on the file and the variable, not the line. The first version used
+# line numbers and cycle 179's edit to call-text-in-chat moved its guard from
+# 105 to 111, so a known-good entry reported as new the very next run. A list
+# that cries wolf after any edit above it is a list nobody reads.
+READ_ALREADY="call-text-in-chat.sh:AFTER call-text-in-chat.sh:SPOKEN chip-and-send-arrow.sh:AFTER pill-count-vs-sheet.sh:SEEN worker-while-it-works.sh:ROWS"
 
 echo "verdicts that can fire on a count of nothing:"
 HITS=0
@@ -62,7 +69,7 @@ for f in "$HERE"/scenarios/*.sh "$HERE"/mac-*.sh; do
     # Is there a verdict in the next few lines of that branch?
     sed -n "${no},$((no + 6))p" "$f" | grep -qiE "VERDICT|holds|the rule" || continue
     case " $READ_ALREADY " in
-      *" $(basename "$f"):$no "*) KNOWN=$((KNOWN + 1)); continue;;
+      *" $(basename "$f"):$var "*) KNOWN=$((KNOWN + 1)); continue;;
     esac
     printf '  %-34s line %-5s %s\n' "$(basename "$f")" "$no" "$(echo "${line#*:}" | sed 's/^ *//' | cut -c1-58)"
     HITS=$((HITS + 1))
