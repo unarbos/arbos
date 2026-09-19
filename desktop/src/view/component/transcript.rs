@@ -1825,6 +1825,16 @@ fn children_lines(
                     }
                     ("Done".to_string(), child.title.clone(), theme.text_faint)
                 }
+                ChildState::Stopped => {
+                    if child
+                        .kernel_id
+                        .as_deref()
+                        .is_some_and(|k| reported.contains(&k))
+                    {
+                        return None;
+                    }
+                    ("Stopped".to_string(), child.title.clone(), theme.text_faint)
+                }
             };
             Some(
                 div()

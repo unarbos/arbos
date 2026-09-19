@@ -1156,7 +1156,8 @@ pub fn pill_counts(project: &Project, chat: &ChatSession) -> (Vec<u64>, Vec<Stri
                     crate::model::session::ChildState::Working => true,
                     crate::model::session::ChildState::Waiting => parent_busy,
                     crate::model::session::ChildState::Asking
-                    | crate::model::session::ChildState::Done => false,
+                    | crate::model::session::ChildState::Done
+                    | crate::model::session::ChildState::Stopped => false,
                 }
         })
         .map(|c| c.id)

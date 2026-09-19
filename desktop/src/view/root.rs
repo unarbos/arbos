@@ -3590,6 +3590,7 @@ fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::C
                 ChildState::Asking => "asking",
                 ChildState::Waiting => "waiting",
                 ChildState::Done => "done",
+                ChildState::Stopped => "stopped",
             }
             .into(),
             step: c.step.clone(),

@@ -543,10 +543,19 @@ impl Arbos {
                 .size(px(12.))
                 .text_color(theme.success)
                 .into_any_element(),
+            ChildState::Stopped if line.main => icons::icon(icons::system::CHAT_ROUND_LINE)
+                .size(px(12.))
+                .text_color(theme.text_muted)
+                .into_any_element(),
+            // Cut short by the person: the stop square, not the check.
+            ChildState::Stopped => icons::icon(icons::media::STOP)
+                .size(px(12.))
+                .text_color(theme.text_faint)
+                .into_any_element(),
         };
         let tint = match (selected, line.state, line.main) {
             (true, ..) => theme.text,
-            (false, ChildState::Done, false) => theme.text_faint,
+            (false, ChildState::Done | ChildState::Stopped, false) => theme.text_faint,
             _ => theme.text_muted,
         };
         let title = SharedString::from(line.title);
@@ -1359,6 +1368,7 @@ fn row_summary(chat: &ChatSession) -> Option<String> {
     let text = match chat.child_state() {
         ChildState::Working => chat.current_step()?,
         ChildState::Asking | ChildState::Waiting => return None,
+        ChildState::Stopped => return Some("stopped by you".to_string()),
         ChildState::Done => chat.items.iter().rev().find_map(|item| match item {
             ChatItem::Agent(text) if !text.trim().is_empty() => Some(text.clone()),
             _ => None,

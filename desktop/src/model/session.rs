@@ -1880,6 +1880,9 @@ pub enum ChildState {
     Waiting,
     /// Its last turn ended and nothing has run since.
     Done,
+    /// Its last turn was cut short by the person (Stop, Stop All) and
+    /// nothing has run since: not finished — stopped (F-238).
+    Stopped,
 }
 
 /// One sub-agent, as its parent shows it.
@@ -2036,10 +2039,30 @@ impl ChatSession {
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking
         } else if self.closed || self.turn_ended.is_some() || self.agent_gone() {
-            ChildState::Done
+            if self.last_turn_stopped() {
+                ChildState::Stopped
+            } else {
+                ChildState::Done
+            }
         } else {
             ChildState::Waiting
         }
+    }
+
+    /// Whether the newest turn ended on the person's Stop: its records
+    /// after the opener hold the interrupt line and no answer after it.
+    /// A stopped worker read *Done* on the root's line and the panel row
+    /// (F-238, cycle 69: *Done · Sleepy worker* over a killed `sleep 90`).
+    fn last_turn_stopped(&self) -> bool {
+        for item in self.items.iter().rev() {
+            match item {
+                ChatItem::Notice { text, .. } if is_interrupt_notice(text) => return true,
+                ChatItem::Agent(text) if !text.trim().is_empty() => return false,
+                ChatItem::User(_) | ChatItem::Wake { .. } => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// The title a `say` line's `who` resolves to: a sub-agent's title
