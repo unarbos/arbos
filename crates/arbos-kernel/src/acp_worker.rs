@@ -266,7 +266,10 @@ pub async fn turn(
                 &hooks,
                 &agent_id,
                 &transcript,
-                Event::new(EventKind::TurnComplete { usage: None }),
+                Event::new(EventKind::TurnComplete {
+                    usage: None,
+                    model: None,
+                }),
             );
             Err(e)
         }
@@ -445,7 +448,10 @@ async fn drive(
                     detail: control.stop_reason(),
                 }));
             }
-            batch.push(Event::new(EventKind::TurnComplete { usage: None }));
+            batch.push(Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            }));
             for e in batch {
                 emit(hooks, &agent_id, transcript, e)?;
             }

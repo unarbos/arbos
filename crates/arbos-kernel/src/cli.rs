@@ -682,7 +682,7 @@ fn print_event(event: &Event, json: bool) {
         EventKind::ImageDescribed { path, model, .. } => {
             println!("  [image {path} described by {model}]")
         }
-        EventKind::TurnComplete { usage } => {
+        EventKind::TurnComplete { usage, .. } => {
             if let Some(u) = usage {
                 eprintln!(
                     "(turn complete; {} of {} context tokens used)",

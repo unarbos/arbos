@@ -353,7 +353,10 @@ fn a_failed_append_leaves_no_partial_line() {
     // The next good append lands on its own line and every reader sees it.
     append_event(
         &transcript,
-        &Event::new(EventKind::TurnComplete { usage: None }),
+        &Event::new(EventKind::TurnComplete {
+            usage: None,
+            model: None,
+        }),
     )
     .unwrap();
     let events = load_transcript(&transcript).unwrap();
@@ -389,7 +392,14 @@ fn transcript_tail_reads_only_new_lines_and_numbers_them_like_load_transcript() 
         .unwrap()
         .write_all(b"not json\n\n")
         .unwrap();
-    append_event(&path, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+    append_event(
+        &path,
+        &Event::new(EventKind::TurnComplete {
+            usage: None,
+            model: None,
+        }),
+    )
+    .unwrap();
 
     let first = tail.read_new(&path).unwrap();
     let full = load_transcript(&path).unwrap();

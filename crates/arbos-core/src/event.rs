@@ -95,6 +95,13 @@ pub enum EventKind {
     TurnComplete {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<Usage>,
+        /// The model that answered this turn's last step — the effective
+        /// one, which a fallback or a blocked family makes different from
+        /// the configured one. The window's chip names this, not the
+        /// configuration; the transcript keeps who answered. None when no
+        /// chat model was called (a Jev-only turn, a refusal).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// Stage one of context management. Tool bodies on lines <= `through`
     /// render to the model as a one-line cite instead of their text. No

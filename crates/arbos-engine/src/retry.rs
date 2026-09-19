@@ -158,6 +158,12 @@ pub fn delay(policy: &RetryPolicy, attempt: u32, hint: Option<Duration>) -> Dura
 pub struct Models {
     list: Vec<String>,
     current: usize,
+    /// A fallback was taken this turn: `prefer` is a no-op from then on.
+    /// Jev names a model on every hop, and its pick put the model that
+    /// had just failed back — the same 4xx, the same "so X answers this
+    /// turn" notice, once per step (three in one kickoff turn, desktop
+    /// cycle 54), and with two empty models a loop with no end (#727).
+    held: bool,
 }
 
 /// Fallbacks a turn gets on OpenRouter when config.toml names none: one
@@ -213,7 +219,11 @@ impl Models {
                 list.push(f.to_string());
             }
         }
-        Self { list, current: 0 }
+        Self {
+            list,
+            current: 0,
+            held: false,
+        }
     }
 
     /// `new`, plus the OpenRouter defaults when `fallbacks` is empty and
@@ -254,13 +264,22 @@ impl Models {
             return None;
         }
         self.current += 1;
+        self.held = true;
         Some(self.current())
+    }
+
+    /// Whether a fallback was taken this turn (see `held`).
+    pub fn fell_back(&self) -> bool {
+        self.held
     }
 
     /// Jev named which chat model to invoke first. Unknown or empty
     /// values keep the configured primary. The rest of the list still
     /// walks on a 403.
     pub fn prefer(&mut self, choice: &str) {
+        if self.held {
+            return;
+        }
         let pick = choice.trim();
         if pick.is_empty()
             || pick.eq_ignore_ascii_case("default")

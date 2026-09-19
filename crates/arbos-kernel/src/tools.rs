@@ -412,7 +412,7 @@ fn render_transcript(events: &[arbos_core::Event]) -> String {
                     text
                 ));
             }
-            EventKind::TurnComplete { usage } => {
+            EventKind::TurnComplete { usage, .. } => {
                 out.push_str(&format!(
                     "-- turn complete{}\n",
                     usage

@@ -2529,7 +2529,7 @@ fn snapshot(place: &Place, hooks: &KernelHooks) -> Frame {
 fn last_usage(place: &Place, agent: &str) -> Option<Usage> {
     let events = load_transcript(&Layout::new(place, agent).transcript()).ok()?;
     events.iter().rev().find_map(|e| match &e.kind {
-        EventKind::TurnComplete { usage } => *usage,
+        EventKind::TurnComplete { usage, .. } => *usage,
         _ => None,
     })
 }

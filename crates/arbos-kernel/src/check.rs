@@ -983,7 +983,14 @@ mod two_writers_tests {
         // Turn A opens; turn B's wake lands before A completes.
         append_event(&t, &wake("a")).unwrap();
         append_event(&t, &wake("b")).unwrap();
-        append_event(&t, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        append_event(
+            &t,
+            &Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            }),
+        )
+        .unwrap();
         // A crash: turn C open, the restart's notice, then turn D — fine.
         append_event(&t, &wake("c")).unwrap();
         append_event(
@@ -995,7 +1002,14 @@ mod two_writers_tests {
         )
         .unwrap();
         append_event(&t, &wake("d")).unwrap();
-        append_event(&t, &Event::new(EventKind::TurnComplete { usage: None })).unwrap();
+        append_event(
+            &t,
+            &Event::new(EventKind::TurnComplete {
+                usage: None,
+                model: None,
+            }),
+        )
+        .unwrap();
         std::fs::write(
             &cps,
             "{\"line\":0,\"ts\":1,\"head\":\"h\"}\n{\"line\":0,\"ts\":2,\"head\":\"h\"}\n{\"line\":3,\"ts\":3,\"head\":\"h\"}\n",
