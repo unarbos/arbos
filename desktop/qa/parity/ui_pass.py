@@ -1711,16 +1711,15 @@ class Pass:
             cards = [p for p in self.ids("term-card-*") if self.seen(p)]
             opened = ""
             if running and not cards:
-                head = next((w for w in self.ids("work-*") if "work-bare-" not in w and self.seen(w)), None)
+                heads = [w for w in self.ids("work-*") if "work-bare-" not in w and self.seen(w)]
+                head = heads[-1] if heads else None
                 if head:
                     self.app.click(head); time.sleep(1.0); opened = " (headline opened)"
                     cards = [p for p in self.ids("term-card-*") if self.seen(p)]
             self.record("command-live-card", sc, "a `sleep 120` holds the turn", "the command's card runs on the pane: a running tool item with the command in its label, its term-card on screen under the live headline",
                         f"running={[(i.get('label') or '')[:40] for i in (running or [])]} cards={cards[:2]}{opened}", "pass" if running and cards else "fail", self.still("command-live-card"))
-            if opened:
-                head = next((w for w in self.ids("work-*") if "work-bare-" not in w and self.seen(w)), None)
-                if head:
-                    self.app.click(head); time.sleep(0.5)
+            if opened and head:
+                self.app.click(head); time.sleep(0.5)
             tmp = copy_dir / "arbos-kernel.new"; shutil.copy(kernel, tmp); os.replace(tmp, copy)
             control = self.wait(lambda s: bool(self.ids("status-bar-stranger-kernel")) or None, 75, every=2, what="stranger plate")
             ids = self.ids("status-bar-stranger-kernel")
