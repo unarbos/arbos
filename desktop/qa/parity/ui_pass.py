@@ -1983,6 +1983,25 @@ class Pass:
             self.go_main(); self.wait_idle(200)
         else:
             self.gap("worker-steer-card", sc, "spawn", "no running worker appeared within 60 s")
+        # F-212: the kernel process dies under a running turn. The line
+        # says so (not "Stopped.", a person's act), stays in view under the
+        # turn's headline, and the connection comes back on its own.
+        self.go_main(); self.wait_idle(60)
+        self.send("Spawn one sub-agent whose only task is: run `sleep 20` with bash, then reply with the word slept. Wait for it, then say done.")
+        s_busy = self.wait(lambda s: busy(s) and (active(s) or {}).get("status"), 40, what="turn with a step")
+        pids = subprocess.run(["pgrep", "-f", f"arbos-kernel[-0-9a-z]* serve {PROJ}$"], capture_output=True, text=True).stdout.split()
+        if s_busy and pids:
+            for pid in pids:
+                subprocess.run(["kill", "-9", pid])
+            s_line = self.wait(lambda s: any("went away mid-turn" in (i.get("text") or "") for i in (active(s) or {}).get("items", []) if i.get("kind") == "notice"), 8, what="kernel-gone line")
+            s_back = self.wait(lambda s: (active(s) or {}).get("connection") == "live", 20, what="reconnect")
+            notices = [i.get("text")[:60] for i in (active(self.state()) or {}).get("items", []) if i.get("kind") == "notice"][-2:]
+            self.record("kernel-killed-mid-turn", sc, "kill -9 the place's kernel under a running turn", "a failed line 'The kernel went away mid-turn' within 8 s; no 'Stopped.'; live again within 20 s",
+                        f"line={bool(s_line)} back={bool(s_back)} notices={notices}",
+                        "pass" if s_line and s_back and not any(n.startswith("Stopped.") for n in notices) else "fail", self.still("kernel-killed"))
+            self.wait_idle(150)
+        else:
+            self.gap("kernel-killed-mid-turn", sc, "turn", f"no running turn to cut (busy={bool(s_busy)} pids={pids})")
 
     def phase_provider_offer(self, binary: str, kernel: str, xdg: Path) -> None:
         """Second launch: the kernel has no key but the desktop does."""

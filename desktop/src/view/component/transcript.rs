@@ -4297,10 +4297,17 @@ fn zone(
         // — steers — are not the agent's work to hide: they stay in view
         // under the headline (a shut live fold swallowed three "run it"
         // bubbles on the rig, cycle 23).
+        // A failed line — the kernel gone mid-turn, a refused key — is
+        // not work to fold away either: Cursor's error lines stand
+        // whatever is folded above them (F-212: "Worked 11s" over a turn
+        // the kernel's death had cut, and no word of it).
         let steers: Vec<AnyElement> = segs
             .iter()
             .filter_map(|seg| match seg {
-                Seg::Other(ix) if inline_user(&chat.items, *ix) => {
+                Seg::Other(ix)
+                    if inline_user(&chat.items, *ix)
+                        || matches!(chat.items[*ix], ChatItem::Notice { failed: true, .. }) =>
+                {
                     Some(work_other(chat, *ix, &theme, window, cx))
                 }
                 _ => None,

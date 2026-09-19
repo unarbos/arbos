@@ -3740,8 +3740,13 @@ impl ChatSession {
                 let busy = self.streaming || self.has_running_tool();
                 let queued = !self.queue.is_empty();
                 self.forget_socket();
+                // The socket closed under a running turn: the kernel went
+                // away (killed, crashed, replaced), not a stop anyone asked
+                // for. "Stopped." read as a person's act (F-212, d22); the
+                // line names what happened, and the reconnect that follows
+                // says nothing more (F-162).
                 if busy && !queued {
-                    self.notice(false, "Stopped.");
+                    self.notice(true, KERNEL_DROPPED_MID_TURN);
                 }
                 self.flush();
             }
@@ -4717,7 +4722,9 @@ fn pump(
                         }
                         chat.flush();
                     } else if busy && !queued {
-                        chat.notice(false, "Stopped.");
+                        // The stream ended under a running turn with the
+                        // kernel still in place: it went away (F-212).
+                        chat.notice(true, KERNEL_DROPPED_MID_TURN);
                         chat.flush();
                     }
                     chat.resumable() && (queued || busy)
@@ -4994,6 +5001,8 @@ pub fn interrupt_label(detail: &str) -> String {
 
 /// The notice text for a turn the user stopped; the fold line keys on it.
 pub const STOPPED_BY_YOU: &str = "Stopped by you";
+/// The kernel's socket closed under a running turn (F-212).
+pub const KERNEL_DROPPED_MID_TURN: &str = "The kernel went away mid-turn";
 /// The head of the notice for a place whose folder moved under the window
 /// (QA `af-03`); the path it expected follows.
 pub const PLACE_GONE: &str = "This project's folder is gone or was moved";
