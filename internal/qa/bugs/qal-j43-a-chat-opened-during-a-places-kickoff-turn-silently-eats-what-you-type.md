@@ -173,3 +173,22 @@ separates the third outcome the verdict hides: a run where the kickoff turn had 
 at mint time proves nothing either way, and `kf-01` reports that as a pass because nothing broke.
 Read it **within one build** — this bug moves with the app, so an aggregate across builds is
 meaningless.
+
+## Score on `8af868422fcb` (2026-09-19 09:15)
+
+The rate, read within one build as it has to be — cycle 15's desktop step built the app fresh at
+`8af868422fcb`, and every run below is against that binary:
+
+```
+cycle 15's own run   LOST   (window hit, composer cleared, line never arrived)
+four runs by hand    LOST, LOST, LOST, LOST
+```
+
+**5 of 5 conclusive, no missed windows.** `mt-01`, `mt-04` and `dg-01` broke alongside it in the
+same step, which is this bug's full signature.
+
+So `2ea8d565`'s regression has now been scored on three separate app builds — `1b4ef7a9` (3 of 3),
+`55c82877`/`01b32cd5` era (5 of 6), and `8af86842` (5 of 5). It is not drifting back on its own.
+
+The retry I added is earning its place quietly: none of these five needed it, but the one that
+would have been a hollow "no window" pass is the reason the five are all conclusive.
