@@ -75,6 +75,48 @@ while read -r s; do
 done < "$SWEEPERS" | sort -u | sed 's/^/  /'
 
 echo
+echo "the work queue — rows the sweep does not reach, oldest first:"
+# The rotation rule says take the oldest row. Read plainly it keeps naming
+# rows the sweep ran an hour earlier, because a row's age is the last cycle
+# that *named* it and the sweep names nothing. The rows worth a cycle are the
+# old ones nothing runs automatically, and that is a different list.
+python3 - "$TABLE" "$SWEEPERS" "$HERE" <<'PY'
+import re, subprocess, sys
+table, sweepers, here = sys.argv[1], sys.argv[2], sys.argv[3]
+swept = set()
+for name in open(sweepers).read().split():
+    try:
+        for line in open(f"{here}/scenarios/{name}"):
+            if line.startswith("# COVERS:"):
+                swept.add(line[len("# COVERS:"):].strip())
+    except OSError:
+        pass
+out = []
+for line in open(table, encoding="utf-8"):
+    if not line.startswith("| ") or line.startswith("|---"):
+        continue
+    cells = line.split("|")
+    if len(cells) < 3:
+        continue
+    name = cells[1].strip()
+    if not name or name in swept:
+        continue
+    # Finding ids look exactly like cycle numbers once the "M-" is gone, and
+    # reading them as cycles put "call — the microphone path" at 285 and sank
+    # rows that are genuinely older. Drop the ids, then the build shas, then
+    # anything past the cycle we could plausibly be in.
+    cell = re.sub(r"M-\d+", "", cells[2][:300])
+    seen = [int(n) for n in re.findall(r"\b(\d{1,3})\b", cell)]
+    seen = [n for n in seen if n <= 200]
+    if name and seen:
+        out.append((max(seen), name))
+for cycle, name in sorted(out)[:6]:
+    print(f"  last named at {cycle:>4}   {name}")
+if not out:
+    print("  none — the sweep reaches every row the table has")
+PY
+
+echo
 if [ -n "$STRAY" ]; then
   echo "VERDICT: $(echo "$STRAY" | wc -l | tr -d ' ') declaration(s) name no row. Fix those first — each one"
   echo "         hides a row that still has nothing covering it."

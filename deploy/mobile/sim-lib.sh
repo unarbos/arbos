@@ -184,3 +184,19 @@ collect_rows() {
   awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$raw" | sort -u > "$out"
   echo "hit the 20-page ceiling"
 }
+
+# The first worker row on the open workers sheet, by what a row says.
+#
+# Picking "the first Button below y" instead has now tapped the sheet's own
+# drag handle three times, in three scenarios — it is a Button called "Sheet
+# Grabber" and it sits exactly where a first row is looked for. The run then
+# stays on the sheet and reports on whatever it finds there.
+#
+# A worker row says what its worker is doing: "<goal>, Done" or ", Running".
+# Pass Done or Running to ask for one kind.
+first_worker_row() {
+  local udid=$1 want=${2:-"(Done|Running)"}
+  python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null \
+    | grep -E "Button +.+, $want" \
+    | head -1 | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'
+}

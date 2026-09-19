@@ -111,3 +111,37 @@ else
   echo "VERDICT: the pill read $HIGH at its highest and $AFTER after reopening —"
   echo "         fewer than were there, so the trip lost some"
 fi
+
+echo
+echo "== what a finished worker keeps =="
+# The row this covers is "several workers at once, archived children", and
+# only the first half has ever been driven. The second was filed as an open
+# question at cycle 32 and left: a Done worker's chat read "Nothing on record
+# yet." even locally, because the kernel's history answered total 0 for an
+# archived agent.
+PILL=$(ui dump | grep -E "Button +([^,]+, )?(Agents|Working) [0-9]+" | head -1 | awk '{print $1, $2}')
+if [ -n "$PILL" ]; then
+  idb ui tap $PILL --udid "$UDID"; sleep 4
+  DONE_ROW=$(first_worker_row "$UDID" Done)
+  echo "  opening: ${DONE_ROW:-no finished worker on the sheet}"
+  if [ -n "$DONE_ROW" ]; then
+    ui tap "$DONE_ROW" >/dev/null 2>&1; sleep 5
+    shot 05-a-finished-worker
+    HELD=$(ui dump | grep -cE "StaticText")
+    EMPTY=$(ui dump | grep -c "Nothing on record yet")
+    ui dump | awk '$3 == "StaticText" { $1="";$2="";$3=""; sub(/^ +/,""); print }' \
+      | head -4 | cut -c1-64 | sed 's/^/     /'
+    if [ "$EMPTY" != 0 ]; then
+      echo "  VERDICT archived: still 'Nothing on record yet.' — the finding from cycle 32 stands"
+    elif [ "$HELD" -ge 2 ]; then
+      echo "  VERDICT archived: its chat holds $HELD line(s) of what it did — cycle 32's"
+      echo "                    'Nothing on record yet' no longer reproduces"
+    else
+      echo "  VERDICT archived: cannot say — $HELD line(s) and no empty-state text either"
+    fi
+    ui tap "Back" >/dev/null 2>&1; sleep 2
+  fi
+else
+  echo "  no pill in this chat, so the sheet could not be opened"
+fi
+
