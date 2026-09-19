@@ -1845,6 +1845,10 @@ class Pass:
     def phase_multitask(self, binary: str, kernel: str, xdg: Path) -> None:
         """Multitasking audit scenarios (internal/qa/inbox/2026-09-13-multitasking-audit.md)."""
         sc = "multitask"
+        # Run alone (`--phases X`) the layout flag is unset and go_project()
+        # is a no-op: the scratch tab below then kept the focus and the
+        # queued follow-up landed in the wrong chat (R40, cycle 75).
+        self.tabs = self.app.exists("tab-bar")
         self.go_project()
         # First-spawn connect: every open chat is live, no 'connection failed' left behind.
         # A closed row (idle) is a chat that was archived or whose agent is
