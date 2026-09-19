@@ -186,6 +186,34 @@ impl Subscription {
         ((now_ms - due) as u64 / every).min(1_000_000)
     }
 
+    /// How far past the latest due time its own schedule can produce this
+    /// subscription's `next_due` sits — which only a clock set backwards
+    /// leaves behind (an NTP correction of a fast clock, a VM restored from
+    /// a snapshot, a dead RTC battery): every due time the kernel wrote
+    /// is then in the future by the size of the jump, and a scheduler
+    /// that only looks for the overdue never touches it (qal-j38 — the
+    /// kernel's own weekly `git gc` chore was stranded a month by a
+    /// month's rewind, silently). The latest honest due time is one
+    /// period from now, plus what `at` alignment can add (a day for
+    /// `hh:mm`, an hour for `:mm`), plus a minute of slack. `None` for a
+    /// paused or one-shot subscription, one with no period, or one whose
+    /// due time is plausible.
+    pub fn rewound_by_ms(&self, now_ms: i64) -> Option<i64> {
+        if self.paused || self.once {
+            return None;
+        }
+        let (Some(due), Some(every)) = (self.next_due_ms(), self.every_ms()) else {
+            return None;
+        };
+        let align = match self.at.as_deref().map(str::trim) {
+            Some(a) if a.starts_with(':') => 3_600_000,
+            Some(_) => 86_400_000,
+            None => 0,
+        };
+        let latest = now_ms + every as i64 + align + 60_000;
+        (due > latest).then(|| due - latest)
+    }
+
     /// After a pause or a long stop: the next firing is one period from
     /// `now`, not a pile of overdue ones. `last_fired` is left alone.
     pub fn resume_at(&mut self, now_ms: i64) {
@@ -920,6 +948,108 @@ mod tests {
             t + 3_600_000 + 15 * 60_000
         );
         assert_eq!(align_at(t, None), t);
+    }
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+
+    fn every(period: &str, due_ms: i64) -> Subscription {
+        let mut sub = tests_timer(period);
+        sub.next_due = Some(crate::inbox::rfc3339(due_ms));
+        sub
+    }
+
+    fn tests_timer(period: &str) -> Subscription {
+        Subscription {
+            id: 1,
+            kind: "shell".into(),
+            prompt: "chore".into(),
+            every: Some(period.into()),
+            at: None,
+            once: false,
+            cmd: Some("true".into()),
+            path: None,
+            repo: None,
+            pr: None,
+            author: None,
+            branch: None,
+            channel: None,
+            thread: None,
+            match_text: None,
+            deliver_to: "none".into(),
+            notify: None,
+            expires: None,
+            paused: false,
+            continuity: false,
+            internal: false,
+            created: String::new(),
+            next_due: None,
+            last_fired: None,
+            last: String::new(),
+            error: None,
+            seen: None,
+        }
+    }
+
+    /// qal-j38: a due time further ahead than one period (plus what `at`
+    /// can add) is a rewound clock. On time, one period out, and an `at`
+    /// alignment within its day are all plausible; ten days ahead on a
+    /// 30 s period is not; a paused or one-shot subscription is left alone.
+    #[test]
+    fn a_due_time_past_what_the_schedule_allows_is_a_rewound_clock() {
+        let now = 1_800_000_000_000i64;
+        let day = 86_400_000i64;
+        assert_eq!(every("30s", now).rewound_by_ms(now), None, "due now");
+        assert_eq!(
+            every("30s", now + 30_000).rewound_by_ms(now),
+            None,
+            "one period out"
+        );
+        assert_eq!(
+            every("30s", now - 10 * day).rewound_by_ms(now),
+            None,
+            "overdue is the other path"
+        );
+        assert_eq!(
+            every("30s", now + 10 * day).rewound_by_ms(now),
+            Some(10 * day - 30_000 - 60_000),
+            "ten days ahead on a 30 s period"
+        );
+        assert_eq!(
+            every("7d", now + 7 * day).rewound_by_ms(now),
+            None,
+            "the gc chore, on time"
+        );
+        assert!(
+            every("7d", now + 37 * day).rewound_by_ms(now).is_some(),
+            "the gc chore after a month's rewind"
+        );
+        // `at = "03:00"` may push a daily firing up to a day past one period.
+        let mut aligned = every("1d", now + day + 20 * 3_600_000);
+        aligned.at = Some("03:00".into());
+        assert_eq!(aligned.rewound_by_ms(now), None, "alignment within its day");
+        let mut far = every("1d", now + 3 * day);
+        far.at = Some("03:00".into());
+        assert!(
+            far.rewound_by_ms(now).is_some(),
+            "past the day alignment can add"
+        );
+        let mut paused = every("30s", now + 10 * day);
+        paused.paused = true;
+        assert_eq!(
+            paused.rewound_by_ms(now),
+            None,
+            "paused: not the scheduler's"
+        );
+        let mut once = every("30s", now + 10 * day);
+        once.once = true;
+        assert_eq!(
+            once.rewound_by_ms(now),
+            None,
+            "a one-shot at a chosen time is a schedule"
+        );
     }
 }
 

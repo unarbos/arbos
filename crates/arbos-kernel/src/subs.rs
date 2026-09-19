@@ -191,6 +191,29 @@ pub fn tick(hooks: &Arc<KernelHooks>, now: i64) {
                 hooks.plan_changed(id);
                 continue;
             }
+            // A due time further ahead than the schedule can produce: the
+            // clock was set back since it was written, and nothing else
+            // would ever pull it in (qal-j38). It fires now, once, with the
+            // reason, and keeps its cadence from here — the coalescing
+            // path below is the same idea for a clock that jumped forward.
+            if let Some(ahead) = sub.rewound_by_ms(now) {
+                let period = sub.every.clone().unwrap_or_default();
+                crate::klog::warn(
+                    "subscription_rewound",
+                    Some(id),
+                    format!(
+                        "#{} was due {} past what every = {period} allows; the clock moved back — firing now",
+                        sub.id,
+                        subscription::human_ms(ahead as u64)
+                    ),
+                );
+                let note = format!(
+                    "(its due time was {} further ahead than its period allows, so the clock had been set back since it was scheduled; it runs now and keeps its cadence from here)",
+                    subscription::human_ms(ahead as u64)
+                );
+                fire_with_note(hooks, &agent, sub, now, Some(note));
+                continue;
+            }
             if !sub.is_due(now) {
                 continue;
             }
