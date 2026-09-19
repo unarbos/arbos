@@ -482,7 +482,7 @@ impl Host {
         if let Some(config) = override_config() {
             return Ok(Self { config, dir });
         }
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&dir).with_context(|| Self::not_writable(&dir))?;
         let path = dir.join("config.toml");
         let config = if path.exists() {
             Self::read(&path)?
@@ -491,14 +491,46 @@ impl Host {
                 provider: Some(ProviderKind::OpenRouter),
                 ..HostConfig::default()
             };
-            write_private(&path, &toml::to_string_pretty(&cfg)?)?;
+            write_private(&path, &toml::to_string_pretty(&cfg)?)
+                .with_context(|| format!("first run: {}", Self::not_writable(&dir)))?;
             cfg
         };
+        // The list of places opened here. Its absence is not an error and
+        // a folder that cannot take the empty file is not either: a config
+        // that reads is enough to serve, and `remember_place` creates the
+        // file on the first open that can. The folder's writability is
+        // said once by the kernel at start (`writable`), not by dying here
+        // with a bare "Permission denied" — a managed machine, a home on a
+        // read-only mount, a folder another user made.
         let places = dir.join("places");
         if !places.exists() {
-            std::fs::write(places, "")?;
+            let _ = std::fs::write(places, "");
         }
         Ok(Self { config, dir })
+    }
+
+    /// Whether the host folder takes writes: `config.toml` saved by
+    /// `setup`, `places`, `keys/`, `machines.toml`. `Err` names the folder
+    /// and what is not kept while it stays that way, for the log and the
+    /// person; the kernel serves either way, since the config reads.
+    pub fn writable(&self) -> std::result::Result<(), String> {
+        let probe = self
+            .dir
+            .join(format!(".write-probe.{}", std::process::id()));
+        match std::fs::write(&probe, b"") {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&probe);
+                Ok(())
+            }
+            Err(e) => Err(format!("{} ({e})", Self::not_writable(&self.dir))),
+        }
+    }
+
+    fn not_writable(dir: &Path) -> String {
+        format!(
+            "the config folder {} cannot be written: nothing is kept there — the API key from `setup`, the places opened, remote keys — until it can be, or XDG_CONFIG_HOME points at a folder that can",
+            dir.display()
+        )
     }
 
     /// The config as it stands, without writing anything. Absent file =
