@@ -5199,3 +5199,35 @@ and this loop's job was to show that it does not currently have one.
 Film and still in `media/mobile/cycle-170/`.
 
 **PR:** [#766](https://github.com/unarbos/arbos/pull/766), harness only.
+
+## Cycle 171 — the style row had a tool and no check
+
+The queue named `style pair vs Cursor stills` at cycle 160, the oldest row
+that does not need Jacob's phone.
+
+**Both surfaces hold** (M-527). The list's row pitch is 8.7% of screen height
+against Cursor's 8.3%; the chat's text starts 5.3% of the width in against
+4.9%. Both within half a point, on phones of different sizes. Those are the
+same numbers cycle 83 got for the list and cycle 152 for the chat — sixty-nine
+and nineteen cycles ago. Ground is printed and never compared, dark-only being
+deliberate on both sides.
+
+**The interesting part is why the row keeps ageing** (M-528). `style-pair.py`
+has done the measuring since cycle 83, but nothing ever handed it the
+pictures. Every reading of this row has been a person taking two screenshots
+and typing two commands — so it aged eleven cycles between readings, and
+cycle 152 spent an entire cycle discovering the tool could not even run on
+the Mac.
+
+It is a check now. `style-pair.sh` captures both surfaces and compares one
+number each, with a point as the threshold: twice measured under half a
+point, sixty-nine cycles apart, so a whole point is comfortably outside the
+noise and far tighter than an eye. It refuses a verdict on a list too short to
+have a rhythm, and it says plainly that a still of the wrong screen measures
+perfectly and means nothing.
+
+Proven it can fail: tightened to a tenth of a point, the verdict turns.
+
+Stills and numbers in `media/mobile/cycle-171/`.
+
+**PR:** [#767](https://github.com/unarbos/arbos/pull/767), harness only.
