@@ -3044,6 +3044,15 @@ fn parse_hashline_diff(src: &str) -> Vec<DiffRow> {
         .collect()
 }
 
+/// A line said `n` times over one turn, once: `text · ×n`.
+fn times(text: &str, n: usize) -> String {
+    if n > 1 {
+        format!("{text} · ×{n}")
+    } else {
+        text.to_owned()
+    }
+}
+
 /// Cursor's file view: a short snippet under "Read foo.rs L40-69".
 fn read_peek(theme: &Theme, label: &str, output: &str, take: usize) -> AnyElement {
     let lines: Vec<&str> = output
@@ -4539,9 +4548,29 @@ fn zone(
     // they were the answer to it (his report 2026-09-17-8). Taken here at
     // the first steer card; otherwise after the tail.
     let mut workers = workers;
+    // The same kernel line again and again — a fallback notice and the
+    // empty-reply nudge alternating twelve times over one turn (cycle 58,
+    // a worker on a model that kept returning nothing) — is one line with
+    // a count, not a column of them. Cursor never shows such a run; ours
+    // says it once and says how often.
+    let mut repeats: HashMap<&str, usize> = HashMap::new();
+    for item in &chat.items[turn.answer_from.max(body_start)..turn.range.end] {
+        match item {
+            ChatItem::Notice { text, .. } | ChatItem::Nudge(text) => {
+                *repeats.entry(text.as_str()).or_insert(0) += 1;
+            }
+            _ => {}
+        }
+    }
+    let mut said: HashSet<&str> = HashSet::new();
     // The tail starts where the body ended: the report line under a wake
     // segment's header is drawn above, not again here.
     for ix in turn.answer_from.max(body_start)..turn.range.end {
+        if let ChatItem::Notice { text, .. } | ChatItem::Nudge(text) = &chat.items[ix]
+            && !said.insert(text.as_str())
+        {
+            continue;
+        }
         if inline_user(&chat.items, ix)
             && matches!(chat.items[ix], ChatItem::User(_))
             && let Some((lines, _)) = workers.take()
@@ -4611,8 +4640,10 @@ fn zone(
             ChatItem::From { who, text, images } => {
                 from_block(chat, ix, who, text, images, &theme, window, cx)
             }
-            ChatItem::Notice { text, failed } => notice(chat, ix, text, *failed, &theme, cx),
-            ChatItem::Nudge(text) => page_nudge(text, &theme),
+            ChatItem::Notice { text, failed } => {
+                notice(chat, ix, &times(text, repeats[text.as_str()]), *failed, &theme, cx)
+            }
+            ChatItem::Nudge(text) => page_nudge(&times(text, repeats[text.as_str()]), &theme),
             ChatItem::Artifacts(files) => artifacts_row(chat, ix, files, &theme, cx),
             ChatItem::Asked { question, answer } => asked_line(question, answer, &theme),
             // A steer typed after the answer began streaming: its bubble,

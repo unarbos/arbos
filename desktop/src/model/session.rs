@@ -1334,6 +1334,25 @@ impl ChatSession {
         }
     }
 
+    /// Whether the agent has been woken since it asked `request_id`: a
+    /// line from another agent, a person's line, or a wake after the
+    /// ask's own record. The question is then nobody's to answer.
+    pub(crate) fn question_superseded(&self, request_id: &str) -> bool {
+        let Some(asked) = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, ChatItem::Tool { id, .. } if id == request_id))
+        else {
+            return false;
+        };
+        self.items[asked + 1..].iter().any(|item| {
+            matches!(
+                item,
+                ChatItem::From { .. } | ChatItem::User(_) | ChatItem::Wake { .. }
+            )
+        })
+    }
+
     /// Whether the UI should treat this chat as in flight: a streamed
     /// turn, a tool that has not returned, or a sub-agent the kernel
     /// still lists as live. The composer Stop and the work header
@@ -3107,6 +3126,11 @@ impl ChatSession {
             }
             Event::Update(update) => self.apply_update(update),
             Event::Incoming { who, text } => {
+                // Another agent's line wakes this one: a question parked
+                // here has been answered by it (the parent's `say` after
+                // a worker's ask), live or in the tail read at a relaunch
+                // (F-221).
+                self.questions = None;
                 self.items.push(ChatItem::From {
                     who,
                     text,
@@ -3601,6 +3625,13 @@ impl ChatSession {
                 title,
                 questions,
             } => {
+                // The kernel offers a parked question again at every
+                // attach, and keeps one the agent has since moved past
+                // (a parent's `say` woke it and it finished): the pane
+                // knows the turn moved on from its own record (F-221).
+                if self.question_superseded(&request_id) {
+                    return;
+                }
                 self.turn_alive();
                 // The transcript tail repeats a question the user already
                 // answered or skipped a moment ago: not a new card (ui-004).

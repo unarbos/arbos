@@ -2759,6 +2759,11 @@ impl Workspace {
             // wrote while no window was attached comes in before anything
             // live does (F-105).
             chat.adopt_kernel_tail();
+            if let Some(ask) = chat.questions.as_ref().map(|q| q.request_id.clone())
+                && chat.question_superseded(&ask)
+            {
+                chat.questions = None;
+            }
             chat.sync_kernel_history();
             // No "reconnected" line on the transcript: the machine pill
             // said "reconnecting" and now says nothing, which is the
