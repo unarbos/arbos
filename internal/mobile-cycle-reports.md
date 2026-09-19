@@ -5397,3 +5397,35 @@ is a stale check.
 Evidence in `media/mobile/cycle-175/`.
 
 **PR:** [#776](https://github.com/unarbos/arbos/pull/776), harness only.
+
+## Cycle 176 — a check that always opened the oldest worker
+
+The queue named `several workers at once, archived children` at cycle 164.
+
+**Both halves hold** (M-543). Four of four workers named on the sheet, the
+pill reading `Agents 48` after going back to the list and reopening, and a
+finished worker's chat holding a record of what it did.
+
+**But the archived half was opening the wrong worker** (M-544). It took the
+first `Done` row on the sheet, which is always the same ancient one — `count
+slowly one to forty`, from some cycle long past. The newest workers sit at the
+*end* of the sheet, so this run's four were never on the first screen. The
+check was proving that a months-old record survives, and saying nothing about
+the four workers it had just watched finish.
+
+It pages to them now: `paged 3 screen(s) to reach this run's workers`, then
+`opening: w163711 rivers, Done  (this run's own)`, whose chat holds six lines.
+It still falls back to any finished worker when it cannot reach its own, and
+says so in the verdict when it does.
+
+**And a suspicion that did not survive counting** (M-545). Three scenarios
+spawn workers on `phone` every run, and the sheet now pages five or six
+screens, so I set out to file unbounded growth. The numbers say otherwise:
+34 at cycle 151, 43 at 161, 33 at 173, 44 at 175 — oscillating in the thirties
+and forties rather than climbing. Nothing filed, but recorded, because "the
+sheet keeps getting longer" is exactly the sort of thing that gets asserted
+later by someone who has not counted.
+
+Still and counts in `media/mobile/cycle-176/`.
+
+**PR:** [#777](https://github.com/unarbos/arbos/pull/777), harness only.
