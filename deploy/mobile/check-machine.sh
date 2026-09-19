@@ -47,14 +47,17 @@ echo
 echo "python modules the harness imports:"
 # Read from the tools themselves, so a new dependency appears here the day it
 # is added rather than the day someone remembers to add it.
-MODS=$(grep -ohE "^(import|from) [a-zA-Z_][a-zA-Z0-9_]*" "$HERE"/*.py \
+# Indentation matters here: an import inside a try block is still a
+# dependency, and anchoring at the line start missed style-pair.py's own PIL
+# the moment it was wrapped in one — so the report blamed a different file.
+MODS=$(grep -ohE "^[[:space:]]*(import|from) [a-zA-Z_][a-zA-Z0-9_]*" "$HERE"/*.py \
        | awk '{print $2}' | sort -u)
 [ -n "$MODS" ] || { echo "  read no imports out of $HERE/*.py — the reader is broken,"
                     echo "  and every line here would be an empty pass"; exit 1; }
 BARE=/usr/bin/python3
 TRAP=0
 for m in $MODS; do
-  WHO=$(grep -lE "^(import|from) $m\b" "$HERE"/*.py | xargs -n1 basename | tr '\n' ' ')
+  WHO=$(grep -lE "^[[:space:]]*(import|from) $m\b" "$HERE"/*.py | xargs -n1 basename | tr '\n' ' ')
   HAVE=no; python3 -c "import $m" >/dev/null 2>&1 && HAVE=yes
   BHAVE=no; [ -x "$BARE" ] && "$BARE" -c "import $m" >/dev/null 2>&1 && BHAVE=yes
   if [ "$HAVE$BHAVE" = yesyes ]; then ok "$m" "importable by either python"
