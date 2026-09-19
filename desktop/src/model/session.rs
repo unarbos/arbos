@@ -1757,6 +1757,14 @@ impl ChatSession {
             self.status = None;
             self.status_over_workers = false;
         }
+        // "waiting on Outer" is about a worker that is working. The kernel
+        // clears its line when the wait ends, but not when the worker it
+        // named was archived on its way out: the row read *waiting on
+        // Outer* over *2 archived* after Outer had reported (F-229, cycle
+        // 62). No worker working, nothing waited on.
+        if !any_working && !self.children.is_empty() && self.waiting.is_some() {
+            self.waiting = None;
+        }
     }
 
     /// Whether the newest notice already says the place is gone — one
@@ -3741,6 +3749,8 @@ impl ChatSession {
             Event::TurnDone(result) => {
                 self.working = None;
                 self.status = None;
+                // The turn is over: it waits on nobody now (F-229).
+                self.waiting = None;
                 self.stamp_worked();
                 self.voice_answer();
                 // A question parks the turn: the kernel ends it and waits
