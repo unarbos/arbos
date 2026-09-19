@@ -6,7 +6,7 @@ use crate::{
     model::{
         panel::{Panel, PanelTab},
         permission_center::{PermissionCenter, Permissions},
-        session::ChatSession,
+        session::{ChatItem, ChatSession},
         settings::Settings,
         state::{self, State},
         surface::SurfaceId,
@@ -1983,11 +1983,30 @@ impl Arbos {
                 } else {
                     first.chars().take(90).collect()
                 };
+                // What was said in the chat, both sides, for a search by
+                // content (F-197: a fact given mid-chat was unfindable).
+                // Capped so a long chat does not weigh the palette down.
+                let mut body = String::new();
+                for item in &chat.items {
+                    let text = match item {
+                        ChatItem::User(message) => message.text.as_str(),
+                        ChatItem::Agent(text) => text.as_str(),
+                        _ => continue,
+                    };
+                    for word in text.split_whitespace() {
+                        body.push_str(word);
+                        body.push(' ');
+                    }
+                    if body.len() > 40_000 {
+                        break;
+                    }
+                }
                 hits.push(Hit {
                     project: ix,
                     session: chat.id,
                     title,
                     snippet,
+                    body,
                     tab: tab.clone(),
                     updated: chat.updated,
                     running: chat.busy(),

@@ -775,6 +775,21 @@ class Pass:
             self.check("copy-turn", sc, "click copy", "clipboard holds the answer", lambda: self.app.click(ids["copy-turn"]), copied)
         else:
             self.gap("copy-turn", sc, "click", "no copy-turn-* element")
+        # F-197: ⌘K finds a chat by what was said in it, not only its title
+        # and first words; the row shows the words around the match.
+        before_search = self.state().get("active_session")
+        self.app.key("cmd-k"); time.sleep(0.8); self.app.type("brown fox"); time.sleep(0.8)
+        hits = [e["path"].split(".")[-1] for e in self.app.snapshot()["elements"]
+                if re.fullmatch(r"palette-\d+", e["path"].split(".")[-1]) and e.get("visible")]
+        self.record("search-by-content", "search", "⌘K, type words said only in an answer", "at least one chat row",
+                    f"rows={hits}", "pass" if hits else "fail", self.still("search-content"))
+        if hits:
+            self.check("search-open-hit", "search", "Enter on the lit row", "the palette closes on a chat",
+                       lambda: self.app.key("enter"), lambda a, b: not self.app.exists("chat-search") and b.get("active_session") is not None, settle=1.0)
+        else:
+            self.app.key("escape"); time.sleep(0.4)
+        if self.state().get("active_session") != before_search:
+            self.go_main()
         for name in ("vote-up", "vote-down"):
             if ids[name]:
                 self.check(name, sc, "click", "message.feedback set", lambda n=name: self.app.click(ids[n]),

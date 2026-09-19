@@ -32,6 +32,9 @@ pub struct Hit {
     pub title: String,
     /// Its first words, when they are not the title.
     pub snippet: String,
+    /// Every line said in it, the person's and the agent's, as written:
+    /// what ⌘K searches beyond the title (F-197). Capped by the builder.
+    pub body: String,
     /// The tab it lives on.
     pub tab: String,
     /// Last activity, for the age column.
@@ -204,6 +207,7 @@ impl ChatSearch {
                     || hit.title.to_lowercase().contains(&q)
                     || hit.snippet.to_lowercase().contains(&q)
                     || hit.tab.to_lowercase().contains(&q)
+                    || hit.body.to_lowercase().contains(&q)
             });
             let hits: Vec<Row> = if q.is_empty() {
                 hits.take(RECENT).map(|(ix, _)| Row::Hit(ix)).collect()
@@ -386,7 +390,19 @@ impl Render for ChatSearch {
                 } else {
                     theme.text_dim
                 });
-                let showing_snippet = !q.is_empty() && !hit.snippet.is_empty();
+                // The line under the title: the chat's first words when
+                // they carry the match, else the words around the match
+                // in its body (F-197: a chat found by what was said in it
+                // shows where).
+                let snippet = if !q.is_empty()
+                    && !hit.title.to_lowercase().contains(&q)
+                    && !hit.snippet.to_lowercase().contains(&q)
+                {
+                    body_snippet(&hit.body, &q).unwrap_or_else(|| hit.snippet.clone())
+                } else {
+                    hit.snippet.clone()
+                };
+                let showing_snippet = !q.is_empty() && !snippet.is_empty();
                 let body = div()
                     .flex()
                     .flex_col()
@@ -404,7 +420,7 @@ impl Render for ChatSearch {
                         el.child(
                             div()
                                 .text_size(px(12.))
-                                .child(lit(&hit.snippet, &q, &theme)),
+                                .child(lit(&snippet, &q, &theme)),
                         )
                     });
                 list.push(
@@ -587,4 +603,42 @@ impl Render for ChatSearch {
             .child(card)
             .into_any_element()
     }
+}
+
+/// Up to ninety characters of `body` around the first `q`, cut at word
+/// edges, with an ellipsis where the text goes on. `None` when `q` is not
+/// in it.
+fn body_snippet(body: &str, q: &str) -> Option<String> {
+    // `q` is lowercased; the body keeps its case. Lowercasing an ASCII
+    // body keeps byte offsets; one that does not is matched loosely.
+    let lower = body.to_lowercase();
+    let at = lower.find(q)?;
+    if lower.len() != body.len() || !body.is_char_boundary(at) {
+        return Some(lower[at..].chars().take(90).collect());
+    }
+    let start = body[..at]
+        .char_indices()
+        .rev()
+        .take_while(|(i, _)| at - i < 40)
+        .last()
+        .map_or(at, |(i, _)| i);
+    let start = body[start..at]
+        .find(' ')
+        .map_or(start, |sp| start + sp + 1)
+        .min(at);
+    let end = body[at..]
+        .char_indices()
+        .take_while(|(i, _)| *i < 60)
+        .last()
+        .map_or(body.len(), |(i, c)| at + i + c.len_utf8());
+    let end = body[end..].find(' ').map_or(body.len(), |sp| end + sp);
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(body[start..end].trim());
+    if end < body.len() {
+        out.push('…');
+    }
+    Some(out)
 }
