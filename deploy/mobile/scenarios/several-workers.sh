@@ -122,8 +122,34 @@ echo "== what a finished worker keeps =="
 PILL=$(ui dump | grep -E "Button +([^,]+, )?(Agents|Working) [0-9]+" | head -1 | awk '{print $1, $2}')
 if [ -n "$PILL" ]; then
   idb ui tap $PILL --udid "$UDID"; sleep 4
-  DONE_ROW=$(first_worker_row "$UDID" Done)
-  echo "  opening: ${DONE_ROW:-no finished worker on the sheet}"
+  # One of this run's own workers, if the sheet is showing one. Taking the
+  # first Done row meant always opening the same ancient worker — "count
+  # slowly one to forty", from some cycle long past — so the check proved
+  # that a months-old record survives and said nothing about the four
+  # workers it had just watched finish.
+  # Page towards them. The newest workers sit at the end of the sheet
+  # (M-482), so this run's four are never on the first screen — falling back
+  # without looking meant the check always opened the oldest worker there is.
+  mine_row() {
+    python3 "$HERE/../ui.py" "$UDID" dump 2>/dev/null \
+      | grep -E "Button +$TAG.*, Done" | head -1 \
+      | awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }'
+  }
+  DONE_ROW=$(mine_row)
+  PAGED=0
+  while [ -z "$DONE_ROW" ] && [ "$PAGED" -lt 8 ]; do
+    idb ui swipe 196 700 196 250 --duration 0.3 --udid "$UDID" >/dev/null 2>&1
+    sleep 1.5
+    PAGED=$((PAGED + 1))
+    DONE_ROW=$(mine_row)
+  done
+  [ "$PAGED" = 0 ] || echo "  paged $PAGED screen(s) to reach this run's workers"
+  MINE=yes
+  if [ -z "$DONE_ROW" ]; then
+    DONE_ROW=$(first_worker_row "$UDID" Done)
+    MINE=no
+  fi
+  echo "  opening: ${DONE_ROW:-no finished worker on the sheet}$([ "$MINE" = yes ] && echo "  (this run's own)" || echo "  (an older one — none of this run's are on this page)")"
   if [ -n "$DONE_ROW" ]; then
     ui tap "$DONE_ROW" >/dev/null 2>&1; sleep 5
     shot 05-a-finished-worker
@@ -136,6 +162,7 @@ if [ -n "$PILL" ]; then
     elif [ "$HELD" -ge 2 ]; then
       echo "  VERDICT archived: its chat holds $HELD line(s) of what it did — cycle 32's"
       echo "                    'Nothing on record yet' no longer reproduces"
+      [ "$MINE" = no ] && echo "                    (on an older worker; this run's were not on the page)"
     else
       echo "  VERDICT archived: cannot say — $HELD line(s) and no empty-state text either"
     fi
