@@ -78,7 +78,12 @@ for line in sys.stdin.read().splitlines():
     if len(parts) < 4:
         continue
     kind, label = parts[2], parts[3].strip()
-    if kind not in ("Button", "Image", "PopUpButton"):
+    # Text fields and section headings carry names too, and the settings
+    # sheet is made almost entirely of them: with only buttons and images
+    # examined, that screen reported "every control here is named" over a
+    # single element. Six fields and five headings were never looked at.
+    if kind not in ("Button", "Image", "PopUpButton", "TextField",
+                    "SecureTextField", "Heading"):
         continue
     if label in BAD_EXACT or (SYMBOLISH.match(label) and label not in OURS):
         print(f"  {kind:12} {label}")
@@ -95,7 +100,7 @@ screen() {
   # control here is named" over three elements is a different sentence from
   # the same words over thirty, and cycle 142 spent five runs believing a
   # verdict that was true of an empty set.
-  looked=$(echo "$tree" | grep -cE "^ *[0-9-]+ +[0-9-]+ +(Button|Image|PopUpButton) ")
+  looked=$(echo "$tree" | grep -cE "^ *[0-9-]+ +[0-9-]+ +(Button|Image|PopUpButton|TextField|SecureTextField|Heading) ")
   bad=$(echo "$tree" | suspect)
   VISITED=$((VISITED + 1))
   if [ -z "$bad" ]; then
