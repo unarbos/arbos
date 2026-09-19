@@ -4969,3 +4969,46 @@ genuinely older.
 Evidence in `media/mobile/cycle-164/`.
 
 **PR:** [#754](https://github.com/unarbos/arbos/pull/754), harness only.
+
+## Cycle 165 — the call row holds, and a fix I had to take back
+
+Two scenarios cover `call — first word and transcription`, neither had run
+since cycle 88, and both are out of the sweep because they drive a real call.
+
+**Both hold** (M-509). One breath gives one transcript, one spoken answer and
+one kernel answer, three runs of three, 900 of 900 frames. The first word
+arrives whole: six runs of six kept every frame, at connects of 1226 to
+1564 ms.
+
+**The slow-connect check was too hard on itself** (M-510). With no connect
+over two seconds it said "this run says nothing about the case in question" —
+having just measured six runs that lost nothing. It reports what it kept and
+over what range now, and names only the slow case as untested. Fixing it, I
+named my counter `RUNS`, which is the scenario's own argument for how many
+runs to do, and reset it to zero before the loop read it: a six-run check
+quietly did two and numbered the second one `0`.
+
+**The still found something the checks do not look at** (M-511). The call
+screen draws `phone` with a red folder — `(229, 83, 61)` — and the list draws
+the same project purple, `(118, 93, 209)`. In code the list keys a project's
+face on `KernelTarget.stored`, which is `hub:<machine>/<project>`, while the
+call screen's fallback keys on `<machine>/<project>`: a different string, so a
+different hash.
+
+I fixed that key. It changed nothing — the glyph stayed at `(229, 83, 61)`.
+So the fallback is not the path being taken: the chat's roster identity is
+supplying that face, and the two screens are reading identity from different
+sources. **The change is reverted.** The finding is measured and stands; the
+fix does not, because I cannot show it doing anything.
+
+**And I read an empty grep as success** (M-512). `mac-cycle.sh` refused a
+branch that exists only on the Mac — `cannot fetch fix165` — and my grep for
+`BUILD` printed nothing, which I took for quiet success. I then measured a
+screenshot of the previous app. The guard did its job; I did not read it. The
+second reading, with the branch's real name, built and installed properly —
+and the colour still did not move, which is how M-511 got its answer.
+
+Stills in `media/mobile/cycle-165/`.
+
+**PR:** [#757](https://github.com/unarbos/arbos/pull/757), harness only —
+`ios/` ends this cycle untouched.
