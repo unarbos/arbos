@@ -5,16 +5,22 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-19 15:15 UTC.
+Last checked 2026-09-19 15:40 UTC.
 
-## Click Update. You will get build 2294. Jev is in it.
+## Click Update. You will get build 2297. Jev is in it.
 
-**2294** — signed, notarised, stapled, on the feed since 15:12 UTC.
+**2297** — signed, notarised, stapled, on the feed since 15:38 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2294 (builds 2295–2297):
+
+- **#772** — the call says "Hi." the moment the Live session is up
+
+## Before that: 2294
 
 New since 2288 (builds 2289–2294):
 
