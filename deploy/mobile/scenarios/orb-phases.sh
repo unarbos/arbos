@@ -38,6 +38,11 @@ CLIP=${2:-$HOME/mobile-clips/pause.wav}
 # "one question baked in" error as M-301, for the third time.
 SAYS=${SAYS:-1}
 OUT="$HOME/mobile-out/$CYCLE/orb-phases"; mkdir -p "$OUT"
+# A run must not read the last run's answer. The two python blocks below
+# talk to each other through this file, and a stale one would put a fault
+# from an earlier call into a clean call's verdict.
+export ORB_SHARED="$OUT/colours-shared"
+rm -f "$ORB_SHARED"
 UDID=$(xcrun simctl list devices booted -j | python3 -c 'import json,sys;print(next(d["udid"] for v in json.load(sys.stdin)["devices"].values() for d in v))')
 B=com.unarbos.arbos.ios
 [ -f "$CLIP" ] || { echo "no clip at $CLIP"; exit 1; }
@@ -84,7 +89,7 @@ echo
 echo "what each phase looked like:"
 python3 - "$OUT" <<'PY'
 from pathlib import Path
-import sys
+import os, sys
 try:
     from PIL import Image
 except ImportError:
@@ -138,6 +143,11 @@ else:
         if bad:
             print("  and both of these happen mid-call: " + "; ".join(bad))
             print("  A caller in a quiet room has only the colour to go on.")
+            # Say it where a skimmer reads. The colour section printed this
+            # plainly and the closing verdict said "one pass through the
+            # phases, no flapping" — a clean line under a real fault, which
+            # is how a reader comes away thinking the orb is fine.
+            open(os.environ["ORB_SHARED"], "w").write("; ".join(bad))
         else:
             print("  each pair involves a state that happens once, before the call"
                   " is under way,")
@@ -151,7 +161,7 @@ echo
 # entered again inside one turn is what M-145 described, and what a caller
 # sees as the orb twitching.
 python3 - "$SEQ" "$SAYS" <<'PY'
-import sys
+import os, sys
 seq = sys.argv[1].split()
 if not seq:
     print("VERDICT: the orb never reported a phase — nothing to read")
@@ -170,6 +180,16 @@ elif spoke > says:
     print(f"VERDICT: {spoke} spoken answers to {says} question(s) — either a reply in "
           f"parts or the double answer of M-146")
 else:
-    print("VERDICT: one pass through the phases per question, in order, no flapping")
+    shared = ""
+    try:
+        shared = open(os.environ["ORB_SHARED"]).read().strip()
+    except OSError:
+        pass
+    if shared:
+        print("VERDICT: the phases run in order, one pass per question, no flapping —")
+        print(f"         but {shared} wear the same face mid-call, so the order is")
+        print("         only readable to something that can read the label")
+    else:
+        print("VERDICT: one pass through the phases per question, in order, no flapping")
 PY
 echo "console in $OUT"
