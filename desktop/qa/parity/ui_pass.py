@@ -1957,7 +1957,7 @@ class Pass:
         # — a steer card inside the turn, not a fresh prompt over it.
         self.go_main(); self.wait_idle(30)
         n0 = len(sessions(self.state()))
-        self.send("Spawn one sub-agent whose only task is: run `sleep 40` with bash, then reply with the word slept. Wait for it, then say done.")
+        self.send("Spawn one sub-agent whose only task is: run `sleep 25` with bash, then reply with the word slept. Wait for it, then say done. Do not retry or spawn again if it is slow.")
         running_worker = lambda s: next((c for c in sessions(s) if c.get("parent") is not None and len(sessions(s)) > n0 and (c.get("status") or c.get("streaming") or c.get("turn_open"))), None)
         ws = self.wait(lambda s: running_worker(s) is not None, 60, what="running worker")
         worker = running_worker(ws) if ws else None
@@ -1978,7 +1978,9 @@ class Pass:
                     self.gap("worker-steer-card", sc, "composer", "the worker chat has no composer")
             else:
                 self.gap("worker-steer-card", sc, "panel row", "the worker's row is not on screen")
-            self.go_main(); self.wait_idle(120)
+            # A sleep-25 worker plus the model's wrap-up: give the turn its
+            # time before recover() reaches for Stop over a spawn (F-179).
+            self.go_main(); self.wait_idle(200)
         else:
             self.gap("worker-steer-card", sc, "spawn", "no running worker appeared within 60 s")
 
