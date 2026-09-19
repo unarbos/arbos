@@ -6045,3 +6045,73 @@ Stills in `media/mobile/cycle-192/`:
 
 **PR:** [#797](https://github.com/unarbos/arbos/pull/797), harness only — no
 `ios/` change, so nothing here needs a TestFlight upload.
+
+## Cycle 193 — the call path, and a screen that had been speaking to nobody
+
+The oldest rows in the queue were all the call: first word and transcription
+(178), the words read back (179), the orb and its colours (181). I took all
+three.
+
+**The voice path is healthy.** `mac-voice.sh` on `main`: connect 2916 ms, the
+kernel's answer at 8386 ms — against 11.0 to 13.1 s at cycle 170 — barge-in
+cutting playback in 272 ms, and the gateway's own reply at 1233 ms. Nothing
+to fix.
+
+**So I asked what the row had never asked** (M-597). The voice check measures
+the turn in milliseconds and reads none of it off the screen: it parses the
+console and takes seven stills nobody opens. What a person *looks at* during
+those eight seconds had never been recorded once.
+
+`what-the-caller-sees.sh` samples the screen as fast as the accessibility
+tree can be read, from before the clip plays to after the reply lands:
+
+```
+  connecting  held  2.0s
+  listening   held  6.1s
+  thinking    held  7.8s
+  speaking    held  5.1s
+```
+
+Two runs agreed. The screen carried **no words at any point** — the identity
+under the orb is all there is, which the code says is deliberate. And the
+`thinking` span is `reply_first_audio` seen from outside: 7.8 s against
+7822 ms, and 7.4 s against 7585 ms the run before. Two independent
+measurements of one wait, agreeing to within a fiftieth of it.
+
+**The screen had been saying this all along and nothing could hear it**
+(M-596). Cycle 84 put the call phase in the orb's accessibility value so the
+wordless screen would still say whether it was listening, thinking or
+speaking. `ui.py dump` prints `AXLabel` *or* `AXValue`; the orb's label is
+`Call`; the `or` stops there. A hundred cycles of checks have been unable to
+read the one field that was added for them. `ui values` reads it now — a
+sibling verb rather than a wider dump, because scenarios match dump lines
+exactly and a text field growing to `Message pod… | what was typed` would
+break every one of those greps in silence.
+
+**Yesterday's fix was wrong about where idb is** (M-598, M-599, M-600).
+Cycle 192 exported `/opt/homebrew/bin` and called it done; idb is installed
+with pip, into `~/Library/Python/3.14/bin`. So any scenario relying on
+`sim-lib.sh` alone would still have failed, and `ui.py` — Python, which the
+new guard did not read — failed on the first run of this cycle with a
+traceback blaming the program rather than the PATH. Both directories now,
+with the version globbed rather than written down; `ui.py` finds idb itself;
+and the guard asks the Python tools the matching question. Its first run
+accused `mac-setup.sh`, which installs idb and never calls it, on the
+strength of a comment — cycle 167's lesson about matching the word `pt` in
+prose, repeated. It strips comments now.
+
+**Three faults in my own check before it measured anything** (M-601): a grep
+alternation ending in an empty branch, a phase parse that matched nothing,
+and sixty samples that took four and a half seconds — so the run ended before
+the kernel answered and reported a screen that never changed. It watches by
+the clock now, and declines when the turn did not complete.
+
+**Row 179 clean** (M-602): 8 rows marked Spoken, 1 answer row below the last
+marker, the kernel's wording appearing once. One turn, one row.
+
+Stills in `media/mobile/cycle-193/`:
+`the-call-screen-is-wordless.png`, `orb-phase-timeline.txt`.
+
+No recording this cycle — 192 carried the third-cycle film.
+
+**PR:** [#798](https://github.com/unarbos/arbos/pull/798), harness only.
