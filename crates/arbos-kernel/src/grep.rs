@@ -86,9 +86,10 @@ impl Grep for PlaceGrep {
                     continue;
                 }
             }
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(bytes) = std::fs::read(&path) else {
                 continue;
             };
+            let (text, _) = arbos_engine::decode_text(&bytes);
             for (i, line) in text.lines().enumerate() {
                 if re.is_match(line) {
                     hits.push(GrepHit {
