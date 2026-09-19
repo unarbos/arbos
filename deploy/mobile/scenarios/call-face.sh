@@ -1,5 +1,6 @@
 #!/bin/bash
 # COVERS: call — voice first, orb, colours
+# COVERS: projects list — faces, rows, sections
 #
 # Does the face under the orb name the project you called?
 #
@@ -45,15 +46,31 @@ for p in "${PROJECTS[@]}"; do
   xcrun simctl terminate "$UDID" $B 2>/dev/null; sleep 1
   xcrun simctl launch "$UDID" $B -noAskNotifications 1 >/dev/null 2>&1; sleep 10
   reach_the_list "$UDID" || exit 1
+  # The list's face for this project, before opening it. Cycle 181 found the
+  # disagreement is not only the orb's: the chat header draws the kernel's
+  # face too, and that is the screen you see every time you open a project.
+  xcrun simctl io "$UDID" screenshot "$OUT/$p-list.png" >/dev/null 2>&1
   ui tap "$p" >/dev/null 2>&1 || { echo "  no $p row"; continue; }
   sleep 5
+  xcrun simctl io "$UDID" screenshot "$OUT/$p-chat.png" >/dev/null 2>&1
   ui tap "More" >/dev/null 2>&1; sleep 2
   CALL=$(ui dump | grep -oE "Call $p\$" | head -1)
   [ -n "$CALL" ] || { echo "  the menu does not offer 'Call $p'"; continue; }
   ui tap "$CALL" >/dev/null 2>&1; sleep 8
   xcrun simctl io "$UDID" screenshot "$OUT/$p.png" >/dev/null 2>&1
   HEX=$(face "$OUT/$p.png")
-  printf '  %-28s %s\n' "$p" "$HEX"
+  # The header glyph sits left of the project's name, near the top.
+  CHAT=$(python3 - "$OUT/$p-chat.png" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert("RGB").crop((460, 225, 540, 285))
+w, h = im.size
+px = [im.getpixel((x, y)) for y in range(h) for x in range(w)]
+best = max(px, key=lambda p: max(p) - min(p))
+print("0x%02X%02X%02X" % best)
+PY
+)
+  printf '  %-22s orb %s   chat header %s\n' "$p" "$HEX" "$CHAT"
   echo "$HEX $p" >> "$SEEN"
   ui tap "End call" >/dev/null 2>&1; sleep 2
 done
