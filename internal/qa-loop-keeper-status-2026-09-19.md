@@ -12,9 +12,9 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | none open; **18 closed 21:02:25Z** (half A), 272 scenarios, 37 breaks |
+| current cycle | **19**, open, **half B**, desktop step done (app `cbb2907a5a7b`), 298 scenarios |
 | previous | 17 closed 17:44:10Z, 292; 16 closed 13:22:48Z, 262 |
-| next | cycle 19 due 22:00, half B (so no `lk-04`) |
+| next | cycle 20 will be **half A** — the letter alternates, so `lk-04` returns |
 | clean run | cycles 15-18: 0 checkpoint noise, 0 budget skips, no truncation in 16-18 |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
@@ -53,6 +53,7 @@ The fault is a **rate**, so it is only meaningful within one app build:
 | `249ddb5f` | live (full signature) |
 | `443ffdc55934` | live (full signature) |
 | `a129992316e9` | live (full signature) |
+| `cbb2907a5a7b` | live (full signature) |
 
 Full signature each time: `kf-01`, `mt-01`, `mt-04`, `dg-01` break together.
 
@@ -139,3 +140,27 @@ remembering when reading that number: **0/10 on J8 means nobody has measured it 
 
 Cycle 19 is due 22:00 and will be **half B**, so `lk-04` will be absent again and `qal-j40` goes
 unasked for that cycle. `kf-01` will run, being desktop-tagged. That is the cadence, not a fault.
+
+## Cycle 19 (half B) — the cadence rule now predicts in advance
+
+Predicted before the cycle ran, from `cycle.sh:113` (the letter flips each cycle) rather than from
+watching: half B, so `lk-01`/`lk-04` absent and `lk-02`/`lk-03` present. That is what happened.
+
+| scenario | result |
+|---|---|
+| `lk-02`, `lk-03` | pass (4.0 s, 3.7 s) — half B |
+| `lk-01`, `lk-04` | absent — half A, correct |
+| `kf-01`, `mt-01`, `mt-04`, `dg-01` | break — `qal-j43`, app `cbb2907a5a7b` |
+| `sq-02` | **pass**, 38.2 s — sixth build |
+
+`qal-j43` is seven builds deep. `sq-02`'s fix has held on six.
+
+One practical note for reading the state file: **the half is chosen at the tracked step, not at
+cycle start** (`cycle.sh:105-115` runs after the first step, which uses `--kernel-branch rust`).
+So `state/library-half` shows the *previous* cycle's letter for the first part of a cycle. I
+checked it too early once and had to wait.
+
+### Cycle 20 will be half A, not B
+
+The letter alternates on every cycle, so `lk-04` and `qal-j40` come back next cycle and
+`lk-02`/`lk-03` drop out. `kf-01` runs either way.
