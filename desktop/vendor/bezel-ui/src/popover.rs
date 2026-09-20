@@ -375,17 +375,23 @@ pub fn match_rank(query: &str, label: &str) -> Option<usize> {
         return Some(1);
     }
     let label = label.to_lowercase();
-    if label.starts_with(&query) {
+    // The whole word typed is the row meant: `/mode` ↵ ran `/model`, the
+    // row before it in the list, because both were prefix matches of
+    // equal rank (Arbos desktop, F-264).
+    if label == query {
         Some(0)
-    } else if label.contains(&query) {
+    } else if label.starts_with(&query) {
         Some(1)
+    } else if label.contains(&query) {
+        Some(2)
     } else {
         None
     }
 }
 
-/// Filter + rank labels for a search query: prefix matches first, then
-/// substring matches, stable within each rank. Returns indices into `labels`.
+/// Filter + rank labels for a search query: an exact match first, then
+/// prefix matches, then substring matches, stable within each rank. Returns
+/// indices into `labels`.
 pub fn filter_indices<S: AsRef<str>>(query: &str, labels: &[S]) -> Vec<usize> {
     let mut ranked: Vec<(usize, usize)> = labels
         .iter()
