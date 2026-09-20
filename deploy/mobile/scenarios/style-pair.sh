@@ -79,6 +79,7 @@ within() { python3 -c "print(1 if abs($1 - $2) <= 1.0 else 0)"; }
 
 echo
 FAULTS=0
+UNREAD=0
 if [ "${#LIST[@]}" = 2 ]; then
   G=$(gap "${LIST[0]}" "${LIST[1]}")
   echo "  list row pitch:   ${LIST[0]}% against ${LIST[1]}%  — ${G} apart"
@@ -93,15 +94,25 @@ if [ "${#CHAT[@]}" = 2 ]; then
   [ "$(within "${CHAT[0]}" "${CHAT[1]}")" = 1 ] || FAULTS=$((FAULTS + 1))
 else
   echo "  chat left margin: not read from both stills — see $OUT/chat.txt"
-  FAULTS=$((FAULTS + 1))
+  UNREAD=$((UNREAD + 1))
 fi
 
 echo
-if [ "$FAULTS" = 0 ]; then
+# Drift and "could not measure" are different answers and were one number.
+# Cycle 206 read `1 surface(s) are more than a point apart, or could not be
+# read` and the list was fine at 0.4 apart — the chat still simply had no
+# body text on it. A drift is a finding about the app; an unmeasured surface
+# is a finding about the run, and reporting them together makes a reader
+# check the app for a fault that was never claimed.
+if [ "${UNREAD:-0}" != 0 ] && [ "$FAULTS" = 0 ]; then
+  echo "VERDICT: cannot say for ${UNREAD} surface(s) — the still had nothing to"
+  echo "         measure, so nothing is claimed about drift there. Every surface"
+  echo "         that could be read sits within a point of Cursor's."
+elif [ "$FAULTS" = 0 ]; then
   echo "VERDICT: both surfaces sit within a point of Cursor's — the list's rhythm"
   echo "         and the chat's left margin"
 else
-  echo "VERDICT: $FAULTS surface(s) are more than a point apart, or could not be read."
+  echo "VERDICT: $FAULTS surface(s) are more than a point apart${UNREAD:+, and ${UNREAD} could not be read}."
   echo "         Read the numbers above before calling it a drift: a still of the"
   echo "         wrong screen measures perfectly and means nothing."
 fi
