@@ -6742,3 +6742,48 @@ Stills in `media/mobile/cycle-204/`:
 `the-chat-full-screen.png`, `the-orb-thinking.png`.
 
 **PR:** [#810](https://github.com/unarbos/arbos/pull/810), harness only.
+
+## Cycle 205 — what the film said that the verdict could not
+
+The oldest row was the audio route, last named at 198, and a film was due.
+
+**The route row holds** (M-662): `route=speaker` in the connect metric, zero
+elements on the call screen naming a route or a volume, zero files importing
+CallKit. Unchanged since 198, which is itself the answer — the app knows
+where the sound goes and never says.
+
+**Stopping a turn, filmed for the first time** (M-663). It works: the square
+becomes a microphone again, the kernel's transcript stops at 5457, and the
+record closes with `interrupted` then `turn_complete`. An independent review
+of the film: sent at 0:30, square tapped at 0:31, turn over at 0:32, no
+flicker and no control left in the wrong state.
+
+**Which exposed a reporting gap** (M-664). The journey has printed *Stop not
+exercised by this step* on every run, and a reader counting four unverified
+steps had no way to know that one of them is covered in full elsewhere. The
+note names `scenarios/stop-a-turn.sh` now and says what it proves. Unverified
+here means this step does not reach it, not that nobody does.
+
+**And the film showed what the verdict could not** (M-665). Above the
+composer, after the stop, under `Worked 1s`:
+
+```
+ 116  351  StaticText   stop during model call
+```
+
+The phrase is nowhere in the iOS source, so the phone is drawing text the
+kernel put in the interrupted frame — the same shape as cycle 200's worker
+lines. It names a pipeline phase, which a developer wants and a person does
+not, and it sits beside `Worked 1m 44s`, `Turn ended` and `While you were
+away`, all of which are written for a reader (M-666).
+
+Filed rather than guessed at:
+`features-inbox/2026-09-20-stopping-a-turn-says-stop-during-model-call.md`.
+A kernel string in any case, so the phone is not where it would be fixed.
+
+Evidence in `media/mobile/cycle-205/`: `stop-during-model-call.png`,
+`stopping-a-turn.mp4`, `01-running.png`, `02-stopped.png`,
+`no-route-on-the-call-screen.png`.
+
+**PR:** [#811](https://github.com/unarbos/arbos/pull/811), harness and an
+inbox note; no `ios/` change.
