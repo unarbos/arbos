@@ -12,9 +12,9 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | none open; **19 closed 2026-09-20 01:03:18Z** (half B), 298 scenarios, 31 breaks |
+| current cycle | **20**, open, **half A** (predicted), desktop step running (app `1647b90a8cfa`), 265 scenarios |
 | previous | 18 closed 21:02:25Z, 272; 17 closed 17:44:10Z, 292; 16, 262 |
-| next | cycle 20 due 02:00, **half A** — `lk-04` returns, `lk-02`/`lk-03` drop out |
+| next | cycle 21 will be **half B** — `lk-04` drops out again |
 | clean run | cycles 15-19: 0 checkpoint noise, 0 budget skips; no truncation in 16-19 |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
@@ -54,6 +54,7 @@ The fault is a **rate**, so it is only meaningful within one app build:
 | `443ffdc55934` | live (full signature) |
 | `a129992316e9` | live (full signature) |
 | `cbb2907a5a7b` | live (full signature) |
+| `1647b90a8cfa` | live (`kf-01`, `dg-01` so far) |
 
 Full signature each time: `kf-01`, `mt-01`, `mt-04`, `dg-01` break together.
 
@@ -174,3 +175,18 @@ The journey read `5/8 pass, 1 unverified, 2 fail` — J3 and J7 failed, J8 unver
 honestly, as `qal-j48` argues it should be read: **two real failures, one thing nobody measured**,
 not three bad steps. J8's feed has been stale since 2026-09-16 and the rate will keep reporting it
 as failure until either the feed returns or the summary learns the third outcome.
+
+## Cycle 20 (half A) — fourth consecutive half called in advance
+
+| scenario | result |
+|---|---|
+| `lk-01` | pass, 331.4 s |
+| `lk-04` | **break, 3.1 s** — `qal-j40` returned on half A, as predicted |
+| `fm-01` | break |
+| `kf-01`, `dg-01` | break — `qal-j43` on app `1647b90a8cfa` |
+
+The half has now been called correctly before the cycle ran four times over: 17 (B), 18 (A),
+19 (B), 20 (A). It is settled enough that a deviation would be a signal rather than a puzzle.
+
+`qal-j43` is eight builds deep. `qal-j40` keeps being reported by `lk-04` on every half-A cycle, in
+3.1 s, which is as cheap as a standing guard gets.
