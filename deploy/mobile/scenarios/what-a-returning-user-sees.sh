@@ -129,7 +129,15 @@ if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sl
   # "Worked <time>". While the worker runs there is none.
   BEFORE_ROWS=$(ui dump | grep -cE "StaticText")
   BEFORE_END=$(ui dump | grep -cE "Worked [0-9]+[a-z]|Turn ended")
-  echo "  left with:         $BEFORE_ROWS line(s) on screen, $BEFORE_END ending line(s)"
+  # Printed as context and labelled as context. The comment above has said
+  # since cycle 182 that this count is not the evidence, but the output put
+  # it immediately above the verdict where it reads as though it were — and
+  # cycle 201 came back to *fewer* lines than it left with, 7 down to 4, on a
+  # run that had plainly caught up. A reader then has to distrust either the
+  # number or the verdict, and both are fine.
+  echo "  left with:         $BEFORE_END ending line(s) — the count that matters"
+  echo "                     ($BEFORE_ROWS line(s) on screen, which moves with the"
+  echo "                      keyboard and the scroll and proves nothing)"
   shot 05-left-it-working
   idb ui button HOME --udid "$UDID"
   sleep 90
@@ -148,8 +156,8 @@ if type_line "$UDID" "Start one worker whose goal is exactly $TAG late, which sl
     sleep 5
   done
   AFTER_ROWS=$(ui dump | grep -cE "StaticText")
-  echo "  came back to:      $AFTER_ROWS line(s) on screen"
-  echo "  the turn's ending: ${AFTER_END:-none on screen}"
+  echo "  came back to:      ${AFTER_END:-no ending line} — the count that matters"
+  echo "                     ($AFTER_ROWS line(s) on screen)"
   if [ -n "$AFTER_END" ] && [ "$BEFORE_END" = 0 ]; then
     echo "  VERDICT: the chat caught up while the phone was away — he left a turn"
     echo "           running and came back to '$AFTER_END'"
