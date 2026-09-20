@@ -206,7 +206,16 @@ impl Opener {
     }
 
     fn query(&self, cx: &App) -> String {
-        self.field.read(cx).content().trim().to_string()
+        let raw = self.field.read(cx).content().trim().to_string();
+        // The folder stage opens with `~/` in the field; an absolute path
+        // typed after it (`~//tmp/place`) is the absolute path, not a
+        // folder under home — on a remote host it became `$HOME//tmp/…`
+        // and the kernel was started in a folder that did not exist
+        // (F-250, cycle 78).
+        match raw.strip_prefix("~//") {
+            Some(rest) => format!("/{}", rest.trim_start_matches('/')),
+            None => raw,
+        }
     }
 
     /// Rebuild the list only when the typed query actually changed.
