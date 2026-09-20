@@ -1,0 +1,10 @@
+{
+  "name": "fm-01-stale-checkpoint-sidecar-from-a-cut-turn-is-taken-for-the-new-turn-at-the-same-line",
+  "doc": "settle_tree reads checkpoints.d/<line>.json when a checkpoint's tree is still pending, and accepts it if its\n        HEAD matches. Line numbers are transcript lines: after a rewind, new turns reuse the cut turns' lines, and the\n        cut turns' sidecars are not removed. Stage it: five turns, rewind to 3 (f3..f5 gone), new turns 3' and 4' with\n        the tree delayed so 4' is still pending, rewind to 4'. The right tree is {f1, f2, g3}; the stale sidecar says\n        {f1, f2, f3} \u2014 and HEAD never moved, so the guard passes it.",
+  "tags": [
+    "landing",
+    "first-match",
+    "rewind",
+    "destructive-order"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "mt-12-one-report-per-child",
+  "doc": "Item 12. A worker without wait: root gets exactly one waking file (done) and runs one turn for it.",
+  "tags": [
+    "multitasking"
+  ]
+}

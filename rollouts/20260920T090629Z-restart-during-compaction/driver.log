@@ -1,0 +1,8 @@
+1789895189505 kernel started pid 2394799
+1789895189556 kernel stopped with code 0
+1789895189557 kernel-compact started pid 2394845
+1789895191462 kernel-compact SIGKILLed
+1789895191966 kernel-resume started pid 2394895
+1789895203239 BREAK turn-contract: transcript does not end in turn_complete: ['turn_complete', 'compaction', 'notice']
+1789895203246 kernel-resume stopped with code 0
+1789895203294 bugs: seen d7a73da7b5.md

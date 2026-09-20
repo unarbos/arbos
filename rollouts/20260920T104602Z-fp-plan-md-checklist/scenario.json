@@ -1,0 +1,7 @@
+{
+  "name": "fp-plan-md-checklist",
+  "doc": "The plan tool is a checklist: `set` writes plan.md with - [ ] lines, `check` ticks one. No scheduling fields.",
+  "tags": [
+    "file-plan"
+  ]
+}

@@ -1,0 +1,11 @@
+1789904235103 J1: pass — tab present, greeting shown ("Hey — the 'shapes' Python project is ready to go, with its `"), .arbos/ created
+1789904240799 J2: pass — chat busy; workers ['fix-failing-test'] / 1 spawn card(s)
+1789904290192 J3: pass — workers finished, no duplicate lines, status shown as status, idle means the turn ended
+1789904293329 J4: pass — mid-flight line relayed to the running worker, no second worker; the later one started its own turn and was answered
+1789904303873 J5: pass — steer taken, read-only question answered, Stop ended the turn and the next prompt ran
+1789904336180 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab
+1789904358288 J6: pass — tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab; away-tab reply: badge + unseen, OS notification posted and confirmed by the daemon, cleared on click
+1789904358333 J7: fail — no branch with a commit ahead of main (['main'])
+1789904388900 J8: unverified — restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)
+1789904391953 BREAK journey-J7: no branch with a commit ahead of main (['main'])
+1789904391989 bugs: seen c247225fbb.md

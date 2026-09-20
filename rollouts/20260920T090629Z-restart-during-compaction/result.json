@@ -1,0 +1,48 @@
+{
+  "scenario": "restart-during-compaction",
+  "doc": "A near-full context forces compaction before the model step; the kernel is killed while the summariser runs, then restarted. The transcript must stay parseable and the turn must finish once.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-contract",
+      "detail": "transcript does not end in turn_complete: ['turn_complete', 'compaction', 'notice']",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "kinds_after_kill": [
+      "notice",
+      "wake",
+      "user"
+    ],
+    "kinds_after_resume": [
+      "notice",
+      "wake",
+      "user",
+      "wake",
+      "compaction",
+      "notice",
+      "assistant",
+      "tool",
+      "compaction",
+      "notice",
+      "assistant",
+      "tool",
+      "notice",
+      "assistant",
+      "turn_complete",
+      "compaction",
+      "notice"
+    ],
+    "compactions": 3
+  },
+  "duration_s": 13.8,
+  "place": "/tmp/arbos-qa-restart-during-compaction-03_kz4d7/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/repo/target/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 a68172884f5c protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T090629Z-restart-during-compaction",
+  "branch": "rust",
+  "usd": 0.02087
+}

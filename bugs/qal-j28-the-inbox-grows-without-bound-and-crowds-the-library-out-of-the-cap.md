@@ -250,3 +250,47 @@ than truncating, and it got through 89 scenarios where the 17:01 step managed 33
 
 So the loop's throughput depends on the agent being there — which is worth knowing before anyone
 tunes the cap or trims the library to fit it.
+
+## The missing half never existed — I was reading the wrong cap
+
+Everything above about "half the cap is not scenario work", the two clocks, and suspension is
+**wrong**, and the cause is embarrassing and simple: **I compared step 1's work against step 3a's
+timeout.**
+
+- step 1 (`cycle.sh:95`): `timeout 50m … --kernel-branch rust`
+- step 3a, tracked (`cycle.sh:148`): `timeout ${ARBOS_QA_TRACK_TIMEOUT:-100m}`
+
+Every `run.py exit 124` I measured follows `-- building arbos-kernel at …`, which is **step 1**. Its
+cap is fifty minutes, not a hundred. Set beside the right number the measurements stop being a
+mystery:
+
+| step | scenarios | measured work | cap | outcome |
+|---|---|---|---|---|
+| 2026-09-18 17:01 | 33 | 49.9 min | **50 min** | truncated |
+| 2026-09-19 04:37 | 77 | 49.6 min | **50 min** | truncated |
+| 2026-09-20 05:00 | 90 | 49.8 min | **50 min** | truncated |
+| 2026-09-19 10:00 | 89 | 42.6 min | 50 min | completed |
+
+The step uses its whole window and is cut off. There is no gap, no unexplained overhead, and
+nothing for suspension to explain. Cycle 21 settles it beyond argument: its wall-clock span was
+**49.9 min against 49.8 min of work — a gap of 0.1 min, no suspension at all** — and it truncated
+anyway, which no version of the suspension story allows.
+
+### What is actually true
+
+**Step 1 is too small for what it runs.** It routinely needs slightly more than fifty minutes and
+loses the tail every time. When a slow provider hour stretches each scenario (`qal-j45`) it reaches
+33 scenarios instead of 90 inside the same fifty minutes — which is this bug's real subject, and
+the only part of my analysis that survives.
+
+### How I got it wrong three times
+
+I read `100m` from `cycle.sh`, matched it to a truncation I had not traced to a specific step, and
+then spent three rounds explaining a fifty-minute discrepancy that was an artefact of the mismatch:
+first blaming suspension, then retracting that on a bad wall-clock argument, then reinstating it on
+two controlled runs that were measuring something real but irrelevant.
+
+The controlled runs were good work and their result stands — per-scenario overhead is 0.1 s. They
+just answered a question that did not need asking. **The step that a number belongs to is part of
+the number.** I should have traced `exit 124` to its own line in the script before theorising about
+clocks, and it would have taken one `awk`.

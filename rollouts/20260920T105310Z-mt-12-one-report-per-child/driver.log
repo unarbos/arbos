@@ -1,0 +1,4 @@
+1789901590789 kernel started pid 2455223
+1789901633956 BREAK mt-12-two-root-turns: 0 root turn(s) after one child reported (expected 1: the child's say plus its done file both wake root)
+1789901633959 kernel stopped with code 0
+1789901634005 bugs: seen 4144d58f87.md

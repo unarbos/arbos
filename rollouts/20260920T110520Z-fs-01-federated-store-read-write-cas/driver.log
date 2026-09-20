@@ -1,0 +1,4 @@
+1789902321989 kernel-b started pid 2457486
+1789902324350 BREAK fs-01-cas-no-current-hash: the conflict reply does not carry the file's current hash for a re-read
+1789902324533 kernel-b stopped with code 0
+1789902324563 bugs: seen 4aef12c1a1.md

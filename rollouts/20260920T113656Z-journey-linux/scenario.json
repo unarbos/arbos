@@ -1,0 +1,9 @@
+{
+  "name": "journey-linux",
+  "doc": "The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step.",
+  "tags": [
+    "journey",
+    "desktop",
+    "headline"
+  ]
+}
