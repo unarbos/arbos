@@ -162,9 +162,6 @@ pub enum ComposerEvent {
     Attach,
     /// No slash or model menu: the arrow keys step the sidebar.
     Step(isize),
-    /// Field empty, no slash or model menu: Delete/Backspace archives or
-    /// kernel-deletes the highlighted chat.
-    Delete,
 }
 
 /// One skill or slash template the `/` menu can offer.

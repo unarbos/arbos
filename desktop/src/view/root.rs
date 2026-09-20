@@ -1166,7 +1166,6 @@ impl Arbos {
                 ComposerEvent::Call => this.start_call_action(&StartCall, window, cx),
                 ComposerEvent::Attach => {}
                 ComposerEvent::Step(step) => this.cycle_entry(*step, window, cx),
-                ComposerEvent::Delete => this.delete_highlighted(cx),
             },
         )
         .detach();
