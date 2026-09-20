@@ -6475,3 +6475,62 @@ Evidence in `media/mobile/cycle-199/`:
 `the-list-reached-again.png`.
 
 **PR:** [#804](https://github.com/unarbos/arbos/pull/804), harness only.
+
+## Cycle 200 — the ledger that had stopped, and what a worker line says
+
+**The journey ledger had lapsed** (M-635). `mac-journey.sh` writes
+`record.json` on the Mac and prints the line; carrying it into the store was
+a step done by hand, and it had not been done since cycle 187. The prose
+ledger held nothing after 187, its machine twin nothing after 09-18 — three
+runs missing from one, fourteen from the other. The runs happened, the
+evidence sat on the Mac, and the ledger QA reads did not know.
+
+`journey-ledger.sh` fetches every record and appends what is missing. Two
+things it learned on its first run:
+
+- **It duplicated fourteen rows** (M-636), because one check against one file
+  appended the difference to both — and the two ledgers were not equally far
+  behind. Each is asked separately now. Restored from the backup taken first
+  and reapplied: no duplicate timestamps, and `diff` of the sorted files
+  shows the same lines.
+- **A backfill is mostly old runs** (M-637), so appending put six runs from
+  two days earlier at the end and the ledger read forwards, backwards, then
+  forwards. Rows are sorted in place afterwards, with the count checked so a
+  sort cannot quietly drop one: 45 before, 45 after. Run again: 0 added, 15
+  already there.
+
+**Then the oldest row, and a hard look at what it leaves on screen.**
+`call-text-in-chat` is clean (M-641) — one answer row under the marker, zero
+matching the kernel's wording because the gateway paraphrased this time,
+which the check allows either way, and zero refusals logged.
+
+The chat it left behind is where the interest was. Counted from the
+accessibility tree rather than the picture:
+
+| | count |
+| --- | --- |
+| worker lines visible | 7 |
+| "Last words" beginning with a plan | **6** |
+| "Last words" beginning with the answer | 1 |
+| named with a space, `w003613 rivers` | 5 |
+| named with a hyphen, `w003613-sky` | **2** |
+
+So the sentence a worker was asked for is usually the part cut off (M-638),
+and one list names some workers by goal and others by agent id (M-639). The
+label promises the end of what the worker said and shows the beginning of its
+final message.
+
+Neither is the app's doing (M-640): the phone renders the kernel's done note,
+the same `Turn ended. Last words:` shape `voice-server` parses, and the two
+name forms are the agent directory against the goal as typed. My first
+reading of the screenshot was also wrong — it looked as though four lines
+were identical, and they are not; the texts differ, what they share is
+opening with procedure.
+
+Filed rather than guessed at:
+`features-inbox/2026-09-20-worker-lines-lead-with-the-plan.md`.
+
+Still in `media/mobile/cycle-200/worker-lines-leading-with-the-plan.png`.
+
+**PR:** [#805](https://github.com/unarbos/arbos/pull/805), harness and an
+inbox note; no `ios/` change.
