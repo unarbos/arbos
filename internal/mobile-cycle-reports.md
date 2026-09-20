@@ -6534,3 +6534,60 @@ Still in `media/mobile/cycle-200/worker-lines-leading-with-the-plan.png`.
 
 **PR:** [#805](https://github.com/unarbos/arbos/pull/805), harness and an
 inbox note; no `ios/` change.
+
+## Cycle 201 — ageing rows by memory, and a number that proved nothing
+
+**A row said 193 for five cycles while the check covering it ran** (M-642).
+`what-the-caller-sees.sh` declares two `# COVERS:` rows and ran at cycle 196.
+Only one was written down, so the queue kept offering *call — first word and
+transcription* as the oldest thing in the loop. The same slip happened at 195
+and at 200: ageing rows from memory keeps missing the second declaration.
+
+**So it is read from what a cycle left behind** (M-643). Each scenario writes
+into `~/mobile-out/<cycle>/<its own subdirectory>`, and that name is a
+literal in the file — so the directories a cycle left behind name the
+scenarios that ran, and each already declares its rows. Nothing had to be
+added to any scenario.
+
+`what-ran.sh`, checked five ways: cycle 196 names both rows including the
+forgotten one; 195 finds `mac-voice`; 197 the whole sweep; 199 and 200
+exactly what was recorded by hand. One blind spot, written in its header
+(M-644): `mac-journey.sh` writes to `~/mobile-out/journey/<run id>` rather
+than under the cycle, so a journey is still aged by hand, and cycle 200's
+`journey-ledger.sh` is the record that it happened.
+
+**Then the oldest row that was genuinely old.** The returning user passes all
+three cases (M-645) — the same screen after two minutes, back in the chat he
+left even after the process was killed, and the turn's ending waiting for him.
+
+But the run printed this, directly above the verdict:
+
+```
+  left with:         7 line(s) on screen, 0 ending line(s)
+  came back to:      4 line(s) on screen
+```
+
+Fewer lines than he left with, under a verdict saying the chat had caught up.
+Both were correct. The code has known since cycle 182 that the on-screen
+count moves with the keyboard and the scroll, and that the evidence is the
+turn's `Worked <time>` appearing where there was none — it says so in a
+comment (M-646). The output did not, so a reader had to distrust either the
+number or the conclusion.
+
+The ending-line count leads now and is labelled as the one that matters, with
+the row count in brackets as what it is. Reran:
+
+```
+  left with:         0 ending line(s) — the count that matters
+                     (6 line(s) on screen, which moves with the
+                      keyboard and the scroll and proves nothing)
+  came back to:      Worked 1m 44s — the count that matters
+                     (5 line(s) on screen)
+```
+
+6 down to 5 again, and nobody misled. The verdict is unchanged.
+
+Stills in `media/mobile/cycle-201/`:
+`came-back-to-finished-work.png`, `back-in-the-chat-after-being-killed.png`.
+
+**PR:** [#806](https://github.com/unarbos/arbos/pull/806), harness only.

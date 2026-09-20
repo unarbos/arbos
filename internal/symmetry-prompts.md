@@ -54,7 +54,7 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | area | last | how | due? |
 | --- | --- | --- | --- |
 | chat: Project style (root) | 81 (a root turn of two reads and prose: *Worked 27s ›* shut, *Explored 2 files* open — Cursor's words; no Thought row from Flash) | `journey.py` beside `cycle-23/` | — |
-| chat: classic style (worker) | 75 (d41: a failing command's card — F-215's state, held in #703; the worker reports the error and ends Done) | `worker_live.py`, `cycle-47/worker-live/` vs `cycle-24/cursor-worker-chat-open.png` | — |
+| chat: classic style (worker) | 82 (a worker's own ask card, Skip: F-258 the kernel's skip line drew as the person's bubble; *Worked for 3s* holds across a relaunch) | `worker_live.py`, `cycle-47/worker-live/` vs `cycle-24/cursor-worker-chat-open.png` | — |
 | long-form project (many turns, notes restructure, workers come and go, archived, context re-found, scroll) | 79 (d45: *Explored 5 files, 1 search, could not edit* — F-254 the hole in the rows; Review and the relaunch hold) | l1–l13, d1–d19 | — |
 | kickoff / new-project landing — the first thirty seconds, refused and silent providers | 81 (a 60-file tree: the same one-command kickoff, 13 s; a key swapped mid-kickoff changes nothing — F-189's per-turn read) | `cold.py` f1/f2, `new-project-kickoff` gate row | every cycle from now |
 | launch, first run, permissions sheet | 80 (a true first run: shimmer, the Home face sheet, the permissions sheet, filled screen by design; F-231 stands — the renamed place is dropped in silence) | gate `launch` phase (Linux rows only) | — |
@@ -66,7 +66,7 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | mode chip, /mode, approval + ask cards per mode | 79 (`/mode ask` → the mode notice; a writing bash ran with no approval card — F-182, kernel, stands; no chip pinned by /mode) | `askmode41.py`, gate `ask-*` rows | — |
 | under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 81 (Push on a repo two ahead of a bare remote: the pill, its tooltip *2 commits not yet pushed*, the click's prompt — the model's spawn `{}` ate it, kernel) | gate `pills` rows | — |
 | bottom bar (version, Update) | 75 (the *is out* plate in light: #525252 on white, white words — holds) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
-| search (⌘K chat search palette) | 77 (a worker hit's row: title, brief, tab, age; a desktop-closed chat is filtered out by design — Cursor's archived-in-search unverified) | gate `search-by-content`, `search-open-hit` | — |
+| search (⌘K chat search palette) | 82 (the Actions filter: five rows with their chords — New Tab ⌘T, Open Folder ⌘O, Project Page ⌘2, Settings ⌘, Report ⇧⌘R; a miss reads No matches) | gate `search-by-content`, `search-open-hit` | — |
 | themes: light, dark; tint | 75 (the *is out* plate and its tooltip in light — holds) | cycle-11 `13-light`; gate `appearance-*` | 15 |
 | window sizes: 900×600, panel fold, 1600×1000 | 77 (⌘B under the fold: *Hide panel* over no panel — F-248, owner's) | `cycle-43/sizes/` | — |
 | remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 78 (a local sshd: fault → fix → live in one retry, the keyless bar; F-250 the `~//` path; the real remote untouched) | remote track scenarios 1–2; 3–4 open | 16 |
