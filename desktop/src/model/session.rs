@@ -3315,6 +3315,14 @@ impl ChatSession {
                 let was = self.provider_missing.take();
                 if key {
                     if was.is_some() {
+                        // The kernel's own line for the same act, if it
+                        // came first (F-260).
+                        if let Some(ix) = self.items.iter().rposition(
+                            |item| matches!(item, ChatItem::Notice { text: t, failed: false } if t.trim_start().starts_with("Model key set for ")),
+                        ) && ix + 3 >= self.items.len()
+                        {
+                            self.items.remove(ix);
+                        }
                         self.notice(
                             false,
                             &format!("{provider} key in place on this kernel ({source})"),
@@ -4474,6 +4482,20 @@ impl ChatSession {
             self.items.retain(|item| {
                 !matches!(item, ChatItem::Notice { text: t, failed: false } if is_page_nudge(t))
             });
+        }
+        // The kernel's own line for a key just lent to it ("Model key set
+        // for openrouter (…): kept in memory for this kernel only") lands
+        // beside this window's "openrouter key in place on this kernel
+        // (memory)" from the provider frame — one act, two lines (F-260,
+        // cycle 84). This window's line stands; the kernel's is the same
+        // news with the model id in it.
+        if !failed
+            && text.trim_start().starts_with("Model key set for ")
+            && self.items.iter().rev().take(3).any(
+                |item| matches!(item, ChatItem::Notice { text: t, failed: false } if t.contains(" key in place on this kernel")),
+            )
+        {
+            return;
         }
         // "compacted 2 turn(s): ~32k → ~21k tokens" is the end of the story
         // "compacting 2 turn(s), ~32k tokens…" began: one line, the result,
