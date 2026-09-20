@@ -3972,8 +3972,18 @@ fn is_ask_echo(items: &[ChatItem], ix: usize) -> bool {
         && matches!(
             (&items[ix - 1], &items[ix]),
             (ChatItem::Asked { answer, .. }, ChatItem::User(message))
-                if !answer.is_empty() && message.text.trim() == answer.trim()
+                if (!answer.is_empty() && message.text.trim() == answer.trim())
+                    || is_skip_prompt(&message.text)
         )
+}
+
+/// The kernel's own line for a Skip — delivered to the agent as a user
+/// message, so it came back as a bubble of the person's under the folded
+/// *Question · … · skipped* row, in words the person never typed
+/// (F-258, cycle 82). The row already says skipped.
+fn is_skip_prompt(text: &str) -> bool {
+    text.trim_start()
+        .starts_with("The user skipped this question without answering.")
 }
 
 /// A question once answered: the card folded to one faint line, the
@@ -4669,10 +4679,16 @@ fn zone(
         // — steers — are not the agent's work to hide: they stay in view
         // under the headline (a shut live fold swallowed three "run it"
         // bubbles on the rig, cycle 23).
+        // A question once answered stays in view too: Cursor keeps the
+        // collapsed card with its pick in the flow, and the skip's echo
+        // no longer opens a turn of its own to carry it (F-258).
         let steers: Vec<AnyElement> = segs
             .iter()
             .filter_map(|seg| match seg {
-                Seg::Other(ix) if inline_user(&chat.items, *ix) => {
+                Seg::Other(ix)
+                    if inline_user(&chat.items, *ix)
+                        || matches!(chat.items[*ix], ChatItem::Asked { .. }) =>
+                {
                     Some(work_other(chat, *ix, &theme, window, cx))
                 }
                 _ => None,
