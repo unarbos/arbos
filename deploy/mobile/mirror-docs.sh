@@ -91,7 +91,14 @@ PY
   SB=$(wc -c < "$SRC"); MB=$(wc -c < "$TMP")
   if [ "$LOST" -gt 0 ]; then
     echo "  $f — REFUSED. $LOST line(s) live only in the mirror; copying would lose them."
-    echo "      source $SB bytes, mirror $MB bytes. Reconcile by hand, then run again."
+    echo "      source $SB bytes, mirror $MB bytes."
+    # The refusal is right far more often than not, but a correction made in
+    # place is indistinguishable from a loss: cycle 204 fixed a wrong PR
+    # number in one line and the tool refused the whole file. The way through
+    # is to look, not to loosen the rule — so it says how to look.
+    echo "      To see what it means:"
+    echo "        scp $REMOTE:~/mobile-docs/$f /tmp/m.md && diff /tmp/m.md $SRC"
+    echo "      If every difference is one you meant, copy that file yourself."
     REFUSED=$((REFUSED + 1))
   elif [ "$SB" -le "$MB" ]; then
     echo "  $f — nothing to do: the mirror already holds everything ($MB bytes)."
