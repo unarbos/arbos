@@ -1051,7 +1051,7 @@ impl Arbos {
                 .p(px(12.))
                 .text_style(TextStyle::Caption)
                 .text_color(theme.text_muted)
-                .child(s.error.clone().unwrap_or_default())
+                .child(live_error_words(s.error.as_deref().unwrap_or_default()))
                 .into_any_element(),
             Some(s) if s.image.is_some() => img(s.image.clone().unwrap())
                 .w(px(width))
@@ -2846,4 +2846,25 @@ pub(crate) fn diff_marks(theme: &Theme, add: u32, del: u32) -> AnyElement {
             )
         })
         .into_any_element()
+}
+
+/// The live strip's failure, in words for the person. The capture tool's
+/// own stderr — *scrot: Can't open X display. It \*is\* running, yeah?* —
+/// came through whole; the kernel's parenthesis at its end says what
+/// matters: no display where the kernel runs (F-259, cycle 84). Cursor
+/// never shows a tool's stderr as a line.
+fn live_error_words(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    if lower.contains("no display") || lower.contains("can't open x display") || lower.contains("no screen to capture") {
+        return "No screen to capture: the kernel has no display where it runs.".into();
+    }
+    if let Some(at) = raw.rfind('(')
+        && raw.ends_with(')')
+    {
+        let inner = raw[at + 1..raw.len() - 1].trim();
+        if !inner.is_empty() {
+            return format!("{}{}.", inner[..1].to_uppercase(), &inner[1..]);
+        }
+    }
+    raw.to_string()
 }
