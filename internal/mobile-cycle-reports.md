@@ -6591,3 +6591,53 @@ Stills in `media/mobile/cycle-201/`:
 `came-back-to-finished-work.png`, `back-in-the-chat-after-being-killed.png`.
 
 **PR:** [#806](https://github.com/unarbos/arbos/pull/806), harness only.
+
+## Cycle 202 — the map of what is stale had gone stale
+
+Opening the cycle, the queue said this:
+
+```
+  last named at    7   background minutes/hours → resume; what a returning user sees first
+```
+
+That row was updated an hour earlier, at cycle 201 (M-647). `coverage-map`
+read every number in the cell and then filtered to `n <= 200` — a ceiling
+added when finding ids were being mistaken for cycles, and described in its
+own comment as *anything past the cycle we could plausibly be in*. The loop
+became implausible. Real cycle numbers were discarded, and whatever digits
+the prose held were kept: a stray 7, and the 44 out of `Worked 1m 44s`.
+
+**The shape was always there to match** (M-648). An entry is written
+`<cycle> (what happened)` and entries are joined with commas, so the cycle is
+the number that *opens* an entry and never one inside the prose. Matching
+that needs no ceiling and no id-stripping, so there is nothing left to rot.
+
+**That exposed a row aged in build numbers** (M-649). `TestFlight build on
+Jacob's phone` reads `956 (13 reports), 994 (fixes for F1–F6)`, and the old
+parser had been taking the **13** out of *13 reports* — which is why that row
+sat at the top of the queue for months meaning nothing. Read properly it
+becomes 994, sorts to the newest end, and vanishes from a list of the oldest.
+Silently, which is worse than wrong.
+
+So rows whose newest entry is far outside the table's own spread are named
+under their own heading rather than ranked or dropped (M-650), with the
+median of the other rows as the yardstick — because a constant is exactly
+what failed here.
+
+**Then the oldest real row, filmed** (M-651). Barge-in is clean: three of
+three, stopping after 396, 326 and 179 ms with the gateway confirming each at
+442, 369 and 221 ms. Zero refused taps. It is visible in the film as the orb
+dropping out of blue, and the two stills are frames two seconds apart either
+side of a barge.
+
+**One old number was standing in for a baseline** (M-652). A healthy 300 ms
+average printed under *(cycle 77 measured 181 ms)* reads as a regression. It
+is not: every measurement since clusters higher — 272 and 316 ms at cycle
+193, 273 and 315 at 195 — so 181 is the outlier, not the target. The verdict
+cites the range now.
+
+Evidence in `media/mobile/cycle-202/`:
+`speaking-before-the-barge.png`, `stopped-after-the-barge.png`,
+`barge-in-three-runs.mp4`.
+
+**PR:** [#807](https://github.com/unarbos/arbos/pull/807), harness only.
