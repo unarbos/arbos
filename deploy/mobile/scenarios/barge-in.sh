@@ -86,7 +86,13 @@ if [ "$CHANCES" = 0 ]; then
 elif [ "$STARTED" = "$CHANCES" ]; then
   MS=$(grep -hoE "metric barge_in_speech_started [0-9]+" "$OUT"/run-*.log | awk '{s+=$3; n++} END {if (n) printf "%d", s/n}')
   echo "VERDICT: speaking over it stops it, every run that could — ${MS} ms on average"
-  echo "         (cycle 77 measured 181 ms)"
+  # A single old number read as the baseline, and at cycle 202 a healthy
+  # 300 ms average sat under "(cycle 77 measured 181 ms)" looking like a
+  # regression. It is not: every measurement since has clustered higher —
+  # 272 and 316 ms at 193, 273 and 315 at 195 — so 181 is the outlier, not
+  # the target. The range says that; one number cannot.
+  echo "         Measured since: 181 ms at cycle 77, then 272/316 at 193 and"
+  echo "         273/315 at 195. Anything inside 180-330 ms is the usual spread."
 else
   echo "VERDICT: it stopped the reply in $STARTED of $CHANCES — not every time, which is"
   echo "         worse than never, because the caller cannot learn what to expect"
