@@ -1,0 +1,26 @@
+{
+  "scenario": "mt-12-one-report-per-child",
+  "doc": "Item 12. A worker without wait: root gets exactly one waking file (done) and runs one turn for it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-12-two-root-turns",
+      "detail": "0 root turn(s) after one child reported (expected 1: the child's say plus its done file both wake root)",
+      "where": "arbos-kernel: child say + done file are two wakes"
+    }
+  ],
+  "notes": {
+    "root_turns_after_spawn": 0,
+    "wakes": [],
+    "inbox": []
+  },
+  "duration_s": 50.4,
+  "place": "/tmp/arbos-qa-mt-12-one-report-per-child-4h467n5x/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2364bcb8b6a4 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T033909Z-mt-12-one-report-per-child",
+  "branch": "main",
+  "usd": 0.01191
+}

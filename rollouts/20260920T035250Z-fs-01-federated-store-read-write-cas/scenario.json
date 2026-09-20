@@ -1,0 +1,8 @@
+{
+  "name": "fs-01-federated-store-read-write-cas",
+  "doc": "Kernel B (machine qa-b, project beta) registers on a local hub. From node A: `store read` of B's notes.md, `store put` into B's docs/ (allowed), the same put with a stale base hash (conflict, current hash returned), a put to B's root-owned notes.md (refused, unchanged), `store ls`, and a read of a path with `..` (refused).",
+  "tags": [
+    "mesh",
+    "federated-store"
+  ]
+}

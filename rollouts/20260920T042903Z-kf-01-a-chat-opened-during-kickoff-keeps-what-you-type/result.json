@@ -1,0 +1,28 @@
+{
+  "scenario": "kf-01-a-chat-opened-during-kickoff-keeps-what-you-type",
+  "doc": "`qal-j43`: on app builds before `1768ec83`, a chat minted while its place was still\n        serving the **kickoff turn** was inert. The app minted it, activated it, reported its\n        connection live, and the composer cleared on Enter \u2014 but the typed line never reached\n        `Session::send()` at all, so no frame went on the wire and the kernel never heard it.\n\n        Fixed on `main` by `1768ec83` (\"desktop: chat fills the column; Clear goes; expand is\n        pinned at the window's top-right\", in [#656](https://github.com/unarbos/arbos/pull/656)),\n        which is a **layout** commit. Nothing in it names this bug, so the fix was almost certainly\n        incidental \u2014 which is the whole reason this scenario exists. Bisected 2026-09-18 with an\n        instrumented build: `e10953fb` (its parent) breaks 3/3, `1768ec83` passes 3/3.\n\n        The contract: a cleared composer means the app accepted the line, and an accepted line must\n        arrive. Minting deliberately inside the kickoff window is the only way to hold it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "kf-01-accepted-line-never-arrived",
+      "detail": "the composer cleared, so the app accepted the line, but chat-1789878545058's transcript never recorded it after 45 s (qal-j43). A cleared composer must mean a delivered line.",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "kickoff_running_when_minted": true,
+    "agent": "chat-1789878545058",
+    "composer_cleared_so_line_accepted": true,
+    "transcript_exists": true,
+    "line_landed": false
+  },
+  "duration_s": 63.9,
+  "place": "/tmp/arbos-qa-kf-01-a-chat-opened-during-kickoff-keeps-what-you-type-kkhyuweq/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1647b90a8cfa protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T042903Z-kf-01-a-chat-opened-during-kickoff-keeps-what-you-type",
+  "branch": "main",
+  "usd": 0.018
+}

@@ -1,0 +1,43 @@
+{
+  "scenario": "prompt-no-key",
+  "doc": "Send one prompt with no API key configured. The turn must end honestly: transcript ended, node not marked done.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "turn-never-started",
+      "detail": "no running turn frame",
+      "where": ""
+    },
+    {
+      "rule": "turn-never-ended",
+      "detail": "no idle turn frame",
+      "where": ""
+    },
+    {
+      "rule": "turn-contract",
+      "detail": "turn ended without turn_complete; transcript kinds: ['notice']",
+      "where": "crates/arbos-engine/src/turn.rs:129"
+    },
+    {
+      "rule": "restart-replays-wake",
+      "detail": "two idle restarts grew the transcript 1 -> 3 lines (each start replays the unended wake)",
+      "where": "crates/arbos-core/src/files.rs:231"
+    }
+  ],
+  "notes": {
+    "transcript_kinds": [
+      "notice"
+    ],
+    "transcript_lines_before_restarts": 1,
+    "transcript_lines_after_restarts": 3
+  },
+  "duration_s": 36.6,
+  "place": "/tmp/arbos-qa-prompt-no-key-7c140k8f/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2364bcb8b6a4 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T024145Z-prompt-no-key",
+  "branch": "main",
+  "usd": 0.0
+}

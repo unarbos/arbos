@@ -1,0 +1,30 @@
+{
+  "scenario": "mt-20-ask-is-a-card-in-place",
+  "doc": "Item 20. A parked question is a card at its turn (not pinned above the composer); the answer writes a user bubble.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "mt-20-ask-pinned-not-in-place",
+      "detail": "no ask card in the transcript; ask elements: []",
+      "where": ""
+    },
+    {
+      "rule": "mt-20-answer-not-a-bubble",
+      "detail": "the answer is not shown as a user bubble",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "driver_screenshot_error": "screenshot: capture of :9556 wrote nothing",
+    "ask_elements": []
+  },
+  "duration_s": 157.3,
+  "place": "/tmp/arbos-qa-mt-20-ask-is-a-card-in-place-0x0d9kry/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 1647b90a8cfa protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T043351Z-mt-20-ask-is-a-card-in-place",
+  "branch": "main",
+  "usd": 0.02386
+}

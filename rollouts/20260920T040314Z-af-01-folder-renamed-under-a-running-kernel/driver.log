@@ -1,0 +1,3 @@
+1789876994757 kernel started pid 2230808
+1789877005828 BREAK af-01-line-lost-in-silence: the line typed after the rename went nowhere; the kernel stopped itself (stderr only) and nothing a person could read says the folder moved or the line was dropped
+1789877005864 bugs: seen cd9b0bdb65.md

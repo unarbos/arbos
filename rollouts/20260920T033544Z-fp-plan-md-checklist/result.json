@@ -1,0 +1,29 @@
+{
+  "scenario": "fp-plan-md-checklist",
+  "doc": "The plan tool is a checklist: `set` writes plan.md with - [ ] lines, `check` ticks one. No scheduling fields.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "plan-md-missing",
+      "detail": "notes.md has 0 checklist lines",
+      "where": ""
+    },
+    {
+      "rule": "plan-md-no-check",
+      "detail": "no step was ticked",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "plan_md": ""
+  },
+  "duration_s": 9.0,
+  "place": "/tmp/arbos-qa-fp-plan-md-checklist-hwmdol6b/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 2364bcb8b6a4 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T033544Z-fp-plan-md-checklist",
+  "branch": "main",
+  "usd": 0.01394
+}

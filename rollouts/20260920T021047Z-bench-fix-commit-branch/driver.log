@@ -1,0 +1,5 @@
+1789870247279 kernel started pid 2161981
+1789870388110 BREAK wrong-output: main was changed
+1789870388111 BREAK wrong-output: the reply does not name the PR base branch
+1789870388114 kernel stopped with code 0
+1789870388172 bugs: seen e17a9ed707.md, seen e17a9ed707.md
