@@ -181,6 +181,19 @@ class Recorder:
         self.final_dir.mkdir(parents=True, exist_ok=True)
         copy_tree_contents(self.dir, self.final_dir)
         shutil.rmtree(self.dir, ignore_errors=True)
+        # Follow the files. `run_one` still writes after this — the process reaper's line, on the
+        # scenarios that leaked something — and until now those went to the staging path this call
+        # had just deleted. `open(..., "a")` does not create a missing parent, so it raised
+        # FileNotFoundError inside the scenario loop and took the whole step down.
+        #
+        # Cycle 21 (2026-09-20 05:00) is what this cost: the tracked step died at `rw-03` with 141
+        # of its scenarios done, and everything registered after it — the whole lock family,
+        # `sw-*`, `fm-01` — never ran. It exits 1, which is also what an ordinary step with breaks
+        # exits, so nothing downstream reads as wrong. Only the `!! RUN CRASHED` alarm caught it.
+        self.dir = self.final_dir
+        self.log_path = self.final_dir / "driver.log"
+        self.frames_path = self.final_dir / "frames.jsonl"
+        self.sent_path = self.final_dir / "sent.jsonl"
         return self.final_dir
 
     def broke(self, rule, detail, where=""):
