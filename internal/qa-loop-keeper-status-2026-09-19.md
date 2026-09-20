@@ -12,9 +12,10 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **21**, open, **half B confirmed**, step 1 truncated at its 50 min cap |
-| previous | **20** closed 04:46:40Z (half A), 276 scenarios, 32 breaks; 19, 298; 18, 272 |
-| next | cycle 22 will be **half A** — `lk-04` returns |
+| current cycle | none open; **21 closed 08:07:19Z** (half B), 264 scenarios |
+| previous | 20 closed 04:46:40Z (half A), 276; 19, 298; 18, 272 |
+| next | cycle 22 due 09:00, **half A** — `lk-04` returns |
+
 | clean run | cycles 15-21: 0 checkpoint noise, 0 budget skips; cycle 21's step 1 truncated (normal — see below) |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
@@ -35,6 +36,7 @@ step truncates (`qal-j28`).
 | `qal-j43` | a chat opened during kickoff silently eats what you type | **open (product), live**; regressed by `2ea8d565` |
 | `qal-j46` | the daily budget runs out ~22:00 and the loss lands on the desktop step | open (loop design) |
 | `qal-j48` | the journey pass rate counts "not measured" as "failed" | open (loop reporting), stays in QA |
+| `qal-j49` | the reaper logs to a folder `finalize()` deleted; the crash ends the step | **fixed in rig** 2026-09-20 |
 
 Closed or settled: `qal-j35` (fixed by #679), `qal-j45` (provider, not the product), `qal-j47`
 (the scenario, not the queue — fixed in the rig), `qal-j28` (settled: suspension), `qal-j44`
@@ -55,6 +57,7 @@ The fault is a **rate**, so it is only meaningful within one app build:
 | `a129992316e9` | live (full signature) |
 | `cbb2907a5a7b` | live (full signature) |
 | `1647b90a8cfa` | live (full signature) |
+| `dcf8313cf00b` | live (full signature) |
 
 Full signature each time: `kf-01`, `mt-01`, `mt-04`, `dg-01` break together.
 
@@ -226,3 +229,33 @@ provider hour makes it reach 33 scenarios instead of 90 — but the suspension t
 theory and the "unexplained overhead" are all withdrawn.
 
 The fifth consecutive half prediction was also correct: cycle 21 is B.
+
+## Cycle 21 lost a third of its tracked step to a rig crash (`qal-j49`)
+
+`lk-*`, `fm-01` and `sw-*` never ran. I first assumed the half split; it was not that. The tracked
+step **died** at `rw-03` after 141 scenarios, on a `FileNotFoundError` in the process reaper:
+`finalize()` moves the rollout out of `staging/` but leaves `Recorder.log_path` pointing into the
+deleted folder, so the reaper's line kills the run.
+
+It only fires when a scenario leaks a process, and it exits **1** — the same code a healthy step
+with breaks returns — so `cycle.sh` reported it as a step that ran. Only the `!! RUN CRASHED`
+alarm caught it.
+
+Fixed: `finalize()` now repoints `log_path`, `frames_path` and `sent_path` at the rollout.
+Verified directly. `run.py` synced to the live loop, so cycle 22 onward has it.
+
+**Coverage note for cycle 21:** `qal-j40` was not asked at all, and `fm-01`'s finding is absent.
+Cycle 22 is half A, so `lk-04` returns and both come back.
+
+## Cycle 21 closed — 264 scenarios, with a third of the tracked step lost
+
+Its desktop step finished normally on app `dcf8313cf00b`: `kf-01`, `mt-01`, `mt-04` and `dg-01`
+broke (`qal-j43`'s full signature, ninth build) and `sq-02` passed at 37.1 s (eighth build).
+
+But the cycle is not a clean one. Two separate losses:
+
+- **step 1 truncated** at its 50-minute cap, as it does whenever it needs slightly more (`qal-j28`);
+- **the tracked step crashed** at `rw-03` and lost everything after it (`qal-j49`, now fixed).
+
+So `qal-j40` went unasked this cycle and `fm-01` produced no finding. Neither is a product change;
+both are the rig. Cycle 22 is half A, so `lk-04` returns and both gaps close.
