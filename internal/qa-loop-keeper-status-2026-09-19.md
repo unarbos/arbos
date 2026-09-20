@@ -12,10 +12,10 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **21**, open, started 05:00:43Z (expected half B) |
+| current cycle | **21**, open, **half B confirmed**, step 1 truncated at its 50 min cap |
 | previous | **20** closed 04:46:40Z (half A), 276 scenarios, 32 breaks; 19, 298; 18, 272 |
 | next | cycle 22 will be **half A** — `lk-04` returns |
-| clean run | cycles 15-20: 0 checkpoint noise, 0 budget skips; no truncation in 16-20 |
+| clean run | cycles 15-21: 0 checkpoint noise, 0 budget skips; cycle 21's step 1 truncated (normal — see below) |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
@@ -204,3 +204,25 @@ and one step nobody has measured since 2026-09-16 (J8, `qal-j48`).
 
 Cycle 21 opened 05:00:43Z and should draw **half B**; the letter is not written until its tracked
 step, so the state file will read `A` until then.
+
+## qal-j28 corrected — the cap I was measuring against was the wrong one
+
+Cycle 21's step 1 truncated with **49.8 min of work in a 49.9 min span — a 0.1 min gap, no
+suspension** — which no version of my suspension explanation allows. Tracing `exit 124` to its own
+line in `cycle.sh` shows why:
+
+- step 1 (`:95`) runs `timeout 50m`
+- the tracked step (`:148`) runs `timeout 100m`
+
+Every truncation I measured was **step 1**, and I had been comparing its ~50 minutes of work
+against the tracked step's 100-minute cap. There was never a missing half. Step 1 simply uses its
+whole fifty minutes and loses the tail.
+
+Three cycles, one shape: 49.9, 49.6, 49.8 minutes of work against a 50-minute cap. Cycle 19's
+step 1 completed because it needed only 42.6.
+
+So `qal-j28`'s real subject stands unchanged — **step 1 is too small for what it runs**, and a slow
+provider hour makes it reach 33 scenarios instead of 90 — but the suspension theory, the two-clocks
+theory and the "unexplained overhead" are all withdrawn.
+
+The fifth consecutive half prediction was also correct: cycle 21 is B.
