@@ -230,6 +230,12 @@ def main():
         # a run reporting "landed on the wrong worker" when nothing had been
         # tapped at all. A line here survives the silencing, and the sweep
         # reads the file at the end.
+        # `try-tap` is the form for "tap this if it is there". Its refusal is
+        # the expected half of a fallback, not a fault, and writing it down
+        # would put a false entry in the log on every run — which is how a
+        # log stops being read, and the log exists because of exactly that.
+        if verb == "try-tap":
+            sys.exit(1)
         try:
             log = os.environ.get("MOBILE_OUT") or os.path.expanduser("~/mobile-out")
             os.makedirs(log, exist_ok=True)
@@ -247,7 +253,7 @@ def main():
     if verb == "find":
         print(f"{x} {y}")
         return
-    if verb == "tap":
+    if verb in ("tap", "try-tap"):
         subprocess.run([idb(), "ui", "tap", str(x), str(y), "--udid", udid], check=True)
         print(f"tapped {el.get('AXLabel') or needle!r} at {x},{y}")
         return

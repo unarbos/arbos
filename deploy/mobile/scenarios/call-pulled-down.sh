@@ -58,7 +58,7 @@ LINE="typed on the call at $(date -u +%H%M%S), reply with the single word heard"
 # into the same trap in a new scenario. It is `type_line` now, so the next
 # file gets it without reading this one.
 type_line "$UDID" "$LINE" || echo "  the line never reached the call's composer"
-ui tap "Send" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID"
+ui try-tap "Send" >/dev/null 2>&1 || idb ui key 40 --udid "$UDID"
 sleep 12; shot 03-typed-and-answered
 echo "  did it reach the kernel: $(hist | awk -v a="${BEFORE:-0}" '$1+0 > a+0' | grep -c "typed on the call")"
 hist | awk -v a="${BEFORE:-0}" '$1+0 > a+0' | tail -2 | cut -c1-140 | sed 's/^/    /'

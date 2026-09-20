@@ -31,7 +31,7 @@ ui() { python3 "$HERE/../ui.py" "$UDID" "$@"; }
 # it used to read `Gear Shape` — SwiftUI's rendering of the SF Symbol. This
 # script tapped the old name and stopped dead on a build that had been
 # improved. Prefer the name, fall back to what older builds say.
-open_settings() { ui tap "Settings" >/dev/null 2>&1 || ui tap "Gear Shape" >/dev/null 2>&1; }
+open_settings() { ui try-tap "Settings" >/dev/null 2>&1 || ui tap "Gear Shape" >/dev/null 2>&1; }
 shot() { xcrun simctl io "$UDID" screenshot "$OUT/$1.png" >/dev/null 2>&1; echo "$(date -u +%H:%M:%S) shot $1"; }
 # A row is a project row whatever its status says. Counting only the ones
 # reading `Idle` or `Working` is how this scenario reported "a token that

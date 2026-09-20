@@ -104,7 +104,7 @@ done
 [ -n "$BANNER" ] || { say "no banner in 120s — check the console for 'notify'"; shot 04-home-no-banner; }
 
 say "tapping the banner" 
-ui tap "Arbos" >/dev/null 2>&1 || idb ui tap 196 120 --udid "$UDID"
+ui try-tap "Arbos" >/dev/null 2>&1 || idb ui tap 196 120 --udid "$UDID"
 sleep 5; shot 05-tapped-into-the-project
 kill -INT $REC 2>/dev/null; sleep 4
 if [ -s "$OUT/away-raw.mp4" ]; then
