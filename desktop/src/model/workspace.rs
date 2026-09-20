@@ -2788,6 +2788,7 @@ impl Workspace {
             {
                 chat.status = arbos_core::status::read(&arbos_core::Place::new(&chat.cwd), sid)
                     .map(|s| s.step);
+                chat.reopen_turn_on_step();
             }
             // Whatever was typed while the connection was down goes now, in order.
             chat.drain();

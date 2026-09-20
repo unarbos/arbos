@@ -1376,6 +1376,23 @@ impl ChatSession {
         self.streaming || self.turn_open || self.has_running_tool() || !self.live.is_empty()
     }
 
+    /// The kernel's step over an unanswered prompt, on a live socket, is
+    /// its word that the turn runs. A window relaunched mid-turn has the
+    /// prompt and nothing under it — the kernel files a call's record when
+    /// the call ends, so no running card comes back at attach — and the
+    /// pane read idle, a mic where Stop should be and no headline, while
+    /// the step file said *Running …* (F-252, cycle 79; F-172 took the
+    /// same word for a worker's row).
+    pub fn reopen_turn_on_step(&mut self) {
+        if self.status.is_some()
+            && !self.busy()
+            && self.live()
+            && matches!(self.items.last(), Some(ChatItem::User(_)))
+        {
+            self.turn_open = true;
+        }
+    }
+
     pub(crate) fn has_running_tool(&self) -> bool {
         self.items.iter().any(|item| {
             matches!(
@@ -3828,6 +3845,7 @@ impl ChatSession {
                         .iter()
                         .any(|child| matches!(child.state, ChildState::Working));
                 self.status = (!text.is_empty() && !is_router_step(&text)).then_some(text);
+                self.reopen_turn_on_step();
             }
             Event::Waiting(line) => {
                 // The kernel clears its waiting line the moment no worker
