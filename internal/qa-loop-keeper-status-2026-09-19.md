@@ -12,7 +12,7 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | none open; **21 closed 08:07:19Z** (half B), 264 scenarios |
+| current cycle | **PAUSED** — Jacob paused every Arbos worker, 2026-09-20 12:05Z |
 | previous | 20 closed 04:46:40Z (half A), 276; 19, 298; 18, 272 |
 | next | cycle 22 due 09:00, **half A** — `lk-04` returns |
 
@@ -259,3 +259,41 @@ But the cycle is not a clean one. Two separate losses:
 
 So `qal-j40` went unasked this cycle and `fm-01` produced no finding. Neither is a product change;
 both are the rig. Cycle 22 is half A, so `lk-04` returns and both gaps close.
+
+## Paused — 2026-09-20 12:05Z
+
+Jacob asked for every Arbos worker to pause. I have stopped, opened no further cycle, and set the
+loop's own switch:
+
+```
+state/PAUSED-until-2026-10-20T00:00:00Z
+```
+
+That is the mechanism in `vm-loop.sh:21-31` (Jacob's, 2026-09-13), which stops every run until the
+instant named. **To resume: delete that file.** The date is a month out only so it cannot expire
+quietly on its own; it is not a schedule.
+
+Cycle 22 was in flight and I have left its own process to finish rather than killing it mid-step —
+stopping it by hand risks stray kernels and half-written rollouts, and the pause is checked at the
+top of the next iteration, so no cycle 23 will open.
+
+### Cycle 22's state at the pause
+
+Half A, 285 scenarios, **zero crashes**, and the `qal-j49` fix confirmed working in production:
+
+| | cycle 21 | cycle 22 |
+|---|---|---|
+| tracked step | died at `rw-03`, 141 scenarios | **147 scenarios, exit 1, no crash** |
+| `lk-04` / `qal-j40` | never ran | **break, 3.1 s** |
+| `fm-01` | never ran | break, its own finding |
+
+So the gap cycle 21 lost is closed, and `qal-j40` is being asked again. `kf-01`, `mt-01`, `mt-04`
+and `dg-01` broke (`qal-j43`, tenth build); `sq-02` passed at 44.7 s (ninth build). Step 1 did not
+truncate this cycle.
+
+### Where things stand for whoever picks this up
+
+Open and mine: `qal-j40` (product, guarded by `lk-04` on half-A cycles), `qal-j43` (product, live
+on ten builds), `qal-j46`, `qal-j48` (both loop-side, in QA). Fixed in the rig: `qal-j39`,
+`qal-j44`, `qal-j47`, `qal-j49`. Settled/closed: `qal-j28` (step 1's 50-minute cap), `qal-j35`,
+`qal-j42`, `qal-j45`. Left alone: steer-order.
