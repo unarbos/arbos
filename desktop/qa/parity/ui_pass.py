@@ -1058,8 +1058,12 @@ class Pass:
             if several:
                 self.record("working-card-closed", sc, "read the pills row while workers run", "no Working card until the pill or the line opens it",
                             f"working-card exists={self.app.exists('working-card')}", "fail" if self.app.exists("working-card") else "pass", "")
+                # The card opens on the click; on a loaded box the layout
+                # settles a beat late, so wait for it rather than read once
+                # at 0.8 s (R47, cycle 89: a full gate read fail with two
+                # workers live; phase S alone could not fan out to reproduce).
                 self.check("child-line", sc, "click the 'N Working' line with several workers", "the Working card opens (a row per worker)",
-                           click_child, lambda a, b: self.seen("working-card"), settle=0.8)
+                           click_child, lambda a, b: self.seen("working-card"), settle=0.8, wait=4.0)
                 row = self.first("working-row-*")
                 if row:
                     self.check("working-row", sc, "click a Working card row", "active_session becomes the child",
