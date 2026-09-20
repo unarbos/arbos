@@ -1,0 +1,80 @@
+{
+  "scenario": "dg-01-a-sub-chats-turn-starts-under-the-harness",
+  "doc": "`mt-01` and `mt-04` are the only two scenarios that wait on a session reporting `streaming`\n        or `turn_open`, and both time out at 40 s on the app at `1beec0a1fd98` while everything they\n        do works when driven by hand outside the harness (`qal-j42`). Helper, payload, predicate and\n        the fields themselves are all eliminated. The one difference left is the launch: the harness\n        starts the app through ns-wrap and my probe did not.\n\n        So: the same steps, inside the harness, recording a timeline instead of a verdict \u2014 the flags\n        each second and the chat agent's transcript growing \u2014 so \"the turn never starts\" and \"the flag\n        never shows\" can be told apart.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "dg-01-the-line-never-reached-the-chat",
+      "detail": "nothing is on chat-1789864513244's transcript after 40 s, so the send did not arrive under the harness: {'t': 39, 'lines': 0, 'flags': [('root', False, False, 'live'), ('root', False, False, 'live'), ('chat-1789864513244', False, False, 'live')]}",
+      "where": ""
+    },
+    {
+      "rule": "dg-01-no-session-ever-reported-a-turn",
+      "detail": "chat-1789864513244's transcript has 0 line(s) but no session reported streaming or turn_open in 40 s: [('root', False, False, 'live'), ('root', False, False, 'live'), ('chat-1789864513244', False, False, 'live')]. If the transcript grew, the turn ran and the flag is the problem; if it did not, the turn never started",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "agent": "chat-1789864513244",
+    "streaming_or_open_ever": false,
+    "transcript_lines_final": 0,
+    "seconds_watched": 40,
+    "first": {
+      "t": 0,
+      "lines": 0,
+      "flags": [
+        [
+          "root",
+          false,
+          false,
+          "live"
+        ],
+        [
+          "root",
+          false,
+          false,
+          "live"
+        ],
+        [
+          "chat-1789864513244",
+          false,
+          false,
+          "live"
+        ]
+      ]
+    },
+    "last": {
+      "t": 39,
+      "lines": 0,
+      "flags": [
+        [
+          "root",
+          false,
+          false,
+          "live"
+        ],
+        [
+          "root",
+          false,
+          false,
+          "live"
+        ],
+        [
+          "chat-1789864513244",
+          false,
+          false,
+          "live"
+        ]
+      ]
+    }
+  },
+  "duration_s": 62.4,
+  "place": "/tmp/arbos-qa-dg-01-a-sub-chats-turn-starts-under-the-harness-v9fevmud/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 cbb2907a5a7b protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T003511Z-dg-01-a-sub-chats-turn-starts-under-the-harness",
+  "branch": "main",
+  "usd": 0.0238
+}

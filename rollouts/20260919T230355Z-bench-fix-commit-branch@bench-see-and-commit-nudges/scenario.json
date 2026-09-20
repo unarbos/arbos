@@ -1,0 +1,10 @@
+{
+  "name": "bench-fix-commit-branch@bench-see-and-commit-nudges",
+  "doc": "Checklist item 8: fix a planted bug on a new branch with a commit, leave main untouched, and name the PR base. (against feature branch cursor/bench-see-and-commit-nudges-b027)",
+  "tags": [
+    "inbox",
+    "bench-see-and-commit-nudges",
+    "benchmark",
+    "item-8"
+  ]
+}

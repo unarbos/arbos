@@ -1,0 +1,8 @@
+{
+  "name": "inbox:secrets-door",
+  "doc": "From inbox note 2026-09-13-secrets-door.md: exercise feature 'secrets-door' and run every detector. Needs a kernel built from branch cursor/secrets-door-b027.",
+  "tags": [
+    "inbox",
+    "secrets-door"
+  ]
+}

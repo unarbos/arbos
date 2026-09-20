@@ -1,0 +1,8 @@
+{
+  "name": "bench-fix-commit-branch",
+  "doc": "Checklist item 8: fix a planted bug on a new branch with a commit, leave main untouched, and name the PR base.",
+  "tags": [
+    "benchmark",
+    "item-8"
+  ]
+}

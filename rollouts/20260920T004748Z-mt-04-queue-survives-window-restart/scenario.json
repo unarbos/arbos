@@ -1,0 +1,8 @@
+{
+  "name": "mt-04-queue-survives-window-restart",
+  "doc": "Item 4. A follow-up typed during a turn survives quitting and relaunching the desktop: it runs when the turn ends.",
+  "tags": [
+    "multitasking",
+    "desktop"
+  ]
+}

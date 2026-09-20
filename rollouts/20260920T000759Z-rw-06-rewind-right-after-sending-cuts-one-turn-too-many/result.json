@@ -1,0 +1,113 @@
+{
+  "scenario": "rw-06-rewind-right-after-sending-cuts-one-turn-too-many",
+  "doc": "Two turns done. Send a third message and, within milliseconds, rewind to turn 3 (files: false \u2014 the record only). Expected every time: the transcript keeps turns 1 and 2 whole (their user lines and replies) and drops only the third. The race (#398): turn 3's checkpoint is written un-awaited on the blocking pool, so a rewind arriving first resolves 'turn 3' to turn 2's checkpoint and cuts turn 2 as well \u2014 the message before the one you rewound is gone; if it was the first, the record is empty. Run pinned to one core beside four spinners, 12 attempts, reported as a rate.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "rw-06-rewind-did-nothing",
+      "detail": "12 rewind(s) left the third message in place",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "attempts": 12,
+    "outcomes": {
+      "third-kept": 12
+    },
+    "results": [
+      {
+        "attempt": 0,
+        "outcome": "third-kept",
+        "users_kept": 3,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 1,
+        "outcome": "third-kept",
+        "users_kept": 6,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 2,
+        "outcome": "third-kept",
+        "users_kept": 9,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 3,
+        "outcome": "third-kept",
+        "users_kept": 12,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 4,
+        "outcome": "third-kept",
+        "users_kept": 15,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 5,
+        "outcome": "third-kept",
+        "users_kept": 18,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 6,
+        "outcome": "third-kept",
+        "users_kept": 21,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 7,
+        "outcome": "third-kept",
+        "users_kept": 24,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 8,
+        "outcome": "third-kept",
+        "users_kept": 27,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 9,
+        "outcome": "third-kept",
+        "users_kept": 30,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 10,
+        "outcome": "third-kept",
+        "users_kept": 33,
+        "rewound": false,
+        "settled": false
+      },
+      {
+        "attempt": 11,
+        "outcome": "third-kept",
+        "users_kept": 36,
+        "rewound": false,
+        "settled": false
+      }
+    ]
+  },
+  "duration_s": 423.9,
+  "place": "/tmp/arbos-qa-rw-06-rewind-right-after-sending-cuts-one-turn-too-many-b_vj2v7j/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 bb0c020d5457 protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T000759Z-rw-06-rewind-right-after-sending-cuts-one-turn-too-many",
+  "branch": "main",
+  "usd": 0.0
+}

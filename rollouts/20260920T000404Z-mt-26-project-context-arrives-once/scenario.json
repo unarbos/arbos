@@ -1,0 +1,7 @@
+{
+  "name": "mt-26-project-context-arrives-once",
+  "doc": "Item 26. The child's prompt has project-context.md injected, and the brief does not make it read the same file again.",
+  "tags": [
+    "multitasking"
+  ]
+}
