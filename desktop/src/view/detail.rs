@@ -2146,6 +2146,7 @@ impl Arbos {
         let theme = Theme::of(cx).clone();
         let chat = self.workspace.read(cx).active_session()?;
         let provider = chat.provider_missing.clone()?;
+        let refused = chat.provider_refused;
         let id = chat.id;
         let mine = arbos_core::Host::load()
             .ok()
@@ -2200,12 +2201,15 @@ impl Arbos {
                     .min_w_0()
                     .text_style(TextStyle::Callout)
                     .text_color(theme.text_muted)
-                    .child(SharedString::from(if mine {
-                        format!("This machine has no {label} key.")
-                    } else {
-                        format!(
+                    .child(SharedString::from(match (refused, mine) {
+                        (true, true) => format!("{label} refused the key on this machine."),
+                        (true, false) => format!(
+                            "{label} refused the key on this machine, and this window has none to lend (Settings › Model)."
+                        ),
+                        (false, true) => format!("This machine has no {label} key."),
+                        (false, false) => format!(
                             "This machine has no {label} key, and neither does this window (Settings › Model)."
-                        )
+                        ),
                     })),
             )
             .when(mine, |row| {

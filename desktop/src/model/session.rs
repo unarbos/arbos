@@ -476,6 +476,9 @@ pub struct ChatSession {
     /// The kernel said it has no model key (`provider {key: false}`): the
     /// provider it wants one for. Cleared when a key arrives. Runtime only.
     pub provider_missing: Option<String>,
+    /// The kernel holds a key and the provider refused it (a 401): the
+    /// offer under the composer says so instead of "no key" (F-269).
+    pub provider_refused: bool,
     /// What the kernel serving this chat last said about itself: provider,
     /// model, whether it holds a key, and where the key came from. Settings
     /// shows it beside this window's own reading of config.toml (ui-010).
@@ -722,6 +725,7 @@ impl ChatSession {
             draft_pushed: false,
             working: None,
             provider_missing: None,
+            provider_refused: false,
             kernel_provider: None,
             rewind_to: None,
             reconnect_attempt: 0,
@@ -824,6 +828,7 @@ impl ChatSession {
             draft_pushed: false,
             working: None,
             provider_missing: None,
+            provider_refused: false,
             kernel_provider: None,
             rewind_to: None,
             reconnect_attempt: 0,
@@ -931,6 +936,7 @@ impl ChatSession {
             draft_pushed: false,
             working: None,
             provider_missing: None,
+            provider_refused: false,
             kernel_provider: None,
             rewind_to: None,
             reconnect_attempt: 0,
@@ -2277,6 +2283,10 @@ impl ChatSession {
         if !keyed {
             return;
         }
+        self.ask_kickoff();
+    }
+
+    fn ask_kickoff(&mut self) {
         if let Connection::Live(session) = &self.connection
             && session.kickoff().is_ok()
         {
@@ -2291,6 +2301,30 @@ impl ChatSession {
             });
             self.new_turn_steps();
         }
+    }
+
+    /// The kickoff ran into a refused key and a key has just arrived: the
+    /// place was never greeted, so it is asked again — the refusal's line
+    /// goes, the key line stays (F-269). Only before any prompt of the
+    /// person's; a chat with a turn of its own keeps its record.
+    fn retry_kickoff_after_key(&mut self) {
+        if self.kickoff_at.is_none() || self.items.iter().any(|item| matches!(item, ChatItem::User(_))) {
+            return;
+        }
+        if !self
+            .items
+            .iter()
+            .any(|item| matches!(item, ChatItem::Notice { failed: true, text } if is_refused_key(text)))
+        {
+            return;
+        }
+        self.items
+            .retain(|item| !matches!(item, ChatItem::Notice { failed: true, .. }));
+        self.kickoff_secs = None;
+        self.kickoff_at = None;
+        self.kickoff_wanted = true;
+        self.ask_kickoff();
+        self.flush();
     }
 
     /// The kickoff turn (asked for by this window, no prompt of the user's
@@ -3321,6 +3355,7 @@ impl ChatSession {
                     source: source.clone(),
                 });
                 let was = self.provider_missing.take();
+                let refused = std::mem::take(&mut self.provider_refused);
                 if key {
                     if was.is_some() {
                         // The kernel's own line for the same act, if it
@@ -3336,6 +3371,9 @@ impl ChatSession {
                             &format!("{provider} key in place on this kernel ({source})"),
                         );
                         self.flush();
+                    }
+                    if refused {
+                        self.retry_kickoff_after_key();
                     }
                     self.send_kickoff_if_ready();
                 } else {
@@ -4465,6 +4503,19 @@ impl ChatSession {
         if let Some(model) = unavailable_model_in(text) {
             self.unavailable_models.insert(model);
         }
+        // A key the provider refused (401) is as good as none: the same
+        // offer goes under the composer — lend this window's key for the
+        // session or the machine — with words that say refused (F-269).
+        // A kernel with no key at all says so on its provider frame and
+        // never gets this far.
+        if failed
+            && self.provider_missing.is_none()
+            && is_refused_key(text)
+            && let Some(provider) = self.kernel_provider.as_ref().map(|kp| kp.provider.clone())
+        {
+            self.provider_missing = Some(provider);
+            self.provider_refused = true;
+        }
         // The kernel's parked-ask line after the question is already
         // answered (a replay, a late frame) says nothing true.
         if !failed && is_waiting_line(text) && self.questions.is_none() {
@@ -5363,6 +5414,16 @@ const KICKOFF_NOT_STARTED: &str = "kickoff not started:";
 pub(crate) const LINE_KEPT_FOR_KEY: &str = "Your message is kept and runs once a key is in place";
 
 /// The kernel's notice while an `ask` is parked with the user.
+/// The provider turned the kernel's key down: a 401, "bad API key",
+/// "invalid api key" or "no api key" in a failed line.
+fn is_refused_key(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("401")
+        || lower.contains("bad api key")
+        || lower.contains("invalid api key")
+        || lower.contains("no api key")
+}
+
 fn is_waiting_line(text: &str) -> bool {
     text.trim() == "Waiting for your answer"
 }
