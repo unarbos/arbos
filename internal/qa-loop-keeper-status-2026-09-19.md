@@ -12,10 +12,10 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **20**, open, **half A** (predicted), desktop step running (app `1647b90a8cfa`), 265 scenarios |
-| previous | 18 closed 21:02:25Z, 272; 17 closed 17:44:10Z, 292; 16, 262 |
-| next | cycle 21 will be **half B** — `lk-04` drops out again |
-| clean run | cycles 15-19: 0 checkpoint noise, 0 budget skips; no truncation in 16-19 |
+| current cycle | **21**, open, started 05:00:43Z (expected half B) |
+| previous | **20** closed 04:46:40Z (half A), 276 scenarios, 32 breaks; 19, 298; 18, 272 |
+| next | cycle 22 will be **half A** — `lk-04` returns |
+| clean run | cycles 15-20: 0 checkpoint noise, 0 budget skips; no truncation in 16-20 |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
@@ -54,7 +54,7 @@ The fault is a **rate**, so it is only meaningful within one app build:
 | `443ffdc55934` | live (full signature) |
 | `a129992316e9` | live (full signature) |
 | `cbb2907a5a7b` | live (full signature) |
-| `1647b90a8cfa` | live (`kf-01`, `dg-01` so far) |
+| `1647b90a8cfa` | live (full signature) |
 
 Full signature each time: `kf-01`, `mt-01`, `mt-04`, `dg-01` break together.
 
@@ -190,3 +190,17 @@ The half has now been called correctly before the cycle ran four times over: 17 
 
 `qal-j43` is eight builds deep. `qal-j40` keeps being reported by `lk-04` on every half-A cycle, in
 3.1 s, which is as cheap as a standing guard gets.
+
+## Cycle 20 closed — 276 scenarios, 32 breaks, nothing new
+
+Its desktop step finished the signature: `mt-01` and `mt-04` broke with `kf-01` and `dg-01`, and
+`sq-02` passed at 34.9 s — the `qal-j47` fix on its seventh build.
+
+No truncation, no budget skips, no checkpoint noise. **Six consecutive clean cycles** (15-20) and
+five without truncation.
+
+Journey: `5/8 pass, 1 unverified, 2 fail` — the same shape as cycle 19. Two real failures (J3, J7)
+and one step nobody has measured since 2026-09-16 (J8, `qal-j48`).
+
+Cycle 21 opened 05:00:43Z and should draw **half B**; the letter is not written until its tracked
+step, so the state file will read `A` until then.
