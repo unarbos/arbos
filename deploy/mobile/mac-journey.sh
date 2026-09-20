@@ -226,7 +226,7 @@ TIME_ANS=$(hist | awk -v f="$F" '$1+0 > f+0' | grep -ciE "assistant .*([0-9]{1,2
 # and it is absent at this moment only because the turn has already ended.
 # QA imports these verdicts, so a scorer that states an app fact must be
 # right about it or say nothing.
-[ "$TIME_ANS" != "0" ] && score J5 U "read-only ask answered; Stop not exercised by this step (the control exists: composer stop square, M-130)" || score J5 FAIL "the read-only ask got no answer"
+[ "$TIME_ANS" != "0" ] && score J5 U "read-only ask answered; Stop not exercised by this step — but it is covered: scenarios/stop-a-turn.sh drives the composer's stop square and checks the kernel closes the turn (interrupted, then turn_complete). Unverified here means this step does not reach it, not that nobody does" || score J5 FAIL "the read-only ask got no answer"
 # J7 — the result on disk, read through the kernel's read frame (not the model's word)
 # the worker's work may live on a branch in a worktree: read the branch, not the checkout's HEAD
 type_send "$ID verify: in $DIR, run these git and python commands yourself and paste the raw output under the headings BRANCHES, CHANGELOG, RETURNS, TESTS, AHEAD, nothing else: (1) list every local branch with its last commit date, newest first; (2) show the CHANGELOG.md from the newest branch that is not main and not the initial setup branch; (3) grep the return lines of mathlib.py on that branch; (4) check that branch out in a detached temporary worktree and run python3 -m unittest -q there, keep only the last line; (5) count that branch commits ahead of main."
