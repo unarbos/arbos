@@ -50,8 +50,21 @@ SIM_PT_H=${SIM_PT_H:-852}
 # Call this after launch, before tapping a row.
 SIM_LIB_DIR=${SIM_LIB_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)}
 reach_the_list() {
-  local udid=$1 i tree
-  for i in 1 2 3 4; do
+  # Up to eight steps, and it stops early when a step changes nothing.
+  #
+  # Four was not enough from a deep start. Cycle 199 filmed a run that began
+  # in a worker's chat: Back to the sheet, the sheet has no Back so a swipe
+  # takes it down, and that lands on the project chat — three steps gone
+  # before the one Back that actually reaches the list. It gave up exactly
+  # one step short and reported "still cannot see the projects list", on an
+  # app that was one tap away from it.
+  #
+  # A bigger number alone would be the wrong fix: it would also make a truly
+  # stuck screen take twice as long to say so. So the loop watches whether
+  # the screen is changing, and a step that changes nothing twice running
+  # ends it — which is the real signal that going back is not working.
+  local udid=$1 i tree sig last="" stuck=0
+  for i in 1 2 3 4 5 6 7 8; do
     tree=$(python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null)
     # An empty tree is not "no Back button", it is "I cannot see". Read the
     # first as the second and this returns success from a blind check — the
@@ -66,6 +79,19 @@ reach_the_list() {
     # `nothing matching 'phone' on screen`, with this function having just
     # reported success.
     echo "$tree" | grep -qE "StaticText +Projects|Button +[A-Za-z.][A-Za-z0-9._-]*, " && return 0
+    # The top of the screen is enough to tell one screen from another, and
+    # it does not churn the way a transcript does while a reply streams.
+    sig=$(echo "$tree" | head -4)
+    if [ "$sig" = "$last" ]; then
+      stuck=$((stuck + 1))
+      if [ "$stuck" -ge 2 ]; then
+        echo "  going back changes nothing — stopped after $i step(s)" >&2
+        return 1
+      fi
+    else
+      stuck=0
+    fi
+    last=$sig
     if echo "$tree" | grep -qE "Button +Back"; then
       python3 "$SIM_LIB_DIR/ui.py" "$udid" tap "Back" >/dev/null 2>&1
     else
@@ -80,7 +106,7 @@ reach_the_list() {
   # and nobody looked again.
   python3 "$SIM_LIB_DIR/ui.py" "$udid" dump 2>/dev/null \
     | grep -qE "StaticText +Projects|Button +[A-Za-z.][A-Za-z0-9._-]*, " && return 0
-  echo "  still cannot see the projects list after four tries" >&2
+  echo "  still cannot see the projects list after eight steps" >&2
   return 1
 }
 
