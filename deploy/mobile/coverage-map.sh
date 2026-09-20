@@ -69,6 +69,27 @@ STRAY=$(comm -13 "$ROWS" "$CLAIMS")
 if [ -z "$STRAY" ]; then echo "  none — every declaration matches a row"; else echo "$STRAY" | sed 's/^/  /'; fi
 
 echo
+# When the sweep last ran, before listing what it covers. The rows below are
+# kept out of the work queue because the sweep reaches them — which is only
+# true while the sweep is being run. At cycle 206 it had last run at 197:
+# twenty-one rows quietly unexercised for eight cycles, and a queue that said
+# nothing because those rows are excluded by design. An assumption that goes
+# unchecked stops being an assumption and becomes a blind spot.
+LAST_SWEEP=$(ls -d "$HOME"/mobile-out/*/sweep 2>/dev/null \
+  | sed 's|.*/mobile-out/||; s|/sweep||' | grep -E '^[0-9]+$' | sort -n | tail -1)
+NEWEST=$(ls "$HOME/mobile-out" 2>/dev/null | grep -E '^[0-9]+$' | sort -n | tail -1)
+echo "the sweep last ran at cycle ${LAST_SWEEP:-never}, and the newest cycle here is ${NEWEST:-unknown}"
+if [ -n "$LAST_SWEEP" ] && [ -n "$NEWEST" ]; then
+  BEHIND=$((NEWEST - LAST_SWEEP))
+  if [ "$BEHIND" -gt 4 ]; then
+    echo "  $BEHIND cycles ago. The rows below are kept out of the work queue"
+    echo "  because the sweep reaches them, so none of them has been exercised"
+    echo "  in that time and nothing else will say so. Run it."
+  else
+    echo "  $BEHIND cycle(s) ago, so the rows below are genuinely covered"
+  fi
+fi
+echo
 echo "rows the sweep reaches every run (these age wrongly in the ledger):"
 while read -r s; do
   grep -h "^# COVERS:" "$HERE/scenarios/$s" 2>/dev/null | sed 's/^# COVERS: *//'
