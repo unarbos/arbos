@@ -1862,9 +1862,13 @@ class Pass:
         pills = (active(self.state()) or {}).get("pills") or {}
         recorded = (PROJ / ".arbos" / "prs.jsonl").read_text().splitlines() if (PROJ / ".arbos" / "prs.jsonl").exists() else []
         self.inv(sc)
+        # Each term on the record, so a fail says which one (R43, cycle 82:
+        # two full runs read fail with the pill on screen in the still).
+        grew = pills.get("prs", 0) > n0
+        on_screen = self.seen("pill-prs")
         self.record("pill-prs", sc, "worker runs `gh pr create` (fake gh on PATH)", "pills.prs counts the subtree's PR; the pill-prs element shows \"PRs 1\"; .arbos/prs.jsonl has the record",
-                    f"pills={json.dumps(pills)[:160]} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')}",
-                    "pass" if pills.get("prs", 0) > n0 and self.seen("pill-prs") and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
+                    f"pills={json.dumps(pills)[:160]} n0={n0} grew={grew} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')} seen={on_screen}",
+                    "pass" if grew and on_screen and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
         if self.app.exists("pill-prs"):
             self.check("pill-prs", sc, "hover the pill", "tooltip lists the PR URLs; no state change", lambda: self.app.hover("pill-prs"), None)
 
