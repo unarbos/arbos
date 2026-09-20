@@ -101,19 +101,50 @@ for line in open(table, encoding="utf-8"):
     name = cells[1].strip()
     if not name or name in swept:
         continue
-    # Finding ids look exactly like cycle numbers once the "M-" is gone, and
-    # reading them as cycles put "call — the microphone path" at 285 and sank
-    # rows that are genuinely older. Drop the ids, then the build shas, then
-    # anything past the cycle we could plausibly be in.
-    cell = re.sub(r"M-\d+", "", cells[2][:300])
-    seen = [int(n) for n in re.findall(r"\b(\d{1,3})\b", cell)]
-    seen = [n for n in seen if n <= 200]
+    # An entry is written `<cycle> (what happened)`, and entries are joined
+    # with commas: `201 (…), 196 (…), 188 (…)`. So the cycle is the number
+    # that opens an entry, never a number inside the prose.
+    #
+    # Reading every number in the cell needed two guards and both went bad.
+    # Finding ids look like cycle numbers once "M-" is gone, which once put
+    # "call — the microphone path" at 285. The fix for that was a ceiling —
+    # "anything past the cycle we could plausibly be in" — hardcoded at 200.
+    # At cycle 202 that ceiling started discarding the real cycle numbers and
+    # falling back to whatever digits the prose held: the row updated an hour
+    # earlier reported "last named at 7", because `Worked 1m 44s` and a stray
+    # 7 were all that survived the filter. A map of what is stale went stale.
+    #
+    # Matching the shape needs no ceiling and no id-stripping, so it cannot
+    # rot with the passage of time.
+    seen = [int(n) for n in re.findall(r"(?:^|,)\s*(\d{1,4})\s*\(", cells[2])]
     if name and seen:
         out.append((max(seen), name))
+
+# Not every row is aged in cycles. "TestFlight build on Jacob's phone" is
+# written in build numbers — `956 (13 reports), 994 (fixes for F1–F6)` — and
+# the old parser read the 13 out of "13 reports" and called it cycle 13, so
+# the row sat at the top of the queue for months meaning nothing. Reading the
+# entries properly puts it at 994, which sorts to the newest end and drops it
+# off a list of the oldest: silently, which is worse.
+#
+# The yardstick is the table's own: most rows are within a few cycles of each
+# other, so the median of their newest entries is near the current cycle, and
+# anything several times that is not a cycle number at all. No constant to go
+# stale.
+ages = sorted(c for c, _ in out)
+median = ages[len(ages) // 2] if ages else 0
+not_cycles = [(c, n) for c, n in out if median and c > median * 2]
+out = [(c, n) for c, n in out if not (median and c > median * 2)]
+
 for cycle, name in sorted(out)[:6]:
     print(f"  last named at {cycle:>4}   {name}")
 if not out:
     print("  none — the sweep reaches every row the table has")
+if not_cycles:
+    print()
+    print("  rows not aged in cycles, so not ranked above:")
+    for cycle, name in sorted(not_cycles):
+        print(f"    {name} — its entries read {cycle}, which is not a cycle number")
 PY
 
 echo
