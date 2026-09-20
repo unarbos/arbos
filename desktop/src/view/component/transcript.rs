@@ -1409,6 +1409,14 @@ fn described_note(message: &UserMessage, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// Whether the worker the kernel calls `who` is parked on a question right
+/// now, by this window's own read of it.
+fn asking_now(chat: &ChatSession, who: &str) -> bool {
+    chat.children.iter().any(|c| {
+        c.kernel_id.as_deref() == Some(who) && c.state == crate::model::session::ChildState::Asking
+    })
+}
+
 /// A message from outside this window. The name is the whole signal: this
 /// is not you, and not the agent answering you.
 fn from_block(
@@ -1422,6 +1430,13 @@ fn from_block(
     cx: &mut Context<Workspace>,
 ) -> AnyElement {
     if let Some((verdict, words)) = done_report(text) {
+        // A worker parked on a question is not done, whatever the kernel's
+        // done file says (*Turn ended. Last words: (no reply)* lands when
+        // the worker asks — filed 09-19): its row under the turn reads
+        // *Asking*, and this line would say the opposite (F-251, cycle 78).
+        if asking_now(chat, who) {
+            return div().into_any_element();
+        }
         return worker_card(chat, ix, who, verdict, &words, theme, window, cx);
     }
     div()
@@ -1794,11 +1809,18 @@ fn children_lines(
             )
             .into_any_element()
     });
+    // A worker whose report is on the page says nothing here — unless it
+    // has since parked on a question: then the report line yields and the
+    // *Asking* row stands (F-251).
     let reported: Vec<&str> = chat
         .items
         .iter()
         .filter_map(|item| match item {
-            ChatItem::From { who, text, .. } if done_report(text).is_some() => Some(who.as_str()),
+            ChatItem::From { who, text, .. }
+                if done_report(text).is_some() && !asking_now(chat, who) =>
+            {
+                Some(who.as_str())
+            }
             _ => None,
         })
         .collect();

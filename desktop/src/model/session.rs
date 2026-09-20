@@ -2094,7 +2094,13 @@ impl ChatSession {
         // word that it is working (F-172, d15: five sleeping workers drew
         // as idle rows after a relaunch).
         let stepping = self.status.is_some() && self.live();
-        if (self.busy() || stepping) && evidence {
+        // A parked `ask` card is the worker waiting on the person, whatever
+        // else its turn looks like — the kernel's done file for the park
+        // (*(no reply)*) and its open turn both read as something else
+        // (F-187, F-251).
+        if self.questions.is_some() {
+            ChildState::Asking
+        } else if (self.busy() || stepping) && evidence {
             ChildState::Working
         } else if self.answering.is_some() || self.plan_open().any(|n| n.do_kind == "ask") {
             ChildState::Asking
