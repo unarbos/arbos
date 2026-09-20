@@ -6694,3 +6694,51 @@ Stills in `media/mobile/cycle-203/`:
 
 **PR:** [#808](https://github.com/unarbos/arbos/pull/808) — the first `ios/`
 change in a while, so it wants a TestFlight build when the steward is ready.
+
+## Cycle 204 — a guard for yesterday's fix, which then caught me
+
+The two oldest rows were both the caller's view of a call, last named at 196.
+Exercised and clean (M-657): `connecting` 3.9s, `listening` 6.0, `thinking`
+10.4, `speaking` 4.8, against a measured `reply_first_audio` of 10200 ms —
+the fifth time in four cycles the screen and the console have agreed to
+within a fiftieth. No refused taps.
+
+**Cycle 203's fix had nothing guarding it** (M-658). One line made the away
+card render markdown, and nothing would have caught it coming back, or caught
+the next surface that draws model words and misses `ChatRow.prose`. So
+`no-raw-markdown.sh` walks the list, the chat, the chat scrolled back and a
+worker's chat, looking for `**`, `__`, a backtick and the `](` of an
+unrendered link, writing each screen's text to a file so a hit can be read
+rather than guessed at.
+
+**Its first run reported a fault it could not see** (M-659). The hit was a
+transcript row at **y=-572** — above the top of the screen, in a dump that
+carries the whole scroll view. A check about what a person can see, reading
+what they cannot. That is the fault found in `several-workers` at cycle 195
+and in `tool-fold` at 197, made again here in the check written to catch a
+different one. On-screen rows only now, and four screens come back clean.
+
+**But narrowing a check is not the same as answering its question** (M-660),
+so I settled the class by experiment. Asked for a reply containing inline
+code and bold, then read the screen:
+
+- the **typed line keeps its characters** — `` `area` `` and `**bold**` —
+  which is right, because a person typed them;
+- the **model's reply renders** — `area` and `w times h` as monospaced chips,
+  with 0 backticks and 0 asterisks among on-screen elements.
+
+So the transcript is sound, and M-101's code-chip styling does what its
+comment says.
+
+**One thing left unresolved rather than claimed** (M-661): the off-screen row
+that started this carried markers in its label and could not be brought back
+into view — the journey's verify answer is no longer loaded in that chat.
+Four screens and a controlled test say the transcript renders; one
+unreachable row is not evidence against that, and saying so is cheaper than a
+wrong verdict.
+
+Stills in `media/mobile/cycle-204/`:
+`typed-markers-kept-model-markdown-rendered.png`,
+`the-chat-full-screen.png`, `the-orb-thinking.png`.
+
+**PR:** [#810](https://github.com/unarbos/arbos/pull/810), harness only.
