@@ -235,7 +235,7 @@ PY
   else
     [ "$hits" -ge 2 ] || { echo "  WRONG: it gave up on something that comes back"; WRONG=$((WRONG + 1)); }
   fi
-  ui tap "Back" >/dev/null 2>&1 || ui back >/dev/null 2>&1 || true
+  ui try-tap "Back" >/dev/null 2>&1 || ui back >/dev/null 2>&1 || true
   sleep 2
 }
 

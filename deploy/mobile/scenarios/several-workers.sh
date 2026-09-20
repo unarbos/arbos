@@ -81,7 +81,15 @@ ui dump | grep -E ', (Done|Working)$' | head -8 | sed 's/^/    /'
 
 echo
 echo "== back and reopen =="
-ui tap "End call" >/dev/null 2>&1 || idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID"
+# Looked for before it is tapped. Written as `tap … || swipe` this asked for
+# a button that is deliberately not expected, so every run wrote a refusal
+# into refused-taps.log — and a log with a false entry every time is a log
+# nobody reads, which is precisely what it was added at cycle 195 to avoid.
+if ui dump | grep -q "End call"; then
+  ui tap "End call" >/dev/null 2>&1
+else
+  idb ui swipe 196 300 196 800 --duration 0.3 --udid "$UDID"
+fi
 sleep 2
 # One Back is not "on the list": the sheet or the call may still be up, and
 # after the sheet a single Back lands on the chat. The first tap of this
