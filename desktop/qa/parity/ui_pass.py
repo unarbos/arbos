@@ -1859,20 +1859,29 @@ class Pass:
         sc = "prs-pill"
         self.go_project()
         ids = self.turn_ids()
-        n0 = ((active(self.state()) or {}).get("pills") or {}).get("prs", 0)
+        pills0 = (active(self.state()) or {}).get("pills") or {}
+        n0 = pills0.get("prs", 0)
+        urls0 = set(pills0.get("pr_urls") or [])
         t0 = time.time()
         self.send(P_PR)
-        s = self.wait(lambda s: ((active(s) or {}).get("pills") or {}).get("prs", 0) > n0 or (not busy(s) and time.time() - t0 > 20), 180, what="PRs pill")
+        # A new URL, not a bigger count: the pill counts the newest turn's
+        # subtree, so a PR from an earlier turn on this chat (the pills phase
+        # opens one) is not in the count after this one lands (R46, cycle 88:
+        # n0=1, n=1, pr_urls=[#74] — the pill was right and the row wrong).
+        def new_url(s):
+            urls = set((((active(s) or {}).get("pills") or {}).get("pr_urls")) or [])
+            return bool(urls - urls0)
+        s = self.wait(lambda s: new_url(s) or (not busy(s) and time.time() - t0 > 20), 180, what="PRs pill")
         self.wait_idle(120)
         pills = (active(self.state()) or {}).get("pills") or {}
         recorded = (PROJ / ".arbos" / "prs.jsonl").read_text().splitlines() if (PROJ / ".arbos" / "prs.jsonl").exists() else []
         self.inv(sc)
         # Each term on the record, so a fail says which one (R43, cycle 82:
         # two full runs read fail with the pill on screen in the still).
-        grew = pills.get("prs", 0) > n0
+        grew = bool(set(pills.get("pr_urls") or []) - urls0) or pills.get("prs", 0) > n0
         on_screen = self.seen("pill-prs")
         self.record("pill-prs", sc, "worker runs `gh pr create` (fake gh on PATH)", "pills.prs counts the subtree's PR; the pill-prs element shows \"PRs 1\"; .arbos/prs.jsonl has the record",
-                    f"pills={json.dumps(pills)[:160]} n0={n0} grew={grew} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')} seen={on_screen}",
+                    f"pills={json.dumps(pills)[:160]} n0={n0} urls0={sorted(urls0)} grew={grew} prs.jsonl lines={len(recorded)} pill element={self.app.exists('pill-prs')} seen={on_screen}",
                     "pass" if grew and on_screen and recorded else ("not-reachable" if not recorded else "fail"), self.still("prs-pill"))
         if self.app.exists("pill-prs"):
             self.check("pill-prs", sc, "hover the pill", "tooltip lists the PR URLs; no state change", lambda: self.app.hover("pill-prs"), None)
