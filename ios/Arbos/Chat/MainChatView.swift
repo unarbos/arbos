@@ -1016,7 +1016,12 @@ struct AwayCard: View {
                                 .font(ArbosTheme.caption.weight(.semibold))
                                 .foregroundStyle(ArbosTheme.textMuted)
                         }
-                        Text(note.body)
+                        // The same markdown the transcript renders. This card
+                        // carries the model's own words, and drawing them
+                        // plain put a literal `**Sun Sep 20 06:06:42 UTC
+                        // 2026**` on screen directly beneath the transcript
+                        // line showing that date in bold (M-655).
+                        Text(ChatRow.prose(note.body))
                             .font(ArbosTheme.body)
                             .foregroundStyle(ArbosTheme.text)
                             .lineLimit(3)
