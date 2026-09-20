@@ -6787,3 +6787,55 @@ Evidence in `media/mobile/cycle-205/`: `stop-during-model-call.png`,
 
 **PR:** [#811](https://github.com/unarbos/arbos/pull/811), harness and an
 inbox note; no `ios/` change.
+
+## Cycle 206 — the queue was hiding twenty-one rows
+
+The work queue looked healthy: nothing older than 199. It was not telling the
+whole truth (M-667). Rows the sweep reaches are kept out of the queue, which
+is right *while the sweep is being run* — and it had last run at cycle 197,
+with the newest cycle 205. Twenty-one rows unexercised for eight cycles, and
+nothing said so, because those rows are excluded by design.
+
+An assumption nothing checks becomes a blind spot. The map reports when the
+sweep last ran, read from the directories it leaves behind (M-668):
+
+```
+the sweep last ran at cycle 197, and the newest cycle here is 205
+  8 cycles ago. The rows below are kept out of the work queue
+  because the sweep reaches them, so none of them has been exercised
+  in that time and nothing else will say so. Run it.
+```
+
+**Then I ran it.** 25 scenarios, 0 silent, 0 without a verdict.
+
+**The refused-tap section fired in a sweep for the first time** (M-669):
+
+```
+  tap '4 tool calls' — nothing matching it was on screen
+  tap 'Call menu' — nothing matching it was on screen
+```
+
+The first agrees exactly with `tool-fold`'s own verdict — *cannot say, the
+fold was never opened* — which is cycle 197's fix declining rather than
+blaming the app. Two independent mechanisms, one answer, which is what the
+log was added at 195 to make possible.
+
+**`style-pair` reported a fault it had not found** (M-670): *1 surface(s) are
+more than a point apart, or could not be read.* The list was fine — 8.7%
+against Cursor's 8.3%, 0.4 apart — and the chat still simply had no body text
+on it. Drift and "could not measure" were one number. A drift is a finding
+about the app; an unmeasured surface is a finding about the run. They are
+counted separately now, and on a rerun both surfaces measured: list 0.4
+apart, chat 0.3 apart, both inside a point (M-671).
+
+**Notifications passed, and it is the check that changed** (M-672). This run:
+*banner ~2s after going away (unseen=1), and the tap landed in the project.*
+At 197: *no banner… the reply outran the half-minute iOS gives a backgrounded
+app*, which that run correctly blamed on its own limit. Both runs are
+consistent with a working app; only one could observe it. Worth saying
+plainly rather than calling this a fix.
+
+Evidence in `media/mobile/cycle-206/`: `the-banner-and-the-badge.png`,
+`tapped-in-from-the-banner.png`, and the whole run in `sweep-206.log`.
+
+**PR:** [#812](https://github.com/unarbos/arbos/pull/812), harness only.
