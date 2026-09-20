@@ -2311,13 +2311,22 @@ impl Workspace {
         // A fork taken mid-run copies the prompt the original is still
         // answering; the copy says so under it (Jacob, 2026-09-17-1).
         let source_busy = self.session(id).is_some_and(|chat| chat.busy());
+        // The copy's first turn is the original's kickoff: without the
+        // stamps the fold read the run's own words, not *Worked Ns*, and
+        // its first call stood as the opener (F-255, cycle 80).
+        let kickoff = self
+            .session(id)
+            .map(|chat| (chat.kickoff_secs, chat.kickoff_at))
+            .unwrap_or_default();
         cx.spawn(async move |this, cx| {
             let cloned = cx
                 .background_executor()
                 .spawn(async move { kernel::clone_session(&place, &sid) })
                 .await;
             let _ = this.update(cx, |workspace, cx| match cloned {
-                Ok(new_sid) => workspace.adopt_clone(ix, &new_sid, &title, source_busy, cx),
+                Ok(new_sid) => {
+                    workspace.adopt_clone(ix, &new_sid, &title, source_busy, kickoff, cx)
+                }
                 Err(err) => {
                     workspace.with_session(id, cx, |chat| {
                         chat.notice(true, &format!("could not fork: {err:#}"));
@@ -2334,6 +2343,7 @@ impl Workspace {
         kernel_id: &str,
         source_title: &str,
         source_busy: bool,
+        kickoff: (Option<u32>, Option<SystemTime>),
         cx: &mut Context<Self>,
     ) {
         if self.projects.get(ix).is_some_and(|project| {
@@ -2373,6 +2383,7 @@ impl Workspace {
         if let Some(model) = replay.model {
             chat.model = Some(model);
         }
+        (chat.kickoff_secs, chat.kickoff_at) = kickoff;
         // The copy ends on a prompt the original is still answering: with
         // nothing under it and an idle composer it read as a chat that
         // never replied ("Forked the chat mid run no response from sub
