@@ -1,0 +1,199 @@
+{
+  "scenario": "journey-linux",
+  "doc": "The acceptance journey J1..J8 on the Linux rig (docs/acceptance-journeys.md): a fresh project, a real challenge with a failing test, follow-ups, steer/interrupt/read-only ask, leave and come back, the result on disk, kernel restart and a second project. Scored per step.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "journey-J3",
+      "detail": "the chat reads idle but the transcript ends in notice (dangling wake)",
+      "where": "docs/acceptance-journeys.md"
+    }
+  ],
+  "notes": {
+    "steps": {
+      "J1": {
+        "verdict": "pass",
+        "why": "tab present, greeting shown (\"Hey \u2014 the place is ready, it's a Python project with a `shap\"), .arbos/ created"
+      },
+      "J2": {
+        "verdict": "pass",
+        "why": "chat busy; workers ['fix-failing-test'] / 1 spawn card(s)"
+      },
+      "J3": {
+        "verdict": "fail",
+        "why": "the chat reads idle but the transcript ends in notice (dangling wake)"
+      },
+      "J4": {
+        "verdict": "pass",
+        "why": "mid-flight line taken in the same turn; the later one started its own turn and was answered"
+      },
+      "J5": {
+        "verdict": "pass",
+        "why": "steer taken, read-only question answered, Stop ended the turn and the next prompt ran"
+      },
+      "J6": {
+        "verdict": "pass",
+        "why": "tab, transcript, workers back; unseen reply shown {'tab_dot': True, 'unseen': 1} before any touch (touched=False), no OS post on relaunch, cleared on opening the tab; away-tab reply: badge + unseen, OS notification posted and confirmed by the daemon, cleared on click"
+      },
+      "J7": {
+        "verdict": "pass",
+        "why": "tests pass, CHANGELOG written (QA line taken), commit on ['fix/geometry-area-calculation']"
+      },
+      "J8": {
+        "verdict": "unverified",
+        "why": "restart and second project fine; dropped connection: phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)"
+      }
+    },
+    "score": "6/8",
+    "unverified": [
+      "J8"
+    ],
+    "failed": [
+      "J3"
+    ],
+    "evidence": {
+      "J1": {
+        "items": 4,
+        "agent_lines": 1,
+        "failed_notices": [],
+        "arbos_dir": true
+      },
+      "J2": {
+        "went_busy": true,
+        "workers": [
+          "fix-failing-test"
+        ],
+        "spawn_cards": 1
+      },
+      "J3": {
+        "idle_within_600s": true,
+        "duplicate_agent_items": [],
+        "status_drawn_as_reply": [],
+        "transcript_ends": "notice",
+        "workers_open": []
+      },
+      "J4": {
+        "midflight": {
+          "index": 17,
+          "reached_root_s": 1.0,
+          "task_turn_complete": 21,
+          "same_turn": true,
+          "relayed_to_worker": true,
+          "turn_tools": [
+            "say"
+          ],
+          "workers": [
+            "fix-failing-test"
+          ],
+          "taken": true
+        },
+        "after": {
+          "started": true,
+          "answered": true
+        }
+      },
+      "J5": {
+        "steer_in_turn": true,
+        "readonly_answered": true,
+        "stop_clicked": true,
+        "interrupt": {
+          "ended_within_20s": true,
+          "interrupted_line": true,
+          "took_s": 0.5
+        },
+        "prompt_after_stop_answered": true
+      },
+      "J6": {
+        "tab_back": true,
+        "landed_on": "/tmp/arbos-qa-journey-linux-usclg3zw/shapes-project",
+        "landed_on_project": true,
+        "late_reply_landed_while_closed": true,
+        "notify_before_click": {
+          "tab_dot": true,
+          "unseen": 1
+        },
+        "notify_after_click": {
+          "tab_dot": false,
+          "unseen": 0
+        },
+        "touched_before_click": false,
+        "touched_after_click": true,
+        "os_posts_on_relaunch": 0,
+        "items_before": 26,
+        "items_after": 29,
+        "sessions_before": 2,
+        "sessions_after": 2,
+        "worker_rows": 2,
+        "notes_unchanged": true,
+        "notifications": "unverified: the driver exposes no unseen count",
+        "away": {
+          "nonce": "away38269",
+          "unseen_away": 1,
+          "tab_dot_away": true,
+          "posted_new": 1,
+          "posted_hit": true,
+          "post_error": null,
+          "daemon_has_it": true,
+          "daemon_entries": 1,
+          "unseen_after_click": 0,
+          "tab_dot_after_click": false,
+          "notifier": "notify-send"
+        }
+      },
+      "J7": {
+        "tests_pass": true,
+        "test_file_untouched": true,
+        "fix_verified_independently": true,
+        "last_test_line": [
+          "OK"
+        ],
+        "changelog": true,
+        "changelog_has_qa": true,
+        "branches": [
+          "fix/geometry-area-calculation",
+          "main"
+        ],
+        "ahead_of_main": {
+          "fix/geometry-area-calculation": "1"
+        },
+        "main_moved": false
+      },
+      "J8": {
+        "restart": {
+          "pid_before": 2373781,
+          "pid_after": 2375681,
+          "line_count": 1,
+          "answered": true,
+          "failed_notices": [
+            "no reply from the kernel"
+          ],
+          "side_effect_runs": 1
+        },
+        "second_project": {
+          "in_second": 1,
+          "in_first": 0,
+          "in_home_store": 0
+        },
+        "dropped_connection": {
+          "verdict": "unverified",
+          "why": "phone loop's last J8c is older than 24 h (2026-09-16T22:46:18Z)"
+        }
+      },
+      "liveness": {
+        "pulses": 24,
+        "slowest_ms": 96,
+        "slowest_after": "launch",
+        "limit_ms": 1000
+      }
+    }
+  },
+  "duration_s": 275.2,
+  "place": "/tmp/arbos-qa-journey-linux-usclg3zw/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-desktop-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 dcf8313cf00b protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T074522Z-journey-linux",
+  "branch": "main",
+  "usd": 0.0
+}

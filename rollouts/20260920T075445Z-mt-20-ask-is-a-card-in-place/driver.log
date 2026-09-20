@@ -1,0 +1,4 @@
+1789890886611 desktop: app pid 2377784 on :9620
+1789891025253 BREAK mt-20-ask-pinned-not-in-place: no ask card in the transcript; ask elements: []
+1789891042436 BREAK mt-20-answer-not-a-bubble: the answer is not shown as a user bubble
+1789891042590 bugs: seen 4245938618.md, seen de9681c5f7.md

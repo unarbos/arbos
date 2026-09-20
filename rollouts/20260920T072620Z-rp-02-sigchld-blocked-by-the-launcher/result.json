@@ -1,0 +1,31 @@
+{
+  "scenario": "rp-02-sigchld-blocked-by-the-launcher",
+  "doc": "The kernel is exec'd with SIGCHLD blocked in its inherited signal mask (what a launcher can do; the shape behind Jacob's five hung workers on macOS). The kernel must unblock it and say so on stderr, and a job must still end with its result. On Linux the pidfd reaper would have masked the fault, which is why a week of green cycles never saw it.",
+  "status": "break",
+  "reason": null,
+  "breaks": [
+    {
+      "rule": "rp-02-mask-not-reported",
+      "detail": "the kernel did not say on stderr that SIGCHLD was blocked and unblocked \u2014 on a build without #371 the mask stays and only Linux's pidfd hides it",
+      "where": ""
+    }
+  ],
+  "notes": {
+    "idle": true,
+    "took_s": 2.4,
+    "tool_lines": 1,
+    "result_has_output": true,
+    "still_running": false,
+    "zombies_under_kernel": 0,
+    "body": "done-S80598",
+    "kernel_said_unblocked": false
+  },
+  "duration_s": 2.8,
+  "place": "/tmp/arbos-qa-rp-02-sigchld-blocked-by-the-launcher-r_47zyv1/place",
+  "with_model": true,
+  "kernel": "/home/ubuntu/arbos-qa/target-track-main/release/arbos-kernel",
+  "kernel_version": "arbos-kernel 0.2.0 85ea2395fdcc protocol 1",
+  "rollout": "/home/ubuntu/arbos-qa/loop/rollouts/20260920T072620Z-rp-02-sigchld-blocked-by-the-launcher",
+  "branch": "main",
+  "usd": 0.0
+}

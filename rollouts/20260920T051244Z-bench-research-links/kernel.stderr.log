@@ -1,0 +1,9 @@
+env_stray_secrets: 4 variable(s) in this kernel's environment look like credentials and are not managed by the secrets door: CLOUD_AGENT_ALL_SECRET_NAMES, CLOUD_AGENT_INJECTED_SECRET_NAMES, CUROR_API_KEY_ENV, CURSOR_API_KEY — start the kernel from a clean environment or declare them in .arbos/secrets.toml
+Walking /tmp/arbos-qa-bench-research-links-9wxl65jp/place...
+Found 10 text files (0 binary skipped, 0 too large, 0 errors)
+Extracting trigrams...
+Writing index (5246 trigrams, 10 files, 0 spill segment(s))...
+Index built successfully at /tmp/arbos-qa-bench-research-links-9wxl65jp/home/.cache/arbos/tgrep/d0429e4c480fb890
+tools root: 3 calls, wall 2ms, sum 2ms, speedup 1.0x
+snapshot_failed: git add: fatal: unable to stat 'agents/research-duplex/notes.md': No such file or directory
+tools root: 2 calls, wall 6ms, sum 1ms, speedup 0.2x

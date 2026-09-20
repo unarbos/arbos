@@ -1,0 +1,7 @@
+{
+  "name": "fp-waiting-ask",
+  "doc": "`ask` parks: the turn ends with a waiting/ask-*.toml; the answer arrives as an inbox file (kind = answer, reply_to) and starts a new turn that uses it.",
+  "tags": [
+    "file-plan"
+  ]
+}

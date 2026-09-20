@@ -1,0 +1,3 @@
+1789890722099 desktop: app pid 2376502 on :9620
+1789890779935 BREAK driver-exception: TimeoutError_: timed out waiting for root running
+1789890779977 bugs: seen 0f4cf20ada.md
