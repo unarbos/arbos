@@ -33,9 +33,14 @@ pub struct FileDoc {
 
 impl FileDoc {
     pub fn new(path: PathBuf, workspace: Entity<Workspace>, cx: &mut Context<Self>) -> Self {
-        let saved = std::fs::read_to_string(&path).unwrap_or_default();
-        let hash = content_hash(saved.as_bytes());
-        let editor = cx.new(|cx| Editor::new(&saved, cx));
+        let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
+        let hash = content_hash(on_disk.as_bytes());
+        let editor = cx.new(|cx| Editor::new(&on_disk, cx));
+        // "Saved" is the editor's own reading of the file, not the bytes:
+        // the editor normalises what it loads (the trailing newline), and
+        // measured against the bytes every file opened from the panel read
+        // *· unsaved* before a keystroke (F-262, cycle 85).
+        let saved = editor.read(cx).source();
         cx.observe(&editor, |this, _, cx| this.on_edit(cx)).detach();
         Self {
             path,
