@@ -34,7 +34,12 @@ check() {
   local what=$1
   ui dump > "$OUT/$what.txt" 2>/dev/null
   local text hits
-  text=$(awk '{ $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$OUT/$what.txt")
+  # On-screen rows only. This check is about what a person can see, and its
+  # first run read a transcript row at y=-572 — above the top, in a dump that
+  # carries the whole scroll view — and called it a fault. That is the
+  # mistake found in several-workers at 195 and in tool-fold at 197, made
+  # again here in the check written to catch a different one.
+  text=$(awk '$2 + 0 > 40 && $2 + 0 < 820 { $1=""; $2=""; $3=""; sub(/^ +/, ""); print }' "$OUT/$what.txt")
   hits=$(echo "$text" | grep -nE '\*\*|__|`|\]\(' | head -4)
   if [ -n "$hits" ]; then
     echo "  $what: RAW MARKDOWN"
