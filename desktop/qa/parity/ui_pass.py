@@ -743,10 +743,27 @@ class Pass:
         if not busy(self.state()):
             self.send(P_LONG); self.wait(lambda s: busy(s), 20, what="turn start")
         root_was_busy = bool((active(self.state()) or {}).get("streaming") or (active(self.state()) or {}).get("turn_open"))
+        # The queued follow-ups above run the moment the stop lands, and
+        # within the check's 1.5 s the transcript can already be two turns
+        # past the stop; the notice is read from where the stop fell, not
+        # from the last prompt (R42, cycle 80: 'no notice' with the stop's
+        # line two cards up).
+        stop_from = len((active(self.state()) or {}).get("items", []))
         self.check("composer-stop", sc, "click Stop", "turn ends (not busy) within 5 s",
                    lambda: self.app.click("composer-stop"), lambda a, b: not busy(self.wait(lambda s: not busy(s), 8) or b), settle=1)
-        if root_was_busy:
-            self.notice_check("stop-notice", sc, "notice after Stop", "'Stopped by you' and no failed notice (PR #83)")
+        # Which turn the kernel cuts is its own call: with the root parked on
+        # a `spawn wait=true`, the Stop can land on the worker and the root's
+        # turn then ends whole — no interrupted line of its own, a *Stopped ·
+        # <worker>* row instead (F-97's shape, F-245's row). Both are the
+        # stop the person asked for.
+        worker_stopped = any(c.get("child_state") == "stopped" for c in project_sessions(self.state()) if c.get("parent") is not None)
+        if root_was_busy and not worker_stopped:
+            self.notice_check("stop-notice", sc, "notice after Stop", "'Stopped by you' and no failed notice (PR #83)", since=max(0, stop_from - 3))
+        elif root_was_busy:
+            items = (active(self.state()) or {}).get("items", [])
+            failed = [it.get("text", "")[:60] for it in items[max(0, stop_from - 3):] if it.get("kind") == "notice" and it.get("failed")]
+            self.record("stop-notice", sc, "Stop with the root parked on its worker", "the worker reads stopped; no failed notice on the root",
+                        f"worker stopped; failed notices={failed}", "pass" if not failed else "fail", self.still("stop-notice"))
         else:
             # F-97: the disc was over running workers with the root idle; Stop stops
             # them and the root's transcript gets no interrupted line — Cursor's
@@ -897,14 +914,16 @@ class Pass:
         else:
             self.gap("rewind-turn", sc, "click", "no rewind-turn-* element")
 
-    def notice_check(self, element: str, screen: str, action: str, expected: str) -> None:
+    def notice_check(self, element: str, screen: str, action: str, expected: str, since: int | None = None) -> None:
         time.sleep(1.5)
         items = (active(self.state()) or {}).get("items", [])
         # Since the turn the user typed: a worker's report can wake the
         # agent into a segment after the stop (#292), pushing the notice
-        # past a fixed window of four.
+        # past a fixed window of four. A caller that knows where its action
+        # fell passes `since` (R42).
         last_user = max((i for i, it in enumerate(items) if it.get("kind") == "user"), default=max(0, len(items) - 4))
-        tail = [it for it in items[last_user:] if it.get("kind") == "notice"]
+        start = since if since is not None else last_user
+        tail = [it for it in items[start:] if it.get("kind") == "notice"]
         text = " / ".join(f"{'FAILED ' if it.get('failed') else ''}{it.get('text', '')[:60]}" for it in tail) or "no notice"
         ok = any("Stopped by you" in it.get("text", "") for it in tail) and not any(it.get("failed") for it in tail)
         self.record(element, screen, action, expected, text, "pass" if ok else "fail", self.still(element))
