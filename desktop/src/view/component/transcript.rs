@@ -5372,19 +5372,21 @@ fn run_fold(
                     .flex()
                     .flex_col()
                     .gap(px(ITEM_GAP))
-                    .children(range.clone().map(|ix| match &chat.items[ix] {
+                    // Only the items that draw a row: an empty element in a
+                    // gapped column still takes its gap, and the nudge the
+                    // kernel filed between two reads (F-236) opened a hole
+                    // between their rows (F-254, cycle 79). The same for a
+                    // `status` call (the live step, not a row, #185) and
+                    // the root's kernel calls (drawn as worker lines and on
+                    // the panel's page).
+                    .children(range.clone().filter(|ix| match &chat.items[*ix] {
+                        ChatItem::Thinking { .. } => true,
+                        ChatItem::Tool { label, .. } if is_status_call(label) => false,
+                        ChatItem::Tool { label, .. } if chat.parent.is_none() && is_kernel_call(label) => false,
+                        ChatItem::Tool { .. } => true,
+                        _ => false,
+                    }).map(|ix| match &chat.items[ix] {
                         ChatItem::Thinking { .. } => thought(chat, ix, false, window, cx),
-                        // A `status` call is the live step, not a row (#185).
-                        ChatItem::Tool { label, .. } if is_status_call(label) => {
-                            div().into_any_element()
-                        }
-                        // The root's kernel calls are drawn elsewhere (worker
-                        // lines, the panel's page): no row for them here.
-                        ChatItem::Tool { label, .. }
-                            if chat.parent.is_none() && is_kernel_call(label) =>
-                        {
-                            div().into_any_element()
-                        }
                         // A worker's `todo` call is its checklist card
                         // (Cursor's TodoWrite in a classic chat), not a
                         // bare "todo" row.
