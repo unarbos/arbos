@@ -60,17 +60,17 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | launch, first run, permissions sheet | 63 (fresh XDG at 1440×900 — holds; F-231 renamed place dropped at launch) | gate `launch` phase (Linux rows only) | — |
 | tabs: cycle, close, reopen, colours, spinner | 73 (drag: none by design; reopen via recents F-240) | `tabs_drive.py`, gate `tabs` phase | — |
 | opener: ~, partial, create, prefix sibling, remote host, recents | 71 (F-240 recent folders) | #258, gate opener rows | — |
-| Project page: in/out, back, Escape, ⌘1, files grid, notes render | 69 (the gate's panel-project rows pass every run; F-214 tables held in #703) | gate `project-page` rows | — |
+| Project page: in/out, back, Escape, ⌘1, files grid, notes render | 78 (the Project tab at 1440: panel 591 px ≈ Cursor's 592; tab row 36 vs 40, pill 24 vs 26 — owner's numbers, F-171/F-184 stand) | gate `project-page` rows | — |
 | panel: agents tree, archived row, Project section, Files, Standing | 69 (Files → a rendered page; F-237 ⌘W) | gate `panel` phase, `cycle-40/panel/` | — |
 | settings: every section, ⌘, / Escape / ⌘W, typography stepper, bionic toggle + eyesight check | 77 (five sections walked at 1440×900; F-198's numbers stand — rail 200 vs 255, column left-aligned, no group surface; Escape/⌘,/⌘W as before) | gate `settings` phase (`weight-visible`), `cycle-45/settings/` | — |
-| mode chip, /mode, approval + ask cards per mode | 65 (d35: a second ask superseded by the root's say — F-221's rule, the kernel's wake) | `askmode41.py`, gate `ask-*` rows | — |
+| mode chip, /mode, approval + ask cards per mode | 78 (the ask card after a relaunch: two options, Other, Skip, Continue — holds; F-251 the root's Asking row; the mode chip half carried) | `askmode41.py`, gate `ask-*` rows | — |
 | under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 75 (Working → Agents + Continue Working after a Stop; the pill's send resumes the worker) | gate `pills` rows | — |
 | bottom bar (version, Update) | 75 (the *is out* plate in light: #525252 on white, white words — holds) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
 | search (⌘K chat search palette) | 77 (a worker hit's row: title, brief, tab, age; a desktop-closed chat is filtered out by design — Cursor's archived-in-search unverified) | gate `search-by-content`, `search-open-hit` | — |
 | themes: light, dark; tint | 75 (the *is out* plate and its tooltip in light — holds) | cycle-11 `13-light`; gate `appearance-*` | 15 |
 | window sizes: 900×600, panel fold, 1600×1000 | 77 (⌘B under the fold: *Hide panel* over no panel — F-248, owner's) | `cycle-43/sizes/` | — |
-| remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 76 (a host that does not resolve: the retry countdown holds; F-247 the *ready* greeting over it; the real remote untouched) | remote track scenarios 1–2; 3–4 open | 16 |
-| voice / dictation entry points (Fn, mic button, call strip) | 60 (mac-only lines and the faint handset — by design on Linux; listening still unpaired) | gate `composer-voice` row; Fn via driver | **15** |
+| remote places: install/update/reconnect states, kernel version handling, attachments as bytes | 78 (a local sshd: fault → fix → live in one retry, the keyless bar; F-250 the `~//` path; the real remote untouched) | remote track scenarios 1–2; 3–4 open | 16 |
+| voice / dictation entry points (Fn, mic button, call strip) | 78 (mic disc #F0F0F0 at rest, #D6D6D6 hover — F-162 holds fixed; F-192's red note stands; the handset's tooltip names the speech server) | gate `composer-voice` row; Fn via driver | **15** |
 | relaunch / replay (root + worker read like live) | 75 (the kickoff fold F-244; a stopped worker's line F-245 — both hold across a relaunch now) | `journey.py` J11 | — |
 | rewind / fork / checkpoint | 76 (F-246 no Rewind on the kickoff turn; a fork of a stopped chat keeps Continue Working; the fork's say reaches the original's worker — kernel, filed) | `rf.py`, `fork_sub.py`, gate `fork-beside-source` | — |
 | notices, nudges, refused-answer shape | 76 (the 401 line reads *No working model key on this kernel.* with Details › — holds) | refused `write` on the att place | — |

@@ -6418,3 +6418,60 @@ and values, so the zero above can be checked rather than believed.
 
 **PR:** [#803](https://github.com/unarbos/arbos/pull/803), harness and an
 inbox note; no `ios/` change.
+
+## Cycle 199 — the journey, and a film that caught something
+
+Two things were due: the journey, last run at 194, and a recording, last made
+at 196.
+
+**The journey is clean a third time** (M-629). 16 pass, 4 unverified on
+`main@cbb2907a`, with the kernel's own build in the record. J4 gave the same
+reading again:
+
+> the kernel made the edit itself rather than pass it to the running worker
+> (tools after the line: read edit)
+
+Three independent runs, one answer. Cycle 194's rewrite of that verdict
+describes what actually happens.
+
+**The film caught a fault** (M-630). Filming `several-workers` — the flow
+fixed at 195 and never recorded — the run ended:
+
+```
+  still cannot see the projects list after four tries
+  could not get back to the list
+```
+
+`reach_the_list` had started from a worker's chat. Back reaches the sheet;
+the sheet is a modal with no Back, so a swipe takes it down; and that lands
+on the project chat — three of the four steps gone before the single Back
+that actually reaches the list. Verified by hand from the state it left
+behind: one Back, 14 list markers. It gave up one tap away.
+
+**A bigger number would have been the wrong fix** (M-631), because it would
+also make a genuinely stuck screen take twice as long to say so. Eight steps
+now, stopping early when a step changes nothing twice running — *going back
+changes nothing* is the real signal. Tested from the sheet, the stuck point:
+it reaches the list.
+
+**The refusal log was writing a false entry every run** (M-632). Every
+`several-workers` run logged `tap 'End call' — nothing matching it was on
+screen`. Not a fault: that line is a deliberate probe for a button usually
+absent, written `tap … || swipe`. Five more fallbacks in the harness are
+written the same way. A log with a false entry every run is a log nobody
+reads, which is what this one was added at cycle 195 to avoid.
+
+So the idiom has a first-class form (M-633): `ui try-tap` taps if it is there
+and exits quietly if not, without writing the refusal down. Reran
+`several-workers`: **0 refusals logged**, and a clean pass — paged 4 screens,
+opened `w004050 rivers`, landed on it, six lines of record.
+
+**One of mine** (M-634): backticks in a commit message are run by the shell,
+and the message for the try-tap commit lost two clauses. Not amended — no
+rewriting of pushed history. Commit messages go through a heredoc from here.
+
+Evidence in `media/mobile/cycle-199/`:
+`the-workers-sheet-end-to-end.mp4`, `a-finished-workers-chat.png`,
+`the-list-reached-again.png`.
+
+**PR:** [#804](https://github.com/unarbos/arbos/pull/804), harness only.
