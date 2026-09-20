@@ -5,16 +5,22 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-20 01:23 UTC.
+Last checked 2026-09-20 02:42 UTC.
 
-## Click Update. You will get build 2385. Jev is in it.
+## Click Update. You will get build 2388. Jev is in it.
 
-**2385** — signed, notarised, stapled, on the feed since 01:20 UTC.
+**2388** — signed, notarised, stapled, on the feed since 02:40 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2385 (builds 2386–2388):
+
+- **#805** — a mobile loop cycle
+
+## Before that: 2385
 
 New since 2382 (builds 2383–2385):
 
