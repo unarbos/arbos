@@ -1905,15 +1905,25 @@ fn children_lines(
                     // its own — the Done row then said only the name while
                     // Cursor's shows the subagent's last words (cycle 73,
                     // d40). Take them from the spawn's output.
-                    let rest = match child
-                        .kernel_id
-                        .as_deref()
-                        .and_then(|k| spawn_report(&chat.items, k))
-                    {
-                        Some(words) => format!("{} — {words}", child.title),
-                        None => child.title.clone(),
-                    };
-                    ("Done".to_string(), rest, theme.text_faint)
+                    let kernel_id = child.kernel_id.as_deref();
+                    // A worker whose turn ended with nothing to say did
+                    // not do the job it was given — the README worker of
+                    // cycle 88 looped plan/status/read and stopped — and
+                    // *Done* on its row said it had (F-270). The spawn's
+                    // return names the shape; the row says so.
+                    if kernel_id.is_some_and(|k| spawn_ended_silent(&chat.items, k)) {
+                        (
+                            "Ended".to_string(),
+                            format!("{} — no report", child.title),
+                            theme.text_faint,
+                        )
+                    } else {
+                        let rest = match kernel_id.and_then(|k| spawn_report(&chat.items, k)) {
+                            Some(words) => format!("{} — {words}", child.title),
+                            None => child.title.clone(),
+                        };
+                        ("Done".to_string(), rest, theme.text_faint)
+                    }
                 }
                 ChildState::Stopped => {
                     if child
@@ -2911,6 +2921,24 @@ fn spawn_report(items: &[ChatItem], kernel_id: &str) -> Option<String> {
             (!line.starts_with('(')).then(|| shorten(line, 96))
         }
         _ => None,
+    })
+}
+
+/// Whether the `spawn` call that awaited worker `kernel_id` came back with
+/// "(the child's turn ended without a report)": the worker's turn ended
+/// and it said nothing — not a job done.
+fn spawn_ended_silent(items: &[ChatItem], kernel_id: &str) -> bool {
+    let lead = format!("{kernel_id} reports:");
+    items.iter().rev().any(|item| match item {
+        ChatItem::Tool { label, output, .. }
+            if label.split_whitespace().next() == Some("spawn") =>
+        {
+            output
+                .trim_start()
+                .strip_prefix(lead.as_str())
+                .is_some_and(|words| words.trim_start().starts_with("(the child's turn ended without a report)"))
+        }
+        _ => false,
     })
 }
 
