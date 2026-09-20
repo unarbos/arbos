@@ -2674,6 +2674,14 @@ impl ChatSession {
             }
             shown.clear();
         }
+        // The kernel's idle frame can land a few milliseconds before the
+        // answer's text (both written at the turn's end): the window had
+        // already said *no reply from the kernel* over the prompt. The
+        // reply is the line; the guess before it goes, as a reason's
+        // arrival takes it (F-189) — F-268, cycle 87.
+        if matches!(self.items.last(), Some(ChatItem::Notice { text: t, .. }) if t == NO_REPLY) {
+            self.items.pop();
+        }
         self.items.push(ChatItem::Agent(shown));
         let ix = self.items.len() - 1;
         self.stream_raw.insert(ix, text);
@@ -4592,6 +4600,14 @@ fn fold_retries(items: Vec<ChatItem>) -> Vec<ChatItem> {
             && matches!(&out[out.len() - 2], ChatItem::User(first) if squash(&first.text) == squash(&again.text))
         {
             out.truncate(out.len() - 2);
+        }
+        // A reply written after the window's *no reply from the kernel*
+        // guess (the idle frame beat the text by a few ms) is the answer
+        // the guess said was missing (F-268).
+        if matches!(&item, ChatItem::Agent(text) if !text.trim().is_empty())
+            && matches!(out.last(), Some(ChatItem::Notice { text, .. }) if text == NO_REPLY)
+        {
+            out.pop();
         }
         out.push(item);
     }
