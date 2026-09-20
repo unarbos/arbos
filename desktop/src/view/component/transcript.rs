@@ -843,6 +843,17 @@ fn short_notice(text: &str) -> String {
         let model = model.rsplit('/').next().unwrap_or(model);
         return format!("Switched to {model} for this turn.");
     }
+    // "/mode auto rejected the request, so anthropic/claude-opus-5 answers
+    // this turn." — the mode's hand-off, with the provider's model id in
+    // it; the id is the detail (F-265, cycle 86).
+    if let Some((mode, rest)) = text.split_once(" rejected the request, so ")
+        && let Some((model, _)) = rest.split_once(" answers this turn")
+    {
+        let mode = mode.trim_start_matches('/');
+        let mode = mode.strip_prefix("mode ").unwrap_or(mode);
+        let model = model.rsplit('/').next().unwrap_or(model);
+        return format!("Mode {mode} passed this turn to {model}.");
+    }
     // "compacted 1 turn(s): ~15k → ~14k tokens (google/gemini-2.5-flash);
     // full record in .arbos/agents/root/transcript.jsonl:1–11": the count
     // and the sizes are the news; the model id and the file pointer are
