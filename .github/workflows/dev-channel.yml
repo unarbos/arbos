@@ -377,6 +377,16 @@ jobs:
                   if [ "${EVENT_CONCLUSION:-}" = "success" ]; then
                     # Green as of this event, which has only just fired.
                     echo "success $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  elif [ "${state#pending}" != "$state" ]; then
+                    # Red as of this event, and a sibling of it is still
+                    # going. Those are two different facts and the plan
+                    # needs both: the verdict is "failed", because waiting
+                    # for an event that has already fired is how a run
+                    # waits on itself — and "sibling", because the green
+                    # may still be coming and this run should be here to
+                    # see it. Said in one word each, since a function read
+                    # through `$( )` cannot set anything the caller keeps.
+                    echo "failed sibling"
                   else
                     echo failed
                   fi
@@ -457,7 +467,15 @@ jobs:
                     fi
                   fi
                   ;;
-                *) ;;
+                # "failed", or "failed sibling" when this run's own commit
+                # has another CI run still going. The verdict is the same
+                # either way; the second word only says that staying might
+                # still be worth something.
+                *)
+                  case "$state" in
+                    "failed sibling") pending_seen=yes ;;
+                  esac
+                  ;;
               esac
             done
 

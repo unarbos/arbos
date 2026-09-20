@@ -383,6 +383,23 @@ WATCH_OVERRIDE=5 EVENT_SHA_OVERRIDE=none check \
   "${SHA[4]}" "${SHA[4]}" 0 none \
   "${SHA[4]}" failed "${SHA[3]}" failed "${SHA[2]}" failed "${SHA[1]}" failed
 
+# The case that started all of this, and the one staying first missed.
+#
+# A commit's two CI runs: the failing one finishes, fires this workflow,
+# and the green one is still going. The run must not *wait for the
+# verdict* on its own commit — that is how it waits on an event that has
+# already fired — but the sibling still running is the reason to stay,
+# because the green may be it.
+#
+# 2026-09-20, commit dcf8313: failure finished 06:38:42 and fired the
+# run; the run read "failed", saw nothing else in flight, and ended in
+# seven seconds. The green finished at 06:46:05 and fired nothing. The
+# feed sat until the next merge.
+WATCH_OVERRIDE=5 EVENT_CONCLUSION_OVERRIDE=failure check \
+  "a red trigger stays for the sibling still running" \
+  "${SHA[4]}" "${SHA[4]}" 0 4 \
+  "${SHA[4]}" late
+
 echo
 if [ "$failures" -eq 0 ]; then
   echo "all good"
