@@ -12,10 +12,10 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **19**, open, **half B**, desktop step done (app `cbb2907a5a7b`), 298 scenarios |
-| previous | 17 closed 17:44:10Z, 292; 16 closed 13:22:48Z, 262 |
-| next | cycle 20 will be **half A** — the letter alternates, so `lk-04` returns |
-| clean run | cycles 15-18: 0 checkpoint noise, 0 budget skips, no truncation in 16-18 |
+| current cycle | none open; **19 closed 2026-09-20 01:03:18Z** (half B), 298 scenarios, 31 breaks |
+| previous | 18 closed 21:02:25Z, 272; 17 closed 17:44:10Z, 292; 16, 262 |
+| next | cycle 20 due 02:00, **half A** — `lk-04` returns, `lk-02`/`lk-03` drop out |
+| clean run | cycles 15-19: 0 checkpoint noise, 0 budget skips; no truncation in 16-19 |
 | health this cycle | 0 `state:checkpoint` noise, 0 budget skips |
 | mirror | pushing on its ~15 min cadence |
 | modules | store and live loop in sync |
@@ -164,3 +164,13 @@ checked it too early once and had to wait.
 
 The letter alternates on every cycle, so `lk-04` and `qal-j40` come back next cycle and
 `lk-02`/`lk-03` drop out. `kf-01` runs either way.
+
+## Cycle 19 closed — 298 scenarios, 31 breaks, nothing new
+
+No truncation, no budget skips, no checkpoint noise. **Five consecutive clean cycles** (15-19) on
+both measures, and four without truncation.
+
+The journey read `5/8 pass, 1 unverified, 2 fail` — J3 and J7 failed, J8 unverified. Reading that
+honestly, as `qal-j48` argues it should be read: **two real failures, one thing nobody measured**,
+not three bad steps. J8's feed has been stale since 2026-09-16 and the rate will keep reporting it
+as failure until either the feed returns or the summary learns the third outcome.
