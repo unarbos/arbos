@@ -850,6 +850,11 @@ impl Workspace {
         }
         let key = self.projects[ix].place().encode();
         self.board_out.remove(&key);
+        // A tab just closed is the first recent — the opener's row that
+        // brings it back (F-266). Before, only an open put a place on the
+        // list, so a long-open tab closed today could have fallen off it.
+        let place = self.projects[ix].place();
+        self.remember_recent(&place);
         // The drawer's shape goes back into the filed map, so opening this
         // folder again brings the panel back as it was left.
         let filed = self.panel_state_of(ix);

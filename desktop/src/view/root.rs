@@ -2656,7 +2656,15 @@ impl Arbos {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let recents = self.workspace.read(cx).recents.clone();
+        // Places with a tab on the strip are one click away already; the
+        // opener's recent rows are for the ones that are not (F-266).
+        let workspace = self.workspace.read(cx);
+        let recents: Vec<crate::model::place::Place> = workspace
+            .recents
+            .iter()
+            .filter(|place| !workspace.projects.iter().any(|p| &p.place() == *place))
+            .cloned()
+            .collect();
         self.opener
             .update(cx, |opener, cx| opener.show(recents, cx));
         window.focus(&self.opener.read(cx).focus_handle(cx), cx);
