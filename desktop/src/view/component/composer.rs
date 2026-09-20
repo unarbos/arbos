@@ -1301,13 +1301,14 @@ impl Composer {
         self.erase(false, window, cx);
     }
 
-    /// Empty field, no picker: the key belongs to the highlighted chat.
-    /// Otherwise it is still typing.
+    /// Backspace and Delete are typing, whatever the field holds. An empty
+    /// field once handed them to the chat row — Backspace archived the chat
+    /// in front, a second Backspace deleted it with its workers' folders,
+    /// no word said — a clearing of the composer's draft that ran one key
+    /// long took three drives' places with it (F-263, cycle 86). Cursor's
+    /// composer does nothing on Backspace when empty; the drawer's own
+    /// key, with the drawer focused, is where a row is removed.
     fn erase(&mut self, backspace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.command.is_none() && !self.menu && self.is_empty(cx) {
-            cx.emit(ComposerEvent::Delete);
-            return;
-        }
         if backspace {
             window.dispatch_action(Box::new(input::Backspace), cx);
         } else {

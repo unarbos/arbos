@@ -328,8 +328,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-c", CopySelection, None),
         KeyBinding::new("ctrl-c", CopyChat, None),
         KeyBinding::new("ctrl-v", PasteChat, None),
-        KeyBinding::new("delete", DeleteChat, Some(WINDOW_CONTEXT)),
-        KeyBinding::new("backspace", DeleteChat, Some(WINDOW_CONTEXT)),
+        // On the drawer's rows only (F-263): the key names the lit row,
+        // not whichever chat is in front of the window's rest focus.
+        KeyBinding::new("delete", DeleteChat, Some(PANEL_CONTEXT)),
+        KeyBinding::new("backspace", DeleteChat, Some(PANEL_CONTEXT)),
         // On the window's rest focus only. A binding with no context is
         // the deepest match gpui knows, so a bare `up` here would beat the
         // opener's and the sheet's own arrows while their field has the
@@ -1587,7 +1589,18 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.paste_chat(cx));
     }
 
-    pub(crate) fn delete_chat(&mut self, _: &DeleteChat, _: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn delete_chat(
+        &mut self,
+        _: &DeleteChat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Only with the drawer focused: its lit row is the one the key
+        // names. On the window's rest focus the same key archived, then
+        // deleted, whichever chat was in front (F-263).
+        if !self.panel_focused(window, cx) {
+            return;
+        }
         self.delete_highlighted(cx);
     }
 
