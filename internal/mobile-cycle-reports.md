@@ -6641,3 +6641,56 @@ Evidence in `media/mobile/cycle-202/`:
 `barge-in-three-runs.mp4`.
 
 **PR:** [#807](https://github.com/unarbos/arbos/pull/807), harness only.
+
+## Cycle 203 — the away card was showing its asterisks
+
+Two rows were due: the microphone path, oldest at 195, and the journey, four
+cycles on from 199.
+
+**Both are clean** (M-653, M-654). The voice run sits inside every range the
+loop has established — kernel-answered reply 9896 ms against a 7.6–14.3 s
+spread, the gateway's own 1247 ms against 1224–1249 since cycle 167,
+barge-in at 277 and 321 ms against 180–330 — with no refused taps. The
+journey passed 16 with 4 unverified on `main@85ea2395`, and J4 gave the same
+reading for a fourth run.
+
+Both tools built at 200 and 201 were used in anger and both were right:
+`journey-ledger.sh` added exactly this run and re-sorted to 46 rows, and
+`what-ran.sh` named `call — the microphone path` while correctly staying
+silent about the journey, which is its documented blind spot.
+
+**Then a hard look at a journey still I had never opened** (M-655). The J6
+card read:
+
+```
+While you were away                    Got it
+  ● root replied
+    It's currently **Sun Sep 20 06:06:42 UTC 2026**.
+```
+
+Literal asterisks — directly beneath the transcript line showing that same
+date in bold. The card draws the model's own words with a plain
+`Text(note.body)`, while the transcript passes them through
+`ChatRow.prose`, whose own comment states the rule: *Markdown as the model
+writes it — links, `code`, **bold** — so PR numbers and paths read as on the
+desktop.*
+
+**Fixed with the rule already in the file** (M-656): one line,
+`Text(ChatRow.prose(note.body))`. Not a design guess — the away card carries
+model text and had simply missed the helper.
+
+Verified on a built app rather than by reading the diff. Sent a question
+whose answer is bold, backgrounded the phone, came back:
+
+```
+  91  318  StaticText   root replied
+ 181  338  StaticText   Sun Sep 20 06:22:26 UTC 2026
+=== asterisks on screen: 0
+```
+
+Stills in `media/mobile/cycle-203/`:
+`away-card-before-raw-asterisks.png`, `away-card-after-bold.png`,
+`away-card-full-screen.png`.
+
+**PR:** [#808](https://github.com/unarbos/arbos/pull/808) — the first `ios/`
+change in a while, so it wants a TestFlight build when the steward is ready.
