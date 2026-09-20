@@ -140,6 +140,9 @@ struct AgentLine {
     /// Cursor's task-list rows read "title — summary": the step while it
     /// works, its last words once done. None for the main chat.
     summary: Option<String>,
+    /// Done with no words of its own — the turn ended without a report
+    /// (F-271): a faint mark and *no report*, not the check.
+    silent: bool,
     /// The main chat's "waiting on <worker> — <step>" while a worker is
     /// live (kernel #366). The row draws whom it waits on, dim; the step is
     /// on the worker's row under it and on the chat's live line.
@@ -287,7 +290,13 @@ impl Arbos {
                     // A kernel child has no flight to time; the shared clock
                     // keeps its spinner turning.
                     since: chat.elapsed().unwrap_or_else(transcript::live_phase),
-                    summary: (n != 0).then(|| row_summary(chat)).flatten(),
+                    summary: (n != 0)
+                        .then(|| {
+                            row_summary(chat)
+                                .or_else(|| chat.ended_silent().then(|| "no report".to_string()))
+                        })
+                        .flatten(),
+                    silent: n != 0 && chat.ended_silent(),
                     waiting: (n == 0).then(|| chat.waiting.clone()).flatten(),
                     readonly: chat.readonly,
                 })
@@ -538,6 +547,14 @@ impl Arbos {
             ChildState::Done if line.main => icons::icon(icons::system::CHAT_ROUND_LINE)
                 .size(px(12.))
                 .text_color(theme.text_muted)
+                .into_any_element(),
+            // Ended with nothing to say: not a job done, so not the check
+            // (F-271, beside the transcript's *Ended · … — no report*).
+            ChildState::Done if line.silent => div()
+                .size(px(9.))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.text_faint)
                 .into_any_element(),
             ChildState::Done => icons::icon(icons::status::CHECK)
                 .size(px(12.))

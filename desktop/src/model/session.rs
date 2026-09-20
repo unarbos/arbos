@@ -2154,6 +2154,29 @@ impl ChatSession {
         false
     }
 
+    /// A worker's newest turn ended with no words of its own: the records
+    /// after the opener hold calls, notices and nudges, and no answer. The
+    /// spawn that awaited it came back *(the child's turn ended without a
+    /// report)*; the panel row and the root's line say so instead of Done
+    /// (F-270, F-271).
+    pub fn ended_silent(&self) -> bool {
+        if !matches!(self.child_state(), ChildState::Done) {
+            return false;
+        }
+        let mut opened = false;
+        for item in self.items.iter().rev() {
+            match item {
+                ChatItem::Agent(text) if !text.trim().is_empty() => return false,
+                ChatItem::User(_) | ChatItem::Wake { .. } => {
+                    opened = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        opened
+    }
+
     /// The title a `say` line's `who` resolves to: a sub-agent's title
     /// when `who` is one of this chat's children, else `who` itself with
     /// the ` → user` tail kept.
