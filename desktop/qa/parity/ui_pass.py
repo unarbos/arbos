@@ -975,7 +975,12 @@ class Pass:
                 agent = [it.get("text", "") for it in items if it.get("kind") == "agent"]
                 notices = [it.get("text", "") for it in items[-4:] if it.get("kind") == "notice"]
                 last = (agent[-1] if agent else "")[:140]
-                bad = any(w in last.lower() for w in ("empty", "blocked", "no answer", "didn't receive", "did not receive")) or any("refused" in n for n in notices)
+                # The model may name the skip and carry on ("Since no answer
+                # was provided, I will proceed with 'alpha'") — that is the
+                # follow-through, not a stall; only a model that stops and
+                # asks again fails the row (R44, cycle 82).
+                stalls = ("cannot proceed", "can't proceed", "unable to proceed", "please provide", "please answer", "please choose", "waiting for your", "need your answer", "need an answer", "blocked")
+                bad = any(w in last.lower() for w in stalls) or any("refused" in n for n in notices)
                 self.record("ask-skip follow-through", sc, "read the answer after Skip", "the model is told the user skipped and carries on", f"agent: {last!r}; notices: {notices}", "fail" if bad else "pass", self.still("ask-skip-answer"))
             else:
                 self.gap("ask-skip", sc, "click", "no ask-skip element")
