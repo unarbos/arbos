@@ -131,3 +131,4 @@ Harness notes: run 1's call did not start because the call screen waits for a ta
 | 09-19 21:37 | `pod` — kernel **`c3247332dc4e`** (attach socket, both ends) | app **`main@4e44f4de`** | **16 pass, 4 unverified** | `media/mobile/journey/0919-213738/` |
 | 09-19 21:50 | `pod` — kernel **`c3247332dc4e`** (attach socket, both ends) | app **`main@4e44f4de`** | **16 pass, 4 unverified** | `media/mobile/journey/0919-215053/` |
 | 09-20 00:19 | `pod` — kernel **`c3247332dc4e`** (attach socket, both ends) | app **`main@cbb2907a`** | **16 pass, 4 unverified** | `media/mobile/journey/0920-001944/` |
+| 09-20 06:01 | `pod` — kernel **`c3247332dc4e`** (attach socket, both ends) | app **`main@85ea2395`** | **16 pass, 4 unverified** | `media/mobile/journey/0920-060142/` |
