@@ -690,7 +690,16 @@ fn notice(
     };
     let detail = (shown.trim() != text.trim()).then(|| text.trim().to_string());
     let open = detail.is_some() && chat.transcript.groups.contains(&ix);
-    let retry = failed.then(|| last_user_prompt(&chat.items)).flatten();
+    // Retry re-sends the last prompt: right for a turn that failed, wrong
+    // for a control the kernel refused — a rewind with nothing to rewind
+    // to offered *Retry*, and the press would have run the last prompt
+    // again (F-253, cycle 79).
+    let refused_control = text.trim_start().to_lowercase().starts_with("rewind:")
+        || text.trim_start().starts_with("stop the turn before rewinding")
+        || text.trim_start().starts_with("could not fork");
+    let retry = (failed && !refused_control)
+        .then(|| last_user_prompt(&chat.items))
+        .flatten();
     let can_retry = retry.is_some() && !chat.busy();
     let id = chat.id;
     let row = div()
