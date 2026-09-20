@@ -843,6 +843,18 @@ fn short_notice(text: &str) -> String {
         let model = model.rsplit('/').next().unwrap_or(model);
         return format!("Switched to {model} for this turn.");
     }
+    // "compacted 1 turn(s): ~15k → ~14k tokens (google/gemini-2.5-flash);
+    // full record in .arbos/agents/root/transcript.jsonl:1–11": the count
+    // and the sizes are the news; the model id and the file pointer are
+    // the detail (F-256, cycle 81). Cursor's is "Summarized N messages".
+    if let Some(rest) = text.strip_prefix("compacted ")
+        && let Some((count, sizes)) = rest.split_once(" turn(s): ")
+    {
+        let sizes = sizes.split(" (").next().unwrap_or(sizes);
+        let sizes = sizes.split(';').next().unwrap_or(sizes).trim();
+        let s = if count.trim() == "1" { "" } else { "s" };
+        return format!("Compacted {} turn{s}, {sizes}.", count.trim());
+    }
     // "mode: ask — ask: every call that writes …": the head is the setting
     // and its value; the rule behind the dash is the detail. Cut at the
     // first colon this read as one word, "mode" (F-188, cycle 41).
