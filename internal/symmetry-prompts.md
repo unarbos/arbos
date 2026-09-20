@@ -53,18 +53,18 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 
 | area | last | how | due? |
 | --- | --- | --- | --- |
-| chat: Project style (root) | 68 (d38: one run across a nudge — F-236) | `journey.py` beside `cycle-23/` | — |
+| chat: Project style (root) | 81 (a root turn of two reads and prose: *Worked 27s ›* shut, *Explored 2 files* open — Cursor's words; no Thought row from Flash) | `journey.py` beside `cycle-23/` | — |
 | chat: classic style (worker) | 75 (d41: a failing command's card — F-215's state, held in #703; the worker reports the error and ends Done) | `worker_live.py`, `cycle-47/worker-live/` vs `cycle-24/cursor-worker-chat-open.png` | — |
 | long-form project (many turns, notes restructure, workers come and go, archived, context re-found, scroll) | 79 (d45: *Explored 5 files, 1 search, could not edit* — F-254 the hole in the rows; Review and the relaunch hold) | l1–l13, d1–d19 | — |
-| kickoff / new-project landing — the first thirty seconds, refused and silent providers | 75 (a fresh Home's kickoff fold after a relaunch: F-244) | `cold.py` f1/f2, `new-project-kickoff` gate row | every cycle from now |
+| kickoff / new-project landing — the first thirty seconds, refused and silent providers | 81 (a 60-file tree: the same one-command kickoff, 13 s; a key swapped mid-kickoff changes nothing — F-189's per-turn read) | `cold.py` f1/f2, `new-project-kickoff` gate row | every cycle from now |
 | launch, first run, permissions sheet | 80 (a true first run: shimmer, the Home face sheet, the permissions sheet, filled screen by design; F-231 stands — the renamed place is dropped in silence) | gate `launch` phase (Linux rows only) | — |
 | tabs: cycle, close, reopen, colours, spinner | 79 (eight tabs at 900 wide fit at 96 px each, ⌘⇧[ ] cycle; no overflow control past that — F-167's metaphor) | `tabs_drive.py`, gate `tabs` phase | — |
 | opener: ~, partial, create, prefix sibling, remote host, recents | 80 (the gate's twelve opener rows pass on this build; F-250 the `~//` path) | #258, gate opener rows | — |
 | Project page: in/out, back, Escape, ⌘1, files grid, notes render | 80 (Escape from the Project tab closes the drawer and focuses the composer; ⌘1 leaves it; a file row opens as a panel tab with ×; a Resources section is new) | gate `project-page` rows | — |
-| panel: agents tree, archived row, Project section, Files, Standing | 69 (Files → a rendered page; F-237 ⌘W) | gate `panel` phase, `cycle-40/panel/` | — |
+| panel: agents tree, archived row, Project section, Files, Standing | 81 (F-257 open: rows of a sibling root vanished live after a plan check archived its worker; back after relaunch) | gate `panel` phase, `cycle-40/panel/` | — |
 | settings: every section, ⌘, / Escape / ⌘W, typography stepper, bionic toggle + eyesight check | 77 (five sections walked at 1440×900; F-198's numbers stand — rail 200 vs 255, column left-aligned, no group surface; Escape/⌘,/⌘W as before) | gate `settings` phase (`weight-visible`), `cycle-45/settings/` | — |
 | mode chip, /mode, approval + ask cards per mode | 79 (`/mode ask` → the mode notice; a writing bash ran with no approval card — F-182, kernel, stands; no chip pinned by /mode) | `askmode41.py`, gate `ask-*` rows | — |
-| under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 75 (Working → Agents + Continue Working after a Stop; the pill's send resumes the worker) | gate `pills` rows | — |
+| under-composer pills: repo vs non-repo, Push, PRs, Working/Agents | 81 (Push on a repo two ahead of a bare remote: the pill, its tooltip *2 commits not yet pushed*, the click's prompt — the model's spawn `{}` ate it, kernel) | gate `pills` rows | — |
 | bottom bar (version, Update) | 75 (the *is out* plate in light: #525252 on white, white words — holds) | Jacob's still `media/mac/update-bar/`; gate has no row | — |
 | search (⌘K chat search palette) | 77 (a worker hit's row: title, brief, tab, age; a desktop-closed chat is filtered out by design — Cursor's archived-in-search unverified) | gate `search-by-content`, `search-open-hit` | — |
 | themes: light, dark; tint | 75 (the *is out* plate and its tooltip in light — holds) | cycle-11 `13-light`; gate `appearance-*` | 15 |
@@ -73,7 +73,7 @@ One row per app area. "Last" is the last cycle that looked at it side by side (o
 | voice / dictation entry points (Fn, mic button, call strip) | 78 (mic disc #F0F0F0 at rest, #D6D6D6 hover — F-162 holds fixed; F-192's red note stands; the handset's tooltip names the speech server) | gate `composer-voice` row; Fn via driver | **15** |
 | relaunch / replay (root + worker read like live) | 79 (a relaunch mid-command on the root: F-252 — the Working line and Stop come back; the running card itself needs the kernel to replay the open call) | `journey.py` J11 | — |
 | rewind / fork / checkpoint | 80 (rewind beside a worker on a git place: chat cut, composer refilled, INDEX.md restored, the worker to the archived fold; a fork's kickoff fold — F-255) | `rf.py`, `fork_sub.py`, gate `fork-beside-source` | — |
-| notices, nudges, refused-answer shape | 76 (the 401 line reads *No working model key on this kernel.* with Details › — holds) | refused `write` on the att place | — |
+| notices, nudges, refused-answer shape | 81 (compaction live: F-226's pair holds; F-256 the result line's words) | refused `write` on the att place | — |
 | composer attachments: file chip, image thumb, hover ×, mid-send bubble | 77 (thumb and token ride the next card; the composer's × goes with the send — holds; a true mid-turn steer not reached: the model would not run the long command) | `attach_drive.py`, `cycle-39/attachments/` | — |
 | **after-failure states — what the window says when the world outside it changed**: folder moved or renamed under a running kernel (QA `af-03`), kernel binary replaced or deleted under a running process (#372/#385 stranger control), key removed mid-session, disk full, tunnel cut (F-81), hub gone | 33 (phase D: folder moved, deleted build — F-134, F-136; key removed / disk full / hub gone still no row) | a `phase_world` in the gate: rename the place, replace the kernel binary, cut the socket — then read the notice, the typed line, the bar, side by side with Cursor's equivalents where it has one (Cursor: a removed workspace shows "folder not found" on the project row) | **33** |
 
