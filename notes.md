@@ -20,7 +20,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 <tldr>
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — cycle 205 closed; [stop-turn film](https://github.com/unarbos/arbos/pull/811) on `main`; TestFlight **2396**; cycle 206 next
-- [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 48 holding; `main` at `a6817288` has nothing to read
+- [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 48 holding; `main` at `4ee41ee8` has nothing to read
 - [Run QA break-and-fix loop](bc-b4f4cdba-0146-5dea-9731-24ea2538adcd) — cycle 22 opening (half A)
 - [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — Mac **2405** on the feed (`4ee41ee`, [stop-turn film](https://github.com/unarbos/arbos/pull/811))
 </tldr>
@@ -85,7 +85,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] OpenRouter blocks OpenAI models — 403 "user blocked for a previous policy violation" on `openai/*`; it cost Jacob a new project's first turn (raw provider text as the opening line, then 98 silent seconds), fixed in [#298](https://github.com/unarbos/arbos/pull/298): a kickoff probes the key before writing a word, a refusal marks that family blocked for later turns, the switch reads as one plain sentence with the provider's text confined to the log, and a model that sends no first byte in 30 seconds is replaced; loops run on Gemini and Sonnet, and the SWE-bench measurements were never OpenAI so they stay comparable; QA now records a provider refusal as an environment fault rather than an Arbos bug; the pod's voice gateway and every mesh kernel are moved to Gemini and running; [#283](https://github.com/unarbos/arbos/pull/283) and [#284](https://github.com/unarbos/arbos/pull/284) are merged, so the kernel's fallbacks start with the primary's own family, a 403 falls through to the next model, and vision and voice defaults are off OpenAI; only Jacob's own `subnet120` kernel still names a blocked model — offered to switch it; Jacob to query the block on his account
 
-- [ ] [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 48 holding; `main` at `a6817288` has nothing to read; Jev stays off ([loop](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-loop.md))
+- [ ] [Run SWE-bench through Arbos harness](bc-bfb2cd63-da09-5a42-920b-3410d3337c9c) — cycle 48 holding; `main` at `4ee41ee8` has nothing to read; Jev stays off ([loop](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-loop.md))
 - [ ] [SWE-bench harness PR](https://github.com/unarbos/arbos/pull/94) — Arbos as a verifiers Harness; [first run](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-run-2026-09-13.md) 12/16; [comparison](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/swebench-harness-comparison-2026-09-13.md) Arbos 8 vs Codex 10 on shared 12, 5x cheaper, 2x more calls; comparison overspent $73 vs $40 cap
 
 - [ ] [Route harness work through Jev](bc-7330e6eb-85be-5448-944c-6ed6225064ce) — [#546](https://github.com/unarbos/arbos/pull/546) on `main`; next is full integration
