@@ -65,15 +65,94 @@ pub use prs::{PrRec, load_prs, record_pr};
 pub use skills::{Skill, load_skills, slash_skill};
 pub use wake::{Wake, WakeKind};
 
+/// The person's home: `$HOME`, or — for a kernel started with a stripped
+/// environment (a launchd agent, a systemd unit, a container, `env -i`)
+/// — the account's home from the passwd file. None when neither knows
+/// (a uid with no passwd entry). Every look for `~/.config/arbos`,
+/// `~/.config/arbos/skills`, the global `mcp.toml` and `memory.md` goes
+/// through here, so they agree: before, a missing HOME sent the config
+/// to `.arbos-host` in the working directory (the project, when the
+/// kernel is started from it — and `setup` would write the API key
+/// there, outside `.git/info/exclude`) while skills, MCP and memory
+/// quietly found nothing.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return Some(std::path::PathBuf::from(home));
+    }
+    passwd_home()
+}
+
+#[cfg(unix)]
+fn passwd_home() -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: getpwuid_r writes into `pw` and `buf` for their given
+    // lengths and sets `found` to `&pw` or null; both outlive the call.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::geteuid(),
+            &mut pw,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+            &mut found,
+        )
+    };
+    if rc != 0 || found.is_null() || pw.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points into `buf`, NUL-terminated by getpwuid_r.
+    let dir = unsafe { std::ffi::CStr::from_ptr(pw.pw_dir) };
+    let dir = std::path::Path::new(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    (dir.is_absolute()).then(|| dir.to_path_buf())
+}
+
+#[cfg(not(unix))]
+fn passwd_home() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Where `host_dir` came from, for the kernel to say when it is the last
+/// resort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostDirFrom {
+    /// `$XDG_CONFIG_HOME/arbos`.
+    Xdg,
+    /// `$HOME/.config/arbos`, or the passwd home's when HOME is unset.
+    Home,
+    /// Neither known: `.arbos-host` under the working directory, made
+    /// absolute so it does not move if the process changes directory.
+    Cwd,
+}
+
 /// `~/.config/arbos` (or `$XDG_CONFIG_HOME/arbos`): the host's own files.
 pub fn host_dir() -> std::path::PathBuf {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        return std::path::PathBuf::from(base).join("arbos");
+    host_dir_from().0
+}
+
+pub fn host_dir_from() -> (std::path::PathBuf, HostDirFrom) {
+    host_dir_given(std::env::var_os("XDG_CONFIG_HOME"), home_dir())
+}
+
+fn host_dir_given(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::path::PathBuf>,
+) -> (std::path::PathBuf, HostDirFrom) {
+    if let Some(base) = xdg.filter(|b| !b.is_empty()) {
+        return (
+            std::path::PathBuf::from(base).join("arbos"),
+            HostDirFrom::Xdg,
+        );
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return std::path::PathBuf::from(home).join(".config").join("arbos");
+    if let Some(home) = home {
+        return (home.join(".config").join("arbos"), HostDirFrom::Home);
     }
-    std::path::PathBuf::from(".arbos-host")
+    let rel = std::path::PathBuf::from(".arbos-host");
+    (
+        std::env::current_dir().map(|d| d.join(&rel)).unwrap_or(rel),
+        HostDirFrom::Cwd,
+    )
 }
 
 /// Whether a message is a bare control word — `stop`, `cancel`, `halt`,
@@ -374,4 +453,34 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * mp + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146_097 + doe - 719_468
+}
+
+#[cfg(all(test, unix))]
+mod home_dir_tests {
+    use super::*;
+
+    /// The passwd home stands in for an unset HOME (a kernel started by
+    /// launchd, systemd, a container, `env -i`), so the host folder is
+    /// the account's `~/.config/arbos` and not `.arbos-host` in the
+    /// working directory; and the last resort, when neither knows, is
+    /// absolute. No env is touched: other tests in this binary read it.
+    #[test]
+    fn without_home_the_passwd_home_stands_in_and_the_host_dir_is_absolute() {
+        let pw = passwd_home().expect("this account has a passwd entry");
+        assert!(pw.is_absolute(), "{}", pw.display());
+        let (dir, from) = host_dir_given(None, Some(pw.clone()));
+        assert_eq!(from, HostDirFrom::Home);
+        assert_eq!(dir, pw.join(".config").join("arbos"));
+        let (dir, from) = host_dir_given(Some("".into()), Some(pw.clone()));
+        assert_eq!(from, HostDirFrom::Home, "an empty XDG_CONFIG_HOME is unset");
+        let (dir2, from) = host_dir_given(Some("/x/cfg".into()), Some(pw));
+        assert_eq!(
+            (dir2.as_path(), from),
+            (std::path::Path::new("/x/cfg/arbos"), HostDirFrom::Xdg)
+        );
+        assert_ne!(dir, dir2);
+        let (dir, from) = host_dir_given(None, None);
+        assert_eq!(from, HostDirFrom::Cwd);
+        assert_eq!(dir, std::env::current_dir().unwrap().join(".arbos-host"));
+    }
 }

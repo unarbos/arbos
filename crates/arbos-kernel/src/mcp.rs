@@ -106,9 +106,7 @@ fn config_dir() -> Option<PathBuf> {
     if let Some(base) = std::env::var_os("XDG_CONFIG_HOME").filter(|b| !b.is_empty()) {
         return Some(PathBuf::from(base).join("arbos"));
     }
-    std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(|home| PathBuf::from(home).join(".config").join("arbos"))
+    arbos_core::home_dir().map(|home| home.join(".config").join("arbos"))
 }
 
 /// How many of [`config_paths`] belong to the place itself (its `.arbos/`

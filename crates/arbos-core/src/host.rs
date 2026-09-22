@@ -756,13 +756,7 @@ mod jev_config_tests {
 }
 
 pub fn dirs_config() -> PathBuf {
-    if let Some(base) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(base).join("arbos");
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config").join("arbos");
-    }
-    PathBuf::from(".arbos-host")
+    crate::host_dir()
 }
 
 /// Request headers a provider wants beyond `Authorization`. OpenRouter
