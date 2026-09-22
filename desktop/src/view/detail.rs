@@ -511,27 +511,9 @@ impl Arbos {
             _ if chat.is_some_and(|chat| chat.agent_gone()) => {
                 "Follow-ups aren't available for this worker"
             }
-            // Cursor's new Project: the first message seeds the project.
-            // Not while a kickoff is wanted or running — that turn is the
-            // project's first, and Cursor's field reads "Send follow-up"
-            // from the project's first frame (F-141, cycle 33's cold pair:
-            // ours flipped two seconds in).
-            _ if chat.is_some_and(|chat| {
-                chat.items.is_empty()
-                    && chat.parent.is_none()
-                    && !chat.kickoff_wanted
-                    && chat.kickoff_at.is_none()
-            }) =>
-            {
-                "What are you working on?"
-            }
-            // A project whose kickoff is wanted or running has its first
-            // turn: the field asks for the next line.
-            _ if chat.is_some_and(|chat| chat.items.is_empty() && chat.parent.is_none()) => {
-                "Send follow-up"
-            }
-            // Cursor: a fresh chat invites; one with a turn asks for the next.
-            // `clear` hides the transcript and returns to that invite.
+            // A new project, a fresh sub-chat, or `clear`: the empty-chat
+            // invite. The kickoff splash used to ask "What are you working
+            // on?" here; that view is gone.
             _ if chat.is_some_and(|chat| chat.items.is_empty() || chat.view_cleared()) => {
                 "Plan, search, build anything"
             }
@@ -659,13 +641,13 @@ impl Arbos {
         // chat itself has no crumbs, title band, or back control.
         // A chat with a transcript fills the column, composer at the foot:
         // the band above and below is what cut a conversation short (#654).
-        // A chat with nothing on screen — a fresh sub-chat, or one `clear`
-        // has just hidden — has nothing to cut, and Cursor's empty chat
-        // puts its title and the composer in the middle of the column
+        // A chat with nothing on screen — a new project, a fresh sub-chat,
+        // or one `clear` has just hidden — has nothing to cut. The empty
+        // chat puts its title and the composer in the middle of the column
         // (#629, which #654 took with the rest of the spacer).
         let empty_chat = show_composer
             && self.workspace.read(cx).active_session().is_some_and(|chat| {
-                chat.view_cleared() || (chat.items.is_empty() && chat.parent.is_some())
+                chat.view_cleared() || chat.items.is_empty()
             });
         let content = div()
             .when(!empty_chat, |el| el.flex_1())
@@ -1354,14 +1336,10 @@ impl Arbos {
         let Some(chat) = workspace.active_session() else {
             return div().flex_1().into_any_element();
         };
-        // Nothing has been said yet, so what the session has to show for
-        // itself is the directory the agent was started in. `clear` hides
-        // a full transcript and returns to the centered empty chat.
-        let inner = if chat.view_cleared() {
-            self.empty_chat_heading(chat.id, &theme, window, cx)
-        } else if chat.items.is_empty() && chat.parent.is_none() {
-            self.kickoff(&theme, window, cx)
-        } else if chat.items.is_empty() {
+        // Nothing has been said yet — a new project, a fresh sub-chat, or
+        // `clear` — so the column is the empty chat. The kickoff splash
+        // (project head + greeting) is parked.
+        let inner = if chat.view_cleared() || chat.items.is_empty() {
             self.empty_chat_heading(chat.id, &theme, window, cx)
         } else {
             let id = chat.id;
@@ -1423,9 +1401,8 @@ impl Arbos {
             .into_any_element()
     }
 
-    /// Cursor's new-chat page: the title alone, just above the composer,
-    /// both in the middle of the column. Used for a fresh sub-chat and
-    /// after `clear`.
+    /// The empty chat: the title alone, just above the composer, both in
+    /// the middle of the column. A new project, a fresh sub-chat, or `clear`.
     fn empty_chat_heading(
         &self,
         id: u64,
@@ -1493,8 +1470,8 @@ impl Arbos {
         let chat = workspace.active_session()?;
         let project = workspace.active_project()?;
         // A subagent's chat in Cursor carries no pills; they are the project's.
-        // A cleared view is the empty chat: no chips above the composer.
-        if chat.parent.is_some() || chat.view_cleared() {
+        // An empty chat — new project, fresh sub-chat, or `clear` — has none.
+        if chat.parent.is_some() || chat.view_cleared() || chat.items.is_empty() {
             return None;
         }
         let (_working, prs) = pill_counts(project, chat);
@@ -1614,12 +1591,9 @@ impl Arbos {
         )
     }
 
-    /// Cursor's new-Project view (`media/cursor-reference/mac-fixes/
-    /// cursor-new-project-kickoff.png`): the project header block, then
-    /// the coordinator's greeting where its first turn's words would go.
-    /// Cursor runs a "Setting up environment" turn here; ours is a line
-    /// until the kernel has a kickoff turn (features inbox). The first
-    /// message sent turns this into the Project chat.
+    /// Parked. A new project now opens on the empty chat, the same as
+    /// `clear`. Keep the splash so a later pass can restore it without a hunt.
+    #[allow(dead_code)]
     fn kickoff(&self, theme: &Theme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let workspace = self.workspace.read(cx);
         let name = workspace
