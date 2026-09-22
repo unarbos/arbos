@@ -566,6 +566,15 @@ impl Provider {
                 .filter(|t| *t == "1h" && (m.contains("claude") || m.starts_with("anthropic/")));
             mark_cache_breakpoints(&mut msgs, ttl);
         }
+        // OpenRouter accepts several leading system messages (contract,
+        // project context, instance, plan). SGLang, vLLM and many other
+        // OpenAI-compatible hosts answer 400 "System message must be at
+        // the beginning" for a system role after index 0. Merge the
+        // prefix into one message there. OpenRouter keeps the split: its
+        // cache markers sit on those separate messages.
+        if !self.base.contains("openrouter.ai") {
+            coalesce_leading_system_messages(&mut msgs);
+        }
         let mut body = json!({
             "model": self.model,
             "messages": msgs,
@@ -1421,6 +1430,45 @@ fn mark_cache_breakpoints(msgs: &mut [Value], ttl: Option<&str>) {
 }
 
 /// The exact `messages` array sent to the provider.
+/// Join every leading `role=system` message into one. Hosts that only
+/// allow a system message at index 0 (SGLang's wording: "must be at the
+/// beginning") reject Arbos's four-part prefix otherwise. Messages after
+/// the first non-system are left as they are.
+fn coalesce_leading_system_messages(msgs: &mut Vec<Value>) {
+    let prefix = msgs
+        .iter()
+        .take_while(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+        .count();
+    if prefix <= 1 {
+        return;
+    }
+    let systems: Vec<Value> = msgs.drain(..prefix).collect();
+    let mut text = String::new();
+    for sys in &systems {
+        let piece = system_text(sys);
+        if piece.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&piece);
+    }
+    msgs.insert(0, json!({"role": "system", "content": text}));
+}
+
+fn system_text(msg: &Value) -> String {
+    match msg.get("content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 pub fn messages_json(messages: &[ChatMessage]) -> Vec<Value> {
     messages
         .iter()
@@ -1551,5 +1599,44 @@ mod cache_tests {
         let anthropic = json!({"usage": {"prompt_tokens": 100, "cache_read_input_tokens": 80}});
         assert_eq!(cached_of(&anthropic), Some(80));
         assert_eq!(cached_of(&json!({"usage": {"prompt_tokens": 1}})), None);
+    }
+
+    #[test]
+    fn leading_system_messages_become_one_for_hosts_that_reject_a_second() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "contract"}),
+            json!({"role": "system", "content": "place"}),
+            json!({"role": "system", "content": "instance"}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        coalesce_leading_system_messages(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "contract\n\nplace\n\ninstance");
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "hi");
+    }
+
+    #[test]
+    fn a_single_system_message_is_left_alone() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": "only"}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        coalesce_leading_system_messages(&mut msgs);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["content"], "only");
+    }
+
+    #[test]
+    fn array_content_from_a_cache_marker_is_joined_as_text() {
+        let mut msgs = vec![
+            json!({"role": "system", "content": [{"type": "text", "text": "a"}]}),
+            json!({"role": "system", "content": [{"type": "text", "text": "b"}]}),
+            json!({"role": "user", "content": "hi"}),
+        ];
+        coalesce_leading_system_messages(&mut msgs);
+        assert_eq!(msgs[0]["content"], "a\n\nb");
+        assert_eq!(msgs[1]["role"], "user");
     }
 }
