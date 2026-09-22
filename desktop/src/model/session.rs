@@ -3732,16 +3732,31 @@ impl ChatSession {
                 self.waiting = line;
             }
             Event::TurnEndedAt(ended) => {
-                // The turn read back is the newest opener's: a prompt, or a
-                // wake — a worker's whole first turn opens on its `plan`
-                // wake and has no `user` line at all, so a replayed worker
-                // tab read "Edited 2 files, …" where Cursor's says "Worked
-                // for 46s" (F-131, cycle 32).
-                let opener = self
-                    .items
-                    .iter_mut()
-                    .rev()
-                    .find(|item| matches!(item, ChatItem::User(_) | ChatItem::Wake { .. }));
+                // The turn that ended is the oldest opener still without a
+                // time: a prompt, or a wake — a worker's whole first turn
+                // opens on its `plan` wake and has no `user` line at all, so
+                // a replayed worker tab read "Edited 2 files, …" where
+                // Cursor's says "Worked for 46s" (F-131, cycle 32). Turns
+                // end in the order they opened: a prompt typed while a
+                // wake's turn still ran took that turn's end as its own —
+                // "Worked 0s", drawn as "Edited project-context.md" while
+                // its neighbours read "Worked 4s" (F-193, cycle 43 d18) —
+                // and its own end then found it stamped. Openers from
+                // before this hour are history the replay stamps itself.
+                let recent = |began: i64| ended - began < 60 * 60 * 1000;
+                let opener = self.items.iter_mut().find(|item| match item {
+                    // A steer rides inside the turn it landed in and heads
+                    // nothing; the turn's own opener takes the time.
+                    ChatItem::User(message) => {
+                        !message.steer
+                            && message.worked_secs.is_none()
+                            && message.sent_at.is_some_and(|sent| ended > sent && recent(sent))
+                    }
+                    ChatItem::Wake { at, secs, .. } => {
+                        secs.is_none() && at.is_some_and(|began| ended > began && recent(began))
+                    }
+                    _ => false,
+                });
                 let stamp = |began: i64| ((ended - began) / 1000).min(u32::MAX as i64) as u32;
                 match opener {
                     Some(ChatItem::User(message)) => {
