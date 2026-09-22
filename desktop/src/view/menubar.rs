@@ -19,9 +19,8 @@
 //! for, and why a greyed item's shortcut still reaches the keymap underneath.
 
 use crate::view::root::{
-    Arbos, CloseProject, EndCall, NewSession, NewTab, NextEntry, NextTab, OpenProject,
-    OpenSettings, PrevEntry, PrevTab, ReportProblem, SearchChats, ShowPermissions, ShowProject,
-    StartCall, ToggleMute, TogglePanel, ZoomIn, ZoomOut, ZoomReset,
+    Arbos, CloseProject, NewSession, NewTab, NextEntry, NextTab, OpenProject, OpenSettings,
+    PrevEntry, PrevTab, ReportProblem, SearchChats, ShowPermissions, ZoomIn, ZoomOut, ZoomReset,
 };
 use bezel::{
     gpui::{
@@ -175,14 +174,7 @@ fn menus() -> Vec<Menu> {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
-            MenuItem::action("Toggle Panel", TogglePanel),
-            MenuItem::action("Show Project", ShowProject),
             MenuItem::action("Search Chats…", SearchChats),
-            MenuItem::separator(),
-            // A call to the project in front, through the speech server.
-            MenuItem::action("Call Project", StartCall),
-            MenuItem::action("End Call", EndCall),
-            MenuItem::action("Mute", ToggleMute),
             MenuItem::separator(),
             // Drawn ⇧⌘] and ⇧⌘[, which is why those are bound first: the
             // `ctrl-tab` pair these also answer to is a chord gpui cannot
@@ -190,8 +182,8 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Next Tab", NextTab),
             MenuItem::action("Previous Tab", PrevTab),
             MenuItem::separator(),
-            MenuItem::action("Next Agent", NextEntry),
-            MenuItem::action("Previous Agent", PrevEntry),
+            MenuItem::action("Next Conversation", NextEntry),
+            MenuItem::action("Previous Conversation", PrevEntry),
             MenuItem::separator(),
             MenuItem::action("Actual Size", ZoomReset),
             MenuItem::action("Zoom In", ZoomIn),

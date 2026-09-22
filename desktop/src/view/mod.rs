@@ -4,6 +4,7 @@
 
 pub mod chips;
 pub mod component;
+pub mod conversation_bar;
 pub mod detail;
 pub mod drawer;
 pub mod file_editor;

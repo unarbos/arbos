@@ -23,6 +23,8 @@ pub(crate) enum Menu {
     /// or an empty tab. A click used to open a tab with no ask; the menu
     /// is the ask.
     PanelNew,
+    /// Agent chats the conversation bar could not fit: `+N`.
+    ConversationOverflow,
 }
 
 /// One row of a menu, and what picking it does.

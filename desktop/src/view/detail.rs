@@ -19,7 +19,7 @@ use crate::{
 use bezel::{
     gpui::{
         AnyElement, App, ClickEvent, Context, ExternalPaths, FocusHandle, Focusable as _,
-        SharedString, Window, div, img, prelude::*, px, svg,
+        SharedString, Window, div, img, prelude::*, px,
     },
     motion::{Fade, Painter},
     theme::{TextStyle, Theme, Typeset},
@@ -655,9 +655,8 @@ impl Arbos {
             Some(Pane::Surface) | Some(Pane::Project) => self.conversation(window, cx),
         };
 
-        let header = show_composer
-            .then(|| self.chat_header(&theme, window, cx))
-            .flatten();
+        // Conversations switch on the bar under the project tabs. The
+        // chat itself has no crumbs, title band, or back control.
         // A chat with a transcript fills the column, composer at the foot:
         // the band above and below is what cut a conversation short (#654).
         // A chat with nothing on screen — a fresh sub-chat, or one `clear`
@@ -677,7 +676,6 @@ impl Arbos {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .children(header)
             .child(body);
         let context_row = show_composer
             .then(|| self.context_row(&theme, cx))
@@ -741,110 +739,8 @@ impl Arbos {
 }
 
 impl Arbos {
-    /// Cursor's chat header: the chat's place in the tree on the left — its
-    /// parents as crumbs, then its title — on one slim line the transcript
-    /// scrolls under. Drawn only when a sub-agent is in front. The main
-    /// chat has no header band: Clear is typed (`clear` / `/clear`), and
-    /// the panel toggle sits on the window tab strip.
-    fn chat_header(
-        &self,
-        theme: &Theme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let workspace = self.workspace.read(cx);
-        let chat = workspace.active_session()?;
-        let id = chat.id;
-        let title = workspace.display_label(id);
-        let naming = self.renaming == Some(Renaming::Session(id)) && self.rename_in_header;
-        // A sub-agent in front is shown under its parents, Cursor's way:
-        // `Main › Review edge cases`, each crumb a click back up the tree.
-        let crumbs: Vec<(u64, String)> = workspace
-            .active_project()
-            .map(|project| {
-                let mut path = project.path_to(id);
-                path.pop();
-                path.into_iter()
-                    .map(|up| (up, workspace.display_label(up)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // The main chat is what the tab names; its title would say the same
-        // thing twice, so only a sub-agent's title is drawn here, after
-        // the crumbs that lead back to it.
-        let titled = !crumbs.is_empty();
-        if !titled {
-            return None;
-        }
-        let name_field = naming.then(|| self.header_name_field(window, cx));
-        Some(
-        div()
-            .id("chat-header")
-            .flex_none()
-            .h(px(root::HEADER_HEIGHT))
-            .w_full()
-            .pl(px(14.))
-            .pr(px(10.))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(6.))
-            .children(crumbs.into_iter().flat_map(|(up, label)| {
-                [
-                    div()
-                        .id(("chat-header-crumb", up))
-                        .flex_none()
-                        .max_w(px(180.))
-                        .truncate()
-                        .text_style(TextStyle::Body)
-                        .text_color(theme.text_muted)
-                        .cursor_pointer()
-                        .hover(|el| el.text_color(theme.text))
-                        .child(SharedString::from(label))
-                        .on_click(cx.listener(move |this, _, _, cx| this.select_session(up, cx)))
-                        .into_any_element(),
-                    div()
-                        .flex_none()
-                        .text_style(TextStyle::Body)
-                        .text_color(theme.text_faint)
-                        .child("›")
-                        .into_any_element(),
-                ]
-            }))
-            .when(titled && naming, |el| {
-                el.child(
-                    div()
-                        .id(("chat-header-title-name", id))
-                        .min_w_0()
-                        .max_w_full()
-                        .text_style(TextStyle::Body)
-                        .text_color(theme.text)
-                        .children(name_field),
-                )
-            })
-            .when(titled && !naming, |el| {
-                el.child(
-                    div()
-                        .id(("chat-header-title", id))
-                        .min_w_0()
-                        .truncate()
-                        .text_style(TextStyle::Body)
-                        .text_color(theme.text)
-                        .cursor_text()
-                        .tooltip(|window, cx| Tooltip::text("Double-click to rename", window, cx))
-                        .child(SharedString::from(title))
-                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                            if event.click_count() >= 2 {
-                                cx.stop_propagation();
-                                this.rename_header_title(id, window, cx);
-                            }
-                        })),
-                )
-            })
-            .child(div().flex_1())
-            .into_any_element(),
-        )
-    }
+    /// Conversations switch on the bar under the project tabs. The chat
+    /// itself has no crumbs, title band, or back control.
 
     /// The line under the composer: a reconnect status when the link is
     /// down, and Try Live. Projects open from the tabs. There is no machine
@@ -1588,11 +1484,9 @@ impl Arbos {
             .into_any_element()
     }
 
-    /// Cursor's chips above the composer: "Working N" for the sub-agents
-    /// with a turn running, "PRs N" for the pull requests this chat and its
-    /// children have opened. Both derived from the sessions on hand;
-    /// neither shows at zero. Working opens the first live child; PRs opens
-    /// the newest one.
+    /// Chips above the composer that are not conversation switchers:
+    /// Continue Working, Push, and PRs. Agent chats live on the bar under
+    /// the project tabs.
     fn pills(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let theme = Theme::of(cx).clone();
         let workspace = self.workspace.read(cx);
@@ -1603,7 +1497,7 @@ impl Arbos {
         if chat.parent.is_some() || chat.view_cleared() {
             return None;
         }
-        let (working, prs) = pill_counts(project, chat);
+        let (_working, prs) = pill_counts(project, chat);
         // No Changes chip and no Commit & Push here: the diff is git's, and
         // both read as the window doing the agent's job (Jacob, 09-18).
         let tree = (!project.is_remote())
@@ -1623,8 +1517,7 @@ impl Arbos {
                 .rev()
                 .take_while(|item| !matches!(item, crate::model::session::ChatItem::User(_)))
                 .any(|item| matches!(item, crate::model::session::ChatItem::Notice { text, .. } if crate::model::session::is_interrupt_notice(text)));
-        let has_agents = project.sessions.iter().any(|c| c.parent == Some(chat.id));
-        if working.is_empty() && !has_agents && prs.is_empty() && ahead.is_none() && !stopped {
+        if prs.is_empty() && ahead.is_none() && !stopped {
             return None;
         }
         let main_id = chat.id;
@@ -1650,84 +1543,13 @@ impl Arbos {
                 .child(glyph)
                 .child(SharedString::from(label))
         };
-        // Cursor's Working card: one row per running worker with its
-        // spinner, Stop All on the right, over the pills. Cursor keeps it
-        // behind the "Working N" pill — a delegated task shows one "1
-        // Working" line in the transcript and the pill, nothing more
-        // (F-82) — so it opens on the pill and × puts it away.
-        let card_open = !working.is_empty() && workspace.working_card_open == Some(main_id);
-        let workers: Vec<(u64, String, Duration, bool)> = working
-            .iter()
-            .filter_map(|id| project.sessions.iter().find(|c| c.id == *id))
-            .map(|c| (c.id, c.label(), c.elapsed().unwrap_or_default(), true))
-            .collect();
-        // Cursor's pill once the workers are done reads "Agents" and opens
-        // the same list, a check per finished worker.
-        let mut agents: Vec<(u64, String, Duration, bool)> = project
-            .sessions
-            .iter()
-            .filter(|c| c.parent == Some(main_id))
-            .map(|c| (c.id, c.label(), Duration::ZERO, c.busy()))
-            .collect();
-        agents.sort_by_key(|(id, ..)| *id);
-        let agents_open =
-            working.is_empty() && !agents.is_empty() && self.agents_card_open == Some(main_id);
-        let row = div()
+        Some(
+            div()
                 .w_full()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(6.))
-                .when(!working.is_empty(), |row| {
-                    row.child(
-                        pill(
-                            "pill-working",
-                            svg()
-                                .path(crate::assets::DELEGATE_ICON)
-                                .size(px(12.))
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element(),
-                            format!("Working {}", working.len()),
-                        )
-                        .tooltip(|window, cx| {
-                            Tooltip::text("Sub-agents with a turn running", window, cx)
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.workspace.update(cx, |workspace, cx| {
-                                workspace.working_card_open = if card_open {
-                                    None
-                                } else {
-                                    Some(main_id)
-                                };
-                                cx.notify();
-                            });
-                        })),
-                    )
-                })
-                .when(working.is_empty() && has_agents, |row| {
-                    row.child(
-                        pill(
-                            "pill-agents",
-                            svg()
-                                .path(crate::assets::DELEGATE_ICON)
-                                .size(px(12.))
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element(),
-                            "Agents".to_string(),
-                        )
-                        .tooltip(|window, cx| Tooltip::text("This chat's sub-agents", window, cx))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.agents_card_open = if this.agents_card_open == Some(main_id) {
-                                None
-                            } else {
-                                Some(main_id)
-                            };
-                            cx.notify();
-                        })),
-                    )
-                })
                 .when(stopped, |row| {
                     row.child(
                         pill(
@@ -1787,142 +1609,9 @@ impl Arbos {
                             }
                         }),
                     )
-                });
-        let card = if card_open {
-            Some(self.working_card(&workers, true, &theme, cx))
-        } else if agents_open {
-            Some(self.working_card(&agents, false, &theme, cx))
-        } else {
-            None
-        };
-        Some(
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .children(card)
-                .child(row)
+                })
                 .into_any_element(),
         )
-    }
-
-    /// The card the Working pill opens: "Working" and "Stop All ×" on one
-    /// line, then a braille spinner and the worker's name per row. A row
-    /// opens the worker; Stop All cancels every running one.
-    fn working_card(
-        &self,
-        workers: &[(u64, String, Duration, bool)],
-        live: bool,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let ids: Vec<u64> = workers.iter().map(|(id, ..)| *id).collect();
-        let mut card = div()
-            .id("working-card")
-            .w_full()
-            .rounded(px(Theme::surface_radius()))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.surface_raised.opacity(0.6))
-            .flex()
-            .flex_col()
-            .py(px(6.))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .px(px(12.))
-                    .h(px(28.))
-                    .text_style(TextStyle::Body)
-                    .text_size(px(root::CURSOR_PROSE_SIZE))
-                    .child(div().flex_1().text_color(theme.text_muted).child(if live {
-                        "Working"
-                    } else {
-                        "Agents"
-                    }))
-                    .when(live, |head| {
-                        head.child(
-                            div()
-                                .id("working-stop-all")
-                                .px(px(4.))
-                                .rounded(px(4.))
-                                .cursor_pointer()
-                                .text_color(theme.text_muted)
-                                .hover(|el| el.text_color(theme.text))
-                                .child("Stop All")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let ids = ids.clone();
-                                    this.workspace.update(cx, |workspace, cx| {
-                                        for id in ids {
-                                            workspace.cancel(id, cx);
-                                        }
-                                    });
-                                })),
-                        )
-                    })
-                    .child(
-                        div()
-                            .id("working-card-close")
-                            .ml(px(6.))
-                            .size(px(18.))
-                            .rounded(px(4.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .text_color(theme.text_muted)
-                            .hover(|el| el.text_color(theme.text).bg(theme.element_hover))
-                            .child(
-                                icons::icon(icons::system::CLOSE)
-                                    .size(px(11.))
-                                    .text_color(theme.text_muted),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if live {
-                                    this.workspace.update(cx, |workspace, cx| {
-                                        workspace.working_card_open = None;
-                                        cx.notify();
-                                    });
-                                } else {
-                                    this.agents_card_open = None;
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            );
-        for (id, label, since, running) in workers {
-            let (id, since, running) = (*id, *since, *running);
-            card = card.child(
-                div()
-                    .id(("working-row", id))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.))
-                    .mx(px(6.))
-                    .px(px(6.))
-                    .h(px(29.))
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(|el| el.bg(theme.element_hover))
-                    .text_style(TextStyle::Callout)
-                    .text_color(theme.text)
-                    .child(if running {
-                        transcript::spinner(since, theme.text_muted, cx)
-                    } else {
-                        icons::icon(icons::status::CHECK)
-                            .size(px(12.))
-                            .flex_none()
-                            .text_color(theme.success)
-                            .into_any_element()
-                    })
-                    .child(SharedString::from(label.clone()))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_session(id, cx))),
-            );
-        }
-        card.into_any_element()
     }
 
     /// Cursor's new-Project view (`media/cursor-reference/mac-fixes/

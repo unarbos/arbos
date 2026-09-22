@@ -177,6 +177,7 @@ impl Arbos {
     /// Rename from the chat header: the same field, Body-sized, in the
     /// title's place on the header line. Reached by a double-click on the
     /// title, like the empty-chat heading.
+    #[allow(dead_code)]
     pub(crate) fn rename_header_title(
         &mut self,
         id: u64,
@@ -198,6 +199,7 @@ impl Arbos {
 
     /// Same field as the chat header's title: Body, hugging the text, so
     /// the header line does not shift when editing starts.
+    #[allow(dead_code)]
     pub(crate) fn header_name_field(
         &self,
         window: &mut Window,
