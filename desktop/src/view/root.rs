@@ -1484,8 +1484,8 @@ impl Arbos {
         self.name_field = name_field_entity(heading, cx);
     }
 
-    /// ⌘N: a sub-chat under the project's main chat. It shows in the panel
-    /// with the sub-agents; the main chat stays the one root.
+    /// ⌘N and the `+` on the conversation bar: a sub-chat under the
+    /// project's main chat. The main chat stays the one root.
     pub(crate) fn new_session_action(
         &mut self,
         _: &NewSession,

@@ -3,7 +3,8 @@
 //! Hierarchy is Workspace → Project → Conversations. The dark strip above
 //! this one is projects. This one is conversations: Main first, then a
 //! divider, then each agent chat with a running or done mark. Overflow
-//! collapses to `+N`. The chat itself has no switcher.
+//! collapses to `+N`. A `+` starts another chat in this project. The chat
+//! itself has no switcher.
 
 use crate::{
     model::session::ChildState,
@@ -12,13 +13,13 @@ use crate::{
             menu::{self, Menu},
             transcript,
         },
-        root::{self, Arbos, Front},
+        root::{self, Arbos, Front, NewSession},
     },
 };
 use bezel::{
     gpui::{AnyElement, SharedString, Window, div, prelude::*, px},
     theme::{TextStyle, Theme, Typeset},
-    ui::{icons, menu::Item, popover, tooltip::Tooltip},
+    ui::{icons, menu::Item, popover, tooltip::Tooltip, widgets::Buttons},
 };
 
 /// Shorter than the project strip above it, so the two rows do not read
@@ -31,6 +32,7 @@ const CHIP_ESTIMATE: f32 = 148.;
 const MAIN_ESTIMATE: f32 = 72.;
 const DIVIDER_WIDTH: f32 = 17.;
 const OVERFLOW_WIDTH: f32 = 36.;
+const PLUS_WIDTH: f32 = 28.;
 
 #[derive(Clone)]
 struct AgentChip {
@@ -104,6 +106,7 @@ impl Arbos {
                     )
                 })
                 .children(self.overflow_chip(&overflow, &theme, cx))
+                .child(self.new_conversation(&theme, cx))
                 .into_any_element(),
         )
     }
@@ -224,6 +227,28 @@ impl Arbos {
             None,
         )
     }
+
+    /// `+` on this bar starts another chat in the project in front. The
+    /// `+` on the strip above opens a project tab.
+    fn new_conversation(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        theme
+            .ghost("conversation-new")
+            .flex_none()
+            .size(px(22.))
+            .rounded(px(6.))
+            .items_center()
+            .justify_center()
+            .tooltip(|window, cx| Tooltip::with_keystroke("New conversation", "⌘N", window, cx))
+            .child(
+                icons::icon(icons::system::PLUS)
+                    .size(px(12.))
+                    .text_color(theme.text_muted),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.new_session_action(&NewSession, window, cx);
+            }))
+            .into_any_element()
+    }
 }
 
 fn chip(
@@ -297,7 +322,12 @@ fn overflow_count(viewport: f32, inset: f32, agents: usize) -> usize {
     if agents == 0 {
         return 0;
     }
-    let reserved = inset + root::HEADER_INSET + MAIN_ESTIMATE + DIVIDER_WIDTH + OVERFLOW_WIDTH;
+    let reserved = inset
+        + root::HEADER_INSET
+        + MAIN_ESTIMATE
+        + DIVIDER_WIDTH
+        + OVERFLOW_WIDTH
+        + PLUS_WIDTH;
     let room = (viewport - reserved).max(0.);
     let fit = (room / CHIP_ESTIMATE).floor() as usize;
     agents.saturating_sub(fit)

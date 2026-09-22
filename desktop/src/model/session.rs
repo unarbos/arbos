@@ -138,6 +138,24 @@ pub enum ChatItem {
     },
 }
 
+impl ChatItem {
+    /// A line the person or the agent said. Notices and nudges are the
+    /// session talking about itself; they do not make a conversation.
+    fn is_spoken(&self) -> bool {
+        match self {
+            Self::User(_)
+            | Self::From { .. }
+            | Self::Agent(_)
+            | Self::Thinking { .. }
+            | Self::Tool { .. }
+            | Self::Artifacts(_)
+            | Self::Asked { .. }
+            | Self::Wake { .. } => true,
+            Self::Notice { .. } | Self::Nudge(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -1959,6 +1977,12 @@ impl ChatSession {
         self.hide_before > 0 && self.hide_before >= self.items.len()
     }
 
+    /// The empty chat: `clear`, never spoken, or only notices (a new
+    /// project whose kernel is still missing). Same view either way.
+    pub fn is_empty_chat(&self) -> bool {
+        self.view_cleared() || !self.items.iter().any(ChatItem::is_spoken)
+    }
+
     /// Explicit names override the delegate identity or the agent's title.
     pub fn label(&self) -> String {
         if let Some(name) = self
@@ -3288,21 +3312,9 @@ impl ChatSession {
                 // words. Kept only while the socket is: `forget_socket` drops
                 // it, so the field cannot outlive the connection it describes.
                 self.kernel_build = ok.then_some(build);
-                // An empty root on a place opened for the first time wants
-                // the kickoff turn once. It goes when the kernel says it has
-                // a key (the `provider` frame follows hello): on a fresh
-                // machine without one the turn only failed, twice (templar,
-                // cycle 11). The kernel files nothing when root has a turn
-                // on record already.
-                if ok
-                    && self.parent.is_none()
-                    && self.items.is_empty()
-                    && self.kickoff_at.is_none()
-                    && self.agent_session.as_deref().is_none_or(|id| id == "root")
-                {
-                    self.kickoff_wanted = true;
-                    self.send_kickoff_if_ready();
-                }
+                // A new project opens on an empty chat, the same as `clear`.
+                // The kickoff splash is no longer asked for: the first turn
+                // is the person's, not a setup greeting.
                 if !ok {
                     let where_ = match &self.host {
                         Some(h) => format!("on {h}"),
