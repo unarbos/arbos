@@ -577,8 +577,32 @@ impl Tool for Spawn {
                     .filter_map(|k| opt_str(&args, k))
                     .any(arbos_core::store::names_an_image);
             // The template wins when a task is given; a raw brief is the
-            // fallback. Neither is an error the model can act on.
-            let rendered = match (opt_str(&args, "task"), opt_str(&args, "brief")) {
+            // fallback. Neither: the person's own line this turn stands in
+            // — it is the request, in their words (desktop cycle 58: a
+            // model called spawn with {} on "Spawn one worker with this
+            // brief: '…'", got a refusal that named the arguments, and
+            // asked the person for `task` or `brief` — words that are the
+            // tool's, not theirs). No line to take is said to the model
+            // with the move, never as a question for the person.
+            let mut brief_note: Option<String> = None;
+            let users_line = arbos_core::store::turn_user_text(&cx.place, cx.agent.id.as_str());
+            let brief_arg = opt_str(&args, "brief")
+                .map(str::trim)
+                .filter(|b| !b.is_empty());
+            let task_arg = opt_str(&args, "task")
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let taken_brief: Option<String> = match (task_arg, brief_arg, &users_line) {
+                (None, None, Some(line)) => {
+                    brief_note = Some(format!(
+                        "no task or brief in the call; the user's line this turn was taken as the brief: «{}»",
+                        arbos_core::text::clip(line.trim(), 160)
+                    ));
+                    Some(line.trim().to_string())
+                }
+                (_, b, _) => b.map(str::to_string),
+            };
+            let rendered = match (task_arg, taken_brief.as_deref()) {
                 (Some(task), _) => arbos_core::store::Kickoff {
                     read_first: opt_str(&args, "read_first"),
                     task,
@@ -595,7 +619,9 @@ impl Tool for Spawn {
                 }
                 (None, Some(brief)) => brief.to_string(),
                 (None, None) => {
-                    anyhow::bail!("spawn: give `task` (with the template fields) or a raw `brief`")
+                    anyhow::bail!(
+                        "spawn: nothing to give the worker. Call spawn again with brief set to the request in the user's words (or task with the template fields). This is for you to fix from what you already have — do not ask the user for a tool argument."
+                    )
                 }
             };
             let brief = rendered.as_str();
@@ -675,6 +701,9 @@ impl Tool for Spawn {
                 )
                 .await?;
                 let mut body = format!("spawned {id} {where_}: {brief}");
+                if let Some(note) = &brief_note {
+                    body.push_str(&format!("\nNote: {note}"));
+                }
                 // `wait=true` blocks on the worker's report the way a local
                 // spawn does — not on the sync and start notices (qa-037).
                 if wait {
@@ -755,6 +784,9 @@ impl Tool for Spawn {
                 body.push_str(&format!("\nNote: {note}."));
             }
             if let Some(note) = &readonly_note {
+                body.push_str(&format!("\nNote: {note}"));
+            }
+            if let Some(note) = &brief_note {
                 body.push_str(&format!("\nNote: {note}"));
             }
             let mut paths = vec![format!(".arbos/agents/{id}")];
