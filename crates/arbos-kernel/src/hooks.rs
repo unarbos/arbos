@@ -2514,7 +2514,8 @@ impl KernelHooks {
 /// person), as opposed to a worker's brief, a done report, or the
 /// kernel's own wake.
 pub fn is_users_own(msg: &inbox::Message) -> bool {
-    msg.kind == "request" && (msg.from == "user" || msg.from.starts_with("user:"))
+    matches!(msg.kind.as_str(), "request" | "steer")
+        && (msg.from == "user" || msg.from.starts_with("user:"))
 }
 
 pub fn kickoff_taken(events: &[Event]) -> bool {
