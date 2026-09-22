@@ -491,6 +491,9 @@ pub async fn run(place_path: impl Into<std::path::PathBuf>) -> Result<i32> {
     host.remember_place(place.path());
     say_if_host_dir_unwritable(&place, &host);
     let git_present = say_if_git_missing(&place);
+    if git_present {
+        say_if_inside_a_repository(&place);
+    }
     let _ = GIT_PRESENT.set(git_present);
     match (host.api_key(), host.config.api_base()) {
         (Some(key), Ok(base)) => {
@@ -2374,6 +2377,7 @@ static GIT_PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// The marker that the missing-git notice was said for this place; in
 /// `runtime/`, so a reinstall of the machine starts the question afresh.
+const INSIDE_REPO_SAID: &str = "inside-repository.said";
 const HOST_DIR_UNWRITABLE_SAID: &str = "host-dir-unwritable.said";
 const GIT_MISSING_SAID: &str = "git-missing.said";
 
@@ -2426,6 +2430,61 @@ fn say_if_host_dir_unwritable(place: &Place, host: &Host) {
             );
         }
         Ok(()) => {}
+    }
+}
+
+/// A place that is a subfolder of a repository (`repo/packages/app` opened
+/// as the project): no checkpoint is ever written there, so rewind and
+/// undo are off — rightly, a rewind would reach the whole repository —
+/// and until now nobody was told. Said once on the main chat with where
+/// the root is and the two ways; cleared when the folder becomes a
+/// repository of its own. A folder that is no repository at all is a
+/// common, deliberate shape and is told only when rewind or undo is tried.
+fn say_if_inside_a_repository(place: &Place) {
+    let marker = place.runtime_dir().join(INSIDE_REPO_SAID);
+    let said = marker.exists();
+    let transcript = Layout::new(place, arbos_core::ROOT_ID).transcript();
+    match arbos_engine::git::checkpoint_home(place.path()) {
+        arbos_engine::git::CheckpointHome::InsideRepository(root) => {
+            klog::warn(
+                "place_inside_repository",
+                None,
+                format!(
+                    "root {}: no checkpoints here; rewind and undo are off",
+                    root.display()
+                ),
+            );
+            if !said {
+                let _ = arbos_core::append_event(
+                    &transcript,
+                    &arbos_core::Event::new(EventKind::Notice {
+                        text: format!(
+                            "This folder is inside the repository at {}, not its root, so checkpoints, rewind and undo are off here (a rewind would reach the whole repository). Open {} as the project to have them, or run `git init` in this folder to make it a repository of its own.",
+                            root.display(),
+                            root.display()
+                        ),
+                        failed: true,
+                    }),
+                );
+                let _ = std::fs::write(&marker, "said\n");
+            }
+        }
+        _ if said => {
+            let _ = std::fs::remove_file(&marker);
+            klog::info(
+                "place_is_repository",
+                None,
+                "checkpoints, rewind and undo are on",
+            );
+            let _ = arbos_core::append_event(
+                &transcript,
+                &arbos_core::Event::new(EventKind::Notice {
+                    text: "This folder is a repository of its own now: checkpoints, rewind and undo are on from this turn.".into(),
+                    failed: false,
+                }),
+            );
+        }
+        _ => {}
     }
 }
 
