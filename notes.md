@@ -19,9 +19,9 @@
 Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-4e3e-9e34-7b2a1f8c6983/docs/project-context.md) — restored at half its size after this morning's store loss, so treat it as incomplete until its gaps are refilled
 
 <tldr>
-- [Ship conversation bar chrome](bc-6a5c5d28-822a-512e-96cb-b1dbc447e73d) — [quiet conversation bar](https://github.com/unarbos/arbos/pull/814) on `main` (`7aaa4630`); waiting on a zip newer than **2408**
+- [Ship conversation bar chrome](bc-6a5c5d28-822a-512e-96cb-b1dbc447e73d) — [conversation plus](https://github.com/unarbos/arbos/pull/815) on `main` (`0ecc21ca`); waiting on a zip newer than **2410**
 - [Wire Affine king on Mac](bc-2f70c55c-890b-5415-9e85-ea2e828f5078) — Mac works via local proxy; [system-message coalesce](https://github.com/unarbos/arbos/pull/813) still the kernel fix
-- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — paused; close-timers aborted; last told Mac **2408**
+- [Add in-app update bar](bc-37bdb830-611b-5b03-8528-e12912f71b59) — last told Mac **2410**
 - [Run iOS app loop on AWS Mac](bc-7c66cfa8-381e-5700-9d78-3129f338a4fa) — paused; timers empty; TestFlight **2396**
 </tldr>
 
@@ -106,12 +106,12 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 - [ ] QA fix PRs ready for review — [#7](https://github.com/unarbos/arbos/pull/7), [#10](https://github.com/unarbos/arbos/pull/10), [#11](https://github.com/unarbos/arbos/pull/11), [#12](https://github.com/unarbos/arbos/pull/12), [#13](https://github.com/unarbos/arbos/pull/13), [#14](https://github.com/unarbos/arbos/pull/14), [#19](https://github.com/unarbos/arbos/pull/19), [#20](https://github.com/unarbos/arbos/pull/20), [#22](https://github.com/unarbos/arbos/pull/22), [#24](https://github.com/unarbos/arbos/pull/24), [#25](https://github.com/unarbos/arbos/pull/25), [#26](https://github.com/unarbos/arbos/pull/26), [#28](https://github.com/unarbos/arbos/pull/28), [#31](https://github.com/unarbos/arbos/pull/31); #12 and #13 stack on #10; #28 now folded into #8; #7 shrinks to test-only after #6
 ## Release and website
 
-- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — paused; close-timers aborted; last told Mac **2408**
+- [ ] [Add in-app update bar and channel](bc-37bdb830-611b-5b03-8528-e12912f71b59) — last told Mac **2410**
 
-- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — paused; timers empty; leftover Chrome cleared; last told Mac **2408**; TestFlight **2396**; `v0.2.0` stays a draft
+- [ ] [Ship Arbos to main with README](bc-71eb0fc3-658e-5b64-8b2b-9854416c9baf) — paused; last told Mac **2410**; TestFlight **2396**; `v0.2.0` stays a draft
+- [x] [quiet conversation bar](https://github.com/unarbos/arbos/pull/814) — on `main` (`7aaa4630`); in **2410**
 - [x] [sweep gap](https://github.com/unarbos/arbos/pull/812) — on `main` (`aed86a0b`); in **2408**
 - [x] [stop-turn film](https://github.com/unarbos/arbos/pull/811) — on `main` (`4ee41ee8`); in **2405**
-- [x] [markdown guard](https://github.com/unarbos/arbos/pull/810) — on `main` (`a6817288`); in **2402**
 
 ## Running Arbos
 
@@ -123,7 +123,7 @@ Goals, principles, benchmark: [project-context](/cursor/stores/bc-ec8c092a-3084-
 
 - [ ] Rotate leaked secrets — four leaks today, every one from a worker masking output it had chosen to print, so masking is now banned outright and no agent may fetch a whole vault item: Jacob to change his Apple ID password (exposed twice), revoke the app-specific password, re-export the `.p12`, rotate the GitHub PAT and turn on GitHub two-factor; the AWS keys, wallet seed and API tokens sitting in two Cursor helper processes on his Mac are worth rotating too
 
-- [ ] [Ship conversation bar chrome](bc-6a5c5d28-822a-512e-96cb-b1dbc447e73d) — [quiet conversation bar](https://github.com/unarbos/arbos/pull/814) on `main` (`7aaa4630`); waiting on a zip newer than **2408**
+- [ ] [Ship conversation bar chrome](bc-6a5c5d28-822a-512e-96cb-b1dbc447e73d) — [conversation plus](https://github.com/unarbos/arbos/pull/815) on `main` (`0ecc21ca`); waiting on a zip newer than **2410**
 - [ ] [Wire Affine king on Mac](bc-2f70c55c-890b-5415-9e85-ea2e828f5078) — Mac works via local proxy (`127.0.0.1:18765`); Retry on hello0; [system-message coalesce](https://github.com/unarbos/arbos/pull/813) still the kernel fix
 - [ ] [Launch Arbos desktop on Macbook](bc-b337f0b1-4e0b-5dcf-ae7f-b040ac2a52cd) — visit done and stopped again: his app runs `181b657` with the bar showing `0.2.0 (879)`, no button because he is on the newest build, so the click is still unproven; the notarised DMG upload and the macOS capture leg wait for his word
 - [ ] [Linux launch fix PR](https://github.com/unarbos/arbos/pull/4) — ready for review; QA and parity builds already use it
