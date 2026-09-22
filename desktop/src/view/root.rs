@@ -1588,6 +1588,13 @@ impl Arbos {
             return None;
         }
         let workspace = self.workspace.read(cx);
+        // A row is highlighted only where it can be seen. With the panel
+        // shut, ⌫ on an emptied composer archived the chat being typed in
+        // (one key past the last letter of a draft; F-205) — Cursor's
+        // composer never deletes a chat.
+        if !workspace.panel().is_some_and(|panel| panel.open) {
+            return None;
+        }
         let id = workspace.active_id()?;
         workspace
             .active_project()
