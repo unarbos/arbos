@@ -138,6 +138,24 @@ pub enum ChatItem {
     },
 }
 
+impl ChatItem {
+    /// A line the person or the agent said. Notices and nudges are the
+    /// session talking about itself; they do not make a conversation.
+    fn is_spoken(&self) -> bool {
+        match self {
+            Self::User(_)
+            | Self::From { .. }
+            | Self::Agent(_)
+            | Self::Thinking { .. }
+            | Self::Tool { .. }
+            | Self::Artifacts(_)
+            | Self::Asked { .. }
+            | Self::Wake { .. } => true,
+            Self::Notice { .. } | Self::Nudge(_) => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -1957,6 +1975,12 @@ impl ChatSession {
     /// A chat that never had a line is empty, not cleared.
     pub fn view_cleared(&self) -> bool {
         self.hide_before > 0 && self.hide_before >= self.items.len()
+    }
+
+    /// The empty chat: `clear`, never spoken, or only notices (a new
+    /// project whose kernel is still missing). Same view either way.
+    pub fn is_empty_chat(&self) -> bool {
+        self.view_cleared() || !self.items.iter().any(ChatItem::is_spoken)
     }
 
     /// Explicit names override the delegate identity or the agent's title.

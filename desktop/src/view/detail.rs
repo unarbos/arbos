@@ -514,7 +514,7 @@ impl Arbos {
             // A new project, a fresh sub-chat, or `clear`: the empty-chat
             // invite. The kickoff splash used to ask "What are you working
             // on?" here; that view is gone.
-            _ if chat.is_some_and(|chat| chat.items.is_empty() || chat.view_cleared()) => {
+            _ if chat.is_some_and(|chat| chat.is_empty_chat()) => {
                 "Plan, search, build anything"
             }
             _ => "Send follow-up",
@@ -646,9 +646,11 @@ impl Arbos {
         // chat puts its title and the composer in the middle of the column
         // (#629, which #654 took with the rest of the spacer).
         let empty_chat = show_composer
-            && self.workspace.read(cx).active_session().is_some_and(|chat| {
-                chat.view_cleared() || chat.items.is_empty()
-            });
+            && self
+                .workspace
+                .read(cx)
+                .active_session()
+                .is_some_and(|chat| chat.is_empty_chat());
         let content = div()
             .when(!empty_chat, |el| el.flex_1())
             .when(empty_chat, |el| {
@@ -1339,7 +1341,7 @@ impl Arbos {
         // Nothing has been said yet — a new project, a fresh sub-chat, or
         // `clear` — so the column is the empty chat. The kickoff splash
         // (project head + greeting) is parked.
-        let inner = if chat.view_cleared() || chat.items.is_empty() {
+        let inner = if chat.is_empty_chat() {
             self.empty_chat_heading(chat.id, &theme, window, cx)
         } else {
             let id = chat.id;
@@ -1471,7 +1473,7 @@ impl Arbos {
         let project = workspace.active_project()?;
         // A subagent's chat in Cursor carries no pills; they are the project's.
         // An empty chat — new project, fresh sub-chat, or `clear` — has none.
-        if chat.parent.is_some() || chat.view_cleared() || chat.items.is_empty() {
+        if chat.parent.is_some() || chat.is_empty_chat() {
             return None;
         }
         let (_working, prs) = pill_counts(project, chat);
