@@ -1,5 +1,5 @@
 //! Root view: the window's grid, the state the chrome owns, and the frame
-//! the tab bar, the chat column and the right-hand panel are hung in.
+//! the tab bar, the conversation bar and the chat column are hung in.
 
 use crate::{
     kernel,
@@ -790,7 +790,8 @@ pub struct Arbos {
     /// kernel moved to `archive/agents/` are listed, faint.
     pub(crate) archived_open: bool,
     /// The root chat whose idle "Agents" card is open (Cursor's Agents pill
-    /// once the workers are done).
+    /// once the workers are done). Parked: the card is gone.
+    #[allow(dead_code)]
     pub(crate) agents_card_open: Option<u64>,
     pub(crate) composer: Entity<Composer>,
     pub(crate) opener: Entity<Opener>,
@@ -1498,22 +1499,13 @@ impl Arbos {
         self.focus_composer_after_create(window, cx);
     }
 
-    /// ⌘T: a new tab. Which row of tabs it lands in follows the focus — the
-    /// side panel's when the panel has it, the window's projects otherwise.
-    /// The lit tab row is the one that answers, and it is lit off the same
-    /// focus this reads, so what the chord will do is on screen before it is
-    /// pressed.
+    /// ⌘T: a new project tab. The machine-then-folder picker.
     pub(crate) fn new_tab_action(
         &mut self,
         _: &NewTab,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.panel_focused(window, cx) {
-            self.workspace
-                .update(cx, |workspace, cx| workspace.new_panel_tab(cx));
-            return;
-        }
         self.open_project_action(&OpenProject, window, cx);
     }
 
@@ -1525,17 +1517,9 @@ impl Arbos {
         self.cycle_tab(-1, window, cx);
     }
 
-    /// Step to the neighbouring tab, wrapping at either end as a browser
-    /// does — the side panel's own row when the panel has the focus, and the
-    /// window's strip otherwise. That strip's ring is the projects in their
-    /// order, then Settings when it is open, because a tab the cycle cannot
-    /// reach is not a tab.
+    /// Step to the neighbouring project tab, wrapping at either end as a
+    /// browser does. Settings, when it is open, sits after the last project.
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.panel_focused(window, cx) {
-            self.workspace
-                .update(cx, |workspace, cx| workspace.step_panel_tab(step, cx));
-            return;
-        }
         let projects = self.workspace.read(cx).projects.len();
         // The Settings slot's index, when the strip holds one: past the last
         // project, which is where the strip draws it.
@@ -1747,49 +1731,25 @@ impl Arbos {
             .update(cx, |workspace, cx| workspace.select_session(id, cx));
     }
 
-    /// A click on a surface, wherever it was clicked: it comes to the front
-    /// of the side panel and the drawer opens with it.
+    /// A surface used to open in the right panel. That chrome is gone, so
+    /// the model still records it and nothing is drawn for it.
     pub(crate) fn show_surface(
         &mut self,
         id: SurfaceId,
-        window: &mut Window,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.workspace
             .update(cx, |workspace, cx| workspace.show_surface(id, true, cx));
-        self.focus_panel(window, cx);
     }
 
-    /// ⌘\\ and the four-box: grow the drawer to the space the window can
-    /// spare, or return it to the default. An older build put the tab in
-    /// front into the chat column, which cloned a Terminal over the
-    /// conversation; if that pane is still showing, this key gives the
-    /// chat back first.
+    /// The drawer is gone. This chord used to widen it.
     pub(crate) fn zoom_panel_action(
         &mut self,
         _: &ZoomPanel,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
-        if self.pane == Pane::Surface {
-            self.show_chat(&ShowChat, window, cx);
-            return;
-        }
-        if self
-            .workspace
-            .read(cx)
-            .panel()
-            .is_none_or(|panel| !panel.open)
-        {
-            self.workspace
-                .update(cx, |workspace, cx| workspace.set_panel_open(true, cx));
-        }
-        let viewport = f32::from(window.viewport_size().width);
-        let available =
-            (viewport - crate::model::panel::CHAT_MIN_WIDTH).max(crate::model::panel::MIN_WIDTH);
-        self.workspace.update(cx, |workspace, cx| {
-            workspace.toggle_panel_expand(available, cx)
-        });
     }
 
     pub(crate) fn open_settings_action(
@@ -1862,28 +1822,13 @@ impl Arbos {
         });
     }
 
-    /// ⌘B: open or close the side panel of the project in front. Opening it
-    /// gives it the focus, so the tab chords act on its row at once — he
-    /// asked for the drawer, so the drawer is what he is driving.
+    /// The drawer is gone. ⌘B does nothing.
     pub(crate) fn toggle_panel_action(
         &mut self,
         _: &TogglePanel,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
-        self.workspace
-            .update(cx, |workspace, cx| workspace.toggle_panel(cx));
-        let open = self
-            .workspace
-            .read(cx)
-            .panel()
-            .is_some_and(|panel| panel.open);
-        if open {
-            self.focus_panel(window, cx);
-        } else {
-            self.focus_composer(window, cx);
-        }
-        cx.notify();
     }
 
     /// Whether the side panel holds the focus — which row of tabs `⌘T` and
@@ -2009,17 +1954,13 @@ impl Arbos {
         window.focus(composer.as_ref().unwrap_or(&self.focus), cx);
     }
 
-    /// ⌘2 and the panel's Project header: the project page in the right
-    /// panel. Never the main column — that covered the chat (#629).
+    /// The project page lived in the right panel. That panel is gone.
     pub(crate) fn show_project(
         &mut self,
         _: &ShowProject,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Window,
+        _: &mut Context<Self>,
     ) {
-        self.workspace
-            .update(cx, |workspace, cx| workspace.select_panel_tab(0, cx));
-        self.focus_panel(window, cx);
     }
 
     /// ⌘1: the chat, whatever else is open — the way back from the Settings
@@ -2412,19 +2353,13 @@ impl Arbos {
         crate::voice_ws::configured() && self.workspace.read(cx).active_id().is_some()
     }
 
-    /// ⇧⌘C and the panel's handset: start a call to the project in front,
-    /// or hang up the one that is live.
+    /// Desktop call chrome is hidden. The hosted voice gateway stays.
     pub(crate) fn start_call_action(
         &mut self,
         _: &StartCall,
         _: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) {
-        if self.call.is_some() {
-            self.end_call(cx);
-        } else {
-            self.start_call(cx);
-        }
     }
 
     pub(crate) fn end_call_action(&mut self, _: &EndCall, _: &mut Window, cx: &mut Context<Self>) {
@@ -2444,6 +2379,8 @@ impl Arbos {
     /// project's main agent; from then on the mic is open, the caller's
     /// words go to the agent as `voice` messages, and the narrator's
     /// highlights are spoken and written into the chat as `voice ·` lines.
+    /// Desktop call chrome is hidden; the gateway stays.
+    #[allow(dead_code)]
     pub(crate) fn start_call(&mut self, cx: &mut Context<Self>) {
         if self.call.is_some() {
             return;
@@ -2568,6 +2505,7 @@ impl Arbos {
     /// While the call is live: spoken lines land only in the call's project
     /// chat (`call.session`). The dictation mirror is off, so Home and other
     /// projects cannot receive them. A dropped session ends the call here.
+    #[allow(dead_code)]
     fn start_call_mirror(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -3273,10 +3211,10 @@ impl Render for Arbos {
             // element's ancestors. Sized at nothing, so the pane that does hold
             // a field keeps its focus through a click anywhere else.
             .child(div().key_context(WINDOW_CONTEXT).track_focus(&self.focus))
-            // The strip of tabs across the top, then whichever tab is in
-            // front: a project — the chat column with the panel on its right —
-            // or Settings, which is not a project and so fills the width.
+            // Projects on the dark strip, conversations on the quiet one
+            // under it, then the chat. The right-hand panel is gone.
             .child(self.tab_bar(window, cx))
+            .children(self.conversation_bar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -3285,14 +3223,10 @@ impl Render for Arbos {
                     .flex()
                     .flex_row()
                     .map(|row| match self.front() {
-                        // No panel beside it: the panel is a view of a
-                        // project's `.arbos/`, and Settings has none.
                         Front::Settings => {
                             row.children(self.settings_tab.as_ref().map(|tab| tab.pane.clone()))
                         }
-                        Front::Project => row
-                            .child(self.detail(window, cx))
-                            .children(self.panel(window, cx)),
+                        Front::Project => row.child(self.detail(window, cx)),
                     }),
             )
             // Under everything, the width of the window: settings and the
@@ -3475,6 +3409,7 @@ fn sync_macos_chrome(_cx: &App) {}
 /// marked by kind so a question or a failure reads as one. Tool and agent
 /// frames are applied as real rows (`apply_call_work`); they must not be
 /// hidden behind spoken-row-only.
+#[allow(dead_code)]
 fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
     let text: String = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
     match m.kind.as_str() {
@@ -3496,6 +3431,7 @@ fn call_line(m: &crate::voice_ws::Mirror) -> Option<String> {
 /// the sub-agents, so the narrator and the speech model can answer "what
 /// were we doing" before the first new turn. Tool lines are the label and
 /// state only — never the output or the diff.
+#[allow(dead_code)]
 fn call_context(chat: &crate::model::session::ChatSession) -> crate::voice_ws::CallContext {
     use crate::model::session::{ChatItem, ChildState, ToolStatus};
     use crate::voice_ws::{CallContext, ContextAgent, ContextLine};

@@ -2505,6 +2505,7 @@ impl Composer {
     /// hang up; faint with a tooltip that says why when no speech server
     /// is set up. It is here rather than in the side panel because this is
     /// where speaking to the agent already happens (Jacob, 09-18).
+    #[allow(dead_code)]
     fn call_btn(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let CallFace {
             live,
@@ -2913,9 +2914,6 @@ impl Composer {
                                             .children(self.menu_card(&theme, window, cx))
                                             .child(self.chip(&theme, cx)),
                                     )
-                                    // The handset sits beside the mic: one
-                                    // place for talking to the agent.
-                                    .child(self.call_btn(&theme, cx))
                                     // One round button: mic while the field
                                     // is empty, send once there is text,
                                     // stop while a turn streams.

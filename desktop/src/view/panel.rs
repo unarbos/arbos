@@ -1047,6 +1047,7 @@ impl Arbos {
     /// The control that hides the panel and brings it back, on the window
     /// tab strip. It is the last control on the strip: the four-box that
     /// widened the panel is gone (Jacob, 09-18); ⌘\ still widens it.
+    #[allow(dead_code)]
     pub(crate) fn panel_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let open = self

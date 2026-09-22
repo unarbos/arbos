@@ -1,5 +1,9 @@
-//! The side panel: the drawer down the right of the window, and its own row
-//! of tabs.
+//! The side panel: parked. Conversations moved to the bar under the
+//! project tabs. Terminal, browser, and the project page lived here;
+//! they are hidden for now, not deleted.
+//!
+//! The drawer down the right of the window, and its own row of tabs.
+#![allow(dead_code)]
 //!
 //! The chat keeps the left. Everything the person or an agent opens that is
 //! not a conversation — a terminal, a job's output, a page, a document — is a
