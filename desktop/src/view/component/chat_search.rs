@@ -274,9 +274,10 @@ impl Focusable for ChatSearch {
     }
 }
 
-/// `text` with the first occurrence of `needle` (case-insensitive) drawn in
-/// the brighter ink, the rest muted — Cursor lights the matched word.
-fn lit(text: &str, needle: &str, theme: &Theme) -> gpui::AnyElement {
+/// `text` with the first occurrence of `needle` (case-insensitive) in the
+/// accent, the rest in `base` — Cursor lights the matched word in the
+/// accent on a one-line row (F-176, `cycle-38/search/`).
+fn lit(text: &str, needle: &str, base: gpui::Hsla, theme: &Theme) -> gpui::AnyElement {
     let at = (!needle.is_empty())
         .then(|| text.to_lowercase().find(needle))
         .flatten();
@@ -285,14 +286,14 @@ fn lit(text: &str, needle: &str, theme: &Theme) -> gpui::AnyElement {
         .flex_row()
         .overflow_hidden()
         .whitespace_nowrap()
-        .text_color(theme.text_muted);
+        .text_color(base);
     match at {
         Some(start) if start + needle.len() <= text.len() => {
             let end = start + needle.len();
             row.child(text[..start].to_string())
                 .child(
                     div()
-                        .text_color(theme.text)
+                        .text_color(theme.accent)
                         .child(text[start..end].to_string()),
                 )
                 .child(text[end..].to_string())
@@ -386,7 +387,14 @@ impl Render for ChatSearch {
                 } else {
                     theme.text_dim
                 });
-                let showing_snippet = !q.is_empty() && !hit.snippet.is_empty();
+                // Cursor's row: the title with its match lit in the accent;
+                // a match found in the words instead adds a second, muted
+                // line with that match lit — the snippet is where the hit
+                // is, and the title alone would not say why the row is here
+                // (`cycle-38/search/cursor-search-typed.png`, the *Parity*
+                // and *Analysis* rows).
+                let in_title = !q.is_empty() && hit.title.to_lowercase().contains(&q);
+                let showing_snippet = !q.is_empty() && !in_title && !hit.snippet.is_empty();
                 let body = div()
                     .flex()
                     .flex_col()
@@ -397,14 +405,13 @@ impl Render for ChatSearch {
                         div()
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .text_color(theme.text)
-                            .child(hit.title.clone()),
+                            .child(lit(&hit.title, &q, theme.text, &theme)),
                     )
                     .when(showing_snippet, |el| {
                         el.child(
                             div()
                                 .text_size(px(12.))
-                                .child(lit(&hit.snippet, &q, &theme)),
+                                .child(lit(&hit.snippet, &q, theme.text_muted, &theme)),
                         )
                     });
                 list.push(
