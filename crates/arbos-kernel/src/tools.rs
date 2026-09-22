@@ -486,7 +486,7 @@ impl Tool for Spawn {
                 ),
                 (
                     "read_first",
-                    "Paths to read first (default: project-context.md, notes.md).",
+                    "Paths to read first (default: notes.md; project-context.md too only when it is not already in every prompt — do not list it, the worker has it).",
                     false,
                     "string",
                 ),
@@ -580,7 +580,11 @@ impl Tool for Spawn {
             // fallback. Neither is an error the model can act on.
             let rendered = match (opt_str(&args, "task"), opt_str(&args, "brief")) {
                 (Some(task), _) => arbos_core::store::Kickoff {
-                    read_first: opt_str(&args, "read_first"),
+                    // The default leaves out a context file the worker's
+                    // prompt already carries whole (QA mt-26: the brief
+                    // sent workers to re-read what they had been handed).
+                    read_first: opt_str(&args, "read_first")
+                        .or(Some(arbos_core::store::default_read_first(&cx.place))),
                     task,
                     do_: opt_str(&args, "do"),
                     rules: opt_str(&args, "rules"),
