@@ -956,14 +956,7 @@ impl Workspace {
     /// Whether `chat` is the remembered last entry: same kernel id, or
     /// the same session file (full path or name).
     fn session_is_entry(chat: &ChatSession, entry: &state::Entry) -> bool {
-        if entry.kind != state::Kind::Session {
-            return false;
-        }
-        let id = entry.id.as_str();
-        chat.agent_session.as_deref() == Some(id)
-            || chat.file.as_deref().is_some_and(|path| {
-                path.to_string_lossy() == id || path.file_name() == Path::new(id).file_name()
-            })
+        entry_names(entry, chat.agent_session.as_deref(), chat.file.as_deref())
     }
 
     /// Put the remembered chat in front, now that this project's sessions
@@ -4966,4 +4959,83 @@ fn transcript_ended(paths: &[PathBuf]) -> bool {
         .find(|line| !line.trim().is_empty())
         .and_then(|line| serde_json::from_str::<arbos_core::Event>(line).ok())
         .is_some_and(|event| event.ends_turn())
+}
+
+/// The remembered front chat is found by what it *is* — its kernel agent
+/// id, or its session file by full path or name — never by its position
+/// in the list, which a relaunch renumbers (qal-j35: the chat that was
+/// tab 3 came back as tab 1). Only a `session` entry names a chat.
+fn entry_names(entry: &state::Entry, agent_session: Option<&str>, file: Option<&Path>) -> bool {
+    if entry.kind != state::Kind::Session {
+        return false;
+    }
+    let id = entry.id.as_str();
+    agent_session == Some(id)
+        || file.is_some_and(|path| {
+            path.to_string_lossy() == id || path.file_name() == Path::new(id).file_name()
+        })
+}
+
+#[cfg(test)]
+mod last_entry_tests {
+    use super::*;
+
+    fn entry(kind: state::Kind, id: &str) -> state::Entry {
+        state::Entry {
+            kind,
+            id: id.to_string(),
+        }
+    }
+
+    /// qal-j35: the front chat comes back by identity. A relaunch
+    /// renumbers sessions (QA's table: id 3 → id 1), so nothing here may
+    /// depend on an index; the kernel id or the session file decides.
+    #[test]
+    fn the_remembered_chat_is_found_by_agent_id_or_file_never_by_position() {
+        let file = Path::new("/p/.arbos/desktop/sessions/1789733586900.json");
+        let by_id = entry(state::Kind::Session, "chat-1789733586900");
+        assert!(entry_names(&by_id, Some("chat-1789733586900"), None));
+        assert!(entry_names(&by_id, Some("chat-1789733586900"), Some(file)));
+        assert!(
+            !entry_names(&by_id, Some("root"), Some(file)),
+            "another chat's id"
+        );
+        assert!(
+            !entry_names(&by_id, None, None),
+            "a chat with no identity yet"
+        );
+
+        let by_path = entry(
+            state::Kind::Session,
+            "/p/.arbos/desktop/sessions/1789733586900.json",
+        );
+        assert!(entry_names(&by_path, None, Some(file)));
+        assert!(
+            entry_names(&by_path, Some("chat-x"), Some(file)),
+            "the file decides when the id differs"
+        );
+        // The place moved: the same file by name still matches.
+        let by_name = entry(state::Kind::Session, "1789733586900.json");
+        assert!(entry_names(&by_name, None, Some(file)));
+        assert!(
+            !entry_names(
+                &by_path,
+                None,
+                Some(Path::new("/p/.arbos/desktop/sessions/1789733586901.json"))
+            ),
+            "a sibling's file"
+        );
+        // A board or article entry never names a chat.
+        assert!(!entry_names(
+            &entry(state::Kind::Board, "chat-1789733586900"),
+            Some("chat-1789733586900"),
+            Some(file)
+        ));
+        // And a bare index is not an identity: "3" names no chat.
+        assert!(!entry_names(
+            &entry(state::Kind::Session, "3"),
+            Some("chat-1789733586900"),
+            Some(file)
+        ));
+    }
 }
