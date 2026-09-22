@@ -6,6 +6,8 @@
 
 Workers paused 2026-09-20 12:01 UTC. Do not kick loops until Jacob says resume.
 The keep-loops-running timer is off.
+Coordinator PR watches closed 2026-09-21 12:19 UTC on Jacob's "stop all background processes".
+Standing loops and update-bar told again to close leftover timers. Leftover iOS `bc-08d8261b` StopAgent again; it cannot take a close-timers message. His Mac was not connected as a worker.
 
 Do not tell a newer Mac until a notarised zip newer than **2408** is actually on the feed.
 Do not tell a newer TestFlight until steward writes `uploaded` newer than **2396**.

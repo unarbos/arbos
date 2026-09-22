@@ -5,16 +5,26 @@ cursor:
 
 # Update bar: what is on the dev channel
 
-Last checked 2026-09-20 11:44 UTC.
+Last checked 2026-09-22 13:33 UTC.
 
-## Click Update. You will get build 2408. Jev is in it.
+## Click Update. You will get build 2410. Jev is in it.
 
-**2408** — signed, notarised, stapled, on the feed since 11:41 UTC.
+**2410** — signed, notarised, stapled, on the feed since 13:30 UTC.
 
 Checked the same way as every number here: notary Accepted, ticket stapled,
 Gatekeeper reads a Notarized Developer ID, the Ed25519 signature verifies
 against the key in the app, size and hash are the feed's, all four payloads
 on the release.
+
+New since 2408 (builds 2409–2410):
+
+- **#814** — the conversation bar
+
+`main` did not move between Sunday 11:25 and Tuesday 13:20, so 2408 stood
+as the newest build for two days. That was a quiet repository, not a
+stuck channel.
+
+## Before that: 2408
 
 New since 2405 (builds 2406–2408):
 

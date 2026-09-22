@@ -12,7 +12,7 @@ Updated as cycles close.
 
 | | |
 |---|---|
-| current cycle | **PAUSED** — Jacob paused every Arbos worker, 2026-09-20 12:05Z |
+| current cycle | **STOPPED** — every background process ended, 2026-09-21 12:30Z |
 | previous | 20 closed 04:46:40Z (half A), 276; 19, 298; 18, 272 |
 | next | cycle 22 due 09:00, **half A** — `lk-04` returns |
 
@@ -297,3 +297,38 @@ Open and mine: `qal-j40` (product, guarded by `lk-04` on half-A cycles), `qal-j4
 on ten builds), `qal-j46`, `qal-j48` (both loop-side, in QA). Fixed in the rig: `qal-j39`,
 `qal-j44`, `qal-j47`, `qal-j49`. Settled/closed: `qal-j28` (step 1's 50-minute cap), `qal-j35`,
 `qal-j42`, `qal-j45`. Left alone: steer-order.
+
+## Stopped — 2026-09-21 12:30Z
+
+Jacob asked for all background processes stopped and every timer and subscription cancelled. Done,
+and nothing is left running.
+
+**Subscriptions and timers:** none existed. `list_subscriptions` returns empty — I never created
+any during this run.
+
+**Processes stopped**, in this order so nothing restarted behind me:
+
+| | |
+|---|---|
+| `vm-loop.sh` | the supervisor, killed first so it could not open anything |
+| `mirror-timer.sh` | the store-docs mirror's 15-minute timer |
+| `cycle.sh` + its two `run.py` | a cycle that had started 12:00:26Z on 09-20, five minutes before the pause |
+| 25 Arbos processes | kernels sent `SIGINT` for a clean shutdown, then desktops and Xvfb terminated |
+| 21 tmux sessions | every one on the machine, including those left by earlier workers (`build-*`, `qa-cycle3`, `rollouts-*`) |
+
+Final sweep is empty; load 0.05.
+
+### One correction to my last note
+
+I said "cycle 22 was in flight". It was **cycle 23**, started 12:00:26Z, five minutes before I set
+the pause. The pause marker did its job — no cycle opened after it — but the one already running
+survived the VM's 24-hour suspension and was still going when I came back.
+
+### To resume
+
+1. `rm /home/ubuntu/arbos-qa/state/PAUSED-until-2026-10-20T00:00:00Z`
+2. restart the supervisor: `cd ~/arbos-qa && bash deploy/vm-loop.sh` (it re-reads the store's
+   modules at each cycle start)
+3. the mirror timer is separate: `bash deploy/mirror-timer.sh`
+
+The marker alone does not restart anything — the supervisor process is gone now, not merely idle.
