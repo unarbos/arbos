@@ -2,7 +2,10 @@ use anyhow::Result;
 use arbos_engine::{Grep, GrepHit};
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tgrep_core::{
     builder::{self, BuildOptions},
@@ -17,34 +20,63 @@ pub struct PlaceGrep {
     root: PathBuf,
     inner: RwLock<Option<HybridIndex>>,
     ready: Mutex<bool>,
+    /// The tree changed since the index was built (a tool wrote): `grep`
+    /// walks until the rebuild lands. The index built at start never
+    /// learned of a file written after it — `upsert` existed and was
+    /// called from nowhere — and the agent's own edits were invisible to
+    /// its own grep for the life of the kernel.
+    stale: AtomicBool,
+    /// Wakes the one rebuild thread.
+    wake: Mutex<std::sync::mpsc::Sender<()>>,
 }
+
+/// How long the rebuild thread waits after a touch for more to land: a
+/// turn's burst of edits is one rebuild, not one per file.
+const REBUILD_SETTLE: std::time::Duration = std::time::Duration::from_millis(750);
 
 impl PlaceGrep {
     pub fn start(root: PathBuf) -> Arc<Self> {
-        let index_dir = cache_dir(&root);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
         let this = Arc::new(Self {
-            root: root.clone(),
+            root,
             inner: RwLock::new(None),
             ready: Mutex::new(false),
+            stale: AtomicBool::new(false),
+            wake: Mutex::new(tx),
         });
-        let boot = Arc::clone(&this);
+        let worker = Arc::clone(&this);
         std::thread::spawn(move || {
-            let _ = std::fs::create_dir_all(&index_dir);
-            // Hidden files are in (`.github/`, dotfiles); the repository's
-            // own `.git/` is not: its loose objects are most of the files
-            // under an old project's root and none of them the project.
-            let opts = BuildOptions {
-                include_hidden: true,
-                exclude_dirs: vec![".git".to_string()],
-                ..Default::default()
-            };
-            let _ = builder::build_index_with_options(&root, Some(&index_dir), &opts);
-            if let Ok(idx) = HybridIndex::open(&index_dir, &root) {
-                *boot.inner.write().unwrap() = Some(idx);
-                *boot.ready.lock().unwrap() = true;
+            worker.build();
+            // Then: one rebuild per burst of touches, for as long as the
+            // kernel lives.
+            while rx.recv().is_ok() {
+                std::thread::sleep(REBUILD_SETTLE);
+                while rx.try_recv().is_ok() {}
+                worker.build();
             }
         });
         this
+    }
+
+    /// Build the index and swap it in. `stale` is cleared as the build
+    /// starts: a touch during the build sets it again and wakes another.
+    fn build(&self) {
+        self.stale.store(false, Ordering::SeqCst);
+        let index_dir = cache_dir(&self.root);
+        let _ = std::fs::create_dir_all(&index_dir);
+        // Hidden files are in (`.github/`, dotfiles); the repository's
+        // own `.git/` is not: its loose objects are most of the files
+        // under an old project's root and none of them the project.
+        let opts = BuildOptions {
+            include_hidden: true,
+            exclude_dirs: vec![".git".to_string()],
+            ..Default::default()
+        };
+        let _ = builder::build_index_with_options(&self.root, Some(&index_dir), &opts);
+        if let Ok(idx) = HybridIndex::open(&index_dir, &self.root) {
+            *self.inner.write().unwrap() = Some(idx);
+            *self.ready.lock().unwrap() = true;
+        }
     }
 
     pub fn upsert(&self, rel: &str, content: &[u8]) {
@@ -56,7 +88,12 @@ impl PlaceGrep {
 
 impl Grep for PlaceGrep {
     fn ready(&self) -> bool {
-        *self.ready.lock().unwrap()
+        *self.ready.lock().unwrap() && !self.stale.load(Ordering::SeqCst)
+    }
+
+    fn touched(&self) {
+        self.stale.store(true, Ordering::SeqCst);
+        let _ = self.wake.lock().unwrap().send(());
     }
 
     fn search(&self, pattern: &str, glob: Option<&str>) -> Result<Vec<GrepHit>> {
