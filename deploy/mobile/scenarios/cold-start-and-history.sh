@@ -99,7 +99,23 @@ echo
 echo "== 2. away and back =="
 BEFORE=$(ui dump | grep -cE "StaticText")
 idb ui button HOME --udid "$UDID"; sleep 8
-xcrun simctl launch "$UDID" $B >/dev/null 2>&1; sleep 3
+
+# This used to relaunch and `sleep 3`, which hides the one number the row is
+# named for — how long the app takes to be usable again — and compares the
+# chat at an arbitrary moment. A screen still being drawn at three seconds
+# reads as "the chat changed while away"; a screen that took ten reads as a
+# pass. Time it instead, and compare once it has settled.
+T1=$(date +%s.%N)
+xcrun simctl launch "$UDID" $B >/dev/null 2>&1
+BACK=""
+for _ in $(seq 1 80); do
+  if ui dump | grep -qE "TextField"; then
+    ROWS_NOW=$(ui dump | grep -cE "StaticText")
+    [ "$ROWS_NOW" -gt 0 ] && { BACK=$(since "$T1"); break; }
+  fi
+  sleep 0.25
+done
+echo "  back to a chat you can type in: ${BACK:-never}s   (after 8s away)"
 AFTER=$(ui dump | grep -cE "StaticText")
 echo "  text rows before: $BEFORE, after: $AFTER"
 shot 05-back-from-away
@@ -126,8 +142,13 @@ else
   echo "VERDICT cold start:   ${FIRST}s to ${LANDED:-nothing}"
 fi
 echo "VERDICT long history: chat in ${OPEN:-never}s, pager ${PAGER:-never appeared}"
-if [ "${BEFORE:-0}" = "${AFTER:-1}" ]; then
-  echo "VERDICT away and back: the chat is as it was — $BEFORE text rows both sides"
+if [ -z "${BACK:-}" ]; then
+  echo "VERDICT away and back: never came back — no composer within 20s of being"
+  echo "                       brought forward, so nothing was compared"
+elif [ "${BEFORE:-0}" = "${AFTER:-1}" ]; then
+  echo "VERDICT away and back: usable again in ${BACK}s and the chat is as it was —"
+  echo "                       $BEFORE text rows both sides"
 else
-  echo "VERDICT away and back: $BEFORE text rows before, $AFTER after — the chat changed while away"
+  echo "VERDICT away and back: usable again in ${BACK}s, but $BEFORE text rows before"
+  echo "                       and $AFTER after — the chat changed while away"
 fi
