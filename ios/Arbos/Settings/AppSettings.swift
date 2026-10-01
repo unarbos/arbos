@@ -11,68 +11,60 @@ final class AppSettings: ObservableObject {
     private static let kernelTokenAccount = "kernel-token"
     private static let hubTokenAccount = "hub-token"
 
-    static let defaultVoiceServerURL = ""
-
     static let callInstructions = """
     You are a brief voice companion. Answer greetings in one short sentence. \
     Anything about code, files, projects, or work: say you will check and wait \
     for the result. Never invent results.
     """
 
-    /// Always self-hosted voice server (GPT-Live on the machine). Kept so
-    /// older CallViewModel / VoiceLink paths still compile.
-    @Published var provider: VoiceProvider {
+    @Published var provider: VoiceProvider = .selfHosted {
         didSet { defaults.set(provider.rawValue, forKey: "voiceProvider") }
     }
-    @Published var openAIModel: String {
+    @Published var openAIModel: String = "gpt-live-1" {
         didSet { defaults.set(openAIModel, forKey: "openAIModel") }
     }
     /// `wss://host/ws` — the voice server that runs GPT-Live + Codex.
-    @Published var selfHostedURL: String {
+    @Published var selfHostedURL: String = "" {
         didSet { defaults.set(selfHostedURL, forKey: "selfHostedURL") }
     }
-    @Published var kernelURL: String {
+    @Published var kernelURL: String = "" {
         didSet { defaults.set(kernelURL, forKey: "kernelURL") }
     }
-    @Published var hubURL: String {
+    @Published var hubURL: String = "" {
         didSet { defaults.set(hubURL, forKey: "hubURL") }
     }
     @Published var frontProject: String? {
         didSet { defaults.set(frontProject, forKey: "frontProject") }
     }
-    @Published var kernelTarget: KernelTarget {
+    @Published var kernelTarget: KernelTarget = .pod {
         didSet { defaults.set(kernelTarget.stored, forKey: "kernelTarget") }
     }
-    @Published private(set) var openAIKey: String
-    @Published private(set) var voiceToken: String
-    @Published private(set) var kernelToken: String
-    @Published private(set) var hubToken: String
+    @Published private(set) var openAIKey: String = ""
+    @Published private(set) var voiceToken: String = ""
+    @Published private(set) var kernelToken: String = ""
+    @Published private(set) var hubToken: String = ""
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        let baked = BuiltInSecrets.current
+
         provider = .selfHosted
         openAIModel = defaults.string(forKey: "openAIModel") ?? "gpt-live-1"
-        let baked = BuiltInSecrets.current
-        let storedURL = defaults.string(forKey: "selfHostedURL") ?? ""
-        if !storedURL.isEmpty {
-            selfHostedURL = storedURL
-        } else if !baked.voiceServerURL.isEmpty {
-            selfHostedURL = baked.voiceServerURL
-        } else {
-            selfHostedURL = Self.defaultVoiceServerURL
-        }
-        // When the bake moves the server URL and the user had not typed over
-        // the previous bake, follow it (quick tunnels rotate).
+
+        var url = defaults.string(forKey: "selfHostedURL") ?? ""
+        if url.isEmpty { url = baked.voiceServerURL }
         if !baked.voiceServerURL.isEmpty, !ProcessInfo.processInfo.arguments.contains("-selfHostedURL") {
             let previous = defaults.string(forKey: "baked-voiceServerURL")
-            if previous == nil || selfHostedURL == previous || selfHostedURL.isEmpty {
-                selfHostedURL = baked.voiceServerURL
-                defaults.set(baked.voiceServerURL, forKey: "selfHostedURL")
+            if previous == nil || url == previous || url.isEmpty {
+                url = baked.voiceServerURL
             }
             defaults.set(baked.voiceServerURL, forKey: "baked-voiceServerURL")
         }
+        selfHostedURL = url
+        defaults.set(url, forKey: "selfHostedURL")
+
         kernelURL = defaults.string(forKey: "kernelURL") ?? baked.kernelURL
         hubURL = defaults.string(forKey: "hubURL") ?? baked.hubURL
         kernelTarget = KernelTarget(stored: defaults.string(forKey: "kernelTarget") ?? "pod")
