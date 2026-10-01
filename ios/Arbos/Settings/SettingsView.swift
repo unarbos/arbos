@@ -36,7 +36,7 @@ struct SettingsView: View {
             header
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
-                    field("Voice server") {
+                    field("Voice server", focusing: .url) {
                         TextField("wss://host/ws", text: $urlDraft)
                             .keyboardType(.URL)
                             .autocorrectionDisabled()
@@ -46,7 +46,7 @@ struct SettingsView: View {
                             .onSubmit(commitURL)
                     }
 
-                    field("OpenAI API key") {
+                    field("OpenAI API key", focusing: .key) {
                         keyField
                         Button {
                             revealKey.toggle()
@@ -110,12 +110,15 @@ struct SettingsView: View {
         }
         .frame(height: 44)
         .padding(.horizontal, ArbosTheme.gutter)
+        // Clear of the sheet's drag indicator.
+        .padding(.top, 12)
     }
 
     /// An upper-case label over a hairline box, which is how the site draws an
     /// input.
     private func field<Content: View>(
         _ label: String,
+        focusing target: Field,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -133,6 +136,11 @@ struct SettingsView: View {
                 RoundedRectangle(cornerRadius: ArbosTheme.controlRadius)
                     .stroke(ArbosTheme.border, lineWidth: 1)
             }
+            // The box is bigger than the text inside it, and a tap on the padding
+            // would otherwise do nothing. Buttons within it still take their own
+            // taps first.
+            .contentShape(Rectangle())
+            .onTapGesture { focus = target }
         }
     }
 
