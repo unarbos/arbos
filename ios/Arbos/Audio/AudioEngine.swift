@@ -107,6 +107,7 @@ final class AudioEngine {
         engine.prepare()
         try engine.start()
         player.play()
+        capturingMic = captureMic
         observeSession()
     }
 
@@ -126,6 +127,8 @@ final class AudioEngine {
         }
         player.stop()
         engine.stop()
+        capturingMic = false
+        onNeedsRestart = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -311,9 +314,11 @@ final class AudioEngine {
             case .began:
                 self.stopPlayback()
             case .ended:
-                try? session.setActive(true)
-                try? self.engine.start()
-                self.player.play()
+                // `shouldResume` is advisory and is missing more often than it
+                // is set. A call that stops for a phone call and never comes
+                // back is worse than one that tries and fails, so the engine is
+                // restarted either way.
+                self.resume(reason: "interruption ended")
             @unknown default:
                 break
             }
@@ -324,7 +329,64 @@ final class AudioEngine {
             guard let self else { return }
             self.routeToSpeakerIfEarpiece()
             self.onRouteChange?(self.outputRoute)
+            // Unplugging headphones mid-call tears the engine's I/O down with
+            // the old route. Without this the call looks connected and is deaf.
+            if !self.engine.isRunning { self.resume(reason: "route change") }
         })
+        // The hardware format changed under the engine: it is stopped now and
+        // only a restart brings the mic and the speaker back.
+        observers.append(center.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            self?.resume(reason: "engine reconfigured")
+        })
+        // Media services died and took every node with them. Everything has to
+        // be built again from nothing.
+        observers.append(center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main
+        ) { [weak self] _ in
+            self?.rebuild()
+        })
+    }
+
+    /// Bring the session and the engine back up. Safe to call when they are
+    /// already running.
+    private func resume(reason: String) {
+        guard capturingMic || player.engine != nil else { return }
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+            if !engine.isRunning {
+                engine.prepare()
+                try engine.start()
+            }
+            player.play()
+            onRouteChange?(outputRoute)
+        } catch {
+            NSLog("audio resume after %s failed: %@", reason, error.localizedDescription)
+            onNeedsRestart?()
+        }
+    }
+
+    /// Called when the engine cannot be revived in place; the call has to tear
+    /// the audio down and start it again.
+    var onNeedsRestart: (() -> Void)?
+
+    /// Whether `start()` opened the microphone, so a recovery knows whether to
+    /// put the input tap back.
+    private var capturingMic = false
+
+    /// After a media-services reset every node is invalid. Tear the taps off
+    /// and hand the decision back to the call, which owns the lifecycle.
+    private func rebuild() {
+        NSLog("audio: media services were reset")
+        if player.engine != nil { player.removeTap(onBus: 0) }
+        if converter != nil {
+            engine.inputNode.removeTap(onBus: 0)
+            converter = nil
+        }
+        player.stop()
+        engine.stop()
+        onNeedsRestart?()
     }
 
     // MARK: - Capture

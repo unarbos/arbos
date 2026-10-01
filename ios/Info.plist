@@ -4,5 +4,14 @@
 <dict>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<!-- The call keeps running with the app in the background or the screen
+	     locked. This is also set as INFOPLIST_KEY_UIBackgroundModes, but the
+	     generated value is only merged in by Xcode and a build that misses it
+	     suspends the app mid-call with nothing to show why. Declared here so
+	     it is in the bundle whatever the build settings do. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 </dict>
 </plist>

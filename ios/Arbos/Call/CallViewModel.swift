@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import Foundation
+import UIKit
 
 struct TranscriptLine: Identifiable, Equatable {
     enum Speaker: Equatable {
@@ -103,6 +104,19 @@ final class CallViewModel: ObservableObject {
     private var openUtterance = false
     private var speechEndedAt: Date?
     private var replyLatency: TimeInterval?
+    /// How long to wait before each attempt at dialling the server again after
+    /// the socket drops mid-call. A tunnel being restarted, a phone moving from
+    /// Wi-Fi to cellular, or a backgrounded app whose connection was reaped all
+    /// look the same from here, and all of them come back within seconds.
+    private static let reconnectDelays: [TimeInterval] = [0.4, 1, 2, 4, 8, 15]
+    private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
+    /// Asks iOS not to suspend the app while a call is up. The `audio`
+    /// background mode is what actually keeps the call alive; this covers the
+    /// moments around it when no audio is flowing yet.
+    private var backgroundHold: UIBackgroundTaskIdentifier = .invalid
+    /// Whether the microphone was opened, so a recovery restarts it the same way.
+    private var captureMic = true
 
     init(settings: AppSettings, chat: ChatStore, link: VoiceLink) {
         self.settings = settings
@@ -135,6 +149,8 @@ final class CallViewModel: ObservableObject {
         kernelBusy = false
         openUtterance = false
         replyLatency = nil
+        reconnectAttempt = 0
+        holdBackgroundTime()
         Task { await connect() }
     }
 
@@ -150,15 +166,13 @@ final class CallViewModel: ObservableObject {
     }
 
     private func connect() async {
-        var captureMic = true
+        captureMic = true
         #if DEBUG
         captureMic = !DebugInjector.isRequested()
         #endif
-        if captureMic {
-            guard await AVAudioApplication.requestRecordPermission() else {
-                phase = .failed("Microphone access is off.")
-                return
-            }
+        if captureMic, !(await grantedMicrophone()) {
+            phase = .failed(Self.microphoneDenied)
+            return
         }
         let connectStarted = Date()
         subscription = link.subscribe { [weak self] event in self?.handle(event) }
@@ -178,6 +192,9 @@ final class CallViewModel: ObservableObject {
             self.route = route
             self.trace("route change outputs=[\(self.audio.outputPorts)] volume=\(self.audio.systemVolume)")
             self.updateNote()
+        }
+        audio.onNeedsRestart = { [weak self] in
+            Task { @MainActor in self?.restartAudio() }
         }
         #if DEBUG
         let defaults = UserDefaults.standard
@@ -228,21 +245,13 @@ final class CallViewModel: ObservableObject {
         }
         guard phase.inCall else { return }
         if let info = link.info { server = info }
-        let sink = link.audioSink()
-        // Muted: the same frames go out as silence, so the duplex model
-        // keeps its clock and nothing of the room is heard.
-        let send: (Data) -> Void = { [weak self] frame in
-            #if DEBUG
-            self?.framesSent += 1
-            #endif
-            sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
-        }
+        let send = wireCapture()
         for frame in held { send(frame) }
         held.removeAll()
-        audio.onCapture = send
         route = audio.outputRoute
         startedAt = Date()
         phase = .listening
+        reconnectAttempt = 0
         metric("connect", since: connectStarted, detail: "\(server.engine) route=\(route)")
         trace("audio mode=\(audio.mode.rawValue) outputs=[\(audio.outputPorts)] volume=\(audio.systemVolume) normalise=\(audio.normalise)")
         #if DEBUG
@@ -281,6 +290,128 @@ final class CallViewModel: ObservableObject {
         #endif
         await joinChat()
         updateNote()
+    }
+
+    /// Point the microphone at the live socket, returning the same sink so the
+    /// first connect can flush the frames it held while the socket opened.
+    @discardableResult
+    private func wireCapture() -> (Data) -> Void {
+        let sink = link.audioSink()
+        // Muted: the same frames go out as silence, so the duplex model keeps
+        // its clock and nothing of the room is heard.
+        let send: (Data) -> Void = { [weak self] frame in
+            #if DEBUG
+            self?.framesSent += 1
+            #endif
+            sink(self?.mutedNow == true ? Data(count: frame.count) : frame)
+        }
+        audio.onCapture = send
+        return send
+    }
+
+    static let microphoneDenied = "Microphone access is off. Turn it on for Arbos in iOS Settings."
+
+    private func grantedMicrophone() async -> Bool {
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            return true
+        case .denied:
+            // Asking again does nothing once it has been refused; the only way
+            // through is iOS Settings, and the call screen offers that.
+            return false
+        case .undetermined:
+            return await AVAudioApplication.requestRecordPermission()
+        @unknown default:
+            return await AVAudioApplication.requestRecordPermission()
+        }
+    }
+
+    // MARK: - Staying on the call
+
+    /// The socket went away while the call was up. Keep the microphone open and
+    /// dial the server again instead of ending: a tunnel restart or a network
+    /// change should not be the end of a conversation, and "still on the call"
+    /// has to survive them.
+    private func reconnect() {
+        guard phase.inCall, reconnectTask == nil else { return }
+        guard reconnectAttempt < Self.reconnectDelays.count else {
+            fail("Lost the connection to your server.")
+            return
+        }
+        let delay = Self.reconnectDelays[reconnectAttempt]
+        reconnectAttempt += 1
+        // Frames captured during the gap would arrive as a stale burst and be
+        // heard as the caller talking over themselves. Drop them.
+        audio.onCapture = nil
+        audio.stopPlayback()
+        link.unsubscribe(subscription)
+        subscription = nil
+        link.disconnect()
+        phase = .connecting
+        note = "reconnecting"
+        trace("reconnect attempt \(reconnectAttempt) in \(delay)s")
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.reconnectTask = nil
+            guard self.phase.inCall else { return }
+            await self.redial()
+        }
+    }
+
+    private func redial() async {
+        subscription = link.subscribe { [weak self] event in self?.handle(event) }
+        do {
+            try await link.connect()
+        } catch {
+            trace("reconnect failed: \(error.localizedDescription)")
+            reconnect()
+            return
+        }
+        guard phase.inCall else { return }
+        if let info = link.info { server = info }
+        wireCapture()
+        responseDone = true
+        responseHadAudio = false
+        spokenReply = ""
+        reconnectAttempt = 0
+        phase = .listening
+        updateNote()
+        trace("reconnected")
+    }
+
+    /// The audio engine could not be revived where it stood — media services
+    /// were reset, or a route change left it unable to start. Build it again.
+    private func restartAudio() {
+        guard phase.inCall else { return }
+        trace("restarting audio")
+        audio.onCapture = nil
+        audio.stop()
+        audio.onNeedsRestart = { [weak self] in
+            Task { @MainActor in self?.restartAudio() }
+        }
+        do {
+            try audio.start(captureMic: captureMic)
+        } catch {
+            fail("The microphone stopped. \(error.localizedDescription)")
+            return
+        }
+        wireCapture()
+        route = audio.outputRoute
+        updateNote()
+    }
+
+    private func holdBackgroundTime() {
+        guard backgroundHold == .invalid else { return }
+        backgroundHold = UIApplication.shared.beginBackgroundTask(withName: "arbos-call") { [weak self] in
+            Task { @MainActor in self?.releaseBackgroundTime() }
+        }
+    }
+
+    private func releaseBackgroundTime() {
+        guard backgroundHold != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundHold)
+        backgroundHold = .invalid
     }
 
     /// The main chat mirrors the kernel. GPT-Live answers itself — skip.
@@ -462,7 +593,7 @@ final class CallViewModel: ObservableObject {
         case .error(let message):
             fail(message)
         case .closed:
-            fail("Connection closed.")
+            reconnect()
         case .textDelta, .textDone, .toolResult, .agentEvent, .agentTurn, .agentTree:
             break
         }
@@ -714,6 +845,10 @@ final class CallViewModel: ObservableObject {
         if framesFromClip > 0 { print("metric mic_frames clip=\(framesFromClip) sent=\(framesSent)") }
         stopMicClip()
         #endif
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempt = 0
+        releaseBackgroundTime()
         link.unsubscribe(subscription)
         subscription = nil
         speakingOff?.cancel()
@@ -722,6 +857,7 @@ final class CallViewModel: ObservableObject {
         busyWatch = nil
         chat.onAgentMessage = nil
         audio.onCapture = nil
+        audio.onNeedsRestart = nil
         audio.stop()
         link.disconnect()
         startedAt = nil
