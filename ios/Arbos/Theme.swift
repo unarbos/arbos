@@ -223,11 +223,19 @@ extension UIColor {
 
 extension View {
     /// The site's chrome treatment: FiraCode at 12 px, 3% letter spacing, upper
-    /// case — the header links, and every label and status line here.
+    /// case — its header links, and every label and status line here.
     func bittensorLabel() -> some View {
+        bittensorNote().textCase(.uppercase)
+    }
+
+    /// The same, in the case it was written in. Anything that is a sentence
+    /// rather than a label goes through here: the site shouts its chrome, not its
+    /// prose, and an upper-case apology for a refused microphone reads as a fault
+    /// in the app.
+    func bittensorNote() -> some View {
         font(ArbosTheme.caption)
             .tracking(ArbosTheme.captionTracking)
-            .textCase(.uppercase)
+            .lineSpacing(ArbosTheme.captionSize * 0.5)
     }
 }
 
@@ -237,12 +245,14 @@ extension View {
 struct BittensorLink: View {
     let title: String
     var tint: Color = ArbosTheme.text
+    /// False where the title is a sentence the app composed rather than a label
+    /// it chose.
+    var shout = true
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .bittensorLabel()
+            label
                 .multilineTextAlignment(.center)
                 .overlay(alignment: .bottom) {
                     Rectangle().frame(height: 1).offset(y: 3)
@@ -254,5 +264,14 @@ struct BittensorLink: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var label: some View {
+        if shout {
+            Text(title).bittensorLabel()
+        } else {
+            Text(title).bittensorNote()
+        }
     }
 }

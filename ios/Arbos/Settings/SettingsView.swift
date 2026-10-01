@@ -60,9 +60,7 @@ struct SettingsView: View {
                     }
 
                     Text(footer)
-                        .font(ArbosTheme.caption)
-                        .tracking(ArbosTheme.captionTracking)
-                        .lineSpacing(ArbosTheme.captionSize * 0.5)
+                        .bittensorNote()
                         .foregroundStyle(footerTint)
                         .fixedSize(horizontal: false, vertical: true)
 

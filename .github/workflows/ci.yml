@@ -156,6 +156,24 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
             2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | grep -E "error:|warning: unre|BUILD (SUCCEEDED|FAILED)|Compiling|Linking" || true
           grep -q "BUILD SUCCEEDED" "$RUNNER_TEMP/xcodebuild.log"
+      - name: The fonts are in the bundle
+        # The theme is bittensor.com's, and bittensor.com's chrome is FiraCode.
+        # A font that does not make it into the bundle does not fail anything: the
+        # face simply does not resolve and every label falls back, so the app
+        # builds, runs, and looks wrong. The target picks its files up from a
+        # synchronised group, which means a resource can stop being copied without
+        # anyone editing a build phase. So this is asserted rather than assumed.
+        run: |
+          app="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/Arbos.app"
+          for face in FiraCode-Regular.ttf FiraCode-Medium.ttf; do
+            found=$(find "$app" -name "$face" -print -quit)
+            if [ -z "$found" ]; then
+              echo "::error title=$face is not in the app bundle::The theme will silently fall back to the system monospace. Check that ios/Arbos/Fonts/$face is still there and that UIAppFonts in ios/Info.plist still names it."
+              exit 1
+            fi
+            echo "$face -> ${found#"$app"/}"
+          done
+          plutil -extract UIAppFonts raw -o - "$app/Info.plist"
       - name: Say plainly what broke
         if: failure()
         run: |

@@ -108,24 +108,28 @@ struct OrbHomeView: View {
                         .bittensorLabel()
                         .foregroundStyle(ArbosTheme.textMuted)
                         .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 BittensorLink(title: "End call") { model.endCall() }
             }
             .transition(.opacity)
         case .unconfigured(let why):
-            BittensorLink(title: why, tint: ArbosTheme.textMuted) { showSettings = true }
+            BittensorLink(title: why, tint: ArbosTheme.textMuted, shout: false) {
+                showSettings = true
+            }
         case .failed(let message):
             VStack(spacing: 12) {
                 Text(message)
-                    .bittensorLabel()
+                    .bittensorNote()
                     .foregroundStyle(ArbosTheme.danger)
                     .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
                 // A refused microphone cannot be asked for again from inside
                 // the app, so the only useful thing to offer is the way out.
                 if message == CallViewModel.microphoneDenied {
                     BittensorLink(title: "Open iOS Settings", action: openSystemSettings)
                 } else {
-                    Text("Tap the figure to try again")
+                    Text("Tap to try again")
                         .bittensorLabel()
                         .foregroundStyle(ArbosTheme.textMuted)
                 }
