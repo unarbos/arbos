@@ -1,5 +1,4 @@
-# Arbos public endpoints (Cloudflare quick tunnels; change when tunnels restart).
-# Updated: 2026-10-01T13:54:01Z from ArbosLife mesh restart.
-# Voice server: not running on ArbosLife currently.
-hub: wss://answered-moore-scotland-compilation.trycloudflare.com
-kernel: wss://cement-nonprofit-medal-thunder.trycloudflare.com/
+# Arbos public endpoints (orb GPT-Live). Updated: 2026-10-01T20:40:54Z
+https://circuit-violin-reached-chairs.trycloudflare.com
+hub: 
+kernel: 
