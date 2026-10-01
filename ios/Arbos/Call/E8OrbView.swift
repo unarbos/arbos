@@ -1,149 +1,265 @@
-import simd
+import MetalKit
 import SwiftUI
+import simd
 
-/// A floating e8-style metagraph orb: nodes and edges on a sphere, soft
-/// cyan/white lattice on near-black, reacting to voice level and call phase.
-/// Inspired by the Bittensor homepage metagraph — not a WebView of it.
+/// The floating e8 metagraph: the figure from bittensor.com, drawn with the
+/// same roots, the same edges and the same tumbling projection (see
+/// `E8Lattice`). The site's WebGL program is reproduced below in Metal — two
+/// inks chosen per vertex, alpha blended, one GL_LINES pass over 6720 edges.
+///
+/// The only thing this adds to the original is the call: `level` breathes the
+/// figure with the voice on the line and `phase` tints it. Geometry and motion
+/// are untouched.
 struct E8OrbView: View {
     let level: Float
     let phase: CallViewModel.Phase
 
-    @State private var shown: Float = 0
-    @State private var spin: Double = 0
-
-    private static let nodes: [SIMD3<Float>] = Self.makeNodes(count: 48)
-    private static let edges: [(Int, Int)] = Self.makeEdges(nodes: nodes, k: 3)
-
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 60)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            let pulse = sin(t * 2 * .pi / 3.2) * 0.5 + 0.5
-            Canvas { ctx, size in
-                let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                let radius = min(size.width, size.height) * 0.42 * CGFloat(discScale(pulse: pulse))
-                let yaw = spin + t * idleSpin
-                let pitch = 0.35 + 0.08 * sin(t * 0.4)
-                let projected = Self.nodes.map { project($0, yaw: yaw, pitch: pitch, center: center, radius: radius) }
-
-                // Soft halo
-                let halo = Path(ellipseIn: CGRect(
-                    x: center.x - radius * 1.15,
-                    y: center.y - radius * 1.15,
-                    width: radius * 2.3,
-                    height: radius * 2.3
-                ))
-                ctx.fill(halo, with: .color(ink.opacity(0.08 + 0.12 * Double(shown))))
-
-                // Edges behind (farther z first is approximate by y)
-                for (a, b) in Self.edges {
-                    let pa = projected[a]
-                    let pb = projected[b]
-                    var line = Path()
-                    line.move(to: pa.point)
-                    line.addLine(to: pb.point)
-                    let depth = (pa.depth + pb.depth) * 0.5
-                    let alpha = 0.12 + 0.35 * Double(depth) + 0.25 * Double(shown)
-                    ctx.stroke(line, with: .color(edgeInk.opacity(alpha)), lineWidth: 0.7 + CGFloat(shown) * 0.6)
-                }
-
-                // Nodes
-                for p in projected {
-                    let r: CGFloat = 1.6 + CGFloat(p.depth) * 2.2 + CGFloat(shown) * 1.4
-                    let rect = CGRect(x: p.point.x - r, y: p.point.y - r, width: r * 2, height: r * 2)
-                    ctx.fill(Path(ellipseIn: rect), with: .color(ink.opacity(0.35 + 0.55 * Double(p.depth))))
-                }
-            }
-            .onChange(of: context.date) { _, _ in
-                shown += (level - shown) * 0.45
-            }
-        }
-        .animation(.easeInOut(duration: 0.35), value: phase)
-        .accessibilityElement()
-        .accessibilityLabel("Call")
-        .accessibilityValue(phase.label)
-        .accessibilityHint(phase == .idle ? "Tap to call" : "")
-        .accessibilityAddTraits(.isButton)
+        E8MetalView(level: level, tint: tint, dim: dim)
+            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityLabel("Call")
+            .accessibilityValue(phase.label)
+            .accessibilityHint(phase.inCall ? "Double tap to mute" : "Double tap to call")
+            .accessibilityAddTraits(.isButton)
     }
 
-    private func discScale(pulse: Double) -> Float {
+    /// The light ink, which is white on the site. On a near-black screen the
+    /// colour is what carries the call's state.
+    private var tint: SIMD3<Float> {
         switch phase {
-        case .listening, .speaking: return 0.92 + 0.12 * min(1, max(0, shown))
-        case .thinking, .connecting: return 0.92 + 0.05 * Float(pulse)
-        case .idle, .unconfigured, .failed: return 0.92
+        case .listening: return SIMD3(0.91, 0.96, 1.00)
+        case .speaking: return SIMD3(0.62, 0.79, 0.93)
+        case .thinking, .connecting: return SIMD3(0.66, 0.72, 0.78)
+        case .idle: return SIMD3(0.42, 0.48, 0.54)
+        case .unconfigured: return SIMD3(0.36, 0.40, 0.45)
+        case .failed: return SIMD3(0.85, 0.45, 0.42)
         }
     }
 
-    private var idleSpin: Double {
+    /// The site's second ink is pure black, which is its structure against a
+    /// white page and nothing at all against ours. Here it is the tint at a
+    /// fraction of the brightness, so the far half of the lattice still reads.
+    private var dim: Float {
         switch phase {
-        case .listening, .speaking: return 0.55
-        case .thinking, .connecting: return 0.35
-        case .idle, .unconfigured, .failed: return 0.18
+        case .listening, .speaking: return 0.30
+        case .thinking, .connecting: return 0.26
+        case .idle, .unconfigured, .failed: return 0.22
         }
     }
+}
 
-    private var ink: Color {
-        switch phase {
-        case .listening: return Color(hex: 0xe8f4ff)
-        case .speaking: return Color(hex: 0x9ec9e8)
-        case .thinking, .connecting: return Color(hex: 0xa8b8c8)
-        case .idle, .unconfigured: return Color(hex: 0x6a7a88)
-        case .failed: return ArbosTheme.danger
+/// `MTKView` around the ported program. One lattice and one drifting plane per
+/// view; positions are recomputed on the CPU each frame exactly as the sketch
+/// does, because 240 roots is nothing and it keeps the port honest.
+private struct E8MetalView: UIViewRepresentable {
+    var level: Float
+    var tint: SIMD3<Float>
+    var dim: Float
+
+    func makeCoordinator() -> Renderer { Renderer() }
+
+    func makeUIView(context: Context) -> MTKView {
+        let view = MTKView()
+        view.isOpaque = false
+        view.backgroundColor = .clear
+        view.layer.isOpaque = false
+        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        view.enableSetNeedsDisplay = false
+        view.isPaused = false
+        // The sketch throttles itself to 60 Hz; matching it keeps the drift at
+        // the speed it was tuned for on a 120 Hz display.
+        view.preferredFramesPerSecond = 60
+        view.framebufferOnly = true
+        // A device this app cannot draw on leaves a blank view rather than
+        // taking the process down: the orb is the whole screen, and a crash
+        // here would mean no way to reach Settings.
+        guard context.coordinator.attach(to: view) else { return view }
+        view.delegate = context.coordinator
+        return view
+    }
+
+    func updateUIView(_ view: MTKView, context: Context) {
+        context.coordinator.level = level
+        context.coordinator.tint = tint
+        context.coordinator.dim = dim
+    }
+
+    static func dismantleUIView(_ view: MTKView, coordinator: Renderer) {
+        view.delegate = nil
+        view.isPaused = true
+    }
+
+    /// Matches the site's shader pair: the vertex stage picks one of two inks
+    /// from a single float attribute and writes `w = 0.9`, which is the scale
+    /// the figure is drawn at.
+    private static let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Uniforms {
+        float scale;
+        float alpha;
+        float4 light;
+        float4 dark;
+    };
+
+    struct Vertex {
+        float4 position [[position]];
+        float4 colour;
+    };
+
+    vertex Vertex e8_vertex(uint id [[vertex_id]],
+                            const device float2 *points [[buffer(0)]],
+                            const device float *shades [[buffer(1)]],
+                            constant Uniforms &uniforms [[buffer(2)]]) {
+        Vertex out;
+        out.position = float4(points[id] * uniforms.scale, 0.9, 0.9);
+        out.colour = shades[id] == 0.1f ? uniforms.light : uniforms.dark;
+        out.colour.a *= uniforms.alpha;
+        return out;
+    }
+
+    fragment float4 e8_fragment(Vertex in [[stage_in]]) {
+        return in.colour;
+    }
+    """
+
+    /// Mirrors the layout the shader reads; `float4` members force 16-byte
+    /// alignment, so the two leading floats are padded to match.
+    private struct Uniforms {
+        var scale: Float
+        var alpha: Float
+        var padding: SIMD2<Float> = .zero
+        var light: SIMD4<Float>
+        var dark: SIMD4<Float>
+    }
+
+    @MainActor
+    final class Renderer: NSObject, MTKViewDelegate {
+        var level: Float = 0
+        var tint = SIMD3<Float>(0.5, 0.5, 0.5)
+        var dim: Float = 0.25
+
+        private let lattice = E8Lattice.shared
+        private var projection = E8Projection()
+        private var points: [SIMD2<Float>]
+        private var smoothedLevel: Float = 0
+        private var lastAdvance = CACurrentMediaTime()
+
+        private var queue: MTLCommandQueue?
+        private var pipeline: MTLRenderPipelineState?
+        private var shadeBuffer: MTLBuffer?
+        private var indexBuffer: MTLBuffer?
+        /// Three position buffers in rotation: the GPU may still be reading
+        /// last frame's while the CPU writes this one.
+        private var pointBuffers: [MTLBuffer] = []
+        private var frame = 0
+
+        override init() {
+            points = Array(repeating: .zero, count: lattice.rootCount)
+            super.init()
+            projection.project(lattice, into: &points)
         }
-    }
 
-    private var edgeInk: Color {
-        switch phase {
-        case .speaking: return Color(hex: 0xb8d8f0)
-        case .listening: return Color(hex: 0xd0e6f5)
-        default: return Color(hex: 0x8aa0b0)
-        }
-    }
+        func attach(to view: MTKView) -> Bool {
+            guard let device = MTLCreateSystemDefaultDevice(),
+                  let queue = device.makeCommandQueue() else { return false }
+            view.device = device
+            self.queue = queue
 
-    private struct Projected {
-        var point: CGPoint
-        var depth: Float // 0…1, nearer is larger
-    }
-
-    private func project(_ v: SIMD3<Float>, yaw: Double, pitch: Double, center: CGPoint, radius: CGFloat) -> Projected {
-        let cy = Float(cos(yaw)), sy = Float(sin(yaw))
-        let cp = Float(cos(pitch)), sp = Float(sin(pitch))
-        // yaw then pitch
-        let x1 = v.x * cy - v.z * sy
-        let z1 = v.x * sy + v.z * cy
-        let y2 = v.y * cp - z1 * sp
-        let z2 = v.y * sp + z1 * cp
-        let depth = (z2 + 1) * 0.5
-        let scale = radius * CGFloat(0.85 + 0.25 * depth)
-        return Projected(
-            point: CGPoint(x: center.x + CGFloat(x1) * scale, y: center.y + CGFloat(y2) * scale),
-            depth: depth
-        )
-    }
-
-    /// Fibonacci sphere points — even coverage that reads as a lattice.
-    private static func makeNodes(count: Int) -> [SIMD3<Float>] {
-        let golden = Float.pi * (3 - sqrt(5))
-        return (0..<count).map { i in
-            let y = 1 - (Float(i) / Float(count - 1)) * 2
-            let r = sqrt(max(0, 1 - y * y))
-            let theta = golden * Float(i)
-            return SIMD3(cos(theta) * r, y, sin(theta) * r)
-        }
-    }
-
-    private static func makeEdges(nodes: [SIMD3<Float>], k: Int) -> [(Int, Int)] {
-        var edges: [(Int, Int)] = []
-        for i in nodes.indices {
-            var nearest: [(Float, Int)] = []
-            for j in nodes.indices where j != i {
-                let d = simd_distance(nodes[i], nodes[j])
-                nearest.append((d, j))
+            let library: MTLLibrary
+            do {
+                library = try device.makeLibrary(source: E8MetalView.shaderSource, options: nil)
+            } catch {
+                NSLog("E8 orb: shader compile failed: %@", String(describing: error))
+                return false
             }
-            nearest.sort { $0.0 < $1.0 }
-            for (_, j) in nearest.prefix(k) where i < j {
-                edges.append((i, j))
+            guard let vertexFunction = library.makeFunction(name: "e8_vertex"),
+                  let fragmentFunction = library.makeFunction(name: "e8_fragment") else { return false }
+
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = vertexFunction
+            descriptor.fragmentFunction = fragmentFunction
+            descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat
+            // The site's blendFunc, so overlapping edges build up the same way.
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].rgbBlendOperation = .add
+            descriptor.colorAttachments[0].alphaBlendOperation = .add
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            do {
+                pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+            } catch {
+                NSLog("E8 orb: pipeline failed: %@", String(describing: error))
+                return false
             }
+
+            let pointBytes = lattice.rootCount * MemoryLayout<SIMD2<Float>>.stride
+            pointBuffers = (0..<3).compactMap { _ in
+                device.makeBuffer(length: pointBytes, options: .storageModeShared)
+            }
+            shadeBuffer = lattice.shades.withUnsafeBytes {
+                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+            }
+            indexBuffer = lattice.lineIndices.withUnsafeBytes {
+                device.makeBuffer(bytes: $0.baseAddress!, length: $0.count, options: .storageModeShared)
+            }
+            return pointBuffers.count == 3 && shadeBuffer != nil && indexBuffer != nil
         }
-        return edges
+
+        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+        func draw(in view: MTKView) {
+            guard let queue, let pipeline, let shadeBuffer, let indexBuffer,
+                  !pointBuffers.isEmpty,
+                  let descriptor = view.currentRenderPassDescriptor,
+                  let drawable = view.currentDrawable,
+                  let buffer = queue.makeCommandBuffer(),
+                  let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+
+            // One step per 1/60 s of wall clock, as the sketch gates itself, so
+            // a dropped frame does not slow the drift down.
+            let now = CACurrentMediaTime()
+            var steps = Int((now - lastAdvance) * 60)
+            if steps > 0 {
+                lastAdvance = now
+                // A view that was off screen for a while must not fast-forward
+                // through thousands of steps on its first frame back.
+                steps = min(steps, 4)
+                for _ in 0..<steps { projection.advance() }
+                projection.project(lattice, into: &points)
+            }
+
+            smoothedLevel += (min(1, max(0, level)) - smoothedLevel) * 0.18
+            let positions = pointBuffers[frame % pointBuffers.count]
+            frame += 1
+            points.withUnsafeBytes { bytes in
+                positions.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+            }
+
+            var uniforms = Uniforms(
+                scale: 1 + 0.05 * smoothedLevel,
+                alpha: 0.72 + 0.28 * smoothedLevel,
+                light: SIMD4(tint, 0.9),
+                dark: SIMD4(tint * dim, 0.9)
+            )
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBuffer(positions, offset: 0, index: 0)
+            encoder.setVertexBuffer(shadeBuffer, offset: 0, index: 1)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 2)
+            encoder.drawIndexedPrimitives(
+                type: .line,
+                indexCount: lattice.lineIndices.count,
+                indexType: .uint16,
+                indexBuffer: indexBuffer,
+                indexBufferOffset: 0
+            )
+            encoder.endEncoding()
+            buffer.present(drawable)
+            buffer.commit()
+        }
     }
 }
