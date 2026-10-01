@@ -780,11 +780,16 @@ class OpenAILiveSession(DuplexSession):
         await self._append("session.thinking.append", did, "Working on it.")
         answer = ""
         try:
-            async for delta in codex.turn(question, timeout=180):
+            async for delta in codex.turn(question):
                 answer += delta
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Whatever went wrong, the caller hears a sentence and not a
+            # traceback: the exception text goes to the log, where it is useful.
             log.exception("[%s] Codex delegation failed", self.sid)
-            await self._append("session.commentary.append", did or self.forced_did, f"That failed: {_ascii(str(exc))[:200]}", answer=True)
+            await self._append("session.commentary.append", did or self.forced_did,
+                               "Something broke running that on the machine.", answer=True)
             return
         spoken = speakable(answer).replace("\n", " ").strip() or "I did not get an answer."
         # Keep what GPT-Live speaks short.
