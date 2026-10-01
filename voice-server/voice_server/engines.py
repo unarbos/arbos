@@ -99,8 +99,9 @@ class Engines:
         engine = args.engine
         duplex_name = ""
         if engine == "openai":
+            # Per-call keys from session.start.openai_api_key are enough; env is a fallback.
             if not os.environ.get("OPENAI_API_KEY"):
-                raise SystemExit("--engine openai needs OPENAI_API_KEY in the environment")
+                log.warning("--engine openai: no OPENAI_API_KEY in the environment; each call must send openai_api_key")
             duplex_name = f"openai/{args.openai_model}"
         elif engine in ("duplex", "auto"):
             duplex_name = await probe_duplex(args.duplex_url)
