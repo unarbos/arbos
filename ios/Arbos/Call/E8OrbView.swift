@@ -5,17 +5,23 @@ import simd
 /// The floating e8 metagraph: the figure from bittensor.com, drawn with the
 /// same roots, the same edges and the same tumbling projection (see
 /// `E8Lattice`). The site's WebGL program is reproduced below in Metal — two
-/// inks chosen per vertex, alpha blended, one GL_LINES pass over 6720 edges.
+/// inks chosen per vertex, alpha blended, one GL_LINES pass over 6720 edges —
+/// and the inks are the site's own `vec4(1, 1, 1, 0.9)` and
+/// `vec4(0, 0, 0, 0.9)`, over `ArbosTheme.bg`. Half the vertices are therefore
+/// the colour of the page and the lines fade into it, which is the look the
+/// site has and the reason the figure seems to float. It comes out right in both
+/// of bittensor's themes without changing anything: on white the black half
+/// carries the figure, on `#111` the white half does.
 ///
-/// The only thing this adds to the original is the call: `level` breathes the
-/// figure with the voice on the line and `phase` tints it. Geometry and motion
-/// are untouched.
+/// At rest this is the site, pixel for pixel. The call is shown by swelling the
+/// figure — a uniform scale, so the projection is untouched — and by recessing
+/// it when there is nothing to call with.
 struct E8OrbView: View {
     let level: Float
     let phase: CallViewModel.Phase
 
     var body: some View {
-        E8MetalView(level: level, tint: tint, dim: dim)
+        E8MetalView(level: level, swell: swell, presence: presence)
             .allowsHitTesting(false)
             .accessibilityElement()
             .accessibilityLabel("Call")
@@ -24,27 +30,25 @@ struct E8OrbView: View {
             .accessibilityAddTraits(.isButton)
     }
 
-    /// The light ink, which is white on the site. On a near-black screen the
-    /// colour is what carries the call's state.
-    private var tint: SIMD3<Float> {
+    /// How large the figure sits before the voice moves it. A call holds it a
+    /// little above its resting size, so a silent moment on the line still does
+    /// not look like a screen nobody is talking to.
+    private var swell: Float {
         switch phase {
-        case .listening: return SIMD3(0.91, 0.96, 1.00)
-        case .speaking: return SIMD3(0.62, 0.79, 0.93)
-        case .thinking, .connecting: return SIMD3(0.66, 0.72, 0.78)
-        case .idle: return SIMD3(0.42, 0.48, 0.54)
-        case .unconfigured: return SIMD3(0.36, 0.40, 0.45)
-        case .failed: return SIMD3(0.85, 0.45, 0.42)
+        case .listening, .speaking: return 1.02
+        case .thinking, .connecting: return 1.01
+        case .idle, .unconfigured, .failed: return 1
         }
     }
 
-    /// The site's second ink is pure black, which is its structure against a
-    /// white page and nothing at all against ours. Here it is the tint at a
-    /// fraction of the brightness, so the far half of the lattice still reads.
-    private var dim: Float {
+    /// The alpha the two inks are multiplied by. 1 is the site exactly; the
+    /// states below it are the ones where tapping the orb will not get you a
+    /// call.
+    private var presence: Float {
         switch phase {
-        case .listening, .speaking: return 0.30
-        case .thinking, .connecting: return 0.26
-        case .idle, .unconfigured, .failed: return 0.22
+        case .idle, .listening, .speaking, .thinking, .connecting: return 1
+        case .failed: return 0.7
+        case .unconfigured: return 0.5
         }
     }
 }
@@ -54,8 +58,8 @@ struct E8OrbView: View {
 /// does, because 240 roots is nothing and it keeps the port honest.
 private struct E8MetalView: UIViewRepresentable {
     var level: Float
-    var tint: SIMD3<Float>
-    var dim: Float
+    var swell: Float
+    var presence: Float
 
     func makeCoordinator() -> Renderer { Renderer() }
 
@@ -81,8 +85,8 @@ private struct E8MetalView: UIViewRepresentable {
 
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.level = level
-        context.coordinator.tint = tint
-        context.coordinator.dim = dim
+        context.coordinator.swell = swell
+        context.coordinator.presence = presence
     }
 
     static func dismantleUIView(_ view: MTKView, coordinator: Renderer) {
@@ -90,9 +94,11 @@ private struct E8MetalView: UIViewRepresentable {
         view.isPaused = true
     }
 
-    /// Matches the site's shader pair: the vertex stage picks one of two inks
-    /// from a single float attribute and writes `w = 0.9`, which is the scale
-    /// the figure is drawn at.
+    /// The site's shader pair, translated. Its vertex stage declares `col` as a
+    /// `vec2` but binds a single float to it, so `col.y` is always 0 and the test
+    /// it writes as `col == vec2(0.1, 0)` is really `shade == 0.1`; `w = 0.9` is
+    /// the scale it draws the figure at. The two inks are verbatim. `scale` and
+    /// `alpha` are this app's, and at 1 they are both no-ops.
     private static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
@@ -100,8 +106,6 @@ private struct E8MetalView: UIViewRepresentable {
     struct Uniforms {
         float scale;
         float alpha;
-        float4 light;
-        float4 dark;
     };
 
     struct Vertex {
@@ -115,7 +119,7 @@ private struct E8MetalView: UIViewRepresentable {
                             constant Uniforms &uniforms [[buffer(2)]]) {
         Vertex out;
         out.position = float4(points[id] * uniforms.scale, 0.9, 0.9);
-        out.colour = shades[id] == 0.1f ? uniforms.light : uniforms.dark;
+        out.colour = shades[id] == 0.1f ? float4(1, 1, 1, 0.9) : float4(0, 0, 0, 0.9);
         out.colour.a *= uniforms.alpha;
         return out;
     }
@@ -125,26 +129,26 @@ private struct E8MetalView: UIViewRepresentable {
     }
     """
 
-    /// Mirrors the layout the shader reads; `float4` members force 16-byte
-    /// alignment, so the two leading floats are padded to match.
+    /// Mirrors the layout the shader reads.
     private struct Uniforms {
         var scale: Float
         var alpha: Float
-        var padding: SIMD2<Float> = .zero
-        var light: SIMD4<Float>
-        var dark: SIMD4<Float>
     }
 
     @MainActor
     final class Renderer: NSObject, MTKViewDelegate {
         var level: Float = 0
-        var tint = SIMD3<Float>(0.5, 0.5, 0.5)
-        var dim: Float = 0.25
+        var swell: Float = 1
+        var presence: Float = 1
 
         private let lattice = E8Lattice.shared
         private var projection = E8Projection()
         private var points: [SIMD2<Float>]
         private var smoothedLevel: Float = 0
+        /// Chased rather than set, so a state change fades the figure instead of
+        /// stepping it.
+        private var smoothedPresence: Float = 1
+        private var smoothedSwell: Float = 1
         private var lastAdvance = CACurrentMediaTime()
 
         private var queue: MTLCommandQueue?
@@ -232,6 +236,8 @@ private struct E8MetalView: UIViewRepresentable {
             }
 
             smoothedLevel += (min(1, max(0, level)) - smoothedLevel) * 0.18
+            smoothedPresence += (presence - smoothedPresence) * 0.08
+            smoothedSwell += (swell - smoothedSwell) * 0.08
             let positions = pointBuffers[frame % pointBuffers.count]
             frame += 1
             points.withUnsafeBytes { bytes in
@@ -239,10 +245,8 @@ private struct E8MetalView: UIViewRepresentable {
             }
 
             var uniforms = Uniforms(
-                scale: 1 + 0.05 * smoothedLevel,
-                alpha: 0.72 + 0.28 * smoothedLevel,
-                light: SIMD4(tint, 0.9),
-                dark: SIMD4(tint * dim, 0.9)
+                scale: smoothedSwell + 0.05 * smoothedLevel,
+                alpha: smoothedPresence
             )
             encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBuffer(positions, offset: 0, index: 0)
