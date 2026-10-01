@@ -60,7 +60,7 @@ private struct E8MetalView: UIViewRepresentable {
     func makeCoordinator() -> Renderer { Renderer() }
 
     func makeUIView(context: Context) -> MTKView {
-        let view = MTKView()
+        let view = MTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         view.isOpaque = false
         view.backgroundColor = .clear
         view.layer.isOpaque = false
@@ -163,9 +163,7 @@ private struct E8MetalView: UIViewRepresentable {
         }
 
         func attach(to view: MTKView) -> Bool {
-            guard let device = MTLCreateSystemDefaultDevice(),
-                  let queue = device.makeCommandQueue() else { return false }
-            view.device = device
+            guard let device = view.device, let queue = device.makeCommandQueue() else { return false }
             self.queue = queue
 
             let library: MTLLibrary
