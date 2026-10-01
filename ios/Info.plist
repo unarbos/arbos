@@ -13,5 +13,15 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!-- FiraCode, which is what bittensor.com sets its chrome in. Declared here
+	     and also registered at launch from the bundle (see `ArbosTheme.Face`):
+	     the theme checks that the face actually resolved and falls back to the
+	     system monospace if it did not, because a missing custom font otherwise
+	     resolves silently to the proportional system face. -->
+	<key>UIAppFonts</key>
+	<array>
+		<string>FiraCode-Regular.ttf</string>
+		<string>FiraCode-Medium.ttf</string>
+	</array>
 </dict>
 </plist>
