@@ -23,11 +23,11 @@ struct E8OrbView: View {
     var body: some View {
         E8MetalView(level: level, swell: swell, presence: presence)
             .allowsHitTesting(false)
-            .accessibilityElement()
-            .accessibilityLabel("Call")
-            .accessibilityValue(phase.label)
-            .accessibilityHint(phase.inCall ? "Double tap to mute" : "Double tap to call")
-            .accessibilityAddTraits(.isButton)
+            // A drawing, and not the thing you tap: the target that carries the
+            // gestures carries the label too, in `OrbHomeView`. Announcing it
+            // here as a button put the words on an element with no action behind
+            // it, so VoiceOver offered a call it could not place.
+            .accessibilityHidden(true)
     }
 
     /// How large the figure sits before the voice moves it. A call holds it a

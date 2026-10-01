@@ -59,16 +59,13 @@ enum ArbosTheme {
     /// `--primary-main` on light, `--info-main` on dark: the site's accent is a
     /// blue on white and a violet on black.
     static let accent = dynamic(light: 0x2f46f4, dark: 0xa77dff)
-    /// `--primary-light`, for the pressed state of anything tinted.
-    static let accentBright = dynamic(light: 0x4257f5, dark: 0xffffff)
     /// `--error-main`.
     static let danger = dynamic(light: 0xd93737, dark: 0xf56868)
     /// `--success-main`.
     static let ok = dynamic(light: 0x49c24e, dark: 0x8ae06c)
-    /// `--warning-main`.
-    static let warning = dynamic(light: 0xeeac3c, dark: 0xf1df38)
-    /// `--highlight-color-kh`, the one colour the site keeps across both sets.
-    static let highlight = Color(hex: 0xe9f4a4)
+    // The site's `--warning-main` is #eeac3c, which is under 2:1 against a white
+    // page: it is a badge colour there, not a text one. Left out rather than left
+    // lying around for someone to set a sentence in.
 
     // MARK: - Radii
 

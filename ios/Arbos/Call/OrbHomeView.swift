@@ -62,6 +62,10 @@ struct OrbHomeView: View {
                     .frame(width: side * 0.85, height: side * 0.85)
                     .onTapGesture(perform: tapOrb)
                     .onLongPressGesture(minimumDuration: 0.55, perform: endIfCalling)
+                    .accessibilityElement()
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel(model.phase.inCall ? "Mute" : "Call")
+                    .accessibilityValue(spokenState)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
             .offset(y: -Self.figureRise)
@@ -100,9 +104,13 @@ struct OrbHomeView: View {
             VStack(spacing: 14) {
                 // Tapping the figure mutes, so the screen has to say when it did.
                 if model.muted {
+                    // Not `warning`: the site's amber is #eeac3c, which against a
+                    // white page is under 2:1 and cannot be read. A muted
+                    // microphone is the one thing on this screen that has to be
+                    // noticed.
                     Text("Muted")
                         .bittensorLabel()
-                        .foregroundStyle(ArbosTheme.warning)
+                        .foregroundStyle(ArbosTheme.danger)
                 } else if let note = model.note {
                     Text(note)
                         .bittensorLabel()
@@ -138,6 +146,20 @@ struct OrbHomeView: View {
             Text("Tap to call")
                 .bittensorLabel()
                 .foregroundStyle(ArbosTheme.textMuted)
+        }
+    }
+
+    /// What the figure is saying, for somebody who cannot see it.
+    private var spokenState: String {
+        if model.muted { return "muted" }
+        switch model.phase {
+        case .idle: return "not on a call"
+        case .connecting: return "connecting"
+        case .listening: return "listening"
+        case .thinking: return "working"
+        case .speaking: return "speaking"
+        case .unconfigured(let why): return why
+        case .failed(let message): return message
         }
     }
 
