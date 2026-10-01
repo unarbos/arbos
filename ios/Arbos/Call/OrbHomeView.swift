@@ -1,7 +1,12 @@
 import SwiftUI
 import UIKit
 
-/// The whole app: one full-bleed orb. Tap to talk. Settings top-right.
+/// The whole app: one e8 figure on a flat page. Tap to talk.
+///
+/// Laid out as bittensor.com lays out the page the figure comes from: a flat
+/// `--background-default`, a header of upper-case FiraCode across the top, the
+/// figure about 85% of the narrow side and nudged up by the site's `-4rem`, and
+/// everything else centred underneath it.
 struct OrbHomeView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var chat: ChatStore
@@ -10,18 +15,23 @@ struct OrbHomeView: View {
     @State private var showSettings = false
     @Environment(\.scenePhase) private var scenePhase
 
+    /// `.page_container__d49Io { max-width: 600px; width: 85vw }`, which is what
+    /// bounds the canvas on a phone.
+    private static let figureFraction: CGFloat = 0.85
+    /// `margin-top: -4rem`.
+    private static let figureRise: CGFloat = 64
+
     init(settings: AppSettings, chat: ChatStore, link: VoiceLink) {
         _model = StateObject(wrappedValue: CallViewModel(settings: settings, chat: chat, link: link))
     }
 
     var body: some View {
         ZStack {
-            background.ignoresSafeArea()
+            ArbosTheme.bg.ignoresSafeArea()
             orb
-            controls
+            chrome
         }
         .animation(.easeOut(duration: 0.2), value: model.phase.inCall)
-        .preferredColorScheme(.dark)
         .sheet(isPresented: $showSettings, onDismiss: model.refreshIdle) {
             SettingsView().environmentObject(settings)
         }
@@ -36,126 +46,95 @@ struct OrbHomeView: View {
         }
     }
 
-    /// Full-bleed, as on the page it comes from. Square, because the projection
-    /// is: a stretched viewport would shear the lattice.
+    /// Square, because the projection is: a stretched viewport would shear the
+    /// lattice.
     private var orb: some View {
         GeometryReader { geometry in
-            let side = min(geometry.size.width, geometry.size.height) * 0.98
+            let side = min(geometry.size.width, geometry.size.height) * Self.figureFraction
             ZStack {
                 E8OrbView(level: model.level, phase: model.phase)
                     .frame(width: side, height: side)
-                // The orb itself does not take touches — a Metal view and a
+                // The figure itself does not take touches — a Metal view and a
                 // SwiftUI gesture argue about them. This is the target.
                 Circle()
                     .fill(.clear)
                     .contentShape(Circle())
-                    .frame(width: side * 0.72, height: side * 0.72)
+                    .frame(width: side * 0.85, height: side * 0.85)
                     .onTapGesture(perform: tapOrb)
                     .onLongPressGesture(minimumDuration: 0.55, perform: endIfCalling)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .offset(y: -Self.figureRise)
         }
-        .ignoresSafeArea()
     }
 
-    private var controls: some View {
+    private var chrome: some View {
         VStack(spacing: 0) {
-            HStack {
-                Spacer()
-                Button {
-                    showSettings = true
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(ArbosTheme.textMuted)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .accessibilityLabel("Settings")
-            }
-            .padding(.horizontal, ArbosTheme.gutter)
-            .padding(.top, 4)
-
+            header
             Spacer()
-
             footer
-                .padding(.bottom, 28)
-                .frame(minHeight: 48)
+                .frame(minHeight: 64)
+                .padding(.horizontal, ArbosTheme.gutter)
+                .padding(.bottom, 24)
         }
+    }
+
+    /// `.Header_container__3ik1i`: the wordmark at one end, upper-case links at
+    /// the other.
+    private var header: some View {
+        HStack {
+            Text("Arbos")
+                .bittensorLabel()
+                .foregroundStyle(ArbosTheme.text)
+            Spacer()
+            BittensorLink(title: "Settings") { showSettings = true }
+        }
+        .frame(height: 44)
+        .padding(.horizontal, ArbosTheme.gutter)
     }
 
     @ViewBuilder
     private var footer: some View {
         switch model.phase {
         case .connecting, .listening, .thinking, .speaking:
-            VStack(spacing: 10) {
-                // Tapping the orb mutes, so the screen has to say when it did.
+            VStack(spacing: 14) {
+                // Tapping the figure mutes, so the screen has to say when it did.
                 if model.muted {
-                    Label("Muted", systemImage: "mic.slash.fill")
-                        .font(ArbosTheme.caption)
-                        .foregroundStyle(ArbosTheme.textMuted)
+                    Text("Muted")
+                        .bittensorLabel()
+                        .foregroundStyle(ArbosTheme.warning)
                 } else if let note = model.note {
                     Text(note)
-                        .font(ArbosTheme.caption)
-                        .foregroundStyle(ArbosTheme.textDim)
-                }
-                Button {
-                    model.endCall()
-                } label: {
-                    Text("End")
-                        .font(ArbosTheme.calloutMedium)
+                        .bittensorLabel()
                         .foregroundStyle(ArbosTheme.textMuted)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .contentShape(Rectangle())
+                        .multilineTextAlignment(.center)
                 }
+                BittensorLink(title: "End call") { model.endCall() }
             }
             .transition(.opacity)
         case .unconfigured(let why):
-            Button {
-                showSettings = true
-            } label: {
-                Text(why)
-                    .font(ArbosTheme.caption)
-                    .foregroundStyle(ArbosTheme.textDim)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .contentShape(Rectangle())
-            }
+            BittensorLink(title: why, tint: ArbosTheme.textMuted) { showSettings = true }
         case .failed(let message):
-            VStack(spacing: 10) {
+            VStack(spacing: 12) {
                 Text(message)
-                    .font(ArbosTheme.caption)
-                    .foregroundStyle(ArbosTheme.danger.opacity(0.9))
+                    .bittensorLabel()
+                    .foregroundStyle(ArbosTheme.danger)
                     .multilineTextAlignment(.center)
-                    .padding(.horizontal, 40)
                 // A refused microphone cannot be asked for again from inside
                 // the app, so the only useful thing to offer is the way out.
                 if message == CallViewModel.microphoneDenied {
-                    Button("Open iOS Settings", action: openSystemSettings)
-                        .font(ArbosTheme.calloutMedium)
-                        .foregroundStyle(ArbosTheme.textMuted)
+                    BittensorLink(title: "Open iOS Settings", action: openSystemSettings)
                 } else {
-                    Text("Tap the orb to try again.")
-                        .font(ArbosTheme.caption)
-                        .foregroundStyle(ArbosTheme.textDim)
+                    Text("Tap the figure to try again")
+                        .bittensorLabel()
+                        .foregroundStyle(ArbosTheme.textMuted)
                 }
             }
         case .idle:
-            Color.clear.frame(height: 20)
+            Text("Tap to call")
+                .bittensorLabel()
+                .foregroundStyle(ArbosTheme.textMuted)
         }
-    }
-
-    private var background: some View {
-        LinearGradient(
-            colors: [
-                Color(hex: 0x0a0c0e),
-                Color(hex: 0x12161a),
-                Color(hex: 0x0c1014),
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
     }
 
     private func tapOrb() {

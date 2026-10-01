@@ -22,6 +22,8 @@ struct ArbosApp: App {
     @StateObject private var notifier = Notifier()
 
     init() {
+        // The navigation bars UIKit draws cannot read SwiftUI's fonts.
+        ArbosTheme.adoptAppearance()
         let settings = AppSettings()
         let link = VoiceLink(settings: settings)
         _settings = StateObject(wrappedValue: settings)
@@ -38,7 +40,8 @@ struct ArbosApp: App {
                 .environmentObject(link)
                 .environmentObject(notifier)
                 .tint(ArbosTheme.accent)
-                .preferredColorScheme(.dark)
+                // No `preferredColorScheme`: bittensor.com ships both token sets
+                // and remembers which you picked, so the phone's setting decides.
         }
     }
 }

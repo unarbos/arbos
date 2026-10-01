@@ -6,6 +6,9 @@ import SwiftUI
 /// a sheet can be dismissed by swiping it down, and a key typed into a draft
 /// that only commits on Done is lost every time somebody does that, which
 /// reads as "the app forgot my key".
+///
+/// Laid out as bittensor.com lays out a form: upper-case FiraCode labels, a
+/// hairline box around each field, square corners, no fills.
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
@@ -29,57 +32,61 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("wss://host/ws", text: $urlDraft)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .submitLabel(.done)
-                        .focused($focus, equals: .url)
-                        .onSubmit(commitURL)
+        VStack(spacing: 0) {
+            header
+            ScrollView {
+                VStack(alignment: .leading, spacing: 26) {
+                    field("Voice server") {
+                        TextField("wss://host/ws", text: $urlDraft)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .submitLabel(.done)
+                            .focused($focus, equals: .url)
+                            .onSubmit(commitURL)
+                    }
 
-                    HStack {
+                    field("OpenAI API key") {
                         keyField
                         Button {
                             revealKey.toggle()
                         } label: {
-                            Image(systemName: revealKey ? "eye.slash" : "eye")
+                            Text(revealKey ? "Hide" : "Show")
+                                .bittensorLabel()
                                 .foregroundStyle(ArbosTheme.textMuted)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(revealKey ? "Hide key" : "Show key")
                     }
-                } header: {
-                    Text("Call")
-                } footer: {
-                    Text(footer)
-                        .foregroundStyle(footerTint)
-                }
-                .listRowBackground(ArbosTheme.card)
 
-                Section {
-                    LabeledContent("Arbos", value: Self.buildLine)
-                        .foregroundStyle(ArbosTheme.textMuted)
-                } footer: {
-                    Text("This TestFlight build.")
-                }
-                .listRowBackground(ArbosTheme.card)
-            }
-            .scrollContentBackground(.hidden)
-            .background(ArbosTheme.bg)
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        commitAll()
-                        dismiss()
+                    Text(footer)
+                        .font(ArbosTheme.caption)
+                        .tracking(ArbosTheme.captionTracking)
+                        .lineSpacing(ArbosTheme.captionSize * 0.5)
+                        .foregroundStyle(footerTint)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Rectangle()
+                        .fill(ArbosTheme.border)
+                        .frame(height: 1)
+
+                    HStack {
+                        Text("Build")
+                            .bittensorLabel()
+                            .foregroundStyle(ArbosTheme.textMuted)
+                        Spacer()
+                        Text(Self.buildLine)
+                            .bittensorLabel()
+                            .foregroundStyle(ArbosTheme.text)
                     }
                 }
+                .padding(.horizontal, ArbosTheme.gutter)
+                .padding(.vertical, 24)
             }
+            .scrollDismissesKeyboard(.interactively)
         }
+        .background(ArbosTheme.bg.ignoresSafeArea())
+        .presentationDragIndicator(.visible)
         .onAppear {
             urlDraft = settings.selfHostedURL
             keyDraft = settings.openAIKey
@@ -92,6 +99,45 @@ struct SettingsView: View {
         }
     }
 
+    private var header: some View {
+        HStack {
+            Text("Settings")
+                .bittensorLabel()
+                .foregroundStyle(ArbosTheme.text)
+            Spacer()
+            BittensorLink(title: "Done") {
+                commitAll()
+                dismiss()
+            }
+        }
+        .frame(height: 44)
+        .padding(.horizontal, ArbosTheme.gutter)
+    }
+
+    /// An upper-case label over a hairline box, which is how the site draws an
+    /// input.
+    private func field<Content: View>(
+        _ label: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(label)
+                .bittensorLabel()
+                .foregroundStyle(ArbosTheme.textMuted)
+            HStack(spacing: 12) {
+                content()
+            }
+            .font(ArbosTheme.body)
+            .foregroundStyle(ArbosTheme.text)
+            .padding(.horizontal, ArbosTheme.promptPadX)
+            .padding(.vertical, ArbosTheme.promptPadY + 2)
+            .overlay {
+                RoundedRectangle(cornerRadius: ArbosTheme.controlRadius)
+                    .stroke(ArbosTheme.border, lineWidth: 1)
+            }
+        }
+    }
+
     @ViewBuilder
     private var keyField: some View {
         // `SecureField` and `TextField` cannot be the same view with a toggled
@@ -101,7 +147,6 @@ struct SettingsView: View {
             TextField(keyPlaceholder, text: $keyDraft)
                 .autocorrectionDisabled()
                 .textInputAutocapitalization(.never)
-                .font(.system(.body, design: .monospaced))
                 .focused($focus, equals: .key)
         } else {
             SecureField(keyPlaceholder, text: $keyDraft)
@@ -111,7 +156,7 @@ struct SettingsView: View {
         }
     }
 
-    private var keyPlaceholder: String { "OpenAI API key" }
+    private var keyPlaceholder: String { "sk-…" }
 
     /// One line that says what is wrong, or what is ready. The address is
     /// checked first: a key is no use without somewhere to call.
@@ -129,13 +174,13 @@ struct SettingsView: View {
         if !key.hasPrefix("sk-") {
             return "Saved, though OpenAI keys normally begin with “sk-”."
         }
-        return "Ready. Tap the orb to call. The voice server on your machine runs GPT-Live and Codex."
+        return "Ready. Tap the figure to call. The voice server on your machine runs GPT-Live and Codex."
     }
 
     private var footerTint: Color {
         if keychainRefused { return ArbosTheme.danger }
-        if AppSettings.problem(withServerURL: urlDraft) != nil { return ArbosTheme.danger.opacity(0.85) }
-        return ArbosTheme.textDim
+        if AppSettings.problem(withServerURL: urlDraft) != nil { return ArbosTheme.danger }
+        return ArbosTheme.textMuted
     }
 
     private func commitAll() {
