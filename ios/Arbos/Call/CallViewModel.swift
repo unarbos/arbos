@@ -362,7 +362,7 @@ final class CallViewModel: ObservableObject {
     private func redial() async {
         subscription = link.subscribe { [weak self] event in self?.handle(event) }
         do {
-            try await link.connect()
+            try await link.connect(greet: false)
         } catch {
             trace("reconnect failed: \(error.localizedDescription)")
             reconnect()

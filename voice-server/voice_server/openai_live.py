@@ -328,10 +328,16 @@ class OpenAILiveSession(DuplexSession):
         """The ready signal: once the Live session is up and the caller can be heard, the call says
         "hi" — in the model's voice, right now, not on a timer. Two appends, as OpenAI's own recipe
         for a greeting: the wording as an instruction (commentary may be paraphrased), then a short
-        commentary to make the model speak first. Once per session. Not the working line."""
+        commentary to make the model speak first. Once per session. Not the working line.
+
+        A client that set `greet: false` is redialling into a call that, as far as the caller is
+        concerned, never stopped. It opens in silence."""
         if self.ready_said or self.up is None:
             return
         self.ready_said = True
+        if not self.greet:
+            log.info("[%s] ready: silent (the client is redialling)", self.sid)
+            return
         self.context_hold_until = time.monotonic() + READY_QUIET_S
         self.ready_expect = True
         self._emit(P.NARRATOR_SAY, text=READY_LINE, kind="ready")

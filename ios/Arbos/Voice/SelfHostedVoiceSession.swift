@@ -7,7 +7,7 @@ import Foundation
 /// is `python -m voice_server --print-protocol`; the frames used here:
 ///
 ///   client → server
-///     `session.start { format: { type: "audio/pcm", rate: 24000 }, project?: { machine, project } }`
+///     `session.start { format: { type: "audio/pcm", rate: 24000 }, project?: { machine, project }, greet?: false }`
 ///     <binary>                       microphone audio
 ///     `speak { text }`               voice this text (gateway TTS)
 ///     `client.speaking { speaking, route }` the phone is (not) playing a reply, and out of what
@@ -53,19 +53,25 @@ final class SelfHostedVoiceSession: VoiceSession {
     private let openAIKey: String
     /// The project the call was opened from; the gateway dials its kernel.
     private let project: KernelTarget?
+    /// Whether the server should speak its opening word. False when this socket
+    /// is replacing one that dropped: the caller never left the call and being
+    /// greeted again is how they would find out the connection broke.
+    private let greet: Bool
 
     init(
         serverURL: String,
         token: String,
         openAIKey: String = "",
         mode: String = "voice",
-        project: KernelTarget? = nil
+        project: KernelTarget? = nil,
+        greet: Bool = true
     ) {
         self.serverURL = serverURL
         self.token = token
         self.openAIKey = openAIKey
         self.mode = mode
         self.project = project
+        self.greet = greet
     }
 
     func connect() async throws {
@@ -91,7 +97,12 @@ final class SelfHostedVoiceSession: VoiceSession {
             onMessage: { [weak self] message in self?.handle(message) },
             onFailure: { [weak self] error in
                 guard let self, !self.closed else { return }
-                self.sink.emit(.error(error.localizedDescription))
+                // The connection went away: a tunnel restarting, the phone
+                // changing network, a backgrounded app whose socket was reaped.
+                // That is a closed session and the call redials it. It is not
+                // an `.error`, which ends the call and is for the things the
+                // server refuses out loud — those arrive as control frames.
+                NSLog("voice socket dropped: %@", error.localizedDescription)
                 self.close()
             }
         )
@@ -104,6 +115,7 @@ final class SelfHostedVoiceSession: VoiceSession {
         if !openAIKey.isEmpty {
             start["openai_api_key"] = openAIKey
         }
+        if !greet { start["greet"] = false }
         if mode != "voice" { start["mode"] = mode }
         if mode == "dictation" { start["answerer"] = "model" }
         if mode == "voice", case .hub(let machine, let name)? = project {

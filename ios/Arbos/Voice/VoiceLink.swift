@@ -43,11 +43,11 @@ final class VoiceLink: ObservableObject {
 
     /// Connect if not already, and return once the server said
     /// `session.ready`. Idempotent.
-    func connect() async throws {
+    func connect(greet: Bool = true) async throws {
         if case .connected = state { return }
         if state != .connecting {
             state = .connecting
-            let session = settings.provider.makeSession(settings)
+            let session = settings.provider.makeSession(settings, greet: greet)
             self.session = session
             pump = Task { [weak self] in
                 for await event in session.events {
@@ -109,7 +109,10 @@ final class VoiceLink: ObservableObject {
         default:
             break
         }
-        for handler in subscribers.values {
+        // A snapshot: a handler may unsubscribe (the call does, when it decides
+        // to redial), and that must not happen underneath the loop delivering
+        // the event that prompted it.
+        for handler in Array(subscribers.values) {
             handler(event)
         }
     }

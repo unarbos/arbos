@@ -106,6 +106,10 @@ class BaseSession:
         self.call_mode = False
         self.channel = "voice"  # what the caller's utterances are filed as in the inbox
         self.device = ""  # the client on the call: phone | desktop (session.start.device)
+        # Whether to speak the opening word. A client redialling after its socket
+        # dropped is continuing a call the caller never left, and being greeted
+        # again mid-conversation is how they find out the connection broke.
+        self.greet = True
         self.project = ""  # `<machine>/<project>` from session.start; empty = the gateway's kernel
         self.screen = "on your screen"
         self.narrator: Narrator | None = None
@@ -633,6 +637,8 @@ class BaseSession:
         device = msg.get("device")
         if isinstance(device, str) and device.strip():
             self.device = device.strip()
+        if "greet" in msg:
+            self.greet = bool(msg["greet"])
         if "agents" in msg:
             self.mirror_agents = bool(msg["agents"]) and self.engines.kernel is not None
         reply = msg.get("reply")

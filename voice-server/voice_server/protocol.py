@@ -56,6 +56,9 @@ WIRE PROTOCOL (matches ios/Arbos/Voice/SelfHostedVoiceSession.swift)
           "language": "en"  ASR language hint (default from --language)
           "voice": "af_heart"  TTS voice for this session (default from --voice)
           "reply": "none" | "openrouter"  who answers the user (default from --reply)
+          "greet": false  open in silence. For a client redialling after its socket dropped:
+                the caller never left the call, and a second greeting mid-conversation is how
+                they would find out the connection broke.
     <binary>                       microphone audio
           "instructions": "..."  system prompt for the speech model (duplex engine)
           "answerer": "auto"|"kernel"|"model"  duplex call mode: who answers a spoken turn (see Engines)

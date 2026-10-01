@@ -37,14 +37,17 @@ enum VoiceProvider: String, CaseIterable, Identifiable {
     }
 
     @MainActor
-    func makeSession(_ settings: AppSettings) -> VoiceSession {
+    /// `greet: false` opens the session in silence, for a socket that is
+    /// replacing one that dropped mid-call.
+    func makeSession(_ settings: AppSettings, greet: Bool = true) -> VoiceSession {
         switch self {
         case .selfHosted:
             return SelfHostedVoiceSession(
                 serverURL: settings.selfHostedURL,
                 token: settings.voiceToken,
                 openAIKey: settings.openAIKey,
-                project: nil
+                project: nil,
+                greet: greet
             )
         case .openAIRealtime:
             return OpenAIRealtimeSession(
