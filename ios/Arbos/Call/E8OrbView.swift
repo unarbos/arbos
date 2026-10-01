@@ -13,15 +13,16 @@ import simd
 /// of bittensor's themes without changing anything: on white the black half
 /// carries the figure, on `#111` the white half does.
 ///
-/// At rest this is the site, pixel for pixel. The call is shown by swelling the
-/// figure — a uniform scale, so the projection is untouched — and by recessing
-/// it when there is nothing to call with.
+/// The figure tumbles only while there is a call on the line. Off the call it
+/// holds the pose it stopped in — still, scale 1, alpha 1, which is the site's
+/// frame frozen. So the motion is the call: the figure moving means it is
+/// listening to you, and the voice on the line breathes it.
 struct E8OrbView: View {
     let level: Float
     let phase: CallViewModel.Phase
 
     var body: some View {
-        E8MetalView(level: level, swell: swell, presence: presence)
+        E8MetalView(level: level, turning: phase.inCall, presence: presence)
             .allowsHitTesting(false)
             // A drawing, and not the thing you tap: the target that carries the
             // gestures carries the label too, in `OrbHomeView`. Announcing it
@@ -30,20 +31,9 @@ struct E8OrbView: View {
             .accessibilityHidden(true)
     }
 
-    /// How large the figure sits before the voice moves it. A call holds it a
-    /// little above its resting size, so a silent moment on the line still does
-    /// not look like a screen nobody is talking to.
-    private var swell: Float {
-        switch phase {
-        case .listening, .speaking: return 1.02
-        case .thinking, .connecting: return 1.01
-        case .idle, .unconfigured, .failed: return 1
-        }
-    }
-
     /// The alpha the two inks are multiplied by. 1 is the site exactly; the
-    /// states below it are the ones where tapping the orb will not get you a
-    /// call.
+    /// states below it are the ones where tapping the figure will not get you a
+    /// call, which standing still can no longer say on its own.
     private var presence: Float {
         switch phase {
         case .idle, .listening, .speaking, .thinking, .connecting: return 1
@@ -58,7 +48,7 @@ struct E8OrbView: View {
 /// does, because 240 roots is nothing and it keeps the port honest.
 private struct E8MetalView: UIViewRepresentable {
     var level: Float
-    var swell: Float
+    var turning: Bool
     var presence: Float
 
     func makeCoordinator() -> Renderer { Renderer() }
@@ -85,8 +75,13 @@ private struct E8MetalView: UIViewRepresentable {
 
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.level = level
-        context.coordinator.swell = swell
+        context.coordinator.turning = turning
         context.coordinator.presence = presence
+        // Nothing moves while there is no call, so there is no reason to redraw
+        // the same 6720 lines sixty times a second. Lowered rather than paused:
+        // a paused `MTKView` that never gets told to resume is a blank screen,
+        // and this view is the whole app.
+        view.preferredFramesPerSecond = turning ? 60 : 20
     }
 
     static func dismantleUIView(_ view: MTKView, coordinator: Renderer) {
@@ -138,7 +133,7 @@ private struct E8MetalView: UIViewRepresentable {
     @MainActor
     final class Renderer: NSObject, MTKViewDelegate {
         var level: Float = 0
-        var swell: Float = 1
+        var turning = false
         var presence: Float = 1
 
         private let lattice = E8Lattice.shared
@@ -148,7 +143,6 @@ private struct E8MetalView: UIViewRepresentable {
         /// Chased rather than set, so a state change fades the figure instead of
         /// stepping it.
         private var smoothedPresence: Float = 1
-        private var smoothedSwell: Float = 1
         private var lastAdvance = CACurrentMediaTime()
 
         private var queue: MTLCommandQueue?
@@ -223,21 +217,28 @@ private struct E8MetalView: UIViewRepresentable {
                   let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
 
             // One step per 1/60 s of wall clock, as the sketch gates itself, so
-            // a dropped frame does not slow the drift down.
+            // a dropped frame does not slow the drift down. Off the call there
+            // are no steps at all: the plane stops drifting and the figure holds
+            // the pose it was in.
             let now = CACurrentMediaTime()
-            var steps = Int((now - lastAdvance) * 60)
-            if steps > 0 {
+            if turning {
+                var steps = Int((now - lastAdvance) * 60)
+                if steps > 0 {
+                    lastAdvance = now
+                    // A view that was off screen for a while must not fast-forward
+                    // through thousands of steps on its first frame back.
+                    steps = min(steps, 4)
+                    for _ in 0..<steps { projection.advance() }
+                    projection.project(lattice, into: &points)
+                }
+            } else {
+                // Kept current while still, so the first frame of the next call
+                // advances by one step rather than by however long it stood there.
                 lastAdvance = now
-                // A view that was off screen for a while must not fast-forward
-                // through thousands of steps on its first frame back.
-                steps = min(steps, 4)
-                for _ in 0..<steps { projection.advance() }
-                projection.project(lattice, into: &points)
             }
 
             smoothedLevel += (min(1, max(0, level)) - smoothedLevel) * 0.18
             smoothedPresence += (presence - smoothedPresence) * 0.08
-            smoothedSwell += (swell - smoothedSwell) * 0.08
             let positions = pointBuffers[frame % pointBuffers.count]
             frame += 1
             points.withUnsafeBytes { bytes in
@@ -245,7 +246,7 @@ private struct E8MetalView: UIViewRepresentable {
             }
 
             var uniforms = Uniforms(
-                scale: smoothedSwell + 0.05 * smoothedLevel,
+                scale: 1 + 0.05 * smoothedLevel,
                 alpha: smoothedPresence
             )
             encoder.setRenderPipelineState(pipeline)
