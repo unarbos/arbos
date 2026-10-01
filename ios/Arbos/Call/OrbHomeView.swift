@@ -4,9 +4,9 @@ import UIKit
 /// The whole app: one e8 figure on a flat page. Tap to talk.
 ///
 /// Laid out as bittensor.com lays out the page the figure comes from: a flat
-/// `--background-default`, a header of upper-case FiraCode across the top, the
-/// figure about 85% of the narrow side and nudged up by the site's `-4rem`, and
-/// everything else centred underneath it.
+/// `--background-default`, a header of upper-case FiraCode across the top, and
+/// the figure at 85% of the narrow side, centred in what is left and nudged up by
+/// the site's `-4rem`.
 struct OrbHomeView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var chat: ChatStore
@@ -28,8 +28,7 @@ struct OrbHomeView: View {
     var body: some View {
         ZStack {
             ArbosTheme.bg.ignoresSafeArea()
-            orb
-            chrome
+            page
         }
         .animation(.easeOut(duration: 0.2), value: model.phase.inCall)
         .sheet(isPresented: $showSettings, onDismiss: model.refreshIdle) {
@@ -46,41 +45,55 @@ struct OrbHomeView: View {
         }
     }
 
-    /// Square, because the projection is: a stretched viewport would shear the
-    /// lattice.
-    private var orb: some View {
-        GeometryReader { geometry in
-            let side = min(geometry.size.width, geometry.size.height) * Self.figureFraction
-            ZStack {
-                E8OrbView(level: model.level, phase: model.phase)
-                    .frame(width: side, height: side)
-                // The figure itself does not take touches — a Metal view and a
-                // SwiftUI gesture argue about them. This is the target.
-                Circle()
-                    .fill(.clear)
-                    .contentShape(Circle())
-                    .frame(width: side * 0.85, height: side * 0.85)
-                    .onTapGesture(perform: tapOrb)
-                    .onLongPressGesture(minimumDuration: 0.55, perform: endIfCalling)
-                    .accessibilityElement()
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityLabel(model.phase.inCall ? "Mute" : "Call")
-                    .accessibilityValue(spokenState)
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-            .offset(y: -Self.figureRise)
-        }
-    }
-
-    private var chrome: some View {
+    /// The site's column: a sticky header, then `.page_container__d49Io` taking
+    /// the rest with `flex: 1` and centring the canvas inside it, pulled up by
+    /// `margin-top: -4rem`. Centring against the whole screen instead would sit
+    /// the figure too high, because the header is above that space rather than
+    /// over it.
+    ///
+    /// The status line is this app's, not the site's — the site's column holds
+    /// only the canvas, its other text being screen-reader-only — so it takes the
+    /// room the rise opens up at the bottom.
+    private var page: some View {
         VStack(spacing: 0) {
             header
-            Spacer()
+            GeometryReader { geometry in
+                let side = min(geometry.size.width, geometry.size.height) * Self.figureFraction
+                // Never rise further than the slack above the figure: the site's
+                // 4rem is a fixed number taken from a desktop viewport, and on a
+                // short phone the whole of it would push the figure up into the
+                // header.
+                let slack = max(0, (geometry.size.height - side) / 2)
+                figure(side: side)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .offset(y: -min(Self.figureRise, slack))
+            }
             footer
-                .frame(minHeight: 64)
+                .frame(minHeight: 56)
                 .padding(.horizontal, ArbosTheme.gutter)
                 .padding(.bottom, 24)
         }
+    }
+
+    /// Square, because the projection is: a stretched viewport would shear the
+    /// lattice.
+    private func figure(side: CGFloat) -> some View {
+        ZStack {
+            E8OrbView(level: model.level, phase: model.phase)
+            // The figure itself does not take touches — a Metal view and a
+            // SwiftUI gesture argue about them. This is the target.
+            Circle()
+                .fill(.clear)
+                .contentShape(Circle())
+                .frame(width: side * 0.85, height: side * 0.85)
+                .onTapGesture(perform: tapOrb)
+                .onLongPressGesture(minimumDuration: 0.55, perform: endIfCalling)
+                .accessibilityElement()
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(model.phase.inCall ? "Mute" : "Call")
+                .accessibilityValue(spokenState)
+        }
+        .frame(width: side, height: side)
     }
 
     /// `.Header_container__3ik1i`: the wordmark at one end, upper-case links at
