@@ -146,7 +146,7 @@ final class CallViewModel: ObservableObject {
     // MARK: - Connect
 
     private var idlePhase: Phase {
-        settings.isConfigured ? .idle : .unconfigured(settings.provider.unconfiguredLabel(settings))
+        settings.isConfigured ? .idle : .unconfigured(settings.unconfiguredLabel)
     }
 
     private func connect() async {
@@ -283,11 +283,10 @@ final class CallViewModel: ObservableObject {
         updateNote()
     }
 
-    /// The main chat mirrors the kernel. Only in the pipeline shape does
-    /// the app route transcripts through it and speak what comes back.
+    /// The main chat mirrors the kernel. GPT-Live answers itself — skip.
     private func joinChat() async {
-        await chat.connect()
         guard !server.answersItself else { return }
+        await chat.connect()
         chat.onAgentMessage = { [weak self] text in self?.speak(text) }
         busyWatch = chat.$busy.sink { [weak self] running in
             guard let self else { return }

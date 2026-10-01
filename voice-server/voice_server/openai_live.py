@@ -33,6 +33,7 @@ import websockets
 from . import protocol as P
 from .activity import ActivityReporter, _detail
 from .base import context_text
+from .codex import CodexClient
 from .narrator import Narrator
 from .routing import is_small_talk
 from .audio import float_to_pcm16, pcm16_to_float
@@ -61,18 +62,13 @@ READY_QUIET_S = 6.0  # no quiet-context appends this long after the greeting is 
 UNMUTE_WATCH_S = 6.0
 
 LIVE_INSTRUCTIONS = (
-    "You are Arbos, the voice of a software engineer's agent system, on a call. Be brief, warm and "
-    "direct: one or two sentences. You are given three stores and they are updated while you talk: "
-    "which project this is, the chat the caller is looking at, and what the main agent and its "
-    "sub-agents (workers) are doing. Use the stores to understand what the caller means. Never "
-    "invent a folder, a status or a result. Never quote diffs, file contents or a whole repository. "
-    "Anything about the project, its state, its agents, files or work, and any request to do "
-    "something (write, fix, run, send an agent), is answered by the backend: delegate it, do not "
-    "answer it from the stores yourself, and wait for the result. The backend is the Arbos kernel; "
-    "it does the work and returns the answer for you to say. Say 'one sec, let me check' only when "
-    "you have actually delegated; then say the result when it arrives, even if the conversation "
-    "has moved on. Answer yourself only greetings, thanks and small talk. Lines beginning "
-    "'Project update:' are for your awareness only; never read them out unless the caller asks."
+    "You are a brief voice companion on a call. Answer in one short sentence. "
+    "Greetings, thanks and small talk: answer yourself. Everything else — code, files, "
+    "projects, status, plans, writing, fixing, searching, or any request to do work — "
+    "you must delegate to the backend. Do not invent results. When you delegate, say "
+    "'one sec' only after you have actually delegated, then speak the result when it "
+    "arrives. Never read diffs, file bodies, tool names, or long lists aloud. Keep every "
+    "spoken line under two sentences."
 )
 
 # Recent project-chat lines seeded into the session at start (session.input): how many, and how
@@ -240,11 +236,13 @@ class OpenAILiveSession(DuplexSession):
 
     async def on_open(self) -> None:
         await super().on_open()
-        self.api_key = os.environ.get("OPENAI_API_KEY", "")
+        # Per-call key from session.start wins; else process env.
+        self.api_key = self.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
         self.live_model = getattr(self.engines, "openai_model", DEFAULT_MODEL)
         self.live_voice = getattr(self.engines, "openai_voice", DEFAULT_VOICE)
-        self.answerer = "model"  # GPT-Live decides when the kernel is needed (client delegation)
+        self.answerer = "model"  # GPT-Live decides when Codex is needed (client delegation)
         self.model_voice = "full"  # main's call-mode voice cutting is for the hosted model
+        self.codex = CodexClient(api_key=self.api_key)
         self.delegations: dict[str, asyncio.Task] = {}
         self.last_final = ""  # our latest Whisper transcript of the caller
         self.last_final_at = 0.0
@@ -258,24 +256,24 @@ class OpenAILiveSession(DuplexSession):
         self.brief_sent = ""  # the project brief GPT-Live has (instructions or a later append)
         self.context_queue: list[str] = []  # thinking appends waiting for the rate limit
         self.context_task: asyncio.Task | None = None
-        self.context_kernel = None  # the kernel whose frames feed GPT-Live's context
+        self.context_kernel = None  # unused when Codex backs the call
         self.workers_known: set[str] = set()
-        self.seed_task: asyncio.Task | None = None  # the chat-history read, started when the kernel is known
-        self.standing_brief: str | None = None  # kernel file body, "unknown", or None if not attempted
-        self.last_answer_at = 0.0  # when a delegation's answer went to the model (its chat copy is not news)
-        self.forced_task: asyncio.Task | None = None  # the delegation we started for a work question
+        self.seed_task: asyncio.Task | None = None
+        self.standing_brief: str | None = None
+        self.last_answer_at = 0.0
+        self.forced_task: asyncio.Task | None = None
         self.forced_at = 0.0
-        self.forced_did: str | None = None  # the model's own delegation for that same question, when it makes one
-        self.model_delegation_at = 0.0  # when the model last raised a delegation of its own
+        self.forced_did: str | None = None
+        self.model_delegation_at = 0.0
         self.unmute_watch: asyncio.Task | None = None
-        self.await_words: set[str] = set()  # the kernel answer's words, awaited in the model's transcript while muted
+        self.await_words: set[str] = set()
         self.await_seen = ""
-        self.working_line_said = False  # one spoken "Yeah, one sec." per work bout
-        self.ready_said = False  # the "hi" that says the Live session is up; once per call
-        self.context_hold_until = 0.0  # quiet context waits until the greeting is out of the way
-        self.ready_expect = False  # the greeting's audio has not started yet
-        self.working_line_expect = False  # commentary filler is in flight
-        self.working_line_open = False  # that filler's audio may play (decision is still kernel)
+        self.working_line_said = False
+        self.ready_said = False
+        self.context_hold_until = 0.0
+        self.ready_expect = False
+        self.working_line_expect = False
+        self.working_line_open = False
         self.working_line_heard = ""
 
     # ------------------------------------------------------------------ upstream
@@ -283,38 +281,28 @@ class OpenAILiveSession(DuplexSession):
     async def _ensure_upstream(self) -> None:
         if self.up is not None:
             return
+        # Prefer a key the phone sent after connect; on_open may have run before session.start.
+        self.api_key = self.openai_api_key or self.api_key or os.environ.get("OPENAI_API_KEY", "")
+        if self.codex is not None:
+            self.codex.api_key = self.api_key
         if not self.api_key:
-            self._emit(P.ERROR, code="no_openai_key", message="OPENAI_API_KEY is not set on the voice server")
+            self._emit(P.ERROR, code="no_openai_key", message="OpenAI API key is not set")
             raise RuntimeError("no OPENAI_API_KEY")
         t0 = time.monotonic()
-        # What the model knows from the first word: who and where, the chat on screen, and the
-        # workers (the brief) plus the same chat as session.input. From the call's kernel and
-        # the client's snapshot, never from the gateway's own folder.
-        brief = self._project_brief()
-        seed_task = self.seed_task or asyncio.create_task(self._history_seed())
-        # The connect and the chat-history read run side by side; the seed may cost the model's
-        # start at most a moment, never the caller's first word. The standing brief is a file
-        # read inside that same seed — Jev is not on this path.
+        # Keep GPT-Live context short: no kernel history seed, brief instructions only.
+        brief = ""
+        seed: list = []
         live_url = os.environ.get("VOICE_OPENAI_URL") or LIVE_URL
-        connect = asyncio.ensure_future(websockets.connect(
+        self.up = await websockets.connect(
             live_url, additional_headers={"Authorization": f"Bearer {self.api_key}"},
             max_size=16 * 1024 * 1024, compression=None, open_timeout=20,
-        ))
-        try:
-            seed = await asyncio.wait_for(asyncio.shield(seed_task), 1.5)
-        except Exception as exc:
-            log.warning("[%s] chat history not ready in time for the seed (%s); starting without it", self.sid, type(exc).__name__)
-            seed = []
-        brief = self._with_standing_brief(brief)
-        self.up = await connect
+        )
         session: dict = {
             "model": self.live_model,
-            "instructions": _ascii((self.instructions or LIVE_INSTRUCTIONS) + "\n\n" + brief),
+            "instructions": _ascii(self.instructions or LIVE_INSTRUCTIONS),
             "audio": {"format": {"type": "audio/pcm", "rate": 24000}, "output": {"voice": self.live_voice}},
             "delegation": {"type": "client"},
         }
-        if seed:
-            session["input"] = seed
         self.brief_sent = brief
         await self.up.send(json.dumps({"type": "session.start", "event_id": "start", "session": session}))
         deadline = time.monotonic() + 20
@@ -332,11 +320,8 @@ class OpenAILiveSession(DuplexSession):
                 raise RuntimeError(f"GPT-Live: {text}")
         self.started_at = time.monotonic()
         self.pump_task = asyncio.create_task(self._pump(), name=f"live-pump-{self.sid}")
-        self._feed_context_from(self.kernel)
-        self._context_snapshot()
-        log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, client delegation; brief for %s, %d history lines)",
-                 self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice,
-                 (self.project_info or {}).get("place") or (self.project_info or {}).get("name") or "no kernel", len(seed))
+        log.info("[%s] GPT-Live session %s ready in %.0fms (%s, voice %s, Codex backend)",
+                 self.sid, self.session_id, (time.monotonic() - t0) * 1000, self.live_model, self.live_voice)
         await self._say_ready()
 
     async def _say_ready(self) -> None:
@@ -580,6 +565,10 @@ class OpenAILiveSession(DuplexSession):
                 pass
         for task in self.delegations.values():
             task.cancel()
+        if self.forced_task is not None:
+            self.forced_task.cancel()
+        if self.codex is not None:
+            await self.codex.cancel()
         if self.context_task is not None:
             self.context_task.cancel()
         if self.context_kernel is not None and self._context_frame in self.context_kernel.listeners:
@@ -692,6 +681,8 @@ class OpenAILiveSession(DuplexSession):
             return
         if self.forced_task is not None and not self.forced_task.done():
             self.forced_task.cancel()
+            if self.codex is not None:
+                asyncio.create_task(self.codex.cancel())
         self.forced_at = time.monotonic()
         self.forced_did = None
         self.forced_task = asyncio.create_task(self._delegate(None, forced_question=text), name=f"delegate-forced-{self.sid}")
@@ -761,10 +752,8 @@ class OpenAILiveSession(DuplexSession):
     # ------------------------------------------------------------------ the kernel as backend
 
     async def _delegate(self, did: str | None, forced_question: str = "") -> None:
-        """GPT-Live asked for backend help: ask the kernel, return the answer for it to speak."""
+        """GPT-Live asked for backend help: ask Codex, return the answer for it to speak."""
         t0 = time.monotonic()
-        # The event carries no text. Our transcript of the utterance usually lands within a
-        # second of it (600 ms end-silence + Whisper); wait for it, else use GPT-Live's own.
         question = forced_question
         deadline = t0 + 1.5
         while not question and time.monotonic() < deadline:
@@ -777,34 +766,34 @@ class OpenAILiveSession(DuplexSession):
         if not question:
             await self._append("session.commentary.append", did or self.forced_did, "I did not catch what you asked. Could you say it again?", answer=True)
             return
-        kernel = self.kernel
-        if kernel is None or not kernel.connected:
-            await self._append("session.commentary.append", did or self.forced_did, "The Arbos kernel is not reachable right now.", answer=True)
+        codex = self.codex
+        if codex is None or not codex.available:
+            await self._append("session.commentary.append", did or self.forced_did, "Codex is not available on this machine right now.", answer=True)
             return
         tag = (did or "forced")[-8:]
-        log.info("[%s] delegation %s -> kernel: %r", self.sid, tag, question)
+        log.info("[%s] delegation %s -> codex: %r", self.sid, tag, question)
         self._emit(P.TOOL_CALL, name="delegate", arguments={"question": question, "delegation": did})
         if self.activity is not None:
-            self.activity.mark_working()  # the working sound starts now, before the kernel's own turn frame
+            self.activity.mark_working()
         self.kernel_launched_at = t0
         await self._say_working_line(did)
-        await self._append("session.thinking.append", did, "Arbos is working on it.")
+        await self._append("session.thinking.append", did, "Working on it.")
         answer = ""
         try:
-            # Filed as spoken (`channel: voice`, the caller's device): the chat shows how the line
-            # arrived, and a client that already drew it from transcript.final can tell it apart.
-            async for delta in kernel.turn(question, timeout=120, channel="voice", device=self.device):
+            async for delta in codex.turn(question, timeout=180):
                 answer += delta
         except Exception as exc:
-            log.exception("[%s] delegation failed", self.sid)
-            await self._append("session.commentary.append", did or self.forced_did, f"The kernel failed: {_ascii(str(exc))[:200]}", answer=True)
+            log.exception("[%s] Codex delegation failed", self.sid)
+            await self._append("session.commentary.append", did or self.forced_did, f"That failed: {_ascii(str(exc))[:200]}", answer=True)
             return
-        spoken = speakable(answer).replace("\n", " ").strip() or "Arbos had no answer."
+        spoken = speakable(answer).replace("\n", " ").strip() or "I did not get an answer."
+        # Keep what GPT-Live speaks short.
+        if len(spoken) > 500:
+            spoken = spoken[:480].rsplit(" ", 1)[0] + "…"
         self._emit(P.TOOL_RESULT, name="delegate", output=spoken[:400])
         self.last_answer_at = time.monotonic()
         self.working_line_open = False
         self.working_line_expect = False
-        # the model's own delegation for this question, if it made one meanwhile, names the answer
         await self._append("session.commentary.append", did or self.forced_did, spoken[:MAX_APPEND_CHARS], answer=True)
         log.info("[%s] delegation %s answered in %.1fs (%d chars)", self.sid, tag, time.monotonic() - t0, len(spoken))
 

@@ -117,6 +117,9 @@ class BaseSession:
         self.dictation = False  # ASR only: words to the client, no reply, no agent, no asks
         self.last_conversational = False  # the last utterance was small talk (auto model voice lets it through)
         self.user_talking = False
+        # Per-call OpenAI key from session.start (orb app). Empty → env OPENAI_API_KEY.
+        self.openai_api_key = ""
+        self.codex = None  # set by OpenAILiveSession when Codex backs GPT-Live
 
     # ------------------------------------------------------------------ hooks for engines
 
@@ -624,6 +627,12 @@ class BaseSession:
             self.speed = float(np.clip(float(msg["speed"]), 0.5, 2.0))
         if isinstance(msg.get("instructions"), str) and msg["instructions"].strip():
             self.instructions = msg["instructions"].strip()
+        key = msg.get("openai_api_key") or msg.get("openaiApiKey") or ""
+        if isinstance(key, str) and key.strip():
+            self.openai_api_key = key.strip()
+        device = msg.get("device")
+        if isinstance(device, str) and device.strip():
+            self.device = device.strip()
         if "agents" in msg:
             self.mirror_agents = bool(msg["agents"]) and self.engines.kernel is not None
         reply = msg.get("reply")

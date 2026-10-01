@@ -48,19 +48,30 @@ final class SelfHostedVoiceSession: VoiceSession {
     /// `mode`: `voice` (the call) or `dictation` (words only: the server
     /// transcribes and answers nothing).
     private let mode: String
+    /// OpenAI key for GPT-Live on the server (orb product). Also used as
+    /// the WebSocket bearer when no shared voice token is set.
+    private let openAIKey: String
     /// The project the call was opened from; the gateway dials its kernel.
     private let project: KernelTarget?
 
-    init(serverURL: String, token: String, mode: String = "voice", project: KernelTarget? = nil) {
+    init(
+        serverURL: String,
+        token: String,
+        openAIKey: String = "",
+        mode: String = "voice",
+        project: KernelTarget? = nil
+    ) {
         self.serverURL = serverURL
         self.token = token
+        self.openAIKey = openAIKey
         self.mode = mode
         self.project = project
     }
 
     func connect() async throws {
         guard !serverURL.isEmpty else { throw VoiceSessionError.missingServer }
-        guard !token.isEmpty else { throw VoiceSessionError.missingToken }
+        let auth = !token.isEmpty ? token : openAIKey
+        guard !auth.isEmpty else { throw VoiceSessionError.missingAPIKey }
         guard var components = URLComponents(string: serverURL),
               let scheme = components.scheme, ["ws", "wss"].contains(scheme.lowercased()) else {
             throw VoiceSessionError.badURL(serverURL)
@@ -68,11 +79,13 @@ final class SelfHostedVoiceSession: VoiceSession {
         if components.path.isEmpty || components.path == "/" { components.path = "/ws" }
         var query = components.queryItems ?? []
         query.removeAll { $0.name == "token" }
-        query.append(URLQueryItem(name: "token", value: token))
+        query.append(URLQueryItem(name: "token", value: auth))
         components.queryItems = query
         guard let url = components.url else { throw VoiceSessionError.badURL(serverURL) }
 
-        let socket = OrderedWebSocket(request: URLRequest(url: url))
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(auth)", forHTTPHeaderField: "Authorization")
+        let socket = OrderedWebSocket(request: request)
         self.socket = socket
         socket.open(
             onMessage: { [weak self] message in self?.handle(message) },
@@ -85,16 +98,14 @@ final class SelfHostedVoiceSession: VoiceSession {
         var start: [String: Any] = [
             "type": "session.start",
             "format": ["type": "audio/pcm", "rate": Int(AudioEngine.sampleRate)],
-            "agents": mode == "voice",
+            "agents": false,
+            "device": "phone",
         ]
+        if !openAIKey.isEmpty {
+            start["openai_api_key"] = openAIKey
+        }
         if mode != "voice" { start["mode"] = mode }
-        // Dictation is words for the field, nobody's turn: the gateway's
-        // kernel routing (PR #56) must not run on them. Observed 2026-09-16:
-        // a dictated line landed in the gateway's own project, unsent.
         if mode == "dictation" { start["answerer"] = "model" }
-        // The call is scoped to the project it was opened from (JB-3): the
-        // gateway attaches to that kernel for the call's life and refuses,
-        // never falls back, when it cannot. `.pod` is the server's default.
         if mode == "voice", case .hub(let machine, let name)? = project {
             start["project"] = ["machine": machine, "project": name]
         }

@@ -170,7 +170,9 @@ def make_process_request(token: str):
         query = parse_qs(parts.query).get("token", [""])[0]
         header = request.headers.get("Authorization", "")
         bearer = header[7:] if header.lower().startswith("bearer ") else ""
-        if query == token or bearer == token:
+        offered = query or bearer
+        # Shared VOICE_TOKEN, or an OpenAI key from the orb app (session.start carries it too).
+        if offered and (offered == token or offered.startswith("sk-")):
             return None
         log.warning("rejected connection from %s: bad token", connection.remote_address)
         return connection.respond(HTTPStatus.UNAUTHORIZED, "unauthorized\n")
