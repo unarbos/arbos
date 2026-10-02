@@ -11,9 +11,12 @@
 #
 #   off a call  the two frames must be identical. Anything else means the figure
 #               is still drifting when it should be parked.
-#   on a call   they must differ. Identical frames here would mean either that the
-#               rotation never started or that Metal drew nothing at all, which is
-#               also how a blank orb would show up.
+#   on a call   they must differ, or the rotation never started.
+#
+# Before any of that, every screen has to have drawn: a frame taken before the
+# first draw is a blank white page, and a blank white page passes every check here
+# that is not looking for ink. So each shot waits for something to appear in the
+# middle of the figure, and the frame that was kept is checked for it again.
 #
 # Then the Keychain, for the same reason: an API key that the Keychain accepts and
 # forgets reads back fine in the launch that wrote it, so only a second process can
@@ -35,15 +38,65 @@ xcrun simctl install "$UDID" "$app"
 # unroutable.
 configured=(-previewKey sk-screenshot-not-a-real-key -selfHostedURL wss://screenshot.invalid/ws)
 
-# shoot <name> <settle seconds> [extra launch args...]
+fail=0
+
+# Rectangles that have something in them once a screen has finished drawing:
+# the middle of the figure on the three screens that have it, and the first field
+# on the settings sheet, which covers the figure up.
+#
+# A screen that has not drawn yet is a blank white page, and a blank white page
+# passes every other check in here — including the one that is supposed to notice
+# a blank orb. So these are what waiting for a screen means, rather than a sleep.
+figure_patch=(500 1000 200 200)
+form_patch=(120 490 420 60)
+
+# True when the whole of the rectangle is one colour, which for these two
+# rectangles means nothing has been drawn in it.
+#   blank <png> <x> <y> <w> <h>
+blank() {
+  local png=$1 x=$2 y=$3 w=$4 h=$5
+  local commonest
+  commonest=$(python3 .github/ios-shot-probe.py "$png" "$x" "$y" "$w" "$h" | head -1 | cut -d' ' -f1)
+  [ "$commonest" = "$((w * h))" ]
+}
+
+# Waits for the app to put something in the rectangle. A fixed sleep cannot do
+# this: a loaded runner took 10m35s over a job that had taken 8m46s, and one frame
+# came back blank because six seconds had not been enough.
+#   await_draw <x> <y> <w> <h>
+await_draw() {
+  local probe="$out/.awaiting.png"
+  local i
+  for i in $(seq 1 30); do
+    if xcrun simctl io "$UDID" screenshot --type=png "$probe" >/dev/null 2>&1 \
+       && [ -s "$probe" ] && ! blank "$probe" "$@"; then
+      rm -f "$probe"
+      return 0
+    fi
+    sleep 1
+  done
+  rm -f "$probe"
+  return 1
+}
+
+# shoot <name> <x> <y> <w> <h> [extra launch args...]
+#
+# Takes the rectangle as four arguments rather than an array by name: the runners
+# answer `bash` with 3.2, which has no namerefs.
 shoot() {
-  local name=$1 settle=$2
-  shift 2
+  local name=$1 x=$2 y=$3 w=$4 h=$5
+  shift 5
   xcrun simctl terminate "$UDID" "$APP_ID" >/dev/null 2>&1 || true
   xcrun simctl launch "$UDID" "$APP_ID" "${configured[@]}" "$@" >/dev/null
-  # Long enough for the launch animation to finish and for the alpha chase to
-  # settle, so a frame pair is only comparing the figure.
-  sleep "$settle"
+  if ! await_draw "$x" "$y" "$w" "$h"; then
+    echo "::error title=$name never drew::Nothing appeared in the ${w}x${h} patch at $x,$y within 30s of launch. On an orb screen that patch is the middle of the figure, so either Metal drew nothing or the app never came up."
+    fail=1
+    return
+  fi
+  # Settling starts when the figure appears, not at launch: the alpha chase runs
+  # from the first frame, so a pair taken too early catches it still fading in and
+  # the two frames differ for a reason that is not the rotation.
+  sleep 4
   xcrun simctl io "$UDID" screenshot --type=png "$out/$name-a.png" >/dev/null 2>&1
   sleep 1.2
   xcrun simctl io "$UDID" screenshot --type=png "$out/$name-b.png" >/dev/null 2>&1
@@ -51,16 +104,17 @@ shoot() {
 }
 
 states=(resting oncall reply settings)
+orb_states=(resting oncall reply)
 
 for mode in light dark; do
   echo "$mode:"
   xcrun simctl ui "$UDID" appearance "$mode"
-  shoot "$mode-resting" 6
+  shoot "$mode-resting" "${figure_patch[@]}"
   # `listening` is mid-utterance, so the caption is the words being spoken;
   # `speaking` is the reply that replaced them.
-  shoot "$mode-oncall" 6 -previewPhase listening
-  shoot "$mode-reply" 6 -previewPhase speaking
-  shoot "$mode-settings" 5 -previewSettings 1
+  shoot "$mode-oncall" "${figure_patch[@]}" -previewPhase listening
+  shoot "$mode-reply" "${figure_patch[@]}" -previewPhase speaking
+  shoot "$mode-settings" "${form_patch[@]}" -previewSettings 1
 done
 
 # Last, because it puts a key in the Keychain and the screens above are
@@ -79,7 +133,20 @@ xcrun simctl terminate "$UDID" "$APP_ID" >/dev/null 2>&1 || true
 xcrun simctl spawn "$UDID" log show --last 10m --style compact \
   --predicate 'process == "Arbos"' > "$out/app.log" 2>/dev/null || true
 
-fail=0
+# The figure is in the frame that was kept, not just in some frame taken while
+# waiting. This is the assertion that a blank orb fails: everything else about a
+# white page with nothing on it looks exactly like a correct light theme.
+for mode in light dark; do
+  for state in "${orb_states[@]}"; do
+    shot="$out/$mode-$state-a.png"
+    if [ -f "$shot" ] && ! blank "$shot" "${figure_patch[@]}"; then
+      echo "$mode-$state: the figure is there"
+    else
+      echo "::error title=No figure on $mode-$state::The middle of the figure came back one flat colour, so the orb is blank. The app logs an E8 failure and carries on without its only screen, so look for 'E8 orb:' in app.log."
+      fail=1
+    fi
+  done
+done
 
 for mode in light dark; do
   if cmp -s "$out/$mode-resting-a.png" "$out/$mode-resting-b.png"; then
@@ -105,7 +172,9 @@ done
 page=(90 1900 120 100)
 for mode in light dark; do
   for state in "${states[@]}"; do
-    read -r count r g b <<<"$(python3 .github/ios-shot-probe.py "$out/$mode-$state-a.png" "${page[@]}" | head -1)"
+    shot="$out/$mode-$state-a.png"
+    [ -f "$shot" ] || continue   # already reported by shoot
+    read -r count r g b <<<"$(python3 .github/ios-shot-probe.py "$shot" "${page[@]}" | head -1)"
     if [ "$count" = 12000 ] && [ "$r$g$b" = "255255255" ]; then
       echo "$mode-$state: the page is white"
     else
