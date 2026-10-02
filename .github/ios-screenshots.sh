@@ -115,17 +115,17 @@ for mode in light dark; do
   done
 done
 
-# The two screens that hold still should be the same picture whichever way the
-# phone is set — not just the same page colour, which would miss a dark keyboard
-# or dark text. The turning ones cannot be compared this way.
-for state in resting settings; do
-  if cmp -s "$out/light-$state-a.png" "$out/dark-$state-a.png"; then
-    echo "$state: identical on a dark phone"
-  else
-    echo "::error title=$state follows the phone::The screen differs between a light and a dark simulator even though the app is pinned to Light."
-    fail=1
-  fi
-done
+# Settings has no figure on it, so it is the one screen that can be held to being
+# the same picture whichever way the phone is set — which catches dark text or a
+# dark keyboard, things a patch of bare page would not. Every screen with the
+# figure on it is out: the projection starts from a random basis, so each launch
+# parks it at a different pose and no two launches agree.
+if cmp -s "$out/light-settings-a.png" "$out/dark-settings-a.png"; then
+  echo "settings: identical on a dark phone"
+else
+  echo "::error title=Settings follows the phone::The sheet differs between a light and a dark simulator even though the app is pinned to Light. Text or the keyboard is still reading the system appearance."
+  fail=1
+fi
 
 # The orb logs and gives up rather than taking the process down, so a failure here
 # is otherwise invisible: the app just runs without its one screen.
