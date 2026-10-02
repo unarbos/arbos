@@ -1,0 +1,74 @@
+name: ios screenshots
+
+# The iPhone app's one screen is a Metal render, and `ci.yml` can only tell you it
+# compiles. This runs it on a simulator and photographs it, which is the only way
+# to see that the figure actually drew, that the bundled font resolved, and that it
+# holds still off a call and turns on one. The images are uploaded either way, so a
+# change to the look can be reviewed by looking at it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios-screenshots.yml'
+      - '.github/ios-screenshots.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  screenshots:
+    name: iPhone (screenshots, simulator)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest Xcode on the runner
+        run: |
+          latest=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          sudo xcode-select -s "$latest"
+          xcodebuild -version
+
+      - name: Boot a simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          { read -r runtime; read -r devtype; } < <(python3 .github/ios-pick-simulator.py)
+          udid=$(xcrun simctl create arbos-shots "$devtype" "$runtime")
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          # A clock that ticks between two frames would read as the figure moving.
+          xcrun simctl status_bar "$udid" override \
+            --time "09:41" --cellularBars 4 --batteryState charged --batteryLevel 100
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Build for that simulator
+        working-directory: ios
+        run: |
+          set -o pipefail
+          # Debug, because the launch arguments the screenshots are driven by are
+          # all behind `#if DEBUG`.
+          xcodebuild build -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee "$RUNNER_TEMP/build.log" | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" "$RUNNER_TEMP/build.log"
+
+      - name: Photograph it
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+          APP_ID: com.unarbos.arbos.ios
+        run: bash .github/ios-screenshots.sh
+
+      - name: Upload the photographs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-screenshots
+          path: ${{ runner.temp }}/shots
+          # Warn rather than error: if the run fell over before taking a frame, the
+          # step that fell over is the one worth reading, not this one.
+          if-no-files-found: warn

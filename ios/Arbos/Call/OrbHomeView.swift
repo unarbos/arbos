@@ -34,6 +34,7 @@ struct OrbHomeView: View {
         .sheet(isPresented: $showSettings, onDismiss: model.refreshIdle) {
             SettingsView().environmentObject(settings)
         }
+        .onAppear(perform: openSettingsIfAsked)
         .onChange(of: settings.openAIKey) { _, _ in model.refreshIdle() }
         .onChange(of: settings.selfHostedURL) { _, _ in model.refreshIdle() }
         .onChange(of: scenePhase) { _, phase in
@@ -199,5 +200,13 @@ struct OrbHomeView: View {
     private func openSystemSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+
+    /// `-previewSettings 1` opens the sheet on launch, so CI can photograph it
+    /// without having to drive a tap.
+    private func openSettingsIfAsked() {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "previewSettings") { showSettings = true }
+        #endif
     }
 }

@@ -70,6 +70,16 @@ final class AppSettings: ObservableObject {
         kernelTarget = KernelTarget(stored: defaults.string(forKey: "kernelTarget") ?? "pod")
         frontProject = defaults.string(forKey: "frontProject")
         openAIKey = Keychain.read(Self.openAIKeyAccount) ?? ""
+        #if DEBUG
+        // `-previewKey sk-…` stands in for the Keychain, which a simulator built
+        // fresh by CI has no way to seed. Without it the only screen that can be
+        // photographed is the unconfigured one, and the states the app spends its
+        // life in never get looked at. Debug builds only, and nothing is written:
+        // `reloadSecrets` fills the key only when it is empty, so this survives.
+        if let preview = defaults.string(forKey: "previewKey"), !preview.isEmpty {
+            openAIKey = preview
+        }
+        #endif
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? baked.voiceToken
         kernelToken = Keychain.read(Self.kernelTokenAccount) ?? baked.kernelToken
         hubToken = Keychain.read(Self.hubTokenAccount) ?? baked.hubToken

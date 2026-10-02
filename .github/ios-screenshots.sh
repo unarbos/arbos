@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+#
+# Photograph the iPhone app on a booted simulator, in both of bittensor's themes,
+# and check the things only a running app can tell you.
+#
+# The app's one screen is a Metal render of a projected polytope. A build that
+# compiles says nothing about whether that figure drew, whether the bundled font
+# resolved, or whether the figure holds still off a call and turns on one — and
+# none of it can be seen on the Linux box the code is written on. So this launches
+# the real app and takes two frames 1.2s apart in each state:
+#
+#   off a call  the two frames must be identical. Anything else means the figure
+#               is still drifting when it should be parked.
+#   on a call   they must differ. Identical frames here would mean either that the
+#               rotation never started or that Metal drew nothing at all, which is
+#               also how a blank orb would show up.
+#
+# Needs UDID and APP_ID in the environment, and the built .app under
+# $RUNNER_TEMP/DerivedData.
+set -euo pipefail
+
+app="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/Arbos.app"
+out="${SHOTS_DIR:-$RUNNER_TEMP/shots}"
+mkdir -p "$out"
+
+xcrun simctl install "$UDID" "$app"
+
+# A dummy key and address stand in for the Keychain and for a real server, so the
+# screens the app spends its life on can be reached. Both are DEBUG-only launch
+# arguments and neither leaves the simulator; the address is deliberately
+# unroutable.
+configured=(-previewKey sk-screenshot-not-a-real-key -selfHostedURL wss://screenshot.invalid/ws)
+
+# shoot <name> <settle seconds> [extra launch args...]
+shoot() {
+  local name=$1 settle=$2
+  shift 2
+  xcrun simctl terminate "$UDID" "$APP_ID" >/dev/null 2>&1 || true
+  xcrun simctl launch "$UDID" "$APP_ID" "${configured[@]}" "$@" >/dev/null
+  # Long enough for the launch animation to finish and for the alpha chase to
+  # settle, so a frame pair is only comparing the figure.
+  sleep "$settle"
+  xcrun simctl io "$UDID" screenshot --type=png "$out/$name-a.png" >/dev/null 2>&1
+  sleep 1.2
+  xcrun simctl io "$UDID" screenshot --type=png "$out/$name-b.png" >/dev/null 2>&1
+  echo "  $name"
+}
+
+for mode in light dark; do
+  echo "$mode:"
+  xcrun simctl ui "$UDID" appearance "$mode"
+  shoot "$mode-resting" 6
+  shoot "$mode-oncall" 6 -previewPhase listening
+  shoot "$mode-settings" 5 -previewSettings 1
+done
+
+xcrun simctl terminate "$UDID" "$APP_ID" >/dev/null 2>&1 || true
+xcrun simctl spawn "$UDID" log show --last 10m --style compact \
+  --predicate 'process == "Arbos"' > "$out/app.log" 2>/dev/null || true
+
+fail=0
+
+for mode in light dark; do
+  if cmp -s "$out/$mode-resting-a.png" "$out/$mode-resting-b.png"; then
+    echo "$mode: the figure held still off the call"
+  else
+    echo "::error title=The figure moves when it should be parked::$mode: two frames 1.2s apart differ with no call on the line. E8OrbView only advances the projection while phase.inCall."
+    fail=1
+  fi
+
+  if cmp -s "$out/$mode-oncall-a.png" "$out/$mode-oncall-b.png"; then
+    echo "::error title=The figure does not turn during a call::$mode: two frames 1.2s apart are identical while the phase is listening. Either the rotation never started, or Metal drew nothing and the orb is blank."
+    fail=1
+  else
+    echo "$mode: the figure turned during the call"
+  fi
+done
+
+# The orb logs and gives up rather than taking the process down, so a failure here
+# is otherwise invisible: the app just runs without its one screen.
+if grep -q 'E8 orb:' "$out/app.log" 2>/dev/null; then
+  echo "::error title=The orb could not start::Metal reported a failure; see app.log in the artifact."
+  grep 'E8 orb:' "$out/app.log" | head -5
+  fail=1
+fi
+
+# Likewise the theme: a font that does not resolve falls back silently, so it says
+# so in the log and this is the only place that reads it.
+if grep -q 'is not in the bundle' "$out/app.log" 2>/dev/null; then
+  echo "::error title=A bundled font did not resolve::The theme fell back to the system monospace; see app.log in the artifact."
+  grep 'is not in the bundle' "$out/app.log" | head -5
+  fail=1
+fi
+
+ls -la "$out"
+exit "$fail"
