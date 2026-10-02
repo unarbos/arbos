@@ -126,6 +126,9 @@ struct OrbHomeView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, ArbosTheme.gutter)
+        // A caption that fills all three lines would otherwise sit on top of the
+        // link below it.
+        .padding(.bottom, ArbosTheme.itemGap)
         .animation(.easeInOut(duration: 0.25), value: model.caption?.id)
     }
 
