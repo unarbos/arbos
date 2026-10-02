@@ -5,9 +5,11 @@
   "Push capability on the App ID?" in .github/workflows/ios-testflight.yml, which
   is what passes this file to the archive.
 
-  Lives beside the target rather than inside ios/Arbos/, because everything under
-  ios/Arbos/ belongs to a synchronised file group and gets copied into the app
-  bundle. Entitlements are an input to signing, not a resource to ship.
+  Lives beside the target rather than inside ios/Arbos/. Everything under there
+  belongs to a synchronised file group, which decides on its own what to copy into
+  the bundle and can start copying a file nobody has touched. Entitlements are an
+  input to signing, so the safe place for them is outside the group; "Nothing in
+  the bundle that should not ship" in .github/workflows/ci.yml holds the line.
 -->
 <plist version="1.0">
 <dict>

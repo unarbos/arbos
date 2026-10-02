@@ -175,10 +175,10 @@ jobs:
           done
           plutil -extract UIAppFonts raw -o - "$app/Info.plist"
       - name: Nothing in the bundle that should not ship
-        # The same synchronised group that copies the fonts in will copy anything
-        # else left under ios/Arbos/, which is why the entitlements live a level
-        # up. Shipping an entitlements file inside the app tells a reader of the
-        # IPA how it is signed and does nothing for the app.
+        # The synchronised group that copies the fonts in chooses for itself what
+        # else under ios/Arbos/ to copy, which is why the entitlements live a level
+        # up. Shipping one inside the app tells a reader of the IPA how it is
+        # signed and does nothing for the app.
         run: |
           app="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/Arbos.app"
           stray=$(find "$app" -name "*.entitlements" -print -quit)
