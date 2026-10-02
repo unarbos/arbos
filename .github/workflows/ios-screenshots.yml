@@ -16,6 +16,7 @@ on:
       - '.github/workflows/ios-screenshots.yml'
       - '.github/ios-screenshots.sh'
       - '.github/ios-pick-simulator.py'
+      - '.github/ios-shot-probe.py'
       - '.github/ios-simulator.entitlements'
 
 permissions:

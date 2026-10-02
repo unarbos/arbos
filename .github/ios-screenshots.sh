@@ -97,6 +97,36 @@ for mode in light dark; do
   fi
 done
 
+# The page is white, on a phone set to either appearance. A patch of bare page
+# below the figure and above the caption, which every screen leaves empty, has to
+# come back one colour and that colour has to be #ffffff. Probed rather than
+# compared against the light shot, because two launches of a screen with a turning
+# figure never land on the same frame.
+page=(90 1900 120 100)
+for mode in light dark; do
+  for state in "${states[@]}"; do
+    read -r count r g b <<<"$(python3 .github/ios-shot-probe.py "$out/$mode-$state-a.png" "${page[@]}" | head -1)"
+    if [ "$count" = 12000 ] && [ "$r$g$b" = "255255255" ]; then
+      echo "$mode-$state: the page is white"
+    else
+      echo "::error title=The page is not white on $mode-$state::The bare patch at ${page[0]},${page[1]} came back $r $g $b over $count of 12000 pixels. The app is pinned to the light appearance with INFOPLIST_KEY_UIUserInterfaceStyle; something here is reading the system appearance anyway."
+      fail=1
+    fi
+  done
+done
+
+# The two screens that hold still should be the same picture whichever way the
+# phone is set — not just the same page colour, which would miss a dark keyboard
+# or dark text. The turning ones cannot be compared this way.
+for state in resting settings; do
+  if cmp -s "$out/light-$state-a.png" "$out/dark-$state-a.png"; then
+    echo "$state: identical on a dark phone"
+  else
+    echo "::error title=$state follows the phone::The screen differs between a light and a dark simulator even though the app is pinned to Light."
+    fail=1
+  fi
+done
+
 # The orb logs and gives up rather than taking the process down, so a failure here
 # is otherwise invisible: the app just runs without its one screen.
 if grep -q 'E8 orb:' "$out/app.log" 2>/dev/null; then

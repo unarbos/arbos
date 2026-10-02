@@ -7,10 +7,16 @@ import UIKit
 /// The site declares two token sets as custom properties — `html` for dark and
 /// `html.light` for light — over one shared grey ramp on `:root`. Every colour
 /// below is one of those values, named in the comment it came from, so a change
-/// on the site is a one-line change here. The page the orb comes from runs the
-/// light set (`<html class="light ...">`), but the site ships both and
-/// remembers which you chose, so the app follows the phone rather than pinning
-/// one of them.
+/// on the site is a one-line change here.
+///
+/// The app runs the light set, always: the page the orb comes from is served
+/// `<html class="light ...">`, and that white page is half of why the figure
+/// reads the way it does — the shader draws white and black ink in equal
+/// measure, so whichever matches the page disappears into it. The dark values
+/// stay because they are the site's and the pair is what documents each token,
+/// but nothing reaches them while `INFOPLIST_KEY_UIUserInterfaceStyle` is
+/// `Light` in Arbos.xcodeproj. Removing that setting is the whole of what it
+/// would take to follow the phone instead.
 ///
 /// Type is FiraCode, which is what the site sets for every piece of chrome
 /// around the e8 figure: weight 400, 12 px, 3% letter spacing, 150% line
