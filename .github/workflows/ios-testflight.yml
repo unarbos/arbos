@@ -92,7 +92,7 @@ jobs:
           try:
               r = requests.get("https://api.appstoreconnect.apple.com/v1/bundleIds", params={"filter[identifier]": "com.unarbos.arbos.ios", "include": "bundleIdCapabilities"}, headers=h, timeout=20)
               caps = [c["attributes"]["capabilityType"] for c in r.json().get("included", []) if c["type"] == "bundleIdCapabilities"]
-              print("Arbos/Arbos.entitlements" if "PUSH_NOTIFICATIONS" in caps else "", end="")
+              print("Arbos.entitlements" if "PUSH_NOTIFICATIONS" in caps else "", end="")
               print(f"\ncapabilities: {caps}", file=sys.stderr)
           except Exception as e:
               print("", end=""); print(f"capability check failed: {e}", file=sys.stderr)

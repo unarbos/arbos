@@ -4,7 +4,9 @@ name: ios screenshots
 # compiles. This runs it on a simulator and photographs it, which is the only way
 # to see that the figure actually drew, that the bundled font resolved, and that it
 # holds still off a call and turns on one. The images are uploaded either way, so a
-# change to the look can be reviewed by looking at it.
+# change to the look can be reviewed by looking at it. It also catches the one thing
+# about the saved API key that a single launch cannot see — whether it is still
+# there on the next one.
 
 on:
   workflow_dispatch:
@@ -13,6 +15,8 @@ on:
       - 'ios/**'
       - '.github/workflows/ios-screenshots.yml'
       - '.github/ios-screenshots.sh'
+      - '.github/ios-pick-simulator.py'
+      - '.github/ios-simulator.entitlements'
 
 permissions:
   contents: read
@@ -49,11 +53,15 @@ jobs:
         run: |
           set -o pipefail
           # Debug, because the launch arguments the screenshots are driven by are
-          # all behind `#if DEBUG`.
+          # all behind `#if DEBUG`. Signed ad-hoc rather than not at all: the
+          # runner has no certificate and a simulator needs none, but the Keychain
+          # wants the entitlements that only a signature can carry.
           xcodebuild build -project Arbos.xcodeproj -scheme Arbos -configuration Debug \
             -destination "id=${{ steps.sim.outputs.udid }}" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="-" DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            CODE_SIGN_ENTITLEMENTS="$GITHUB_WORKSPACE/.github/ios-simulator.entitlements" \
             2>&1 | tee "$RUNNER_TEMP/build.log" | grep -E "error:|BUILD (SUCCEEDED|FAILED)" || true
           grep -q "BUILD SUCCEEDED" "$RUNNER_TEMP/build.log"
 

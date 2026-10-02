@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Entitlements for the simulator build that .github/workflows/ios-screenshots.yml
+  photographs. Not the app's own: ios/Arbos.entitlements is what a real build
+  signs with, and nothing here ever reaches a device.
+
+  An unsigned app has no `application-identifier`, so every Keychain call inside
+  it fails with -34018 — which looks exactly like the app losing the key, the one
+  thing the screenshot run most wants to rule out. A real build is handed these
+  two by its provisioning profile. A simulator has no profile and needs no
+  certificate, but it does need an ad-hoc signature carrying them.
+
+  `keychain-access-groups` has to lead with the identifier: Keychain.swift asks
+  for no group by name, so it lands in the first one.
+-->
+<plist version="1.0">
+<dict>
+	<key>application-identifier</key>
+	<string>25SCF3Q2AK.com.unarbos.arbos.ios</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>25SCF3Q2AK.com.unarbos.arbos.ios</string>
+	</array>
+</dict>
+</plist>

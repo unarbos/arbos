@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Signed with only once the App ID has the Push Notifications capability — see
+  "Push capability on the App ID?" in .github/workflows/ios-testflight.yml, which
+  is what passes this file to the archive.
+
+  Lives beside the target rather than inside ios/Arbos/, because everything under
+  ios/Arbos/ belongs to a synchronised file group and gets copied into the app
+  bundle. Entitlements are an input to signing, not a resource to ship.
+-->
+<plist version="1.0">
+<dict>
+	<key>aps-environment</key>
+	<string>production</string>
+</dict>
+</plist>

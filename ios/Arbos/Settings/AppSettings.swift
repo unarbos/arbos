@@ -83,7 +83,30 @@ final class AppSettings: ObservableObject {
         voiceToken = Keychain.read(Self.voiceTokenAccount) ?? baked.voiceToken
         kernelToken = Keychain.read(Self.kernelTokenAccount) ?? baked.kernelToken
         hubToken = Keychain.read(Self.hubTokenAccount) ?? baked.hubToken
+        #if DEBUG
+        reportKeychainRoundTrip()
+        #endif
     }
+
+    #if DEBUG
+    /// Says in the log what the Keychain gave back this launch, and with
+    /// `-previewSaveKey sk-…` first puts a key there through the same call
+    /// Settings makes.
+    ///
+    /// A key that the Keychain accepts and then forgets is how this app lost a
+    /// key before, and no single launch can see it: the write reads back fine in
+    /// the process that made it. CI writes in one launch and reads in the next.
+    private func reportKeychainRoundTrip() {
+        if let key = defaults.string(forKey: "previewSaveKey"), !key.isEmpty {
+            let stored = saveOpenAIKey(key)
+            NSLog("Keychain check: wrote, stored=%@ readback=%@",
+                  stored ? "yes" : "no", openAIKey == key ? "match" : "MISMATCH")
+        } else {
+            let stored = Keychain.read(Self.openAIKeyAccount) ?? ""
+            NSLog("Keychain check: read %@", stored.isEmpty ? "nothing" : "a key")
+        }
+    }
+    #endif
 
     var hubConfigured: Bool {
         !hubToken.isEmpty && URL(string: hubURL)?.host != nil

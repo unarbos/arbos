@@ -15,8 +15,12 @@
 #               rotation never started or that Metal drew nothing at all, which is
 #               also how a blank orb would show up.
 #
+# Then the Keychain, for the same reason: an API key that the Keychain accepts and
+# forgets reads back fine in the launch that wrote it, so only a second process can
+# catch it. The app lost a key that way once.
+#
 # Needs UDID and APP_ID in the environment, and the built .app under
-# $RUNNER_TEMP/DerivedData.
+# $RUNNER_TEMP/DerivedData, signed with .github/ios-simulator.entitlements.
 set -euo pipefail
 
 app="$RUNNER_TEMP/DerivedData/Build/Products/Debug-iphonesimulator/Arbos.app"
@@ -54,6 +58,18 @@ for mode in light dark; do
   shoot "$mode-settings" 5 -previewSettings 1
 done
 
+# Last, because it puts a key in the Keychain and the screens above are
+# photographed with nothing in it. Two launches: one writes the key through the
+# same call Settings makes, the next has to find it. One launch cannot tell the
+# difference, since a write reads back fine in the process that made it.
+launch_quietly() {
+  xcrun simctl terminate "$UDID" "$APP_ID" >/dev/null 2>&1 || true
+  xcrun simctl launch "$UDID" "$APP_ID" "$@" >/dev/null
+  sleep 3
+}
+launch_quietly -previewSaveKey sk-keychain-round-trip
+launch_quietly
+
 xcrun simctl terminate "$UDID" "$APP_ID" >/dev/null 2>&1 || true
 xcrun simctl spawn "$UDID" log show --last 10m --style compact \
   --predicate 'process == "Arbos"' > "$out/app.log" 2>/dev/null || true
@@ -89,6 +105,33 @@ fi
 if grep -q 'is not in the bundle' "$out/app.log" 2>/dev/null; then
   echo "::error title=A bundled font did not resolve::The theme fell back to the system monospace; see app.log in the artifact."
   grep 'is not in the bundle' "$out/app.log" | head -5
+  fail=1
+fi
+
+# -34018 is errSecMissingEntitlement. It means the app was signed without
+# `application-identifier`, so no Keychain call in it can work and the two
+# assertions below would fail for a reason that has nothing to do with the app.
+if grep -q 'Keychain read failed for .*: -34018' "$out/app.log" 2>/dev/null; then
+  echo "::error title=The app has no Keychain entitlement::Every Keychain call failed with -34018, so this run proves nothing about the key. Check that the build signed with .github/ios-simulator.entitlements."
+  fail=1
+fi
+
+if grep -q 'Keychain check: wrote, stored=yes readback=match' "$out/app.log" 2>/dev/null; then
+  echo "the Keychain took the key"
+else
+  echo "::error title=The Keychain would not take the key::saveOpenAIKey could not write the key, or could not read back what it wrote. See 'Keychain check' in app.log."
+  grep 'Keychain check' "$out/app.log" | tail -5
+  fail=1
+fi
+
+# The one that matters: a different process has to find the key. A write that
+# reads back inside the launch that made it still looks saved and comes back
+# empty next time, which is how the key went missing before.
+if [ "$(grep 'Keychain check:' "$out/app.log" | tail -1 | sed 's/.*Keychain check: //')" = "read a key" ]; then
+  echo "the key survived a relaunch"
+else
+  echo "::error title=The key did not survive a relaunch::A later launch of the app read nothing back. Typing a key into Settings would not stick."
+  grep 'Keychain check' "$out/app.log" | tail -5
   fail=1
 fi
 
