@@ -69,6 +69,7 @@ struct OrbHomeView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .offset(y: -min(Self.figureRise, slack))
             }
+            captionBand
             footer
                 .frame(minHeight: 56)
                 .padding(.horizontal, ArbosTheme.gutter)
@@ -95,6 +96,37 @@ struct OrbHomeView: View {
                 .accessibilityValue(spokenState)
         }
         .frame(width: side, height: side)
+    }
+
+    /// What is being said, while it is being said: your words as the recogniser
+    /// sharpens them, then the reply in their place, then nothing.
+    ///
+    /// The band is always this tall, full or empty, because text arriving must not
+    /// move the figure. Its height comes from three hidden lines rather than a
+    /// number, so a phone with the text size turned up gets a taller band instead
+    /// of a clipped one.
+    private var captionBand: some View {
+        ZStack(alignment: .top) {
+            Text(verbatim: "X\nX\nX")
+                .captionLine()
+                .hidden()
+            if let caption = model.caption {
+                Text(caption.text)
+                    .captionLine()
+                    // Your own words are the echo and the reply is the answer, so
+                    // the reply is the one at full strength. Which of the two is
+                    // speaking is not worth a label on a screen this bare.
+                    .foregroundStyle(caption.speaker == .user ? ArbosTheme.textMuted : ArbosTheme.text)
+                    // A line still being written grows at its end, so a long one
+                    // loses its beginning rather than the words just spoken.
+                    .truncationMode(.head)
+                    .id(caption.id)
+                    .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, ArbosTheme.gutter)
+        .animation(.easeInOut(duration: 0.25), value: model.caption?.id)
     }
 
     /// `.Header_container__3ik1i`: the wordmark at one end, upper-case links at
@@ -208,5 +240,18 @@ struct OrbHomeView: View {
         #if DEBUG
         if UserDefaults.standard.bool(forKey: "previewSettings") { showSettings = true }
         #endif
+    }
+}
+
+private extension Text {
+    /// The caption's one measure of type, shared by the real line and by the
+    /// hidden one that reserves its height — they have to agree or the band is
+    /// the wrong size.
+    func captionLine() -> some View {
+        font(ArbosTheme.body)
+            .tracking(ArbosTheme.tracking(ArbosTheme.bodySize))
+            .lineSpacing(ArbosTheme.lineSpacing)
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
     }
 }

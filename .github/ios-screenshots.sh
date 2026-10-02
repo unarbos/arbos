@@ -50,11 +50,16 @@ shoot() {
   echo "  $name"
 }
 
+states=(resting oncall reply settings)
+
 for mode in light dark; do
   echo "$mode:"
   xcrun simctl ui "$UDID" appearance "$mode"
   shoot "$mode-resting" 6
+  # `listening` is mid-utterance, so the caption is the words being spoken;
+  # `speaking` is the reply that replaced them.
   shoot "$mode-oncall" 6 -previewPhase listening
+  shoot "$mode-reply" 6 -previewPhase speaking
   shoot "$mode-settings" 5 -previewSettings 1
 done
 

@@ -56,6 +56,14 @@ final class CallViewModel: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var lines: [TranscriptLine] = []
+    /// The one thing on the screen besides the figure: whatever is being said,
+    /// while it is being said.
+    ///
+    /// Your words appear as the recogniser sharpens them, the reply takes their
+    /// place when it starts, and a few seconds after the talking stops the
+    /// screen is a figure again. `lines` keeps the whole exchange for anything
+    /// that wants it — this is only ever the live edge of it.
+    @Published private(set) var caption: TranscriptLine?
     @Published private(set) var startedAt: Date?
     /// Short status under the label: engine, latency, "kernel offline".
     @Published private(set) var note: String?
@@ -81,6 +89,11 @@ final class CallViewModel: ObservableObject {
     /// The speech side finished sending the reply; playback may still be
     /// draining.
     private var responseDone = true
+    /// How long the last thing said stays up once nothing more is arriving.
+    /// Long enough to finish reading a sentence, short enough that the screen is
+    /// back to the figure before the next turn starts.
+    private static let captionLingers: TimeInterval = 4
+    private var captionRemoval: Task<Void, Never>?
     /// Whether the response now open has played anything. A response closed
     /// without audio never reached the caller's ears and should not be drawn
     /// as one that finished.
@@ -145,6 +158,7 @@ final class CallViewModel: ObservableObject {
         trace("startCall")
         note = nil
         lines.removeAll()
+        showCaption(nil)
         responseDone = true
         kernelBusy = false
         openUtterance = false
@@ -447,7 +461,7 @@ final class CallViewModel: ObservableObject {
         guard !trimmed.isEmpty || !attachments.isEmpty else { return }
         let shown = attachments.isEmpty ? trimmed : (trimmed.isEmpty ? "" : trimmed + " ") + "📎 " + attachments.map(\.name).joined(separator: ", ")
         lines.append(TranscriptLine(speaker: .user, text: shown))
-        trimLines()
+        linesChanged()
         if !server.answersItself { kernelBusy = true; phase = .thinking }
         chat.send(trimmed, attachments: attachments)
     }
@@ -486,7 +500,7 @@ final class CallViewModel: ObservableObject {
     private func speak(_ text: String) {
         guard phase.inCall else { return }
         lines.append(TranscriptLine(speaker: .arbos, text: text))
-        trimLines()
+        linesChanged()
         responseDone = false
         phase = .thinking
         link.speak(text)
@@ -712,7 +726,7 @@ final class CallViewModel: ObservableObject {
             }
             append(text, to: .user)
         }
-        trimLines()
+        linesChanged()
     }
 
     private func append(_ delta: String, to speaker: TranscriptLine.Speaker) {
@@ -727,17 +741,36 @@ final class CallViewModel: ObservableObject {
         } else {
             lines.append(TranscriptLine(speaker: speaker, text: delta))
         }
-        trimLines()
+        linesChanged()
     }
 
     private func appendSystem(_ text: String) {
         guard !text.isEmpty else { return }
         lines.append(TranscriptLine(speaker: .system, text: text))
-        trimLines()
+        linesChanged()
     }
 
-    private func trimLines() {
+    /// Called after every change to `lines`: caps the history and moves the
+    /// caption to the live edge of it.
+    private func linesChanged() {
         if lines.count > 12 { lines.removeFirst(lines.count - 12) }
+        // Tool calls and sub-agent reports are not something anybody said, and
+        // the screen says only what is being said.
+        showCaption(lines.last { $0.speaker != .system })
+    }
+
+    /// Puts `line` on the screen and arms its removal. Every delta re-arms it,
+    /// so a line still being written never fades out from under the words.
+    private func showCaption(_ line: TranscriptLine?) {
+        caption = line
+        captionRemoval?.cancel()
+        captionRemoval = nil
+        guard line != nil else { return }
+        captionRemoval = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.captionLingers))
+            guard !Task.isCancelled else { return }
+            self?.caption = nil
+        }
     }
 
     /// What is held while the socket is still connecting, at the wire format
@@ -848,6 +881,9 @@ final class CallViewModel: ObservableObject {
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectAttempt = 0
+        // The call is over, so the last thing said goes now rather than lingering
+        // over a screen that has gone back to offering a call.
+        showCaption(nil)
         releaseBackgroundTime()
         link.unsubscribe(subscription)
         subscription = nil
@@ -881,15 +917,29 @@ final class CallViewModel: ObservableObject {
                 TranscriptLine(speaker: .user, text: "Okay, start on the attach test and"),
             ]
             openUtterance = true
+            holdCaption()
         case "thinking":
             phase = .thinking
             startedAt = Date().addingTimeInterval(-40)
         case "speaking":
             phase = .speaking
             startedAt = Date().addingTimeInterval(-40)
+            lines = [
+                TranscriptLine(speaker: .user, text: "Okay, start on the attach test."),
+                TranscriptLine(speaker: .arbos, text: "Starting on it now. The attach test needs a second pod, so give me a minute."),
+            ]
+            holdCaption()
         default:
             break
         }
+    }
+
+    /// A screen about to be photographed has to keep what it is showing: the real
+    /// caption would have faded long before the shutter.
+    private func holdCaption() {
+        linesChanged()
+        captionRemoval?.cancel()
+        captionRemoval = nil
     }
 
     private var injector: DebugInjector?
