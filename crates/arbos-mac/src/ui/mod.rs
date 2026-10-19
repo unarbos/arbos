@@ -22,6 +22,7 @@ pub mod people;
 pub mod profiles;
 pub mod routines;
 pub mod secrets;
+pub mod select;
 pub mod shell;
 pub mod sidebar;
 pub mod skills;

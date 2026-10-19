@@ -21,6 +21,7 @@ use crate::ui::feedback;
 use crate::ui::motion::{self, PulseClock};
 use crate::ui::shell::{self, Shell};
 use crate::ui::theme::{reapply_window_background, AppearancePref, Surface, Theme};
+use crate::ui::transcript;
 use crate::ui::widgets;
 
 fn main() {
@@ -173,6 +174,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("up", widgets::PrevOption, Some("QuestionCard")),
         KeyBinding::new("left", widgets::PrevOption, Some("QuestionCard")),
         KeyBinding::new("space", widgets::ToggleOption, Some("QuestionCard")),
+        // Text selected in a chat bubble (drag / double-click) takes focus; ⌘C copies it.
+        KeyBinding::new("cmd-c", transcript::Copy, Some("Transcript")),
+        KeyBinding::new("ctrl-c", transcript::Copy, Some("Transcript")),
         KeyBinding::new("cmd-w", shell::CloseTab, None),
         KeyBinding::new("ctrl-w", shell::CloseTab, None),
         KeyBinding::new("cmd-t", shell::NewTab, None),
