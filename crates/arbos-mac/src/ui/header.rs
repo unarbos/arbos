@@ -21,7 +21,7 @@ use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::machine_dot;
+use crate::ui::sidebar::{is_control_click, machine_dot};
 use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
@@ -497,6 +497,9 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             let rename_label = title.clone();
             pill = pill.on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if is_control_click(event) {
+                        return;
+                    }
                     if event.click_count() >= 2 {
                         if this.renaming_tab.as_ref() != Some(&id) {
                             this.begin_tab_rename(id.clone(), rename_label.clone(), window, cx);
@@ -679,7 +682,10 @@ pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) ->
                 .rounded(px(9.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.surface_2))
-                .on_click(cx.listener(move |this, _, window, cx| {
+                .on_click(cx.listener(move |this, event, window, cx| {
+                    if is_control_click(event) {
+                        return;
+                    }
                     this.archived_open = false;
                     this.chat_menu = None;
                     this.state

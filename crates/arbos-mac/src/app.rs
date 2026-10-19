@@ -3707,7 +3707,12 @@ impl AppState {
         let name = Self::unique_copy_name(&src.name, &self.projects);
         let description = src.description.clone();
         let color = Some(src.color.clone());
-        let avatar_color_index = src.avatar_color_override;
+        // Keep the source's tree colour even when it was the automatic
+        // (id-derived) one; the fork's own id would pick a different swatch.
+        let avatar_color_index = Some(crate::ui::avatars::index_for(
+            &src.id,
+            src.avatar_color_override.or(src.avatar_color_index),
+        ));
         self.awaiting_new_project = true;
         self.command(ClientCommand::CreateProject {
             name,

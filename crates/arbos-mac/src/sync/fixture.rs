@@ -287,9 +287,22 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::RemoveProjectMember { .. }
         | ClientCommand::FetchAvatar { .. }
         | ClientCommand::ArchiveChat { .. }
-        | ClientCommand::DeleteProject { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::CloseChat { .. } => {}
+        ClientCommand::DeleteProject { project_id } => {
+            shared
+                .projects
+                .lock()
+                .unwrap()
+                .retain(|p| p.id != project_id);
+            shared
+                .chats
+                .lock()
+                .unwrap()
+                .retain(|c| c.project_id != project_id);
+            emit_projects(shared);
+            emit_chats(shared);
+        }
         ClientCommand::OpenChat { chat_id } => {
             *shared.open_chat.lock().unwrap() = Some(chat_id.clone());
             mark_read(shared, &chat_id);

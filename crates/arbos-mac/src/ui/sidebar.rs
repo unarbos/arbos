@@ -610,6 +610,12 @@ fn render_row(
         .on_click({
             let id = id.clone();
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                // Control-click is the secondary click: the mouse-down below
+                // opened the row menu, and GPUI still delivers the click on
+                // mouse-up — swallow it so the menu stays open.
+                if is_control_click(event) {
+                    return;
+                }
                 this.menu_open = false;
                 this.row_menu = None;
                 this.chat_menu = None;
@@ -638,6 +644,7 @@ fn render_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((menu_id.clone(), event.position));
+                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -651,6 +658,7 @@ fn render_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((ctrl_menu_id.clone(), event.position));
+                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -790,6 +798,82 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let delete_id = space.id.clone();
     let delete_people = is_people;
 
+    // Delete is destructive: the first click swaps the menu for an iPhone-style
+    // "Delete “Name”?" with Cancel / Delete; Esc or a click elsewhere cancels.
+    if shell.row_delete_armed && can_delete {
+        let title = if is_people {
+            space
+                .person()
+                .filter(|_| !space.is_people_group())
+                .map(|p| p.display_name())
+                .unwrap_or_else(|| space.name.clone())
+        } else {
+            space.name.clone()
+        };
+        let note = if is_people {
+            "Removes this chat from your list."
+        } else {
+            "Removes this agent and its chats from your list."
+        };
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(8.0))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child(format!("Delete “{title}”?")),
+            )
+            .child(
+                div()
+                    .text_size(px(TEXT_TINY))
+                    .text_color(theme.text_muted)
+                    .child(note),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.0))
+                    .child(
+                        confirm_button("row-menu-delete-cancel", "Cancel", false, &theme).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.row_menu = None;
+                                this.row_delete_armed = false;
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .child(
+                        confirm_button("row-menu-delete-go", "Delete", true, &theme).on_click(
+                            cx.listener(move |this, _, _, cx| {
+                                this.row_menu = None;
+                                this.row_delete_armed = false;
+                                let id = delete_id.clone();
+                                this.state.update(cx, |s, cx| {
+                                    if delete_people {
+                                        s.delete_people_chat(id, cx);
+                                    } else {
+                                        s.delete_project(id, cx);
+                                    }
+                                });
+                            }),
+                        ),
+                    ),
+            );
+        return Some(
+            div()
+                .absolute()
+                .left(at.x)
+                .top(at.y)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(glass::frosted_menu(240.0, &theme, body)),
+        );
+    }
+
     let mut body = div().flex().flex_col().gap(px(1.0));
     body = body.child(
         glass::menu_row(
@@ -872,16 +956,9 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     if can_delete {
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete", true, &theme).on_click(
-                cx.listener(move |this, _, _, cx| {
-                    this.row_menu = None;
-                    let id = delete_id.clone();
-                    this.state.update(cx, |s, cx| {
-                        if delete_people {
-                            s.delete_people_chat(id, cx);
-                        } else {
-                            s.delete_project(id, cx);
-                        }
-                    });
+                cx.listener(|this, _, _, cx| {
+                    this.row_delete_armed = true;
+                    cx.notify();
                 }),
             ),
         );
@@ -1034,6 +1111,43 @@ fn agent_rows(
             this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
         })),
     )
+}
+
+/// A left click whose mouse-down carried Control (macOS secondary click).
+pub fn is_control_click(event: &gpui::ClickEvent) -> bool {
+    matches!(event, gpui::ClickEvent::Mouse(e) if e.down.modifiers.control)
+}
+
+/// Cancel / Delete pill for the row menu's delete confirmation.
+fn confirm_button(
+    id: &'static str,
+    label: &'static str,
+    danger: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(12.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .text_size(px(TEXT_SMALL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .cursor_pointer()
+        .when(danger, |el| {
+            el.bg(theme.danger)
+                .text_color(gpui::white())
+                .hover(|s| s.opacity(0.88))
+        })
+        .when(!danger, |el| {
+            el.bg(theme.field)
+                .border_1()
+                .border_color(theme.field_border)
+                .text_color(theme.text)
+                .hover(|s| s.bg(theme.surface_2))
+        })
+        .child(label)
 }
 
 /// Right-click / control-click menu on a chat tab or an archived chat row:
