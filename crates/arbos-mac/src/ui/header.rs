@@ -775,16 +775,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
 
     // Clone everything we need from AppState, then drop the read guard before
     // any `cx.listener` / `menu_hover_row` that need `&mut Context`.
-    let (
-        streaming,
-        voice_mode,
-        projects_count,
-        multi_chat,
-        archived,
-        voices,
-        models,
-        voice_label,
-    ) = {
+    let (streaming, voice_mode, projects_count, multi_chat, archived, voices, models, voice_label) = {
         let state = shell.state.read(cx);
         (
             state.project_is_streaming(&space.id),
@@ -917,12 +908,17 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                 cx,
             );
             let model_panel = model_open.then(|| {
-                model_submenu(&models, &model, &model_query, search_input.clone(), &theme, cx)
+                model_submenu(
+                    &models,
+                    &model,
+                    &model_query,
+                    search_input.clone(),
+                    &theme,
+                    cx,
+                )
             });
-            let effort_panel =
-                effort_open.then(|| effort_submenu(space.effort, &theme, cx));
-            let voice_panel =
-                voice_open.then(|| voice_submenu(space, &voices, &theme, cx));
+            let effort_panel = effort_open.then(|| effort_submenu(space.effort, &theme, cx));
+            let voice_panel = voice_open.then(|| voice_submenu(space, &voices, &theme, cx));
             body = body.child(model_row);
             if let Some(panel) = model_panel {
                 body = body.child(panel);
@@ -1141,7 +1137,7 @@ fn model_submenu(
     search_input: gpui::Entity<crate::ui::composer::ComposerInput>,
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
+) -> gpui::Stateful<Div> {
     let mut names: Vec<String> = if models.is_empty() {
         MODELS.iter().map(|m| m.to_string()).collect()
     } else {
@@ -1221,7 +1217,7 @@ fn model_submenu(
     list
 }
 
-fn effort_submenu(current: Effort, theme: &Theme, cx: &mut Context<Shell>) -> Div {
+fn effort_submenu(current: Effort, theme: &Theme, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
     let mut list = div()
         .id("menu-effort-list")
         .flex()
@@ -1266,7 +1262,7 @@ fn voice_submenu(
     voices: &[crate::model::Voice],
     theme: &Theme,
     cx: &mut Context<Shell>,
-) -> Div {
+) -> gpui::Stateful<Div> {
     let selected = space.voice.clone();
     let pid = space.id.clone();
     let mut list = div()

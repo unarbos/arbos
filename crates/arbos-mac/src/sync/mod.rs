@@ -200,11 +200,6 @@ pub enum SyncEvent {
     AttachmentSaved {
         path: PathBuf,
     },
-    /// One JPEG frame from the box's browser stream (S16).
-    BrowserFrame {
-        project_id: Id,
-        jpeg: Arc<Vec<u8>>,
-    },
     /// Relay link state (S14).
     Link(Link),
     /// Short user-facing notice (errors from HTTP calls, etc.).
@@ -475,20 +470,10 @@ pub enum ClientCommand {
         space_id: Id,
         muted: bool,
     },
-    /// Avatar picker (D79): `PATCH /projects/{id} {avatar_color_index: 0–6|null}`;
-    /// `None` = automatic (derived from the project id).
-    SetAvatarColorIndex {
-        project_id: Id,
-        index: Option<u8>,
-    },
     FetchBlob {
         project_id: Id,
         key: String,
         save: bool,
-    },
-    WatchBrowser {
-        project_id: Id,
-        on: bool,
     },
     /// Fetch an image attachment's bytes for the inline thumbnail (F10).
     FetchThumbnail {

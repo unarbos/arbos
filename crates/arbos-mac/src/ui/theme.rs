@@ -31,7 +31,6 @@ pub const CONTROL: f32 = 32.0;
 /// Bubble corners (Grok Mac ≈ 16 pt; the iPhone uses 20).
 pub const BUBBLE_RADIUS: f32 = 16.0;
 pub const PANEL_RADIUS: f32 = 14.0;
-pub const RIGHT_PANEL_WIDTH: f32 = 360.0;
 pub const DRAWER_WIDTH: f32 = 320.0;
 pub const NARROW_WINDOW: f32 = 1000.0;
 pub const GLASS_ALPHA: f32 = 0.80;

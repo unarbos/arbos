@@ -101,7 +101,6 @@ struct Shared {
     unacked: Mutex<HashSet<Id>>,
     events: mpsc::UnboundedSender<SyncEvent>,
     subscriptions: Mutex<Vec<loro::Subscription>>,
-    browser_watch: Mutex<HashMap<Id, JoinHandle<()>>>,
     machine: Mutex<Machine>,
     refresh_lock: tokio::sync::Mutex<()>,
     /// People chat ids (rooms live under `/room/people/{id}`).
@@ -512,7 +511,6 @@ impl SyncSource for RelaySource {
                 unacked: Mutex::new(HashSet::new()),
                 events: events.clone(),
                 subscriptions: Mutex::new(Vec::new()),
-                browser_watch: Mutex::new(HashMap::new()),
                 machine: Mutex::new(Machine::default()),
                 refresh_lock: tokio::sync::Mutex::new(()),
                 people: Mutex::new(HashSet::new()),
@@ -4042,34 +4040,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::SetAvatarColorIndex { project_id, index } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color_override = index;
-                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-                }
-                let snapshot = projects.clone();
-                drop(projects);
-                let _ = shared.events.send(SyncEvent::Projects(snapshot));
-            }
-            let shared = shared.clone();
-            tokio::spawn(async move {
-                let body = json!({ "avatar_color_index": index });
-                match shared
-                    .patch_json(&format!("/projects/{project_id}"), body)
-                    .await
-                {
-                    Ok(_) => {}
-                    Err(err) => {
-                        if !err.to_string().contains("HTTP 404") {
-                            shared
-                                .notice(format!("Avatar colour not saved: {}", people_error(&err)));
-                        }
-                    }
-                }
-            });
-        }
         ClientCommand::UpdateProfile { name, handle } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -4782,33 +4752,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 refresh_secrets(&shared).await;
             });
         }
-        ClientCommand::WatchBrowser { project_id, on } => {
-            let mut watches = shared.browser_watch.lock().unwrap();
-            if let Some(task) = watches.remove(&project_id) {
-                task.abort();
-            }
-            if on {
-                let shared2 = shared.clone();
-                let pid = project_id.clone();
-                watches.insert(
-                    project_id,
-                    tokio::spawn(async move {
-                        // No session yet closes the socket at once; keep trying
-                        // quietly while the panel is open.
-                        let mut first = true;
-                        loop {
-                            if let Err(err) = watch_browser(shared2.clone(), pid.clone()).await {
-                                if first {
-                                    shared2.notice(format!("Browser stream: {err:#} — retrying"));
-                                    first = false;
-                                }
-                            }
-                            sleep(Duration::from_secs(5)).await;
-                        }
-                    }),
-                );
-            }
-        }
         ClientCommand::RoutinesRefresh { project_id } => {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_routines(&shared, &project_id).await });
@@ -5262,83 +5205,6 @@ async fn refresh_project_secrets(shared: &Arc<Shared>, project_id: &str) {
             }
         }
     }
-}
-
-/// S16: the box's `/browser/stream` (agentd proxies agent-browser's JPEG
-/// WebSocket). The URL comes from `GET /projects/{id}/status`
-/// (`provider.box_url`), or `ARBOS_BROWSER_STREAM_URL` for a direct dial.
-async fn watch_browser(shared: Arc<Shared>, project_id: Id) -> Result<()> {
-    let url = match std::env::var("ARBOS_BROWSER_STREAM_URL") {
-        Ok(u) if !u.is_empty() => u,
-        _ => {
-            let status = shared
-                .get_json(&format!("/projects/{project_id}/status"))
-                .await?;
-            let provider = status.get("provider").cloned().unwrap_or(Value::Null);
-            // Relay-proxied stream (token in the URL) first; a direct box
-            // URL only as the v2 fallback.
-            match provider.get("browser_stream_url").and_then(Value::as_str) {
-                Some(url) if !url.is_empty() => url.to_string(),
-                Some(_) | None => {
-                    let box_url = provider
-                        .get("box_url")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| anyhow!("box has no URL yet (asleep?)"))?
-                        .trim_end_matches('/')
-                        .to_string();
-                    let ws = box_url
-                        .replacen("https://", "wss://", 1)
-                        .replacen("http://", "ws://", 1);
-                    format!("{ws}/browser/stream")
-                }
-            }
-        }
-    };
-    let (ws, _) = timeout(HELLO_DEADLINE, connect_async(&url))
-        .await
-        .context("browser stream dial timed out")??;
-    let (_tx, mut rx) = ws.split();
-    while let Some(msg) = rx.next().await {
-        let jpeg: Option<Vec<u8>> = match msg? {
-            WsMessage::Binary(b) => Some(b.to_vec()),
-            WsMessage::Text(t) => {
-                // agent-browser frames: {"type":"frame","data":"<base64 jpeg>"}
-                let v: Value = serde_json::from_str(t.as_str()).unwrap_or(Value::Null);
-                v.get("data")
-                    .and_then(Value::as_str)
-                    .and_then(|d| base64_decode(d.rsplit(',').next().unwrap_or(d)))
-            }
-            WsMessage::Close(_) => break,
-            WsMessage::Ping(_) | WsMessage::Pong(_) | WsMessage::Frame(_) => None,
-        };
-        if let Some(jpeg) = jpeg {
-            let _ = shared.events.send(SyncEvent::BrowserFrame {
-                project_id: project_id.clone(),
-                jpeg: Arc::new(jpeg),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for c in s.bytes() {
-        if c == b'=' || c == b'\n' || c == b'\r' {
-            continue;
-        }
-        let v = TABLE.iter().position(|&t| t == c)? as u32;
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xff) as u8);
-        }
-    }
-    Some(out)
 }
 
 fn hostname() -> String {

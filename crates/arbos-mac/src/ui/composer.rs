@@ -19,9 +19,7 @@ use gpui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{AppState, ComposerMode};
-use crate::model::Effort;
-use crate::sync::fixture::MODELS;
-use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
+use crate::ui::frost::{frosted, PANEL_BLUR};
 use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::theme::{
@@ -944,12 +942,6 @@ impl Focusable for ComposerInput {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Picker {
-    Model,
-    Effort,
-}
-
 pub struct Composer {
     state: Entity<AppState>,
     pub input: Entity<ComposerInput>,
@@ -959,8 +951,6 @@ pub struct Composer {
     /// Which chat the input text belongs to; drafts are kept per chat.
     draft_chat: Option<crate::model::Id>,
     drafts: std::collections::HashMap<crate::model::Id, String>,
-    /// The model / effort menu, opened from the header's "…" menu.
-    pub open_picker: Option<Picker>,
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.
     pub nudge_at: Option<u64>,
@@ -1008,7 +998,6 @@ impl Composer {
             attachments: Vec::new(),
             draft_chat: None,
             drafts: std::collections::HashMap::new(),
-            open_picker: None,
             nudge_at: None,
         }
     }
@@ -1064,7 +1053,6 @@ impl Composer {
                 cx.emit(ComposerEvent::Send(text, attachments));
             }
         }
-        self.open_picker = None;
         cx.notify();
     }
 
@@ -1217,103 +1205,6 @@ impl Composer {
             .bottom(px(COMPOSER_HEIGHT + 12.0))
             .left(px(8.0))
             .child(frosted(PANEL_RADIUS, PANEL_BLUR, menu))
-    }
-
-    fn render_picker_menu(&self, picker: Picker, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx).clone();
-        let state = self.state.read(cx);
-        let (model, effort) = state
-            .selected()
-            .map(|p| (p.model.clone(), p.effort))
-            .unwrap_or((MODELS[0].to_string(), Effort::High));
-        let mut menu = div()
-            .id("picker-menu")
-            .flex()
-            .flex_col()
-            .min_w(px(220.0))
-            .max_h(px(320.0))
-            .overflow_y_scroll()
-            .p(px(4.0))
-            .rounded(px(PANEL_RADIUS))
-            .bg(theme.card())
-            .border_1()
-            .border_color(theme.border_strong)
-            .shadow_lg();
-        match picker {
-            Picker::Model => {
-                let mut names: Vec<String> = if state.models.is_empty() {
-                    MODELS.iter().map(|m| m.to_string()).collect()
-                } else {
-                    state.models.clone()
-                };
-                if !names.contains(&model) {
-                    names.insert(0, model.clone());
-                }
-                for (i, name) in names.iter().enumerate() {
-                    let selected = *name == model;
-                    let name_owned = name.to_string();
-                    menu = menu.child(
-                        div()
-                            .id(ElementId::NamedInteger("model-item".into(), i as u64))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .rounded(px(6.0))
-                            .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .hover(|s| s.bg(theme.surface_2))
-                            .cursor_pointer()
-                            .child(name.clone())
-                            .when(selected, |el| {
-                                el.child(div().text_color(theme.accent).child("✓"))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state
-                                    .update(cx, |s, cx| s.set_model(name_owned.clone(), cx));
-                                this.open_picker = None;
-                                cx.notify();
-                            })),
-                    );
-                }
-            }
-            Picker::Effort => {
-                for (i, level) in Effort::ALL.iter().enumerate() {
-                    let selected = *level == effort;
-                    let level = *level;
-                    menu = menu.child(
-                        div()
-                            .id(ElementId::NamedInteger("effort-item".into(), i as u64))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .rounded(px(6.0))
-                            .text_size(px(13.0))
-                            .text_color(theme.text)
-                            .hover(|s| s.bg(theme.surface_2))
-                            .cursor_pointer()
-                            .child(level.label())
-                            .when(selected, |el| {
-                                el.child(div().text_color(theme.accent).child("✓"))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.state.update(cx, |s, cx| s.set_effort(level, cx));
-                                this.open_picker = None;
-                                cx.notify();
-                            })),
-                    );
-                }
-            }
-        }
-        // Opens upward, above the field.
-        div()
-            .absolute()
-            .bottom(px(COMPOSER_HEIGHT + 12.0))
-            .right(px(0.0))
-            .child(frosted(PANEL_RADIUS, MENU_BLUR, menu))
     }
 }
 
@@ -1618,9 +1509,6 @@ impl Render for Composer {
             );
         }
 
-        if let Some(picker) = self.open_picker {
-            column = column.child(glass::popover(self.render_picker_menu(picker, cx)));
-        }
         let mentions = self.mention_candidates(cx);
         if !mentions.is_empty() {
             column = column.child(glass::popover(self.render_mentions(mentions, cx)));

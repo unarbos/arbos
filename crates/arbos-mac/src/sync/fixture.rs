@@ -709,16 +709,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             set_machine(shared, MachineState::Stopped, Some("Stopped by you"), None);
         }
         ClientCommand::FocusChat { .. } => {}
-        ClientCommand::SetAvatarColorIndex { project_id, index } => {
-            {
-                let mut projects = shared.projects.lock().unwrap();
-                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.avatar_color_override = index;
-                    p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-                }
-            }
-            emit_projects(shared);
-        }
         ClientCommand::UpdateProfile { name, handle } => {
             // The fixture keeps it: Settings shows the new name and handle.
             let _ = shared
@@ -912,13 +902,6 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             }
         }
-        ClientCommand::WatchBrowser { on: true, .. } => {
-            let _ = shared.events.send(SyncEvent::Notice(
-                "Fixture has no browser stream; the relay source shows the box's JPEG frames here."
-                    .into(),
-            ));
-        }
-        ClientCommand::WatchBrowser { on: false, .. } => {}
         ClientCommand::RefreshConnectors => emit_connectors(shared),
         ClientCommand::ConnectorConnect { provider, token } => {
             // Mock relay: the "OAuth dance" completes by itself after a moment.

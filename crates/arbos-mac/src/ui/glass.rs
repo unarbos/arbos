@@ -180,17 +180,7 @@ pub fn icon_tile(glyph: &str, theme: &Theme) -> Div {
         .child(icon(glyph, 15.0, gpui::white()))
 }
 
-/// A tappable row: label, optional detail, chevron.
-pub fn nav_row(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    detail: Option<String>,
-    theme: &Theme,
-) -> Stateful<Div> {
-    nav_row_with(id, None, label, detail, theme)
-}
-
-/// `nav_row` with an Apple-style icon tile in front of the label (D80 settings).
+/// A tappable row with an Apple-style icon tile in front of the label (D80 settings).
 pub fn nav_row_icon(
     id: impl Into<ElementId>,
     glyph: &str,

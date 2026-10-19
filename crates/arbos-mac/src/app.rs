@@ -271,8 +271,6 @@ pub struct AppState {
     pub thumbnails: HashMap<String, Arc<RenderImage>>,
     /// Thumbnail fetches in flight or failed (never asked twice).
     thumbnails_requested: HashSet<String>,
-    pub browser_frame: Option<Arc<RenderImage>>,
-    pub browser_frames_seen: u64,
     pub notices: Vec<Notice>,
     pub selected_project: Option<Id>,
     /// Bytes and chats kept on this Mac by the on-device store (Settings → About).
@@ -292,7 +290,6 @@ pub struct AppState {
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
     /// auto-hides; the header toggle (or ⌘B) floats it over the chat instead.
     pub sidebar_overlay: bool,
-    pub right_panel_open: bool,
     pub details_open: Option<DetailsTarget>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
@@ -540,8 +537,6 @@ impl AppState {
             blobs: HashMap::new(),
             thumbnails: HashMap::new(),
             thumbnails_requested: HashSet::new(),
-            browser_frame: None,
-            browser_frames_seen: 0,
             notices: Vec::new(),
             selected_project: None,
             store_usage: (0, 0),
@@ -552,7 +547,6 @@ impl AppState {
             link: Link::Connecting,
             rail_collapsed: false,
             sidebar_overlay: false,
-            right_panel_open: false,
             details_open: None,
             new_project_open: false,
             show_details: false,
@@ -947,16 +941,6 @@ impl AppState {
                 self.push_notice(format!("Saved to {}", path.display()));
                 crate::ui::attachments::reveal(&path);
                 cx.notify();
-            }
-            SyncEvent::BrowserFrame { project_id, jpeg } => {
-                if self.selected_project.as_deref() != Some(project_id.as_str()) {
-                    return;
-                }
-                if let Some(image) = decode_image(&jpeg) {
-                    self.browser_frame = Some(Arc::new(image));
-                    self.browser_frames_seen += 1;
-                    cx.notify();
-                }
             }
             SyncEvent::Notice(text) => {
                 self.push_notice(text);
@@ -2446,21 +2430,6 @@ impl AppState {
         }
     }
 
-    /// D79: the owner's avatar gradient pick (`None` = automatic). Optimistic, then PATCH.
-    pub fn set_avatar_color_index(
-        &mut self,
-        project_id: Id,
-        index: Option<u8>,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
-            p.avatar_color_override = index;
-            p.avatar_color_index = Some(crate::ui::avatars::index_for(&project_id, index));
-        }
-        self.command(ClientCommand::SetAvatarColorIndex { project_id, index });
-        cx.notify();
-    }
-
     /// The agent's profile page (which holds the tree + colour picker).
     pub fn toggle_avatar_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
         match &self.profile {
@@ -2548,11 +2517,6 @@ impl AppState {
 
     pub fn set_profile_tab(&mut self, tab: usize, cx: &mut Context<Self>) {
         self.profile_tab = tab;
-        cx.notify();
-    }
-
-    pub fn toggle_profile_picker(&mut self, cx: &mut Context<Self>) {
-        self.profile_picker_open = !self.profile_picker_open;
         cx.notify();
     }
 
@@ -2669,13 +2633,6 @@ impl AppState {
         if let Some(chat_id) = self.active_chat_id() {
             cx.emit(AppEvent::TranscriptChanged { chat_id });
         }
-        cx.notify();
-    }
-
-    pub fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
-        self.right_panel_open = !self.right_panel_open;
-        let on = self.right_panel_open;
-        self.watch_browser(on, cx);
         cx.notify();
     }
 
@@ -3464,17 +3421,6 @@ impl AppState {
         cx.notify();
     }
 
-    pub fn watch_browser(&mut self, on: bool, cx: &mut Context<Self>) {
-        let Some(project_id) = self.selected_project.clone() else {
-            return;
-        };
-        if !on {
-            self.browser_frame = None;
-        }
-        self.command(ClientCommand::WatchBrowser { project_id, on });
-        cx.notify();
-    }
-
     // ----- connectors (F1) -------------------------------------------------
 
     pub fn refresh_connectors(&mut self, cx: &mut Context<Self>) {
@@ -3901,28 +3847,6 @@ impl AppState {
         self.selected_project
             .as_deref()
             .and_then(|id| self.project_docs.get(id))
-    }
-
-    /// The live browser card of the selected project, if any (S16).
-    pub fn live_browser(&self) -> Option<(String, String, String)> {
-        let project_id = self.selected_project.as_deref()?;
-        for chat in self.tabs(project_id) {
-            for m in self.messages_of(&chat.id).iter().rev() {
-                for p in &m.parts {
-                    if let Part::Browser {
-                        title,
-                        url,
-                        last_action,
-                        live: true,
-                        ..
-                    } = p
-                    {
-                        return Some((title.clone(), url.clone(), last_action.clone()));
-                    }
-                }
-            }
-        }
-        None
     }
 
     pub fn box_state(&self) -> Option<BoxState> {

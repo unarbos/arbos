@@ -639,12 +639,6 @@ impl Shell {
             self.react_menu = None;
             cx.notify();
         }
-        if self.composer.read(cx).open_picker.is_some() {
-            self.composer.update(cx, |c, cx| {
-                c.open_picker = None;
-                cx.notify();
-            });
-        }
     }
 
     // ----- react menu -----------------------------------------------------------------
