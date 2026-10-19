@@ -429,6 +429,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         .items_center()
         .gap(px(6.0))
         .overflow_x_scroll();
+    let renaming = shell.renaming_tab.clone();
     for (chat, active, streaming) in tabs {
         if streaming {
             PulseClock::request(cx);
@@ -438,12 +439,17 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         let close_id = chat.id.clone();
         let menu_chat_id = chat.id.clone();
         let ctrl_chat_id = chat.id.clone();
-        let title = if chat.is_pinned {
+        // Pinned chat stays labeled "Main" until the user renames it away
+        // from the project name (or an explicit "Main").
+        let title = if chat.is_pinned
+            && (chat.title.is_empty() || chat.title == space.name || chat.title == "Main")
+        {
             "Main".to_string()
         } else {
             chat.title.clone()
         };
-        let closable = multi_chat && !chat.is_pinned;
+        let editing = renaming.as_ref() == Some(&chat.id);
+        let closable = multi_chat && !chat.is_pinned && !editing;
         let mut pill = div()
             .id(ElementId::Name(SharedString::from(format!(
                 "tab-{}",
@@ -458,93 +464,125 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             .pl(px(11.0))
             .pr(px(if closable { 6.0 } else { 11.0 }))
             .rounded_full()
-            .bg(if active {
+            .bg(if editing {
+                theme.field
+            } else if active {
                 theme.bubble
             } else {
                 theme.bubble_assistant
             })
             .text_size(px(TEXT_SMALL))
             // The active chip is a user bubble (dark in both appearances):
-            // white text on it, like the bubbles themselves.
-            .text_color(if active {
+            // white text on it, like the bubbles themselves. While renaming,
+            // the field fill uses normal text so the input stays readable.
+            .text_color(if editing {
+                theme.text
+            } else if active {
                 theme.bubble_text()
             } else {
                 theme.text_muted
             })
-            .when(chat.unread && !active, |el| {
+            .when(chat.unread && !active && !editing, |el| {
                 el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
             })
             .cursor_pointer()
-            .when(!active, |el| el.hover(|s| s.text_color(theme.text)))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.chat_menu = None;
-                this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
-                Composer::focus(&this.composer, window, cx);
-            }))
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    cx.stop_propagation();
-                    this.menu_open = false;
-                    this.row_menu = None;
-                    this.chat_menu = Some((menu_chat_id.clone(), event.position));
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    if !event.modifiers.control {
+            .when(!active && !editing, |el| {
+                el.hover(|s| s.text_color(theme.text))
+            });
+        if editing {
+            pill = pill
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .min_w(px(72.0))
+                        .max_w(px(160.0))
+                        .child(shell.tab_rename_input.clone()),
+                );
+        } else {
+            pill = pill
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu_open = false;
+                        this.row_menu = None;
+                        this.chat_menu = Some((menu_chat_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        if !event.modifiers.control {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.menu_open = false;
+                        this.row_menu = None;
+                        this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                );
+            let rename_label = title.clone();
+            pill = pill.on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        if this.renaming_tab.as_ref() != Some(&id) {
+                            this.begin_tab_rename(id.clone(), rename_label.clone(), window, cx);
+                        }
                         return;
                     }
-                    cx.stop_propagation();
-                    this.menu_open = false;
-                    this.row_menu = None;
-                    this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
-                    cx.notify();
+                    this.chat_menu = None;
+                    if this.renaming_tab.is_some() {
+                        this.commit_tab_rename(window, cx);
+                    }
+                    this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
+                    Composer::focus(&this.composer, window, cx);
                 }),
             );
-        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
-            pill = pill.child(glyphs);
-        }
-        pill = pill.child(div().max_w(px(160.0)).truncate().child(title));
-        if streaming {
-            pill = pill.child(
-                div()
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
-            );
-        }
-        if closable {
-            pill = pill.child(
-                div()
-                    .id(ElementId::Name(SharedString::from(format!(
-                        "tab-close-{}",
-                        chat.id
-                    ))))
-                    .size(px(16.0))
-                    .rounded_full()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .hover(|s| s.bg(theme.border_strong))
-                    .child(icon(
-                        "xmark",
-                        9.0,
-                        if active {
-                            Theme::with_alpha(theme.bubble_text(), 0.8)
-                        } else {
-                            theme.text_muted
-                        },
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.state.update(cx, |s, cx| {
-                            s.close_tab(close_id.clone(), cx);
-                        });
-                    })),
-            );
+            if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
+                pill = pill.child(glyphs);
+            }
+            pill = pill.child(div().max_w(px(160.0)).truncate().child(title));
+            if streaming {
+                pill = pill.child(
+                    div()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
+                );
+            }
+            if closable {
+                pill = pill.child(
+                    div()
+                        .id(ElementId::Name(SharedString::from(format!(
+                            "tab-close-{}",
+                            chat.id
+                        ))))
+                        .size(px(16.0))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(theme.border_strong))
+                        .child(icon(
+                            "xmark",
+                            9.0,
+                            if active {
+                                Theme::with_alpha(theme.bubble_text(), 0.8)
+                            } else {
+                                theme.text_muted
+                            },
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.state.update(cx, |s, cx| {
+                                s.close_tab(close_id.clone(), cx);
+                            });
+                        })),
+                );
+            }
         }
         row = row.child(pill);
     }

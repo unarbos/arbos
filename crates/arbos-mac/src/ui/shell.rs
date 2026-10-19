@@ -103,6 +103,9 @@ pub struct Shell {
     pub members_open: bool,
     /// The agent's "Archived" chats list (header strip / "…" menu).
     pub(crate) archived_open: bool,
+    /// Double-click rename on a chat tab: the chat being edited, and its field.
+    pub(crate) renaming_tab: Option<crate::model::Id>,
+    pub(crate) tab_rename_input: Entity<ComposerInput>,
     /// Per-agent call voice picker sheet ("…" menu → Voice, profile → voice).
     pub(crate) voice_picker_open: bool,
     /// Video picture-in-picture while the call screen is collapsed: offset
@@ -278,6 +281,18 @@ impl Shell {
             });
         }
         cx.observe(&handle_input, |_, _, cx| cx.notify()).detach();
+        let tab_rename_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            tab_rename_input.update(cx, |input, _| {
+                input.set_placeholder("Chat name");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.commit_tab_rename(window, cx));
+                }));
+            });
+        }
+        cx.observe(&tab_rename_input, |_, _, cx| cx.notify())
+            .detach();
         let people_input = cx.new(ComposerInput::new);
         {
             let weak = cx.entity().downgrade();
@@ -419,6 +434,8 @@ impl Shell {
             react_menu: None,
             group_picker_open: false,
             archived_open: false,
+            renaming_tab: None,
+            tab_rename_input,
             voice_picker_open: false,
             pip_offset: (24.0, 96.0),
             pip_drag: None,
@@ -440,6 +457,48 @@ impl Shell {
             members_open: false,
             feedback,
         }
+    }
+
+    /// Double-click a chat tab: turn its label into an editable field.
+    pub(crate) fn begin_tab_rename(
+        &mut self,
+        chat_id: crate::model::Id,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_popovers(cx);
+        self.renaming_tab = Some(chat_id);
+        self.tab_rename_input.update(cx, |input, cx| {
+            input.set_text(label, cx);
+            input.select_all_text(cx);
+        });
+        let handle = self.tab_rename_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn commit_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.renaming_tab.take() else {
+            return;
+        };
+        let title = self.tab_rename_input.read(cx).text().to_string();
+        self.tab_rename_input
+            .update(cx, |input, cx| input.clear(cx));
+        self.state
+            .update(cx, |s, cx| s.retitle_chat(chat_id, title, cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_tab_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming_tab.take().is_none() {
+            return;
+        }
+        self.tab_rename_input
+            .update(cx, |input, cx| input.clear(cx));
+        Composer::focus(&self.composer, window, cx);
+        cx.notify();
     }
 
     fn send_feedback(&mut self, _: &SendFeedback, window: &mut Window, cx: &mut Context<Self>) {
@@ -638,6 +697,10 @@ impl Shell {
 
     /// Escape closes whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming_tab.is_some() {
+            self.cancel_tab_rename(window, cx);
+            return;
+        }
         let editing_agent = {
             let s = self.state.read(cx);
             s.renaming_project.is_some() || (s.profile.is_some() && s.profile_editing_description)
@@ -2738,6 +2801,12 @@ impl Render for Shell {
                 cx.listener(|this, _, window, cx| {
                     this.close_popovers(cx);
                     if this.feedback.read(cx).is_open() {
+                        return;
+                    }
+                    // Click outside an inline tab rename commits it (the editing
+                    // pill stops propagation, so this only runs for elsewhere).
+                    if this.renaming_tab.is_some() {
+                        this.commit_tab_rename(window, cx);
                         return;
                     }
                     let pairing = this.pairing_input.read(cx).focus_handle(cx);

@@ -165,6 +165,13 @@ impl ComposerInput {
         self.selected_range = 0..0;
     }
 
+    /// Select the whole contents (inline rename fields).
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
+        self.selected_range = 0..self.content.len();
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.selected_range = 0..0;

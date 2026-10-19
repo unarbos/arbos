@@ -3928,6 +3928,39 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 doc.commit();
             }
         }
+        ClientCommand::Retitle {
+            project_id,
+            chat_id,
+            title,
+        } => {
+            {
+                let mut chats = shared.chats.lock().unwrap();
+                if let Some(c) = chats.iter_mut().find(|c| c.id == chat_id) {
+                    c.title = title.clone();
+                }
+            }
+            emit_chats(shared);
+            {
+                let docs = shared.docs.lock().unwrap();
+                if let Some(doc) = docs.get(&chat_id) {
+                    let _ =
+                        doc.push_command("retitle", json!({ "title": title }), &shared.device_id());
+                    doc.commit();
+                }
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(
+                        &format!("/projects/{project_id}/chats/{chat_id}"),
+                        json!({ "title": title }),
+                    )
+                    .await
+                {
+                    shared.notice(format!("Rename: {err:#}"));
+                }
+            });
+        }
         ClientCommand::NewChat {
             project_id,
             chat_id: local_id,

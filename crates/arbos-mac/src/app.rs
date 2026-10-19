@@ -1998,6 +1998,35 @@ impl AppState {
         true
     }
 
+    /// Double-click on a chat tab: set its title (registry + doc `retitle`).
+    pub fn retitle_chat(&mut self, chat_id: Id, title: String, cx: &mut Context<Self>) {
+        let title = title.trim().chars().take(34).collect::<String>();
+        if title.is_empty() {
+            return;
+        }
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
+            return;
+        };
+        let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        else {
+            return;
+        };
+        if chat.title == title {
+            return;
+        }
+        chat.title = title.clone();
+        self.command(ClientCommand::Retitle {
+            project_id,
+            chat_id,
+            title,
+        });
+        cx.notify();
+    }
+
     pub fn send(
         &mut self,
         text: String,
