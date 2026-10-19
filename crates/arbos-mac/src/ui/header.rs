@@ -168,7 +168,6 @@ pub fn render(
             }));
     } else {
         let avatar_state = state.avatar_state(&space.id);
-        let streaming = state.project_is_streaming(&space.id);
         let machine = state.machine.shown_state();
         let pid = space.id.clone();
         let can_rename = !space.is_guest();
@@ -176,9 +175,7 @@ pub fn render(
             .renaming_project
             .as_ref()
             .is_some_and(|p| p == &space.id);
-        let sub = if streaming {
-            Some(format!("{} is working", space.name))
-        } else if space.is_guest() {
+        let sub = if space.is_guest() {
             Some(format!(
                 "shared by @{}",
                 space
