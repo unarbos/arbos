@@ -581,9 +581,17 @@ impl Shell {
         cx.notify();
     }
 
+    /// Enter in the name field: sidebar / header rename, or the agent page's.
     pub(crate) fn commit_rename_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(project_id) = self.state.read(cx).renaming_project.clone() else {
-            return;
+        let project_id = {
+            let state = self.state.read(cx);
+            match (&state.renaming_project, &state.profile) {
+                (Some(id), _) => id.clone(),
+                (None, Some(ProfilePage::Agent { project_id })) if state.profile_editing_name => {
+                    project_id.clone()
+                }
+                _ => return,
+            }
         };
         let name = self.agent_name_input.read(cx).text().to_string();
         self.state
@@ -597,15 +605,17 @@ impl Shell {
         cx.notify();
     }
 
-    /// The agent page's "Edit": name and description become fields, inside the
-    /// sheet (owned agents only); the name field takes the keyboard.
+    /// The agent page's "Edit" (`description: true`) or a double-click on its
+    /// name (`false`): the name — and the description — become fields inside
+    /// the sheet (owned agents only); the name field takes the keyboard.
     pub(crate) fn start_edit_agent(
         &mut self,
         project_id: crate::model::Id,
+        description: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (name, description) = {
+        let (name, about) = {
             let state = self.state.read(cx);
             let Some(p) = state.project(&project_id) else {
                 return;
@@ -619,11 +629,16 @@ impl Shell {
         self.row_menu = None;
         self.agent_name_input
             .update(cx, |input, cx| input.set_text(name, cx));
-        self.description_input
-            .update(cx, |input, cx| input.set_text(description, cx));
+        if description {
+            self.description_input
+                .update(cx, |input, cx| input.set_text(about, cx));
+        }
         self.state.update(cx, |s, cx| {
-            s.start_renaming(project_id, cx);
-            s.set_profile_editing_description(true, cx);
+            s.profile_editing_name = true;
+            if description {
+                s.set_profile_editing_description(true, cx);
+            }
+            cx.notify();
         });
         let handle = self.agent_name_input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
@@ -647,14 +662,13 @@ impl Shell {
             let Some(ProfilePage::Agent { project_id }) = state.profile.clone() else {
                 return;
             };
-            let renaming = state.renaming_project.as_ref() == Some(&project_id);
             let current = state
                 .project(&project_id)
                 .and_then(|p| p.description.clone())
                 .unwrap_or_default();
             (
                 project_id,
-                renaming,
+                state.profile_editing_name,
                 state.profile_editing_description,
                 current,
             )
@@ -715,7 +729,9 @@ impl Shell {
         }
         let editing_agent = {
             let s = self.state.read(cx);
-            s.renaming_project.is_some() || (s.profile.is_some() && s.profile_editing_description)
+            s.renaming_project.is_some()
+                || (s.profile.is_some()
+                    && (s.profile_editing_name || s.profile_editing_description))
         };
         if editing_agent {
             // The agent page's edit mode (name and/or description fields) ends

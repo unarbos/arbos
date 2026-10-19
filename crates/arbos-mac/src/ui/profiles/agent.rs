@@ -128,11 +128,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let picker_open = state.profile_picker_open;
     let pick = state.agent_pick;
     let editing = state.profile_editing_description && mine;
-    let renaming = mine
-        && state
-            .renaming_project
-            .as_ref()
-            .is_some_and(|p| p == &project.id);
+    let renaming = state.profile_editing_name && mine;
     let muted = state.is_muted(&project.id);
     let content = collect(state, &chats_of(state, &project.id));
     let pid: Id = project.id.clone();
@@ -189,7 +185,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     if event.click_count() >= 2 {
-                        this.start_rename_agent(p_rename.clone(), window, cx);
+                        this.start_edit_agent(p_rename.clone(), false, window, cx);
                     }
                 }),
             )
@@ -607,18 +603,17 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(body_tab);
     // "Edit" turns the card into its editor, Contacts-style: the name and the
     // description become fields and the button reads "Done" until they are saved.
-    let edit =
-        mine.then(|| {
-            if renaming || editing {
-                glass::sheet_button("profile-done", "Done", &theme)
-                    .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
-            } else {
-                let p = pid.clone();
-                glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
-                    move |this, _, window, cx| this.start_edit_agent(p.clone(), window, cx),
-                ))
-            }
-        });
+    let edit = mine.then(|| {
+        if renaming || editing {
+            glass::sheet_button("profile-done", "Done", &theme)
+                .on_click(cx.listener(|this, _, window, cx| this.finish_edit_agent(window, cx)))
+        } else {
+            let p = pid.clone();
+            glass::sheet_button("profile-edit", "Edit", &theme).on_click(cx.listener(
+                move |this, _, window, cx| this.start_edit_agent(p.clone(), true, window, cx),
+            ))
+        }
+    });
     Some(frame(body, edit, &theme, cx))
 }
 

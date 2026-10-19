@@ -351,7 +351,12 @@ pub struct AppState {
     pub agent_pick: Option<AgentPick>,
     /// Agent page: the owner is editing the description inline.
     pub profile_editing_description: bool,
-    /// Double-click rename: the project whose name is being edited inline.
+    /// Agent page: the owner is editing the name inline ("Edit" or a
+    /// double-click on the name). Separate from `renaming_project` so the
+    /// sidebar and header under the page do not grow a field of their own.
+    pub profile_editing_name: bool,
+    /// Double-click rename (sidebar / header): the project whose name is being
+    /// edited inline.
     pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
@@ -601,6 +606,7 @@ impl AppState {
             profile_more_open: false,
             agent_pick: None,
             profile_editing_description: false,
+            profile_editing_name: false,
             renaming_project: None,
             muted: load_muted(),
             presence_seen: HashMap::new(),
@@ -2748,6 +2754,7 @@ impl AppState {
         self.profile_more_open = false;
         self.agent_pick = None;
         self.profile_editing_description = false;
+        self.profile_editing_name = false;
         self.renaming_project = None;
         cx.notify();
     }
@@ -2783,7 +2790,9 @@ impl AppState {
     }
 
     pub fn cancel_renaming(&mut self, cx: &mut Context<Self>) {
-        if self.renaming_project.take().is_some() {
+        let was = self.renaming_project.take().is_some() || self.profile_editing_name;
+        self.profile_editing_name = false;
+        if was {
             cx.notify();
         }
     }
@@ -2812,12 +2821,14 @@ impl AppState {
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             if p.name == name {
                 self.renaming_project = None;
+                self.profile_editing_name = false;
                 cx.notify();
                 return;
             }
             p.name = name.clone();
         }
         self.renaming_project = None;
+        self.profile_editing_name = false;
         self.command(ClientCommand::SetProjectName { project_id, name });
         cx.notify();
     }
@@ -2830,7 +2841,7 @@ impl AppState {
         self.agent_pick = None;
         let was = self.profile.take().is_some();
         if was {
-            self.renaming_project = None;
+            self.profile_editing_name = false;
             self.profile_editing_description = false;
             cx.notify();
         }
