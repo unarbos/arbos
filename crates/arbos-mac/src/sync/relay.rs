@@ -4323,6 +4323,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            source_project_id,
+            description,
+            color,
         } => {
             let shared = shared.clone();
             tokio::spawn(async move {
@@ -4334,6 +4337,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(i) = avatar_color_index {
                     body["avatar_color_index"] = json!(i);
                 }
+                if let Some(src) = source_project_id {
+                    body["source_project_id"] = json!(src);
+                }
+                if let Some(d) = description.filter(|s| !s.is_empty()) {
+                    body["description"] = json!(d);
+                }
+                if let Some(c) = color.filter(|s| !s.is_empty()) {
+                    body["color"] = json!(c);
+                }
                 match shared.post_json("/projects", body).await {
                     Ok(_) => {
                         if let Err(err) = refresh_registry(&shared).await {
@@ -4341,6 +4353,47 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                         }
                     }
                     Err(err) => shared.notice(format!("New project failed: {err:#}")),
+                }
+            });
+        }
+        ClientCommand::DeleteProject { project_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/projects/{project_id}")).await {
+                    shared.notice(format!("Delete failed: {}", people_error(&err)));
+                }
+                if let Err(err) = refresh_registry(&shared).await {
+                    shared.notice(format!("Relay: {err:#}"));
+                }
+            });
+        }
+        ClientCommand::DeletePeopleChat { chat_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared.delete(&format!("/chats/{chat_id}")).await {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                shared.people.lock().unwrap().remove(&chat_id);
+                shared.with_store(|s| s.delete_doc(&chat_id));
+                let _ = refresh_registry(&shared).await;
+            });
+        }
+        ClientCommand::CloseChat {
+            project_id,
+            chat_id,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/chats/{chat_id}"))
+                    .await
+                {
+                    shared.notice(format!("Delete chat failed: {}", people_error(&err)));
+                }
+                if let Err(err) = refresh_registry(&shared).await {
+                    shared.notice(format!("Relay: {err:#}"));
                 }
             });
         }

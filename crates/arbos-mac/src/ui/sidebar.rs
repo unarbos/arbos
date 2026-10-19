@@ -620,6 +620,7 @@ fn render_row(
             cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                 this.menu_open = false;
                 this.row_menu = None;
+                this.chat_menu = None;
                 if can_rename && event.click_count() >= 2 {
                     this.state
                         .update(cx, |s, cx| s.select_project(id.clone(), cx));
@@ -637,6 +638,7 @@ fn render_row(
             cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
                 cx.stop_propagation();
                 this.menu_open = false;
+                this.chat_menu = None;
                 this.row_menu = Some((menu_id.clone(), event.position));
                 cx.notify();
             }),
@@ -649,6 +651,7 @@ fn render_row(
                 }
                 cx.stop_propagation();
                 this.menu_open = false;
+                this.chat_menu = None;
                 this.row_menu = Some((ctrl_menu_id.clone(), event.position));
                 cx.notify();
             }),
@@ -746,7 +749,7 @@ fn render_row(
 }
 
 /// The right-click menu of a sidebar row (Grok Mac, ref 48): profile, mute,
-/// new chat — existing actions only, anchored at the click.
+/// new chat, fork, delete — anchored at the click.
 pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
@@ -754,6 +757,8 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let space = state.projects.iter().find(|p| p.id == space_id)?.clone();
     let muted = state.is_muted(&space.id);
     let is_people = space.is_people();
+    let can_fork = !is_people && !space.shared;
+    let can_delete = is_people || !space.shared;
     let person = space.person().cloned();
 
     let profile_id = space.id.clone();
@@ -778,6 +783,9 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     };
     let mute_id = space.id.clone();
     let chat_id = space.id.clone();
+    let fork_id = space.id.clone();
+    let delete_id = space.id.clone();
+    let delete_people = is_people;
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     body = body.child(
@@ -835,6 +843,37 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             })),
         );
     }
+    if can_fork || can_delete {
+        body = body.child(glass::menu_divider(&theme));
+    }
+    if can_fork {
+        body = body.child(
+            glass::menu_row("row-menu-fork", "branch", "Fork", false, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let id = fork_id.clone();
+                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+                }),
+            ),
+        );
+    }
+    if can_delete {
+        body = body.child(
+            glass::menu_row("row-menu-delete", "trash", "Delete", true, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let id = delete_id.clone();
+                    this.state.update(cx, |s, cx| {
+                        if delete_people {
+                            s.delete_people_chat(id, cx);
+                        } else {
+                            s.delete_project(id, cx);
+                        }
+                    });
+                }),
+            ),
+        );
+    }
     // Appended straight to the root: taffy places an absolute child relative
     // to its parent, so a static wrapper would push the menu off to the right.
     Some(
@@ -844,5 +883,69 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             .top(at.y)
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(glass::frosted_menu(200.0, &theme, body)),
+    )
+}
+
+/// Right-click / control-click menu on a chat tab or an archived chat row:
+/// Fork (the agent) and Delete (archive, or permanently close when already archived).
+pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
+    let (chat_id, at) = shell.chat_menu.clone()?;
+    let theme = Theme::of(cx).clone();
+    let state = shell.state.read(cx);
+    let chat = state
+        .chats
+        .values()
+        .flatten()
+        .find(|c| c.id == chat_id)?
+        .clone();
+    let project = state.project(&chat.project_id)?.clone();
+    let archived = state.archived_chats.contains(&chat.id);
+    let can_fork = !project.shared && !project.is_people();
+    let can_delete = !chat.is_pinned;
+    let fork_id = project.id.clone();
+    let delete_id = chat.id.clone();
+    let delete_archived = archived;
+
+    let mut body = div().flex().flex_col().gap(px(1.0));
+    if can_fork {
+        body = body.child(
+            glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.chat_menu = None;
+                    this.archived_open = false;
+                    let id = fork_id.clone();
+                    this.state.update(cx, |s, cx| s.duplicate_project(id, cx));
+                }),
+            ),
+        );
+    }
+    if can_delete {
+        body = body.child(
+            glass::menu_row("chat-menu-delete", "trash", "Delete", true, &theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.chat_menu = None;
+                    this.archived_open = false;
+                    let id = delete_id.clone();
+                    this.state.update(cx, |s, cx| {
+                        if delete_archived {
+                            s.delete_chat_tab(id, cx);
+                        } else {
+                            s.close_tab(id, cx);
+                        }
+                    });
+                }),
+            ),
+        );
+    }
+    if !can_fork && !can_delete {
+        return None;
+    }
+    Some(
+        div()
+            .absolute()
+            .left(at.x)
+            .top(at.y)
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(glass::frosted_menu(180.0, &theme, body)),
     )
 }

@@ -1005,6 +1005,9 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            source_project_id: None,
+                            description: None,
+                            color: None,
                         });
                     }
                 }
@@ -3455,9 +3458,143 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            source_project_id: None,
+            description: None,
+            color: None,
         });
         self.push_notice("Creating project…");
         cx.notify();
+    }
+
+    /// Grok / iPhone "Fork": a new agent with the same look and workspace
+    /// context (files + memory). Own agents only; chat history stays empty.
+    pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(src) = self
+            .project(&project_id)
+            .filter(|p| !p.shared && !p.is_people())
+        else {
+            return;
+        };
+        let name = Self::unique_copy_name(&src.name, &self.projects);
+        let description = src.description.clone();
+        let color = Some(src.color.clone());
+        let avatar_color_index = src.avatar_color_override;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+            source_project_id: Some(project_id),
+            description,
+            color,
+        });
+        self.push_notice("Forking…");
+        cx.notify();
+    }
+
+    /// Soft-delete an owned agent from every list (`DELETE /projects/{id}`).
+    pub fn delete_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(p) = self.project(&project_id) else {
+            return;
+        };
+        if p.shared || p.is_people() {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(project_id.as_str()) {
+            self.selected_project = None;
+        }
+        if let Some(tabs) = self.chats.remove(&project_id) {
+            for c in tabs {
+                self.messages.remove(&c.id);
+                self.chat_ui.remove(&c.id);
+                self.archived_chats.remove(&c.id);
+            }
+        }
+        self.active_tab.remove(&project_id);
+        self.last_chats.remove(&project_id);
+        self.projects.retain(|p| p.id != project_id);
+        self.muted.remove(&project_id);
+        self.command(ClientCommand::DeleteProject { project_id });
+        cx.notify();
+    }
+
+    /// Delete a people chat I own (`DELETE /chats/{id}`).
+    pub fn delete_people_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(chat_id.as_str()) {
+            self.selected_project = None;
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        self.chats.remove(&chat_id);
+        self.archived_chats.remove(&chat_id);
+        self.projects.retain(|p| p.id != chat_id);
+        self.muted.remove(&chat_id);
+        self.command(ClientCommand::DeletePeopleChat { chat_id });
+        cx.notify();
+    }
+
+    /// Permanently close a non-pinned chat tab (drops it from Archived too).
+    pub fn delete_chat_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
+            return;
+        };
+        if self
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && c.is_pinned)
+        {
+            return;
+        }
+        self.archived_chats.remove(&chat_id);
+        if let Some(tabs) = self.chats.get_mut(&project_id) {
+            tabs.retain(|c| c.id != chat_id);
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        if self.active_tab.get(&project_id) == Some(&chat_id) {
+            let pick = self
+                .visible_tabs(&project_id)
+                .into_iter()
+                .next()
+                .map(|c| c.id.clone());
+            if let Some(pick) = pick {
+                self.active_tab.insert(project_id.clone(), pick.clone());
+                self.last_chats.insert(project_id.clone(), pick.clone());
+                self.command(ClientCommand::OpenChat { chat_id: pick });
+            } else {
+                self.active_tab.remove(&project_id);
+            }
+        }
+        self.command(ClientCommand::CloseChat {
+            project_id,
+            chat_id,
+        });
+        cx.notify();
+    }
+
+    /// "`Name` copy", then "`Name` copy 2"… so the relay's unique-name check passes.
+    fn unique_copy_name(name: &str, projects: &[Project]) -> String {
+        let owned: HashSet<&str> = projects
+            .iter()
+            .filter(|p| !p.shared && !p.is_people())
+            .map(|p| p.name.as_str())
+            .collect();
+        let base = format!("{name} copy");
+        if !owned.contains(base.as_str()) {
+            return base;
+        }
+        for i in 2..=99 {
+            let candidate = format!("{name} copy {i}");
+            if !owned.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        format!("{name} copy {}", &new_id()[..4])
     }
 
     pub fn fetch_blob(&mut self, key: String, save: bool, cx: &mut Context<Self>) {

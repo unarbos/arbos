@@ -286,7 +286,10 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::InviteToProject { .. }
         | ClientCommand::RemoveProjectMember { .. }
         | ClientCommand::FetchAvatar { .. }
-        | ClientCommand::ArchiveChat { .. } => {}
+        | ClientCommand::ArchiveChat { .. }
+        | ClientCommand::DeleteProject { .. }
+        | ClientCommand::DeletePeopleChat { .. }
+        | ClientCommand::CloseChat { .. } => {}
         ClientCommand::OpenChat { chat_id } => {
             *shared.open_chat.lock().unwrap() = Some(chat_id.clone());
             mark_read(shared, &chat_id);
@@ -786,6 +789,9 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            source_project_id: _,
+            description,
+            color,
         } => {
             let id = new_id();
             let icon = name
@@ -793,11 +799,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .next()
                 .map(|c| c.to_uppercase().to_string())
                 .unwrap_or_else(|| "Ω".into());
+            let accent = color.unwrap_or_else(|| "#8b7cf6".into());
             shared.projects.lock().unwrap().push(Project {
                 id: id.clone(),
                 name: name.clone(),
                 icon,
-                color: "#8b7cf6".into(),
+                color: accent,
                 state: BoxState::Awake,
                 state_detail: None,
                 wake_progress: None,
@@ -813,7 +820,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 owner_handle: None,
                 avatar: None,
                 avatar_color: None,
-                description: None,
+                description,
                 owner_person: None,
                 machine_info: None,
                 muted: false,
