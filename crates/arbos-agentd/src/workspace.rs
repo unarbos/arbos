@@ -291,7 +291,8 @@ impl Supervisor {
             }));
         }
         // Command loop. Each command runs on its own task: `send`/`answer` serialize on the
-        // agent's turn lock (FIFO), while `stop` and settings changes land at once, mid-turn.
+        // agent's turn lock (FIFO), while `stop`/`steer` (Guide) and settings changes land at
+        // once, mid-turn.
         {
             let agent2 = agent.clone();
             tasks.push(tokio::spawn(async move {

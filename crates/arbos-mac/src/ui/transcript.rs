@@ -403,7 +403,8 @@ impl Transcript {
             voice_mode: state.voice_mode,
         };
         let me_id = state.me_id();
-        let new_rows = build_rows(&messages, show_details, speech, &me_id);
+        let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
+        let new_rows = build_rows(&messages, show_details, speech, &me_id, &thumb_keys);
 
         // Veils: observe text growth of live markdown rows.
         for row in &new_rows {
@@ -1347,11 +1348,15 @@ fn is_json_block(block: &Block) -> bool {
 /// questions, errors. Everything the agent did (tool calls, status events,
 /// JSON, usage) is hidden; the Details drawer has it. One indicator per chat
 /// pulses under the last message while anything runs.
+///
+/// `thumb_keys` are blob refs that already have a decoded preview; they are
+/// mixed into row versions so a late thumbnail reloads the picture row.
 pub fn build_rows(
     messages: &[Message],
     show_details: bool,
     speech: SpeechRows<'_>,
     me_id: &str,
+    thumb_keys: &HashSet<&str>,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -1418,13 +1423,19 @@ pub fn build_rows(
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
                 for (part_id, attachment) in &attachment_parts {
+                    let has_thumb = attachment
+                        .blob_ref
+                        .as_deref()
+                        .is_some_and(|k| thumb_keys.contains(k));
                     rows.push(Row {
                         version: hash_version(
                             &(
                                 &attachment.name,
                                 &attachment.title,
                                 attachment.bytes,
+                                &attachment.blob_ref,
                                 is_mine,
+                                has_thumb,
                             ),
                             false,
                         ),
@@ -1651,18 +1662,30 @@ pub fn build_rows(
                                 block_ix += 1;
                             }
                         }
-                        Part::Attachment { id, attachment } => rows.push(Row {
-                            version: hash_version(
-                                &(&attachment.name, &attachment.title, attachment.bytes),
-                                false,
-                            ),
-                            id: format!("{}#{}", message.id, id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Attachment {
-                                attachment: attachment.clone(),
-                                mine: false,
-                            },
-                        }),
+                        Part::Attachment { id, attachment } => {
+                            let has_thumb = attachment
+                                .blob_ref
+                                .as_deref()
+                                .is_some_and(|k| thumb_keys.contains(k));
+                            rows.push(Row {
+                                version: hash_version(
+                                    &(
+                                        &attachment.name,
+                                        &attachment.title,
+                                        attachment.bytes,
+                                        &attachment.blob_ref,
+                                        has_thumb,
+                                    ),
+                                    false,
+                                ),
+                                id: format!("{}#{}", message.id, id),
+                                message_id: message.id.clone(),
+                                kind: RowKind::Attachment {
+                                    attachment: attachment.clone(),
+                                    mine: false,
+                                },
+                            })
+                        }
                         // Legacy `waiting_user` row: only when no `question` part carries it.
                         Part::Status {
                             id,

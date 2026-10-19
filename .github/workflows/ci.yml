@@ -6,7 +6,9 @@ name: CI
 
 on:
   push:
-    branches: [main, arbos-v2, "cursor/**"]
+    # gate/** = the feedback loop's integration branches (current main + the ready
+    # fix branches); this run is the Linux half of its pre-merge gate.
+    branches: [main, arbos-v2, "cursor/**", "gate/**"]
     # The phone app has its own workflow (ios.yml); an apps/ios-only push needs
     # no Rust gate and no Mac release.
     paths-ignore: ["apps/ios/**"]

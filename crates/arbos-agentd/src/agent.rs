@@ -1107,6 +1107,8 @@ impl Agent {
         let res = match cmd.kind.as_str() {
             "send" => self.handle_send(chat_id, &host, &cmd).await,
             "stop" => self.handle_stop(chat_id).await,
+            // Guide: inject into the running turn (no turn_lock). Same as stop — mid-task.
+            "steer" | "guide" => self.handle_steer(chat_id, &host, &cmd).await,
             "answer" => self.handle_send(chat_id, &host, &cmd).await,
             "retitle" => {
                 let title = cmd
@@ -1164,7 +1166,7 @@ impl Agent {
                 );
                 // iOS never renders command status. A send that failed before any assistant
                 // row would leave the user message alone forever — surface an error with Retry.
-                if matches!(cmd.kind.as_str(), "send" | "answer") {
+                if matches!(cmd.kind.as_str(), "send" | "answer" | "steer" | "guide") {
                     let user_msg = cmd
                         .payload
                         .get("messageId")
@@ -1176,6 +1178,8 @@ impl Agent {
                                 && m.rest.get("inReplyTo").and_then(Value::as_str) == Some(user_msg)
                                 && m.status != "cancelled"
                         });
+                        // A failed steer still has the live turn's assistant row; only surface a
+                        // new error bubble when nothing is answering this user message.
                         if !has_reply {
                             let id = ulid();
                             h.doc
@@ -1279,6 +1283,62 @@ impl Agent {
                 .add_status_part(&msg_id, "stopped", "Stopped by the user");
         }
         tracing::info!(chat_id, "stop: pi turn aborted");
+        Ok(())
+    }
+
+    /// `steer` / `guide` runs out of band (no turn lock): inject the user's words into the
+    /// currently running pi turn via `RpcCommand::Steer`. When nothing is running, fall back to
+    /// a normal `send` so a late Guide still lands.
+    async fn handle_steer(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        cmd: &CommandView,
+    ) -> Result<()> {
+        let user_msg_id = cmd
+            .payload
+            .get("messageId")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        let user_text = {
+            let h = host.lock().await;
+            h.doc
+                .message(&user_msg_id)
+                .map(|m| m.text())
+                .unwrap_or_default()
+        };
+        if user_text.trim().is_empty() {
+            return Err(anyhow!("steer: message {user_msg_id} not found or empty"));
+        }
+        let running_here = {
+            let tl = self.turn.lock().await;
+            matches!(tl.as_ref(), Some(t) if t.chat_id == chat_id)
+        };
+        if !running_here {
+            tracing::info!(chat_id, "steer: no turn running; falling back to send");
+            return self.handle_send(chat_id, host, cmd).await;
+        }
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "user",
+            Some("user"),
+            &user_text,
+            Some(&json!({ "message_id": user_msg_id, "steer": true })),
+        );
+        let pi = self.pi().await?;
+        let r = pi
+            .call(RpcCommand::Steer {
+                id: pi.next_id("s"),
+                message: user_text,
+            })
+            .await?;
+        if !r.success {
+            return Err(anyhow!("steer rejected: {}", r.error.unwrap_or_default()));
+        }
+        tracing::info!(chat_id, "steer: injected into running turn");
         Ok(())
     }
 

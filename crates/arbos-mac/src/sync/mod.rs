@@ -355,6 +355,14 @@ pub enum ClientCommand {
         /// People-chat / hover-reply: the message this send answers (`replyTo`).
         reply_to: Option<String>,
     },
+    /// Guide: inject `text` into the agent's currently running turn (`steer` command).
+    /// Same message shape as `Send`; the box calls pi/Prime `Steer` instead of queuing.
+    Steer {
+        chat_id: Id,
+        message_id: Id,
+        text: String,
+        reply_to: Option<String>,
+    },
     /// Reply to an `ask_user` question (S8). Same shape as `Send`, different outbox kind.
     /// A typed widget answer carries `question_id` and the structured `value`; `text` is
     /// the rendered form shown in the user's bubble.

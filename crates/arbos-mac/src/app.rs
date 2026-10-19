@@ -1854,12 +1854,17 @@ impl AppState {
         reply_to: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.send_with(text, attachments, None, reply_to, cx);
+        self.send_with(text, attachments, None, reply_to, false, cx);
+    }
+
+    /// Guide: inject `text` into the agent's running turn instead of queuing a follow-up.
+    pub fn guide(&mut self, text: String, reply_to: Option<String>, cx: &mut Context<Self>) {
+        self.send_with(text, Vec::new(), None, reply_to, true, cx);
     }
 
     /// F11: a spoken message; `wav` is kept on the row as an `audio` attachment.
     pub fn send_voice(&mut self, text: String, wav: Arc<Vec<u8>>, cx: &mut Context<Self>) {
-        self.send_with(text, Vec::new(), Some(wav), None, cx);
+        self.send_with(text, Vec::new(), Some(wav), None, false, cx);
     }
 
     /// Hover reply: the next send in this chat answers `message_id`.
@@ -1882,13 +1887,15 @@ impl AppState {
         attachments: Vec<PathBuf>,
         voice_wav: Option<Arc<Vec<u8>>>,
         reply_to: Option<String>,
+        steer: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(chat_id) = self.active_chat_id() else {
             return;
         };
         let message_id = new_id();
-        let answer = self.chat_needs_answer(&chat_id);
+        // Guide never answers a card — it steers the live turn.
+        let answer = !steer && self.chat_needs_answer(&chat_id);
         {
             let ui = self.chat_ui.entry(chat_id.clone()).or_default();
             if !ui.composer_dropped {
@@ -1908,29 +1915,51 @@ impl AppState {
             chat.title = title_from(&text);
         }
         // Optimistic echo: the row shows at once; the source's frame with the
-        // same id replaces it (§3.6).
-        let mut parts: Vec<Part> = attachments
-            .iter()
-            .map(|path| {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("attachment")
-                    .to_string();
-                let mime = mime_for_path(path).to_string();
-                Part::Attachment {
-                    id: new_id(),
-                    attachment: crate::model::Attachment {
-                        name,
-                        mime,
-                        blob_ref: None,
-                        bytes: std::fs::metadata(path).ok().map(|m| m.len()),
-                        kind: None,
-                        title: None,
-                    },
+        // same id replaces it (§3.6). Image files get a local thumbnail so the
+        // card shows a picture immediately, not "No preview".
+        let mut parts: Vec<Part> = Vec::new();
+        for path in &attachments {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_string();
+            let mime = mime_for_path(path).to_string();
+            let att_id = new_id();
+            let mut blob_ref = None;
+            let bytes = if let Ok(data) = std::fs::read(path) {
+                let probe = crate::model::Attachment {
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    blob_ref: None,
+                    bytes: Some(data.len() as u64),
+                    kind: None,
+                    title: None,
+                };
+                if probe.is_image() {
+                    if let Some(image) = decode_image(&data) {
+                        let key = format!("local:{att_id}");
+                        self.thumbnails.insert(key.clone(), Arc::new(image));
+                        self.thumbnails_requested.insert(key.clone());
+                        blob_ref = Some(key);
+                    }
                 }
-            })
-            .collect();
+                Some(data.len() as u64)
+            } else {
+                std::fs::metadata(path).ok().map(|m| m.len())
+            };
+            parts.push(Part::Attachment {
+                id: att_id,
+                attachment: crate::model::Attachment {
+                    name,
+                    mime,
+                    blob_ref,
+                    bytes,
+                    kind: None,
+                    title: None,
+                },
+            });
+        }
         if voice_wav.is_some() {
             parts.push(Part::Attachment {
                 id: new_id(),
@@ -1956,7 +1985,12 @@ impl AppState {
                 chat_id: chat_id.clone(),
                 role: Role::User,
                 sender: "user".into(),
-                status: MessageStatus::Queued,
+                // Guide lands in the live turn (not queued behind it).
+                status: if steer {
+                    MessageStatus::Done
+                } else {
+                    MessageStatus::Queued
+                },
                 turn: None,
                 decision: None,
                 subagent_id: None,
@@ -1981,7 +2015,7 @@ impl AppState {
                 model: None,
                 effort: None,
                 created_at: now_ms(),
-                completed_at: None,
+                completed_at: if steer { Some(now_ms()) } else { None },
                 call_id: None,
                 activity: None,
                 pending: true,
@@ -2003,6 +2037,13 @@ impl AppState {
                 text,
                 question_id,
                 value,
+            });
+        } else if steer {
+            self.command(ClientCommand::Steer {
+                chat_id: chat_id.clone(),
+                message_id,
+                text,
+                reply_to,
             });
         } else if let Some(wav) = voice_wav {
             self.command(ClientCommand::SendVoice {
@@ -3491,6 +3532,10 @@ impl AppState {
                 let Some(key) = attachment.blob_ref.clone() else {
                     continue;
                 };
+                // Optimistic send stores a decoded preview under `local:…`.
+                if key.starts_with("local:") {
+                    continue;
+                }
                 if !self.thumbnails_requested.insert(key.clone()) {
                     continue;
                 }

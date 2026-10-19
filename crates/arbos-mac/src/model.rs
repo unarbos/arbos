@@ -189,6 +189,7 @@ pub enum SpaceKind {
 
 /// An Arbos user as the relay lists them (`GET /users/search`, chat members).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "PersonWire")]
 pub struct Person {
     /// `gh_<github id>`.
     #[serde(default)]
@@ -202,7 +203,7 @@ pub struct Person {
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
     /// D79: the avatar gradient in effect (0–6) when the relay sends it.
-    #[serde(default, alias = "avatar_color_index_effective")]
+    #[serde(default)]
     pub avatar_color_index: Option<u8>,
     /// `member` (has signed in) or `invited` (placeholder).
     #[serde(default)]
@@ -216,6 +217,49 @@ pub struct Person {
     /// API §9: seen within the last 90 s.
     #[serde(default)]
     pub online: bool,
+}
+
+#[derive(Deserialize)]
+struct PersonWire {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    handle: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    avatar_url: String,
+    #[serde(default)]
+    avatar_color_index: Option<u8>,
+    #[serde(default)]
+    avatar_color_index_effective: Option<u8>,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    last_seen_at: Option<i64>,
+    #[serde(default)]
+    online: bool,
+}
+
+impl From<PersonWire> for Person {
+    fn from(w: PersonWire) -> Self {
+        Self {
+            id: w.id,
+            handle: w.handle,
+            name: w.name,
+            avatar_url: w.avatar_url,
+            avatar_color_index: avatar_color_in_effect(
+                w.avatar_color_index,
+                w.avatar_color_index_effective,
+            ),
+            status: w.status,
+            role: w.role,
+            last_seen_at: w.last_seen_at,
+            online: w.online,
+        }
+    }
 }
 
 impl Person {
@@ -266,6 +310,7 @@ impl CallKind {
 /// The relay's `sender{}`: who started a call or sits in it (also the shape
 /// LiveKit participant metadata carries).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "SenderWire")]
 pub struct Sender {
     /// `user` or `agent`.
     #[serde(default)]
@@ -282,10 +327,50 @@ pub struct Sender {
     #[serde(default)]
     pub avatar_color: Option<String>,
     /// D79: the agent's avatar gradient in effect (0–6), when the relay sends it.
-    #[serde(default, alias = "avatar_color_index_effective")]
+    #[serde(default)]
     pub avatar_color_index: Option<u8>,
     #[serde(default, deserialize_with = "null_to_empty")]
     pub avatar_url: String,
+}
+
+#[derive(Deserialize)]
+struct SenderWire {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    id: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    name: String,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    handle: String,
+    #[serde(default)]
+    avatar: Option<String>,
+    #[serde(default)]
+    avatar_color: Option<String>,
+    #[serde(default)]
+    avatar_color_index: Option<u8>,
+    #[serde(default)]
+    avatar_color_index_effective: Option<u8>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    avatar_url: String,
+}
+
+impl From<SenderWire> for Sender {
+    fn from(w: SenderWire) -> Self {
+        Self {
+            kind: w.kind,
+            id: w.id,
+            name: w.name,
+            handle: w.handle,
+            avatar: w.avatar,
+            avatar_color: w.avatar_color,
+            avatar_color_index: avatar_color_in_effect(
+                w.avatar_color_index,
+                w.avatar_color_index_effective,
+            ),
+            avatar_url: w.avatar_url,
+        }
+    }
 }
 
 impl Sender {
@@ -554,6 +639,7 @@ pub enum ReplyPolicy {
 
 /// A project agent someone added to a people chat.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "AgentMemberWire")]
 pub struct AgentMember {
     pub project_id: Id,
     pub name: String,
@@ -571,7 +657,7 @@ pub struct AgentMember {
     #[serde(default)]
     pub avatar_color: Option<String>,
     /// D79: the agent's avatar gradient in effect (0–6).
-    #[serde(default, alias = "avatar_color_index_effective")]
+    #[serde(default)]
     pub avatar_color_index: Option<u8>,
     /// API §9: the agent's description and talking model.
     #[serde(default)]
@@ -581,6 +667,64 @@ pub struct AgentMember {
     /// API §9: `project.owner` with presence.
     #[serde(default)]
     pub owner: Option<Person>,
+}
+
+#[derive(Deserialize)]
+struct AgentMemberWire {
+    #[serde(default)]
+    project_id: Id,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    icon: String,
+    #[serde(default)]
+    color: String,
+    #[serde(default)]
+    handle: String,
+    #[serde(default)]
+    owner_id: String,
+    #[serde(default)]
+    owner_handle: String,
+    #[serde(default)]
+    reply_policy: ReplyPolicy,
+    #[serde(default)]
+    avatar: Option<String>,
+    #[serde(default)]
+    avatar_color: Option<String>,
+    #[serde(default)]
+    avatar_color_index: Option<u8>,
+    #[serde(default)]
+    avatar_color_index_effective: Option<u8>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    owner: Option<Person>,
+}
+
+impl From<AgentMemberWire> for AgentMember {
+    fn from(w: AgentMemberWire) -> Self {
+        Self {
+            project_id: w.project_id,
+            name: w.name,
+            icon: w.icon,
+            color: w.color,
+            handle: w.handle,
+            owner_id: w.owner_id,
+            owner_handle: w.owner_handle,
+            reply_policy: w.reply_policy,
+            avatar: w.avatar,
+            avatar_color: w.avatar_color,
+            avatar_color_index: avatar_color_in_effect(
+                w.avatar_color_index,
+                w.avatar_color_index_effective,
+            ),
+            description: w.description,
+            model: w.model,
+            owner: w.owner,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -688,6 +832,14 @@ fn default_true() -> bool {
 
 pub fn null_to_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+/// Prefer `avatar_color_index_effective` when the relay sends both that and
+/// `avatar_color_index`. Serde's `alias` rejects the pair as a duplicate field,
+/// which made every `POST …/calls` answer fail to parse (`The relay answered
+/// without a call.`).
+fn avatar_color_in_effect(override_idx: Option<u8>, effective: Option<u8>) -> Option<u8> {
+    effective.or(override_idx)
 }
 
 fn de_turn<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<TurnKind>, D::Error> {
@@ -853,6 +1005,11 @@ impl Attachment {
     #[allow(dead_code)]
     pub fn is_audio(&self) -> bool {
         self.kind() == AttachmentKind::Audio || self.mime.starts_with("audio/")
+    }
+
+    /// An image that should render as a picture in the transcript, not a file name.
+    pub fn is_image(&self) -> bool {
+        self.kind() == AttachmentKind::Image || self.mime.starts_with("image/")
     }
 }
 

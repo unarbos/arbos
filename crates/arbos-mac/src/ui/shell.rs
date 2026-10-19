@@ -194,6 +194,11 @@ impl Shell {
                     this.state
                         .update(cx, |s, cx| s.send(text, attachments, reply_to, cx));
                 }
+                ComposerEvent::Guide { text, reply_to } => {
+                    let text = text.clone();
+                    let reply_to = reply_to.clone();
+                    this.state.update(cx, |s, cx| s.guide(text, reply_to, cx));
+                }
                 ComposerEvent::Stop => this.state.update(cx, |s, cx| s.stop(cx)),
             },
         )

@@ -389,6 +389,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 .collect();
             send_user(shared, chat_id, message_id, text, parts, reply_to);
         }
+        ClientCommand::Steer {
+            chat_id,
+            message_id,
+            text,
+            reply_to,
+        } => {
+            // Fixture has no live pi turn; land the bubble like a normal send.
+            send_user(shared, chat_id, message_id, text, Vec::new(), reply_to);
+        }
         ClientCommand::SendVoice {
             chat_id,
             message_id,

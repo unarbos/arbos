@@ -16,7 +16,7 @@
 <body class="welcome">
   <main class="welcome-main">
     <a class="brand" href="/" aria-label="Arbos home">
-      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark-small"/></svg>
       <span class="brand-name">Arbos</span>
     </a>
     <div class="welcome-card" data-state="signed-in">
@@ -44,14 +44,9 @@
   </main>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
-      <mask id="arbos-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-        <rect width="64" height="64" fill="#fff"/>
-        <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="#000" stroke-width="8" stroke-linecap="round" fill="none"/>
-      </mask>
-      <g id="arbos-mark" mask="url(#arbos-cut)">
-        <circle cx="32" cy="26" r="24" fill="currentColor"/>
-        <path d="M26 44h12v10a6 6 0 0 1-12 0z" fill="currentColor"/>
-      </g>
+      <!-- Arbos mark (acacia, D84): master, and the pixel-hinted cut for renders at or below 32 px. -->
+      <g id="arbos-mark"><path fill="currentColor" transform="translate(0 5.4) scale(1 0.8)" d="M13 27A6 6 0 1 1 13.209 15.004A4 4 0 0 0 16.963 12.719A10 10 0 0 1 29.286 7.555A8 8 0 0 0 35.865 6.956A10.4 10.4 0 0 1 50.034 10.847A4.5 4.5 0 0 0 52.619 12.919A7.2 7.2 0 0 1 50.5 27Z"/><path fill="currentColor" d="M22 58C26.1 58 28.4 55.6 28.8 52C29.1 49.3 29.2 45.5 29.2 42.5C29.2 38.5 23.8 31 19 25H25.6C28.2 28.8 30.4 34.4 32 34.4C33.6 34.4 35.8 28.8 38.4 25H45C40.2 31 34.8 38.5 34.8 42.5C34.8 45.5 34.9 49.3 35.2 52C35.6 55.6 37.9 58 42 58Z"/></g>
+      <g id="arbos-mark-small"><path fill="currentColor" transform="translate(4 8) scale(1.1045 1.1682) translate(-7 -9.88) translate(0 5.4) scale(1 0.8)" d="M13 27A6 6 0 1 1 13.209 15.004A4 4 0 0 0 16.963 12.719A10 10 0 0 1 29.286 7.555A8 8 0 0 0 35.865 6.956A10.4 10.4 0 0 1 50.034 10.847A4.5 4.5 0 0 0 52.619 12.919A7.2 7.2 0 0 1 50.5 27Z"/><path fill="currentColor" d="M20.5 60C25 60 28 58.2 28 54V46.5C28 42 22 34 15 27H23.2C26 31.5 29.5 40 32 40C34.5 40 38 31.5 40.8 27H49C42 34 36 42 36 46.5V54C36 58.2 39 60 43.5 60Z"/></g>
     </defs>
   </svg>
 </body>

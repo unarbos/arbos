@@ -1,10 +1,11 @@
 //! The composer, Grok Bot layout: a "+" circle for attachments, the pill
 //! field ("Message <name>") with the hold-to-talk mic (transcribe), and the
-//! round white button that sends text, stops a running turn, or starts a call
-//! when empty — same as the iPhone (mic + phone; calls start audio-only).
-//! Hand-rolled multi-line text input with IME (`EntityInputHandler`,
-//! zeron-study §4.6). Enter sends, Shift+Enter inserts a newline. The model
-//! and reasoning pickers open from the header's "…" menu.
+//! round white button that sends text, Guides a running turn, stops when the
+//! field is empty mid-turn, or starts a call when empty — same as the iPhone
+//! (mic + phone; calls start audio-only). Hand-rolled multi-line text input
+//! with IME (`EntityInputHandler`, zeron-study §4.6). Enter sends (or Guides
+//! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
+//! open from the header's "…" menu.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -73,6 +74,11 @@ pub enum ComposerEvent {
     Send {
         text: String,
         attachments: Vec<PathBuf>,
+        reply_to: Option<String>,
+    },
+    /// Inject `text` into the agent's currently running turn (Guide).
+    Guide {
+        text: String,
         reply_to: Option<String>,
     },
     Stop,
@@ -1156,6 +1162,12 @@ impl Composer {
                     cx.notify();
                     return;
                 }
+                let running = self
+                    .state
+                    .read(cx)
+                    .active_chat_id()
+                    .map(|id| self.state.read(cx).chat_is_streaming(&id))
+                    .unwrap_or(false);
                 let attachments = std::mem::take(&mut self.attachments);
                 self.input.update(cx, |input, cx| input.clear(cx));
                 let reply_to = self.state.read(cx).active_chat_id().and_then(|cid| {
@@ -1165,11 +1177,17 @@ impl Composer {
                         .get(&cid)
                         .and_then(|ui| ui.reply_to.clone())
                 });
-                cx.emit(ComposerEvent::Send {
-                    text,
-                    attachments,
-                    reply_to,
-                });
+                // Mid-task + typed text → Guide (steer into the live turn). Attachments still
+                // queue as a normal send so the box can fetch them for the next turn.
+                if running && !text.is_empty() && attachments.is_empty() {
+                    cx.emit(ComposerEvent::Guide { text, reply_to });
+                } else {
+                    cx.emit(ComposerEvent::Send {
+                        text,
+                        attachments,
+                        reply_to,
+                    });
+                }
             }
         }
         self.open_picker = None;
@@ -1504,63 +1522,90 @@ impl Render for Composer {
             }
         };
 
-        // The round primary button: send text, stop a running turn when the
-        // field is empty, or start / end a call when idle and empty (iPhone:
-        // phone next to the mic; calls start audio-only).
+        // The round primary button: Guide while a turn is running and the field
+        // has text; otherwise send, stop when empty mid-turn, or start / end a
+        // call when idle and empty (iPhone: phone next to the mic; calls start
+        // audio-only).
         let hanging_up = in_call || in_livekit;
-        let (glyph, action): (&str, ButtonAction) = if has_text {
+        let guide = running && has_text && self.attachments.is_empty();
+        let (glyph, action): (&str, ButtonAction) = if guide {
+            ("", ButtonAction::Guide)
+        } else if has_text {
             ("arrow-up", ButtonAction::Send)
         } else if running {
             ("stop", ButtonAction::Stop)
         } else {
             ("phone", ButtonAction::Call)
         };
-        let primary_button = div()
-            .id("composer-send")
-            .size(px(SEND_BUTTON))
-            .flex_shrink_0()
-            .rounded_full()
-            .bg(if action == ButtonAction::Call && hanging_up {
-                theme.danger
-            } else {
-                theme.primary
-            })
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.88))
-            .child(icon(
-                glyph,
-                if glyph == "stop" { 14.0 } else { 16.0 },
-                if action == ButtonAction::Call && hanging_up {
-                    theme.text
+        let primary_button = if action == ButtonAction::Guide {
+            div()
+                .id("composer-guide")
+                .h(px(SEND_BUTTON))
+                .px(px(14.0))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(theme.primary)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.88))
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.on_primary)
+                        .child("Guide"),
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
+        } else {
+            div()
+                .id("composer-send")
+                .size(px(SEND_BUTTON))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(if action == ButtonAction::Call && hanging_up {
+                    theme.danger
                 } else {
-                    theme.on_primary
-                },
-            ))
-            .on_click(cx.listener(move |this, _, window, cx| match action {
-                ButtonAction::Send => this.submit(window, cx),
-                ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
-                ButtonAction::Call => {
-                    let live = this.state.read(cx).my_call.is_some();
-                    let voice_on = this.voice.read(cx).in_call();
-                    if live {
-                        this.state.update(cx, |s, cx| s.leave_call(cx));
-                    } else if voice_on {
-                        this.voice.update(cx, |v, cx| v.toggle_call(cx));
-                    } else if this
-                        .state
-                        .read(cx)
-                        .selected()
-                        .is_some_and(callview::callable)
-                    {
-                        // Audio-only; camera is toggled on the call screen.
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                    theme.primary
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|s| s.opacity(0.88))
+                .child(icon(
+                    glyph,
+                    if glyph == "stop" { 14.0 } else { 16.0 },
+                    if action == ButtonAction::Call && hanging_up {
+                        theme.text
+                    } else {
+                        theme.on_primary
+                    },
+                ))
+                .on_click(cx.listener(move |this, _, window, cx| match action {
+                    ButtonAction::Send | ButtonAction::Guide => this.submit(window, cx),
+                    ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
+                    ButtonAction::Call => {
+                        let live = this.state.read(cx).my_call.is_some();
+                        let voice_on = this.voice.read(cx).in_call();
+                        if live {
+                            this.state.update(cx, |s, cx| s.leave_call(cx));
+                        } else if voice_on {
+                            this.voice.update(cx, |v, cx| v.toggle_call(cx));
+                        } else if this
+                            .state
+                            .read(cx)
+                            .selected()
+                            .is_some_and(callview::callable)
+                        {
+                            // Audio-only; camera is toggled on the call screen.
+                            this.state
+                                .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                        }
                     }
-                }
-            }));
+                }))
+        };
 
         // Hold to record a voice memo, or click to toggle recording. Idle it is
         // Grok Mac's filled round mic (black on light, white on dark).
@@ -1864,6 +1909,7 @@ impl Render for Composer {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonAction {
     Send,
+    Guide,
     Stop,
     Call,
 }
