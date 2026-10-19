@@ -3,7 +3,7 @@
 //! button that plays the cached sample, and a checkmark on the selected one.
 //! Saving is a click (`PATCH /projects/{id} {voice}`).
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedString};
+use gpui::{div, prelude::*, px, Context, Div, ElementId, FontWeight, SharedString, Stateful};
 
 use crate::model::{Project, Voice};
 use crate::ui::glass;
@@ -14,6 +14,50 @@ use crate::ui::widgets::CardPalette;
 
 /// The sheet. `space` is the agent whose voice is being picked.
 pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
+    let theme = Theme::of(cx).clone();
+
+    let done = glass::sheet_button("voice-done", "Done", &theme).on_click(cx.listener(
+        |this, _, window, cx| {
+            this.voice_picker_open = false;
+            this.state.update(cx, |s, cx| s.stop_voice_sample(cx));
+            crate::ui::composer::Composer::focus(&this.composer, window, cx);
+            cx.notify();
+        },
+    ));
+    let header = glass::sheet_header("Voice", None, Some(done), &theme);
+    let list = list(shell, space, "voice", 520.0, cx);
+
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .px(px(16.0))
+        .pb(px(18.0))
+        .child(
+            div()
+                .px(px(4.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child(format!(
+                    "How {} sounds on calls. Press play to hear a sample.",
+                    space.name
+                )),
+        )
+        .child(list);
+    glass::sheet(440.0, &theme, header, body.max_h(px(620.0)))
+}
+
+/// The voice list on its own: "Default" first, then every voice with its
+/// play button and a checkmark on the selected one; a click saves. Shared by
+/// the sheet and the agent page's Voice dropdown (`ui::hoverpick`). `ids`
+/// prefixes the element ids so two lists may be on screen at once.
+pub fn list(
+    shell: &Shell,
+    space: &Project,
+    ids: &'static str,
+    max_height: f32,
+    cx: &mut Context<Shell>,
+) -> Stateful<Div> {
     let theme = Theme::of(cx).clone();
     let palette = CardPalette::of(&theme);
     let state = shell.state.read(cx);
@@ -40,16 +84,6 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         Appearance::Dark => palette.outer,
     };
 
-    let done = glass::sheet_button("voice-done", "Done", &theme).on_click(cx.listener(
-        |this, _, window, cx| {
-            this.voice_picker_open = false;
-            this.state.update(cx, |s, cx| s.stop_voice_sample(cx));
-            crate::ui::composer::Composer::focus(&this.composer, window, cx);
-            cx.notify();
-        },
-    ));
-    let header = glass::sheet_header("Voice", None, Some(done), &theme);
-
     let row_base = |id: ElementId, theme: &Theme| {
         div()
             .id(id)
@@ -72,13 +106,14 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             .when(on, |el| el.child(icon("check", 16.0, theme.accent)))
     };
 
+    let eid = |suffix: String| ElementId::Name(SharedString::from(format!("{ids}-{suffix}")));
     let mut list = div()
-        .id("voice-list")
+        .id(eid("list".into()))
         .flex()
         .flex_col()
         .rounded(px(14.0))
         .overflow_y_scroll()
-        .max_h(px(520.0))
+        .max_h(px(max_height))
         .bg(list_bg)
         .border_1()
         .border_color(palette.hairline);
@@ -128,11 +163,11 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             .as_deref()
             .is_some_and(|u| state.voice_sample_playing(u));
         list = list.child(
-            row_base(ElementId::Name("voice-default".into()), &theme)
+            row_base(eid("default".into()), &theme)
                 .border_b_1()
                 .border_color(palette.hairline)
                 .child(play_button(
-                    ElementId::Name("voice-play-default".into()),
+                    eid("play-default".into()),
                     url,
                     playing,
                     &theme,
@@ -182,72 +217,51 @@ pub fn sheet(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         let p = pid.clone();
         let vid = v.id.clone();
         let url = v.sample_url.clone();
-        let mut row = row_base(
-            ElementId::Name(SharedString::from(format!("voice-{}", v.id))),
-            &theme,
-        )
-        .when(i + 1 < n, |el| {
-            el.border_b_1().border_color(palette.hairline)
-        })
-        .child(play_button(
-            ElementId::Name(SharedString::from(format!("voice-play-{}", v.id))),
-            Some(url).filter(|u| !u.is_empty()),
-            playing,
-            &theme,
-        ))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .child(
-                    div()
-                        .text_size(px(TEXT_BODY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .truncate()
-                        .child(v.name.clone()),
-                )
-                .when_some(
-                    v.description.clone().filter(|d| !d.trim().is_empty()),
-                    |el, d| {
-                        el.child(
-                            div()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child(d),
-                        )
-                    },
-                ),
-        )
-        .child(check(on, &theme));
+        let mut row = row_base(eid(v.id.clone()), &theme)
+            .when(i + 1 < n, |el| {
+                el.border_b_1().border_color(palette.hairline)
+            })
+            .child(play_button(
+                eid(format!("play-{}", v.id)),
+                Some(url).filter(|u| !u.is_empty()),
+                playing,
+                &theme,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(TEXT_BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(v.name.clone()),
+                    )
+                    .when_some(
+                        v.description.clone().filter(|d| !d.trim().is_empty()),
+                        |el, d| {
+                            el.child(
+                                div()
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .child(d),
+                            )
+                        },
+                    ),
+            )
+            .child(check(on, &theme));
         row = row.on_click(cx.listener(move |this, _, _, cx| {
             this.state
                 .update(cx, |s, cx| s.set_voice(p.clone(), Some(vid.clone()), cx));
         }));
         list = list.child(row);
     }
-
-    let body = div()
-        .flex()
-        .flex_col()
-        .gap(px(10.0))
-        .px(px(16.0))
-        .pb(px(18.0))
-        .child(
-            div()
-                .px(px(4.0))
-                .text_size(px(TEXT_SMALL))
-                .text_color(theme.text_muted)
-                .child(format!(
-                    "How {} sounds on calls. Press play to hear a sample.",
-                    space.name
-                )),
-        )
-        .child(list);
-    glass::sheet(440.0, &theme, header, body.max_h(px(620.0)))
+    list
 }
 
 /// The label for the "…" menu row and the profile's info row.

@@ -1,14 +1,16 @@
 //! An agent's page: the coloured tree, name, what it is doing, call / voice
-//! (soon) / mute / search / more, the info card (owner, machine, model,
-//! description), an Appearance section holding the tree + colour picker,
-//! then Media / Files / Links from its chats.
+//! (soon) / mute / search / more, the info card (owner, machine, then — for
+//! my own agent — Model / Reasoning / Voice rows that drop down on hover,
+//! secrets, camera vision, description), an Appearance section holding the
+//! tree + colour picker, then Media / Files / Links from its chats.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
 
-use crate::app::{CallTarget, ProfilePage};
+use crate::app::{AgentPick, CallTarget, ProfilePage};
 use crate::model::{Id, MachineState, Person, Project};
 use crate::ui::avatars::{self, AvatarState};
 use crate::ui::glass;
+use crate::ui::hoverpick;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
@@ -124,6 +126,7 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     let tab = state.profile_tab;
     let more_open = state.profile_more_open;
     let picker_open = state.profile_picker_open;
+    let pick = state.agent_pick;
     let editing = state.profile_editing_description && mine;
     let renaming = mine
         && state
@@ -312,8 +315,44 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     // ----- info card -------------------------------------------------------------
     let mut info = card(&theme)
         .child(info_row("owner", owner_text, &theme))
-        .child(info_row("machine", machine_text, &theme))
-        .child(info_row("model", model_text, &theme));
+        .child(info_row("machine", machine_text, &theme));
+    if mine {
+        // The agent's own settings: Model (searchable), Reasoning and Voice
+        // drop down on hover (or a click) and apply at once.
+        let model_open = pick == Some(AgentPick::Model);
+        let reasoning_open = pick == Some(AgentPick::Reasoning);
+        let voice_open = pick == Some(AgentPick::Voice);
+        info = info
+            .child(hoverpick::row(
+                "model",
+                model_text,
+                AgentPick::Model,
+                model_open,
+                model_open.then(|| hoverpick::model_panel(shell, &project, cx)),
+                &theme,
+                cx,
+            ))
+            .child(hoverpick::row(
+                "reasoning",
+                project.effort.label(),
+                AgentPick::Reasoning,
+                reasoning_open,
+                reasoning_open.then(|| hoverpick::reasoning_panel(&project, cx)),
+                &theme,
+                cx,
+            ))
+            .child(hoverpick::row(
+                "voice",
+                voice_text,
+                AgentPick::Voice,
+                voice_open,
+                voice_open.then(|| hoverpick::voice_panel(shell, &project, cx)),
+                &theme,
+                cx,
+            ));
+    } else {
+        info = info.child(info_row("model", model_text, &theme));
+    }
     // D83: what this agent may use; opens the agent's Secrets page.
     let secrets_text = match secrets_data.as_ref() {
         Some(d) => {
@@ -379,46 +418,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
             })),
     );
     if mine {
-        // Call voice: opens the picker sheet.
-        info = info.child(
-            div()
-                .id("agent-voice-row")
-                .flex()
-                .items_center()
-                .gap(px(10.0))
-                .px(px(16.0))
-                .py(px(10.0))
-                .border_b_1()
-                .border_color(theme.border)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.surface_2))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_muted)
-                                .child("voice"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(TEXT_BODY))
-                                .text_color(theme.text)
-                                .child(voice_text),
-                        ),
-                )
-                .child(icon("chevron-right", 14.0, theme.text_faint))
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.voice_picker_open = true;
-                    this.state.update(cx, |s, _| s.fetch_voices());
-                    cx.notify();
-                })),
-        );
         // Camera vision (voice API §11): a switch row, default on.
         let vision_on = project.vision_enabled;
         let p_vision = pid.clone();

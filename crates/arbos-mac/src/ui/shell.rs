@@ -93,6 +93,8 @@ pub struct Shell {
     pub(crate) description_input: Entity<ComposerInput>,
     /// Double-click rename: the inline name field for an agent.
     pub(crate) agent_name_input: Entity<ComposerInput>,
+    /// Agent page: the filter field in the Model dropdown (`ui::hoverpick`).
+    pub(crate) model_search_input: Entity<ComposerInput>,
     /// Settings header: editing my display name and handle (`PATCH /me`).
     profile_edit_open: bool,
     name_input: Entity<ComposerInput>,
@@ -249,6 +251,18 @@ impl Shell {
             });
         }
         cx.observe(&agent_name_input, |_, _, cx| cx.notify())
+            .detach();
+        let model_search_input = cx.new(ComposerInput::new);
+        {
+            let weak = cx.weak_entity();
+            model_search_input.update(cx, |input, _| {
+                input.set_placeholder("Search models");
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.pick_first_model(window, cx));
+                }));
+            });
+        }
+        cx.observe(&model_search_input, |_, _, cx| cx.notify())
             .detach();
         let name_input = cx.new(ComposerInput::new);
         name_input.update(cx, |input, _| input.set_placeholder("Display name"));
@@ -418,6 +432,7 @@ impl Shell {
             people_input,
             description_input,
             agent_name_input,
+            model_search_input,
             profile_edit_open: false,
             name_input,
             handle_input,
@@ -636,6 +651,9 @@ impl Shell {
             Composer::focus(&self.composer, window, cx);
             return;
         }
+        if self.close_agent_pick(Some(window), cx) {
+            return;
+        }
         let floating = self.menu_open
             || self.members_open
             || self.add_agent_open
@@ -714,6 +732,7 @@ impl Shell {
 
     /// Everything that floats closes on a click elsewhere.
     fn close_popovers(&mut self, cx: &mut Context<Self>) {
+        self.close_agent_pick(None, cx);
         if self.menu_open
             || self.members_open
             || self.add_agent_open

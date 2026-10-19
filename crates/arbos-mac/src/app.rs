@@ -52,6 +52,27 @@ pub enum ProfilePage {
     Agent { project_id: Id },
 }
 
+/// Which agent-settings row on the agent's profile page is expanded into its
+/// dropdown (hover / click to open; see `ui::hoverpick`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentPick {
+    Model,
+    Reasoning,
+    Voice,
+}
+
+impl AgentPick {
+    /// `ARBOS_OPEN_PROFILE=agent:<model|reasoning|voice>` (rig).
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "model" => Some(Self::Model),
+            "reasoning" | "effort" => Some(Self::Reasoning),
+            "voice" => Some(Self::Voice),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallTarget {
     User(String),
@@ -326,6 +347,8 @@ pub struct AppState {
     pub profile_picker_open: bool,
     /// Agent page / user page "more" menu is open.
     pub profile_more_open: bool,
+    /// Agent page: which settings row (model / reasoning / voice) is dropped down.
+    pub agent_pick: Option<AgentPick>,
     /// Agent page: the owner is editing the description inline.
     pub profile_editing_description: bool,
     /// Double-click rename: the project whose name is being edited inline.
@@ -576,6 +599,7 @@ impl AppState {
             profile_tab: 0,
             profile_picker_open: false,
             profile_more_open: false,
+            agent_pick: None,
             profile_editing_description: false,
             renaming_project: None,
             muted: load_muted(),
@@ -1077,7 +1101,18 @@ impl AppState {
                         self.active_tab.insert(project_id.clone(), chat_id);
                     }
                     // select_project() keeps the tab within the visible chats.
-                    self.select_project(project_id, cx);
+                    self.select_project(project_id.clone(), cx);
+                    // Rig: `ARBOS_OPEN_PROFILE=agent[:model|reasoning|voice]` opens
+                    // the agent's page (with one settings row dropped down).
+                    if let Ok(spec) = std::env::var("ARBOS_OPEN_PROFILE") {
+                        if let Some(rest) = spec.strip_prefix("agent") {
+                            self.open_profile(ProfilePage::Agent { project_id }, cx);
+                            self.agent_pick = rest.strip_prefix(':').and_then(AgentPick::parse);
+                            if self.agent_pick == Some(AgentPick::Voice) {
+                                self.fetch_voices();
+                            }
+                        }
+                    }
                 }
             }
             SyncEvent::ChatPrefs {
@@ -2491,9 +2526,16 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        let effort = self.selected().map(|p| p.effort).unwrap_or(Effort::High);
+        self.set_project_model(project_id, model, cx);
+    }
+
+    /// The agent's model (profile page picker) — optimistic, then `SetModel`
+    /// with its current effort.
+    pub fn set_project_model(&mut self, project_id: Id, model: String, cx: &mut Context<Self>) {
+        let mut effort = Effort::High;
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.model = model.clone();
+            effort = p.effort;
         }
         self.command(ClientCommand::SetModel {
             project_id,
@@ -2577,9 +2619,16 @@ impl AppState {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
-        let model = self.selected().map(|p| p.model.clone()).unwrap_or_default();
+        self.set_project_effort(project_id, effort, cx);
+    }
+
+    /// The agent's reasoning effort (profile page picker) — optimistic, then
+    /// `SetModel` with its current model.
+    pub fn set_project_effort(&mut self, project_id: Id, effort: Effort, cx: &mut Context<Self>) {
+        let mut model = String::new();
         if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
             p.effort = effort;
+            model = p.model.clone();
         }
         self.command(ClientCommand::SetModel {
             project_id,
@@ -2668,6 +2717,7 @@ impl AppState {
         self.profile_tab = 0;
         self.profile_picker_open = false;
         self.profile_more_open = false;
+        self.agent_pick = None;
         self.profile_editing_description = false;
         self.renaming_project = None;
         cx.notify();
@@ -2748,6 +2798,7 @@ impl AppState {
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
         self.avatar_picker = None;
         self.profile_more_open = false;
+        self.agent_pick = None;
         let was = self.profile.take().is_some();
         if was {
             self.renaming_project = None;
@@ -2770,6 +2821,14 @@ impl AppState {
     pub fn toggle_profile_more(&mut self, cx: &mut Context<Self>) {
         self.profile_more_open = !self.profile_more_open;
         cx.notify();
+    }
+
+    /// Agent page: drop one settings row down (`None` folds them all).
+    pub fn set_agent_pick(&mut self, pick: Option<AgentPick>, cx: &mut Context<Self>) {
+        if self.agent_pick != pick {
+            self.agent_pick = pick;
+            cx.notify();
+        }
     }
 
     /// Muted: the relay's `me.muted` for a people chat (synced across devices),

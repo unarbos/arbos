@@ -11,6 +11,7 @@ pub mod frost;
 pub mod glass;
 pub mod groups;
 pub mod header;
+pub mod hoverpick;
 pub mod icons;
 pub mod local;
 pub mod markdown;
