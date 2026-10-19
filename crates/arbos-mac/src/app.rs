@@ -287,6 +287,12 @@ pub struct AppState {
     /// offline copy): off the tab strip, listed under "Archived", still open on
     /// the relay (history in context, memory and search), never badge or notify.
     pub archived_chats: HashSet<Id>,
+    /// Chat a home-search hit opened; kept visible while single-chat would hide it.
+    search_chat: Option<Id>,
+    /// Scroll the transcript to this `(chat_id, message_id)` once its rows exist.
+    pub reveal_message: Option<(Id, Id)>,
+    /// Brief highlight on the message a home-search hit opened.
+    pub highlight_message: Option<Id>,
     pub link: Link,
     pub rail_collapsed: bool,
     /// Below [`NARROW_WINDOW`](crate::ui::theme::NARROW_WINDOW) the sidebar
@@ -553,6 +559,9 @@ impl AppState {
             multi_chat: multi_chat_enabled(),
             last_chats: HashMap::new(),
             archived_chats: HashSet::new(),
+            search_chat: None,
+            reveal_message: None,
+            highlight_message: None,
             link: Link::Connecting,
             rail_collapsed: false,
             sidebar_overlay: false,
@@ -1011,6 +1020,9 @@ impl AppState {
                         self.command(ClientCommand::CreateProject {
                             name: "Home".into(),
                             avatar_color_index: None,
+                            source_project_id: None,
+                            description: None,
+                            color: None,
                         });
                     }
                 }
@@ -1516,10 +1528,12 @@ impl AppState {
         if visible.is_empty() {
             return false;
         }
+        // A search hit may open a chat the strip would hide until another tab
+        // is chosen.
         if self
             .active_tab
             .get(project_id)
-            .is_some_and(|a| visible.contains(a))
+            .is_some_and(|a| visible.contains(a) || self.search_chat.as_deref() == Some(a.as_str()))
         {
             return false;
         }
@@ -1657,6 +1671,11 @@ impl AppState {
     }
 
     pub fn select_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        if self.selected_project.as_deref() != Some(project_id.as_str()) {
+            self.search_chat = None;
+        }
+        self.reveal_message = None;
+        self.highlight_message = None;
         if self
             .renaming_project
             .as_ref()
@@ -1683,15 +1702,118 @@ impl AppState {
         cx.notify();
     }
 
+    /// Home-search row click: open the chat that holds the matching message and
+    /// ask the transcript to scroll to it. Name-only matches open normally.
+    pub fn open_from_home_search(&mut self, project_id: Id, query: &str, cx: &mut Context<Self>) {
+        let q = query.trim().to_lowercase();
+        let hit = if q.is_empty() {
+            None
+        } else {
+            self.find_message_match(&project_id, &q)
+        };
+        let Some((chat_id, message_id)) = hit else {
+            self.select_project(project_id, cx);
+            return;
+        };
+        self.search_chat = Some(chat_id.clone());
+        if self.archived_chats.remove(&chat_id) {
+            self.command(ClientCommand::ArchiveChat {
+                chat_id: chat_id.clone(),
+                archived: false,
+            });
+        }
+        self.selected_project = Some(project_id.clone());
+        self.sidebar_overlay = false;
+        self.active_tab.insert(project_id.clone(), chat_id.clone());
+        self.last_chats.insert(project_id, chat_id.clone());
+        if let Some(chat) = self
+            .chats
+            .values_mut()
+            .flat_map(|v| v.iter_mut())
+            .find(|c| c.id == chat_id)
+        {
+            chat.unread = false;
+        }
+        self.command(ClientCommand::OpenChat {
+            chat_id: chat_id.clone(),
+        });
+        self.highlight_message = Some(message_id.clone());
+        self.reveal_message = Some((chat_id, message_id));
+        self.sync_focus();
+        cx.notify();
+    }
+
+    /// Newest user/assistant/project message whose prose contains `query`
+    /// (already lowercased). Searches every chat under the space.
+    fn find_message_match(&self, project_id: &str, query: &str) -> Option<(Id, Id)> {
+        let mut best: Option<(u64, Id, Id)> = None;
+        for chat in self.tabs(project_id) {
+            for m in self.messages_of(&chat.id) {
+                match m.role {
+                    Role::User | Role::Assistant | Role::Project => {}
+                    Role::System => continue,
+                }
+                let text = m.plain_text();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                if !text.to_lowercase().contains(query) {
+                    continue;
+                }
+                let better = best
+                    .as_ref()
+                    .map(|(at, _, _)| m.created_at >= *at)
+                    .unwrap_or(true);
+                if better {
+                    best = Some((m.created_at, chat.id.clone(), m.id.clone()));
+                }
+            }
+        }
+        best.map(|(_, chat, msg)| (chat, msg))
+    }
+
+    /// Whether the space name, a chat title, or any loaded message matches `query`.
+    pub fn space_matches_query(&self, space: &Project, query: &str) -> bool {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        let hay = format!(
+            "{} {}",
+            space.name.to_lowercase(),
+            space
+                .person()
+                .map(|x| x.handle.to_lowercase())
+                .unwrap_or_default()
+        );
+        if hay.contains(&q) {
+            return true;
+        }
+        if self
+            .tabs(&space.id)
+            .iter()
+            .any(|c| c.title.to_lowercase().contains(&q))
+        {
+            return true;
+        }
+        self.find_message_match(&space.id, &q).is_some()
+    }
+
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
         let Some(project_id) = self.selected_project.clone() else {
             return;
         };
+        if self.search_chat.as_deref() != Some(chat_id.as_str()) {
+            self.search_chat = None;
+        }
+        self.reveal_message = None;
+        self.highlight_message = None;
         // Single-chat: an agent has one chat, whichever one was asked for.
         let chat_id = if self
             .visible_tabs(&project_id)
             .iter()
             .any(|c| c.id == chat_id)
+            || self.search_chat.as_deref() == Some(chat_id.as_str())
         {
             chat_id
         } else {
@@ -3488,9 +3610,143 @@ impl AppState {
         self.command(ClientCommand::CreateProject {
             name,
             avatar_color_index,
+            source_project_id: None,
+            description: None,
+            color: None,
         });
         self.push_notice("Creating project…");
         cx.notify();
+    }
+
+    /// Grok / iPhone "Fork": a new agent with the same look and workspace
+    /// context (files + memory). Own agents only; chat history stays empty.
+    pub fn duplicate_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(src) = self
+            .project(&project_id)
+            .filter(|p| !p.shared && !p.is_people())
+        else {
+            return;
+        };
+        let name = Self::unique_copy_name(&src.name, &self.projects);
+        let description = src.description.clone();
+        let color = Some(src.color.clone());
+        let avatar_color_index = src.avatar_color_override;
+        self.awaiting_new_project = true;
+        self.command(ClientCommand::CreateProject {
+            name,
+            avatar_color_index,
+            source_project_id: Some(project_id),
+            description,
+            color,
+        });
+        self.push_notice("Forking…");
+        cx.notify();
+    }
+
+    /// Soft-delete an owned agent from every list (`DELETE /projects/{id}`).
+    pub fn delete_project(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        let Some(p) = self.project(&project_id) else {
+            return;
+        };
+        if p.shared || p.is_people() {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(project_id.as_str()) {
+            self.selected_project = None;
+        }
+        if let Some(tabs) = self.chats.remove(&project_id) {
+            for c in tabs {
+                self.messages.remove(&c.id);
+                self.chat_ui.remove(&c.id);
+                self.archived_chats.remove(&c.id);
+            }
+        }
+        self.active_tab.remove(&project_id);
+        self.last_chats.remove(&project_id);
+        self.projects.retain(|p| p.id != project_id);
+        self.muted.remove(&project_id);
+        self.command(ClientCommand::DeleteProject { project_id });
+        cx.notify();
+    }
+
+    /// Delete a people chat I own (`DELETE /chats/{id}`).
+    pub fn delete_people_chat(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.project(&chat_id).is_some_and(|p| p.is_people()) {
+            return;
+        }
+        if self.selected_project.as_deref() == Some(chat_id.as_str()) {
+            self.selected_project = None;
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        self.chats.remove(&chat_id);
+        self.archived_chats.remove(&chat_id);
+        self.projects.retain(|p| p.id != chat_id);
+        self.muted.remove(&chat_id);
+        self.command(ClientCommand::DeletePeopleChat { chat_id });
+        cx.notify();
+    }
+
+    /// Permanently close a non-pinned chat tab (drops it from Archived too).
+    pub fn delete_chat_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
+        if !self.multi_chat {
+            return;
+        }
+        let Some(project_id) = self.project_of_chat(&chat_id).map(|p| p.id.clone()) else {
+            return;
+        };
+        if self
+            .tabs(&project_id)
+            .iter()
+            .any(|c| c.id == chat_id && c.is_pinned)
+        {
+            return;
+        }
+        self.archived_chats.remove(&chat_id);
+        if let Some(tabs) = self.chats.get_mut(&project_id) {
+            tabs.retain(|c| c.id != chat_id);
+        }
+        self.messages.remove(&chat_id);
+        self.chat_ui.remove(&chat_id);
+        if self.active_tab.get(&project_id) == Some(&chat_id) {
+            let pick = self
+                .visible_tabs(&project_id)
+                .into_iter()
+                .next()
+                .map(|c| c.id.clone());
+            if let Some(pick) = pick {
+                self.active_tab.insert(project_id.clone(), pick.clone());
+                self.last_chats.insert(project_id.clone(), pick.clone());
+                self.command(ClientCommand::OpenChat { chat_id: pick });
+            } else {
+                self.active_tab.remove(&project_id);
+            }
+        }
+        self.command(ClientCommand::CloseChat {
+            project_id,
+            chat_id,
+        });
+        cx.notify();
+    }
+
+    /// "`Name` copy", then "`Name` copy 2"… so the relay's unique-name check passes.
+    fn unique_copy_name(name: &str, projects: &[Project]) -> String {
+        let owned: HashSet<&str> = projects
+            .iter()
+            .filter(|p| !p.shared && !p.is_people())
+            .map(|p| p.name.as_str())
+            .collect();
+        let base = format!("{name} copy");
+        if !owned.contains(base.as_str()) {
+            return base;
+        }
+        for i in 2..=99 {
+            let candidate = format!("{name} copy {i}");
+            if !owned.contains(candidate.as_str()) {
+                return candidate;
+            }
+        }
+        format!("{name} copy {}", &new_id()[..4])
     }
 
     pub fn fetch_blob(&mut self, key: String, save: bool, cx: &mut Context<Self>) {

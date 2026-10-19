@@ -168,7 +168,6 @@ pub fn render(
             }));
     } else {
         let avatar_state = state.avatar_state(&space.id);
-        let streaming = state.project_is_streaming(&space.id);
         let machine = state.machine.shown_state();
         let pid = space.id.clone();
         let can_rename = !space.is_guest();
@@ -176,9 +175,7 @@ pub fn render(
             .renaming_project
             .as_ref()
             .is_some_and(|p| p == &space.id);
-        let sub = if streaming {
-            Some(format!("{} is working", space.name))
-        } else if space.is_guest() {
+        let sub = if space.is_guest() {
             Some(format!(
                 "shared by @{}",
                 space
@@ -439,6 +436,8 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
         let phase = PulseClock::phase(cx, 1200);
         let id = chat.id.clone();
         let close_id = chat.id.clone();
+        let menu_chat_id = chat.id.clone();
+        let ctrl_chat_id = chat.id.clone();
         let title = if chat.is_pinned {
             "Main".to_string()
         } else {
@@ -478,9 +477,33 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
             .cursor_pointer()
             .when(!active, |el| el.hover(|s| s.text_color(theme.text)))
             .on_click(cx.listener(move |this, _, window, cx| {
+                this.chat_menu = None;
                 this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
                 Composer::focus(&this.composer, window, cx);
-            }));
+            }))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    this.chat_menu = Some((menu_chat_id.clone(), event.position));
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    if !event.modifiers.control {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    this.menu_open = false;
+                    this.row_menu = None;
+                    this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
+                    cx.notify();
+                }),
+            );
         if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
             pill = pill.child(glyphs);
         }
@@ -626,6 +649,8 @@ pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) ->
     for chat in archived {
         let id = chat.id.clone();
         let open_id = chat.id.clone();
+        let menu_chat_id = chat.id.clone();
+        let ctrl_chat_id = chat.id.clone();
         let preview = state
             .messages_of(&chat.id)
             .iter()
@@ -649,10 +674,34 @@ pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) ->
                 .hover(|s| s.bg(theme.surface_2))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.archived_open = false;
+                    this.chat_menu = None;
                     this.state
                         .update(cx, |s, cx| s.unarchive_chat(open_id.clone(), cx));
                     Composer::focus(&this.composer, window, cx);
                 }))
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu_open = false;
+                        this.row_menu = None;
+                        this.chat_menu = Some((menu_chat_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        if !event.modifiers.control {
+                            return;
+                        }
+                        cx.stop_propagation();
+                        this.menu_open = false;
+                        this.row_menu = None;
+                        this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .flex_1()

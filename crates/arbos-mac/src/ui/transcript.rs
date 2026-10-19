@@ -250,6 +250,8 @@ pub struct Transcript {
     /// One stateful card per typed question, keyed by question id; dropped with its row.
     cards: HashMap<String, Entity<QuestionCard>>,
     pinned_to_bottom: bool,
+    /// Message id we already scrolled to for the current reveal request.
+    revealed: Option<Id>,
     spring: StickSpring,
     /// Set by the scroll callback; the next frame re-pins when the user
     /// stopped within `STICK_THRESHOLD_PX` of the end.
@@ -286,6 +288,7 @@ impl Transcript {
             veils: HashMap::new(),
             cards: HashMap::new(),
             pinned_to_bottom: true,
+            revealed: None,
             spring: StickSpring::default(),
             repin_check_pending: false,
             activity_shown: None,
@@ -432,16 +435,20 @@ impl Transcript {
             self.rows = new_rows;
             self.list.reset(self.rows.len());
             self.pinned_to_bottom = true;
+            self.revealed = None;
             self.list.scroll_to_end();
             // `ARBOS_SCROLL_UP=1`: open at the top instead (screenshot rig; the
             // GUI session accepts no synthetic wheel events).
-            if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1") {
+            if std::env::var("ARBOS_SCROLL_UP").is_ok_and(|v| v == "1")
+                && self.state.read(cx).reveal_message.is_none()
+            {
                 self.pinned_to_bottom = false;
                 self.list.scroll_to(gpui::ListOffset {
                     item_ix: 0,
                     offset_in_item: px(0.0),
                 });
             }
+            self.reveal_hit(cx);
             cx.notify();
             return;
         }
@@ -453,12 +460,41 @@ impl Transcript {
             .take_while(|(a, b)| a.id == b.id && a.version == b.version)
             .count();
         if prefix == self.rows.len() && prefix == new_rows.len() {
+            self.reveal_hit(cx);
             return;
         }
         let old_len = self.rows.len();
         self.rows = new_rows;
         self.list.splice(prefix..old_len, self.rows.len() - prefix);
+        self.reveal_hit(cx);
         // While pinned the spring glides to the new end on the next frames.
+        cx.notify();
+    }
+
+    /// A home-search hit asked to land on a message. Scroll once, when its row exists.
+    fn reveal_hit(&mut self, cx: &mut Context<Self>) {
+        let Some((chat, msg)) = self.state.read(cx).reveal_message.clone() else {
+            self.revealed = None;
+            return;
+        };
+        if self.chat_id.as_deref() != Some(chat.as_str()) {
+            return;
+        }
+        if self.revealed.as_deref() == Some(msg.as_str()) {
+            return;
+        }
+        let Some(ix) = self.rows.iter().position(|r| {
+            r.message_id == msg
+                && !matches!(r.kind, RowKind::Stamp { .. } | RowKind::Indicator { .. })
+        }) else {
+            return;
+        };
+        self.pinned_to_bottom = false;
+        self.list.scroll_to(gpui::ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.0),
+        });
+        self.revealed = Some(msg);
         cx.notify();
     }
 
@@ -1184,11 +1220,16 @@ impl Transcript {
                     .into_any_element()
             }
         };
+        let highlighted =
+            self.state.read(cx).highlight_message.as_deref() == Some(row.message_id.as_str());
         div()
             .w_full()
             .flex()
             .justify_center()
             .px(px(COLUMN_MARGIN))
+            .when(highlighted, |el| {
+                el.bg(Theme::with_alpha(theme.accent, 0.14))
+            })
             .child(div().w_full().max_w(px(COLUMN_MAX_WIDTH)).child(inner))
             .into_any_element()
     }

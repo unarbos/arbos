@@ -448,6 +448,25 @@ pub enum ClientCommand {
         name: String,
         /// D79: the owner's swatch pick at creation; `None` = automatic (the id's colour).
         avatar_color_index: Option<u8>,
+        /// Fork: copy this agent's workspace (files + memory) into the new one.
+        source_project_id: Option<Id>,
+        /// Optional profile blurb for the new agent (forks copy the source's).
+        description: Option<String>,
+        /// Optional hex accent; forks copy the source's.
+        color: Option<String>,
+    },
+    /// Soft-delete an owned agent (`DELETE /projects/{id}`).
+    DeleteProject {
+        project_id: Id,
+    },
+    /// Delete a people chat I own (`DELETE /chats/{id}`).
+    DeletePeopleChat {
+        chat_id: Id,
+    },
+    /// Close a non-pinned chat tab (`DELETE /projects/{id}/chats/{chat}`).
+    CloseChat {
+        project_id: Id,
+        chat_id: Id,
     },
     MachineStart,
     MachineStop,

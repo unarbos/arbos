@@ -137,6 +137,14 @@ const ICONS: &[(&str, &str)] = &[
     icon!("camera-off", "<path d=\"M3 7h9l6 6v2a2 2 0 0 1-2 2H3z\" fill=\"#000\"/><path d=\"M16 10l5-3v10\" fill=\"#000\"/><path d=\"M3 3l18 18\" stroke-width=\"2.4\"/>"),
     icon!("mic-off", "<rect x=\"9\" y=\"3\" width=\"6\" height=\"11\" rx=\"3\"/><path d=\"M5 11a7 7 0 0 0 11.5 5.3M19 11a7 7 0 0 1-.9 3.4M12 18v3\"/><path d=\"M3 3l18 18\" stroke-width=\"2.4\"/>"),
     icon!("phone-down", "<path d=\"M3 14c5-5 13-5 18 0l-2.5 2.5-3-1.5v-2.5a9 9 0 0 0-7 0V15l-3 1.5z\" fill=\"#000\"/>"),
+    icon!(
+        "trash",
+        "<path d=\"M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M8 7l1 12a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6\"/>"
+    ),
+    icon!(
+        "branch",
+        "<circle cx=\"6\" cy=\"6\" r=\"2.5\"/><circle cx=\"18\" cy=\"6\" r=\"2.5\"/><circle cx=\"18\" cy=\"18\" r=\"2.5\"/><path d=\"M6 8.5v5.5a4 4 0 0 0 4 4h5.5M18 8.5V15.5\"/>"
+    ),
 ];
 
 impl AssetSource for Assets {

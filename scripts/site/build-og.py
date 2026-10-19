@@ -3,15 +3,21 @@
 Lays out a row of coloured-initial circles (palette = GET https://relay.arbos.life/avatar-colors,
 index = sum of the name's UTF-8 bytes mod 7) beside the Arbos mark and wordmark in an HTML page
 and screenshots it with headless Chromium (Playwright if installed, else google-chrome/chromium
-on PATH). Output: site/assets/og/arbos-social.png. Run: python scripts/site/build-og.py
+on PATH). Output: site/assets/og/arbos-social.<sha256[:10]>.png — /assets/* is served with a 7-day
+immutable cache, so the file name carries its content hash and site/index.html's og:image / twitter:image
+are rewritten to the new name (older arbos-social.*.png files are removed). Run: python scripts/site/build-og.py
 """
+import hashlib
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-OUT = REPO / "site/assets/og/arbos-social.png"
+OG_DIR = REPO / "site/assets/og"
+OUT = OG_DIR / "arbos-social.png"
+INDEX = REPO / "site/index.html"
 MARK = (REPO / "site/assets/logo/arbos-mark.svg").read_text()
 
 PALETTE = [  # light pairs (top, bottom); the OG image is light like the default page
@@ -66,4 +72,11 @@ except ImportError:
         raise SystemExit("install playwright (pip) or put google-chrome/chromium on PATH")
     subprocess.run([chrome, "--headless=new", "--hide-scrollbars", "--window-size=1200,630",
                     f"--screenshot={OUT}", tmp.as_uri()], check=True, capture_output=True)
-print(OUT, OUT.stat().st_size // 1024, "KB")
+digest = hashlib.sha256(OUT.read_bytes()).hexdigest()[:10]
+final = OG_DIR / f"arbos-social.{digest}.png"
+for old in OG_DIR.glob("arbos-social.*.png"):
+    if old != final:
+        old.unlink()
+OUT.rename(final)
+INDEX.write_text(re.sub(r"/assets/og/arbos-social(\.[0-9a-f]{10})?\.png", f"/assets/og/{final.name}", INDEX.read_text()))
+print(final, final.stat().st_size // 1024, "KB")
