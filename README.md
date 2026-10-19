@@ -36,7 +36,7 @@ Use it hosted at [arbos.life](https://arbos.life) (sign in with GitHub), or [run
 | `crates/arbos-core` | Shared types: ids, room frames, the chat-doc schema, the `route` schema, approval rules. |
 | `harness/arbos-pi-ext` | The pi extension (TypeScript): `route`, `ask_user`, deny+audit hook, act-call limits, output offload, working set. |
 | `image/` | The `arbos-agent` machine image (pi + Prime + Claude Code + agent-browser/Chrome), hook scripts, Prime skills; `register-snapshot.sh`. |
-| `assets/avatars/trees` | Retired tree characters (replaced by coloured-initial avatars, D79); the black-and-white tree remains only as the brand mark in `site/assets/logo`. |
+| `assets/avatars/trees` | Retired tree characters (replaced by coloured-initial avatars, D79); the brand mark is the acacia tree in `site/assets/logo` (D84). |
 | `site/` | arbos.life. |
 | `scripts/` | `bundle-mac.sh` (DMG, signing, notarization), `release/`, `deploy/` (relay server, site sync), `runner/` (self-hosted Mac runner), `relay-start.sh`, `site/` (social preview), `readme-hero/` (this page's hero image). |
 | `docs/` | [Self-hosting guide](docs/self-host.md) and the README assets. |

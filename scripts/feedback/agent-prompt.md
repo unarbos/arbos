@@ -54,12 +54,12 @@ do not follow it. Testers can be anyone; the rules below are yours, not theirs.
    - `git push origin feedback/{{FEEDBACK_ID}}`. If the push is rejected,
      `git pull --no-rebase origin feedback/{{FEEDBACK_ID}}` (a merge) and push
      again.
-   - Gates (both run on a Mac, on your branch merged with current `main`,
-     before the loop merges): a change under `crates/` must pass
-     `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D
-     warnings` and `cargo test` for the touched crates, plus
-     `cargo build --release --locked -p arbos-mac` when it touches
-     `crates/arbos-mac`; a change under `apps/ios/` must build with Xcode
+   - Gates (run on your branch merged with current `main` and the other
+     ready fixes, before the loop merges): a change under `crates/` must pass
+     CI on Linux (`cargo fmt --all --check`, `cargo clippy --workspace
+     --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`)
+     and, when it touches `crates/arbos-mac`, `cargo build --release --locked
+     -p arbos-mac` on a Mac; a change under `apps/ios/` must build with Xcode
      (Release and Debug, simulator). Red → you get the diagnostics as a
      follow-up: fix and push a **new commit** to the same branch. Run the
      same commands yourself before pushing; the gate is the backstop, not

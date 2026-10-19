@@ -32,7 +32,7 @@
   <div class="header-bg" aria-hidden="true"></div>
   <nav class="header-inner container-wide" aria-label="Primary">
     <a class="brand" href="/" aria-label="Arbos home">
-      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+      <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark-small"/></svg>
       <span class="brand-name">Arbos</span>
     </a>
     <ul class="nav-links">
@@ -338,7 +338,7 @@
       </article>
     </div>
     <div class="banner" data-reveal>
-      <div class="banner-text"><svg class="banner-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>Already have the app? <span class="muted">Sign in and your machine wakes up where you left it.</span></div>
+      <div class="banner-text"><svg class="banner-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark-small"/></svg>Already have the app? <span class="muted">Sign in and your machine wakes up where you left it.</span></div>
       <a class="btn btn-outline" href="https://relay.arbos.life/auth/github/start?redirect=https://arbos.life/welcome">Sign in with GitHub</a>
     </div>
   </div>
@@ -443,7 +443,7 @@
   <div class="container-wide footer-inner">
     <div class="footer-brand">
       <a class="brand" href="/" aria-label="Arbos home">
-        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark"/></svg>
+        <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="#arbos-mark-small"/></svg>
         <span class="brand-name">Arbos</span>
       </a>
       <p class="copyright">© 2026 Arbos</p>
@@ -484,14 +484,9 @@
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true">
   <defs>
-    <mask id="arbos-cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64">
-      <rect width="64" height="64" fill="#fff"/>
-      <path d="M32 50V32M32 34L19 21M32 30L45 17" stroke="#000" stroke-width="8" stroke-linecap="round" fill="none"/>
-    </mask>
-    <g id="arbos-mark" mask="url(#arbos-cut)">
-      <circle cx="32" cy="26" r="24" fill="currentColor"/>
-      <path d="M26 44h12v10a6 6 0 0 1-12 0z" fill="currentColor"/>
-    </g>
+    <!-- Arbos mark (acacia, D84): master, and the pixel-hinted cut for renders at or below 32 px. -->
+    <g id="arbos-mark"><path fill="currentColor" transform="translate(0 5.4) scale(1 0.8)" d="M13 27A6 6 0 1 1 13.209 15.004A4 4 0 0 0 16.963 12.719A10 10 0 0 1 29.286 7.555A8 8 0 0 0 35.865 6.956A10.4 10.4 0 0 1 50.034 10.847A4.5 4.5 0 0 0 52.619 12.919A7.2 7.2 0 0 1 50.5 27Z"/><path fill="currentColor" d="M22 58C26.1 58 28.4 55.6 28.8 52C29.1 49.3 29.2 45.5 29.2 42.5C29.2 38.5 23.8 31 19 25H25.6C28.2 28.8 30.4 34.4 32 34.4C33.6 34.4 35.8 28.8 38.4 25H45C40.2 31 34.8 38.5 34.8 42.5C34.8 45.5 34.9 49.3 35.2 52C35.6 55.6 37.9 58 42 58Z"/></g>
+    <g id="arbos-mark-small"><path fill="currentColor" transform="translate(4 8) scale(1.1045 1.1682) translate(-7 -9.88) translate(0 5.4) scale(1 0.8)" d="M13 27A6 6 0 1 1 13.209 15.004A4 4 0 0 0 16.963 12.719A10 10 0 0 1 29.286 7.555A8 8 0 0 0 35.865 6.956A10.4 10.4 0 0 1 50.034 10.847A4.5 4.5 0 0 0 52.619 12.919A7.2 7.2 0 0 1 50.5 27Z"/><path fill="currentColor" d="M20.5 60C25 60 28 58.2 28 54V46.5C28 42 22 34 15 27H23.2C26 31.5 29.5 40 32 40C34.5 40 38 31.5 40.8 27H49C42 34 36 42 36 46.5V54C36 58.2 39 60 43.5 60Z"/></g>
     <path id="apple-logo" d="M13.6 10.6c0-2.4 2-3.6 2.1-3.6-1.1-1.7-2.9-1.9-3.5-1.9-1.5-.2-2.9.9-3.7.9-.8 0-1.9-.9-3.2-.8-1.6 0-3.1 1-4 2.4-1.7 3-.4 7.3 1.2 9.7.8 1.2 1.8 2.5 3 2.4 1.2 0 1.7-.8 3.2-.8 1.5 0 1.9.8 3.2.8 1.3 0 2.2-1.2 3-2.4.9-1.3 1.3-2.6 1.3-2.7 0 0-2.6-1-2.6-4zM11.2 3.4c.7-.8 1.1-1.9 1-3-1 0-2.1.7-2.8 1.5-.6.7-1.2 1.8-1 2.9 1.1.1 2.2-.6 2.8-1.4z" fill="currentColor"/>
   </defs>
 </svg>

@@ -1,6 +1,1 @@
-<svg role="img" aria-label="Arbos" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-<rect width="64" height="64" rx="14" fill="#0a0a0a"/><defs><mask id="m" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/>
-<path d="M32 51V32M32 34L19 21M32 30L45 17" stroke="#000" stroke-width="9.5" stroke-linecap="round" fill="none"/>
-</mask></defs>
-<g mask="url(#m)"><circle cx="32" cy="26" r="25" fill="#fff"/>
-<path d="M25 45h14v9.0a7.0 7.0 0 0 1 -14 0z" fill="#fff"/></g></svg>
+<svg role="img" aria-label="Arbos" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><rect width="1024" height="1024" rx="224" fill="#0a0a0a"/><g transform="translate(512.000 512.000) scale(14.26286) translate(-32.000 -33.599)"><path fill="#fff" transform="translate(4 8) scale(1.1045 1.1682) translate(-7.0 -9.879999999999999) translate(0 5.400) scale(1 0.8)" d="M13.000 27.000A6.000 6.000 0 1 1 13.209 15.004A4.000 4.000 0 0 0 16.963 12.719A10.000 10.000 0 0 1 29.286 7.555A8.000 8.000 0 0 0 35.865 6.956A10.400 10.400 0 0 1 50.034 10.847A4.500 4.500 0 0 0 52.619 12.919A7.200 7.200 0 0 1 50.500 27.000Z"/><path fill="#fff" d="M20.5 60C25 60 28 58.2 28 54V46.5C28 42 22 34 15 27H23.2C26 31.5 29.5 40 32 40C34.5 40 38 31.5 40.8 27H49C42 34 36 42 36 46.5V54C36 58.2 39 60 43.5 60Z"/></g></svg>
