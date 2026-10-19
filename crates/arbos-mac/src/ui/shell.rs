@@ -702,8 +702,13 @@ impl Shell {
         });
     }
 
-    /// Escape closes whatever floats: menus, then sheets.
+    /// Escape stops a recording memo (keeping its transcript), then closes
+    /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice.update(cx, |v, cx| v.escape(cx)) {
+            Composer::focus(&self.composer, window, cx);
+            return;
+        }
         if self.renaming_tab.is_some() {
             self.cancel_tab_rename(window, cx);
             return;

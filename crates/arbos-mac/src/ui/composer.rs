@@ -1625,6 +1625,7 @@ impl Render for Composer {
         }
 
         let border_color = match mode {
+            _ if recording => Theme::with_alpha(theme.danger, 0.5),
             ComposerMode::Answer | ComposerMode::Approve => Theme::with_alpha(theme.warn, 0.7),
             ComposerMode::Send => {
                 if nudge {
@@ -1635,21 +1636,20 @@ impl Render for Composer {
             }
         };
 
-        // The round primary button: Guide while a turn is running and the field
-        // has text; otherwise send, stop when empty mid-turn, or start / end a
-        // call when idle and empty (iPhone: phone next to the mic; calls start
-        // audio-only).
+        // The round primary button: a red Stop while a memo records (stops the
+        // mic and transcribes what was said); Guide while a turn is running and
+        // the field has text; otherwise send, stop a running turn when the
+        // field is empty, or start / end a call when idle and empty (iPhone:
+        // phone next to the mic; calls start audio-only).
         let hanging_up = in_call || in_livekit;
-        let guide = running && has_text && self.attachments.is_empty();
-        let (glyph, action): (&str, ButtonAction) = if guide {
-            ("", ButtonAction::Guide)
-        } else if has_text {
-            ("arrow-up", ButtonAction::Send)
-        } else if running {
-            ("stop", ButtonAction::Stop)
+        let guide = running && has_text && self.attachments.is_empty() && !recording;
+        let action = if guide {
+            ButtonAction::Guide
         } else {
-            ("phone", ButtonAction::Call)
+            primary_action(has_text, running, recording)
         };
+        let glyph = action.glyph();
+        let red = action == ButtonAction::StopMemo || (action == ButtonAction::Call && hanging_up);
         let primary_button = if action == ButtonAction::Guide {
             div()
                 .id("composer-guide")
@@ -1677,11 +1677,7 @@ impl Render for Composer {
                 .size(px(SEND_BUTTON))
                 .flex_shrink_0()
                 .rounded_full()
-                .bg(if action == ButtonAction::Call && hanging_up {
-                    theme.danger
-                } else {
-                    theme.primary
-                })
+                .bg(if red { theme.danger } else { theme.primary })
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1690,7 +1686,9 @@ impl Render for Composer {
                 .child(icon(
                     glyph,
                     if glyph == "stop" { 14.0 } else { 16.0 },
-                    if action == ButtonAction::Call && hanging_up {
+                    if action == ButtonAction::StopMemo {
+                        gpui::white()
+                    } else if red {
                         theme.text
                     } else {
                         theme.on_primary
@@ -1699,6 +1697,7 @@ impl Render for Composer {
                 .on_click(cx.listener(move |this, _, window, cx| match action {
                     ButtonAction::Send | ButtonAction::Guide => this.submit(window, cx),
                     ButtonAction::Stop => cx.emit(ComposerEvent::Stop),
+                    ButtonAction::StopMemo => this.voice.update(cx, |v, cx| v.stop_memo(cx)),
                     ButtonAction::Call => {
                         let live = this.state.read(cx).my_call.is_some();
                         let voice_on = this.voice.read(cx).in_call();
@@ -1721,7 +1720,9 @@ impl Render for Composer {
         };
 
         // Hold to record a voice memo, or click to toggle recording. Idle it is
-        // Grok Mac's filled round mic (black on light, white on dark).
+        // Grok Mac's filled round mic (black on light, white on dark); while
+        // recording it stays mounted, tinted red like the iPhone, so a release
+        // (hold-to-talk) or a second click also finishes the memo.
         let mic_button = div()
             .id("composer-mic")
             .size(px(SEND_BUTTON))
@@ -1740,7 +1741,7 @@ impl Render for Composer {
             })
             .hover(|s| s.opacity(0.88))
             .child(icon(
-                if recording { "stop" } else { "mic" },
+                "mic",
                 16.0,
                 if recording {
                     theme.danger
@@ -1784,13 +1785,30 @@ impl Render for Composer {
             .on_click(cx.listener(|this, _, _, cx| this.attach(cx)));
 
         let field_body = if recording {
+            // iPhone recorder row: ✕ (discard) · red dot · timer · level bars.
+            let discard = div()
+                .id("composer-memo-cancel")
+                .size(px(22.0))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(icon("xmark", 11.0, theme.text_muted))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.voice.update(cx, |v, cx| v.cancel_memo(cx));
+                }));
             div()
                 .flex_1()
                 .min_w_0()
                 .h(px(COMPOSER_HEIGHT - 2.0))
                 .flex()
                 .items_center()
-                .pl(px(10.0))
+                .gap(px(8.0))
+                .pl(px(6.0))
+                .child(discard)
                 .child(render_recording_row(self.voice.read(cx), &theme))
         } else {
             div()
@@ -1839,11 +1857,11 @@ impl Render for Composer {
             .gap(px(2.0))
             .h(px(COMPOSER_HEIGHT - 2.0))
             .flex_shrink_0();
-        if !has_text && !recording {
+        if mic_mounted(has_text, recording) {
             trailing = trailing.child(mic_button);
         }
         // Always show the round button: phone when idle (like the iPhone), else
-        // send / stop / hang-up.
+        // Stop (memo) / send / stop (turn) / hang-up.
         trailing = trailing.child(primary_button);
         field = field.child(trailing);
 
@@ -2019,10 +2037,73 @@ impl Render for Composer {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ButtonAction {
     Send,
     Guide,
+    /// Stop the running turn.
     Stop,
+    /// Stop the recording memo and transcribe it.
+    StopMemo,
     Call,
+}
+
+impl ButtonAction {
+    fn glyph(self) -> &'static str {
+        match self {
+            ButtonAction::Send => "arrow-up",
+            ButtonAction::Guide => "",
+            ButtonAction::Stop | ButtonAction::StopMemo => "stop",
+            ButtonAction::Call => "phone",
+        }
+    }
+}
+
+/// What the round primary button does. A recording memo wins: the user needs
+/// a visible way to stop the microphone before anything else.
+fn primary_action(has_text: bool, running: bool, recording: bool) -> ButtonAction {
+    if recording {
+        ButtonAction::StopMemo
+    } else if has_text {
+        ButtonAction::Send
+    } else if running {
+        ButtonAction::Stop
+    } else {
+        ButtonAction::Call
+    }
+}
+
+/// The mic shows while the field is empty and stays mounted for the whole
+/// recording (a hold-to-talk release lands on it).
+fn mic_mounted(has_text: bool, recording: bool) -> bool {
+    recording || !has_text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_shows_a_stop_button_whatever_else_is_going_on() {
+        for has_text in [false, true] {
+            for running in [false, true] {
+                assert_eq!(
+                    primary_action(has_text, running, true),
+                    ButtonAction::StopMemo
+                );
+                assert!(mic_mounted(has_text, true));
+            }
+        }
+        assert_eq!(ButtonAction::StopMemo.glyph(), "stop");
+    }
+
+    #[test]
+    fn idle_field_keeps_the_iphone_layout() {
+        assert_eq!(primary_action(false, false, false), ButtonAction::Call);
+        assert!(mic_mounted(false, false));
+        assert_eq!(primary_action(true, false, false), ButtonAction::Send);
+        assert!(!mic_mounted(true, false));
+        assert_eq!(primary_action(false, true, false), ButtonAction::Stop);
+        assert_eq!(primary_action(true, true, false), ButtonAction::Send);
+    }
 }

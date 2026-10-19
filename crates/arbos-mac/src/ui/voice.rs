@@ -464,6 +464,9 @@ struct PendingStt {
 struct Recording {
     started_at: u64,
     samples: Vec<i16>,
+    /// Keep recording after the test clip ends (screenshot rig) instead of
+    /// stopping when it runs out.
+    hold: bool,
 }
 
 struct Call {
@@ -534,7 +537,7 @@ impl Voice {
             AppEvent::TranscriptText { .. } | AppEvent::TranscriptChanged { .. } => {}
         })
         .detach();
-        Self {
+        let mut this = Self {
             state,
             capture: None,
             recording: None,
@@ -553,7 +556,13 @@ impl Voice {
             mock: false,
             tick: None,
             level: 0.0,
+        };
+        // Rig: `ARBOS_SHOW=recording` opens the composer mid-memo and keeps it
+        // there (the test clip feeds silence once it ends) until Stop / Esc.
+        if std::env::var("ARBOS_SHOW").is_ok_and(|v| v == "recording") {
+            this.start_recording(true, cx);
         }
+        this
     }
 
     // ----- read-only state for the composer and the strip --------------------
@@ -627,7 +636,7 @@ impl Voice {
             return;
         }
         self.ignore_release = false;
-        self.start_recording(cx);
+        self.start_recording(false, cx);
     }
 
     /// Mouse up on the mic: a long press was hold-to-talk and stops here.
@@ -641,6 +650,41 @@ impl Voice {
         }
     }
 
+    /// The Stop button / Esc while a memo records: stop the microphone and
+    /// transcribe what was said so far (the text lands in the composer).
+    pub fn stop_memo(&mut self, cx: &mut Context<Self>) {
+        self.ignore_release = false;
+        self.stop_recording(cx);
+    }
+
+    /// The ✕ beside the recording row: throw the memo away. While the relay is
+    /// still transcribing, forget that request instead (nothing is inserted).
+    pub fn cancel_memo(&mut self, cx: &mut Context<Self>) {
+        self.ignore_release = false;
+        if self.recording.take().is_some() {
+            if self.call.is_none() {
+                self.capture = None;
+            }
+            self.notice = Some("Recording discarded".into());
+        } else if self.pending_stt.take().is_some() {
+            self.notice = Some("Transcription cancelled".into());
+        } else {
+            return;
+        }
+        cx.notify();
+    }
+
+    /// Esc: stop a running memo (keeping its transcript) or cancel a
+    /// transcription in flight. Returns false when there was nothing to do.
+    pub fn escape(&mut self, cx: &mut Context<Self>) -> bool {
+        match escape_action(self.recording.is_some(), self.pending_stt.is_some()) {
+            Some(EscapeAction::StopMemo) => self.stop_memo(cx),
+            Some(EscapeAction::CancelTranscription) => self.cancel_memo(cx),
+            None => return false,
+        }
+        true
+    }
+
     fn ensure_capture(&mut self) {
         if self.capture.is_none() {
             let (capture, notice) = Capture::open();
@@ -652,7 +696,7 @@ impl Voice {
         }
     }
 
-    fn start_recording(&mut self, cx: &mut Context<Self>) {
+    fn start_recording(&mut self, hold: bool, cx: &mut Context<Self>) {
         self.ensure_capture();
         if let Some(c) = &self.capture {
             c.drain();
@@ -660,6 +704,7 @@ impl Voice {
         self.recording = Some(Recording {
             started_at: now_ms(),
             samples: Vec::new(),
+            hold,
         });
         self.ensure_tick(cx);
         cx.notify();
@@ -1046,10 +1091,11 @@ impl Voice {
 
         if let Some(rec) = &mut self.recording {
             rec.samples.extend_from_slice(&samples);
-            let clip_done = self
-                .capture
-                .as_ref()
-                .is_some_and(|c| c.is_test_clip() && !c.clip_active());
+            let clip_done = !rec.hold
+                && self
+                    .capture
+                    .as_ref()
+                    .is_some_and(|c| c.is_test_clip() && !c.clip_active());
             let too_long = rec.samples.len() as f32 / RATE as f32 >= MAX_MEMO_SECS;
             if clip_done || too_long {
                 self.stop_recording(cx);
@@ -1111,6 +1157,26 @@ fn mmss(ms: u64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EscapeAction {
+    /// Stop the microphone; what was said so far is still transcribed.
+    StopMemo,
+    /// Drop the STT request in flight; nothing is inserted.
+    CancelTranscription,
+}
+
+/// What Esc does to the memo path: a live recording stops (and keeps its
+/// text), a transcription in flight is cancelled, otherwise Esc is not ours.
+fn escape_action(recording: bool, transcribing: bool) -> Option<EscapeAction> {
+    if recording {
+        Some(EscapeAction::StopMemo)
+    } else if transcribing {
+        Some(EscapeAction::CancelTranscription)
+    } else {
+        None
+    }
+}
+
 /// Thin recording/level row for the composer while a memo records (the voice
 /// tick re-renders it every 50 ms).
 pub fn render_recording_row(voice: &Voice, theme: &Theme) -> impl IntoElement {
@@ -1133,7 +1199,7 @@ pub fn render_recording_row(voice: &Voice, theme: &Theme) -> impl IntoElement {
                 .child(if voice.using_test_clip() {
                     "no microphone: recording the bundled test clip"
                 } else {
-                    "release to send, or click ■ to stop"
+                    "Stop or Esc to transcribe · ✕ discards"
                 }),
         )
 }
@@ -1273,5 +1339,21 @@ impl Render for Voice {
                     .child(frosted(14.0, PANEL_BLUR, strip)),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_stops_a_recording_before_anything_else() {
+        assert_eq!(escape_action(true, false), Some(EscapeAction::StopMemo));
+        assert_eq!(escape_action(true, true), Some(EscapeAction::StopMemo));
+        assert_eq!(
+            escape_action(false, true),
+            Some(EscapeAction::CancelTranscription)
+        );
+        assert_eq!(escape_action(false, false), None);
     }
 }
