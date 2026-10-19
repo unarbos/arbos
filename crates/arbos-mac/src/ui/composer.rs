@@ -5,7 +5,7 @@
 //! (mic + phone; calls start audio-only). Hand-rolled multi-line text input
 //! with IME (`EntityInputHandler`, zeron-study §4.6). Enter sends (or Guides
 //! mid-task), Shift+Enter inserts a newline. The model and reasoning pickers
-//! open from the header's "…" menu.
+//! open from the sidebar row's control-click menu.
 
 use std::ops::Range;
 use std::path::PathBuf;
@@ -1175,7 +1175,7 @@ pub struct Composer {
     /// Which chat the input text belongs to; drafts are kept per chat.
     draft_chat: Option<crate::model::Id>,
     drafts: std::collections::HashMap<crate::model::Id, String>,
-    /// The model / effort menu, opened from the header's "…" menu.
+    /// The model / effort menu, opened from the sidebar row's control-click menu.
     pub open_picker: Option<Picker>,
     /// S8 shake when the user hits Cmd+W on the pinned tab; also reused for
     /// the empty-send nudge.

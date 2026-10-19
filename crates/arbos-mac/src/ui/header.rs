@@ -1,21 +1,20 @@
-//! The conversation header, Grok Bot Mac layout: the avatar and name on the
-//! left (click an agent to open its profile), then — for an agent — its chat
-//! tabs ("Main", groups with their heads, "+" for a new chat, "×" archives),
-//! icon buttons on the right ("…", and "add people" in a DM). Under it, one
-//! optional chips row: the members of a people chat. The "…" menu holds what
-//! the iPhone keeps there: New chat, Archived, Model, Members / Share, Avatar,
-//! voice, Stop, Settings.
+//! The conversation header, Grok Bot Mac layout: the sidebar toggle, the
+//! avatar and name on the left (click an agent to open its profile), then —
+//! for an agent — its chat tabs ("Main", groups with their heads, "+" for a
+//! new chat, "×" archives). The right edge carries no icons for an agent
+//! chat (tester report app-01M5ATBWSY9E1HHBKH2QQVDEZX: no call, camera,
+//! browser or "…" buttons); a people chat keeps its "add people" circle.
+//! Calls start from the composer (mic + phone); the agent's own settings
+//! live on its profile page; the sidebar row's control-click menu holds the
+//! rest (share, groups, model, effort, spoken replies). Under the header,
+//! one optional chips row: the members of a people chat.
 
-use gpui::{
-    div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
-    SharedString,
-};
+use gpui::{div, prelude::*, px, AnyElement, Context, Div, ElementId, FontWeight, SharedString};
 
 use crate::app::ProfilePage;
-use crate::model::{CallKind, Chat, Project};
+use crate::model::{Chat, Project};
 use crate::ui::avatars;
-use crate::ui::callview;
-use crate::ui::composer::{Composer, Picker};
+use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
@@ -26,7 +25,6 @@ use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
-use crate::ui::voicepicker;
 
 pub fn render(
     shell: &Shell,
@@ -37,8 +35,6 @@ pub fn render(
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let is_people = space.is_people();
-    let in_call = shell.voice.read(cx).in_call();
-    let menu_open = shell.menu_open;
 
     // ----- left: avatar + name (click an agent to open its profile) -----------
     let mut title = div()
@@ -62,7 +58,6 @@ pub fn render(
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.menu_open = false;
                 this.members_open = false;
                 this.add_agent_open = false;
                 let (handle, sid) = (handle.clone(), sid.clone());
@@ -158,7 +153,6 @@ pub fn render(
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.menu_open = false;
                 this.members_open = false;
                 this.add_agent_open = false;
                 let sid = sid.clone();
@@ -265,7 +259,6 @@ pub fn render(
             .hover(|s| s.bg(theme.surface_2))
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    this.menu_open = false;
                     this.members_open = false;
                     this.add_agent_open = false;
                     let p = pid.clone();
@@ -307,8 +300,9 @@ pub fn render(
                 if on { theme.text } else { theme.text_muted },
             ))
     };
-    // Match the iPhone: no dual call / camera icons here. Start a call from
-    // the composer (mic + phone) or the "…" menu; camera defaults off.
+    // An agent chat has nothing here: calls (and hanging up) live on the
+    // composer's phone button, everything else on the profile page or the
+    // sidebar row's control-click menu. A people chat keeps "add people".
     let mut right = div().flex().items_center().gap(px(2.0));
     if is_people {
         right = right.child(
@@ -318,34 +312,11 @@ pub fn render(
                     cx.stop_propagation();
                     this.members_open = !this.members_open;
                     this.add_agent_open = false;
-                    this.menu_open = false;
                     cx.notify();
                 }),
             ),
         );
     }
-    if in_call {
-        right = right.child(
-            button("header-call", "phone", true, &theme)
-                .bg(theme.danger_soft)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.voice.update(cx, |v, cx| v.toggle_call(cx));
-                })),
-        );
-    }
-    right = right.child(
-        button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
-            gpui::MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                this.menu_open = !this.menu_open;
-                this.members_open = false;
-                this.add_agent_open = false;
-                this.set_group_picker(false, cx);
-                cx.notify();
-            }),
-        ),
-    );
 
     let tabs = if is_people {
         None
@@ -358,7 +329,6 @@ pub fn render(
     let sidebar_open = !sidebar_hidden || overlay;
     let sidebar_toggle = button("header-sidebar", "sidebar-left", sidebar_open, &theme).on_click(
         cx.listener(|this, _, window, cx| {
-            this.menu_open = false;
             let width: f32 = window.viewport_size().width.into();
             this.state.update(cx, |s, cx| {
                 let narrow = s.window_is_narrow(width);
@@ -640,7 +610,6 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
                         cx.listener(|this, _, _, cx| {
                             cx.stop_propagation();
                             this.archived_open = !this.archived_open;
-                            this.menu_open = false;
                             cx.notify();
                         }),
                     ),
@@ -808,352 +777,4 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
     }
     let theme = Theme::of(cx).clone();
     Some(people::member_chips(space, shell.add_agent_open, &theme, cx).into_any_element())
-}
-
-/// The "…" dropdown under the header's right circle.
-pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
-    let theme = Theme::of(cx).clone();
-    let state = shell.state.read(cx);
-    let is_people = space.is_people();
-    let streaming = state.project_is_streaming(&space.id);
-    let voice_mode = state.voice_mode;
-    let in_call = shell.voice.read(cx).in_call();
-    let in_livekit = state.my_call.is_some();
-    let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
-    let name = if space.is_people_group() {
-        space.name.clone()
-    } else if is_people {
-        space
-            .person()
-            .map(|p| format!("@{}", p.handle))
-            .unwrap_or_else(|| space.name.clone())
-    } else {
-        space.name.clone()
-    };
-    let right = 16.0;
-
-    let mut body = div().flex().flex_col().gap(px(1.0));
-    if is_people {
-        body = body
-            .child(
-                glass::menu_row("menu-members", "people", "Members & agents", false, &theme)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.members_open = true;
-                        cx.notify();
-                    })),
-            )
-            .child(
-                glass::menu_row(
-                    "menu-add-agent",
-                    "sparkles",
-                    "Add one of your agents",
-                    false,
-                    &theme,
-                )
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.menu_open = false;
-                    this.add_agent_open = true;
-                    cx.notify();
-                })),
-            );
-        if let Some(person) = space.person() {
-            let handle = person.handle.clone();
-            let chat = space.id.clone();
-            body = body.child(
-                glass::menu_row(
-                    "menu-block",
-                    "xmark",
-                    format!("Block @{}", person.handle),
-                    true,
-                    &theme,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.menu_open = false;
-                    let h = handle.clone();
-                    let c = chat.clone();
-                    this.state.update(cx, |s, cx| {
-                        s.block_user(h, cx);
-                        s.leave_chat(c, cx);
-                    });
-                })),
-            );
-        }
-    } else {
-        let model = space.model.clone();
-        let effort = space.effort.label();
-        let multi_chat = state.multi_chat;
-        if multi_chat {
-            let archived = state.archived_tabs(&space.id).len();
-            body = body
-                .child(
-                    glass::menu_row("menu-new-chat", "square-pencil", "New chat", false, &theme)
-                        .child(
-                            div()
-                                .text_size(px(TEXT_TINY))
-                                .text_color(theme.text_faint)
-                                .child("⌘T"),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.menu_open = false;
-                            this.state.update(cx, |s, cx| s.new_tab(cx));
-                            Composer::focus(&this.composer, window, cx);
-                        })),
-                )
-                .child(
-                    glass::menu_row("menu-archived", "archivebox", "Archived", false, &theme)
-                        .when(archived > 0, |el| {
-                            el.child(
-                                div()
-                                    .text_size(px(TEXT_TINY))
-                                    .text_color(theme.text_faint)
-                                    .child(archived.to_string()),
-                            )
-                        })
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.menu_open = false;
-                                this.archived_open = true;
-                                cx.notify();
-                            }),
-                        ),
-                );
-        }
-        if !space.is_guest() {
-            body = body
-                .child(
-                    glass::menu_row(
-                        "menu-model",
-                        "cpu",
-                        format!("Model · {model}"),
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.composer.update(cx, |c, cx| {
-                            c.open_picker = Some(Picker::Model);
-                            cx.notify();
-                        });
-                    })),
-                )
-                .child(
-                    glass::menu_row(
-                        "menu-effort",
-                        "waveform",
-                        format!("Effort · {effort}"),
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.composer.update(cx, |c, cx| {
-                            c.open_picker = Some(Picker::Effort);
-                            cx.notify();
-                        });
-                    })),
-                )
-                .child(
-                    glass::menu_row(
-                        "menu-voice",
-                        "mic",
-                        format!(
-                            "Voice · {}",
-                            voicepicker::current_label(space, &state.voices)
-                        ),
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.voice_picker_open = true;
-                        this.state.update(cx, |s, _| s.fetch_voices());
-                        cx.notify();
-                    })),
-                )
-                .child({
-                    // Voice API §11: may the agent look through my camera on calls.
-                    let pid = space.id.clone();
-                    let on = space.vision_enabled;
-                    glass::menu_row(
-                        "menu-vision",
-                        "eye",
-                        if on {
-                            "Camera vision · on"
-                        } else {
-                            "Camera vision · off"
-                        },
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.menu_open = false;
-                        let p = pid.clone();
-                        this.state
-                            .update(cx, |s, cx| s.set_vision_enabled(p, !on, cx));
-                    }))
-                })
-                .child(glass::menu_divider(&theme))
-                .child(
-                    glass::menu_row(
-                        "menu-share",
-                        "person-plus",
-                        if space.guests().next().is_some() {
-                            "Members"
-                        } else {
-                            "Share project…"
-                        },
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.menu_open = false;
-                        let has_guests = this
-                            .state
-                            .read(cx)
-                            .selected()
-                            .map(|p| p.guests().next().is_some())
-                            .unwrap_or(false);
-                        if has_guests {
-                            this.members_open = true;
-                            cx.notify();
-                        } else {
-                            let id = this.state.read(cx).selected_project.clone();
-                            if let Some(id) = id {
-                                this.people_input.update(cx, |i, cx| i.clear(cx));
-                                this.state.update(cx, |s, cx| s.open_invite(id, cx));
-                                let handle = this.people_input.read(cx).focus_handle(cx);
-                                window.focus(&handle, cx);
-                            }
-                        }
-                    })),
-                )
-                .child(
-                    glass::menu_row("menu-avatar", "sparkles", "Avatar & colour", false, &theme)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.menu_open = false;
-                            let id = this.state.read(cx).selected_project.clone();
-                            if let Some(id) = id {
-                                this.state
-                                    .update(cx, |s, cx| s.toggle_avatar_picker(id, cx));
-                            }
-                        })),
-                );
-            if multi_chat && projects_count > 1 {
-                body = body.child(
-                    glass::menu_row(
-                        "menu-group",
-                        "people",
-                        "Add a project to this chat",
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.set_group_picker(true, cx);
-                    })),
-                );
-            }
-        } else {
-            body = body.child(
-                glass::menu_row("menu-members-guest", "people", "Members", false, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.members_open = true;
-                        cx.notify();
-                    }),
-                ),
-            );
-        }
-    }
-    body = body
-        .child(glass::menu_divider(&theme))
-        .child(
-            glass::menu_row(
-                "menu-voice-mode",
-                "waveform",
-                if voice_mode {
-                    "Voice mode · on"
-                } else {
-                    "Voice mode · off"
-                },
-                false,
-                &theme,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.menu_open = false;
-                this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
-            })),
-        )
-        .child(
-            glass::menu_row(
-                "menu-call",
-                "phone",
-                if in_livekit || in_call {
-                    "Hang up"
-                } else {
-                    "Call"
-                },
-                false,
-                &theme,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.menu_open = false;
-                // LiveKit call first (same as the iPhone); else voice-mode hang-up /
-                // start. Calls always begin audio-only; turn the camera on in-call.
-                let live = this.state.read(cx).my_call.is_some();
-                let voice_on = this.voice.read(cx).in_call();
-                if live {
-                    this.state.update(cx, |s, cx| s.leave_call(cx));
-                } else if voice_on {
-                    this.voice.update(cx, |v, cx| v.toggle_call(cx));
-                } else if this
-                    .state
-                    .read(cx)
-                    .selected()
-                    .is_some_and(callview::callable)
-                {
-                    this.state
-                        .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
-                }
-            })),
-        );
-    if streaming {
-        body = body.child(
-            glass::menu_row("menu-stop", "stop", format!("Stop {name}"), true, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.menu_open = false;
-                    this.state.update(cx, |s, cx| s.stop(cx));
-                }),
-            ),
-        );
-    }
-    body = body
-        .child(glass::menu_divider(&theme))
-        .child(
-            glass::menu_row(
-                "menu-feedback",
-                "square-pencil",
-                "Send feedback",
-                false,
-                &theme,
-            )
-            .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx))),
-        )
-        .child(
-            glass::menu_row("menu-settings", "gear", "Settings", false, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.menu_open = false;
-                    this.settings_open = true;
-                    cx.notify();
-                }),
-            ),
-        );
-    div()
-        .absolute()
-        .top(px(HEADER_HEIGHT - 4.0))
-        .right(px(right))
-        .child(glass::frosted_menu(250.0, &theme, body))
 }
