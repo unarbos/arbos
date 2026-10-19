@@ -412,6 +412,13 @@ pub enum ClientCommand {
         chat_id: Id,
         archived: bool,
     },
+    /// Rename a chat tab (`PATCH /projects/{id}/chats/{chat}` + a `retitle`
+    /// command in the chat doc so the box's local index matches).
+    Retitle {
+        project_id: Id,
+        chat_id: Id,
+        title: String,
+    },
     MarkRead {
         chat_id: Id,
     },

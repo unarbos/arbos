@@ -572,6 +572,21 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 spawn_turn(shared, project_id, chat_id, new_id(), text, true);
             }
         }
+        ClientCommand::Retitle { chat_id, title, .. } => {
+            let changed = {
+                let mut chats = shared.chats.lock().unwrap();
+                match chats.iter_mut().find(|c| c.id == chat_id) {
+                    Some(c) => {
+                        c.title = title;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if changed {
+                emit_chats(shared);
+            }
+        }
         ClientCommand::NewChat {
             project_id,
             chat_id,
