@@ -1,9 +1,8 @@
 //! An agent's page: the coloured tree, name, what it is doing, call / voice
-//! (soon) / mute / search / more, the info card (owner, machine, model,
-//! description), an Appearance section holding the tree + colour picker,
-//! then Media / Files / Links from its chats.
+//! / mute / search / more, the info card (owner, machine, model,
+//! description), then Media / Files / Links from its chats.
 
-use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString};
+use gpui::{div, prelude::*, px, Context, Div, Focusable};
 
 use crate::app::{CallTarget, ProfilePage};
 use crate::model::{Id, MachineState, Person, Project};
@@ -123,7 +122,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
     };
     let tab = state.profile_tab;
     let more_open = state.profile_more_open;
-    let picker_open = state.profile_picker_open;
     let editing = state.profile_editing_description && mine;
     let muted = state.is_muted(&project.id);
     let content = collect(state, &chats_of(state, &project.id));
@@ -516,39 +514,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         }
     }
 
-    // ----- appearance (mine only): Automatic + the seven gradients, folded ----
-    let appearance = mine.then(|| {
-        let current_index = avatars::index_for(&project.id, project.avatar_color_override);
-        let label = match project.avatar_color_override {
-            None => format!("Automatic · {}", avatars::GRADIENTS[current_index as usize].name),
-            Some(i) => avatars::GRADIENTS[(i as usize) % 7].name.to_string(),
-        };
-        let mut section = card(&theme).child(
-            glass::nav_row(
-                "profile-appearance",
-                "Avatar colour",
-                Some(if picker_open { "pick".into() } else { label }),
-                &theme,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.update(cx, |s, cx| s.toggle_profile_picker(cx));
-            })),
-        );
-        if picker_open {
-            section = section
-                .child(colour_row(&project, &theme, cx))
-                .child(
-                    div()
-                        .px(px(16.0))
-                        .pb(px(12.0))
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child("Automatic picks the colour from the agent's id, the same on every device; choose one to make it yours."),
-                );
-        }
-        section
-    });
-
     // ----- tabs -----------------------------------------------------------------
     let tabs = tab_bar(&TABS, tab, &theme, cx);
     let body_tab = match tab {
@@ -564,8 +529,6 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         .child(hero)
         .child(actions)
         .children(more)
-        // Avatar colour sits right under the big avatar it changes.
-        .children(appearance)
         .child(info)
         .child(tabs)
         .child(body_tab);
@@ -587,100 +550,4 @@ pub(super) fn page(project_id: &str, shell: &Shell, cx: &mut Context<Shell>) -> 
         ))
     });
     Some(frame(body, edit, &theme, cx))
-}
-
-fn colour_row(project: &Project, theme: &Theme, cx: &mut Context<Shell>) -> Div {
-    let mut colours = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(10.0))
-        .px(px(16.0))
-        .pb(px(14.0));
-    let auto_index = avatars::color_index(&project.id);
-    let override_index = project.avatar_color_override;
-    let ring = |selected: bool, theme: &Theme| {
-        div()
-            .size(px(52.0))
-            .rounded_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .border_2()
-            .border_color(if selected {
-                theme.text
-            } else {
-                gpui::transparent_black()
-            })
-            .cursor_pointer()
-            .hover(|st| st.border_color(theme.border_strong))
-    };
-    // "Automatic": the id-derived gradient with the agent's initials.
-    {
-        let pid = project.id.clone();
-        colours = colours.child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    ring(override_index.is_none(), theme)
-                        .id("avatar-color-auto")
-                        .child(avatars::element(
-                            &project.id,
-                            &project.name,
-                            None,
-                            44.0,
-                            theme,
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let p = pid.clone();
-                            this.state
-                                .update(cx, |st, cx| st.set_avatar_color_index(p, None, cx));
-                        })),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(theme.text_muted)
-                        .child("Automatic"),
-                ),
-        );
-    }
-    for (i, g) in avatars::GRADIENTS.iter().enumerate() {
-        let index = i as u8;
-        let selected = override_index == Some(index);
-        let pid = project.id.clone();
-        colours = colours.child(
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    ring(selected, theme)
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "avatar-color-{index}"
-                        ))))
-                        .child(avatars::swatch(index, 44.0, theme))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let p = pid.clone();
-                            this.state
-                                .update(cx, |st, cx| st.set_avatar_color_index(p, Some(index), cx));
-                        })),
-                )
-                .child(
-                    div()
-                        .text_size(px(TEXT_TINY))
-                        .text_color(if index == auto_index && override_index.is_none() {
-                            theme.text
-                        } else {
-                            theme.text_muted
-                        })
-                        .child(g.name),
-                ),
-        );
-    }
-    colours
 }

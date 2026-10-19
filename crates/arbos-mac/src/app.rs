@@ -2516,6 +2516,25 @@ impl AppState {
         cx.notify();
     }
 
+    /// Header double-click rename: optimistic, then `PATCH /projects/{id} {name}`.
+    pub fn set_project_name(&mut self, name: String, cx: &mut Context<Self>) {
+        let name = name.trim().chars().take(80).collect::<String>();
+        if name.is_empty() {
+            return;
+        }
+        let Some(project_id) = self.selected_project.clone() else {
+            return;
+        };
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if p.is_people() || p.is_guest() {
+                return;
+            }
+            p.name = name.clone();
+        }
+        self.command(ClientCommand::SetProjectName { project_id, name });
+        cx.notify();
+    }
+
     /// Closes the sheet; `true` when one was open.
     pub fn close_profile(&mut self, cx: &mut Context<Self>) -> bool {
         self.avatar_picker = None;

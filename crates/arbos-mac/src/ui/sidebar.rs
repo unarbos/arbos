@@ -238,7 +238,26 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         PulseClock::request(cx);
     }
 
-    // ----- top: "+" beside the traffic lights, then the search pill ------------
+    // ----- top: collapse + "+" beside the traffic lights, then the search pill --
+    let collapse = div()
+        .id("sidebar-collapse")
+        .size(px(28.0))
+        .flex_shrink_0()
+        .rounded(px(7.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.surface_2))
+        .child(icon("sidebar-left", 16.0, theme.text_muted))
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.menu_open = false;
+            let width: f32 = window.viewport_size().width.into();
+            this.state.update(cx, |s, cx| {
+                let narrow = s.window_is_narrow(width);
+                s.toggle_rail(narrow, cx);
+            });
+        }));
     let plus = div()
         .id("sidebar-new")
         .size(px(28.0))
@@ -265,8 +284,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .flex()
         .items_end()
         .justify_end()
+        .gap(px(4.0))
         .px(px(12.0))
         .pb(px(2.0))
+        .child(collapse)
         .child(plus)
         .window_drag();
     let search = div()

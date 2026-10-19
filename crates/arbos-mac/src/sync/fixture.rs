@@ -746,6 +746,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             }
             emit_projects(shared);
         }
+        ClientCommand::SetProjectName { project_id, name } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.name = name;
+                }
+            }
+            emit_projects(shared);
+        }
         ClientCommand::SetMuted { space_id, muted } => {
             {
                 let mut projects = shared.projects.lock().unwrap();

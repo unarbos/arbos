@@ -4119,6 +4119,26 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetProjectName { project_id, name } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
+                    p.name = name.clone();
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(&format!("/projects/{project_id}"), json!({ "name": name }))
+                    .await
+                {
+                    shared.notice(format!("Rename: {err:#}"));
+                }
+            });
+        }
         ClientCommand::SetMuted { space_id, muted } => {
             if !shared.is_people(&space_id) {
                 return;

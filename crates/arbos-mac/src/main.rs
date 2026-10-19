@@ -156,8 +156,6 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-t", shell::NewTab, None),
         KeyBinding::new("cmd-b", shell::ToggleRail, None),
         KeyBinding::new("ctrl-b", shell::ToggleRail, None),
-        KeyBinding::new("cmd-shift-b", shell::TogglePanel, None),
-        KeyBinding::new("ctrl-shift-b", shell::TogglePanel, None),
         KeyBinding::new("escape", shell::Escape, None),
         KeyBinding::new("cmd-q", shell::Quit, None),
         KeyBinding::new("cmd-shift-f", feedback::SendFeedback, None),

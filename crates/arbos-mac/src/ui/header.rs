@@ -1,10 +1,11 @@
 //! The conversation header, Grok Bot Mac layout: the avatar and name on the
-//! left (click an agent to open its profile), then — for an agent — its chat
-//! tabs ("Main", groups with their heads, "+" for a new chat, "×" archives),
-//! icon buttons on the right (browser view, "…", and "add people" in a DM).
-//! Under it, one optional chips row: the members of a people chat. The "…"
-//! menu holds what the iPhone keeps there: New chat, Archived, Model,
-//! Members / Share, Avatar, voice, Stop, Settings.
+//! left (click an agent to open its profile; double-click to rename), then —
+//! for an agent — its chat tabs ("Main", groups with their heads, "+" for a
+//! new chat, "×" archives), icon buttons on the right (transcribe, call, "…",
+//! and "add people" in a DM). Under it, one optional chips row: the members of
+//! a people chat. The "…" menu holds what the iPhone keeps there: New chat,
+//! Archived, Model / Effort / Voice (hover to expand), Members / Share, Stop,
+//! Settings.
 
 use gpui::{
     div, prelude::*, px, AnyElement, Context, Div, ElementId, Focusable as _, FontWeight,
@@ -12,20 +13,20 @@ use gpui::{
 };
 
 use crate::app::ProfilePage;
-use crate::model::{CallKind, Chat, Project};
+use crate::model::{CallKind, Chat, Effort, Project};
+use crate::sync::fixture::MODELS;
 use crate::ui::avatars;
 use crate::ui::callview;
-use crate::ui::composer::{Composer, Picker};
+use crate::ui::composer::Composer;
 use crate::ui::glass::{self, WindowDrag};
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
-use crate::ui::shell::Shell;
+use crate::ui::shell::{MenuSubmenu, Shell};
 use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{
-    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, RIGHT_PANEL_WIDTH, TEXT_BODY, TEXT_SMALL,
-    TEXT_TINY,
+    Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 use crate::ui::voicepicker;
 
@@ -39,9 +40,10 @@ pub fn render(
     let state = shell.state.read(cx);
     let is_people = space.is_people();
     let in_call = shell.voice.read(cx).in_call();
+    let voice_mode = state.voice_mode;
     let menu_open = shell.menu_open;
-    let panel_open = state.right_panel_open;
-    // Calls: start a voice / video call in a people chat, a shared project, or with the agent.
+    let renaming = shell.renaming_agent;
+    // Calls: start a voice call (camera off by default; turn it on in the call screen).
     let in_call_here = state
         .my_call
         .as_ref()
@@ -174,11 +176,34 @@ pub fn render(
                     s.open_profile(ProfilePage::Group { space_id: sid }, cx)
                 });
             }));
+    } else if renaming && !space.is_people() && !space.is_guest() {
+        // Double-click rename: an inline field where the name was.
+        title = title
+            .child(
+                div()
+                    .relative()
+                    .size(px(AVATAR_HEADER))
+                    .flex_shrink_0()
+                    .child(avatars::project(space, AVATAR_HEADER, &theme)),
+            )
+            .child(
+                div()
+                    .w(px(160.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(8.0))
+                    .bg(theme.field)
+                    .border_1()
+                    .border_color(theme.field_border)
+                    .text_size(px(TEXT_BODY))
+                    .child(shell.agent_rename_input.clone()),
+            );
     } else {
         let avatar_state = state.avatar_state(&space.id);
         let streaming = state.project_is_streaming(&space.id);
         let machine = state.machine.shown_state();
         let pid = space.id.clone();
+        let can_rename = !space.is_guest() && !space.is_groupish();
         let sub = if streaming {
             Some(format!("{} is working", space.name))
         } else if space.is_guest() {
@@ -245,25 +270,30 @@ pub fn render(
         if avatar_state != avatars::AvatarState::Idle {
             PulseClock::request(cx);
         }
-        // A group chat or a project with other people: the group page; my
-        // own solo agent: its profile (with the tree + colour picker).
+        // Single-click: group page or agent profile. Double-click (own agent): rename.
         let groupish = space.is_groupish();
         title = title
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.menu_open = false;
-                this.members_open = false;
-                this.add_agent_open = false;
-                let p = pid.clone();
-                this.state.update(cx, |s, cx| {
-                    if groupish {
-                        s.open_profile(ProfilePage::Group { space_id: p }, cx);
-                    } else {
-                        s.toggle_avatar_picker(p, cx);
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    this.menu_open = false;
+                    this.members_open = false;
+                    this.add_agent_open = false;
+                    if can_rename && event.click_count() >= 2 {
+                        this.start_agent_rename(window, cx);
+                        return;
                     }
-                });
-            }));
+                    let p = pid.clone();
+                    this.state.update(cx, |s, cx| {
+                        if groupish {
+                            s.open_profile(ProfilePage::Group { space_id: p }, cx);
+                        } else {
+                            s.toggle_avatar_picker(p, cx);
+                        }
+                    });
+                }),
+            );
     }
 
     // ----- right: icon buttons --------------------------------------------------
@@ -289,27 +319,28 @@ pub fn render(
                 if on { theme.text } else { theme.text_muted },
             ))
     };
+    // iPhone parity: transcribe (voice mode) + call (audio; camera on in-call).
     let mut right = div().flex().items_center().gap(px(2.0));
+    if !is_people {
+        right = right.child(
+            button("header-transcribe", "waveform", voice_mode, &theme).on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.menu_open = false;
+                    this.voice.update(cx, |v, cx| v.toggle_voice_mode(cx));
+                },
+            )),
+        );
+    }
     if callview::callable(space) && !in_call_here {
-        right = right
-            .child(
-                button("header-voice-call", "phone", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu_open = false;
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
-                    },
-                )),
-            )
-            .child(
-                button("header-video-call", "camera", false, &theme).on_click(cx.listener(
-                    |this, _, _, cx| {
-                        this.menu_open = false;
-                        this.state
-                            .update(cx, |s, cx| s.start_call_in_chat(CallKind::Video, cx));
-                    },
-                )),
-            );
+        right = right.child(
+            button("header-call", "phone", false, &theme).on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.menu_open = false;
+                    this.state
+                        .update(cx, |s, cx| s.start_call_in_chat(CallKind::Voice, cx));
+                },
+            )),
+        );
     }
     if is_people {
         right = right.child(
@@ -327,34 +358,27 @@ pub fn render(
     }
     if in_call {
         right = right.child(
-            button("header-call", "phone", true, &theme)
+            button("header-hangup", "phone", true, &theme)
                 .bg(theme.danger_soft)
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.voice.update(cx, |v, cx| v.toggle_call(cx));
                 })),
         );
     }
-    right = right
-        .child(
-            button("header-panel", "window", panel_open, &theme).on_click(cx.listener(
-                |this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.toggle_right_panel(cx));
-                },
-            )),
-        )
-        .child(
-            button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.menu_open = !this.menu_open;
-                    this.members_open = false;
-                    this.add_agent_open = false;
-                    this.set_group_picker(false, cx);
-                    cx.notify();
-                }),
-            ),
-        );
+    right = right.child(
+        button("header-menu", "ellipsis", menu_open, &theme).on_mouse_down(
+            gpui::MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.menu_open = !this.menu_open;
+                this.menu_submenu = None;
+                this.members_open = false;
+                this.add_agent_open = false;
+                this.set_group_picker(false, cx);
+                cx.notify();
+            }),
+        ),
+    );
 
     let tabs = if is_people {
         None
@@ -599,12 +623,7 @@ fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option
 pub fn archived_list(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
-    let panel_open = state.right_panel_open;
-    let right = if panel_open {
-        RIGHT_PANEL_WIDTH + 16.0
-    } else {
-        16.0
-    };
+    let right = 16.0;
     let archived: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
@@ -737,13 +756,11 @@ pub fn chips(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<
 /// The "…" dropdown under the header's right circle.
 pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let state = shell.state.read(cx);
     let is_people = space.is_people();
-    let streaming = state.project_is_streaming(&space.id);
-    let panel_open = state.right_panel_open;
-    let voice_mode = state.voice_mode;
     let in_call = shell.voice.read(cx).in_call();
-    let projects_count = state.projects.iter().filter(|p| !p.is_people()).count();
+    let submenu = shell.menu_submenu;
+    let model_query = shell.model_search_input.read(cx).text().to_string();
+    let search_input = shell.model_search_input.clone();
     let name = if space.is_people_group() {
         space.name.clone()
     } else if is_people {
@@ -754,10 +771,31 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     } else {
         space.name.clone()
     };
-    let right = if panel_open {
-        RIGHT_PANEL_WIDTH + 16.0
-    } else {
-        16.0
+    let right = 16.0;
+
+    // Clone everything we need from AppState, then drop the read guard before
+    // any `cx.listener` / `menu_hover_row` that need `&mut Context`.
+    let (
+        streaming,
+        voice_mode,
+        projects_count,
+        multi_chat,
+        archived,
+        voices,
+        models,
+        voice_label,
+    ) = {
+        let state = shell.state.read(cx);
+        (
+            state.project_is_streaming(&space.id),
+            state.voice_mode,
+            state.projects.iter().filter(|p| !p.is_people()).count(),
+            state.multi_chat,
+            state.archived_tabs(&space.id).len(),
+            state.voices.clone(),
+            state.models.clone(),
+            voicepicker::current_label(space, &state.voices),
+        )
     };
 
     let mut body = div().flex().flex_col().gap(px(1.0));
@@ -810,9 +848,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
     } else {
         let model = space.model.clone();
         let effort = space.effort.label();
-        let multi_chat = state.multi_chat;
         if multi_chat {
-            let archived = state.archived_tabs(&space.id).len();
             body = body
                 .child(
                     glass::menu_row("menu-new-chat", "square-pencil", "New chat", false, &theme)
@@ -850,61 +886,60 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                 );
         }
         if !space.is_guest() {
+            let model_open = submenu == Some(MenuSubmenu::Model);
+            let effort_open = submenu == Some(MenuSubmenu::Effort);
+            let voice_open = submenu == Some(MenuSubmenu::Voice);
+            let model_row = menu_hover_row(
+                "menu-model",
+                "cpu",
+                format!("Model · {model}"),
+                model_open,
+                MenuSubmenu::Model,
+                &theme,
+                cx,
+            );
+            let effort_row = menu_hover_row(
+                "menu-effort",
+                "waveform",
+                format!("Effort · {effort}"),
+                effort_open,
+                MenuSubmenu::Effort,
+                &theme,
+                cx,
+            );
+            let voice_row = menu_hover_row(
+                "menu-voice",
+                "mic",
+                format!("Voice · {voice_label}"),
+                voice_open,
+                MenuSubmenu::Voice,
+                &theme,
+                cx,
+            );
+            let model_panel = model_open.then(|| {
+                model_submenu(&models, &model, &model_query, search_input.clone(), &theme, cx)
+            });
+            let effort_panel =
+                effort_open.then(|| effort_submenu(space.effort, &theme, cx));
+            let voice_panel =
+                voice_open.then(|| voice_submenu(space, &voices, &theme, cx));
+            body = body.child(model_row);
+            if let Some(panel) = model_panel {
+                body = body.child(panel);
+            }
+            body = body.child(effort_row);
+            if let Some(panel) = effort_panel {
+                body = body.child(panel);
+            }
+            body = body.child(voice_row);
+            if let Some(panel) = voice_panel {
+                body = body.child(panel);
+            }
+            // Voice API §11: may the agent look through my camera on calls.
+            let pid = space.id.clone();
+            let on = space.vision_enabled;
             body = body
                 .child(
-                    glass::menu_row(
-                        "menu-model",
-                        "cpu",
-                        format!("Model · {model}"),
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.composer.update(cx, |c, cx| {
-                            c.open_picker = Some(Picker::Model);
-                            cx.notify();
-                        });
-                    })),
-                )
-                .child(
-                    glass::menu_row(
-                        "menu-effort",
-                        "waveform",
-                        format!("Effort · {effort}"),
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.composer.update(cx, |c, cx| {
-                            c.open_picker = Some(Picker::Effort);
-                            cx.notify();
-                        });
-                    })),
-                )
-                .child(
-                    glass::menu_row(
-                        "menu-voice",
-                        "mic",
-                        format!(
-                            "Voice · {}",
-                            voicepicker::current_label(space, &state.voices)
-                        ),
-                        false,
-                        &theme,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.menu_open = false;
-                        this.voice_picker_open = true;
-                        this.state.update(cx, |s, _| s.fetch_voices());
-                        cx.notify();
-                    })),
-                )
-                .child({
-                    // Voice API §11: may the agent look through my camera on calls.
-                    let pid = space.id.clone();
-                    let on = space.vision_enabled;
                     glass::menu_row(
                         "menu-vision",
                         "eye",
@@ -918,11 +953,12 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.menu_open = false;
+                        this.menu_submenu = None;
                         let p = pid.clone();
                         this.state
                             .update(cx, |s, cx| s.set_vision_enabled(p, !on, cx));
-                    }))
-                })
+                    })),
+                )
                 .child(glass::menu_divider(&theme))
                 .child(
                     glass::menu_row(
@@ -938,6 +974,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                     )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.menu_open = false;
+                        this.menu_submenu = None;
                         let has_guests = this
                             .state
                             .read(cx)
@@ -957,17 +994,6 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
                             }
                         }
                     })),
-                )
-                .child(
-                    glass::menu_row("menu-avatar", "sparkles", "Avatar & colour", false, &theme)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.menu_open = false;
-                            let id = this.state.read(cx).selected_project.clone();
-                            if let Some(id) = id {
-                                this.state
-                                    .update(cx, |s, cx| s.toggle_avatar_picker(id, cx));
-                            }
-                        })),
                 );
             if multi_chat && projects_count > 1 {
                 body = body.child(
@@ -1054,6 +1080,7 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
             glass::menu_row("menu-settings", "gear", "Settings", false, &theme).on_click(
                 cx.listener(|this, _, _, cx| {
                     this.menu_open = false;
+                    this.menu_submenu = None;
                     this.settings_open = true;
                     cx.notify();
                 }),
@@ -1063,5 +1090,249 @@ pub fn menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Div {
         .absolute()
         .top(px(HEADER_HEIGHT - 4.0))
         .right(px(right))
-        .child(glass::frosted_menu(250.0, &theme, body))
+        .child(glass::frosted_menu(280.0, &theme, body))
+}
+
+/// A "…" row that expands its submenu on hover (model / effort / voice).
+fn menu_hover_row(
+    id: &'static str,
+    glyph: &str,
+    label: impl Into<SharedString>,
+    open: bool,
+    which: MenuSubmenu,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    glass::menu_row(id, glyph, label, false, theme)
+        .bg(if open {
+            theme.surface_2
+        } else {
+            gpui::transparent_black()
+        })
+        .child(icon(
+            if open { "chevron-up" } else { "chevron-down" },
+            12.0,
+            theme.text_faint,
+        ))
+        .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
+            if !*hovered || this.menu_submenu == Some(which) {
+                return;
+            }
+            this.menu_submenu = Some(which);
+            match which {
+                MenuSubmenu::Model => {
+                    this.model_search_input.update(cx, |i, cx| i.clear(cx));
+                    let handle = this.model_search_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+                MenuSubmenu::Voice => {
+                    this.state.update(cx, |s, _| s.fetch_voices());
+                }
+                MenuSubmenu::Effort => {}
+            }
+            cx.notify();
+        }))
+}
+
+fn model_submenu(
+    models: &[String],
+    current: &str,
+    query: &str,
+    search_input: gpui::Entity<crate::ui::composer::ComposerInput>,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Div {
+    let mut names: Vec<String> = if models.is_empty() {
+        MODELS.iter().map(|m| m.to_string()).collect()
+    } else {
+        models.to_vec()
+    };
+    if !names.iter().any(|n| n == current) {
+        names.insert(0, current.to_string());
+    }
+    let q = query.trim().to_lowercase();
+    if !q.is_empty() {
+        names.retain(|n| n.to_lowercase().contains(&q));
+    }
+    let mut list = div()
+        .id("menu-model-list")
+        .flex()
+        .flex_col()
+        .max_h(px(220.0))
+        .overflow_y_scroll()
+        .ml(px(8.0))
+        .mr(px(4.0))
+        .mb(px(4.0))
+        .rounded(px(9.0))
+        .bg(theme.surface_1)
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .px(px(10.0))
+                .py(px(6.0))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(icon("search", 12.0, theme.text_faint))
+                        .child(search_input),
+                ),
+        );
+    if names.is_empty() {
+        list = list.child(
+            div()
+                .px(px(10.0))
+                .py(px(8.0))
+                .text_size(px(TEXT_TINY))
+                .text_color(theme.text_muted)
+                .child("No models match."),
+        );
+    }
+    for (i, name) in names.iter().enumerate() {
+        let selected = name == current;
+        let name_owned = name.clone();
+        list = list.child(
+            div()
+                .id(ElementId::NamedInteger("menu-model-item".into(), i as u64))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(10.0))
+                .py(px(6.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(name.clone())
+                .when(selected, |el| el.child(icon("check", 12.0, theme.accent)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .update(cx, |s, cx| s.set_model(name_owned.clone(), cx));
+                    this.menu_submenu = None;
+                    this.menu_open = false;
+                    cx.notify();
+                })),
+        );
+    }
+    list
+}
+
+fn effort_submenu(current: Effort, theme: &Theme, cx: &mut Context<Shell>) -> Div {
+    let mut list = div()
+        .id("menu-effort-list")
+        .flex()
+        .flex_col()
+        .ml(px(8.0))
+        .mr(px(4.0))
+        .mb(px(4.0))
+        .rounded(px(9.0))
+        .bg(theme.surface_1)
+        .border_1()
+        .border_color(theme.border);
+    for (i, level) in Effort::ALL.iter().enumerate() {
+        let selected = *level == current;
+        let level = *level;
+        list = list.child(
+            div()
+                .id(ElementId::NamedInteger("menu-effort-item".into(), i as u64))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(10.0))
+                .py(px(6.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(level.label())
+                .when(selected, |el| el.child(icon("check", 12.0, theme.accent)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.set_effort(level, cx));
+                    this.menu_submenu = None;
+                    this.menu_open = false;
+                    cx.notify();
+                })),
+        );
+    }
+    list
+}
+
+fn voice_submenu(
+    space: &Project,
+    voices: &[crate::model::Voice],
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> Div {
+    let selected = space.voice.clone();
+    let pid = space.id.clone();
+    let mut list = div()
+        .id("menu-voice-list")
+        .flex()
+        .flex_col()
+        .max_h(px(220.0))
+        .overflow_y_scroll()
+        .ml(px(8.0))
+        .mr(px(4.0))
+        .mb(px(4.0))
+        .rounded(px(9.0))
+        .bg(theme.surface_1)
+        .border_1()
+        .border_color(theme.border);
+    let default_on = selected.is_none();
+    let p_default = pid.clone();
+    list = list.child(
+        div()
+            .id("menu-voice-default")
+            .flex()
+            .items_center()
+            .justify_between()
+            .px(px(10.0))
+            .py(px(6.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
+            .child("Default")
+            .when(default_on, |el| el.child(icon("check", 12.0, theme.accent)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let p = p_default.clone();
+                this.state.update(cx, |s, cx| s.set_voice(p, None, cx));
+                this.menu_submenu = None;
+                this.menu_open = false;
+                cx.notify();
+            })),
+    );
+    for (i, voice) in voices.iter().enumerate() {
+        let on = selected.as_deref() == Some(voice.id.as_str());
+        let id = voice.id.clone();
+        let name = voice.name.clone();
+        let p = pid.clone();
+        list = list.child(
+            div()
+                .id(ElementId::NamedInteger("menu-voice-item".into(), i as u64))
+                .flex()
+                .items_center()
+                .justify_between()
+                .px(px(10.0))
+                .py(px(6.0))
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.surface_2))
+                .child(name)
+                .when(on, |el| el.child(icon("check", 12.0, theme.accent)))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let (p, id) = (p.clone(), id.clone());
+                    this.state.update(cx, |s, cx| s.set_voice(p, Some(id), cx));
+                    this.menu_submenu = None;
+                    this.menu_open = false;
+                    cx.notify();
+                })),
+        );
+    }
+    list
 }
