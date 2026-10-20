@@ -43,7 +43,10 @@ use crate::ui::transcript::{Transcript, TranscriptEvent, COLUMN_MAX_WIDTH};
 use crate::ui::voice::Voice;
 use crate::ui::voicepicker;
 
-actions!(shell, [CloseTab, NewTab, ToggleRail, Escape, Quit]);
+actions!(
+    shell,
+    [CloseTab, NewTab, PrevTab, NextTab, ToggleRail, Escape, Quit]
+);
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
 const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
@@ -1122,6 +1125,35 @@ impl Shell {
                 cx.notify();
             }
         }
+    }
+
+    /// ⌘⇧[ / ⌘⇧]: the previous / next tab in dropdown order, wrapping.
+    fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let next = {
+            let state = self.state.read(cx);
+            let Some(project_id) = state.selected_project.clone() else {
+                return;
+            };
+            let tabs = state.visible_tabs(&project_id);
+            if tabs.len() < 2 {
+                return;
+            }
+            let active = state.active_tab.get(&project_id);
+            let ix = tabs.iter().position(|c| Some(&c.id) == active).unwrap_or(0) as isize;
+            let n = tabs.len() as isize;
+            tabs[((ix + delta).rem_euclid(n)) as usize].id.clone()
+        };
+        self.tab_menu_open = false;
+        self.state.update(cx, |s, cx| s.select_tab(next, cx));
+        Composer::focus(&self.composer, window, cx);
+    }
+
+    fn prev_tab(&mut self, _: &PrevTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(-1, window, cx);
+    }
+
+    fn next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        self.step_tab(1, window, cx);
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -3554,6 +3586,8 @@ impl Render for Shell {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::new_tab))
+            .on_action(cx.listener(Self::prev_tab))
+            .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
