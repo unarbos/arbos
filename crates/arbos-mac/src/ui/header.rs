@@ -9,7 +9,7 @@
 //! the composer; adding people or agents lives in the right pane's Members.
 
 use gpui::{
-    anchored, deferred, div, point, prelude::*, px, AnyElement, Context, Div, Edges, ElementId,
+    anchored, deferred, div, prelude::*, px, AnyElement, Context, Div, Edges, ElementId,
     FontWeight, SharedString, Stateful,
 };
 
@@ -366,17 +366,19 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
                 }),
             )
             .when(open, |el| {
-                // Anchored to the segment (taffy places it relative to its
-                // parent), deferred so it paints over the transcript.
+                // Hangs under the segment: an absolute wrapper places it (taffy
+                // positions it relative to the segment), the anchored child
+                // keeps it inside the window, deferred paints it over the chat.
                 el.child(
-                    deferred(
-                        anchored()
-                            .position_mode(gpui::AnchoredPositionMode::Local)
-                            .offset(point(px(-8.0), px(34.0)))
-                            .snap_to_window_with_margin(Edges::all(px(8.0)))
-                            .child(glass::popover(tab_dropdown(shell, space, cx))),
-                    )
-                    .with_priority(1),
+                    div().absolute().left(px(-8.0)).top(px(34.0)).child(
+                        deferred(
+                            anchored()
+                                .position_mode(gpui::AnchoredPositionMode::Local)
+                                .snap_to_window_with_margin(Edges::all(px(8.0)))
+                                .child(glass::popover(tab_dropdown(shell, space, cx))),
+                        )
+                        .with_priority(1),
+                    ),
                 )
             }),
     )
