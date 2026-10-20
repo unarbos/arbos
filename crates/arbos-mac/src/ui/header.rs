@@ -371,6 +371,7 @@ fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Optio
                 el.child(
                     deferred(
                         anchored()
+                            .position_mode(gpui::AnchoredPositionMode::Local)
                             .offset(point(px(-8.0), px(34.0)))
                             .snap_to_window_with_margin(Edges::all(px(8.0)))
                             .child(glass::popover(tab_dropdown(shell, space, cx))),
