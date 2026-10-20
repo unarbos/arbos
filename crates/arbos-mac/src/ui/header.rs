@@ -1,18 +1,16 @@
-//! The conversation header, Grok Bot Mac layout: the sidebar toggle, the
-//! avatar and name on the left (click an agent to open its profile), then —
-//! for an agent — its chat tabs ("Main", groups with their heads, "×"
-//! archives, "+" right after the last tab: a new chat, or a dropdown of the
-//! previous chats to bring back). The right edge carries no icons for an
-//! agent chat (tester report app-01M5ATBWSY9E1HHBKH2QQVDEZX: no call, camera,
-//! browser or "…" buttons); a people chat keeps its "add people" circle.
-//! Calls start from the composer (mic + phone); the agent's own settings
-//! live on its profile page; the sidebar row's control-click menu holds the
-//! rest (share, groups, model, effort, spoken replies). Under the header,
-//! one optional chips row: the members of a people chat.
+//! The conversation header (unified top bar, Jacob 2026-10-20, mockups
+//! `topbar-unify/`): one centred pill for every chat — avatar + name, the
+//! same control for agents, people and groups. Click the name → that chat's
+//! right pane. An agent with more than one tab folds them into the pill as a
+//! second hit region, "Name · Tab ⌄": its dropdown lists the tabs (current
+//! checked, last activity, × on hover closes), the previous chats, then
+//! New tab ⌘T. Nothing else lives in the bar: no @handle line, no agent
+//! chips, no add-person button, no member heads or counts. Calls start from
+//! the composer; adding people or agents lives in the right pane's Members.
 
 use gpui::{
     anchored, deferred, div, point, prelude::*, px, AnyElement, Context, Div, Edges, ElementId,
-    FontWeight, SharedString,
+    FontWeight, SharedString, Stateful,
 };
 
 use crate::app::ProfilePage;
@@ -30,6 +28,16 @@ use crate::ui::theme::{
     Theme, AVATAR_HEADER, CONTROL, HEADER_HEIGHT, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
+/// The pinned chat reads "Main" until it is renamed away from the agent's name.
+pub(crate) fn tab_title(chat: &Chat, space: &Project) -> String {
+    if chat.is_pinned && (chat.title.is_empty() || chat.title == space.name || chat.title == "Main")
+    {
+        "Main".to_string()
+    } else {
+        chat.title.clone()
+    }
+}
+
 pub fn render(
     shell: &Shell,
     space: &Project,
@@ -40,22 +48,22 @@ pub fn render(
     let state = shell.state.read(cx);
     let is_people = space.is_people();
 
-    // ----- left: avatar + name (click an agent to open its profile) -----------
-    let mut title = div()
+    // ----- the pill: avatar + name (click → the right pane) --------------------
+    let mut pill = div()
         .id("header-title")
         .flex()
         .items_center()
-        .gap(px(9.0))
         .h(px(34.0))
         .pl(px(4.0))
         .pr(px(10.0))
-        .rounded(px(9.0))
+        .rounded_full()
+        .bg(theme.bubble_assistant)
         .min_w_0()
         // The header is a window_drag region: a mouse-down that bubbles to it
         // arms a window move, and the slightest pointer jitter before the
         // mouse-up turns the click into a drag that never completes — the
-        // second click of a double-click most of all (#1068, as the chat
-        // tabs). Stop it here and do what the root would have on the way.
+        // second click of a double-click most of all (#1068). Stop it here and
+        // do what the root would have on the way.
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, window, cx| {
@@ -66,6 +74,28 @@ pub fn render(
                 }
             }),
         );
+
+    let name_label = |text: String, theme: &Theme| {
+        div()
+            .text_size(px(TEXT_BODY))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme.text)
+            .truncate()
+            .child(text)
+    };
+    // The name part: its own hit region so the tab segment can sit beside it.
+    let mut name_part = div()
+        .id("header-name")
+        .flex()
+        .items_center()
+        .gap(px(9.0))
+        .h_full()
+        .min_w_0()
+        .cursor_pointer()
+        .rounded_full()
+        .hover(|s| s.bg(theme.surface_2))
+        .pr(px(4.0));
+
     if let Some(person) = space
         .person()
         .filter(|_| is_people && !space.is_people_group())
@@ -73,9 +103,9 @@ pub fn render(
         let image = state.avatar(&person.avatar_url);
         let handle = person.handle.clone();
         let sid = space.id.clone();
-        title = title
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+        name_part = name_part
+            .child(people::avatar(image, person, AVATAR_HEADER, &theme))
+            .child(name_label(person.display_name(), &theme))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.members_open = false;
                 this.add_agent_open = false;
@@ -90,59 +120,11 @@ pub fn render(
                     )
                 });
             }));
-        let sub = if space.pending {
-            Some("Invited · opens when they sign in".to_string())
-        } else if !space.agents.is_empty() {
-            Some(format!(
-                "@{} · {} agent{}",
-                person.handle,
-                space.agents.len(),
-                if space.agents.len() == 1 { "" } else { "s" }
-            ))
-        } else {
-            Some(format!("@{}", person.handle))
-        };
-        title = title
-            .child(people::avatar(image, person, AVATAR_HEADER, &theme))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(TEXT_BODY))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(person.display_name()),
-                    )
-                    .when_some(sub, |el, s| {
-                        el.child(
-                            div()
-                                .text_size(px(TEXT_TINY - 1.0))
-                                .text_color(theme.text_muted)
-                                .truncate()
-                                .child(s),
-                        )
-                    }),
-            );
     } else if space.is_people_group() {
-        // A group is one pill like an agent chat: its disc and its name → group page
-        // (redesign 2026-10-20: no stacked heads, no member count).
         let sid = space.id.clone();
-        title = title
+        name_part = name_part
             .child(groups::picture(space, state, AVATAR_HEADER, &theme))
-            .child(
-                div()
-                    .text_size(px(TEXT_BODY))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .truncate()
-                    .child(space.name.clone()),
-            )
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .child(name_label(space.name.clone(), &theme))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.members_open = false;
                 this.add_agent_open = false;
@@ -160,18 +142,6 @@ pub fn render(
             .renaming_project
             .as_ref()
             .is_some_and(|p| p == &space.id);
-        let sub = if space.is_guest() {
-            Some(format!(
-                "shared by @{}",
-                space
-                    .owner_handle
-                    .clone()
-                    .or_else(|| space.owner().map(|o| o.handle.clone()))
-                    .unwrap_or_else(|| "owner".into())
-            ))
-        } else {
-            None
-        };
         let name_el = if renaming {
             div()
                 .id("header-rename")
@@ -188,15 +158,17 @@ pub fn render(
                 .child(shell.agent_name_input.clone())
                 .into_any_element()
         } else {
-            div()
-                .text_size(px(TEXT_BODY))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme.text)
-                .truncate()
-                .child(space.name.clone())
-                .into_any_element()
+            name_label(space.name.clone(), &theme).into_any_element()
         };
-        title = title
+        if avatar_state != avatars::AvatarState::Idle {
+            PulseClock::request(cx);
+        }
+        // A project with other people: the group pane; my own agent: its
+        // profile. Double-click the name to rename (owned agents only) — so
+        // a single click opens the page only after the double-click window
+        // (#1068).
+        let groupish = space.is_groupish();
+        name_part = name_part
             .child(
                 div()
                     .relative()
@@ -222,34 +194,7 @@ pub fn render(
                             ),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .min_w_0()
-                    .child(name_el)
-                    .when_some(sub, |el, s| {
-                        el.child(
-                            div()
-                                .text_size(px(TEXT_TINY - 1.0))
-                                .text_color(theme.text_muted)
-                                .truncate()
-                                .child(s),
-                        )
-                    }),
-            );
-        if avatar_state != avatars::AvatarState::Idle {
-            PulseClock::request(cx);
-        }
-        // A group chat or a project with other people: the group page; my
-        // own solo agent: its profile (with the tree + colour picker).
-        // Double-click the name to rename (owned agents only) — so for those
-        // a single click opens the page only after the double-click window,
-        // or the page's backdrop would swallow the second click (#1068).
-        let groupish = space.is_groupish();
-        title = title
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.surface_2))
+            .child(name_el)
             .on_click(
                 cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
                     this.members_open = false;
@@ -265,8 +210,16 @@ pub fn render(
                 }),
             );
     }
+    pill = pill.child(name_part);
 
-    // ----- right: icon buttons --------------------------------------------------
+    // ----- tabs fold into the pill: "· Tab ⌄" with the dropdown ---------------
+    if !is_people {
+        if let Some(segment) = tab_segment(shell, space, cx) {
+            pill = pill.child(segment);
+        }
+    }
+
+    // ----- the bar: equal side slots keep the pill centred ---------------------
     let button = |id: &'static str, glyph: &str, on: bool, theme: &Theme| {
         div()
             .id(id)
@@ -289,18 +242,8 @@ pub fn render(
                 if on { theme.text } else { theme.text_muted },
             ))
     };
-    // Nothing here (2026-10-20): calls live on the composer's phone button;
-    // adding people or agents to a chat lives in the right pane's Members
-    // list. The DM's "add person" button and agent chips are gone.
-    let right = div().flex().items_center().gap(px(2.0));
-
-    let tabs = if is_people {
-        None
-    } else {
-        agent_tabs(shell, space, cx)
-    };
     // Expand only when the rail is hidden (collapsed or too narrow). Collapse
-    // lives next to "+" in the sidebar — not in this tab bar.
+    // lives next to "+" in the sidebar.
     let sidebar_toggle = sidebar_hidden.then(|| {
         let overlay = shell.state.read(cx).sidebar_overlay;
         button("header-sidebar", "sidebar-left", overlay, &theme).on_click(cx.listener(
@@ -313,7 +256,8 @@ pub fn render(
             },
         ))
     });
-    let bar = div()
+    let side = px(CONTROL + 8.0);
+    div()
         .h(px(HEADER_HEIGHT))
         .flex_shrink_0()
         .w_full()
@@ -325,352 +269,301 @@ pub fn render(
         .pr(px(10.0))
         .border_b_1()
         .border_color(theme.border)
-        .window_drag();
-    if space.is_people_group() {
-        // A group has no tabs: its pill sits centred at the top of the chat,
-        // like the agent pill Jacob sees (redesign mockups a, b). Equal side
-        // slots keep it centred whether or not the sidebar toggle shows.
-        let side = px(CONTROL + 8.0);
-        return bar
-            .child(
-                div()
-                    .w(side)
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .children(sidebar_toggle),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .justify_center()
-                    .child(title.flex_shrink_0().max_w(px(300.0))),
-            )
-            .child(div().w(side).flex_shrink_0());
-    }
-    bar.child(
-        div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .flex_shrink_0()
-            .children(sidebar_toggle)
-            .child(title.flex_shrink_0().max_w(px(300.0))),
-    )
-    .when_some(tabs, |el, t| el.child(t))
-    .child(right.flex_shrink_0())
+        .window_drag()
+        .child(
+            div()
+                .w(side)
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .children(sidebar_toggle),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .child(pill.flex_shrink_0().max_w(px(460.0))),
+        )
+        .child(div().w(side).flex_shrink_0())
 }
 
-/// The agent's chat tabs, next to its name: every visible chat as a pill
-/// (groups with their participants' heads), "×" on each but the pinned "Main"
-/// (archives it), and "+" right after the last tab — a new chat opens there;
-/// with previous (archived) chats it drops down a menu to bring one back.
-/// With multi-chat off: the primary, groups and the Projects tab only, no
-/// "+", no "×".
-fn agent_tabs(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Div> {
+/// "· Tab ⌄" inside the pill for an agent with more than one tab (a single
+/// tab shows the name only). Click toggles the dropdown, which hangs off it.
+fn tab_segment(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> Option<Stateful<Div>> {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
-    let multi_chat = state.multi_chat;
-    let tabs: Vec<(Chat, bool, bool)> = state
-        .visible_tabs(&space.id)
-        .into_iter()
-        .map(|c| {
-            (
-                c.clone(),
-                state.active_tab.get(&space.id) == Some(&c.id),
-                state.chat_is_streaming(&c.id),
-            )
-        })
-        .collect();
-    let previous = state.archived_tabs(&space.id).len();
-    if tabs.is_empty() {
+    let tabs = state.visible_tabs(&space.id);
+    if tabs.len() < 2 {
         return None;
     }
-    if !multi_chat && tabs.len() < 2 {
-        return None;
+    let active = state.active_tab.get(&space.id).cloned();
+    let current = tabs
+        .iter()
+        .find(|c| Some(&c.id) == active.as_ref())
+        .or(tabs.first())
+        .map(|c| tab_title(c, space))
+        .unwrap_or_else(|| "Main".into());
+    let streaming = active
+        .as_deref()
+        .is_some_and(|id| state.chat_is_streaming(id));
+    if streaming {
+        PulseClock::request(cx);
     }
-    let projects = state.projects.clone();
-    // The row is as wide as its tabs (it scrolls once they overflow), so "+"
-    // sits right beside the last tab instead of at the far end of the header.
-    let mut row = div()
-        .id("chat-tabs")
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .overflow_x_scroll()
-        .track_scroll(&shell.tabs_scroll);
-    let renaming = shell.renaming_tab.clone();
-    for (chat, active, streaming) in tabs {
-        if streaming {
-            PulseClock::request(cx);
-        }
-        let phase = PulseClock::phase(cx, 1200);
-        let id = chat.id.clone();
-        let close_id = chat.id.clone();
-        let menu_chat_id = chat.id.clone();
-        let ctrl_chat_id = chat.id.clone();
-        // Pinned chat stays labeled "Main" until the user renames it away
-        // from the project name (or an explicit "Main").
-        let title = if chat.is_pinned
-            && (chat.title.is_empty() || chat.title == space.name || chat.title == "Main")
-        {
-            "Main".to_string()
-        } else {
-            chat.title.clone()
-        };
-        let editing = renaming.as_ref() == Some(&chat.id);
-        let closable = multi_chat && !chat.is_pinned && !editing;
-        let mut pill = div()
-            .id(ElementId::Name(SharedString::from(format!(
-                "tab-{}",
-                chat.id
-            ))))
-            .group("tab")
-            .flex_shrink_0()
+    let phase = PulseClock::phase(cx, 1200);
+    let open = shell.tab_menu_open;
+    Some(
+        div()
+            .id("header-tab")
+            .relative()
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .h(px(28.0))
-            .pl(px(11.0))
-            .pr(px(if closable { 6.0 } else { 11.0 }))
-            .rounded_full()
-            .bg(if editing {
-                theme.field
-            } else if active {
-                theme.bubble
-            } else {
-                theme.bubble_assistant
-            })
-            .text_size(px(TEXT_SMALL))
-            // The active chip is a user bubble (dark in both appearances):
-            // white text on it, like the bubbles themselves. While renaming,
-            // the field fill uses normal text so the input stays readable.
-            .text_color(if editing {
-                theme.text
-            } else if active {
-                theme.bubble_text()
-            } else {
-                theme.text_muted
-            })
-            .when(chat.unread && !active && !editing, |el| {
-                el.font_weight(FontWeight::SEMIBOLD).text_color(theme.text)
-            })
-            .cursor_pointer()
-            .when(!active && !editing, |el| {
-                el.hover(|s| s.text_color(theme.text))
-            });
-        if editing {
-            // Stop propagation so the header's window_drag and the shell root
-            // do not treat a click in the field as "elsewhere" (which would
-            // commit) or start a window move.
-            pill = pill
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(
-                    div()
-                        .w(px(120.0))
-                        .min_w(px(72.0))
-                        .max_w(px(160.0))
-                        .h(px(22.0))
-                        .child(shell.tab_rename_input.clone()),
-                );
-        } else {
-            let rename_label = title.clone();
-            let rename_id = id.clone();
-            pill = pill
-                .on_mouse_down(
-                    gpui::MouseButton::Right,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.menu_open = false;
-                        this.row_menu = None;
-                        this.chat_menu = Some((menu_chat_id.clone(), event.position));
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
-                        // Always stop: the header is a window_drag region, and
-                        // interactive children must not let mouse-down bubble
-                        // or a drag/move steals the double-click.
-                        cx.stop_propagation();
-                        if event.modifiers.control {
-                            this.menu_open = false;
-                            this.row_menu = None;
-                            this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
-                            cx.notify();
-                            return;
-                        }
-                        if event.click_count >= 2 && this.renaming_tab.as_ref() != Some(&rename_id)
-                        {
-                            this.begin_tab_rename(
-                                rename_id.clone(),
-                                rename_label.clone(),
-                                window,
-                                cx,
-                            );
-                        }
-                    }),
-                );
-            pill = pill.on_click(
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    // Control-click opened the chat menu on mouse-down; the click
-                    // that follows must not select the tab and close it again.
-                    if event.modifiers().control {
-                        return;
-                    }
-                    // Double-click rename starts on mouse-down; ignore the
-                    // matching click so we do not select/focus away from it.
-                    if event.click_count() >= 2 || this.renaming_tab.as_ref() == Some(&id) {
-                        return;
-                    }
-                    this.chat_menu = None;
-                    if this.renaming_tab.is_some() {
-                        this.commit_tab_rename(window, cx);
-                    }
-                    this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
-                    Composer::focus(&this.composer, window, cx);
-                }),
-            );
-            if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
-                pill = pill.child(glyphs);
-            }
-            pill = pill.child(div().max_w(px(160.0)).truncate().child(title));
-            if streaming {
-                pill = pill.child(
-                    div()
-                        .size(px(6.0))
-                        .rounded_full()
-                        .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
-                );
-            }
-            if closable {
-                pill = pill.child(
-                    div()
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "tab-close-{}",
-                            chat.id
-                        ))))
-                        .size(px(16.0))
-                        .rounded_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(theme.border_strong))
-                        .child(icon(
-                            "xmark",
-                            9.0,
-                            if active {
-                                Theme::with_alpha(theme.bubble_text(), 0.8)
-                            } else {
-                                theme.text_muted
-                            },
-                        ))
-                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.state.update(cx, |s, cx| {
-                                s.close_tab(close_id.clone(), cx);
-                            });
-                        })),
-                );
-            }
-        }
-        row = row.child(pill);
-    }
-    let mut strip = div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .child(row);
-    if multi_chat {
-        let open = shell.tab_menu_open;
-        let plus = div()
-            .id("tab-new")
-            .flex_shrink_0()
-            .size(px(28.0))
+            .gap(px(5.0))
+            .h(px(26.0))
+            .ml(px(2.0))
+            .pl(px(9.0))
+            .pr(px(7.0))
             .rounded_full()
             .bg(if open {
                 theme.surface_2
             } else {
-                theme.bubble_assistant
+                theme.surface_1
             })
-            .flex()
-            .items_center()
-            .justify_center()
+            .text_size(px(TEXT_SMALL))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.text)
             .cursor_pointer()
             .hover(|s| s.bg(theme.surface_2))
-            .child(icon("plus", 13.0, theme.text_muted))
+            .child(
+                div()
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text_faint)
+                    .child("·"),
+            )
+            .child(div().max_w(px(160.0)).truncate().child(current))
+            .when(streaming, |el| {
+                el.child(
+                    div()
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(Theme::with_alpha(theme.warn, 0.4 + 0.6 * phase)),
+                )
+            })
+            .child(icon("chevron-down", 11.0, theme.text_muted))
             // Mouse-down, not click: the root closes every popover on
             // mouse-down, so a click handler could never toggle this one shut.
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
+                cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
                     this.menu_open = false;
-                    if previous == 0 {
-                        // Nothing to bring back: "+" opens the new chat directly.
-                        this.tab_menu_open = false;
-                        this.open_new_tab(window, cx);
-                        return;
+                    if this.renaming_tab.is_some() {
+                        this.commit_tab_rename(window, cx);
                     }
                     this.tab_menu_open = !this.tab_menu_open;
                     cx.notify();
                 }),
-            );
-        // The dropdown hangs off the "+" itself: anchored to this wrapper
-        // (taffy places it relative to its parent), deferred so it paints over
-        // the transcript, kept inside the window.
-        let anchor = div()
-            .relative()
-            .flex()
-            .flex_shrink_0()
-            .child(plus)
+            )
             .when(open, |el| {
+                // Anchored to the segment (taffy places it relative to its
+                // parent), deferred so it paints over the transcript.
                 el.child(
                     deferred(
                         anchored()
-                            .offset(point(px(0.0), px(34.0)))
+                            .offset(point(px(-8.0), px(34.0)))
                             .snap_to_window_with_margin(Edges::all(px(8.0)))
-                            .child(glass::popover(tab_menu(shell, space, cx))),
+                            .child(glass::popover(tab_dropdown(shell, space, cx))),
                     )
                     .with_priority(1),
                 )
-            });
-        strip = strip.child(anchor);
-    }
-    Some(strip)
+            }),
+    )
 }
 
-/// The "+" dropdown: "New chat", then the agent's previous (archived) chats,
-/// newest first — clicking one brings it back as a tab.
-fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl IntoElement {
+/// The dropdown (mockup b): every visible tab — current checked, its last
+/// activity, × on hover (closes; the pinned Main cannot) — then the previous
+/// (archived) chats, a separator and New tab ⌘T.
+fn tab_dropdown(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl IntoElement {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
+    let multi_chat = state.multi_chat;
+    let active = state.active_tab.get(&space.id).cloned();
+    let tabs: Vec<Chat> = state.visible_tabs(&space.id).into_iter().cloned().collect();
     let mut previous: Vec<Chat> = state
         .archived_tabs(&space.id)
         .into_iter()
         .cloned()
         .collect();
     previous.sort_by_key(|c| std::cmp::Reverse(c.last_message_at));
-    let mut body = div().flex().flex_col().gap(px(1.0)).child(
-        glass::menu_row("tab-menu-new", "square-pencil", "New chat", false, &theme)
+    let projects = state.projects.clone();
+    let renaming = shell.renaming_tab.clone();
+
+    let mut body = div().flex().flex_col().gap(px(1.0));
+    let mut list = div()
+        .id("tab-menu-tabs")
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .max_h(px(360.0))
+        .overflow_y_scroll();
+    for chat in tabs {
+        let is_active = Some(&chat.id) == active.as_ref();
+        let editing = renaming.as_ref() == Some(&chat.id);
+        let closable = multi_chat && !chat.is_pinned && !editing;
+        let title = tab_title(&chat, space);
+        let id = chat.id.clone();
+        let close_id = chat.id.clone();
+        let menu_chat_id = chat.id.clone();
+        let ctrl_chat_id = chat.id.clone();
+        let rename_id = chat.id.clone();
+        let rename_label = title.clone();
+        let key = chat.id.clone();
+        let mut row = div()
+            .id(ElementId::Name(SharedString::from(format!(
+                "tab-menu-{}",
+                chat.id
+            ))))
+            .group(SharedString::from(format!("tab-row-{key}")))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .h(px(36.0))
+            .pl(px(10.0))
+            .pr(px(8.0))
+            .rounded(px(9.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text)
+            .bg(if is_active {
+                theme.surface_2
+            } else {
+                gpui::transparent_black()
+            })
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.surface_2))
             .child(
                 div()
+                    .w(px(14.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .justify_center()
+                    .when(is_active, |el| el.child(icon("check", 12.0, theme.text))),
+            );
+        if editing {
+            row = row
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(24.0))
+                        .px(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(theme.field)
+                        .border_1()
+                        .border_color(theme.field_border)
+                        .child(shell.tab_rename_input.clone()),
+                );
+            list = list.child(row);
+            continue;
+        }
+        if let Some(glyphs) = groups::tab_glyphs(&chat, &projects, &theme) {
+            row = row.child(glyphs);
+        }
+        row = row
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(chat.unread && !is_active, |el| {
+                        el.font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .child(title),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
                     .text_size(px(TEXT_TINY))
                     .text_color(theme.text_faint)
-                    .child("⌘T"),
+                    .child(crate::ui::sidebar::time_label(chat.last_message_at)),
+            );
+        if closable {
+            row = row.child(
+                div()
+                    .id(ElementId::Name(SharedString::from(format!(
+                        "tab-close-{}",
+                        chat.id
+                    ))))
+                    .size(px(18.0))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(0.0)
+                    .group_hover(SharedString::from(format!("tab-row-{key}")), |s| {
+                        s.opacity(1.0)
+                    })
+                    .hover(|s| s.bg(theme.border_strong))
+                    .child(icon("xmark", 9.0, theme.text_muted))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.state.update(cx, |s, cx| {
+                            s.close_tab(close_id.clone(), cx);
+                        });
+                    })),
+            );
+        } else {
+            row = row.child(div().size(px(18.0)).flex_shrink_0());
+        }
+        row = row
+            // Right-click / control-click: the chat menu (Rename, Fork, Delete).
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.tab_menu_open = false;
+                    this.row_menu = None;
+                    this.chat_menu = Some((menu_chat_id.clone(), event.position));
+                    cx.notify();
+                }),
             )
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.tab_menu_open = false;
-                this.open_new_tab(window, cx);
-            })),
-    );
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    if event.modifiers.control {
+                        this.tab_menu_open = false;
+                        this.row_menu = None;
+                        this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
+                        cx.notify();
+                        return;
+                    }
+                    if event.click_count >= 2 && this.renaming_tab.as_ref() != Some(&rename_id) {
+                        this.begin_tab_rename(rename_id.clone(), rename_label.clone(), window, cx);
+                    }
+                }),
+            )
+            .on_click(
+                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                    if event.modifiers().control
+                        || event.click_count() >= 2
+                        || this.renaming_tab.as_ref() == Some(&id)
+                    {
+                        return;
+                    }
+                    this.tab_menu_open = false;
+                    this.chat_menu = None;
+                    this.state.update(cx, |s, cx| s.select_tab(id.clone(), cx));
+                    Composer::focus(&this.composer, window, cx);
+                }),
+            );
+        list = list.child(row);
+    }
+    body = body.child(list);
+
     if !previous.is_empty() {
         body = body.child(glass::menu_divider(&theme)).child(
             div()
@@ -686,12 +579,11 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
             .flex()
             .flex_col()
             .gap(px(1.0))
-            .max_h(px(320.0))
+            .max_h(px(240.0))
             .overflow_y_scroll();
         for chat in previous {
             let id = chat.id.clone();
             let menu_chat_id = chat.id.clone();
-            let ctrl_chat_id = chat.id.clone();
             list = list.child(
                 div()
                     .id(ElementId::Name(SharedString::from(format!(
@@ -702,14 +594,13 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
                     .items_center()
                     .gap(px(10.0))
                     .h(px(36.0))
-                    .px(px(12.0))
+                    .pl(px(34.0))
+                    .pr(px(12.0))
                     .rounded(px(9.0))
                     .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text)
+                    .text_color(theme.text_muted)
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.surface_2))
-                    // Right-click / control-click: the chat menu (Delete, Fork)
-                    // replaces the dropdown, which would otherwise paint over it.
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
@@ -717,19 +608,6 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
                             this.tab_menu_open = false;
                             this.row_menu = None;
                             this.chat_menu = Some((menu_chat_id.clone(), event.position));
-                            cx.notify();
-                        }),
-                    )
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                            if !event.modifiers.control {
-                                return;
-                            }
-                            cx.stop_propagation();
-                            this.tab_menu_open = false;
-                            this.row_menu = None;
-                            this.chat_menu = Some((ctrl_chat_id.clone(), event.position));
                             cx.notify();
                         }),
                     )
@@ -747,27 +625,37 @@ fn tab_menu(shell: &Shell, space: &Project, cx: &mut Context<Shell>) -> impl Int
                             .text_color(theme.text_faint)
                             .child(crate::ui::sidebar::time_label(chat.last_message_at)),
                     )
-                    .on_click(
-                        cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                            if event.modifiers().control {
-                                return;
-                            }
-                            this.tab_menu_open = false;
-                            let id = id.clone();
-                            this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
-                            this.reveal_active_tab(cx);
-                            Composer::focus(&this.composer, window, cx);
-                        }),
-                    ),
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.tab_menu_open = false;
+                        let id = id.clone();
+                        this.state.update(cx, |s, cx| s.unarchive_chat(id, cx));
+                        Composer::focus(&this.composer, window, cx);
+                    })),
             );
         }
         body = body.child(list);
     }
-    glass::frosted_menu(260.0, &theme, body)
+
+    if multi_chat {
+        body = body.child(glass::menu_divider(&theme)).child(
+            glass::menu_row("tab-menu-new", "plus", "New tab", false, &theme)
+                .child(
+                    div()
+                        .text_size(px(TEXT_TINY))
+                        .text_color(theme.text_faint)
+                        .child("⌘T"),
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.tab_menu_open = false;
+                    this.open_new_tab(window, cx);
+                })),
+        );
+    }
+    glass::frosted_menu(280.0, &theme, body)
 }
 
-/// Chips under the header: none (2026-10-20). A DM's agents sit in the right
-/// pane's Members list, where "Add members" adds people and agents alike.
+/// Nothing under the header any more (2026-10-20): agents of a DM or group
+/// sit in the right pane's Members list.
 pub fn chips(_shell: &Shell, _space: &Project, _cx: &mut Context<Shell>) -> Option<AnyElement> {
     None
 }
