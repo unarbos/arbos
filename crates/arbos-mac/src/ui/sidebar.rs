@@ -1520,6 +1520,20 @@ pub fn chat_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let delete_archived = archived;
 
     let mut body = div().flex().flex_col().gap(px(1.0));
+    if !archived && !project.is_people() {
+        // Rename: the inline field in the tab dropdown (also double-click there).
+        let rename_id = chat.id.clone();
+        let rename_label = crate::ui::header::tab_title(&chat, &project);
+        body = body.child(
+            glass::menu_row("chat-menu-rename", "square-pencil", "Rename", false, &theme).on_click(
+                cx.listener(move |this, _, window, cx| {
+                    this.chat_menu = None;
+                    this.tab_menu_open = true;
+                    this.begin_tab_rename(rename_id.clone(), rename_label.clone(), window, cx);
+                }),
+            ),
+        );
+    }
     if can_fork {
         body = body.child(
             glass::menu_row("chat-menu-fork", "branch", "Fork", false, &theme).on_click(
