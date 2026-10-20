@@ -35,9 +35,6 @@ const RING_TIMEOUT_MS: u64 = 45_000;
 const RINGBACK_TIMEOUT_MS: u64 = 60_000;
 /// How long a `call_missed` push waits for its chat to load before it is dropped.
 const MISSED_PENDING_MS: u64 = 120_000;
-/// Presence frames come every 15 s; three missed = offline (relay §7c uses 45 s too).
-const PRESENCE_ONLINE_MS: u64 = 45_000;
-
 /// Which profile sheet is open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfilePage {
@@ -77,6 +74,9 @@ impl AgentPick {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallTarget {
+    /// Kept for the relay path; the person pane no longer offers a call
+    /// button (2026-10-20), so nothing constructs it today.
+    #[allow(dead_code)]
     User(String),
     Agent(Id),
 }
@@ -112,39 +112,6 @@ fn save_muted(muted: &HashSet<Id>) {
     if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
         let _ = std::fs::write(muted_path(), json);
     }
-}
-
-/// Telegram wording, shared with the iPhone: "last seen 3 min ago" (< 1 h),
-/// "last seen today at 14:05" (same day), "last seen N days ago", and
-/// "last seen recently" when the stamp is older than a month.
-pub fn last_seen_text(at_ms: u64) -> String {
-    use chrono::{Datelike, Local, TimeZone};
-    let now = now_ms();
-    let ago = now.saturating_sub(at_ms);
-    if ago < 60_000 {
-        return "last seen just now".into();
-    }
-    if ago < 3_600_000 {
-        return format!("last seen {} min ago", ago / 60_000);
-    }
-    let (Some(t), Some(n)) = (
-        Local.timestamp_millis_opt(at_ms as i64).single(),
-        Local.timestamp_millis_opt(now as i64).single(),
-    ) else {
-        return "last seen recently".into();
-    };
-    if t.date_naive() == n.date_naive() {
-        return format!("last seen today at {}", t.format("%H:%M"));
-    }
-    let days = (n.date_naive() - t.date_naive()).num_days().max(1);
-    if days == 1 {
-        return format!("last seen yesterday at {}", t.format("%H:%M"));
-    }
-    if days <= 30 {
-        return format!("last seen {days} days ago");
-    }
-    let _ = t.year();
-    "last seen recently".into()
 }
 
 /// "3 min ago", "2 h ago", "yesterday", "5 days ago".
@@ -3220,34 +3187,6 @@ impl AppState {
                 self.start_call_in_chat(kind, cx);
             }
         }
-    }
-
-    /// Presence line for a person: "online", "last seen …", "invited".
-    /// The relay's `online` / `last_seen_at` (API §9) first; a presence frame
-    /// seen in a shared room this session can only make it fresher.
-    pub fn presence_text(&self, person: &Person) -> String {
-        if person.status == "invited" {
-            return "invited · not signed in yet".into();
-        }
-        if self.is_online(person) {
-            return "online".into();
-        }
-        let seen_frame = self.presence_seen.get(&person.handle).copied();
-        let relay = person.last_seen_at.filter(|t| *t > 0).map(|t| t as u64);
-        match seen_frame.into_iter().chain(relay).max() {
-            Some(at) => last_seen_text(at),
-            None => "last seen recently".into(),
-        }
-    }
-
-    /// Online right now: the relay said so, or their device sent a presence
-    /// frame in a room we share within the last 45 s.
-    pub fn is_online(&self, person: &Person) -> bool {
-        person.online
-            || self
-                .presence_seen
-                .get(&person.handle)
-                .is_some_and(|at| now_ms().saturating_sub(*at) < PRESENCE_ONLINE_MS)
     }
 
     /// A person by handle, from any space's member list or the directory.

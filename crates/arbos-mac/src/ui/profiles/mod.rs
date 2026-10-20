@@ -28,10 +28,6 @@ use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// The right pane's width (mockups b, d, g: a quarter of the window).
 pub const SHEET_WIDTH: f32 = 340.0;
-/// "online" text, shared with the iPhone pages.
-pub(super) fn presence_blue() -> Hsla {
-    gpui::rgb(0x1084fe).into()
-}
 pub(super) const HERO_AVATAR: f32 = 96.0;
 
 /// The open page, if any — rendered as the right pane.
@@ -238,16 +234,6 @@ pub(super) fn editable_name(
         .when_some(on_click, |el, f| el.on_click(move |e, w, cx| f(e, w, cx)))
 }
 
-/// Default hero name label (semibold, truncated).
-pub(super) fn hero_name(name: &str, theme: &Theme) -> Div {
-    div()
-        .text_size(px(TEXT_BODY + 8.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme.text)
-        .truncate()
-        .child(name.to_string())
-}
-
 /// One round action: glyph above a caption, like Telegram's call / mute / search row.
 pub(super) struct Action {
     pub id: &'static str,
@@ -343,31 +329,6 @@ pub(super) fn info_row(caption: &str, value: impl Into<SharedString>, theme: &Th
                 .text_color(theme.text)
                 .child(value.into()),
         )
-}
-
-/// Info card action row ("Add to Contacts", "Block User"): coloured label, clickable.
-pub(super) fn info_action(
-    id: impl Into<ElementId>,
-    label: &str,
-    color: Hsla,
-    glyph: Option<&str>,
-    theme: &Theme,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap(px(10.0))
-        .min_h(px(44.0))
-        .px(px(16.0))
-        .border_b_1()
-        .border_color(theme.border)
-        .text_size(px(TEXT_BODY))
-        .text_color(color)
-        .cursor_pointer()
-        .hover(|s| s.bg(theme.surface_2))
-        .when_some(glyph, |el, g| el.child(icon(g, 16.0, color)))
-        .child(label.to_string())
 }
 
 pub(super) fn card(theme: &Theme) -> Div {
