@@ -407,12 +407,8 @@ struct UserProfileView: View {
     @Environment(\.dismiss) private var dismiss
     let person: ProfilePerson
     @State private var tab = "Links"
-    @State private var muted = false
     @State private var sharedProjects: [Project] = []
     @State private var confirmBlock = false
-    /// "Add members" on a DM: the Members sheet (people and agents), which
-    /// turns the DM into a group. The chat header's add button is gone.
-    @State private var showAddMembers = false
 
     /// Stable user id: prefer a fresh card, then a handle lookup (agent-owner rows
     /// sometimes open this page with `id == handle`), then the value we were given.
@@ -426,9 +422,6 @@ struct UserProfileView: View {
         model.peopleChats.first { $0.kind == "dm" && $0.humans.contains(where: isPeer) }
     }
     @State private var fresh: Person?
-    private var status: (text: String, online: Bool) {
-        lastSeenLine(max(fresh?.lastSeenAt ?? 0, person.lastSeenAt ?? 0, model.lastSeen[peerId] ?? 0), online: fresh?.online ?? person.online)
-    }
     private var isMe: Bool { peerId == model.user?.id || person.id == model.user?.id }
     private var items: [ChatItem] {
         guard let dm else { return [] }
@@ -446,31 +439,11 @@ struct UserProfileView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     Color.clear.frame(height: 80)
-                    ProfileHeader(name: person.displayName, status: isMe ? "@\(person.handle)" : status.text, statusOnline: status.online) {
+                    // The shared read-only layout (2026-10-20, topbar-unify f/g):
+                    // picture, name, @handle; no last-seen, no action row, no
+                    // username field, no Open chat / Add members.
+                    ProfileHeader(name: person.displayName, status: "@\(person.handle)", statusOnline: false) {
                         PersonAvatar(url: person.avatarUrl, handle: person.handle, size: 112, name: person.name, id: person.id, colorIndex: person.avatarColorIndex)
-                    }
-                    if !isMe {
-                        ProfileActionRow(actions: [
-                            // Calls start audio-only; camera is toggled on the call screen.
-                            ProfileAction(icon: "phone.fill", label: "call") { call(.voice) },
-                            ProfileAction(icon: muted ? "bell.slash.fill" : "bell.fill", label: muted ? "unmute" : "mute") { toggleMute() },
-                            ProfileAction(icon: "magnifyingglass", label: "search") { openDM(search: true) },
-                            ProfileAction(icon: "ellipsis", label: "more") { },
-                        ])
-                    }
-                    ProfileCard {
-                        ProfileInfoRow(label: "username", value: "@\(person.handle)", tint: Color(hex: "#1084FE")!, trailingIcon: "qrcode")
-                            .onTapGesture { UIPasteboard.general.string = "@\(person.handle)" }
-                        if !isMe {
-                            ProfileRowDivider()
-                            ProfileLinkRow(title: dm == nil ? "Start a chat" : "Open chat") { openDM(search: false) }
-                            if dm != nil {
-                                ProfileRowDivider()
-                                ProfileLinkRow(title: "Add members") { showAddMembers = true }
-                            }
-                            ProfileRowDivider()
-                            ProfileLinkRow(title: "Block User", destructive: true) { confirmBlock = true }
-                        }
                     }
                     ProfileTabs(tabs: ["Links", "Groups"], selected: $tab)
                     if tab == "Links" {
@@ -478,15 +451,16 @@ struct UserProfileView: View {
                     } else {
                         groupsList
                     }
+                    if !isMe {
+                        // The one action.
+                        ProfileCard {
+                            ProfileLinkRow(title: "Block user", destructive: true) { confirmBlock = true }
+                        }
+                    }
                     Color.clear.frame(height: 40)
                 }
             }
             ProfileTopBar { EmptyView() }
-        }
-        .sheet(isPresented: $showAddMembers) {
-            if let dm {
-                MembersSheet(chatId: dm.id).environmentObject(model).environment(\.theme, theme)
-            }
         }
         .confirmationDialog("Block @\(person.handle)?", isPresented: $confirmBlock, titleVisibility: .visible) {
             Button("Block", role: .destructive) {
@@ -495,7 +469,6 @@ struct UserProfileView: View {
             }
         } message: { Text("They cannot message you or add you to chats.") }
         .task {
-            muted = dm?.muted ?? false
             await model.refreshPeople()
             let id = model.personId(handle: person.handle) ?? person.id
             fresh = await model.fetchUser(id)
@@ -553,33 +526,6 @@ struct UserProfileView: View {
         }
     }
 
-    private func call(_ kind: CallKind) {
-        Task {
-            var chat = dm
-            if chat == nil { chat = await model.openDM(handle: person.handle, navigate: false) }
-            guard let chat else { return }
-            dismiss()
-            await CallManager.shared.start(chatId: chat.id, projectId: nil, kind: kind, title: person.displayName)
-        }
-    }
-
-    private func toggleMute() {
-        guard let dm else { return }
-        muted.toggle()
-        model.setMuted(chatId: dm.id, muted: muted)
-    }
-
-    private func openDM(search: Bool) {
-        Task {
-            var chat = dm
-            if chat == nil { chat = await model.openDM(handle: person.handle, navigate: false) }
-            if let chat {
-                dismiss()
-                if search { model.pendingSearchChat = chat.id }
-                model.open(peopleChat: chat)
-            }
-        }
-    }
 }
 
 // MARK: - Group page
