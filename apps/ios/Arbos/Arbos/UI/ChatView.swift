@@ -101,26 +101,6 @@ struct ChatView: View {
         return model.blobURL(projectId: "\(peopleSlot):\(people.id)", key: key)?.absoluteString
     }
 
-    private func groupHeaderMembers(_ people: PeopleChat) -> [ChatMember] {
-        let others = people.humans.filter { $0.id != model.user?.id }
-        return others.isEmpty ? people.humans : others
-    }
-
-    /// "4 members · 1 agent"; `short` gives "4 · 1 agent" for the narrow header pill.
-    private func groupSubtitle(_ people: PeopleChat, short: Bool = false) -> String {
-        let n = people.humans.count
-        var s = short ? "\(n)" : "\(n) member\(n == 1 ? "" : "s")"
-        if !people.agents.isEmpty {
-            s += " · \(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")"
-        } else if short {
-            s += " member\(n == 1 ? "" : "s")"
-        }
-        return s
-    }
-
-    /// iPhone SE / mini class widths, where the header row has ~180 pt for the pill.
-    private var compactWidth: Bool { UIScreen.main.bounds.width < 390 }
-
     /// A call in this chat we are not in (the one we are in shows as the in-call pill instead).
     private var hasCallBar: Bool {
         guard let active = calls.activeByChat[chatId], !active.ended else { return false }
@@ -537,37 +517,22 @@ struct ChatView: View {
             GlassPill {
                 HStack(spacing: 6) {
                     if let people {
-                        HStack(spacing: 6) {
+                        // One pill for every chat (2026-10-20): avatar + name,
+                        // no member cluster, counts or agent lines.
+                        HStack(spacing: 8) {
                             if people.isGroup {
-                                // Compact widths (SE, 375 pt): two faces instead of three and a title
-                                // that shrinks a little before it truncates — the pill shares the
-                                // row with Back and the members button when present.
-                                AvatarCluster(members: groupHeaderMembers(people), size: Theme.avatar,
-                                              maxVisible: compactWidth ? 2 : 3, imageUrl: groupImageURL(people))
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text(people.title)
-                                        .font(.system(size: Theme.body, weight: .semibold))
-                                        .foregroundStyle(theme.text)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.85)
-                                    Text(groupSubtitle(people, short: compactWidth))
-                                        .font(.system(size: 10)).foregroundStyle(theme.muted)
-                                        .lineLimit(1)
-                                        .minimumScaleFactor(0.85)
-                                }
+                                // The group's picture, else its D79 initials disc (as the Mac).
+                                PersonAvatar(url: groupImageURL(people), handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                                Text(people.title)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
                             } else {
                                 PersonAvatar(url: counterpart?.avatarUrl, handle: counterpart?.handle ?? "?", size: Theme.avatar, name: counterpart?.name, id: counterpart?.id, colorIndex: counterpart?.avatarColorIndex)
-                                VStack(alignment: .leading, spacing: 0) {
-                                    Text(counterpart?.displayName ?? people.title)
-                                        .font(.system(size: Theme.body, weight: .semibold))
-                                        .foregroundStyle(theme.text)
-                                        .lineLimit(1)
-                                    if people.pending {
-                                        Text("Invited · opens when they sign in").font(theme.font(10)).foregroundStyle(theme.muted)
-                                    } else if !people.agents.isEmpty {
-                                        Text("\(people.agents.count) agent\(people.agents.count == 1 ? "" : "s")").font(theme.font(10)).foregroundStyle(theme.muted)
-                                    }
-                                }
+                                Text(counterpart?.displayName ?? people.title)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
                             }
                         }
                         .contentShape(Rectangle())
