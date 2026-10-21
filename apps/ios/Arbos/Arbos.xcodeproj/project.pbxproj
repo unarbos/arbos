@@ -460,6 +460,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = A15B00000000000000000011 /* Build configuration list for PBXNativeTarget "ArbosFFI" */;
 			buildPhases = (
+				A15B00000000000000000014 /* Build ArbosFFI xcframework */,
 				A15B00000000000000000004 /* Sources */,
 				A15B00000000000000000003 /* Frameworks */,
 				A15B00000000000000000005 /* Resources */,
@@ -556,6 +557,31 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		A15B00000000000000000014 /* Build ArbosFFI xcframework */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build ArbosFFI xcframework";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(SRCROOT)/../../../target/xcframework/ArbosFFI.xcframework",
+				"$(SRCROOT)/../../../target/xcframework/ArbosFFI.swift",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\nexport PATH=\"$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"\nif [[ -f \"$HOME/.cargo/env\" ]]; then source \"$HOME/.cargo/env\"; fi\nREPO_ROOT=\"$(cd \"${SRCROOT}/../../..\" && pwd)\"\nOUT=\"${REPO_ROOT}/target/xcframework\"\nSTAMP=\"${OUT}/.built-for\"\nWANT=\"$(cd \"${REPO_ROOT}\" && git rev-parse HEAD 2>/dev/null || echo unknown)\"\nif [[ -d \"${OUT}/ArbosFFI.xcframework\" && -f \"${OUT}/ArbosFFI.swift\" && -f \"${STAMP}\" && \"$(cat \"${STAMP}\")\" == \"${WANT}\" ]]; then\n  echo \"note: ArbosFFI xcframework already built for ${WANT}\"\n  exit 0\nfi\necho \"note: building ArbosFFI xcframework for ${WANT}\"\nif ! command -v rustup >/dev/null 2>&1; then\n  echo \"error: rustup not on PATH — install Rust so ArbosFFI can compile arbos-ffi\"\n  exit 1\nfi\n\"${REPO_ROOT}/scripts/build-xcframework.sh\"\nprintf '%s\\n' \"${WANT}\" > \"${STAMP}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A1A46372208F38BC5C2620AE /* Sources */ = {

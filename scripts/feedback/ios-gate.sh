@@ -9,6 +9,15 @@ branch=$1; sha=$2
 cd ~/arbos-gate || exit 2
 git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || { echo "fetch of ${branch} failed"; exit 2; }
 git checkout -q --detach "$sha" || { echo "checkout of ${sha} failed"; exit 2; }
+# Arbos embeds ArbosFFI, which links the gitignored xcframework from
+# scripts/build-xcframework.sh. Build it here so Release/Debug fail on Rust
+# problems with a clear log, not only inside xcodebuild. The ArbosFFI target
+# also has a Run Script that builds when the artifact is missing/stale for this
+# commit (covers a gate Mac still running an older copy of this script).
+if [[ -x scripts/build-xcframework.sh ]]; then
+  echo "== xcframework: building ArbosFFI for ${sha}"
+  ./scripts/build-xcframework.sh || { echo "== xcframework: FAILS"; exit 1; }
+fi
 cd apps/ios/Arbos || exit 2
 # TestFlight archives the Release configuration: a `#if DEBUG` type used unconditionally compiles in
 # Debug and breaks the TestFlight job (2026-10-19, 6d64c2ee). Build Release first (that is what ships),
