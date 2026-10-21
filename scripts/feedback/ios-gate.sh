@@ -10,9 +10,8 @@ cd ~/arbos-gate || exit 2
 git fetch -q origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" || { echo "fetch of ${branch} failed"; exit 2; }
 git checkout -q --detach "$sha" || { echo "checkout of ${sha} failed"; exit 2; }
 # Arbos embeds ArbosFFI, which links the gitignored xcframework from
-# scripts/build-xcframework.sh. Build it once here and stamp .built-for so the
-# ArbosFFI target's Run Script does not rebuild (a second full Rust build was
-# blowing the gate timeout).
+# scripts/build-xcframework.sh. Build it before xcodebuild (Xcode cannot generate
+# that input in a target Run Script without a dependency cycle on the framework).
 if [[ -x scripts/build-xcframework.sh ]]; then
   echo "== xcframework: building ArbosFFI for ${sha}"
   ./scripts/build-xcframework.sh || { echo "== xcframework: FAILS"; exit 1; }
