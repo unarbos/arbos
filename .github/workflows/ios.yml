@@ -30,6 +30,14 @@ on:
     paths:
       - "apps/ios/**"
       - ".github/workflows/ios.yml"
+      # Arbos embeds ArbosFFI (arbos-ffi); Rust/client changes must rebuild TestFlight.
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-ffi/**"
+      - "scripts/build-xcframework.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       # The phone bundles the tree avatars: an art drop is a new TestFlight build.
       - "assets/avatars/trees/manifest.json"
       - "assets/avatars/trees/lottie/**"
@@ -78,6 +86,26 @@ jobs:
           newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
           if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
           xcodebuild -version
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-arbos-ffi
+          cache-on-failure: true
+      - name: Build ArbosFFI xcframework
+        run: |
+          set -euo pipefail
+          ./scripts/build-xcframework.sh
+          test -d target/xcframework/ArbosFFI.xcframework
+          test -f target/xcframework/ArbosFFI.swift
       - name: Archive, and upload to TestFlight when this ref ships
         env:
           AC_API_KEY_P8: ${{ secrets.AC_API_KEY_P8 }}

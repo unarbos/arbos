@@ -358,7 +358,11 @@ impl RoomSession {
     }
 
     fn on_ack(&mut self, frame: Frame) {
-        if self.phase != Phase::Live {
+        // Apply during WaitState / WaitCheckpoint too: a local PUSH can race the
+        // handshake (Swift Room.applyAck while waiting for STATE). Ignoring the
+        // ACK until Live leaves the batch in `pending` forever when the only ACK
+        // arrived before STATE and a later resend is treated as dup.
+        if matches!(self.phase, Phase::Idle | Phase::Closed) {
             return;
         }
         let Ok(header) = serde_json::from_value::<Ack>(frame.header) else {
@@ -692,6 +696,31 @@ mod tests {
         assert!(ack_actions
             .iter()
             .any(|a| matches!(a, RoomAction::Ack { seq: 2, .. })));
+    }
+
+    #[test]
+    fn ack_during_wait_state_clears_pending() {
+        let pending = vec![("batch-early".into(), b"pushed-before-state".to_vec())];
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, pending);
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        // Still WaitState: ACK must clear pending (Swift Room hello-wait parity).
+        s.on_frame(&ack_frame("batch-early", 1));
+        let actions = s.drain_actions();
+        assert!(s.pending().is_empty());
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Pending(p) if p.is_empty())));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Ack { seq: 1, .. })));
+        // Handshake still completes after STATE.
+        s.on_frame(&state_frame(0, Vec::new()));
+        let after = s.drain_actions();
+        assert!(s.is_live());
+        assert!(take_sends(&after)
+            .iter()
+            .any(|f| f.ty == FrameType::RowsReq));
     }
 
     #[test]

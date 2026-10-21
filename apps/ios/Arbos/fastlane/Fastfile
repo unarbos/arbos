@@ -98,9 +98,41 @@ def with_transient_retry(name, log_path: nil)
   end
 end
 
+# ArbosFFI.xcframework + ArbosFFI.swift from `./scripts/build-xcframework.sh`
+# (repo-root `target/xcframework/`). The ArbosFFI framework target and the app
+# embed both; archive/test fail loudly when they are missing or not built for
+# this commit (CI runs the script before these lanes).
+def require_xcframework!
+  root = File.expand_path("../../../../target/xcframework", __dir__)
+  xc = File.join(root, "ArbosFFI.xcframework")
+  swift = File.join(root, "ArbosFFI.swift")
+  missing = []
+  missing << xc unless File.directory?(xc)
+  missing << swift unless File.file?(swift)
+  return if missing.empty?
+  UI.user_error!(
+    "missing ArbosFFI build product(s): #{missing.join(', ')} — " \
+    "run ./scripts/build-xcframework.sh from the repo root first"
+  )
+end
+
+def report_arbosffi_size(archive_path)
+  fw = "#{archive_path}/Products/Applications/Arbos.app/Frameworks/ArbosFFI.framework"
+  UI.user_error!("archive embeds no ArbosFFI.framework at #{fw}") unless File.directory?(fw)
+  bytes = 0
+  Dir.glob("#{fw}/**/*", File::FNM_DOTMATCH).each do |p|
+    next unless File.file?(p)
+    bytes += File.size(p)
+  end
+  mib = bytes / (1024.0 * 1024.0)
+  UI.success(format("ArbosFFI.framework in archive: %.2f MiB (%d bytes)", mib, bytes))
+  File.write("#{out_dir}/arbosffi-size.txt", "#{bytes}\n")
+end
+
 platform :ios do
   desc "Debug build for the iOS simulator (no signing)"
   lane :sim do
+    require_xcframework!
     xcodebuild_logged("sim",
       "cd .. && xcodebuild build -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
       "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
@@ -110,11 +142,10 @@ platform :ios do
   # Unit tests (ArbosTests). Needs the gitignored xcframework from
   # `./scripts/build-xcframework.sh` at repo-root `target/xcframework/`.
   # Same project, scheme, and simulator destination as `sim`; only the Test
-  # action builds ArbosTests (not Run / Archive).
+  # action builds ArbosTests (not Run / Archive). Links ArbosFFI.framework.
   desc "Run ArbosTests on the iOS simulator (no signing); requires target/xcframework"
   lane :test do
-    xc = File.expand_path("../../../../target/xcframework/ArbosFFI.xcframework", __dir__)
-    UI.user_error!("missing #{xc} — run ./scripts/build-xcframework.sh from the repo root first") unless File.directory?(xc)
+    require_xcframework!
     xcodebuild_logged("test",
       "cd .. && xcodebuild test -project #{PROJECT} -scheme #{SCHEME} -configuration Debug " \
       "-destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath '#{out_dir}/dd' #{spm_flags}" \
@@ -123,6 +154,7 @@ platform :ios do
 
   desc "Unsigned Release archive (what CI keeps even when no Apple secret is set)"
   lane :archive do
+    require_xcframework!
     number = build_number
     archive_path = "#{out_dir}/Arbos.xcarchive"
     log = xcodebuild_logged("archive",
@@ -132,6 +164,7 @@ platform :ios do
       "CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO " \
       "CURRENT_PROJECT_VERSION=#{number}")
     UI.user_error!("archive has no binary (see #{log})") unless File.executable?("#{archive_path}/Products/Applications/Arbos.app/Arbos")
+    report_arbosffi_size(archive_path)
     UI.success("Archive #{archive_path} build #{number}")
     lane_context[:ARBOS_ARCHIVE] = archive_path
     lane_context[:ARBOS_BUILD_NUMBER] = number

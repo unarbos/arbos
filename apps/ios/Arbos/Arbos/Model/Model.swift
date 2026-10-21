@@ -511,6 +511,11 @@ enum DocJSON {
             }
             parts.append(part(pm))
         }
+        // Core projected rows put hidden tool/etc. parts in `hiddenParts` instead
+        // of `hidden: true` inside `parts` (read_rows_json / project_hidden_parts).
+        if let hp = m["hiddenParts"] as? [Any] {
+            hidden += hp.count
+        }
         var usage: [String: Double] = [:]
         if let u = m["usage"] as? [String: Any] {
             for (k, v) in u {
@@ -558,13 +563,12 @@ enum DocJSON {
         for (key, v) in map {
             guard !key.isEmpty else { continue }
             if let people = v as? [String: Any] {
-                // Legacy nested bucket.
-                var senders: [String] = []
+                // Legacy nested bucket. Merge into any flat-key senders already
+                // collected for this emoji (core project_reactions does the same).
                 for (sid, flag) in people {
-                    guard !sid.isEmpty else { continue }
-                    if bool(flag) { senders.append(sid) }
+                    guard !sid.isEmpty, bool(flag) else { continue }
+                    byEmoji[key, default: []].append(sid)
                 }
-                if !senders.isEmpty { byEmoji[key] = senders.sorted() }
                 continue
             }
             // Flat key: "emoji|sender" → true.

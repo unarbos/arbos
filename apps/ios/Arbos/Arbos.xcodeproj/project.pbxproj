@@ -62,8 +62,11 @@
 
 		A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* CoreFixturesTests.swift */; };
 		A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000012 /* ReactionToggleTests.swift */; };
-		A15A00000000000000000006 /* ArbosFFI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000005 /* ArbosFFI.swift */; };
-		A15A00000000000000000008 /* ArbosFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000007 /* ArbosFFI.xcframework */; };
+		A15B00000000000000000006 /* ArbosFFI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000005 /* ArbosFFI.swift */; };
+		A15B00000000000000000007 /* ArbosFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000007 /* ArbosFFI.xcframework */; };
+		A15B00000000000000000008 /* ArbosFFI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A15B00000000000000000001 /* ArbosFFI.framework */; };
+		A15B00000000000000000009 /* ArbosFFI.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = A15B00000000000000000001 /* ArbosFFI.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		A15B0000000000000000000A /* ArbosFFI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A15B00000000000000000001 /* ArbosFFI.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +85,20 @@
 			remoteGlobalIDString = A10000000000000000000002;
 			remoteInfo = Arbos;
 		};
+		A15B0000000000000000000B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A15B00000000000000000002;
+			remoteInfo = ArbosFFI;
+		};
+		A15B0000000000000000000D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A15B00000000000000000002;
+			remoteInfo = ArbosFFI;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -94,6 +111,17 @@
 				A1C074DB74357475F6D8CFFE /* ArbosNotificationService.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A15B00000000000000000012 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A15B00000000000000000009 /* ArbosFFI.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -153,6 +181,7 @@
 		A19678BD13DA9148706081DF /* SecretsViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretsViews.swift; sourceTree = "<group>"; };
 
 		A15A00000000000000000001 /* ArbosTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ArbosTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A15B00000000000000000001 /* ArbosFFI.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = ArbosFFI.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		A15A00000000000000000003 /* CoreFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreFixturesTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000012 /* ReactionToggleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReactionToggleTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000005 /* ArbosFFI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ArbosFFI.swift; path = ../../../target/xcframework/ArbosFFI.swift; sourceTree = SOURCE_ROOT; };
@@ -166,6 +195,7 @@
 			files = (
 				A1E4BA8C12CCEA3325BE2435 /* Loro in Frameworks */,
 				A142325F91336BDF2882011F /* LiveKit in Frameworks */,
+				A15B00000000000000000008 /* ArbosFFI.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -181,7 +211,15 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A15A00000000000000000008 /* ArbosFFI.xcframework in Frameworks */,
+				A15B0000000000000000000A /* ArbosFFI.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A15B00000000000000000003 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A15B00000000000000000007 /* ArbosFFI.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -193,6 +231,7 @@
 			children = (
 				A129CE0010199C1F57214B55,
 				A12CE546A1A4EDA93F7ABC69,
+				A15B00000000000000000013 /* ArbosFFI */,
 				A15A00000000000000000011,
 				A13B28988372749C80462C3E,
 				A1CA9DEF8434A85687602C88,
@@ -214,6 +253,7 @@
 			children = (
 				A15C30AC29682FF68428C798,
 				A1F36F98FFEAB133710BB7DD,
+				A15B00000000000000000001 /* ArbosFFI.framework */,
 				A15A00000000000000000001,
 			);
 			name = Products;
@@ -334,10 +374,17 @@
 			children = (
 				A15A00000000000000000003 /* CoreFixturesTests.swift */,
 				A15A00000000000000000012 /* ReactionToggleTests.swift */,
+			);
+			path = ArbosTests;
+			sourceTree = "<group>";
+		};
+		A15B00000000000000000013 /* ArbosFFI */ = {
+			isa = PBXGroup;
+			children = (
 				A15A00000000000000000005 /* ArbosFFI.swift */,
 				A15A00000000000000000007 /* ArbosFFI.xcframework */,
 			);
-			path = ArbosTests;
+			name = ArbosFFI;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -351,11 +398,13 @@
 				A1BAE6071D1C69CB73006484 /* Frameworks */,
 				A104AF54675AAF92A458A90C /* Resources */,
 				A1F0AB04EE052351C80F3286 /* Embed Foundation Extensions */,
+				A15B00000000000000000012 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
 			dependencies = (
 				A16CA4EADB7B09EBD4910B02 /* PBXTargetDependency */,
+				A15B0000000000000000000C /* PBXTargetDependency */,
 			);
 			name = Arbos;
 			packageProductDependencies = (
@@ -398,6 +447,7 @@
 			);
 			dependencies = (
 				A15A0000000000000000000C /* PBXTargetDependency */,
+				A15B0000000000000000000E /* PBXTargetDependency */,
 			);
 			name = ArbosTests;
 			packageProductDependencies = (
@@ -405,6 +455,25 @@
 			productName = ArbosTests;
 			productReference = A15A00000000000000000001 /* ArbosTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		A15B00000000000000000002 /* ArbosFFI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A15B00000000000000000011 /* Build configuration list for PBXNativeTarget "ArbosFFI" */;
+			buildPhases = (
+				A15B00000000000000000004 /* Sources */,
+				A15B00000000000000000003 /* Frameworks */,
+				A15B00000000000000000005 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ArbosFFI;
+			packageProductDependencies = (
+			);
+			productName = ArbosFFI;
+			productReference = A15B00000000000000000001 /* ArbosFFI.framework */;
+			productType = "com.apple.product-type.framework";
 		};
 /* End PBXNativeTarget section */
 
@@ -424,6 +493,9 @@
 					A15A00000000000000000002 = {
 						CreatedOnToolsVersion = 16.0;
 						TestTargetID = A10000000000000000000002;
+					};
+					A15B00000000000000000002 = {
+						CreatedOnToolsVersion = 16.0;
 					};
 				};
 			};
@@ -446,6 +518,7 @@
 			targets = (
 				A10000000000000000000002 /* Arbos */,
 				A12AA1364CDBF367A9DFBF0A /* ArbosNotificationService */,
+				A15B00000000000000000002 /* ArbosFFI */,
 				A15A00000000000000000002 /* ArbosTests */,
 			);
 		};
@@ -469,6 +542,13 @@
 		};
 
 		A15A0000000000000000000B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A15B00000000000000000005 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -547,7 +627,14 @@
 			files = (
 				A15A00000000000000000004 /* CoreFixturesTests.swift in Sources */,
 				A15A00000000000000000013 /* ReactionToggleTests.swift in Sources */,
-				A15A00000000000000000006 /* ArbosFFI.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A15B00000000000000000004 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A15B00000000000000000006 /* ArbosFFI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -564,6 +651,16 @@
 			isa = PBXTargetDependency;
 			target = A10000000000000000000002 /* Arbos */;
 			targetProxy = A15A0000000000000000000D /* PBXContainerItemProxy */;
+		};
+		A15B0000000000000000000C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A15B00000000000000000002 /* ArbosFFI */;
+			targetProxy = A15B0000000000000000000B /* PBXContainerItemProxy */;
+		};
+		A15B0000000000000000000E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A15B00000000000000000002 /* ArbosFFI */;
+			targetProxy = A15B0000000000000000000D /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -763,6 +860,66 @@
 			};
 			name = Release;
 		};
+		A15B0000000000000000000F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 8;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 25SCF3Q2AK;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = ArbosFFI;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.unarbos.arbos.ios.ffi;
+				PRODUCT_MODULE_NAME = ArbosFFI;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A15B00000000000000000010 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 8;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = 25SCF3Q2AK;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = ArbosFFI;
+				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.unarbos.arbos.ios.ffi;
+				PRODUCT_MODULE_NAME = ArbosFFI;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -799,6 +956,15 @@
 			buildConfigurations = (
 				A15A0000000000000000000E /* Debug */,
 				A15A0000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A15B00000000000000000011 /* Build configuration list for PBXNativeTarget "ArbosFFI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A15B0000000000000000000F /* Debug */,
+				A15B00000000000000000010 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

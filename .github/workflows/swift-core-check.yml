@@ -1,0 +1,93 @@
+name: Swift core check
+
+# Compiles arbos-ffi for this commit, then runs ArbosTests via fastlane (no
+# signing, no TestFlight upload). Covers the shared client core surface the
+# phone embeds as ArbosFFI.
+
+on:
+  push:
+    paths:
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-ffi/**"
+      - "scripts/build-xcframework.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "apps/ios/Arbos/**"
+      - ".github/workflows/swift-core-check.yml"
+  pull_request:
+    paths:
+      - "crates/arbos-core/**"
+      - "crates/arbos-client/**"
+      - "crates/arbos-ffi/**"
+      - "scripts/build-xcframework.sh"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "apps/ios/Arbos/**"
+      - ".github/workflows/swift-core-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: swift-core-check-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    name: build-xcframework + fastlane test
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      APP_DIR: apps/ios/Arbos
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift package cache
+        uses: actions/cache@v4
+        with:
+          path: apps/ios/Arbos/build/spm
+          key: spm-${{ runner.os }}-${{ hashFiles('apps/ios/Arbos/Arbos.xcodeproj/project.pbxproj', 'apps/ios/Arbos/Arbos.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          newest="$(find /Applications -maxdepth 1 -name 'Xcode_*.app' | sort -V | tail -1)"
+          if [[ -n "$newest" ]]; then sudo xcode-select -s "$newest"; fi
+          xcodebuild -version
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: swift-core-check
+          cache-on-failure: true
+      - name: Build ArbosFFI xcframework
+        run: |
+          set -euo pipefail
+          ./scripts/build-xcframework.sh
+          test -d target/xcframework/ArbosFFI.xcframework
+          test -f target/xcframework/ArbosFFI.swift
+      - name: fastlane test
+        env:
+          ARBOS_SPM_DIR: ${{ github.workspace }}/apps/ios/Arbos/build/spm
+        run: |
+          set -euo pipefail
+          cd "$APP_DIR"
+          fastlane test
+      - name: Keep the xcodebuild logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: swift-core-check-logs-${{ github.sha }}
+          path: apps/ios/Arbos/build/xcodebuild-*.log
+          if-no-files-found: ignore
+          retention-days: 14

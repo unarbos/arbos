@@ -1,11 +1,8 @@
 import XCTest
+import ArbosFFI
 @testable import Arbos
 
 /// Core golden fixtures under `crates/arbos-core/fixtures` (host path via `#filePath`).
-///
-/// Inside this target the generated UniFFI types (`ChatDoc`, `FrameType`, …)
-/// shadow the app's. Refer to the Swift client's types as `Arbos.ChatDoc`,
-/// `Arbos.FrameType`, and so on.
 final class CoreFixturesTests: XCTestCase {
     private static let fixturesDir: URL = {
         // apps/ios/Arbos/ArbosTests/ThisFile.swift → repo root
@@ -73,7 +70,7 @@ final class CoreFixturesTests: XCTestCase {
     /// arbos-ffi path: same snapshot through UniFFI ChatDoc.readRowsJson.
     func testFfiReadsCoreChatDocFixture() throws {
         let snap = try fixtureData("chat_doc.bin")
-        let doc = try ChatDoc.openFromSnapshot(snapshot: snap)
+        let doc = try ArbosFFI.ChatDoc.openFromSnapshot(snapshot: snap)
         let raw = doc.readRowsJson()
         let json = try JSONSerialization.jsonObject(with: Data(raw.utf8))
         guard let rows = json as? [[String: Any]] else {
@@ -100,7 +97,7 @@ final class CoreFixturesTests: XCTestCase {
     }
 
     func testLoroSwiftAndFfiDecodeFrameFixtures() throws {
-        let cases: [(String, Arbos.FrameType, FrameType)] = [
+        let cases: [(String, Arbos.FrameType, ArbosFFI.FrameType)] = [
             ("frame_hello.bin", .hello, .hello),
             ("frame_state.bin", .state, .state),
             ("frame_row.bin", .row, .row),
@@ -112,7 +109,7 @@ final class CoreFixturesTests: XCTestCase {
             let bytes = try fixtureData(name)
             let swiftFrame = Arbos.Frame.decode(bytes)
             XCTAssertEqual(swiftFrame?.type, swiftTy, name)
-            let decoded = try decodeFrame(bytes: bytes)
+            let decoded = try ArbosFFI.decodeFrame(bytes: bytes)
             XCTAssertEqual(decoded.ty, ffiTy, name)
             XCTAssertEqual(decoded.payload, swiftFrame?.payload ?? Data(), name)
         }
