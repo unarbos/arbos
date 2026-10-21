@@ -1,4 +1,10 @@
-/target
+/target/*
+# Stub ArbosFFI.xcframework so Xcode can resolve the path before the Run Script
+# builds the real one (the iOS gate Mac only runs xcodebuild).
+!/target/xcframework/
+/target/xcframework/**
+!/target/xcframework/ArbosFFI.xcframework/
+!/target/xcframework/ArbosFFI.xcframework/Info.plist
 /dist
 node_modules/
 harness/**/dist/
