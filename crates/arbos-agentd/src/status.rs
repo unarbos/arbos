@@ -66,6 +66,8 @@ pub const QUICK_MAX_TOKENS: u32 = 220;
 pub const QUICK_CALLS_PER_MINUTE: usize = 6;
 /// Characters of the user's message the quick call sees.
 const USER_TEXT_MAX: usize = 1200;
+/// How long a held lock is given to free before a message counts as arriving at a busy agent.
+const BUSY_GRACE: Duration = Duration::from_millis(1500);
 
 /// `ARBOS_QUICK_REPLY_TIMEOUT_MS` (default 8000): the call's budget before the canned line.
 pub fn quick_reply_timeout() -> Duration {
@@ -425,6 +427,12 @@ impl Agent {
         };
         if from_voice || user_text.trim().is_empty() {
             return QuickOutcome::NotBusy;
+        }
+        // A lock about to free (a short reply turn, the setup of the previous message) is not
+        // "busy": give it a moment, so two quick messages in a row do not earn a canned ack.
+        let t_wait = Instant::now();
+        while self.turn_lock_busy() && t_wait.elapsed() < BUSY_GRACE {
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         let Some(snap) = self.busy_snapshot(chat_id, host).await else {
             return QuickOutcome::NotBusy;
