@@ -145,6 +145,21 @@ struct LeafAvatar: View {
     }
 }
 
+/// A server's picture: the leaf picked on its Create screen (D92 amendment), else D79 initials.
+struct ServerAvatar: View {
+    @ObservedObject private var flag = LeafAvatarsFlag.shared
+    let server: Server
+    var size: CGFloat = Theme.avatar
+
+    var body: some View {
+        if let pick = server.leafPick, flag.on {
+            LeafAvatar(pick: pick, size: size)
+        } else {
+            InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: size)
+        }
+    }
+}
+
 /// Leaf + colour picker, pane-kit style: nine leaves on the current disc
 /// colour, ten colour discs, and Automatic. Every tap saves at once so the
 /// hero above is the live preview.

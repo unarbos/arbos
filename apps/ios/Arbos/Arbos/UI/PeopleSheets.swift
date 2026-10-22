@@ -21,8 +21,17 @@ struct NewChatSheet: View {
     @State private var searching = false
     @State private var opening = false
     @State private var loadingDirectory = false
-    /// `ARBOS_SHOW=newagent` lands on the New agent page (screenshot rig).
-    @State private var showNewAgent = DebugHooks.show == "newagent"
+    /// `ARBOS_SHOW=newagent|newgroup|newserver` lands on that Create screen, `newgroup2` on the
+    /// member picker (screenshot rig).
+    @State private var showCreate: CreateKind? = {
+        switch DebugHooks.show {
+        case "newagent": return .agent
+        case "newgroup": return .group
+        case "newserver": return .server
+        default: return nil
+        }
+    }()
+    @State private var showGroupPicker = DebugHooks.show == "newgroup2"
     @FocusState private var focused: Bool
 
     private var trimmed: String {
@@ -81,19 +90,19 @@ struct NewChatSheet: View {
 
                     if trimmed.isEmpty {
                         card {
-                            NavigationLink { NewAgentView(onDone: { dismiss() }) } label: {
+                            NavigationLink { CreateEntityView(kind: .agent, onDone: { dismiss() }) } label: {
                                 actionRow(icon: "sparkles", title: "New agent", subtitle: "Its own workspace on your machine")
                             }
                             .buttonStyle(.plain)
                             rowDivider
-                            NavigationLink { NewGroupView(onDone: { dismiss() }) } label: {
+                            NavigationLink { CreateEntityView(kind: .group, onDone: { dismiss() }) } label: {
                                 actionRow(icon: "person.2.fill", title: "New group", subtitle: "People and agents in one chat")
                             }
                             .buttonStyle(.plain)
                             if model.serversAvailable {
                                 // D88 rule 8: a server of your own, or one you were invited to.
                                 rowDivider
-                                NavigationLink { NewServerView(onDone: { dismiss() }) } label: {
+                                NavigationLink { CreateEntityView(kind: .server, onDone: { dismiss() }) } label: {
                                     actionRow(icon: "number", title: "New server", subtitle: "Channels for a group of people")
                                 }
                                 .buttonStyle(.plain)
@@ -158,7 +167,12 @@ struct NewChatSheet: View {
             .background(theme.bg)
             .navigationTitle("New Message")
             .navigationBarTitleDisplayMode(.inline)
-            .navigationDestination(isPresented: $showNewAgent) { NewAgentView(onDone: { dismiss() }) }
+            .navigationDestination(isPresented: Binding(get: { showCreate != nil }, set: { if !$0 { showCreate = nil } })) {
+                CreateEntityView(kind: showCreate ?? .agent, onDone: { dismiss() })
+            }
+            .navigationDestination(isPresented: $showGroupPicker) {
+                NewGroupView(onDone: { dismiss() }, draft: GroupDraft(title: "Launch week", leaf: LeafArt.pick(seed: "rig")))
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() }.foregroundStyle(theme.text) }
             }
@@ -335,7 +349,7 @@ struct ServerPickRow: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: 44)
+            ServerAvatar(server: server, size: 44)
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name).font(theme.font(Theme.body, weight: .medium)).foregroundStyle(theme.text).lineLimit(1)
                 Text(server.isMember
@@ -421,26 +435,77 @@ struct PersonRow: View {
 /// New agent: a name and an avatar colour, then `POST /projects`. The relay
 /// sets up its workspace. The preview is the Telegram-style initials circle
 /// (D79): Automatic until a swatch is picked.
-/// Create agent (D92, Jacob 2026-10-22): Grok Bot's "Create New Bot" layout — title + close ×,
-/// the swaying preview of the chosen leaf, a centred name field, the nine leaves in a 5 / 4 grid,
-/// the ten colours in two rows of five, Cancel + Create pinned above the home indicator. Grok's
-/// sizes in points (measured on the 2x reference) inside the shipped bottom-sheet frame; the 44 pt
-/// footer pills are the one deliberate deviation (touch minimum). Pushed from New Message with its
-/// own header; × and Cancel close the whole sheet.
-struct NewAgentView: View {
+/// What the Create screen creates (D93: one style, parameterised by entity).
+enum CreateKind {
+    case agent, group, server
+
+    var title: String {
+        switch self {
+        case .agent: return "Create New Agent"
+        case .group: return "Create New Group"
+        case .server: return "Create New Server"
+        }
+    }
+
+    var placeholder: String {
+        switch self {
+        case .agent: return "Name your agent"
+        case .group: return "Name your group"
+        case .server: return "Name your server"
+        }
+    }
+
+    /// The footer action: groups continue to the member picker.
+    var action: String {
+        switch self {
+        case .agent, .server: return "Create"
+        case .group: return "Next"
+        }
+    }
+
+    var explainer: String? {
+        switch self {
+        case .server: return "A server has channels and an invite link. You start as its owner, in #general."
+        case .agent, .group: return nil
+        }
+    }
+}
+
+/// The one Create screen (D93) for a new agent, group or server — Grok Bot's "Create New Bot"
+/// layout: title + close ×, the swaying preview of the chosen leaf, a centred name field, the nine
+/// leaves in a 5 / 4 grid, the ten colours in two rows of five, Cancel + the action pinned above the
+/// home indicator. Grok's sizes in points (measured on the 2x reference) inside the shipped
+/// bottom-sheet frame; the 44 pt footer pills are the one deliberate deviation (touch minimum).
+/// Agents create here; a group goes on to the member picker (`NewGroupView`) as step two with the
+/// name + leaf as its draft; a server keeps its one-line explainer under the field. Pushed from New
+/// Message with its own header; × and Cancel close the whole sheet.
+struct CreateEntityView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
+    let kind: CreateKind
     /// Closes the whole sheet (a pushed view's own dismiss only pops).
     let onDone: () -> Void
     @State private var name = DebugHooks.newAgentName ?? ""
     @State private var pickedLeaf: Int? = nil
     @State private var pickedColor: Int? = nil
+    @State private var creating = false
+    @State private var errorText: String?
+    @State private var next = false
     @FocusState private var focused: Bool
 
     private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-    /// A stable default for this sheet (seeded by how many agents exist) so successive new agents
-    /// start on different leaves without the preview jumping while typing; clicks override it.
-    private var pick: LeafPick { LeafArt.pick(seed: "new-agent-\(model.projects.filter { !$0.shared }.count)", leaf: pickedLeaf, color: pickedColor) }
+    /// A stable default for this sheet (seeded by how many of that entity exist) so successive new
+    /// ones start on different leaves without the preview jumping while typing; clicks override it.
+    private var pick: LeafPick {
+        let n: Int
+        switch kind {
+        case .agent: n = model.projects.filter { !$0.shared }.count
+        case .group: n = model.peopleChats.filter(\.isGroup).count
+        case .server: n = model.servers.count
+        }
+        return LeafArt.pick(seed: "new-\(kind)-\(n)", leaf: pickedLeaf, color: pickedColor)
+    }
+    private var canGo: Bool { !clean.isEmpty && !creating }
 
     // Grok's palette, approved as is.
     private let sheetBg = Color(red: 0x1F / 255, green: 0x1F / 255, blue: 0x1F / 255)
@@ -455,7 +520,7 @@ struct NewAgentView: View {
         VStack(spacing: 0) {
             header
             // The middle scrolls when the keyboard is up (the footer stays above the keyboard,
-            // so Create is always reachable); at rest it is Grok's fixed layout.
+            // so the action is always reachable); at rest it is Grok's fixed layout.
             ScrollView(showsIndicators: false) {
                 ZStack(alignment: .top) {
                     LeafAvatar(pick: pick, size: 114, idle: true)
@@ -463,9 +528,24 @@ struct NewAgentView: View {
                         .animation(.snappy, value: "\(pick.leaf)-\(pick.color)")
                     // Grok's vertical rhythm from the sheet top (header 54.5): field 183…218, leaf
                     // row centres 264 / 320 (40 pt rings → 244…340), swatch row centres 386 / 426
-                    // (32 pt rings → 370…442).
+                    // (32 pt rings → 370…442). The server explainer (two lines) adds 40 under the field.
                     VStack(spacing: 0) {
                         field.padding(.top, 183 - 54.5)
+                        if let explainer = kind.explainer {
+                            Text(explainer)
+                                .font(.system(size: 13))
+                                .foregroundStyle(placeholder)
+                                .multilineTextAlignment(.center)
+                                .lineSpacing(3)
+                                .padding(.horizontal, 16.5)
+                                .padding(.top, 8)
+                                .frame(height: 40, alignment: .top)
+                        }
+                        if let errorText {
+                            Text(errorText)
+                                .font(.system(size: 13)).foregroundStyle(theme.danger)
+                                .multilineTextAlignment(.center).padding(.horizontal, 24).padding(.top, 8)
+                        }
                         leafGrid.padding(.top, 244 - 218)
                         colourGrid.padding(.top, 370 - 340)
                     }
@@ -477,43 +557,44 @@ struct NewAgentView: View {
         }
         .background(sheetBg.ignoresSafeArea())
         .toolbar(.hidden, for: .navigationBar)
-        // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=newagent`); users get the caret.
-        .onAppear { if DebugHooks.show != "newagent" { focused = true } }
+        .navigationDestination(isPresented: $next) {
+            NewGroupView(onDone: onDone, draft: GroupDraft(title: clean, leaf: pick))
+        }
+        // The rig shoots the sheet without the keyboard (`ARBOS_SHOW=new…`); users get the caret.
+        .onAppear { if !(DebugHooks.show ?? "").hasPrefix("new") { focused = true } }
     }
 
     private var header: some View {
-        ZStack {
-            HStack {
-                Text("Create New Agent")
-                    .font(.system(size: 14.2, weight: .semibold))
-                    .foregroundStyle(Color(white: 0xF5 / 255))
-                    .padding(.leading, 17.5)
-                Spacer()
-                Button(action: onDone) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Color(white: 0xD2 / 255))
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 5.5)
-                .accessibilityLabel("Close")
+        HStack {
+            Text(kind.title)
+                .font(.system(size: 14.2, weight: .semibold))
+                .foregroundStyle(Color(white: 0xF5 / 255))
+                .padding(.leading, 17.5)
+            Spacer()
+            Button(action: onDone) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Color(white: 0xD2 / 255))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .padding(.trailing, 5.5)
+            .accessibilityLabel("Close")
         }
         .frame(height: 54.5)
         .overlay(alignment: .bottom) { Rectangle().fill(line).frame(height: 1) }
     }
 
     private var field: some View {
-        TextField("", text: $name, prompt: Text("Name your agent").foregroundStyle(placeholder))
+        TextField("", text: $name, prompt: Text(kind.placeholder).foregroundStyle(placeholder))
             .font(.system(size: 15.5))
             .foregroundStyle(Color(white: 0xF5 / 255))
             .multilineTextAlignment(.center)
             .autocorrectionDisabled()
             .focused($focused)
-            .submitLabel(.done)
-            .onSubmit(create)
+            .submitLabel(kind == .group ? .next : .done)
+            .onSubmit(go)
             .padding(.horizontal, 12)
             .frame(height: 35)
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(line, lineWidth: 1))
@@ -568,13 +649,13 @@ struct NewAgentView: View {
                     .frame(width: 84, height: 44).background(Capsule().fill(cancelBg))
             }
             .buttonStyle(.plain)
-            Button(action: create) {
-                Text("Create").font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(clean.isEmpty ? createText : theme.onPrimary)
-                    .frame(width: 92, height: 44).background(Capsule().fill(clean.isEmpty ? createBg : theme.primary))
+            Button(action: go) {
+                Text(creating ? "Creating…" : kind.action).font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(canGo ? theme.onPrimary : createText)
+                    .frame(width: 92, height: 44).background(Capsule().fill(canGo ? theme.primary : createBg))
             }
             .buttonStyle(.plain)
-            .disabled(clean.isEmpty)
+            .disabled(!canGo)
         }
         .padding(.trailing, 16)
         .padding(.top, 25)
@@ -582,11 +663,34 @@ struct NewAgentView: View {
         .overlay(alignment: .top) { Rectangle().fill(line).frame(height: 1) }
     }
 
-    private func create() {
-        guard !clean.isEmpty else { return }
-        model.createProject(name: clean, leaf: pick)
-        onDone()
+    private func go() {
+        guard canGo else { return }
+        switch kind {
+        case .agent:
+            model.createProject(name: clean, leaf: pick)
+            onDone()
+        case .group:
+            next = true
+        case .server:
+            creating = true
+            errorText = nil
+            Task {
+                if await model.createServer(name: clean, leaf: pick) {
+                    onDone()
+                } else {
+                    errorText = model.notice?.text ?? "Could not create the server."
+                    model.notice = nil
+                }
+                creating = false
+            }
+        }
     }
+}
+
+/// What the Create group screen hands to the member picker (step 2).
+struct GroupDraft: Equatable {
+    var title: String
+    var leaf: LeafPick
 }
 
 /// New group: pick people (and your own agents), then create. With `addTo`
@@ -598,6 +702,8 @@ struct NewGroupView: View {
     let onDone: () -> Void
     /// People-chat id to add to; nil creates a new group.
     var addTo: String? = nil
+    /// D93 step 1's name + leaf picture (nil when opened as Add members).
+    var draft: GroupDraft? = nil
     @State private var query = ""
     @State private var remote: [Person] = []
     @State private var picked: [Person] = []
@@ -814,7 +920,7 @@ struct NewGroupView: View {
         errorText = nil
         let agentIds = pickedAgents.map(\.id)
         Task {
-            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds) {
+            if await model.createGroup(handles: picked.map(\.handle), agentIds: agentIds, title: draft?.title, leaf: draft?.leaf) {
                 onDone()
             } else {
                 // Copy onto this screen: RootView's alert is behind the sheet.

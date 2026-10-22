@@ -3,6 +3,7 @@
 // tap opens that room in the normal ChatView. Everything here reuses the
 // home-row metrics and the Hidden chats page header so nothing new has to be learned.
 
+import ArbosFFI
 import SwiftUI
 
 /// A server in the home list: the D79 initials disc, the name, the newest line
@@ -16,7 +17,7 @@ struct ServerRow: View {
 
     var body: some View {
         HStack(spacing: 15) {
-            InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: Theme.rowAvatar)
+            ServerAvatar(server: server, size: Theme.rowAvatar)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(server.name)
@@ -205,7 +206,7 @@ struct ServerChannelsView: View {
             GlassPill {
                 HStack(spacing: 8) {
                     if let server {
-                        InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: Theme.avatar)
+                        ServerAvatar(server: server, size: Theme.avatar)
                     }
                     Text(server?.name ?? "Server")
                         .font(.system(size: Theme.body, weight: .semibold))
@@ -349,81 +350,6 @@ struct NewChannelSheet: View {
     }
 }
 
-/// Rule 8: "Server" in the `+` sheet — a name, then `POST /servers`; lands on its channel list.
-struct NewServerView: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.theme) private var theme
-    /// Closes the whole sheet (a pushed view's own dismiss only pops).
-    let onDone: () -> Void
-    @State private var name = ""
-    @State private var creating = false
-    @State private var errorText: String?
-    @FocusState private var focused: Bool
-
-    private var clean: String { name.trimmingCharacters(in: .whitespaces) }
-
-    var body: some View {
-        VStack(spacing: 18) {
-            InitialsAvatar(name: clean.isEmpty ? "Server" : clean, handle: nil, id: clean.isEmpty ? "new" : clean, size: 92)
-                .padding(.top, 28)
-                .animation(.snappy, value: clean)
-            Text(clean.isEmpty ? "Name your server" : "Starts with #general")
-                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            TextField("", text: $name, prompt: Text("Server name").foregroundStyle(theme.placeholder))
-                .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                .multilineTextAlignment(.center)
-                .autocorrectionDisabled()
-                .focused($focused)
-                .submitLabel(.done)
-                .onSubmit(create)
-                .padding(.horizontal, 16).frame(height: 50)
-                .background(RoundedRectangle(cornerRadius: 25, style: .continuous).fill(theme.field))
-                .overlay(RoundedRectangle(cornerRadius: 25, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                .padding(.horizontal, 24)
-            Button(action: create) {
-                Text(creating ? "Creating…" : "Create server")
-                    .font(theme.font(Theme.body, weight: .semibold)).foregroundStyle(theme.onPrimary)
-                    .frame(maxWidth: .infinity).frame(height: 50)
-                    .background(Capsule().fill(theme.primary))
-            }
-            .buttonStyle(.plain)
-            .disabled(clean.isEmpty || creating)
-            .opacity(clean.isEmpty || creating ? 0.45 : 1)
-            .padding(.horizontal, 24)
-            if let errorText {
-                Text(errorText)
-                    .font(theme.font(Theme.small)).foregroundStyle(theme.danger)
-                    .multilineTextAlignment(.center).padding(.horizontal, 36)
-            }
-            Text("A place with channels for a group of people. You own it: invite people with its link, add channels, pick who posts.")
-                .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-                .multilineTextAlignment(.center).padding(.horizontal, 36)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer()
-        }
-        .background(theme.bg)
-        .navigationTitle("New server")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.bg, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
-        .onAppear { focused = true }
-    }
-
-    private func create() {
-        guard !clean.isEmpty, !creating else { return }
-        creating = true
-        errorText = nil
-        Task {
-            if await model.createServer(name: clean) {
-                onDone()
-            } else {
-                errorText = model.notice?.text ?? "Could not create the server."
-                model.notice = nil
-            }
-            creating = false
-        }
-    }
-}
 
 /// Rule 8: "Join a server" — paste an invite link (or its code), or search an
 /// open server by name and join without a link (`POST /servers/join`).

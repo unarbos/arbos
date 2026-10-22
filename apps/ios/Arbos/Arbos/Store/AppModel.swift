@@ -1738,7 +1738,7 @@ final class AppModel: ObservableObject {
     /// rest (`POST /chats/{id}/members` turns a DM into a group on the third person).
     /// Optional `agentIds` are added afterwards (`POST /chats/{id}/agents`) so the
     /// group can start with people and your agents in one step.
-    func createGroup(handles: [String], agentIds: [Id] = []) async -> Bool {
+    func createGroup(handles: [String], agentIds: [Id] = [], title: String? = nil, leaf: LeafPick? = nil) async -> Bool {
         let cleaned = handles
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "@ ")) }
             .filter { !$0.isEmpty }
@@ -1749,7 +1749,7 @@ final class AppModel: ObservableObject {
         do {
             var chat: PeopleChat
             do {
-                chat = try await api.createGroup(handles: cleaned)
+                chat = try await api.createGroup(handles: cleaned, title: title, leaf: leaf)
             } catch let e as RelayError where e.status == 404 || e.status == 405 || e.status == 501 {
                 chat = try await createGroupViaDm(handles: cleaned)
             }

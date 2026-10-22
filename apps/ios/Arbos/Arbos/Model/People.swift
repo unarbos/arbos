@@ -162,6 +162,13 @@ struct PeopleChat: Identifiable, Equatable {
     var title: String
     /// Blob key under `people:{id}` for an optional group picture.
     var imageKey: String? = nil
+    /// D92 amendment: the group's leaf picture from the Create screen (the uploaded picture wins).
+    var avatarLeaf: Int? = nil
+    var avatarLeafColor: Int? = nil
+    var leafPick: LeafPick? {
+        guard let l = avatarLeaf, let c = avatarLeafColor else { return nil }
+        return LeafPick(leaf: UInt8(clamping: l), color: UInt8(clamping: c))
+    }
     var pending: Bool
     var members: [ChatMember]
     var headSeq: Int64
@@ -198,6 +205,8 @@ extension PeopleChat {
         self.createdAt = dto.created_at
         self.title = dto.title.isEmpty ? "Chat" : dto.title
         self.imageKey = dto.image_key.flatMap { $0.isEmpty ? nil : $0 }
+        self.avatarLeaf = dto.avatar_leaf.map(Int.init)
+        self.avatarLeafColor = dto.avatar_leaf_color.map(Int.init)
         self.pending = dto.pending
         self.members = dto.members.map { ChatMember(dto: $0) }
         self.headSeq = dto.head_seq

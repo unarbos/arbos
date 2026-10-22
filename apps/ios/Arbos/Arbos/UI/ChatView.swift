@@ -4,6 +4,7 @@
 // "Ask <Project>" field with mic, white call button) floating above the
 // keyboard.
 
+import ArbosFFI
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -586,7 +587,7 @@ struct ChatView: View {
                         // name (never "#name": the glyph shows it, #1317).
                         HStack(spacing: 8) {
                             if let s = channelServer {
-                                InitialsAvatar(name: s.name, handle: nil, id: s.id, override: s.avatarColorIndex, size: Theme.avatar)
+                                ServerAvatar(server: s, size: Theme.avatar)
                             }
                             HStack(spacing: 5) {
                                 Text("#")
@@ -609,6 +610,13 @@ struct ChatView: View {
                             if people.isGroup, let url = groupImageURL(people) {
                                 // Custom group picture.
                                 PersonAvatar(url: url, handle: people.title, size: Theme.avatar, name: people.title, id: people.id)
+                                Text(people.title)
+                                    .font(.system(size: Theme.body, weight: .semibold))
+                                    .foregroundStyle(theme.text)
+                                    .lineLimit(1)
+                            } else if people.isGroup, let leaf = people.leafPick, LeafAvatarsFlag.shared.on {
+                                // D92 amendment: the leaf picked on the Create screen.
+                                LeafAvatar(pick: leaf, size: Theme.avatar)
                                 Text(people.title)
                                     .font(.system(size: Theme.body, weight: .semibold))
                                     .foregroundStyle(theme.text)

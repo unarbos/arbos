@@ -3,6 +3,7 @@
 // preview) — nothing between the bar and the list. One machine: its state is
 // the small dot on the account circle; the machine details live in Settings.
 
+import ArbosFFI
 import SwiftUI
 
 struct HomeView: View {
@@ -1178,6 +1179,9 @@ struct PeopleRow: View {
                 if chat.isGroup {
                     if let groupImageURL {
                         AvatarCluster(members: [], size: Theme.rowAvatar, imageUrl: groupImageURL)
+                    } else if let leaf = chat.leafPick, LeafAvatarsFlag.shared.on {
+                        // D92 amendment: the leaf picked on the Create screen.
+                        LeafAvatar(pick: leaf, size: Theme.rowAvatar)
                     } else {
                         ZStack {
                             Circle().fill(theme.card).frame(width: Theme.rowAvatar, height: Theme.rowAvatar)

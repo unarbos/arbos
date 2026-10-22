@@ -5,6 +5,7 @@
 // shared project chats), and an agent (`AgentProfileView`, its own file).
 // `AppModel.showProfile(_:)` opens one from anywhere; the root presents it.
 
+import ArbosFFI
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -740,7 +741,7 @@ struct GroupProfileView: View {
                             AgentAvatar(project: project, theme: theme, size: 112, idle: true)
                         } else {
                             Button { showEdit = true } label: {
-                                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL)
+                                AvatarCluster(members: clusterMembers, size: 72, imageUrl: groupImageURL, leaf: people?.leafPick)
                                     .frame(width: PaneHeader<EmptyView>.avatarSize, height: PaneHeader<EmptyView>.avatarSize)
                                     .paneCrayon()
                                     .contentShape(Rectangle())
@@ -1000,14 +1001,14 @@ struct ServerProfileView: View {
                     renameDraft = server.name
                     showRename = true
                 } label: {
-                    InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: PaneHeader<EmptyView>.avatarSize)
+                    ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
                         .paneCrayon()
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Rename server")
             } else {
-                InitialsAvatar(name: server.name, handle: nil, id: server.id, override: server.avatarColorIndex, size: PaneHeader<EmptyView>.avatarSize)
+                ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
             }
         }
     }
@@ -1587,8 +1588,7 @@ struct ChannelProfileView: View {
                                 model.showProfile(.server(serverId: server.id))
                             } label: {
                                 PaneRow(leading: .avatar(AnyView(
-                                    InitialsAvatar(name: server.name, handle: nil, id: server.id,
-                                                   override: server.avatarColorIndex, size: PaneKit.avatar)
+                                    ServerAvatar(server: server, size: PaneKit.avatar)
                                 )), title: server.name, subtitle: "Server", chevron: true)
                             }
                             .buttonStyle(.plain)

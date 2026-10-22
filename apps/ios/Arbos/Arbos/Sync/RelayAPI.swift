@@ -660,8 +660,11 @@ final class RelayAPI {
         return chat
     }
 
-    func createGroup(handles: [String]) async throws -> PeopleChat {
-        let v = try await json("POST", "/chats", body: ["kind": "group", "members": handles])
+    func createGroup(handles: [String], title: String? = nil, leaf: LeafPick? = nil) async throws -> PeopleChat {
+        var body: [String: Any] = ["kind": "group", "members": handles]
+        if let title, !title.isEmpty { body["title"] = title }
+        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        let v = try await json("POST", "/chats", body: body)
         guard let chat = PeopleChat.parse(v) else { throw RelayError(status: 0, message: "The relay returned no chat") }
         return chat
     }
@@ -680,8 +683,10 @@ final class RelayAPI {
     }
 
     /// `POST /servers {name}` → 201 the server (with `#general` and members).
-    func createServer(name: String) async throws -> Server {
-        let v = try await json("POST", "/servers", body: ["name": name.trimmingCharacters(in: .whitespacesAndNewlines)])
+    func createServer(name: String, leaf: LeafPick? = nil) async throws -> Server {
+        var body: [String: Any] = ["name": name.trimmingCharacters(in: .whitespacesAndNewlines)]
+        if let leaf { body["avatar_leaf"] = Int(leaf.leaf); body["avatar_leaf_color"] = Int(leaf.color) }
+        let v = try await json("POST", "/servers", body: body)
         guard let s = Server.parse(v) else { throw RelayError(status: 0, message: "The relay returned no server") }
         return s
     }

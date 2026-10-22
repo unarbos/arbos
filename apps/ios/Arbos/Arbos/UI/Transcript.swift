@@ -1208,12 +1208,16 @@ struct AvatarCluster: View {
     var size: CGFloat = Theme.avatar
     var maxVisible: Int = 3
     var imageUrl: String? = nil
+    /// D92 amendment: the group's leaf picture from the Create screen (a custom picture wins).
+    var leaf: LeafPick? = nil
 
     private var shown: [ChatMember] { Array(members.prefix(maxVisible)) }
     private var hasMore: Bool { members.count > maxVisible }
 
     var body: some View {
-        if let imageUrl, !imageUrl.isEmpty {
+        if let leaf, imageUrl?.isEmpty ?? true, LeafAvatarsFlag.shared.on {
+            LeafAvatar(pick: leaf, size: size * 1.12)
+        } else if let imageUrl, !imageUrl.isEmpty {
             // Keep the group silhouette under the picture until it arrives so we
             // do not flash initials ("G") then flip to the selected image.
             ZStack {

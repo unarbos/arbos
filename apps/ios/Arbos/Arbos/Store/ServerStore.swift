@@ -204,9 +204,9 @@ extension AppModel {
     }
 
     /// Rule 8: "Server" in the `+` menu → `POST /servers {name}`, then its channel list.
-    func createServer(name: String) async -> Bool {
+    func createServer(name: String, leaf: LeafPick? = nil) async -> Bool {
         do {
-            let s = try await relay.createServer(name: name)
+            let s = try await relay.createServer(name: name, leaf: leaf)
             upsert(server: s)
             open(server: s)
             await startMatrixIfNeeded()
