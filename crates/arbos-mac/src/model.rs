@@ -2541,6 +2541,11 @@ pub struct ServerInfo {
     pub name: String,
     #[serde(default)]
     pub image_key: Option<String>,
+    /// D92 amendment: the leaf picture from the Create screen; `None` = initials.
+    #[serde(default)]
+    pub avatar_leaf: Option<u8>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<u8>,
     #[serde(default)]
     pub owner_user_id: String,
     #[serde(default)]

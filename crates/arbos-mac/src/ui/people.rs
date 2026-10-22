@@ -204,7 +204,7 @@ pub fn new_chat_sheet(
                         ),
                 )
                 .child(icon("chevron-right", 13.0, theme.text_faint))
-                // D92: opens the Create agent sheet (`create_agent::sheet`) in place of this one.
+                // D93: opens the Create screen (`create_entity::sheet`) in place of this one.
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.state.update(cx, |s, cx| {
                         s.new_project_open = true;
@@ -246,14 +246,8 @@ pub fn new_chat_sheet(
                         ),
                 )
                 .child(icon("chevron-right", 13.0, theme.text_faint))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.people_input.update(cx, |input, _| {
-                        input.set_placeholder("Add people or agents");
-                    });
-                    this.state.update(cx, |s, cx| s.open_new_group(cx));
-                    let handle = this.people_input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                }));
+                // D93: step 1 is the Create screen (picture + name); the picker below is step 2.
+                .on_click(cx.listener(|this, _, window, cx| this.open_create_group(window, cx)));
             // Inside the scrolling body the card must keep its height, or the
             // expanded form is squeezed and clipped once the list below is long.
             let mut group = glass::group(&theme)

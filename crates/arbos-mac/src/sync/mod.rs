@@ -318,6 +318,9 @@ pub enum ClientCommand {
     CreatePeopleGroup {
         handles: Vec<String>,
         agent_ids: Vec<Id>,
+        /// D93 Create screen: the group's name and leaf picture, when it came through it.
+        title: Option<String>,
+        leaf: Option<crate::ui::avatars::LeafPick>,
     },
     /// Presence `typing` for a people chat.
     SetTyping {
@@ -776,6 +779,8 @@ pub enum ClientCommand {
     /// D88: `POST /servers {name}`; answered by `ServerOpened`.
     ServerCreate {
         name: String,
+        /// D93 Create screen: the server's leaf picture.
+        leaf: Option<crate::ui::avatars::LeafPick>,
     },
     /// D88: `POST /servers/join {code}` with a code or a full invite link; `ServerOpened`.
     ServerJoin {

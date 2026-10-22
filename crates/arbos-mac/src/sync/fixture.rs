@@ -5073,7 +5073,12 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             }
             true
         }
-        ClientCommand::CreatePeopleGroup { handles, agent_ids } => {
+        ClientCommand::CreatePeopleGroup {
+            handles,
+            agent_ids,
+            title: draft_title,
+            leaf,
+        } => {
             let mut members: Vec<Person> = Vec::new();
             for raw in handles {
                 let handle = raw.trim().trim_start_matches('@').to_lowercase();
@@ -5127,14 +5132,21 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .collect()
             };
             let id = new_id();
-            let title = members
-                .iter()
-                .map(|p| p.handle.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let title = draft_title
+                .clone()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| {
+                    members
+                        .iter()
+                        .map(|p| p.handle.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                });
             let mut space = people_space(&id, members[0].clone(), agents);
             space.kind = SpaceKind::Group;
             space.name = title.clone();
+            space.avatar_leaf = leaf.as_ref().map(|l| l.leaf);
+            space.avatar_leaf_color = leaf.as_ref().map(|l| l.color);
             space.people = members;
             space.pending = space.people.iter().any(|p| p.status == "invited");
             shared.projects.lock().unwrap().push(space);

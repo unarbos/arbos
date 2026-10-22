@@ -722,8 +722,20 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     column.child(account_row)
 }
 
-/// The D79 disc of a server: initials from its name, the relay's gradient index.
+/// A server's picture: the leaf picked on its Create screen (D92 amendment),
+/// else the D79 disc — initials from its name, the relay's gradient index.
 pub fn server_picture(server: &ServerInfo, size: f32, theme: &Theme) -> Div {
+    if let (true, Some(leaf), Some(color)) = (
+        avatars::leaf_avatars_on(),
+        server.avatar_leaf,
+        server.avatar_leaf_color,
+    ) {
+        return avatars::leaf_hover(
+            avatars::LeafPick { leaf, color },
+            size,
+            avatars::leaf_hover_key(&server.id, size),
+        );
+    }
     avatars::element(
         &server.id,
         &server.name,

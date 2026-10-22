@@ -875,8 +875,9 @@ pub(crate) fn people_space_from(
         vision_enabled: true,
         avatar_color_index: None,
         avatar_color_override: None,
-        avatar_leaf: None,
-        avatar_leaf_color: None,
+        // D92 amendment: a group's leaf picture from the Create screen (the uploaded picture wins).
+        avatar_leaf: dto.avatar_leaf.and_then(leaf_index),
+        avatar_leaf_color: dto.avatar_leaf_color.and_then(leaf_index),
         image_url: dto
             .image_key
             .as_deref()

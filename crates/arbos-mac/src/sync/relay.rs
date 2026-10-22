@@ -1442,12 +1442,18 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             let shared = shared.clone();
             tokio::spawn(async move { refresh_servers_list(&shared).await });
         }
-        ClientCommand::ServerCreate { name } => {
+        ClientCommand::ServerCreate { name, leaf } => {
             let shared = shared.clone();
             let name = name.clone();
+            let leaf = *leaf;
             tokio::spawn(async move {
+                let mut body = json!({ "name": name });
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
+                }
                 match shared
-                    .post_json("/servers", json!({ "name": name }))
+                    .post_json("/servers", body)
                     .await
                     .and_then(parse_server)
                 {
@@ -3739,7 +3745,12 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::CreatePeopleGroup { handles, agent_ids } => {
+        ClientCommand::CreatePeopleGroup {
+            handles,
+            agent_ids,
+            title,
+            leaf,
+        } => {
             let shared = shared.clone();
             tokio::spawn(async move {
                 let members: Vec<String> = handles
@@ -3747,10 +3758,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     .map(|h| h.trim().trim_start_matches('@').to_string())
                     .filter(|h| !h.is_empty())
                     .collect();
-                match shared
-                    .post_json("/chats", json!({ "kind": "group", "members": members }))
-                    .await
-                {
+                let mut body = json!({ "kind": "group", "members": members });
+                if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+                    body["title"] = json!(t.trim());
+                }
+                if let Some(l) = leaf {
+                    body["avatar_leaf"] = json!(l.leaf);
+                    body["avatar_leaf_color"] = json!(l.color);
+                }
+                match shared.post_json("/chats", body).await {
                     Ok(v) => {
                         let chat_id = match serde_json::from_value::<PeopleChatDto>(v) {
                             Ok(dto) => dto.id,

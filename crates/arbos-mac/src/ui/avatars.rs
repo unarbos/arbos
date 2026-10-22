@@ -125,6 +125,10 @@ fn set_hover_state(key: u64, hovered: bool) {
     }
 }
 
+pub fn leaf_hover_key(seed: &str, size: f32) -> u64 {
+    hover_key(seed, size)
+}
+
 fn hover_key(seed: &str, size: f32) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     seed.hash(&mut h);
@@ -397,10 +401,16 @@ pub fn element(seed: &str, name: &str, index: Option<u8>, size: f32, theme: &The
 }
 
 /// An agent (project): its id seeds the leaf and colour, the owner's picks override.
-/// A people space (DM / group) rides the same `Project` type and keeps its D79
-/// initials: the leaf is for agents only.
+/// A people space (DM / group) rides the same `Project` type: a group shows the
+/// leaf picked on its Create screen (D92 amendment) and otherwise, like a DM,
+/// its D79 initials — never an id-derived leaf.
 pub fn project(p: &Project, size: f32, theme: &Theme) -> Div {
     if p.is_people() {
+        if let (true, Some(leaf), Some(color)) =
+            (leaf_avatars_on(), p.avatar_leaf, p.avatar_leaf_color)
+        {
+            return leaf_hover(LeafPick { leaf, color }, size, hover_key(&p.id, size));
+        }
         return element(&p.id, &p.name, p.avatar_color_index, size, theme);
     }
     agent(

@@ -1,11 +1,13 @@
-//! The Create agent sheet (Jacob, 2026-10-22): Grok Bot's "Create New Bot"
-//! layout with the D92 leaves — header with a close ×, the swaying preview of
-//! the chosen leaf on its colour, a centred name field, the nine leaves in a
-//! 5 / 4 grid, the ten autumn colours in two rows of five, and a footer with
-//! Cancel + Create (disabled until named). It replaces the inline "New agent"
-//! expansion of the New Message sheet. Every size is Grok's, measured on the
-//! 2x reference (`media/leaf-avatars/create-sheet/ref-grok-create-new-bot.png`)
-//! and written here in points; the mockup Jacob approved matched them to the
+//! The one Create screen (D93: one style, parameterised by entity) for a new
+//! agent, group or server — Grok Bot's "Create New Bot" layout with the D92
+//! leaves: header with a close ×, the swaying preview of the chosen leaf on
+//! its colour, a centred name field, the nine leaves in a 5 / 4 grid, the ten
+//! autumn colours in two rows of five, and a footer with Cancel + the action
+//! (disabled until named). Agents create from here; groups go on to the
+//! existing member picker as step two ("Next"); servers keep their one-line
+//! explainer under the field. Every size is Grok's, measured on the 2x
+//! reference (`media/leaf-avatars/create-sheet/ref-grok-create-new-bot.png`)
+//! and written here in points; the mockups Jacob approved matched them to the
 //! pixel.
 
 use gpui::{
@@ -38,6 +40,60 @@ const FOOTER_TOP: f32 = 466.0;
 const FOOTER_H: f32 = 56.5;
 const PILL_H: f32 = 27.0;
 const HEIGHT: f32 = FOOTER_TOP + FOOTER_H;
+/// The server explainer (13 pt, two lines at this width) plus its gap: everything under the
+/// field moves down by this much.
+const EXPLAINER_SHIFT: f32 = 40.0;
+
+/// What the sheet creates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Agent,
+    Group,
+    Server,
+}
+
+impl Kind {
+    fn title(self) -> &'static str {
+        match self {
+            Kind::Agent => "Create New Agent",
+            Kind::Group => "Create New Group",
+            Kind::Server => "Create New Server",
+        }
+    }
+
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Kind::Agent => "Name your agent",
+            Kind::Group => "Name your group",
+            Kind::Server => "Name your server",
+        }
+    }
+
+    /// The footer action: groups continue to the member picker.
+    fn action(self) -> &'static str {
+        match self {
+            Kind::Agent | Kind::Server => "Create",
+            Kind::Group => "Next",
+        }
+    }
+
+    fn explainer(self) -> Option<&'static str> {
+        match self {
+            Kind::Server => Some(
+                "A server has channels and an invite link. You start as its owner, in #general.",
+            ),
+            Kind::Agent | Kind::Group => None,
+        }
+    }
+
+    fn shift(self) -> f32 {
+        if self.explainer().is_some() {
+            EXPLAINER_SHIFT
+        } else {
+            0.0
+        }
+    }
+}
 
 /// Grok's dark sheet palette (approved as is); the light theme keeps its own.
 struct Palette {
@@ -87,12 +143,24 @@ fn palette(theme: &Theme) -> Palette {
 }
 
 /// The pick shown while the sheet is open: the owner's clicks, else a stable
-/// default for this sheet (seeded by how many agents exist, so successive new
-/// agents start on different leaves without the preview jumping while typing).
-pub fn current_pick(shell: &Shell, cx: &Context<Shell>) -> LeafPick {
-    let n = shell.state.read(cx).my_projects().count();
-    let seed = format!("new-agent-{n}");
-    leaf::pick_for(&seed, shell.new_agent_leaf, shell.new_agent_leaf_color)
+/// default for this sheet (seeded by how many of that entity exist, so
+/// successive new ones start on different leaves without the preview jumping
+/// while typing).
+pub fn current_pick(shell: &Shell, kind: Kind, cx: &Context<Shell>) -> LeafPick {
+    let state = shell.state.read(cx);
+    let seed = match kind {
+        Kind::Agent => format!("new-agent-{}", state.my_projects().count()),
+        Kind::Group => format!(
+            "new-group-{}",
+            state
+                .projects
+                .iter()
+                .filter(|p| p.is_people_group())
+                .count()
+        ),
+        Kind::Server => format!("new-server-{}", state.servers.len()),
+    };
+    leaf::pick_for(&seed, shell.create_leaf, shell.create_leaf_color)
 }
 
 fn ring(size: f32, selected: bool, colour: Hsla) -> Div {
@@ -112,12 +180,21 @@ fn ring(size: f32, selected: bool, colour: Hsla) -> Div {
         .cursor_pointer()
 }
 
-pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
+pub fn sheet(shell: &Shell, kind: Kind, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let p = palette(&theme);
-    let pick = current_pick(shell, cx);
-    let typed = shell.project_input.read(cx).text().trim().to_string();
-    let can_create = !typed.is_empty();
+    let pick = current_pick(shell, kind, cx);
+    let input = match kind {
+        Kind::Agent | Kind::Group => shell.project_input.clone(),
+        Kind::Server => shell.server_input.clone(),
+    };
+    let typed = input.read(cx).text().trim().to_string();
+    let busy = match kind {
+        Kind::Server => shell.state.read(cx).server_busy,
+        Kind::Agent | Kind::Group => false,
+    };
+    let can_go = !typed.is_empty() && !busy;
+    let shift = kind.shift();
 
     let header = div()
         .absolute()
@@ -136,11 +213,11 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .line_height(px(20.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(p.title)
-                .child("Create New Agent"),
+                .child(kind.title()),
         )
         .child(
             div()
-                .id("create-agent-close")
+                .id("create-entity-close")
                 .absolute()
                 .right(px(16.5))
                 .top(px(15.0))
@@ -152,7 +229,9 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.surface_2))
                 .child(icon("xmark", 10.0, hex(0xD2D2D2)))
-                .on_click(cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx))),
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
+                ),
         );
 
     let preview = div()
@@ -177,8 +256,24 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .items_center()
         .px(px(12.0))
         .text_size(px(15.5))
-        .text_color(if can_create { p.title } else { p.placeholder })
-        .child(shell.project_input.clone());
+        .text_color(if typed.is_empty() {
+            p.placeholder
+        } else {
+            p.title
+        })
+        .child(input);
+    let explainer = kind.explainer().map(|text| {
+        div()
+            .absolute()
+            .left(px(FIELD_INSET))
+            .right(px(FIELD_INSET))
+            .top(px(FIELD_TOP + FIELD_H + 8.0))
+            .text_size(px(13.0))
+            .line_height(px(16.0))
+            .text_center()
+            .text_color(p.placeholder)
+            .child(text)
+    });
 
     let mut rows: Vec<Div> = Vec::new();
     for (r, top) in LEAF_ROWS.iter().enumerate() {
@@ -191,7 +286,7 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             .absolute()
             .left_0()
             .right_0()
-            .top(px(top - LEAF_RING / 2.0))
+            .top(px(top - LEAF_RING / 2.0 + shift))
             .flex()
             .justify_center();
         for index in leaves {
@@ -202,12 +297,12 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             row = row.child(
                 ring(LEAF_RING, pick.leaf == index, p.ring)
                     .id(ElementId::Name(SharedString::from(format!(
-                        "create-agent-leaf-{index}"
+                        "create-entity-leaf-{index}"
                     ))))
                     .mx(px((LEAF_PITCH - LEAF_RING) / 2.0))
                     .child(avatars::leaf_element(cell, LEAF_DISC))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.new_agent_leaf = Some(index);
+                        this.create_leaf = Some(index);
                         cx.notify();
                     })),
             );
@@ -219,7 +314,7 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             .absolute()
             .left_0()
             .right_0()
-            .top(px(top - SWATCH_RING / 2.0))
+            .top(px(top - SWATCH_RING / 2.0 + shift))
             .flex()
             .justify_center();
         for j in 0..5u8 {
@@ -227,7 +322,7 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             row = row.child(
                 ring(SWATCH_RING, pick.color == index, p.ring)
                     .id(ElementId::Name(SharedString::from(format!(
-                        "create-agent-colour-{index}"
+                        "create-entity-colour-{index}"
                     ))))
                     .mx(px((SWATCH_PITCH - SWATCH_RING) / 2.0))
                     .child(
@@ -237,7 +332,7 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                             .bg(avatars::leaf_disc(index)),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.new_agent_leaf_color = Some(index);
+                        this.create_leaf_color = Some(index);
                         cx.notify();
                     })),
             );
@@ -266,21 +361,23 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .absolute()
         .left_0()
         .right_0()
-        .top(px(FOOTER_TOP))
+        .top(px(FOOTER_TOP + shift))
         .h(px(FOOTER_H))
         .border_t_1()
         .border_color(p.line)
         .child(
-            pill("create-agent-cancel", "Cancel", 68.5, p.cancel_bg, p.title)
+            pill("create-entity-cancel", "Cancel", 68.5, p.cancel_bg, p.title)
                 .right(px(12.5 + 67.0 + 8.0))
                 .cursor_pointer()
                 .hover(|s| s.opacity(0.85))
-                .on_click(cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx))),
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
+                ),
         )
-        .child(if can_create {
+        .child(if can_go {
             pill(
-                "create-agent-create",
-                "Create",
+                "create-entity-go",
+                kind.action(),
                 67.0,
                 theme.primary,
                 theme.on_primary,
@@ -288,11 +385,11 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             .right(px(12.5))
             .cursor_pointer()
             .hover(|s| s.opacity(0.88))
-            .on_click(cx.listener(|this, _, window, cx| this.submit_project(window, cx)))
+            .on_click(cx.listener(move |this, _, window, cx| this.submit_create(kind, window, cx)))
         } else {
             pill(
-                "create-agent-create",
-                "Create",
+                "create-entity-go",
+                if busy { "Creating…" } else { kind.action() },
                 67.0,
                 p.create_bg,
                 p.create_text,
@@ -303,7 +400,7 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let card = div()
         .relative()
         .w(px(WIDTH))
-        .h(px(HEIGHT))
+        .h(px(HEIGHT + shift))
         .max_w_full()
         .max_h_full()
         .rounded(px(RADIUS))
@@ -315,6 +412,7 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .child(header)
         .child(preview)
         .child(field)
+        .children(explainer)
         .children(rows)
         .child(footer);
     // The same modal backdrop as the New Message sheet: a click outside closes.
@@ -331,6 +429,6 @@ pub fn sheet(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .child(frosted(RADIUS, PANEL_BLUR, card))
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, _, window, cx| this.close_new_chat_sheet(window, cx)),
+            cx.listener(move |this, _, window, cx| this.cancel_create(kind, window, cx)),
         )
 }

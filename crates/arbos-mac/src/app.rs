@@ -260,6 +260,8 @@ pub struct AppState {
     pub new_chat_open: bool,
     /// New Message → New group: multi-select people (and optional agents).
     pub new_group_open: bool,
+    /// D93 Create group step 1 → 2: the name and leaf picked, sent with the members on Create.
+    pub new_group_draft: Option<(String, crate::ui::avatars::LeafPick)>,
     pub new_group_picked: Vec<Person>,
     pub new_group_agents: Vec<Id>,
     pub people_query: String,
@@ -626,6 +628,7 @@ impl AppState {
                 }),
             new_chat_open: false,
             new_group_open: false,
+            new_group_draft: None,
             new_group_picked: Vec::new(),
             new_group_agents: Vec::new(),
             people_query: String::new(),
@@ -3005,14 +3008,19 @@ impl AppState {
     }
 
     /// Sheet "Create": `POST /servers`; the answer opens it on `#general`.
-    pub fn create_server(&mut self, name: String, cx: &mut Context<Self>) {
+    pub fn create_server(
+        &mut self,
+        name: String,
+        leaf: Option<crate::ui::avatars::LeafPick>,
+        cx: &mut Context<Self>,
+    ) {
         let name = name.trim().chars().take(64).collect::<String>();
         if name.is_empty() || self.server_busy {
             return;
         }
         self.server_busy = true;
         self.server_error = None;
-        self.command(ClientCommand::ServerCreate { name });
+        self.command(ClientCommand::ServerCreate { name, leaf });
         cx.notify();
     }
 
@@ -5215,7 +5223,16 @@ impl AppState {
         self.people_busy = true;
         self.people_error = None;
         self.awaiting_group = Some(handles.clone());
-        self.command(ClientCommand::CreatePeopleGroup { handles, agent_ids });
+        let (title, leaf) = match self.new_group_draft.take() {
+            Some((t, l)) => (Some(t), Some(l)),
+            None => (None, None),
+        };
+        self.command(ClientCommand::CreatePeopleGroup {
+            handles,
+            agent_ids,
+            title,
+            leaf,
+        });
         cx.notify();
     }
 

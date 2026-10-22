@@ -22,7 +22,7 @@ use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
 use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
-use crate::ui::create_agent;
+use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::feedback::{FeedbackSheet, SendFeedback};
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::glass::{self, WindowDrag};
@@ -172,9 +172,11 @@ pub struct Shell {
     pub(crate) project_input: Entity<ComposerInput>,
     /// D79: the swatch picked for the agent being created; `None` = automatic.
     pub(crate) new_agent_color: Option<u8>,
-    /// D92 Create agent sheet: the leaf and colour clicked; `None` = the sheet's default pick.
-    pub(crate) new_agent_leaf: Option<u8>,
-    pub(crate) new_agent_leaf_color: Option<u8>,
+    /// D93 Create screen: the leaf and colour clicked; `None` = the sheet's default pick.
+    pub(crate) create_leaf: Option<u8>,
+    pub(crate) create_leaf_color: Option<u8>,
+    /// Create group, step 1 (picture + name) showing over the New Message backdrop.
+    pub(crate) create_group_open: bool,
     /// Sidebar search field.
     pub(crate) search_input: Entity<ComposerInput>,
     pub(crate) connectors: Entity<ConnectorsPanel>,
@@ -544,6 +546,28 @@ impl Shell {
                 project_input.update(cx, |input, cx| input.set_text(name, cx));
             }
         }
+        // Rig: `ARBOS_OPEN_CREATE=group|server` opens the D93 Create screen for that entity
+        // (group = step 1; `ARBOS_OPEN_NEW_GROUP=1` is step 2); `ARBOS_NEW_AGENT_NAME` prefills.
+        let open_create = std::env::var("ARBOS_OPEN_CREATE").ok();
+        let create_group_open = open_create.as_deref() == Some("group");
+        if create_group_open {
+            state.update(cx, |s, cx| s.open_new_chat(cx));
+            project_input.update(cx, |input, cx| {
+                input.set_placeholder(CreateKind::Group.placeholder());
+                if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
+                    input.set_text(name, cx);
+                }
+            });
+        }
+        if open_create.as_deref() == Some("server") {
+            state.update(cx, |s, cx| s.open_server_sheet(ServerSheet::NewServer, cx));
+            server_input.update(cx, |input, cx| {
+                input.set_placeholder(CreateKind::Server.placeholder());
+                if let Ok(name) = std::env::var("ARBOS_NEW_AGENT_NAME") {
+                    input.set_text(name, cx);
+                }
+            });
+        }
         let connectors = cx.new(|cx| ConnectorsPanel::new(state.clone(), cx));
         // Rig: `ARBOS_OPEN_SETTINGS=connectors` — the Connectors page inside the sheet.
         if open_settings.as_deref() == Some("connectors") {
@@ -630,8 +654,9 @@ impl Shell {
             pairing_input,
             project_input,
             new_agent_color: None,
-            new_agent_leaf: None,
-            new_agent_leaf_color: None,
+            create_leaf: None,
+            create_leaf_color: None,
+            create_group_open,
             search_input,
             connectors,
             skills,
@@ -910,15 +935,84 @@ impl Shell {
         let color = self.new_agent_color.take();
         // D92: the Create sheet always shows a definite leaf + colour; send that pair so the
         // new agent looks exactly like its preview.
-        let pick = crate::ui::create_agent::current_pick(self, cx);
-        self.new_agent_leaf = None;
-        self.new_agent_leaf_color = None;
+        let pick = create_entity::current_pick(self, CreateKind::Agent, cx);
+        self.create_leaf = None;
+        self.create_leaf_color = None;
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
             s.close_new_chat(cx);
             s.create_project(name, color, Some(pick), cx);
         });
         Composer::focus(&self.composer, window, cx);
+    }
+
+    /// Open the Create group screen (step 1) over the New Message backdrop.
+    pub(crate) fn open_create_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.create_group_open = true;
+        self.create_leaf = None;
+        self.create_leaf_color = None;
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Group.placeholder());
+            input.clear(cx);
+        });
+        let handle = self.project_input.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// The Create screen's action: agents create, groups go on to the member
+    /// picker (step 2) with the name + leaf kept as the draft, servers create.
+    pub(crate) fn submit_create(
+        &mut self,
+        kind: CreateKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            CreateKind::Agent => self.submit_project(window, cx),
+            CreateKind::Group => {
+                let name = self.project_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let pick = create_entity::current_pick(self, kind, cx);
+                self.create_group_open = false;
+                self.create_leaf = None;
+                self.create_leaf_color = None;
+                self.project_input.update(cx, |input, cx| input.clear(cx));
+                self.people_input.update(cx, |input, _| {
+                    input.set_placeholder("Add people or agents");
+                });
+                self.state.update(cx, |s, cx| {
+                    s.new_group_draft = Some((name, pick));
+                    s.open_new_group(cx);
+                });
+                let handle = self.people_input.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            }
+            CreateKind::Server => {
+                let name = self.server_input.read(cx).text().trim().to_string();
+                if name.is_empty() {
+                    return;
+                }
+                let pick = create_entity::current_pick(self, kind, cx);
+                self.state
+                    .update(cx, |s, cx| s.create_server(name, Some(pick), cx));
+            }
+        }
+    }
+
+    /// × / Cancel / click outside on a Create screen.
+    pub(crate) fn cancel_create(
+        &mut self,
+        kind: CreateKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            CreateKind::Agent | CreateKind::Group => self.close_new_chat_sheet(window, cx),
+            CreateKind::Server => self.close_server_sheet(window, cx),
+        }
     }
 
     /// Double-click an agent's name: load it into the rename field and focus.
@@ -1070,7 +1164,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let placeholder = match &sheet {
-            ServerSheet::NewServer => "Server name",
+            ServerSheet::NewServer => CreateKind::Server.placeholder(),
             ServerSheet::JoinServer => "Invite link or code",
             ServerSheet::NewChannel { .. } => "channel-name",
         };
@@ -1124,8 +1218,10 @@ impl Shell {
             return;
         };
         let restricted = self.new_channel_restricted;
+        // Enter in the Create screen: same as its action button.
+        let server_pick = create_entity::current_pick(self, CreateKind::Server, cx);
         self.state.update(cx, |s, cx| match sheet {
-            ServerSheet::NewServer => s.create_server(text, cx),
+            ServerSheet::NewServer => s.create_server(text, Some(server_pick), cx),
             ServerSheet::JoinServer => s.join_server(text, cx),
             ServerSheet::NewChannel { server_id } => {
                 s.create_channel(server_id, text, restricted, cx)
@@ -1328,11 +1424,16 @@ impl Shell {
     pub(crate) fn close_new_chat_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.people_input
             .update(cx, |input, _| input.set_placeholder("Search people"));
-        self.new_agent_leaf = None;
-        self.new_agent_leaf_color = None;
-        self.project_input.update(cx, |input, cx| input.clear(cx));
+        self.create_leaf = None;
+        self.create_leaf_color = None;
+        self.create_group_open = false;
+        self.project_input.update(cx, |input, cx| {
+            input.set_placeholder(CreateKind::Agent.placeholder());
+            input.clear(cx);
+        });
         self.state.update(cx, |s, cx| {
             s.new_project_open = false;
+            s.new_group_draft = None;
             s.close_new_chat(cx);
         });
         Composer::focus(&self.composer, window, cx);
@@ -3235,15 +3336,21 @@ impl Render for Shell {
             }
         }
         if new_chat_open {
-            // D92: "New agent" opens its own Create sheet over the same backdrop.
+            // D93: "New agent" / "New group" open the Create screen over the same backdrop
+            // (a group goes on to the member picker as step 2).
             if self.state.read(cx).new_project_open {
-                root = root.child(create_agent::sheet(self, cx));
+                root = root.child(create_entity::sheet(self, CreateKind::Agent, cx));
+            } else if self.create_group_open {
+                root = root.child(create_entity::sheet(self, CreateKind::Group, cx));
             } else {
                 root = root.child(people::new_chat_sheet(&self.state, &self.people_input, cx));
             }
         }
         if let Some(sheet) = self.state.read(cx).server_sheet.clone() {
-            root = root.child(servers::sheet(self, &sheet, cx));
+            root = root.child(match sheet {
+                ServerSheet::NewServer => create_entity::sheet(self, CreateKind::Server, cx),
+                other => servers::sheet(self, &other, cx),
+            });
         }
         if self.feedback.read(cx).is_open() {
             root = root.child(self.feedback.clone());
