@@ -427,6 +427,8 @@ pub fn people_chat_dto(
         created_at: cm.chat.created_at,
         title,
         image_key: cm.chat.image_key.clone(),
+        avatar_leaf: cm.chat.avatar_leaf,
+        avatar_leaf_color: cm.chat.avatar_leaf_color,
         pending,
         members,
         room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
@@ -642,6 +644,13 @@ pub struct CreateGroupBody {
     pub kind: String,
     /// GitHub handles of the other people (the caller is added as owner).
     pub members: Vec<String>,
+    /// Create screen (D93): the group's name and its leaf picture; all optional.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub avatar_leaf: Option<i64>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<i64>,
 }
 
 /// `POST /chats {kind: "group", members: [handles…]}` — a new people group. The caller is the
@@ -722,13 +731,24 @@ pub async fn chats_create_group(
     if state.db.people_chats_created_since(&me, today).unwrap_or(0) >= limit {
         return rate_limited(((today + 86_400_000 - now_ms()) / 1000).max(1));
     }
+    let leaf = match leaf_patch(b.avatar_leaf.map(Some), b.avatar_leaf_color.map(Some)) {
+        Ok(l) => l.flatten(),
+        Err(r) => return r,
+    };
     let chat = PeopleChat {
         id: ulid(),
         kind: "group".into(),
         created_by: me.clone(),
         created_at: now_ms(),
-        title: None,
+        title: b
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.chars().take(80).collect()),
         image_key: None,
+        avatar_leaf: leaf.map(|l| l.0),
+        avatar_leaf_color: leaf.map(|l| l.1),
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -828,6 +848,8 @@ pub async fn dm_create(
         created_at: now_ms(),
         title: None,
         image_key: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -904,6 +926,40 @@ pub struct PatchChatBody {
     /// Blob key under `people:{chat}` for the group picture. Empty clears it.
     #[serde(default)]
     pub image_key: Option<String>,
+    /// D92 amendment: the group's leaf picture (0–8) and disc colour (0–9), both or neither;
+    /// `null` for both clears it (back to the member cluster).
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf_color: Option<Option<i64>>,
+}
+
+/// `avatar_leaf` + `avatar_leaf_color` from a body: `None` = untouched, `Some(None)` = clear,
+/// `Some(Some((leaf, colour)))` = set (validated).
+fn leaf_patch(
+    leaf: Option<Option<i64>>,
+    color: Option<Option<i64>>,
+) -> Result<Option<Option<(i64, i64)>>, Response> {
+    match (leaf, color) {
+        (None, None) => Ok(None),
+        (Some(None), Some(None)) | (Some(None), None) | (None, Some(None)) => Ok(Some(None)),
+        (Some(Some(l)), Some(Some(c))) => {
+            crate::avatar::check_leaf_pick(Some(l), Some(c))
+                .map_err(|(st, msg)| api_error(st, "bad_leaf", msg))?;
+            Ok(Some(Some((l, c))))
+        }
+        _ => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "bad_leaf",
+            "avatar_leaf and avatar_leaf_color go together".to_owned(),
+        )),
+    }
 }
 
 fn safe_image_key(k: &str) -> bool {
@@ -925,7 +981,11 @@ pub async fn chat_patch(
         Ok(v) => v,
         Err(r) => return *r,
     };
-    if b.title.is_none() && b.image_key.is_none() {
+    let leaf = match leaf_patch(b.avatar_leaf, b.avatar_leaf_color) {
+        Ok(l) => l,
+        Err(r) => return r,
+    };
+    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
     }
     let title = b.title.as_ref().map(|t| {
@@ -962,7 +1022,7 @@ pub async fn chat_patch(
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     if let Err(e) = state
         .db
-        .update_people_chat_profile(&id, title_ref, image_ref)
+        .update_people_chat_profile(&id, title_ref, image_ref, leaf)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
@@ -2104,6 +2164,8 @@ pub async fn invite_create(
                     created_at: now_ms(),
                     title: None,
                     image_key: None,
+                    avatar_leaf: None,
+                    avatar_leaf_color: None,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -2679,6 +2741,9 @@ mod agent_tests {
             Json(CreateGroupBody {
                 kind: "group".into(),
                 members: vec!["user32".into(), "@user33".into(), "user32".into()],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await;
@@ -2722,6 +2787,9 @@ mod agent_tests {
             Json(CreateGroupBody {
                 kind: "group".into(),
                 members: vec![],
+                title: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await;
@@ -2852,6 +2920,8 @@ pub(crate) mod tests_support {
             created_at: now_ms(),
             title: None,
             image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -2953,6 +3023,8 @@ mod picture_tests {
             Json(PatchChatBody {
                 title: None,
                 image_key: Some(key.to_owned()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await

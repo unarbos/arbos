@@ -170,6 +170,8 @@ fn server_json(state: &AppState, s: &Server, me: &ServerMember, detail: bool) ->
         "channels": channels.iter().map(|c| channel_json_for(state, c, &me.user_id)).collect::<Vec<_>>(),
         "general_channel_id": channels.iter().find(|c| c.name == "general").or(channels.first()).map(|c| c.id.clone()),
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
+        "avatar_leaf": s.avatar_leaf,
+        "avatar_leaf_color": s.avatar_leaf_color,
     });
     if me.can_admin() {
         v["invite"] = json!({
@@ -250,6 +252,11 @@ pub struct CreateBody {
     /// `true` (default) also makes `#announcements` (admins post).
     #[serde(default = "yes")]
     pub announcements: bool,
+    /// Create screen (D93): the server's leaf picture (0–8) and disc colour (0–9), both or neither.
+    #[serde(default)]
+    pub avatar_leaf: Option<i64>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<i64>,
 }
 
 fn yes() -> bool {
@@ -289,6 +296,10 @@ pub async fn create(
             "too many servers today",
         );
     }
+    if let Err((st, msg)) = crate::avatar::check_leaf_pick(b.avatar_leaf, b.avatar_leaf_color) {
+        return api_error(st, "bad_leaf", msg);
+    }
+    let leaf = b.avatar_leaf.zip(b.avatar_leaf_color);
     let now = now_ms();
     let server = Server {
         id: ulid(),
@@ -299,6 +310,8 @@ pub async fn create(
         space_room_id: None,
         created_at: now,
         is_open: false,
+        avatar_leaf: leaf.map(|l| l.0),
+        avatar_leaf_color: leaf.map(|l| l.1),
     };
     if let Err(e) = state.db.insert_server(&server) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -881,6 +894,8 @@ fn open_hit_json(s: &Server, member_count: i64) -> Value {
         "open": true,
         "member_count": member_count,
         "avatar_color_index_effective": crate::avatar::effective_color_index(&s.id, None),
+        "avatar_leaf": s.avatar_leaf,
+        "avatar_leaf_color": s.avatar_leaf_color,
         "my_role": "",
         "channels": [],
     })
@@ -1327,6 +1342,8 @@ mod picture_tests {
             space_room_id: None,
             created_at: now_ms(),
             is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         state.db.insert_server(&server).unwrap();
         let picture = |state: &AppState| state.db.server(&server.id).unwrap().unwrap().image_key;

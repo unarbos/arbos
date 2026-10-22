@@ -1686,6 +1686,8 @@ mod tests {
             created_at: FIXED_AT,
             title: None,
             image_key: None,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         state.db.insert_people_chat(&chat).unwrap();
         for u in [&alice, &bob] {

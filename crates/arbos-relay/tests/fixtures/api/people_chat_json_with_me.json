@@ -5,6 +5,8 @@
   "head_seq": 0,
   "id": "people_dm",
   "image_key": null,
+  "avatar_leaf": null,
+  "avatar_leaf_color": null,
   "kind": "dm",
   "last_activity_at": 1700000000000,
   "lock_state": "people_only",

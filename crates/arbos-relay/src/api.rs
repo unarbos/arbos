@@ -541,7 +541,7 @@ where
     Option::<String>::deserialize(d).map(Some)
 }
 
-fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+pub(crate) fn deserialize_double_option_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

@@ -15,7 +15,7 @@ use crate::db::Db;
 pub const PEOPLE_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS people_chats (
   id TEXT PRIMARY KEY, kind TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
-  deleted_at INTEGER, title TEXT, image_key TEXT
+  deleted_at INTEGER, title TEXT, image_key TEXT, avatar_leaf INTEGER, avatar_leaf_color INTEGER
 );
 CREATE TABLE IF NOT EXISTS people_members (
   chat_id TEXT NOT NULL, member TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -63,6 +63,14 @@ pub fn migrate_people(c: &Connection) {
     );
     let _ = c.execute("ALTER TABLE people_chats ADD COLUMN title TEXT", []);
     let _ = c.execute("ALTER TABLE people_chats ADD COLUMN image_key TEXT", []);
+    let _ = c.execute(
+        "ALTER TABLE people_chats ADD COLUMN avatar_leaf INTEGER",
+        [],
+    );
+    let _ = c.execute(
+        "ALTER TABLE people_chats ADD COLUMN avatar_leaf_color INTEGER",
+        [],
+    );
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +100,12 @@ pub struct PeopleChat {
     /// Blob key under `people:{chat_id}` for an optional group picture.
     #[serde(default)]
     pub image_key: Option<String>,
+    /// D92 amendment: the group's leaf picture (shape 0–8, disc colour 0–9) picked on the
+    /// Create screen; `None` = today's member cluster. A `image_key` picture wins.
+    #[serde(default)]
+    pub avatar_leaf: Option<i64>,
+    #[serde(default)]
+    pub avatar_leaf_color: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +161,8 @@ fn people_chat_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PeopleChat> {
         created_at: r.get(3)?,
         title: r.get(4)?,
         image_key: r.get(5)?,
+        avatar_leaf: r.get(6)?,
+        avatar_leaf_color: r.get(7)?,
     })
 }
 
@@ -156,8 +172,8 @@ impl Db {
     pub fn insert_people_chat(&self, chat: &PeopleChat) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO people_chats(id, kind, created_by, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![chat.id, chat.kind, chat.created_by, chat.created_at],
+                "INSERT INTO people_chats(id, kind, created_by, created_at, title, avatar_leaf, avatar_leaf_color) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![chat.id, chat.kind, chat.created_by, chat.created_at, chat.title, chat.avatar_leaf, chat.avatar_leaf_color],
             )
             .map(|_| ())
         })
@@ -166,7 +182,7 @@ impl Db {
     pub fn people_chat(&self, id: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT id, kind, created_by, created_at, title, image_key FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
+                "SELECT id, kind, created_by, created_at, title, image_key, avatar_leaf, avatar_leaf_color FROM people_chats WHERE id = ?1 AND deleted_at IS NULL",
                 params![id],
                 people_chat_from_row,
             )
@@ -180,8 +196,15 @@ impl Db {
         chat_id: &str,
         title: Option<Option<&str>>,
         image_key: Option<Option<&str>>,
+        leaf: Option<Option<(i64, i64)>>,
     ) -> Result<bool> {
         self.with(|c| {
+            if let Some(l) = leaf {
+                c.execute(
+                    "UPDATE people_chats SET avatar_leaf = ?2, avatar_leaf_color = ?3 WHERE id = ?1 AND deleted_at IS NULL",
+                    params![chat_id, l.map(|l| l.0), l.map(|l| l.1)],
+                )?;
+            }
             if let Some(t) = title {
                 c.execute(
                     "UPDATE people_chats SET title = ?2 WHERE id = ?1 AND deleted_at IS NULL",
@@ -278,7 +301,7 @@ impl Db {
     pub fn chats_of_member(&self, member: &str) -> Result<Vec<ChatWithMembers>> {
         let chats: Vec<PeopleChat> = self.with(|c| {
             let mut st = c.prepare(
-                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color FROM people_chats p
                  JOIN people_members m ON m.chat_id = p.id
                  WHERE m.member = ?1 AND m.left_at IS NULL AND p.deleted_at IS NULL
                  ORDER BY p.created_at DESC",
@@ -299,7 +322,7 @@ impl Db {
     pub fn dm_between(&self, a: &str, b: &str) -> Result<Option<PeopleChat>> {
         self.with(|c| {
             c.query_row(
-                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key FROM people_chats p
+                "SELECT p.id, p.kind, p.created_by, p.created_at, p.title, p.image_key, p.avatar_leaf, p.avatar_leaf_color FROM people_chats p
                  JOIN people_members ma ON ma.chat_id = p.id AND ma.member = ?1 AND ma.left_at IS NULL
                  JOIN people_members mb ON mb.chat_id = p.id AND mb.member = ?2 AND mb.left_at IS NULL
                  WHERE p.kind = 'dm' AND p.deleted_at IS NULL ORDER BY p.created_at LIMIT 1",

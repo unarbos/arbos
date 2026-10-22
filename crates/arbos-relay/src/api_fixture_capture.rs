@@ -221,6 +221,8 @@ async fn member_json_matches_fixtures() {
         created_at: FIXED_AT,
         title: None,
         image_key: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     state.db.insert_people_chat(&dm).unwrap();
     state
@@ -255,6 +257,8 @@ async fn member_json_matches_fixtures() {
         created_at: FIXED_AT,
         title: Some("With agent".into()),
         image_key: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     state.db.insert_people_chat(&agent_chat).unwrap();
     state
@@ -299,6 +303,8 @@ async fn people_chat_json_matches_fixtures() {
         created_at: FIXED_AT,
         title: None,
         image_key: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     state.db.insert_people_chat(&dm).unwrap();
     state
@@ -521,6 +527,8 @@ async fn me_and_machine_unread_fixtures() {
         created_at: FIXED_AT,
         title: None,
         image_key: None,
+        avatar_leaf: None,
+        avatar_leaf_color: None,
     };
     state.db.insert_people_chat(&chat).unwrap();
     for u in [&alice, &user.id] {

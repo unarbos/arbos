@@ -14,7 +14,7 @@ pub const SERVERS_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS servers (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_user_id TEXT NOT NULL, image_key TEXT,
   invite_code TEXT NOT NULL UNIQUE, space_room_id TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER,
-  is_open INTEGER NOT NULL DEFAULT 0
+  is_open INTEGER NOT NULL DEFAULT 0, avatar_leaf INTEGER, avatar_leaf_color INTEGER
 );
 CREATE TABLE IF NOT EXISTS server_members (
   server_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL, added_by TEXT NOT NULL,
@@ -40,6 +40,11 @@ pub fn migrate_servers(c: &Connection) {
         "ALTER TABLE servers ADD COLUMN is_open INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = c.execute("ALTER TABLE servers ADD COLUMN avatar_leaf INTEGER", []);
+    let _ = c.execute(
+        "ALTER TABLE servers ADD COLUMN avatar_leaf_color INTEGER",
+        [],
+    );
     let _ = c.execute_batch(
         "CREATE INDEX IF NOT EXISTS servers_open_name ON servers(is_open, name) WHERE deleted_at IS NULL;",
     );
@@ -56,6 +61,10 @@ pub struct Server {
     pub created_at: i64,
     /// Anyone on Arbos can find and join without an invite link.
     pub is_open: bool,
+    /// D92 amendment: the server's leaf picture (0–8) and disc colour (0–9) from the Create
+    /// screen; `None` = initials. An `image_key` picture wins.
+    pub avatar_leaf: Option<i64>,
+    pub avatar_leaf_color: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,11 +106,12 @@ fn server_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Server> {
         space_room_id: r.get(5)?,
         created_at: r.get(6)?,
         is_open: r.get::<_, i64>(7)? != 0,
+        avatar_leaf: r.get(8)?,
+        avatar_leaf_color: r.get(9)?,
     })
 }
 
-const SERVER_COLS: &str =
-    "id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open";
+const SERVER_COLS: &str = "id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open, avatar_leaf, avatar_leaf_color";
 
 fn channel_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Channel> {
     Ok(Channel {
@@ -132,8 +142,8 @@ impl Db {
     pub fn insert_server(&self, s: &Server) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO servers(id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO servers(id, name, owner_user_id, image_key, invite_code, space_room_id, created_at, is_open, avatar_leaf, avatar_leaf_color)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     s.id,
                     s.name,
@@ -142,7 +152,9 @@ impl Db {
                     s.invite_code,
                     s.space_room_id,
                     s.created_at,
-                    if s.is_open { 1 } else { 0 }
+                    if s.is_open { 1 } else { 0 },
+                    s.avatar_leaf,
+                    s.avatar_leaf_color
                 ],
             )?;
             c.execute(
@@ -186,11 +198,11 @@ impl Db {
             let rows = st.query_map(params![user_id], |r| {
                 let s = server_from_row(r)?;
                 let m = ServerMember {
-                    server_id: r.get(8)?,
-                    user_id: r.get(9)?,
-                    role: r.get(10)?,
-                    joined_at: r.get(11)?,
-                    banned_at: r.get(12)?,
+                    server_id: r.get(10)?,
+                    user_id: r.get(11)?,
+                    role: r.get(12)?,
+                    joined_at: r.get(13)?,
+                    banned_at: r.get(14)?,
                 };
                 Ok((s, m))
             })?;
@@ -217,7 +229,7 @@ impl Db {
             ))?;
             let rows = st.query_map(params![needle, limit], |r| {
                 let s = server_from_row(r)?;
-                let count: i64 = r.get(8)?;
+                let count: i64 = r.get(10)?;
                 Ok((s, count))
             })?;
             rows.collect()
@@ -478,6 +490,8 @@ mod tests {
             space_room_id: None,
             created_at: 1,
             is_open: false,
+            avatar_leaf: None,
+            avatar_leaf_color: None,
         };
         d.insert_server(&s).unwrap();
         assert_eq!(d.server("S1").unwrap().unwrap().name, "Launch Crew");
