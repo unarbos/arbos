@@ -4586,6 +4586,15 @@ impl AppState {
             }
             p.name = name.clone();
         }
+        // People-group AgentMember.handle is the @mention slug; refresh it so
+        // a mid-chat rename does not leave mentions pointed at the old name.
+        let handle = Project::mention_slug(&name);
+        for space in self.projects.iter_mut().filter(|p| p.is_people()) {
+            if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                a.name = name.clone();
+                a.handle = handle.clone();
+            }
+        }
         self.renaming_project = None;
         self.profile_editing_name = false;
         self.command(ClientCommand::SetProjectName { project_id, name });

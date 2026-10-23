@@ -918,7 +918,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.name = name;
+                    p.name = name.clone();
+                }
+                // Keep people-group @mention handles in sync with the new name.
+                let handle = Project::mention_slug(&name);
+                for space in projects.iter_mut().filter(|p| p.is_people()) {
+                    if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                        a.name = name.clone();
+                        a.handle = handle.clone();
+                    }
                 }
             }
             emit_projects(shared);
@@ -5038,7 +5046,11 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
     let lower = text.to_lowercase();
     let mut out = Vec::new();
     for a in &space.agents {
-        if lower.contains(&format!("@{}", a.handle)) {
+        let handle = a.handle.to_lowercase();
+        let slug = Project::mention_slug(&a.name);
+        if (!handle.is_empty() && lower.contains(&format!("@{handle}")))
+            || (!slug.is_empty() && lower.contains(&format!("@{slug}")))
+        {
             out.push(format!("agent:{}", a.project_id));
         }
     }
