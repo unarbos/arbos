@@ -168,6 +168,11 @@ pub struct RowHeader {
 pub struct PushHeader {
     #[serde(rename = "batchId")]
     pub batch_id: String,
+    /// History heal: these are ops the device holds and the relay's `ROWS_DONE` version vector
+    /// lacked (a lost checkpoint). The relay audits and caps such pushes; the row is otherwise
+    /// an ordinary row.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub heal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

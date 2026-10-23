@@ -32,6 +32,8 @@ base64.workspace = true
 sha2.workspace = true
 chrono.workspace = true
 log = "0.4"
+# Sign in with GitHub: the NSView behind the GPUI window anchors the system sheet.
+raw-window-handle = "0.6"
 
 gpui = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
 gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54", features = ["wayland", "x11", "font-kit", "runtime_shaders"] }
@@ -65,7 +67,7 @@ nokhwa = { version = "0.10", default-features = false, features = ["input-avfoun
 objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSURL", "NSString", "NSError", "NSObject", "NSGeometry", "NSBundle", "NSArray", "NSSet", "NSEnumerator"] }
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSResponder", "NSDockTile", "NSPanel", "NSSavePanel", "NSOpenPanel", "block2", "objc2-uniform-type-identifiers"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSDockTile", "NSPanel", "NSSavePanel", "NSOpenPanel", "block2", "objc2-uniform-type-identifiers"] }
 # Avatar picker: NSOpenPanel limited to image UTTypes (PNG, JPEG, HEIC, GIF, WebP).
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "UNUserNotificationCenter", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationAttachment", "UNNotificationSound", "UNNotificationTrigger", "UNNotificationAction", "UNNotificationCategory"] }

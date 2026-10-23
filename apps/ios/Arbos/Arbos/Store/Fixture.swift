@@ -198,6 +198,22 @@ extension AppModel {
             }
         }
         caughtUp.insert("fx-group-launch")
+        // The DM carries two lines so the rig can show a 1:1 chat (no sender names,
+        // sender-name-in-bubble-2026-10-23).
+        messages["fx-dm-unconst"] = [
+            Message(id: "d1", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 9 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d1t", text: "Hey — are you around? I want to go over the beta invite copy before it ships.")], hiddenCount: 0,
+                    senderHandle: "unconst", senderName: "Unconst"),
+            Message(id: "d2", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 8 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d2t", text: "Here now. Paste what you have and I'll read it.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
+            Message(id: "d3", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
+                    senderHandle: "unconst", senderName: "Unconst"),
+        ]
+        caughtUp.insert("fx-dm-unconst")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),

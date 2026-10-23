@@ -24,6 +24,7 @@ use crate::model::{
     NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
     RoutineRun, RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
 };
+use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
@@ -189,8 +190,12 @@ pub enum SignInMode {
 pub struct Pairing {
     pub relay_url: String,
     pub mode: SignInMode,
+    /// Pairing-code mode: the code is being exchanged.
     pub busy: bool,
+    /// Pairing-code mode: the last failure.
     pub error: Option<String>,
+    /// GitHub mode: the pill's state machine (copy, Cancel / Retry, timeout).
+    pub flow: sign_in::Flow,
 }
 
 /// A downloaded blob shown in the Details drawer.
@@ -1177,6 +1182,7 @@ impl AppState {
                     mode,
                     busy: false,
                     error: None,
+                    flow: sign_in::Flow::default(),
                 });
                 self.device_id = None;
                 self.room_links.clear();
@@ -1340,7 +1346,9 @@ impl AppState {
             SyncEvent::PairingFailed(err) => {
                 if let Some(p) = &mut self.pairing {
                     p.busy = false;
-                    p.error = Some(err);
+                    p.error = Some(err.clone());
+                    let attempt = p.flow.attempt;
+                    p.flow.failed(attempt, err);
                 }
                 cx.notify();
             }
@@ -5794,41 +5802,117 @@ impl AppState {
         cx.notify();
     }
 
-    /// "Sign in with GitHub": run the browser leg, then exchange the grant.
+    /// "Sign in with GitHub" (and Retry): run the browser leg, then exchange
+    /// the grant. The pill follows `pairing.flow`; a 60-s soft timeout offers
+    /// Retry / Open in browser without closing a sheet that is merely slow.
     pub fn sign_in(&mut self, cx: &mut Context<Self>) {
         let Some(p) = &mut self.pairing else {
             return;
         };
-        if p.busy {
+        let Some(attempt) = p.flow.start(now_ms()) else {
             return;
-        }
-        p.busy = true;
-        p.error = None;
+        };
         let relay = p.relay_url.clone();
         cx.notify();
+        self.arm_sign_in_timeout(attempt, cx);
         let this = cx.entity().downgrade();
-        auth::begin(relay, device_name(), cx, move |outcome, cx| {
+        auth::begin(relay, device_name(), cx, move |event, cx| {
             let _ = this.update(cx, |state, cx| {
-                match outcome {
-                    Ok(auth::SignIn::Grant(grant_code)) => {
-                        state.command(ClientCommand::SignIn { grant_code });
-                    }
-                    Ok(auth::SignIn::PairCodeMode) => {
-                        if let Some(p) = &mut state.pairing {
-                            p.mode = SignInMode::PairCode;
-                            p.busy = false;
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(p) = &mut state.pairing {
-                            p.busy = false;
-                            p.error = Some(format!("{err:#}"));
-                        }
-                    }
-                }
+                state.on_sign_in_event(attempt, event);
                 cx.notify();
             });
         });
+    }
+
+    fn on_sign_in_event(&mut self, attempt: u64, event: auth::Event) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        match event {
+            auth::Event::Opened { in_browser } => p.flow.opened(attempt, in_browser),
+            auth::Event::Finished(Ok(auth::SignIn::Grant(grant_code))) => {
+                if p.flow.grant(attempt) {
+                    self.command(ClientCommand::SignIn { grant_code });
+                }
+            }
+            auth::Event::Finished(Ok(auth::SignIn::PairCodeMode)) => {
+                if attempt == p.flow.attempt {
+                    p.mode = SignInMode::PairCode;
+                    p.flow.cancelled(attempt);
+                }
+            }
+            auth::Event::Finished(Ok(auth::SignIn::Cancelled)) => p.flow.cancelled(attempt),
+            auth::Event::Finished(Err(err)) => p.flow.failed(attempt, format!("{err:#}")),
+        }
+    }
+
+    /// `sign_in::SOFT_TIMEOUT_MS` after the click: Retry / Open in browser.
+    fn arm_sign_in_timeout(&mut self, attempt: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(sign_in::SOFT_TIMEOUT_MS))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(p) = &mut state.pairing {
+                    if p.flow.tick(attempt, now_ms()) {
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Cancel on the pill: close the sheet (its block reports Cancelled) and
+    /// go back to "Sign in with GitHub" at once.
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        auth::cancel();
+        if let Some(p) = &mut self.pairing {
+            let attempt = p.flow.attempt;
+            p.flow.cancelled(attempt);
+        }
+        cx.notify();
+    }
+
+    /// "Open in browser" on the pill: hand the GitHub page to the default
+    /// browser; the relay's `arbos://auth/callback` comes back through
+    /// LaunchServices (`sign_in_callback`).
+    pub fn sign_in_in_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        let Some(attempt) = p.flow.continue_in_browser(now_ms()) else {
+            return;
+        };
+        auth::cancel();
+        let url = auth::start_url(&p.relay_url, &device_name());
+        if let Err(err) = auth::open_in_browser(&url) {
+            p.flow.failed(attempt, format!("{err:#}"));
+        } else {
+            self.arm_sign_in_timeout(attempt, cx);
+        }
+        cx.notify();
+    }
+
+    /// `arbos://auth/callback?code=…` delivered by the platform (the browser
+    /// leg). Ignored when no sign-in is in flight.
+    pub fn sign_in_callback(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        let attempt = p.flow.attempt;
+        if !p.flow.busy() {
+            return;
+        }
+        match auth::parse_callback(url) {
+            Ok(grant_code) => {
+                if p.flow.grant(attempt) {
+                    self.command(ClientCommand::SignIn { grant_code });
+                }
+            }
+            Err(err) => p.flow.failed(attempt, format!("{err:#}")),
+        }
+        cx.notify();
     }
 
     // ----- people chats (D72)

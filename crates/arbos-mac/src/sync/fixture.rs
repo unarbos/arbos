@@ -5261,6 +5261,36 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         ),
     ];
     insert_message_via_core(&group, &page);
+    // Jacob's v0.6.184 shots (bubble-overflow-hotfix-2026-10-23): a one-line
+    // message longer than the bubble cap — his own and someone else's — so the
+    // rig shows whether the text wraps inside the bubble or runs out of it.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sara,
+            "Expected: holding my own message shows an Edit option in the menu alongside copy, reply and delete. Forward is missing here too.",
+            base + 450_000,
+        ),
+    );
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &me(),
+            "When you think about it, most people are going to be blocked by how many tokens they can access pretty soon, so the launch page should say what a seat includes.",
+            base + 452_000,
+        ),
+    );
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &me(),
+            "Most people cant do what I am doing right now",
+            base + 455_000,
+        ),
+    );
     out.push(group);
     out
 }
@@ -6290,6 +6320,9 @@ mod seed_parity_tests {
             "Assistant Error agent:01J9ARBOS00000000000000000 name=None h=Some(\"arbos\") asked=Some(\"samir\") turn=None wa=false [text] hidden=[] text=0 r=0 dt=133000 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=61 r=0 dt=140000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text,attachment:Screenshot 2026-10-23 at 7.55.41.png:Some(212000):Image] hidden=[] text=48 r=0 dt=145000 ct=Some(0)",
+            "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=128 r=0 dt=150000 ct=Some(0)",
+            "User Done user:gh_1 name=Some(\"Jacob Steeves\") h=Some(\"jacob\") asked=None turn=None wa=false [text] hidden=[] text=160 r=0 dt=152000 ct=Some(0)",
+            "User Done user:gh_1 name=Some(\"Jacob Steeves\") h=Some(\"jacob\") asked=None turn=None wa=false [text] hidden=[] text=45 r=0 dt=155000 ct=Some(0)",
         ]),
         
     ];

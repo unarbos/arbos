@@ -85,6 +85,10 @@ pub enum RoomAction {
     },
     /// Catch-up finished (`ROWS_DONE`).
     LinkLive,
+    /// `ROWS_DONE` carried the relay's version vector for the room. Host: export the doc's
+    /// updates since `relay_vv`; when non-empty, call [`RoomSession::on_heal`] with them —
+    /// the relay lost rows this device still holds (#1518) and gets them back as one row.
+    HealCheck { relay_vv: Vec<u8> },
     /// Socket died or handshake failed; host should reconnect after `after`.
     ScheduleReconnect { after: Duration },
     /// Hard relay error (not `lagging`); tear down this attempt.
@@ -145,6 +149,9 @@ pub struct RoomSession {
     held_wake: Option<String>,
     /// Latest outbound presence header while not Live (same retention).
     held_presence: Option<Value>,
+    /// A history heal was pushed on this connection (one per connection; reset by
+    /// `prepare_reconnect`).
+    healed: bool,
 }
 
 impl RoomSession {
@@ -170,6 +177,7 @@ impl RoomSession {
             last_now_ms: 0,
             held_wake: None,
             held_presence: None,
+            healed: false,
         }
     }
 
@@ -339,7 +347,11 @@ impl RoomSession {
         )));
         let pending = self.pending.clone();
         for (batch_id, bytes) in pending {
-            let header = serde_json::to_value(PushHeader { batch_id }).expect("push");
+            let header = serde_json::to_value(PushHeader {
+                batch_id,
+                heal: false,
+            })
+            .expect("push");
             self.push(RoomAction::SendFrame(Self::encode(
                 FrameType::Push,
                 header,
@@ -393,6 +405,38 @@ impl RoomSession {
         self.cursor_before_apply = self.cursor;
         self.push(RoomAction::Cursor(self.cursor));
         self.push(RoomAction::LinkLive);
+        if !frame.payload.is_empty() && !self.healed {
+            self.push(RoomAction::HealCheck {
+                relay_vv: frame.payload.to_vec(),
+            });
+        }
+    }
+
+    /// Host answer to [`RoomAction::HealCheck`]: `bytes` are the doc's updates the relay's
+    /// version vector lacked. Pushed once per connection as a row flagged `heal`, through the
+    /// same pending queue as a local commit (persisted, resent, acked). Empty = nothing to do.
+    pub fn on_heal(&mut self, bytes: Vec<u8>) {
+        if bytes.is_empty() || self.healed || self.phase != Phase::Live {
+            return;
+        }
+        if bytes.len() > ROW_MAX {
+            self.push(RoomAction::DroppedOversize { bytes: bytes.len() });
+            return;
+        }
+        self.healed = true;
+        let batch_id = ulid();
+        self.pending.push((batch_id.clone(), bytes.clone()));
+        self.push(RoomAction::Pending(self.pending.clone()));
+        let header = serde_json::to_value(PushHeader {
+            batch_id,
+            heal: true,
+        })
+        .expect("push");
+        self.push(RoomAction::SendFrame(Self::encode(
+            FrameType::Push,
+            header,
+            bytes,
+        )));
     }
 
     fn on_ack(&mut self, frame: Frame) {
@@ -491,7 +535,11 @@ impl RoomSession {
         self.pending.push((batch_id.clone(), bytes.clone()));
         self.push(RoomAction::Pending(self.pending.clone()));
         if self.phase == Phase::Live {
-            let header = serde_json::to_value(PushHeader { batch_id }).expect("push");
+            let header = serde_json::to_value(PushHeader {
+                batch_id,
+                heal: false,
+            })
+            .expect("push");
             self.push(RoomAction::SendFrame(Self::encode(
                 FrameType::Push,
                 header,
@@ -574,6 +622,7 @@ impl RoomSession {
         self.actions.clear();
         self.checkpoint_seq = 0;
         self.reconnect_after = None;
+        self.healed = false;
     }
 
     pub fn wake(&mut self, reason: impl Into<String>) {
@@ -1110,6 +1159,104 @@ mod tests {
             sends.iter().filter(|f| f.ty == FrameType::Presence).count(),
             1
         );
+    }
+
+    fn rows_done_with_vv(head: i64, vv: &[u8]) -> Vec<u8> {
+        Frame::new(FrameType::RowsDone, json!({ "headSeq": head }), vv.to_vec())
+            .encode()
+            .to_vec()
+    }
+
+    /// History heal (#1518): ROWS_DONE with the relay's version vector asks the host to compare;
+    /// what the host hands back goes out once per connection as a `heal` PUSH through the
+    /// pending queue; nothing is asked twice, nothing is sent for an empty answer, and a new
+    /// connection may heal again.
+    #[test]
+    fn rows_done_vv_asks_host_and_heal_pushes_once_per_connection() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+
+        // Plain ROWS_DONE (older relay): no heal check.
+        s.on_frame(&rows_done(5));
+        assert!(!s
+            .drain_actions()
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+
+        s.on_frame(&rows_done_with_vv(5, b"relay-vv"));
+        let actions = s.drain_actions();
+        assert!(actions.iter().any(|a| matches!(a, RoomAction::LinkLive)));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { relay_vv } if relay_vv == b"relay-vv")));
+
+        // Host: nothing missing → nothing sent.
+        s.on_heal(Vec::new());
+        assert!(s.drain_actions().is_empty());
+
+        // Host: missing ops → one heal PUSH, persisted as pending.
+        s.on_heal(b"missing-ops".to_vec());
+        let actions = s.drain_actions();
+        let sends = take_sends(&actions);
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].ty, FrameType::Push);
+        assert_eq!(
+            sends[0].header.get("heal").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(sends[0].payload.as_ref(), b"missing-ops");
+        assert_eq!(s.pending().len(), 1);
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::Pending(p) if p.len() == 1)));
+
+        // Same connection: a second ROWS_DONE (after `lagging`) asks nothing, a second answer sends nothing.
+        s.on_frame(&rows_done_with_vv(6, b"relay-vv-2"));
+        assert!(!s
+            .drain_actions()
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+        s.on_heal(b"more".to_vec());
+        assert!(take_sends(&s.drain_actions()).is_empty());
+
+        // ACK clears the heal batch like any push.
+        let batch = s.pending()[0].0.clone();
+        s.on_frame(&ack_frame(&batch, 7));
+        let _ = s.drain_actions();
+        assert!(s.pending().is_empty());
+
+        // New connection: may heal again.
+        s.on_close(2_000);
+        let _ = s.drain_actions();
+        s.prepare_reconnect();
+        s.on_open(3_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_frame(&rows_done_with_vv(7, b"relay-vv-3"));
+        assert!(s
+            .drain_actions()
+            .iter()
+            .any(|a| matches!(a, RoomAction::HealCheck { .. })));
+    }
+
+    #[test]
+    fn oversize_heal_is_dropped_not_sent() {
+        let mut s = RoomSession::new("dev:me", "proj/chat", 0, Vec::new());
+        s.on_open(1_000);
+        let _ = s.drain_actions();
+        s.on_frame(&state_frame(0, Vec::new()));
+        let _ = s.drain_actions();
+        s.on_heal(vec![0u8; ROW_MAX + 1]);
+        let actions = s.drain_actions();
+        assert!(take_sends(&actions).is_empty());
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, RoomAction::DroppedOversize { .. })));
+        assert!(s.pending().is_empty());
     }
 
     #[test]

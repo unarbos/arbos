@@ -98,6 +98,9 @@ case "$cmd" in
     grep -E "^== " "$log" | head -n 60
     grep -E "^(error|warning)(\[|:)|^\s+--> |^Diff in |^test .* FAILED|^failures:|panicked at|: error: |\*\* BUILD FAILED" "$log" \
       | sed "s#$repo/##g;s#$HOME/arbos-gate/##g" | head -n 150
+    # A clean log has no diagnostics: grep exits 1 and, as the last command, made `status` exit 1 - the
+    # poller took that for "Mac unreachable" and the iOS half never settled (19:15-19:30 Oct 23).
+    exit 0
     ;;
   abort)
     id=$1

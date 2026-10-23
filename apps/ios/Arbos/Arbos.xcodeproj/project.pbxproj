@@ -75,6 +75,7 @@
 		A1BC00000000000000000002 /* MessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000001 /* MessageMenu.swift */; };
 		A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000003 /* MessageMenuTests.swift */; };
 		A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */; };
+		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
 		A15C0000000000000000000B /* SessionRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15C0000000000000000000A /* SessionRoomTests.swift */; };
@@ -196,6 +197,7 @@
 		A1BC00000000000000000001 /* MessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenu.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000003 /* MessageMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenuTests.swift; sourceTree = "<group>"; };
 		A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTranscriptPerfTests.swift; sourceTree = "<group>"; };
+		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
 		A15C0000000000000000000A /* SessionRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRoomTests.swift; sourceTree = "<group>"; };
@@ -395,6 +397,7 @@
 				A1BC00000000000000000003 /* MessageMenuTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
+				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -625,6 +628,7 @@
 				A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
+				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

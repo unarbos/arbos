@@ -188,8 +188,12 @@ fi
 # keep values already in the env file when nothing new was supplied
 if [[ -f "$ENV_FILE" ]]; then
   keep() { local k=$1; [[ -n "${!k:-}" ]] || printf -v "$k" '%s' "$(sed -n "s/^$k=//p" "$ENV_FILE" | head -1)"; }
-  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}"; do keep "$k"; done
+  for k in OPENROUTER_API_KEY OPENAI_API_KEY DAYTONA_API_KEY ARBOS_RELAY_ADMIN_TOKEN ARBOS_RELAY_KEY ARBOS_JWT_KEY ARBOS_GITHUB_CLIENT_ID ARBOS_GITHUB_CLIENT_SECRET ARBOS_DAYTONA_SNAPSHOT LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET ARBOS_AUTH_REDIRECTS "${MATRIX_KEYS[@]}" "${FLEET_KEYS[@]}" "${FEATURE_KEYS[@]}"; do keep "$k"; done
 fi
+# Where /auth/github/start may send the browser besides the apps' arbos:// scheme, loopback and the
+# relay's own origin (comma-separated prefixes). The site's "Sign in with GitHub" lands on
+# $SITE_URL/welcome, so the site is allowed by default; without it the relay answers 400 bad_redirect.
+: "${ARBOS_AUTH_REDIRECTS:=$SITE_URL}"
 [[ -n "${DAYTONA_API_KEY:-}" ]] || echo "WARNING: DAYTONA_API_KEY is empty — new projects will get process boxes"
 [[ -n "${OPENROUTER_API_KEY:-}${OPENAI_API_KEY:-}" ]] || echo "WARNING: no model provider key"
 : "${ARBOS_RELAY_ADMIN_TOKEN:=adm_$(openssl rand -hex 32)}"
@@ -207,6 +211,7 @@ ARBOS_RELAY_ADMIN_TOKEN=$ARBOS_RELAY_ADMIN_TOKEN
 ARBOS_RELAY_KEY=$ARBOS_RELAY_KEY
 ARBOS_JWT_KEY=$ARBOS_JWT_KEY
 ARBOS_AUTH_MODE=${ARBOS_AUTH_MODE:-github}
+ARBOS_AUTH_REDIRECTS=$ARBOS_AUTH_REDIRECTS
 OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 OPENAI_API_KEY=${OPENAI_API_KEY:-}
 DAYTONA_API_KEY=${DAYTONA_API_KEY:-}

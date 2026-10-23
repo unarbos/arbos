@@ -44,6 +44,7 @@ mod people;
 mod proxy;
 mod releases;
 mod restart;
+mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
@@ -624,6 +625,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/relay-errors", get(debug_api::me_relay_errors))
         .route("/machine/debug", get(debug_api::machine_debug))
         .route("/chats/{id}/reads", get(debug_api::chat_reads))
+        .route("/chats/{id}/health", get(room_health::chat_health))
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),

@@ -704,8 +704,10 @@ relay_hotfix_marker() {
   local deployed
   deployed="$(deployed_sha relay)"
   [[ -n "$deployed" ]] && git -C "$REPO" cat-file -e "$deployed^{commit}" 2>/dev/null || return 0
+  # `|| true`: grep exits 1 when there is no marker - the normal case - and under pipefail that
+  # ended every tick with exit 1 (46 failed ticks 17:55-18:40 Oct 23, no deploys at all).
   git -C "$REPO" log --first-parent --format='%H%x09%s%x09%b' "$deployed..origin/main" 2>/dev/null \
-    | grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' | head -1 | cut -f1
+    | { grep -iE $'\t(revert|hotfix)\b|\[hotfix\]' || true; } | head -1 | cut -f1
 }
 
 # Four relay deploys in 95 minutes caused the 2026-10-22 "Reconnecting..." outage. Hold a relay
@@ -909,10 +911,34 @@ status() {
   echo "last log lines:"; tail -n 15 "$LOG" 2>/dev/null || true
 }
 
+# `selftest`: exercise the pure helpers on a scratch repo without touching the host (no root, no
+# queue, no deploy), exit 0 only if every expected answer comes back. install-deploy-hook.sh runs
+# it before installing, so a worker that cannot complete a tick is never installed again.
+selftest() {
+  local t b m c
+  t="$(mktemp -d)"; trap 'rm -rf "$t"' RETURN
+  git -C "$t" init -q && git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+  b="$(git -C "$t" rev-parse HEAD)"
+  git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: a"
+  git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "hotfix: ship a [hotfix]"
+  m="$(git -C "$t" rev-parse HEAD)"
+  git -C "$t" -c user.name=t -c user.email=t@t commit -q --allow-empty -m "feat: b"
+  c="$(git -C "$t" rev-parse HEAD)"
+  git -C "$t" update-ref refs/remotes/origin/main HEAD
+  REPO="$t"; STATE="$t"
+  deployed_sha() { echo "$SELFTEST_DEPLOYED"; }
+  SELFTEST_DEPLOYED="$b"; [[ "$(relay_hotfix_marker)" == "$m" ]] || { echo "selftest: marker above base: got '$(relay_hotfix_marker)', want $m" >&2; return 1; }
+  SELFTEST_DEPLOYED="$c"; [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: marker above head must be empty" >&2; return 1; }
+  SELFTEST_DEPLOYED="$m"; [[ -z "$(relay_hotfix_marker)" ]] || { echo "selftest: marker at the marker must be empty" >&2; return 1; }
+  [[ "$(auto_enabled relay)" == "$AUTO_DEPLOY_RELAY" ]] || { echo "selftest: auto_enabled" >&2; return 1; }
+  echo "selftest ok"
+}
+
 case "${1:-}" in
   tick) tick ;;
+  selftest) selftest ;;
   roll-image) roll_image "${2:?sha}" ;;
   roll-continue) roll_continue ;;
   status) status ;;
-  *) echo "usage: arbos-deploy-worker tick | roll-image <sha> | roll-continue | status" >&2; exit 2 ;;
+  *) echo "usage: arbos-deploy-worker tick | roll-image <sha> | roll-continue | status | selftest" >&2; exit 2 ;;
 esac

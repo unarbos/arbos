@@ -8,6 +8,8 @@ set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo)" >&2; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 install -m 0755 "$HERE/arbos-deploy-hook" /usr/local/bin/arbos-deploy-hook
+bash -n "$HERE/arbos-deploy-worker"
+bash "$HERE/arbos-deploy-worker" selftest   # a worker that cannot complete a tick is not installed (Oct 23 17:55-18:40)
 install -m 0755 "$HERE/arbos-deploy-worker" /usr/local/bin/arbos-deploy-worker
 install -m 0644 "$HERE/arbos-deploy.service" /etc/systemd/system/arbos-deploy.service
 install -m 0644 "$HERE/arbos-deploy.timer" /etc/systemd/system/arbos-deploy.timer

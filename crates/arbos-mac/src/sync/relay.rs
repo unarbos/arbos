@@ -3162,6 +3162,25 @@ async fn perform_room_actions(
                         let _ = shared.events.send(SyncEvent::ChatSynced(key.to_string()));
                     }
                 }
+                RoomAction::HealCheck { relay_vv } => {
+                    // The relay told us what it holds; if this replica has more (a lost
+                    // checkpoint, #1518), push the difference back once so the room heals.
+                    let missing = {
+                        let docs = shared.docs.lock().unwrap();
+                        match (docs.get(key), arbos_core::doc::decode_vv(&relay_vv)) {
+                            (Some(doc), Some(vv)) => doc.core.updates_beyond(&vv),
+                            _ => Vec::new(),
+                        }
+                    };
+                    if !missing.is_empty() {
+                        eprintln!(
+                            "relay room {}: history heal, pushing {} bytes the relay lacked",
+                            session.room(),
+                            missing.len()
+                        );
+                        session.on_heal(missing);
+                    }
+                }
                 RoomAction::ScheduleReconnect { after } => {
                     reconnect = Some(after);
                 }

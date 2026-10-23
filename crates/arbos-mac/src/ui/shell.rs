@@ -15,6 +15,7 @@ use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
+use crate::sign_in;
 use crate::sync::PictureSource;
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
@@ -3112,28 +3113,68 @@ impl Shell {
             );
         match pairing.mode {
             SignInMode::GitHub => {
-                let busy = pairing.busy;
-                let button = glass::primary_button(
-                    "sign-in-github",
-                    if busy {
-                        "Waiting for GitHub…"
-                    } else {
-                        "Sign in with GitHub"
-                    },
-                    &theme,
-                )
-                .mt(px(18.0))
-                .h(px(40.0))
-                .px(px(22.0))
-                .text_size(px(TEXT_BODY))
-                .when(busy, |el| el.opacity(0.7))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.sign_in(cx));
-                }));
+                let flow = &pairing.flow;
+                let busy = flow.busy();
+                // The pill: "Sign in with GitHub" → "Opening GitHub sign-in…" →
+                // "Waiting for GitHub…" → "Finishing sign-in…"; after 60 s with
+                // no answer "GitHub did not answer." with Retry / Open in browser.
+                let button = glass::primary_button("sign-in-github", flow.label(), &theme)
+                    .h(px(40.0))
+                    .px(px(22.0))
+                    .text_size(px(TEXT_BODY))
+                    .when(busy, |el| el.opacity(0.7))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.sign_in(cx));
+                    }));
+                let action_button = |id: &'static str, label: &str, theme: &Theme| {
+                    glass::quiet_button(id, label, theme)
+                        .h(px(40.0))
+                        .px(px(18.0))
+                        .text_size(px(TEXT_BODY))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                };
+                let mut row = div()
+                    .mt(px(18.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(button);
+                for action in flow.actions() {
+                    row = row.child(match action {
+                        sign_in::Action::Cancel => {
+                            action_button("sign-in-cancel", "Cancel", &theme).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.cancel_sign_in(cx));
+                                },
+                            ))
+                        }
+                        sign_in::Action::Retry => action_button("sign-in-retry", "Retry", &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.sign_in(cx));
+                            })),
+                        sign_in::Action::OpenInBrowser => {
+                            action_button("sign-in-browser", "Open in browser", &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.sign_in_in_browser(cx));
+                                }),
+                            )
+                        }
+                    });
+                }
                 screen
-                    .child(button)
-                    .when_some(pairing.error.clone(), |el, err| {
+                    .child(row)
+                    .when_some(flow.hint(), |el, hint| {
+                        el.child(
+                            div()
+                                .max_w(px(420.0))
+                                .text_center()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(hint),
+                        )
+                    })
+                    .when_some(flow.error.clone(), |el, err| {
                         el.child(
                             div()
                                 .max_w(px(420.0))
