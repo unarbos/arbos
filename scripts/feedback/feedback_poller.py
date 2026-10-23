@@ -407,14 +407,61 @@ class Asc:
 
 
 class GitHub:
+    """REST client with a conditional-request cache: every GET sends `If-None-Match` with the ETag of the
+    last answer for that URL and a 304 is served from the cache. GitHub does not charge 304s against
+    the core rate limit, and a tick re-reads mostly unchanged resources (runs, branches, commits of
+    ~20 gating items), so this turns ~260 billed calls per tick into a few dozen (2026-10-23 20:17: the
+    shared PAT hit 0/5000 and every merge/release stalled until the reset). The cache lives in
+    <state>/github-etags.json; a stale entry only costs one extra request."""
+
     def __init__(self, cfg: Config):
         self.repo = cfg.github_repo
         self.h = {"Authorization": f"Bearer {cfg.github_token}", "Accept": "application/vnd.github+json",
                   "X-GitHub-Api-Version": "2022-11-28"}
+        self._cache_path = cfg.state_dir / "github-etags.json"
+        try:
+            self._cache: dict[str, dict] = json.loads(self._cache_path.read_text())
+        except (OSError, ValueError):
+            self._cache = {}
+        self.calls = 0
+        self.cache_hits = 0
+
+    def _save_cache(self) -> None:
+        # Bounded: keep the newest 3000 URLs so the file cannot grow without end.
+        if len(self._cache) > 3000:
+            for k in sorted(self._cache, key=lambda u: self._cache[u].get("at", 0))[: len(self._cache) - 3000]:
+                self._cache.pop(k, None)
+        with contextlib.suppress(OSError):
+            tmp = self._cache_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._cache))
+            tmp.replace(self._cache_path)
 
     def api(self, method: str, path: str, **kw: Any) -> Any:
         url = path if path.startswith("http") else f"{GITHUB_API}{path}"
-        return http_json(method, url, headers=self.h, **kw)
+        if method != "GET" or kw.get("json_body") is not None or kw.get("data") is not None:
+            self.calls += 1
+            return http_json(method, url, headers=self.h, **kw)
+        hdrs = dict(self.h)
+        hit = self._cache.get(url)
+        if hit and hit.get("etag"):
+            hdrs["If-None-Match"] = hit["etag"]
+        self.calls += 1
+        try:
+            status, resp_h, body = http(method, url, headers=hdrs, **kw)
+        except HttpError as e:
+            if e.status == 304 and hit:
+                self.cache_hits += 1
+                return hit["body"]
+            raise
+        if status == 304 and hit:
+            self.cache_hits += 1
+            return hit["body"]
+        parsed = None if status == 204 or not body else json.loads(body)
+        etag = resp_h.get("etag")
+        if etag:
+            self._cache[url] = {"etag": etag, "body": parsed, "at": time.time()}
+            self._save_cache()
+        return parsed
 
     def repo_api(self, method: str, path: str, **kw: Any) -> Any:
         return self.api(method, f"/repos/{self.repo}{path}", **kw)
@@ -2831,6 +2878,8 @@ class Loop:
             self.watch_handoffs()
         except Exception as e:  # noqa: BLE001
             log(f"handoff watch failed: {e}")
+        if self.gh.calls:
+            log(f"github: {self.gh.calls} requests this tick, {self.gh.cache_hits} answered 304 from the ETag cache")
         return 0
 
     # ---- handed-off items: a dedicated worker fixes them; the loop still tracks the landing -------
