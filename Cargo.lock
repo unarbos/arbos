@@ -466,6 +466,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "ulid",
+ "unicode-normalization",
  "unicode-segmentation",
  "velato",
 ]

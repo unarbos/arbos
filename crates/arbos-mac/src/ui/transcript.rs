@@ -331,6 +331,11 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
+    /// Agent-to-agent messaging: this reply went back to the agent that wrote in —
+    /// "Replied to ◉ hjkb", the same line style as a hand-off.
+    RepliedTo {
+        name: String,
+    },
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
         attachment: Attachment,
@@ -350,11 +355,15 @@ pub enum RowKind {
     /// S18: draft-and-approve card.
     Approval {
         view: ApprovalView,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
     Question {
         question_id: String,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     Error {
         code: String,
@@ -444,9 +453,16 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
 /// Right-click on a bubble: the shell opens the message menu there.
+/// Hover face-smile: the shell opens the quick-react emoji bar there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
+        chat_id: Id,
+        message_id: Id,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    /// Hover react glyph → the six-emoji bar (`react_menu`).
+    ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -757,9 +773,9 @@ impl Transcript {
         self.veils
             .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
         self.cards.retain(|qid, _| {
-            new_rows
-                .iter()
-                .any(|r| matches!(&r.kind, RowKind::Question { question_id } if question_id == qid))
+            new_rows.iter().any(
+                |r| matches!(&r.kind, RowKind::Question { question_id, .. } if question_id == qid),
+            )
         });
 
         if chat_changed {
@@ -944,8 +960,9 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
-    /// After a successful copy the glyph becomes a checkmark for a moment.
+    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
+    /// row). After a successful copy the glyph becomes a checkmark for a
+    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
     fn hover_reply_copy(
         &self,
         row_id: &str,
@@ -957,6 +974,8 @@ impl Transcript {
         let chat_id = self.chat_id.clone();
         let reply_msg = message_id.clone();
         let copy_msg = message_id.clone();
+        let react_chat = self.chat_id.clone();
+        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
@@ -1010,6 +1029,25 @@ impl Transcript {
                     copy_color,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactMenu {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
             )
     }
 
@@ -1079,6 +1117,71 @@ impl Transcript {
             image,
             project_id: agent_pid,
         }
+    }
+
+    /// Grok's centred agent line: `lead` then "◉ A, ◉ B and ◉ C" with 16 pt discs. A name that
+    /// is one of my agents is a link to that agent's chat (the "open Doug" affordance).
+    fn agent_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text_muted)
+            .child(lead.to_owned());
+        let n = names.len();
+        for (i, name) in names.iter().enumerate() {
+            let mine = state
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
+            let glyph: AnyElement = match mine {
+                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                // Not one of my projects (a subagent): initials on the name's gradient.
+                None => {
+                    crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
+                }
+            };
+            let mut who = div()
+                .id(SharedString::from(format!("agent-line-{lead}-{i}-{name}")))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(glyph)
+                .child(div().child(name.clone()));
+            if let Some(space) = mine {
+                let pid = space.id.clone();
+                let state_entity = self.state.clone();
+                who = who
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text))
+                    .on_click(move |_, _, cx| {
+                        let pid = pid.clone();
+                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                    });
+            }
+            line = line.child(who);
+            if n >= 2 && i + 2 == n {
+                line = line.child(div().child("and"));
+            } else if i + 2 < n {
+                line = line.child(div().ml(px(-5.0)).child(","));
+            }
+        }
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(10.0))
+            .pb(px(6.0))
+            .child(line)
+            .into_any_element()
     }
 
     /// The 24 pt disc for an agent's message in a people chat.
@@ -1266,8 +1369,7 @@ impl Transcript {
                 time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply + copy. The react glyph that opened the emoji bar is
-        // gone with the bar itself (#1370).
+        // Hover: reply · copy · react (face-smile opens the emoji bar).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
@@ -1686,49 +1788,14 @@ impl Transcript {
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
-                let state = self.state.read(cx);
                 let lead = if total <= names.len() as u32 {
                     "Messaged".to_string()
                 } else {
                     format!("{total} messages with")
                 };
-                let mut line = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(lead);
-                let n = names.len();
-                for (i, name) in names.iter().enumerate() {
-                    let glyph: AnyElement = match state
-                        .projects
-                        .iter()
-                        .find(|p| p.name.eq_ignore_ascii_case(name))
-                    {
-                        Some(space) => {
-                            crate::ui::avatars::project(space, 16.0, &theme).into_any_element()
-                        }
-                        // Not one of my projects (a subagent): initials on the name's gradient.
-                        None => crate::ui::avatars::element(name, name, None, 16.0, &theme)
-                            .into_any_element(),
-                    };
-                    line = line.child(glyph).child(div().child(name.clone()));
-                    if n >= 2 && i + 2 == n {
-                        line = line.child(div().child("and"));
-                    } else if i + 2 < n {
-                        line = line.child(div().ml(px(-5.0)).child(","));
-                    }
-                }
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(line)
-                    .into_any_element()
+                self.agent_line(&lead, &names, &theme, cx)
             }
+            RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
                 attachment,
                 part_id,
@@ -1779,7 +1846,7 @@ impl Transcript {
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
-            RowKind::Question { question_id } => {
+            RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
                     return div().into_any_element();
                 };
@@ -1809,14 +1876,9 @@ impl Transcript {
                         cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
                     })
                     .clone();
-                // Grok: the card is as wide as the assistant block.
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
-            RowKind::Approval { view } => {
+            RowKind::Approval { view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
@@ -1841,11 +1903,7 @@ impl Transcript {
                         });
                     },
                 );
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -1971,6 +2029,19 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .items_center()
         .debug_selector(|| "chat-bubble-slot".into())
         .child(bubble)
+}
+
+/// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
+/// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
+/// the same cap width (`assistant_slot`). The lane is left empty: the card belongs to the
+/// agent's run and the disc already sits on its bubble.
+pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .when(lane, |el| el.pl(px(SENDER_LANE)))
+        .debug_selector(|| "chat-card-row".into())
+        .child(assistant_slot(card))
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -2569,6 +2640,7 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Question {
                                     question_id: question_id.clone(),
+                                    lane: lane.is_some(),
                                 },
                             }),
                             None => rows.push(Row {
@@ -2610,7 +2682,10 @@ pub fn build_rows(
                                 ),
                                 id: format!("{}#{}", message.id, id),
                                 message_id: message.id.clone(),
-                                kind: RowKind::Approval { view },
+                                kind: RowKind::Approval {
+                                    view,
+                                    lane: lane.is_some(),
+                                },
                             });
                         }
                         Part::Status {
@@ -2753,6 +2828,21 @@ pub fn build_rows(
                         id: format!("{}#details", message.id),
                         message_id: message.id.clone(),
                         kind: RowKind::Details,
+                    });
+                }
+                // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+                if let Some(name) = message
+                    .agent_reply_to
+                    .as_deref()
+                    .filter(|n| !streaming && !n.trim().is_empty())
+                {
+                    rows.push(Row {
+                        version: hash_version(&name, false),
+                        id: format!("{}#replied", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::RepliedTo {
+                            name: name.to_owned(),
+                        },
                     });
                 }
             }
@@ -3827,6 +3917,17 @@ mod layout_tests {
                 queued: false,
             };
             let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            // A question / approval card, framed by the real `card_row`: in an agent chat (no
+            // lane) and in a people chat (lane) — a card that wants more than any pane has.
+            let card = |sel: &'static str| {
+                div()
+                    .debug_selector(move || sel.into())
+                    .max_w_full()
+                    .min_w_0()
+                    .child(div().w(px(4000.0)).h(px(CHAT_LINE_HEIGHT)))
+            };
+            let card_plain = card_row(card("test-card"), false).into_any_element();
+            let card_people = card_row(card("test-people-card"), true).into_any_element();
             div()
                 .w(px(self.pane))
                 .h(px(400.0))
@@ -3834,6 +3935,8 @@ mod layout_tests {
                 .flex_col()
                 .child(column_row(row))
                 .child(column_row(people_row))
+                .child(column_row(card_plain))
+                .child(column_row(card_people))
                 .child(column_row(row_over_pill))
                 .child(column_row(pill))
         }
@@ -3857,6 +3960,8 @@ mod layout_tests {
         disc: gpui::Bounds<Pixels>,
         people_bubble_left: f32,
         composer_text_left: f32,
+        card: gpui::Bounds<gpui::Pixels>,
+        people_card: gpui::Bounds<gpui::Pixels>,
     }
 
     fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
@@ -3901,6 +4006,10 @@ mod layout_tests {
         let composer_text = vcx
             .debug_bounds("test-composer-text")
             .expect("composer text drawn");
+        let card = vcx.debug_bounds("test-card").expect("card drawn");
+        let people_card = vcx
+            .debug_bounds("test-people-card")
+            .expect("people card drawn");
         Edges {
             bubble_left: bubble.origin.x.into(),
             bubble_width: bubble.size.width.into(),
@@ -3919,6 +4028,43 @@ mod layout_tests {
             disc,
             people_bubble_left: people_bubble.origin.x.into(),
             composer_text_left: composer_text.origin.x.into(),
+            card,
+            people_card,
+        }
+    }
+
+    /// #1440 follow-up (Jacob, 2026-10-23 17:59): a question / approval card lines up with the
+    /// bubbles — card left == bubble left, card width ≤ the bubble cap — in an agent chat and,
+    /// after the avatar lane, in a people chat.
+    #[gpui::test]
+    fn cards_share_the_bubbles_left_edge_and_cap(cx: &mut TestAppContext) {
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let (cx0, cw): (f32, f32) = (e.card.origin.x.into(), e.card.size.width.into());
+            assert!(
+                (cx0 - e.bubble_left).abs() <= 0.5,
+                "pane {pane}: card left {cx0} vs bubble left {}",
+                e.bubble_left
+            );
+            assert!(
+                cw <= e.bubble_width + 0.5,
+                "pane {pane}: card width {cw} over the bubble cap {}",
+                e.bubble_width
+            );
+            let (pcx, pcw): (f32, f32) = (
+                e.people_card.origin.x.into(),
+                e.people_card.size.width.into(),
+            );
+            assert!(
+                (pcx - e.people_bubble_left).abs() <= 0.5,
+                "pane {pane}: people card left {pcx} vs people bubble left {}",
+                e.people_bubble_left
+            );
+            let people_cap = e.bubble_width - SENDER_LANE;
+            assert!(
+                pcw <= people_cap + 0.5,
+                "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
+            );
         }
     }
 

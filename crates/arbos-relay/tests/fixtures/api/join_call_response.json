@@ -3,6 +3,7 @@
     "agents": [],
     "app_version": "0.6.24",
     "call_id": "call_fixture",
+    "can_speak": true,
     "chat_id": "people_call_fixture",
     "ended_at": null,
     "kind": "voice",
@@ -27,6 +28,7 @@
     "project_id": "people",
     "reason": null,
     "room": "call_room_fixture",
+    "speak_mode": "open",
     "started_at": 1700000000000,
     "started_by": {
       "avatar": null,

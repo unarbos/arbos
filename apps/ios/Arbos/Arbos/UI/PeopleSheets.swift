@@ -724,6 +724,9 @@ struct NewGroupView: View {
     var addTo: String? = nil
     /// Server id to add to (D88 Members › Add members): people only, members greyed.
     var addToServer: String? = nil
+    /// Secret id whose People list the picks join (Secret page › "Give a person access…",
+    /// spec §7.7): people only, listed people greyed.
+    var addToSecret: String? = nil
     /// D93 step 1's name + leaf picture (nil when opened as Add members).
     var draft: GroupDraft? = nil
     @State private var query = ""
@@ -740,7 +743,7 @@ struct NewGroupView: View {
     /// Empty query hides archived agents; a search finds them again — archived agents still
     /// exist and can join groups unless deleted (home archive is hide-only).
     private var agentCandidates: [Project] {
-        if addToServer != nil { return [] }
+        if addToServer != nil || addToSecret != nil { return [] }
         let q = trimmed.lowercased()
         let base = model.projects.filter { !$0.shared && (q.isEmpty ? !model.isArchived($0.id) : true) }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -758,8 +761,10 @@ struct NewGroupView: View {
 
     private var addToChat: PeopleChat? { addTo.flatMap { model.peopleChat($0) } }
     private var server: Server? { addToServer.flatMap { model.server($0) } }
-    private var adding: Bool { addTo != nil || addToServer != nil }
+    private var secret: SecretItem? { addToSecret.flatMap { id in model.secrets?.secrets.first { $0.id == id } } }
+    private var adding: Bool { addTo != nil || addToServer != nil || addToSecret != nil }
     private var title: String {
+        if secret != nil { return "Give a person access" }
         if let s = server { return "Add members to \(s.name)" }
         return addToChat.map { "Add members to \($0.title)" } ?? (adding ? "Add members" : "New group")
     }
@@ -769,6 +774,9 @@ struct NewGroupView: View {
     private var canSubmit: Bool { !(picked.isEmpty && pickedAgents.isEmpty) }
 
     private func isIn(_ p: Person) -> Bool {
+        if let secret {
+            return p.id == model.user?.id || secret.directors.contains { $0.userId == p.id || $0.handle.caseInsensitiveCompare(p.handle) == .orderedSame }
+        }
         if let s = server {
             return p.id == model.user?.id || s.members.contains { $0.id == p.id || $0.handle.caseInsensitiveCompare(p.handle) == .orderedSame }
         }
@@ -806,7 +814,7 @@ struct NewGroupView: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").font(.system(size: SheetSearchField.iconSize, weight: .medium)).foregroundStyle(theme.muted)
-                TextField("", text: $query, prompt: Text("Add people or agents").foregroundStyle(theme.placeholder))
+                TextField("", text: $query, prompt: Text(addToSecret != nil ? "Search people" : "Add people or agents").foregroundStyle(theme.placeholder))
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .font(theme.font(Theme.body)).foregroundStyle(theme.text)
             }
@@ -920,8 +928,24 @@ struct NewGroupView: View {
         errorText = nil
     }
 
-    /// Add members: every pick goes to the group — or server — this picker was opened for.
+    /// Add members: every pick goes to the group — or server, or secret — this picker was opened for.
     private func add() {
+        if let secret {
+            let new = picked.filter { !isIn($0) }
+            guard !new.isEmpty else { errorText = "Pick someone who is not on the list yet"; return }
+            creating = true
+            errorText = nil
+            Task {
+                if await model.addSecretPeople(secretId: secret.id, handles: new.map(\.handle)) {
+                    onDone()
+                } else {
+                    errorText = model.notice?.text ?? "Could not add them."
+                    model.notice = nil
+                }
+                creating = false
+            }
+            return
+        }
         if let s = server {
             let new = picked.filter { !isIn($0) }
             guard !new.isEmpty else { errorText = "Pick someone who is not in the server yet"; return }

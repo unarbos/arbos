@@ -1,8 +1,8 @@
 //! The project MCP server (design §6.7): Streamable-HTTP JSON-RPC on loopback.
 //! Tools: history_search, history_read, read_thread, memory_search, memory_read,
-//! peek, sub_llm, remember, recall, projects_list, projects_send, ask_user,
+//! peek, sub_llm, remember, recall, projects_list, ask_user,
 //! spawn_subagent, wake_subagent, connectors_list, connector_call, local_devices,
-//! local_run, local_read, local_list, deliver_file, generate_image, group_send, vault_list,
+//! local_run, local_read, local_list, deliver_file, generate_image, send_message, vault_list,
 //! vault_request, egress, browser_fill, routines_list, routines_create, routines_update,
 //! routines_delete, goals_list, goals_create, goals_update, goals_log, goals_delete,
 //! web_search, web_fetch, submit_feedback.
@@ -59,10 +59,8 @@ fn tools() -> Value {
           "inputSchema": { "type": "object", "properties": { "name": { "type": "string" }, "value": { "type": ["string","null"] } }, "required": ["name"] } },
         { "name": "recall", "description": "Read a note saved with remember.", "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] } },
         { "name": "projects_list", "description": "List the user's other Projects (name, state).", "inputSchema": { "type": "object", "properties": {} } },
-        { "name": "projects_send", "description": "Send a message to another Project by name. Async: the reply lands in this Project's 'Projects ⇄' tab.",
-          "inputSchema": { "type": "object", "properties": { "to": { "type": "string" }, "text": { "type": "string" }, "wait": { "type": "boolean" } }, "required": ["to","text"] } },
-        { "name": "group_send", "description": "Say something to the other Projects in the current group chat (or to one of them with `to`). Only in a group chat; replies land in the same chat.",
-          "inputSchema": { "type": "object", "properties": { "text": { "type": "string" }, "to": { "type": "string", "description": "Project name or id; default: every other participant" } }, "required": ["text"] } },
+        { "name": "send_message", "description": "Message another agent. `to` = its name, @handle or id (your owner's agents; another owner's only when they allowed it). The text lands in that agent's own chat and its reply comes back to you here. Inside a group chat, omit `to` to speak to the other agents in the group.",
+          "inputSchema": { "type": "object", "properties": { "to": { "type": "string", "description": "Agent name, @handle or id" }, "text": { "type": "string" } }, "required": ["text"] } },
         { "name": "ask_user", "description": "Ask the user one question and wait; the answer arrives as the next message. Pass `widget` for a typed answer (choice, multi_select, text, date, form).",
           "inputSchema": { "type": "object", "properties": { "question": { "type": "string" }, "widget": widget_schema() }, "required": ["question"] } },
         { "name": "spawn_subagent", "description": "Hand a task to a new subagent (Prime by default). Prefer for long or research-heavy work.",
@@ -100,9 +98,10 @@ pub enum SessionRole {
     Subagent,
 }
 
-/// Tools only the main agent may use: anything that talks to another Project (D69 — subagents
-/// never reach the cross-project surface).
-const MAIN_ONLY_TOOLS: &[&str] = &["group_send", "projects_send"];
+/// Tools only the main agent may use: anything that talks to another agent (D69 — subagents
+/// never reach the cross-project surface). `group_send` / `projects_send` are the old names,
+/// still accepted from older sessions.
+const MAIN_ONLY_TOOLS: &[&str] = &["send_message", "group_send", "projects_send"];
 
 /// `Some(reason)` when `role` may not call `tool`.
 pub fn refusal_for(role: SessionRole, tool: &str) -> Option<String> {
@@ -488,28 +487,12 @@ async fn call_tool(a: &Arc<Agent>, name: &str, args: &Value) -> Value {
             }
             Err(e) => err_result(e),
         },
-        "projects_send" => {
-            let to = s("to").unwrap_or_default();
+        "send_message" | "group_send" | "projects_send" => {
             let text = s("text").unwrap_or_default();
-            let body = json!({ "kind": "message", "payload": { "from": a.cfg.project_id, "from_name": a.name(), "text": text, "trace_id": arbos_core::ids::ulid(), "depth": 1 } });
-            match reqwest::Client::new()
-                .post(format!("{}/projects/{}/push", a.cfg.relay_url, to))
-                .bearer_auth(&a.cfg.box_token)
-                .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) if r.status().is_success() => text_result(
-                    json!({ "request_id": body["payload"]["trace_id"], "status": "queued" })
-                        .to_string(),
-                ),
-                Ok(r) => err_result(format!("relay refused: HTTP {}", r.status())),
-                Err(e) => err_result(e),
-            }
-        }
-        "group_send" => {
-            let text = s("text").unwrap_or_default();
-            match a.group_send_from_turn(&text, s("to").as_deref()).await {
+            let to = s("to")
+                .map(|t| t.trim().to_owned())
+                .filter(|t| !t.is_empty());
+            match a.send_message_from_turn(to.as_deref(), &text).await {
                 Ok(t) => text_result(t),
                 Err(e) => err_result(e),
             }
@@ -800,9 +783,11 @@ mod tests {
     /// D69: a subagent-role session may not speak for the Project to other Projects.
     #[test]
     fn subagent_cannot_reach_other_projects() {
+        assert!(refusal_for(SessionRole::Subagent, "send_message").is_some());
         assert!(refusal_for(SessionRole::Subagent, "group_send").is_some());
         assert!(refusal_for(SessionRole::Subagent, "projects_send").is_some());
         assert!(refusal_for(SessionRole::Subagent, "history_search").is_none());
+        assert!(refusal_for(SessionRole::Main, "send_message").is_none());
         assert!(refusal_for(SessionRole::Main, "group_send").is_none());
         assert!(refusal_for(SessionRole::Main, "projects_send").is_none());
     }

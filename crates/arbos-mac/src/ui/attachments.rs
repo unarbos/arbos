@@ -1,8 +1,9 @@
 //! Attachment cards (feedback chat-preview-cards-2026-10-23, Grok-black): a
 //! **picture is its own bubble** — the trimmed image, aspect-fit, bubble radius,
-//! no frame and no footer (a ↓ disc appears on hover; the viewer has Download
-//! and Forward). A **file** is Grok's doc card (web-08): kind-coloured doc
-//! glyph, name, "PDF · 1.8 MB". Clicking either opens the media viewer.
+//! a slim hairline so dark screenshots do not melt into the chat, and no footer
+//! (a ↓ disc appears on hover; the viewer has Download and Forward). A **file**
+//! is Grok's doc card (web-08): kind-coloured doc glyph, name, "PDF · 1.8 MB".
+//! Clicking either opens the media viewer.
 
 use std::path::Path;
 use std::process::Command;
@@ -135,8 +136,8 @@ pub fn card(
     }
 }
 
-/// A picture: aspect-fit at its own ratio, bubble radius, no chrome. Hover shows
-/// the ↓ disc top-right; the whole bubble opens the viewer.
+/// A picture: aspect-fit at its own ratio, bubble radius, slim outline. Hover
+/// shows the ↓ disc top-right; the whole bubble opens the viewer.
 fn picture_bubble(
     row_id: &str,
     attachment: &Attachment,
@@ -165,6 +166,10 @@ fn picture_bubble(
         .max_w_full()
         .rounded(px(BUBBLE_RADIUS))
         .overflow_hidden()
+        // Thin hairline so dark screenshots stay readable on the chat bg
+        // (same idea as the group-chat left-edge accent, neutral colour).
+        .border_1()
+        .border_color(theme.border_strong)
         .bg(theme.bubble_assistant)
         .flex()
         .items_center()

@@ -2613,7 +2613,13 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         }
     }
     for a in &space.agents {
-        if lower.contains(&format!("@{}", a.handle.to_lowercase())) {
+        let handle = a.handle.to_lowercase();
+        let slug = Project::mention_slug(&a.name);
+        // Match cached handle or the live name slug so a mid-group rename
+        // still encodes `agent:<id>` before membership is refreshed.
+        if (!handle.is_empty() && text_has_at_token(&lower, &handle))
+            || (!slug.is_empty() && text_has_at_token(&lower, &slug))
+        {
             let id = format!("agent:{}", a.project_id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);
@@ -4658,6 +4664,48 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .put_json(
+                        &format!("/projects/{project_id}/message-access"),
+                        json!({ "grantee": grantee, "enabled": enabled }),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        let _ = refresh_registry(&shared).await;
+                    }
+                    Err(err) => {
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::PeopleError(people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/projects/{project_id}/message-access/{grantee}"))
+                    .await
+                {
+                    let _ = shared
+                        .events
+                        .send(SyncEvent::PeopleError(people_error(&err)));
+                }
+                let _ = refresh_registry(&shared).await;
+            });
+        }
         ClientCommand::RemoveProjectMember {
             project_id,
             user_id,
@@ -5472,6 +5520,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                     p.name = name.clone();
                 }
+                // Keep people-group @mention handles in sync with the new name.
+                let handle = Project::mention_slug(&name);
+                for space in projects.iter_mut().filter(|p| p.is_people()) {
+                    if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                        a.name = name.clone();
+                        a.handle = handle.clone();
+                    }
+                }
                 let snapshot = projects.clone();
                 drop(projects);
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
@@ -6101,6 +6157,56 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             tokio::spawn(async move {
                 if let Err(err) = shared
                     .post_json(&format!("/secrets/{id}/revoke-all"), json!({}))
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "enabled": enabled });
+                if let Some(n) = note {
+                    body["note"] = Value::String(n);
+                }
+                if let Err(err) = shared
+                    .put_json(&format!("/secrets/{id}/people/{user_id}"), body)
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPeopleAdd { id, handles } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                for handle in handles {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/secrets/{id}/people"),
+                            json!({ "handle": handle }),
+                        )
+                        .await
+                    {
+                        shared.notice(format!("Secrets: @{handle}: {}", relay_message(&err)));
+                    }
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPersonRemove { id, user_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/secrets/{id}/people/{user_id}"))
                     .await
                 {
                     shared.notice(format!("Secrets: {}", relay_message(&err)));

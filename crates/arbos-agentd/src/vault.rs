@@ -80,9 +80,11 @@ struct Grant {
     inject_env: bool,
     /// Variable names the real value arrives under (`$NAME`, `$NAME_USERNAME`…).
     real_vars: Vec<String>,
-    /// User ids the owner named who may direct use of this secret (owner always may).
+    /// User ids on the secret's People list (rows that are on; the owner always may ask).
     director_ids: Vec<String>,
-    /// Constraints the agent must honour (secret note + per-director notes).
+    /// `refuse | card`: what happens when someone not on the list asks (spec §7.7).
+    others_ask: String,
+    /// Constraints the agent must honour (secret note + per-person notes).
     use_notes: Vec<String>,
 }
 
@@ -219,14 +221,17 @@ impl Grant {
             None if has_env => real_var_names(&name, &placeholders),
             None => Vec::new(),
         };
-        let director_ids: Vec<String> = item["directors"]
+        let director_ids: Vec<String> = item["people"]
             .as_array()
+            .or_else(|| item["directors"].as_array())
             .map(|a| {
                 a.iter()
+                    .filter(|d| d["enabled"].as_bool().unwrap_or(true))
                     .filter_map(|d| d["user_id"].as_str().map(str::to_owned))
                     .collect()
             })
             .unwrap_or_default();
+        let others_ask = item["others_ask"].as_str().unwrap_or("refuse").to_owned();
         let use_notes: Vec<String> = item["use_notes"]
             .as_array()
             .map(|a| {
@@ -257,6 +262,7 @@ impl Grant {
             inject_env,
             real_vars,
             director_ids,
+            others_ask,
             use_notes,
         })
     }
@@ -292,15 +298,43 @@ impl Grant {
             "use_notes": self.use_notes,
             "policy": policy_line(&self.use_notes),
             "note_rule": NOTE_POLICY,
-            "who_may_direct": "Only the owner, or people the owner added under Who can direct for this secret. Anyone else directing you cannot use it.",
+            "who_may_direct": self.who_may_direct(),
             "how": if self.inject_env {
-                format!("The owner put the real value in your environment: ${} works in any shell command or program. Keep it out of chat and logs. Only use it when the person directing you is the owner or is listed as allowed to direct this secret; honour every use_notes constraint.", self.real_vars.first().cloned().unwrap_or_else(|| self.name.clone()))
+                format!("The owner put the real value in your environment: ${} works in any shell command or program. Keep it out of chat and logs. Only use it when the person asking you is the owner or is on this secret's People list; honour every use_notes constraint.", self.real_vars.first().cloned().unwrap_or_else(|| self.name.clone()))
             } else { match self.kind.as_str() {
                 "login" => "Call browser_fill(name, url) to have Arbos type the login into the page; you never see the values.".to_owned(),
-                _ => format!("Put the placeholder (or ${}) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read, print, encode or copy the value. Only use it when the person directing you is allowed; honour every use_notes constraint.", self.name),
+                _ => format!("Put the placeholder (or ${}) in a header or body and call the egress tool; the relay swaps in the real value only for the allowed hosts and redacts it from the reply. Never try to read, print, encode or copy the value. Only use it when the person asking you is allowed; honour every use_notes constraint.", self.name),
             } },
         })
     }
+}
+
+impl Grant {
+    /// The one-line rule the agent reads next to every grant (spec §7.7).
+    fn who_may_direct(&self) -> &'static str {
+        if self.others_ask == "card" {
+            "The owner, and the people on this secret's People list. For anyone else, call secrets_request first: the owner gets a card naming who asked, and you wait for the answer."
+        } else {
+            "Only the owner, and the people on this secret's People list. Anyone else who asks cannot use it — tell them plainly."
+        }
+    }
+}
+
+/// The chat a card for someone else's ask goes to: the owner's pinned ("main") chat with this
+/// agent, opened if needed; the asking chat only when the project has no such chat.
+async fn owner_card_chat(agent: &Arc<Agent>, asking_chat: &str) -> String {
+    let chats = agent.store.chats().unwrap_or_default();
+    let Some(main) = chats
+        .iter()
+        .find(|c| c.is_pinned && !agent.people.is_people_chat(&c.id))
+        .or_else(|| chats.iter().find(|c| !agent.people.is_people_chat(&c.id)))
+    else {
+        return asking_chat.to_owned();
+    };
+    if agent.sync.host(&main.id).await.is_none() && agent.sync.open_room(&main.id).await.is_err() {
+        return asking_chat.to_owned();
+    }
+    main.id.clone()
 }
 
 /// User id of the human directing the current turn, when known.
@@ -308,16 +342,29 @@ fn asked_by_user_id(agent: &Agent) -> Option<String> {
     agent.people.current_asker().map(|a| a.user_id)
 }
 
-/// May the current asker direct use of this grant? Owner / no asker → yes; else directors list.
-fn asker_may_direct(agent: &Agent, g: &Grant) -> bool {
-    let Some(asker) = agent.people.current_asker() else {
-        return true;
-    };
+/// The person asking this turn when they are not the owner (a people-chat guest or member).
+fn non_owner_asker(agent: &Agent) -> Option<crate::people::Asker> {
+    let asker = agent.people.current_asker()?;
     let owner = agent.people.project_owner();
     if asker.role == "owner" || (!owner.is_empty() && asker.user_id == owner) {
-        return true;
+        return None;
     }
-    g.director_ids.iter().any(|id| id == &asker.user_id)
+    Some(asker)
+}
+
+/// May the current asker direct use of this grant? Owner / no asker → yes; else the People list.
+fn asker_may_direct(agent: &Agent, g: &Grant) -> bool {
+    match non_owner_asker(agent) {
+        None => true,
+        Some(asker) => g.director_ids.iter().any(|id| id == &asker.user_id),
+    }
+}
+
+/// The plain refusal for a person who is not on the list (same words as the relay's).
+fn not_listed_message(name: &str) -> String {
+    format!(
+        "{name}: the person asking you is not on this secret's People list. Only the owner, or people the owner added under People on the secret's page, may ask for it. Tell them plainly, and do not retry with this secret for them."
+    )
 }
 
 /// The variable names a secret's real value would take: the same names its placeholders use.
@@ -900,8 +947,8 @@ pub async fn secrets_list(agent: &Agent) -> Value {
         .map(|it| {
             let access = it["enabled"].as_bool().unwrap_or(false);
             json!({ "name": if it["env"].is_null() { it["title"].clone() } else { it["env"].clone() }, "kind": it["kind"], "fields": it["fields"], "placeholders": it["placeholders"],
-                "hosts": it["hosts"], "note": it["note"], "use_notes": it["use_notes"], "directors": it["directors"],
-                "who_may_direct": it["who_may_direct"],
+                "hosts": it["hosts"], "note": it["note"], "use_notes": it["use_notes"], "people": if it["people"].is_null() { it["directors"].clone() } else { it["people"].clone() },
+                "others_ask": it["others_ask"], "who_may_direct": it["who_may_direct"],
                 "policy": policy_line(&it["use_notes"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<Vec<_>>()).unwrap_or_default()),
                 "vault": it["vault_name"], "ref": it["ref"],
                 "access": if paused { "paused" } else if access { "on" } else { "off" },
@@ -912,7 +959,7 @@ pub async fn secrets_list(agent: &Agent) -> Value {
     text_result(
         json!({ "paused": paused, "items": items, "note_rule": NOTE_POLICY,
             "note": if paused { "Secrets are paused by the owner: every use fails until they turn Pause all secrets off. Stop and say so." }
-                    else { "A secret with access on is already $NAME in your shell: the real value when real_value is true (use it directly in commands and programs; keep it out of chat and logs), otherwise a placeholder usable through egress. For one with access off call secrets_request(name, purpose, use, host). Only the owner — or people listed in directors for that secret — may direct you to use it; honour every use_notes constraint when you do." } })
+                    else { "A secret with access on is already $NAME in your shell: the real value when real_value is true (use it directly in commands and programs; keep it out of chat and logs), otherwise a placeholder usable through egress. For one with access off call secrets_request(name, purpose, use, host). Only the owner — or people on that secret's People list — may ask you to use it; when others_ask is card, anyone else's ask goes through secrets_request and the owner's card; otherwise tell them it is not theirs to ask for. Honour every use_notes constraint." } })
             .to_string(),
     )
 }
@@ -1050,14 +1097,16 @@ async fn obtain_grant(
                 })
             })
     };
+    let asker = non_owner_asker(agent);
     if let Some(g) = grant_for(&project, &name) {
         if g.request_id.is_none() && host_ok(&g) && use_kind != "browser_fill" {
             if asker_may_direct(agent, &g) {
                 return Ok(g);
             }
-            return Err(err_result(format!(
-                "{name}: the person directing you is not allowed to use this secret. Only the owner, or people the owner added under Who can direct, may. Tell them, and do not retry with this secret."
-            )));
+            if g.others_ask != "card" {
+                return Err(err_result(not_listed_message(&name)));
+            }
+            // Ask me: fall through to the relay, which raises the owner's card.
         }
     }
     let mut req = json!({ "name": name, "purpose": purpose, "use": use_kind, "host": host, "chat_id": chat_id });
@@ -1120,27 +1169,50 @@ async fn obtain_grant(
         // generic gate for the secrets tools so this is the only card).
         let (tx, rx) = oneshot::channel();
         let agent_name = agent.cfg.project_name.clone();
+        // A person other than the owner asked: the card names them, "Always allow" adds them
+        // to the People list, and it goes to the owner's own chat with this agent — never
+        // into the shared chat (spec §7.7).
+        let for_whom = asker
+            .as_ref()
+            .map(|a| format!(" for @{}", a.handle))
+            .unwrap_or_default();
         let title = match (kind.as_str(), host) {
-            ("login", Some(h)) => format!("Let {agent_name} sign in to {h} with {name}?"),
-            ("login", None) => format!("Let {agent_name} sign in with {name}?"),
-            (_, Some(h)) => format!("Let {agent_name} use {name} at {h}?"),
-            (_, None) => format!("Let {agent_name} use {name}?"),
+            ("login", Some(h)) => format!("Let {agent_name} sign in to {h} with {name}{for_whom}?"),
+            ("login", None) => format!("Let {agent_name} sign in with {name}{for_whom}?"),
+            (_, Some(h)) => format!("Let {agent_name} use {name}{for_whom} at {h}?"),
+            (_, None) => format!("Let {agent_name} use {name}{for_whom}?"),
+        };
+        let always = match &asker {
+            Some(a) => format!("Always allow @{}", a.handle),
+            None => format!("Always allow {agent_name}"),
+        };
+        let summary = match &asker {
+            Some(a) => format!("{} asked · {purpose}", a.spoken()),
+            None => purpose.to_owned(),
         };
         let req = ApprovalRequest {
             title,
-            summary: purpose.to_owned(),
+            summary,
             risk: Risk::Credential,
             payload: json!({ "kind": "secret_request", "secretRequestId": request_id, "name": name, "secretKind": kind,
                 "use": use_kind, "host": host, "purpose": purpose, "agent": agent_name,
+                "askedBy": asker.as_ref().map(|a| a.user_id.clone()),
+                "askedByHandle": asker.as_ref().map(|a| a.handle.clone()),
+                "askedByName": asker.as_ref().map(|a| a.spoken().to_owned()),
+                "askedIn": asker.as_ref().map(|_| chat_id),
                 "answers": [
                     { "id": "once", "label": "Allow once" },
                     { "id": "chat", "label": "Allow for this chat" },
-                    { "id": "always", "label": format!("Always allow {agent_name}") },
+                    { "id": "always", "label": always },
                     { "id": "deny", "label": "Deny" },
                 ] }),
         };
+        let card_chat = match &asker {
+            Some(_) => owner_card_chat(agent, chat_id).await,
+            None => chat_id.to_owned(),
+        };
         match agent
-            .begin_approval(chat_id, req, WaitMode::Inline, Some(tx))
+            .begin_approval(&card_chat, req, WaitMode::Inline, Some(tx))
             .await
         {
             Ok(id) => (Some(id), Some(rx)),
@@ -1161,9 +1233,12 @@ async fn obtain_grant(
     .await
     .map_err(err_result)?;
     let Some(status) = decided else {
+        let note = match &asker {
+            Some(a) => format!("The owner has not decided yet; the card is in the owner's own chat with you. Tell {} only that you have asked the owner and end the turn; calling secrets_request again with the same name resumes waiting and returns at once once it is allowed.", a.spoken()),
+            None => "The owner has not decided yet (the card in this chat, or Arbos → Settings → Secrets). Tell them you are waiting for access and end the turn; calling secrets_request again with the same name resumes waiting and returns at once once it is allowed.".to_owned(),
+        };
         return Err(text_result(
-            json!({ "status": "pending", "requestId": request_id, "name": name, "use": use_kind,
-                "note": "The owner has not decided yet (the card in this chat, or Arbos → Settings → Secrets). Tell them you are waiting for access and end the turn; calling secrets_request again with the same name resumes waiting and returns at once once it is allowed." })
+            json!({ "status": "pending", "requestId": request_id, "name": name, "use": use_kind, "note": note })
                 .to_string(),
         ));
     };
@@ -1550,6 +1625,30 @@ pub async fn browser_fill(agent: &Arc<Agent>, args: &Value, chat_id: &str) -> Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The People list reaches the box as `people[]` (rows that are on) plus `others_ask`;
+    /// an older relay's `directors[]` still works; the rule line follows the switch.
+    #[test]
+    fn people_list_and_others_ask_come_from_the_box_item() {
+        let item = json!({ "env": "ENGY_API_KEY", "kind": "key", "enabled": true, "hosts": [],
+            "placeholders": { "value": "arbos-secret://ENGY_API_KEY/value" }, "note": "", "vault_name": "Arbos",
+            "people": [ { "user_id": "u_sam", "enabled": true }, { "user_id": "u_samir", "enabled": false } ],
+            "directors": [ { "user_id": "u_old" } ],
+            "others_ask": "card" });
+        let g = Grant::from_item("p1", &item).unwrap();
+        assert_eq!(g.director_ids, vec!["u_sam".to_owned()]);
+        assert_eq!(g.others_ask, "card");
+        assert!(g.who_may_direct().contains("secrets_request first"));
+
+        let legacy = json!({ "env": "K", "kind": "key", "enabled": true, "hosts": [],
+            "placeholders": { "value": "arbos-secret://K/value" }, "note": "", "vault_name": "Arbos",
+            "directors": [ { "user_id": "u_old" } ] });
+        let g = Grant::from_item("p1", &legacy).unwrap();
+        assert_eq!(g.director_ids, vec!["u_old".to_owned()]);
+        assert_eq!(g.others_ask, "refuse");
+        assert!(g.who_may_direct().contains("cannot use it"));
+        assert!(not_listed_message("K").contains("People list"));
+    }
 
     /// Env name = the secret's own name (decision 1): one-field secrets are `$NAME`, logins
     /// `$NAME_USERNAME` / `$NAME_PASSWORD`; nothing while paused.

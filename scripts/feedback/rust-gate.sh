@@ -21,11 +21,19 @@ cmd=${1:-}; shift || true
 disk_floor_check() {
   # A release build of arbos-mac needs several GiB of scratch; below ~2 GiB free it fails half-way and
   # takes the shared runner down with it (2026-10-22 01:55: 3.8 GiB free, four concurrent release builds).
-  # Under MIN_FREE_GB the run is refused as an infrastructure error (the poller retries next tick), the
-  # loop journal gets an ALERT line, and the sweep runs if it can.
+  # Under PRUNE_FREE_GB (40) the batch starts with the lock-aware sweep (stale simulator Deleting-* dirs,
+  # idle worker checkouts) and re-reads free space — #1466's iOS half hit ENOSPC at 17 GB free on
+  # 2026-10-23 20:4x. Under MIN_FREE_GB the run is refused as an infrastructure error (the poller retries
+  # next tick) and the loop journal gets an ALERT line.
   local free
   free=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
   [ -n "$free" ] || return 0
+  if [ "$free" -lt "${PRUNE_FREE_GB:-40}" ]; then
+    echo "== disk: ${free} GiB free on the Mac (< ${PRUNE_FREE_GB:-40}); running arbos-mac-clean.sh --if-low first"
+    sudo -n /bin/bash /usr/local/bin/arbos-mac-clean.sh --if-low >/dev/null 2>&1 || true
+    free=$(df -g /System/Volumes/Data 2>/dev/null | awk 'NR==2 {print $4}')
+    echo "== disk: ${free} GiB free after the sweep"
+  fi
   if [ "$free" -lt "${MIN_FREE_GB:-6}" ]; then
     echo "== disk: ${free} GiB free on the Mac (< ${MIN_FREE_GB:-6}); refusing to start the release build"
     msg="ALERT $(date -u +%FT%TZ) EC2 Mac has ${free} GiB free (< ${MIN_FREE_GB:-6}); the Rust gate refused a release build — prune target dirs (arbos-mac-clean.sh --if-low runs every 30 min)"

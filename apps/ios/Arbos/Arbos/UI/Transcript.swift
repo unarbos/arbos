@@ -114,7 +114,9 @@ enum RowKind: Equatable {
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
+    /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
+    /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     case file(item: MediaItem, subtitle: String)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
@@ -258,6 +260,13 @@ enum Transcript {
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil,
                                                            time: pix == lastTextPart ? inlineTime : nil)))
+                        } else if message.role == .project, let from = Self.projectSender(message) {
+                            // Another agent wrote into this chat (agent-to-agent messaging):
+                            // the group member bubble — its avatar, its colour, its name above.
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: blocks, live: live, handle: from.handle,
+                                                           avatar: nil, named: pix == firstTextPart, agentId: from.projectId,
+                                                           quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -266,12 +275,14 @@ enum Transcript {
                         // agentd writes a `question` part and this status line; the part wins.
                         if message.questions.isEmpty {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true)))
+                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true,
+                                                             lane: people && message.senderHandle != nil)))
                         }
                     case .question(let id, let q):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
-                                                         multi: q.multi, picked: q.answer, open: q.open)))
+                                                         multi: q.multi, picked: q.answer, open: q.open,
+                                                         lane: people && message.senderHandle != nil)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -331,6 +342,12 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(e.id)", messageId: message.id, role: .assistant, kind: .error(code: e.code, message: e.text)))
                     }
                 }
+            }
+            // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+            if !streaming, let to = message.agentReplyTo?.trimmingCharacters(in: .whitespaces), !to.isEmpty,
+               message.role == .assistant {
+                chunk.append(Row(id: "\(message.id)#replied", messageId: message.id, role: .system,
+                                 kind: .system(icon: nil, text: "Replied to \u{FFFC}\(to)", avatarProject: nil)))
             }
             guard !chunk.isEmpty else { continue }
             for i in chunk.indices { chunk[i].createdAt = message.createdAt }
@@ -414,6 +431,15 @@ enum Transcript {
         }
         flush()
         return out
+    }
+
+    /// `sender: project:<id>` plus the row's `senderHandle` (or a slug of `senderName`): the
+    /// handle the member bubble is drawn with and the agent id its tap opens.
+    static func projectSender(_ message: Message) -> (handle: String, projectId: String)? {
+        guard message.sender.hasPrefix("project:") else { return nil }
+        let pid = String(message.sender.dropFirst("project:".count))
+        let handle = message.senderHandle ?? message.senderName.map { mentionSlug($0) } ?? pid
+        return (handle, pid)
     }
 
     /// Grok's wording: "Messaged ◉ A" (brief only), "Messaged ◉ A and ◉ B", or
@@ -1022,11 +1048,14 @@ struct RowView: View {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open):
-            HStack {
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane):
+            // The card is a transcript row like a bubble: the same left edge (after the avatar
+            // lane in a people chat) and the same cap width as an incoming bubble.
+            HStack(spacing: 0) {
+                if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open)
-                    .frame(maxWidth: maxBubble, alignment: .leading)
+                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let item, let subtitle):
@@ -1112,6 +1141,7 @@ struct RowView: View {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane
+        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane : 0
         default: return 0
         }
     }

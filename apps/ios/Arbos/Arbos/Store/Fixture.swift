@@ -230,19 +230,24 @@ extension AppModel {
     /// activity. No value exists anywhere in the fixture.
     private func seedFixtureSecrets(now: Int64) {
         func agent(_ id: String, _ name: String, _ enabled: Bool, _ note: String) -> [String: Any] {
-            var a: [String: Any] = ["project_id": id, "name": name, "access_id": "fx-acc-\(id)-\(note.count)", "enabled": enabled, "note": note, "hosts": []]
+            // Every key the shared `SecretAccessDto` requires (strict Codable since f24098b8).
+            var a: [String: Any] = ["project_id": id, "name": name, "access_id": "fx-acc-\(id)-\(note.count)", "enabled": enabled, "note": note, "hosts": [],
+                                    "scope": ["kind": "all"], "created_from": "settings", "created_at": now - 10 * 86_400_000]
             if enabled { a["last_used_at"] = now - 120_000 } else { a["disabled_at"] = now - 6 * 86_400_000 }
             return a
         }
         func secret(_ id: String, _ name: String, _ env: String, _ kind: String, _ note: String, _ hosts: [String], _ agents: [[String: Any]], _ daysAgo: Int64) -> [String: Any] {
             var m: [String: Any] = ["id": id, "name": name, "env": env, "kind": kind, "note": note, "hosts": hosts, "ask_every_time": false,
-                                    "version": 1, "created_at": now - daysAgo * 86_400_000, "vault_name": "Arbos", "agents": agents]
+                                    "inject_env": false, "version": 1, "created_at": now - daysAgo * 86_400_000, "updated_at": now - daysAgo * 86_400_000,
+                                    "vault_name": "Arbos", "ref": "arbos-secret://\(env)/\(kind == "login" ? "password" : "value")",
+                                    "agents": agents, "directors": [], "people": [], "others_ask": "refuse"]
             if daysAgo > 3 { m["last_used_at"] = now - 120_000 }
             if kind == "login" { m["username"] = "unarbos" }
             return m
         }
         func act(_ id: Int, _ action: String, _ name: String, _ project: (String, String)?, _ host: String?, _ by: String, _ minsAgo: Int64) -> [String: Any] {
-            var m: [String: Any] = ["id": id, "at": now - minsAgo * 60_000, "action": action, "name": name, "by": by, "detail": [:]]
+            var m: [String: Any] = ["id": id, "user_id": "fx-me", "at": now - minsAgo * 60_000, "action": action, "name": name, "by": by, "detail": [:],
+                                    "target_kind": "secret", "target_id": "fx-sec-\(name.lowercased())", "target_name": name]
             if let p = project { m["project_id"] = p.0; m["project_name"] = p.1 }
             if let host { m["host"] = host }
             return m
@@ -252,18 +257,29 @@ extension AppModel {
                             agent("fx-hyper", "Hyper", false, "")]
         var stripe = secret("fx-sec-stripe", "STRIPE_KEY", "STRIPE_KEY", "key", "Stripe live key — refunds and reports. Never for payouts.", ["api.stripe.com"], stripeAgents, 12)
         stripe["inject_env"] = true
+        // The People list (spec §7.7), the Mac fixture's twin: Sam may ask (on), Jen's row is off.
+        stripe["people"] = [
+            ["user_id": "fx-u4", "handle": "sam", "name": "Sam Okafor", "note": "reports only", "created_at": now - 9 * 86_400_000,
+             "enabled": true, "scope": ["kind": "all"], "last_asked_at": now - 120_000],
+            ["user_id": "fx-u2", "handle": "jen", "name": "Jen Park", "note": "", "created_at": now - 9 * 86_400_000,
+             "enabled": false, "disabled_at": now - 2 * 86_400_000, "scope": ["kind": "all"]],
+        ]
+        stripe["others_ask"] = "refuse"
         let mailgun = secret("fx-sec-mailgun", "MAILGUN_API_KEY", "MAILGUN_API_KEY", "key", "Newsletter sends.", ["api.mailgun.net"], [agent("fx-comms", "Comms", true, "send the newsletter")], 5)
         let github = secret("fx-sec-github", "GitHub login", "GITHUB_LOGIN", "login", "The unarbos account, for Actions and reviews.", ["github.com", "*.github.com"], [agent("fx-hyper", "Hyper", true, "review failing Actions runs")], 1)
-        let vault: [String: Any] = ["id": "fx-vault-1p", "provider": "onepassword", "name": "Arbos — Research", "items_count": 12, "status": "ok",
-                                    "env_items": 1, "limits": ["reads_per_hour": 1000, "reads_used_hour": 3],
+        let vault: [String: Any] = ["id": "fx-vault-1p", "provider": "onepassword", "name": "Arbos — Research", "items_count": 12, "status": "ok", "created_at": now - 20 * 86_400_000,
+                                    "env_items": 1, "limits": ["reads_per_hour": 1000, "reads_used_hour": 3, "reads_per_day": 1000, "reads_used_day": 41, "cache_ttl_secs": 300],
                                     "agents": [agent("fx-affine", "Affine", true, "read the Stripe and Postgres items")]]
-        let activity = [act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2),
+        var usedBySam = act(1, "used", "STRIPE_KEY", ("fx-affine", "Affine"), "api.stripe.com", "agent:affine", 2)
+        usedBySam["detail"] = ["asked_by": "fx-u4", "asked_by_handle": "sam"]
+        let activity = [usedBySam,
                         act(2, "access_on", "MAILGUN_API_KEY", ("fx-comms", "Comms"), nil, "user:me", 1_440),
                         act(3, "refused", "STRIPE_KEY", ("fx-hyper", "Hyper"), "stripe.evil.example", "agent:hyper", 4_320)]
         // One pending card: shown on the Secrets root and on Comms's page (same rule on the Mac).
-        let request: [String: Any] = ["id": "fx-req-1", "project_id": "fx-comms", "project_name": "Comms", "name": "GITHUB_LOGIN",
+        let request: [String: Any] = ["id": "fx-req-1", "project_id": "fx-comms", "project_name": "Comms", "chat_id": "fx-comms-main", "name": "GITHUB_LOGIN",
+                                      "target": ["kind": "secret", "id": "fx-sec-github", "ref": "GITHUB_LOGIN"],
                                       "purpose": "Sign in to post the release notes", "use": "browser_fill", "host": "github.com",
-                                      "status": "pending", "created_at": now - 180_000]
+                                      "status": "pending", "created_at": now - 180_000, "expires_at": now + 420_000]
         fixtureVaultItems = [
             ["ref": "op://Arbos — Research/Stripe", "title": "Stripe", "category": "API_CREDENTIAL", "fields": ["credential", "username"], "env": "STRIPE", "inject_env": true],
             ["ref": "op://Arbos — Research/Postgres", "title": "Postgres", "category": "DATABASE", "fields": ["password", "hostname", "port", "database"], "env": "POSTGRES", "inject_env": false],
@@ -330,6 +346,42 @@ extension AppModel {
             list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
         }
         list.append(assistant(newId(), chatId, text, at: nowMs()))
+        messages[chatId] = list
+    }
+
+    /// Rig (`ARBOS_SHOW=agent-message` / `agent-message-received`): the agent-to-agent
+    /// messaging rows exactly as agentd writes them — sender side: "send Affine a hello" →
+    /// the hand-off row ("2 messages with ◉ Affine") → "Sent to Affine." → the relayed reply;
+    /// receiving side: Comms's words as a `project` row (member bubble labelled "Comms"),
+    /// the reply, "Replied to ◉ Comms".
+    func fixtureAgentMessage(chatId: Id, received: Bool) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        if received {
+            var from = Message(id: newId(), chatId: chatId, role: .project, sender: "project:fx-comms", status: .done, turn: nil,
+                               decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                               createdAt: t, completedAt: t, pending: false,
+                               parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")], hiddenCount: 0)
+            from.senderName = "Comms"
+            from.senderHandle = "comms"
+            var reply = assistant(newId(), chatId, "Hello back, Jacob — and hi Comms! Ready whenever you want the shortlist sent.", at: t + 15_000)
+            reply.agentReplyTo = "Comms"
+            list += [from, reply]
+        } else {
+            let sent = Message(id: newId(), chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",
+                               subagentId: nil, subagentName: "Affine", handoffMessages: 2, inReplyTo: nil, usage: [:], model: nil,
+                               createdAt: t + 5_000, completedAt: t + 5_000, pending: false, parts: [], hiddenCount: 1)
+            list += [
+                user(newId(), chatId, "send Affine a hello", at: t),
+                sent,
+                assistant(newId(), chatId, "Sent to Affine.", at: t + 6_000),
+                assistant(newId(), chatId, "Affine says hello back — and it's ready whenever you want the shortlist sent.", at: t + 40_000),
+            ]
+        }
         messages[chatId] = list
     }
 

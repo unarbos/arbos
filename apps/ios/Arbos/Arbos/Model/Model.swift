@@ -301,6 +301,9 @@ struct Project: Identifiable, Equatable, Codable {
     var machineClass: String? = nil
     var machineSnapshot: String? = nil
     var machineAlwaysOn: Bool = false
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed to message this agent. Empty unless I own it.
+    var messageGrants: [MessageGrant] = []
 
     var shortModel: String { Project.shortModel(model) }
 
@@ -347,6 +350,38 @@ extension Project {
         self.machineClass = dto.machine.`class`
         self.machineSnapshot = dto.machine.snapshot
         self.machineAlwaysOn = dto.machine.always_on
+        self.messageGrants = (dto.message_grants ?? []).map(MessageGrant.init(dto:))
+    }
+}
+
+/// One row of an agent's "Who may message X" card (`message_grants` on the project).
+struct MessageGrant: Identifiable, Equatable, Codable {
+    /// `user:<id>` / `project:<id>`: the key for PUT / DELETE.
+    var grantee: String
+    /// `person` or `agent`.
+    var kind: String
+    var id: String
+    var name: String?
+    var handle: String?
+    var avatarUrl: String?
+    var enabled: Bool
+    var note: String
+    var createdAt: Int64
+    var lastAt: Int64?
+
+    var displayName: String { name ?? handle.map { "@\($0)" } ?? id }
+
+    init(dto: MessageGrantDto) {
+        grantee = dto.grantee
+        kind = dto.kind
+        id = dto.id
+        name = dto.name.flatMap { $0.isEmpty ? nil : $0 }
+        handle = dto.handle.flatMap { $0.isEmpty ? nil : $0 }
+        avatarUrl = dto.avatar_url
+        enabled = dto.enabled
+        note = dto.note
+        createdAt = dto.created_at
+        lastAt = dto.last_at
     }
 }
 
@@ -599,6 +634,9 @@ struct Message: Identifiable, Equatable {
     var subagentName: String?
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     var handoffMessages: Int? = nil
+    /// Agent-to-agent messaging: this reply answered a message another agent sent into the
+    /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
+    var agentReplyTo: String? = nil
     var inReplyTo: String?
     var usage: [String: Double]
     var model: String?
@@ -769,6 +807,7 @@ enum DocJSON {
             subagentId: str(m["subagentId"]),
             subagentName: str(m["subagentName"]),
             handoffMessages: int(m["handoffMessages"]).map { Int($0) },
+            agentReplyTo: str(m["agentReplyTo"]).flatMap { $0.isEmpty ? nil : $0 },
             inReplyTo: str(m["inReplyTo"]),
             usage: usage,
             model: str(m["model"]),

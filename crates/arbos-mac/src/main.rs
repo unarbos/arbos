@@ -7,14 +7,15 @@ mod calls;
 mod image_picker;
 mod model;
 mod onboarding;
+mod search;
 mod sign_in;
 mod sync;
 mod ui;
 mod update;
 
 use gpui::{
-    point, px, size, App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
-    WindowBounds, WindowDecorations, WindowOptions,
+    point, px, size, App, AppContext as _, Bounds, KeyBinding, Menu, MenuItem, OsAction,
+    TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
 };
 
 use std::cell::RefCell;
@@ -162,13 +163,24 @@ fn main() {
     });
 }
 
-/// The menu bar: the app menu and Help → Send Feedback… (⌘⇧F), the Mac twin of
-/// TestFlight's screenshot feedback.
+/// The menu bar: the app menu, Edit (Cut / Copy / Paste — ⌘V reaches the chat
+/// through AppKit's `paste:` selector), and Help → Send Feedback… (⌘⇧F).
 fn set_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu {
             name: "Arbos".into(),
             items: vec![MenuItem::action("Quit Arbos", shell::Quit)],
+            disabled: false,
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::os_action("Cut", composer::Cut, OsAction::Cut),
+                MenuItem::os_action("Copy", composer::Copy, OsAction::Copy),
+                MenuItem::os_action("Paste", composer::Paste, OsAction::Paste),
+                MenuItem::separator(),
+                MenuItem::os_action("Select All", composer::SelectAll, OsAction::SelectAll),
+            ],
             disabled: false,
         },
         Menu {

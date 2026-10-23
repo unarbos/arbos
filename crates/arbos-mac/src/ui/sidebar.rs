@@ -1,8 +1,8 @@
-//! The chat list: the iPhone home screen as a Mac sidebar. A top bar with the
-//! collapse control and "+", search, then every agent and person as one row —
-//! avatar, name, time, last line. The account circle (its dot is the machine
-//! state) and gear sit at the bottom; the Update pill only while a newer build
-//! exists.
+//! The chat list: the iPhone home screen as a Mac sidebar. A top bar with an
+//! oval Search field on the left, "+" and the collapse control on the right,
+//! then every agent and person as one row — avatar, name, time, last line.
+//! The account circle (its dot is the machine state) and gear sit at the
+//! bottom; the Update pill only while a newer build exists.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::{Id, MachineState, Message, Project, Role, ServerInfo};
+use crate::search;
 use crate::ui::avatars;
 use crate::ui::composer::Composer;
 use crate::ui::frost::edge_faded;
@@ -41,12 +42,12 @@ impl Render for SidebarResizeDragGhost {
 }
 
 /// The drag strip beside the traffic lights: Grok Mac's 44 pt top band, the
-/// same height as the chat header ([feedback mac-header-height-grok]). The
-/// collapse control sits right of the lights — at the header toggle's exact
-/// spot, so folding the pane never moves it — and + / search keep the right
-/// end. Controls are centred on the lights' line: macOS draws them at 20.75 pt
-/// in this window, so the 44 band is centred 1 pt high (Grok: 21.75 / 21.75)
-/// ([feedback mac-collapsed-toggle-inline]).
+/// same height as the chat header ([feedback mac-header-height-grok]). An oval
+/// Search field sits left of the lights' gap; "+" and the collapse control
+/// sit on the right end of the strip so folding the pane is intuitive
+/// ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG]). Controls are centred on the
+/// lights' line: macOS draws them at 20.75 pt in this window, so the 44 band
+/// is centred 1 pt high (Grok: 21.75 / 21.75).
 fn top_strip() -> f32 {
     if cfg!(target_os = "macos") {
         HEADER_HEIGHT
@@ -250,19 +251,17 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
     }
 }
 
-fn server_matches_query(server: &ServerInfo, query: &str) -> bool {
-    server.name.to_lowercase().contains(query)
-        || server
-            .channels
-            .iter()
-            .any(|c| c.name.to_lowercase().contains(query))
-}
+/// Sort key of a search result: the kind of hit first (people, titles,
+/// members, messages — `search::HitKind` order), newest activity inside a kind.
+/// Without a query every row is a `Title` hit, so the list is by activity.
+type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 
 pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
-    let query = shell.search_input.read(cx).text().trim().to_lowercase();
+    let typed = shell.search_input.read(cx).text().trim().to_string();
+    let query = search::normalize_query(&typed);
     let machine = state.machine.shown_state();
     let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
@@ -270,11 +269,11 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
     let waitlist_position = state.machine.waitlist_position;
 
-    let mut rows: Vec<(u64, ListEntry)> = Vec::new();
+    let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
-        if !query.is_empty() && !server_matches_query(s, &query) {
+        let Some(hit) = search::server_hit(s, &query) else {
             continue;
-        }
+        };
         let selected = state.open_server.as_deref() == Some(s.id.as_str())
             || state
                 .selected_channel
@@ -282,21 +281,23 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .is_some_and(|c| c.server_id == s.id);
         let at = state.server_last_activity(s);
         rows.push((
-            at,
+            (hit.kind, std::cmp::Reverse(at)),
             ListEntry::Server(Box::new(ServerRowView {
                 selected,
                 unread: state.space_row(s).is_some_and(|r| r.unread > 0),
-                preview: server_preview(state, s),
+                preview: hit.reason.unwrap_or_else(|| server_preview(state, s)),
                 time: time_label(at),
                 server: s.clone(),
             })),
         ));
     }
     for p in state.projects.iter() {
-        // Name, @handle, chat title, or any loaded message text.
-        if !query.is_empty() && !state.space_matches_query(p, &query) {
+        // Display name / @handle, title, a member, a chat title, or a loaded
+        // message — ranked in that order; a hit beyond the row's own name is
+        // explained on the second line.
+        let Some(hit) = state.space_search_hit(p, &query) else {
             continue;
-        }
+        };
         let streaming = state.project_is_streaming(&p.id);
         // Shared projects badge the disc with the other side; a group is one
         // plain disc (redesign 2026-10-20).
@@ -312,7 +313,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             streaming,
             unread: state.project_unread(&p.id) > 0,
             typing: !state.typing_in(&p.id).is_empty(),
-            preview: preview(state, p),
+            preview: hit.reason.unwrap_or_else(|| preview(state, p)),
             time: time_label(last_activity(state, p)),
             person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
             guests: shown_people
@@ -325,18 +326,22 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             avatar_state: state.avatar_state(&p.id),
             space: p.clone(),
         };
-        rows.push((last_activity(state, p), ListEntry::Chat(Box::new(row))));
+        rows.push((
+            (hit.kind, std::cmp::Reverse(last_activity(state, p))),
+            ListEntry::Chat(Box::new(row)),
+        ));
     }
-    rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    rows.sort_by_key(|(key, _)| *key);
     let empty = state.projects.is_empty() && state.servers.is_empty();
     let link_connecting = state.link == crate::model::Link::Connecting;
     if machine == MachineState::Waking {
         PulseClock::request(cx);
     }
 
-    // ----- top: collapse + "+" beside the traffic lights, then search ----------
+    // ----- top: oval Search left, "+" and collapse on the right ---------------
     // Collapse lives here (not the chat header). When the rail is hidden the
     // header still shows an expand control so the list can come back.
+    // ([feedback app-01M5MWZ5T20MS6KA35CFZY8CTG])
     let collapse = div()
         .id("sidebar-collapse")
         .size(px(28.0))
@@ -394,78 +399,31 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             })
         });
     let show_plus = open_server.is_none() || open_server_admin;
-    // The magnifier shows the search field below (and keeps it while a query
-    // is typed); Escape or the clear dot fold it (three-pane rule: the strip
-    // holds exactly +, search, minimize).
-    let search_shown = shell.search_open || !query.is_empty();
-    let search_toggle = div()
-        .id("sidebar-search-toggle")
-        .size(px(28.0))
-        .flex_shrink_0()
-        .rounded(px(7.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        .bg(if search_shown {
-            theme.surface_2
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| s.bg(theme.surface_2))
-        .child(icon(
-            "search",
-            16.0,
-            if search_shown {
-                theme.text
-            } else {
-                theme.text_muted
-            },
-        ))
-        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.menu_open = false;
-            if this.search_open {
-                this.search_open = false;
-                this.search_input.update(cx, |i, cx| i.clear(cx));
-                Composer::focus(&this.composer, window, cx);
-            } else {
-                this.search_open = true;
-                let handle = this.search_input.read(cx).focus_handle(cx);
-                window.focus(&handle, cx);
-            }
-            cx.notify();
-        }));
-    let strip = div()
-        .h(px(top_strip()))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
-        .pr(px(12.0))
-        .pb(px(2.0))
-        .child(collapse)
-        .child(div().flex_1())
-        .when(show_plus, |el| el.child(plus))
-        .child(search_toggle)
-        .window_drag();
+    // Oval Search field in the top strip (magnifier + "Search" placeholder).
+    // Escape or the clear dot empty it; the field stays in the strip.
     let search = div()
         .id("sidebar-search")
-        .mx(px(12.0))
-        .mt(px(6.0))
-        .mb(px(6.0))
-        .h(px(32.0))
-        .px(px(10.0))
+        .flex_1()
+        .min_w_0()
+        .h(px(28.0))
+        .pl(px(9.0))
+        .pr(px(8.0))
         .flex()
         .items_center()
-        .gap(px(7.0))
-        // Grok Mac: a flat tinted field (#F0F0F0 light / #242423 dark), no rim.
-        .rounded(px(8.0))
+        .gap(px(6.0))
+        .rounded_full()
         .bg(theme.surface_2)
         .cursor_text()
-        .child(icon("search", 14.0, theme.text_muted))
-        .child(div().flex_1().min_w_0().child(shell.search_input.clone()))
+        .child(icon("search", 13.0, theme.text_muted))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .child(shell.search_input.clone()),
+        )
         .when(!query.is_empty(), |el| {
             el.child(
                 div()
@@ -480,7 +438,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                     .child(icon("xmark", 8.0, theme.bg))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.search_input.update(cx, |i, cx| i.clear(cx));
-                        this.search_open = false;
                         Composer::focus(&this.composer, window, cx);
                         cx.notify();
                     })),
@@ -489,10 +446,26 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .on_mouse_down(
             gpui::MouseButton::Left,
             cx.listener(|this, _, window, cx| {
+                this.menu_open = false;
                 let handle = this.search_input.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
+                cx.stop_propagation();
             }),
         );
+    let strip = div()
+        .h(px(top_strip()))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .pl(px(TRAFFIC_LIGHTS_INSET + 12.0))
+        .pr(px(12.0))
+        .pb(px(2.0))
+        .when(open_server.is_none(), |el| el.child(search))
+        .when(open_server.is_some(), |el| el.child(div().flex_1()))
+        .when(show_plus, |el| el.child(plus))
+        .child(collapse)
+        .window_drag();
     // ----- rows -------------------------------------------------------------
     let mut list = div()
         .id("chat-list")
@@ -589,7 +562,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(format!("Nothing matches “{query}”.")),
+                .child(format!("Nothing matches “{typed}”.")),
         );
     }
     for (_, entry) in rows {
@@ -748,7 +721,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
-        .when(search_shown && open_server.is_none(), |el| el.child(search))
         .child(match open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
             Some(server) => {

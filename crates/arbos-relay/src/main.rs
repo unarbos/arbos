@@ -1,4 +1,5 @@
 mod admin;
+mod agent_messages;
 mod api;
 mod api_error_layer;
 #[cfg(test)]
@@ -16,6 +17,7 @@ mod credits;
 mod daytona;
 mod db;
 mod db_accounts;
+mod db_agent_messages;
 mod db_calls;
 mod db_fleet;
 mod db_inspect;
@@ -417,6 +419,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/calls/{id}", get(calls::get_call))
         .route("/calls/{id}/join", post(calls::join_call))
         .route("/calls/{id}/leave", post(calls::leave_call))
+        .route("/calls/{id}/speakers", post(calls::invite_speaker))
+        .route(
+            "/calls/{id}/speakers/{user_id}",
+            axum::routing::delete(calls::revoke_speaker),
+        )
         .route(
             "/devices/{id}/voip",
             post(calls::register_voip).delete(calls::unregister_voip),
@@ -583,6 +590,21 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/projects/{id}/members/{user_id}",
             delete(people::project_member_remove),
+        )
+        // Agent-to-agent messaging (docs/agent-to-agent-messaging.md): the box sends for its
+        // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
+        .route("/projects/{id}/agent-messages", post(agent_messages::send))
+        .route(
+            "/projects/{id}/agent-messages/{mid}/reply",
+            post(agent_messages::reply),
+        )
+        .route(
+            "/projects/{id}/message-access",
+            get(agent_messages::list_grants).put(agent_messages::put_grant),
+        )
+        .route(
+            "/projects/{id}/message-access/{grantee}",
+            delete(agent_messages::delete_grant),
         )
         .route(
             "/blocks",
@@ -832,6 +854,12 @@ async fn main() -> anyhow::Result<()> {
             "/secrets/{id}/access/{project_id}",
             put(secrets::put_access).delete(secrets::delete_access),
         )
+        .route("/secrets/{id}/people", post(secrets::post_director))
+        .route(
+            "/secrets/{id}/people/{director_user_id}",
+            put(secrets::put_director).delete(secrets::delete_director),
+        )
+        // #1041 names, kept one release for clients built before #1442.
         .route("/secrets/{id}/directors", post(secrets::post_director))
         .route(
             "/secrets/{id}/directors/{director_user_id}",

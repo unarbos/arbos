@@ -1631,6 +1631,7 @@ pub(crate) async fn box_request(
                     created_at: now,
                     decided_at: Some(now),
                     expires_at: i64::MAX,
+                    asked_by: None,
                 };
                 state.db.insert_secret_request(&rq).map_err(internal)?;
                 if allowed.pin_host {
@@ -1666,6 +1667,7 @@ pub(crate) async fn box_request(
         created_at: now,
         decided_at: None,
         expires_at: now + REQUEST_PENDING_MS,
+        asked_by: None,
     };
     state.db.insert_secret_request(&rq).map_err(internal)?;
     audit(

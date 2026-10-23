@@ -110,8 +110,14 @@ public struct CallDto: Codable {
 	public let app_version: String?
 	public let token: String?
 	public let token_expires_at: Int64?
+	/// `"open"` = anyone may speak; `"hosted"` = only the host and invited speakers (bigger groups).
+	public let speak_mode: String?
+	/// People the host invited to speak. The host is `started_by` and is not listed here.
+	public let invited_speakers: [SenderDto]?
+	/// Whether the requesting user may publish audio (set when a join token is minted).
+	public let can_speak: Bool?
 
-	public init(call_id: String, chat_id: String, project_id: String, kind: String, room: String, livekit_url: String?, max_participants: Int64, started_by: SenderDto, participants: [SenderDto], agents: [SenderDto], started_at: Int64, ended_at: Int64?, reason: String?, started_device: String?, platform: String?, app_version: String?, token: String?, token_expires_at: Int64?) {
+	public init(call_id: String, chat_id: String, project_id: String, kind: String, room: String, livekit_url: String?, max_participants: Int64, started_by: SenderDto, participants: [SenderDto], agents: [SenderDto], started_at: Int64, ended_at: Int64?, reason: String?, started_device: String?, platform: String?, app_version: String?, token: String?, token_expires_at: Int64?, speak_mode: String?, invited_speakers: [SenderDto]?, can_speak: Bool?) {
 		self.call_id = call_id
 		self.chat_id = chat_id
 		self.project_id = project_id
@@ -130,6 +136,9 @@ public struct CallDto: Codable {
 		self.app_version = app_version
 		self.token = token
 		self.token_expires_at = token_expires_at
+		self.speak_mode = speak_mode
+		self.invited_speakers = invited_speakers
+		self.can_speak = can_speak
 	}
 }
 
@@ -680,6 +689,38 @@ public struct MachineDto: Codable {
 	}
 }
 
+/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
+/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
+public struct MessageGrantDto: Codable {
+	public let project_id: String
+	/// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
+	public let grantee: String
+	public let kind: String
+	public let id: String
+	public let name: String?
+	public let handle: String?
+	public let avatar_url: String?
+	public let enabled: Bool
+	public let note: String
+	public let created_at: Int64
+	/// Last time a message came through this grant.
+	public let last_at: Int64?
+
+	public init(project_id: String, grantee: String, kind: String, id: String, name: String?, handle: String?, avatar_url: String?, enabled: Bool, note: String, created_at: Int64, last_at: Int64?) {
+		self.project_id = project_id
+		self.grantee = grantee
+		self.kind = kind
+		self.id = id
+		self.name = name
+		self.handle = handle
+		self.avatar_url = avatar_url
+		self.enabled = enabled
+		self.note = note
+		self.created_at = created_at
+		self.last_at = last_at
+	}
+}
+
 /// Project record as clients see it (`project_json`), plus optional `list_projects` extras.
 public struct ProjectDto: Codable {
 	public let id: String
@@ -720,8 +761,11 @@ public struct ProjectDto: Codable {
 	public let my_role: String?
 	/// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
 	public let owner_handle: String??
+	/// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+	/// owner allowed; empty for everyone but the owner's own clients.
+	public let message_grants: [MessageGrantDto]?
 
-	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??) {
+	public init(id: String, name: String, icon: String, color: String, instructions: String, avatar: String, avatar_color: String, state: String, box: String, box_since: Int64, spend_today_usd: Double, spend_cap_usd: Double, created_at: Int64, last_active_at: Int64, description: String, voice: String?, vision_enabled: Bool, avatar_color_index: Int64?, avatar_color_index_effective: Int64, avatar_leaf: Int64?, avatar_leaf_color: Int64?, avatar_leaf_effective: Int64?, avatar_leaf_color_effective: Int64?, image_key: String?, primary_chat_id: String?, owner: ProjectOwnerDto, model: String?, machine: MachineDto, shared: Bool?, my_role: String?, owner_handle: String??, message_grants: [MessageGrantDto]?) {
 		self.id = id
 		self.name = name
 		self.icon = icon
@@ -753,6 +797,7 @@ public struct ProjectDto: Codable {
 		self.shared = shared
 		self.my_role = my_role
 		self.owner_handle = owner_handle
+		self.message_grants = message_grants
 	}
 }
 
@@ -849,8 +894,12 @@ public struct SecretRequestDto: Codable {
 	public let created_at: Int64
 	public let decided_at: Int64?
 	public let expires_at: Int64
+	/// The person who asked the agent, when it was not the owner (spec §7.7).
+	public let asked_by: String?
+	public let asked_by_handle: String?
+	public let asked_by_name: String?
 
-	public init(id: String, project_id: String, project_name: String?, chat_id: String, target: SecretRequestTargetDto, name: String, purpose: String, use: String, host: String?, status: String, decided_by: String?, created_at: Int64, decided_at: Int64?, expires_at: Int64) {
+	public init(id: String, project_id: String, project_name: String?, chat_id: String, target: SecretRequestTargetDto, name: String, purpose: String, use: String, host: String?, status: String, decided_by: String?, created_at: Int64, decided_at: Int64?, expires_at: Int64, asked_by: String?, asked_by_handle: String?, asked_by_name: String?) {
 		self.id = id
 		self.project_id = project_id
 		self.project_name = project_name
@@ -865,6 +914,9 @@ public struct SecretRequestDto: Codable {
 		self.created_at = created_at
 		self.decided_at = decided_at
 		self.expires_at = expires_at
+		self.asked_by = asked_by
+		self.asked_by_handle = asked_by_handle
+		self.asked_by_name = asked_by_name
 	}
 }
 
@@ -1386,6 +1438,17 @@ public struct MeUserResponseDto: Codable {
 	public init(user: AccountUserDto, avatar_url: String??) {
 		self.user = user
 		self.avatar_url = avatar_url
+	}
+}
+
+/// `GET /projects/{id}/message-access`.
+public struct MessageGrantsDto: Codable {
+	public let project_id: String
+	public let grants: [MessageGrantDto]
+
+	public init(project_id: String, grants: [MessageGrantDto]) {
+		self.project_id = project_id
+		self.grants = grants
 	}
 }
 
@@ -1936,7 +1999,9 @@ public struct SecretActivityPageDto: Codable {
 	}
 }
 
-/// Director card on `secret.directors[]`.
+/// One person on a secret's People list (`secret.people[]`; `secret.directors[]` is the same
+/// list under its #1041 name, kept one release). The new fields are optional so a client built
+/// after this change still reads a relay built before it.
 public struct SecretDirectorDto: Codable {
 	public let user_id: String
 	public let handle: String
@@ -1944,14 +2009,27 @@ public struct SecretDirectorDto: Codable {
 	public let avatar_url: String?
 	public let note: String
 	public let created_at: Int64
+	/// Row switch (absent = on).
+	public let enabled: Bool?
+	public let disabled_at: Int64?
+	/// `all` or `chat` (absent = all).
+	public let scope: SecretAccessScopeDto?
+	public let last_asked_at: Int64?
+	/// `settings | card:<request id>` (absent = settings).
+	public let created_from: String?
 
-	public init(user_id: String, handle: String, name: String?, avatar_url: String?, note: String, created_at: Int64) {
+	public init(user_id: String, handle: String, name: String?, avatar_url: String?, note: String, created_at: Int64, enabled: Bool?, disabled_at: Int64?, scope: SecretAccessScopeDto?, last_asked_at: Int64?, created_from: String?) {
 		self.user_id = user_id
 		self.handle = handle
 		self.name = name
 		self.avatar_url = avatar_url
 		self.note = note
 		self.created_at = created_at
+		self.enabled = enabled
+		self.disabled_at = disabled_at
+		self.scope = scope
+		self.last_asked_at = last_asked_at
+		self.created_from = created_from
 	}
 }
 
@@ -1975,9 +2053,14 @@ public struct SecretDto: Codable {
 	public let vault_name: String
 	public let ref: String
 	public let agents: [SecretAccessDto]
+	/// Same list as `people`; the #1041 name, kept one release.
 	public let directors: [SecretDirectorDto]
+	/// People who may ask an agent with access to use this secret (spec §7.7).
+	public let people: [SecretDirectorDto]?
+	/// `refuse | card`: what a non-listed person's ask does (absent = refuse).
+	public let others_ask: String?
 
-	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto]) {
+	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto], people: [SecretDirectorDto]?, others_ask: String?) {
 		self.id = id
 		self.name = name
 		self.env = env
@@ -1996,6 +2079,8 @@ public struct SecretDto: Codable {
 		self.ref = ref
 		self.agents = agents
 		self.directors = directors
+		self.people = people
+		self.others_ask = others_ask
 	}
 }
 

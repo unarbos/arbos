@@ -223,8 +223,11 @@ def project_name(project):
     return ((v or {}).get("project") or v or {}).get("name") if st == 200 else None
 
 
-def create_secret(name, value, note=""):
-    return relay("POST", "/secrets", {"name": name, "value": value, "note": note, "agents": []})
+def create_secret(name, value, note="", agents=(), inject_env=False):
+    body = {"name": name, "value": value, "note": note, "agents": [{"project_id": p} for p in agents]}
+    if inject_env:
+        body["inject_env"] = True
+    return relay("POST", "/secrets", body)
 
 
 def delete_secret(secret_id):
@@ -250,3 +253,40 @@ def group_create(host, with_names, title):
 def group_send(host, chat_id, text, wait_s=120):
     code, out, err = ctl("group", "send", host, chat_id, text, "--stream", "--wait", str(wait_s), timeout=wait_s + 700)
     return out + "\n" + err
+
+
+def people_dm_with_agent(peer_handle, project):
+    """A DM between the eval user and a scratch peer (created once, reused), with `project`'s
+    agent added. Returns (chat_id, peer access token)."""
+    st, users = admin("GET", "/admin/users")
+    users = users if isinstance(users, list) else (users or {}).get("users") or []
+    peer = next((u for u in users if u.get("login") == peer_handle), None)
+    if peer is None:
+        st, v = admin("POST", "/admin/users/test", {"handle": peer_handle, "name": "Long-task eval peer"})
+        if st != 201:
+            raise RuntimeError(f"create peer: {st} {v}")
+        peer_id = v["user"]["id"]
+    else:
+        peer_id = peer["id"]
+    st, tok = admin("POST", f"/admin/users/{peer_id}/devices", {"name": "lt eval driver"})
+    if st not in (200, 201):
+        raise RuntimeError(f"peer device: {st} {tok}")
+    st, chat = relay("POST", "/chats/dm", {"handle": peer_handle})
+    if st not in (200, 201):
+        raise RuntimeError(f"dm create: {st} {chat}")
+    chat_id = chat["id"]
+    st, v = relay("POST", f"/chats/{chat_id}/agents", {"project_id": project})
+    if st not in (200, 201, 409):
+        raise RuntimeError(f"agent add: {st} {v}")
+    return chat_id, {"access_token": tok["access_token"], "device_id": tok.get("device_id", "")}
+
+
+def people_send_as(peer, chat_id, text):
+    """One human row from the peer into the DM, written through the peer's own arbosctl config
+    (device id included, so the row carries the peer's identity rather than `dev:anon`)."""
+    cfg = STATE_DIR / "ctl-peer" / "arbosctl.json"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"relay_url": RELAY, "device_token": peer["access_token"], "device_id": peer.get("device_id", "")}))
+    env = dict(os.environ, ARBOSCTL_CONFIG=str(cfg))
+    p = subprocess.run([ARBOSCTL, "chat", "send", "people", chat_id, text, "--timeout", "5"], capture_output=True, text=True, timeout=60, env=env)
+    return p.returncode

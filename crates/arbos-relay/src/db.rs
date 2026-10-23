@@ -569,6 +569,7 @@ impl Db {
         crate::db_voice::migrate_voice(&c);
         Self::migrate_vault_items_per_user(&c)?;
         c.execute_batch(crate::db_secrets::SECRETS_SCHEMA)?;
+        c.execute_batch(crate::agent_messages::SCHEMA)?;
         crate::db_secrets::migrate_secrets(&c);
         c.execute_batch(crate::matrix::db::MATRIX_SCHEMA)?;
         crate::matrix::db::migrate_matrix(&c);

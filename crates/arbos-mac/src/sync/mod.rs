@@ -416,6 +416,18 @@ pub enum ClientCommand {
         project_id: Id,
         user_id: String,
     },
+    /// `PUT /projects/{id}/message-access {grantee, enabled}` — "Who may message X"
+    /// (agent-to-agent messaging). `grantee` = `@handle`, `user:<id>` or `project:<id>`.
+    SetMessageGrant {
+        project_id: Id,
+        grantee: String,
+        enabled: bool,
+    },
+    /// `DELETE /projects/{id}/message-access/{grantee}`.
+    RemoveMessageGrant {
+        project_id: Id,
+        grantee: String,
+    },
     /// Fetch an avatar once (`SyncEvent::Avatar`).
     FetchAvatar {
         url: String,
@@ -738,6 +750,23 @@ pub enum ClientCommand {
     /// Every Access of a secret off.
     SecretRevokeAll {
         id: Id,
+    },
+    /// One People row (`PUT /secrets/{id}/people/{user_id}`): switch and note (spec §7.7).
+    SecretPerson {
+        id: Id,
+        user_id: Id,
+        enabled: bool,
+        note: Option<String>,
+    },
+    /// Add people from the picker (`POST /secrets/{id}/people { handle }`, one per handle).
+    SecretPeopleAdd {
+        id: Id,
+        handles: Vec<String>,
+    },
+    /// Take a person off the list (`DELETE /secrets/{id}/people/{user_id}`).
+    SecretPersonRemove {
+        id: Id,
+        user_id: Id,
     },
     /// The kill switch (`PUT /me/secrets/settings`).
     SecretsPause {

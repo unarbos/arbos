@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS voip_tokens (
   bundle_id TEXT NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS voip_tokens_user ON voip_tokens(user_id);
+CREATE TABLE IF NOT EXISTS call_speakers (
+  call_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  PRIMARY KEY (call_id, user_id)
+);
 "#;
 
 /// Columns added after the first calls release (ALTER is idempotent through the error).
@@ -32,6 +36,13 @@ pub fn migrate_calls(c: &Connection) {
     for col in ["started_device TEXT", "platform TEXT", "app_version TEXT"] {
         let _ = c.execute(&format!("ALTER TABLE calls ADD COLUMN {col}"), []);
     }
+    let _ = c.execute(
+        "CREATE TABLE IF NOT EXISTS call_speakers (
+          call_id TEXT NOT NULL, user_id TEXT NOT NULL,
+          PRIMARY KEY (call_id, user_id)
+        )",
+        [],
+    );
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -261,6 +272,37 @@ impl Db {
                 })
             })?;
             rows.collect()
+        })
+    }
+
+    /// Invited speakers on a hosted group call (the host is `calls.started_by`, not listed here).
+    pub fn call_speakers(&self, call_id: &str) -> Result<Vec<String>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT user_id FROM call_speakers WHERE call_id = ?1 ORDER BY user_id")?;
+            let rows = st.query_map(params![call_id], |r| r.get(0))?;
+            rows.collect()
+        })
+    }
+
+    pub fn add_call_speaker(&self, call_id: &str, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "INSERT INTO call_speakers(call_id, user_id) VALUES (?1, ?2)
+                 ON CONFLICT(call_id, user_id) DO NOTHING",
+                params![call_id, user_id],
+            )
+            .map(|_| ())
+        })
+    }
+
+    pub fn remove_call_speaker(&self, call_id: &str, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "DELETE FROM call_speakers WHERE call_id = ?1 AND user_id = ?2",
+                params![call_id, user_id],
+            )
+            .map(|_| ())
         })
     }
 

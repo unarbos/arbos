@@ -389,6 +389,16 @@ impl Agent {
                 }
             }
         }
+        // A pending approval card is not running work: never report the gated tool's label.
+        let turn_chat = {
+            let tl = self.turn.lock().await;
+            tl.as_ref().map(|t| t.chat_id.clone())
+        };
+        if let Some(tc) = turn_chat {
+            if self.approval_pending_for(&tc).await {
+                snap.activity = Some("Waiting for approval".into());
+            }
+        }
         let live: std::collections::HashSet<String> =
             self.subagent_msgs.lock().await.keys().cloned().collect();
         for s in self.store.subagents().unwrap_or_default() {
@@ -773,6 +783,16 @@ pub(crate) mod tests {
         assert!(s
             .canned_line()
             .starts_with("Still on it: finishing something in another conversation, 2 min in."));
+        let s = BusySnapshot {
+            same_chat: true,
+            activity: Some("Waiting for approval".into()),
+            elapsed_s: 600,
+            ..Default::default()
+        };
+        assert_eq!(
+            s.canned_line(),
+            "Still on it: Waiting for approval, 10 min in. I'll pick this up right after."
+        );
     }
 
     #[test]
@@ -979,6 +999,58 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(saved.name, "GigChadAgent");
         assert_eq!(saved.former_names(), vec!["Doug".to_owned()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// #1481: renaming an agent already in a people group refreshes the cached @slug and
+    /// member handle so @newname still wakes it (no remove/re-add).
+    #[tokio::test]
+    async fn renamed_agent_keeps_people_group_handle() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTPEOPLERENAME000001";
+        let me = format!("agent:{}", agent.cfg.project_id);
+        agent.people.test_insert(
+            chat,
+            crate::people::PeopleChatInfo {
+                members: vec![serde_json::json!({
+                    "member": me,
+                    "handle": "doug",
+                    "name": "Doug",
+                    "project": { "name": "Doug" },
+                })],
+                slug: "doug".into(),
+                kind: "group".into(),
+                ..Default::default()
+            },
+        );
+        let r = agent.identity.observe("FeedbackGuy").expect("renamed");
+        agent.on_renamed(&r).await;
+        let info = agent.people.info(chat).expect("people chat");
+        assert_eq!(info.slug, "feedbackguy");
+        let mine = info
+            .members
+            .iter()
+            .find(|m| m["member"].as_str() == Some(&format!("agent:{}", agent.cfg.project_id)))
+            .expect("member");
+        assert_eq!(mine["handle"].as_str(), Some("feedbackguy"));
+        assert_eq!(mine["project"]["name"].as_str(), Some("FeedbackGuy"));
+        assert!(crate::people::addressed(
+            &arbos_core::doc::MessageView {
+                id: "m1".into(),
+                role: "user".into(),
+                status: "done".into(),
+                parts: vec![serde_json::json!({
+                    "kind": "text",
+                    "text": "@feedbackguy you alive?"
+                })],
+                rest: serde_json::json!({ "sender": "user:u1" }),
+            },
+            &agent.cfg.project_id,
+            &info.slug,
+            false,
+            false,
+            false,
+        ));
         let _ = std::fs::remove_dir_all(root);
     }
 

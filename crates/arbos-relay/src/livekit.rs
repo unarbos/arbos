@@ -126,7 +126,7 @@ impl LiveKit {
         }
     }
 
-    /// A join token for `identity` in `room`: publish + subscribe + data, one hour.
+    /// A join token for `identity` in `room`: subscribe + data, and publish when `can_publish`.
     /// Returns `(token, expires_at_ms)`.
     pub fn join_token(
         &self,
@@ -134,6 +134,7 @@ impl LiveKit {
         identity: &str,
         name: &str,
         metadata: &Value,
+        can_publish: bool,
     ) -> (String, i64) {
         let now = now_ms() / 1000;
         let exp = now + TOKEN_TTL_S;
@@ -148,12 +149,51 @@ impl LiveKit {
             "video": {
                 "roomJoin": true,
                 "room": room,
-                "canPublish": true,
+                "canPublish": can_publish,
                 "canSubscribe": true,
                 "canPublishData": true,
             },
         });
         (jwt(&self.api_secret, &claims), exp * 1000)
+    }
+
+    /// Change whether a live participant may publish (host invites / revokes a speaker).
+    pub async fn update_publish(
+        &self,
+        http: &reqwest::Client,
+        room: &str,
+        identity: &str,
+        can_publish: bool,
+    ) {
+        let resp = http
+            .post(format!(
+                "{}/twirp/livekit.RoomService/UpdateParticipant",
+                self.http_url
+            ))
+            .bearer_auth(self.admin_token(room))
+            .json(&json!({
+                "room": room,
+                "identity": identity,
+                "permission": {
+                    "canSubscribe": true,
+                    "canPublish": can_publish,
+                    "canPublishData": true,
+                },
+            }))
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() || r.status().as_u16() == 404 => {}
+            Ok(r) => tracing::warn!(
+                room,
+                identity,
+                status = %r.status(),
+                "LiveKit UpdateParticipant refused"
+            ),
+            Err(e) => {
+                tracing::warn!(room, identity, error = %e, "LiveKit UpdateParticipant failed")
+            }
+        }
     }
 
     fn admin_token(&self, room: &str) -> String {
@@ -246,7 +286,7 @@ mod tests {
         let lk = LiveKit::new("wss://lk.example", "APIkey", "secret123", None);
         assert_eq!(lk.http_url, "https://lk.example");
         let meta = json!({ "kind": "user", "id": "gh_1", "handle": "alice" });
-        let (tok, exp_ms) = lk.join_token("call_01H", "u_gh_1", "Alice", &meta);
+        let (tok, exp_ms) = lk.join_token("call_01H", "u_gh_1", "Alice", &meta, true);
         let claims = verify_jwt("secret123", &tok).expect("verifies with the API secret");
         assert_eq!(claims["iss"], "APIkey");
         assert_eq!(claims["sub"], "u_gh_1");
@@ -262,6 +302,9 @@ mod tests {
         assert_eq!(exp * 1000, exp_ms);
         assert!((exp - now_ms() / 1000 - TOKEN_TTL_S).abs() <= 2);
         assert!(verify_jwt("wrong", &tok).is_none());
+        let (listen, _) = lk.join_token("call_01H", "u_gh_2", "Bob", &meta, false);
+        let listen_claims = verify_jwt("secret123", &listen).unwrap();
+        assert_eq!(listen_claims["video"]["canPublish"], false);
     }
 
     #[test]

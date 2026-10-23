@@ -111,7 +111,7 @@ class Lane(threading.Thread):
         elif kind == "create_secret":
             import secrets as _s
             value = "evaltok-" + _s.token_hex(12)
-            stc, v = rl.create_secret(act["name"], value, act.get("note", ""))
+            stc, v = rl.create_secret(act["name"], value, act.get("note", ""), agents=[self.project] if act.get("access") else [], inject_env=bool(act.get("inject_env")))
             if stc not in (200, 201):
                 raise RuntimeError(f"create secret: {stc} {v}")
             st["secret_value"] = value
@@ -120,6 +120,10 @@ class Lane(threading.Thread):
         elif kind == "delete_secret":
             if st.get("secret_id"):
                 rl.delete_secret(st["secret_id"])
+        elif kind == "people_dm":
+            # a DM between the eval user and a second scratch user, with this lane's agent added
+            st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
+            time.sleep(8)
         elif kind == "group_create":
             st["group_chat"] = rl.group_create(self.project, act["with"], act.get("title", "eval group"))
             time.sleep(5)
@@ -137,6 +141,7 @@ class Lane(threading.Thread):
         t_task0 = time.time()
         usage0 = rl.usage_all(self.project)
         gen_truth = {}
+        project_for_send = self.project
         task_state = {"D": D, "secret_value": None, "group_chat": None, "old_name": None}
         tag_up = re.sub(r"[^A-Za-z0-9]", "_", tag).upper()
         if task.get("setup_actions"):
@@ -150,7 +155,11 @@ class Lane(threading.Thread):
         all_docs = []
         first_chat = None
         for i, turn in enumerate(task["turns"], 1):
-            prompt = turn["prompt"].replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
+            base_prompt = turn["prompt"]
+            if turn.get("prompt_variants"):
+                # rotate per run so the memory tree cannot answer from the last run's reply
+                base_prompt = turn["prompt_variants"][sum(map(ord, tag)) % len(turn["prompt_variants"])]
+            prompt = base_prompt.replace("{D}", D).replace("{FIXTURES}", FIXTURES).replace("{TAG}", tag_up)
             if turn.get("seed"):
                 code, out = self.box.run_as_ws(self.project, turn["seed"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=180)
                 if "fatal" in out.lower() or (code not in (0, None)):
@@ -185,13 +194,42 @@ class Lane(threading.Thread):
                 turns_out.append({"turn": i, "chat_id": task_state["group_chat"], "prompt": prompt[:300], "ok": g["ok"], "reasons": g["reasons"], "ttfr_s": None, "first_status_s": None, "wall_s": None, "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": g["rubric"], "truth": g["truth"], "verify_out": g["verify_out"], "reply": reply[:1500], "excerpt": out[-2500:]})
                 self.say(f"{tid} group turn {i}: {'ok' if g['ok'] else 'FAIL ' + str(g['reasons'])[:160]} | others {[n for n, _ in others]}")
                 continue
-            if turn.get("chat") == "first" and first_chat:
+            if turn.get("chat") == "dm" and task_state.get("dm_chat"):
+                chat_id = task_state["dm_chat"]
+                project_for_send = "people"
+            elif turn.get("chat") == "first" and first_chat:
                 chat_id = first_chat  # back to the task's first chat after a new_chat turn
             elif chat_id is None or turn.get("new_chat"):
                 chat_id = rl.chat_open(self.project, f"{tid} {tag}" + (f" t{i}" if turn.get("new_chat") else ""))
                 if first_chat is None:
                     first_chat = chat_id
             t0_ms = int(time.time() * 1000)
+            if turn.get("peer"):
+                # the colleague writes in the DM; we watch the agent's reply by polling the doc
+                text = prompt.replace("[peer] ", "")
+                t0 = time.time()
+                rl.people_send_as(task_state["dm_peer_token"], chat_id, text)
+                reply, ttfr = "", None
+                while time.time() - t0 < turn.get("timeout_s", 180):
+                    doc = rl.chat_dump("people", chat_id)
+                    rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
+                    tail = [m for m in rows if (m.get("createdAt") or 0) >= int(t0 * 1000) - 2000]
+                    if tail and any(dr.text_of(m) for m in tail):
+                        ttfr = ttfr or round(time.time() - t0, 2)
+                        if all(m.get("status") in ("done", "error", "failed") for m in tail):
+                            reply = "\n\n".join(dr.text_of(m) for m in tail if dr.text_of(m))
+                            break
+                    time.sleep(3)
+                time.sleep(3)
+                turn_spec = dict(turn, prompt=prompt)
+                for k in ("verify", "show"):
+                    if turn_spec.get(k):
+                        turn_spec[k] = turn_spec[k].replace("{D}", D).replace("{P}", proj_dir)
+                ctx = {"reply": reply, "all_text": reply, "dm": {"reply": reply, "all_text": reply, "tool_parts": 0, "routes": []}, "res": {"ttfr_s": ttfr, "wall_s": round(time.time() - t0, 1), "timed_out": not reply}, "gen_truth": gen_truth, "state": task_state}
+                g = gr.grade_turn(turn_spec, ctx, self.box, self.project, env)
+                turns_out.append({"turn": i, "chat_id": chat_id, "prompt": prompt[:300], "ok": g["ok"], "reasons": g["reasons"], "ttfr_s": ttfr, "first_status_s": None, "wall_s": round(time.time() - t0, 1), "timed_out": not reply, "stalls": 0, "approvals_rejected": [], "routes": [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": g["rubric"], "truth": g["truth"], "verify_out": g["verify_out"], "reply": reply[:1500], "excerpt": f"**Peer:** {text}\n\n**Assistant:** {reply[:900]}"})
+                self.say(f"{tid} peer turn {i}: {'ok' if g['ok'] else 'FAIL ' + str(g['reasons'])[:160]} | ttfr {ttfr}")
+                continue
             decided = []
 
             def on_poll():
@@ -203,7 +241,7 @@ class Lane(threading.Thread):
                         decided.append(req["id"])
 
             res = dr.send_turn(
-                self.project,
+                project_for_send if turn.get("chat") == "dm" else self.project,
                 chat_id,
                 prompt,
                 turn.get("timeout_s", task.get("timeout_s", 600)),
@@ -214,7 +252,7 @@ class Lane(threading.Thread):
             res["secret_requests_decided"] = decided
             if turn.get("after_s"):
                 time.sleep(turn["after_s"])
-            entries = self.box.session_entries(self.project, chat_id)
+            entries = self.box.session_entries(self.project, chat_id) if turn.get("chat") != "dm" else []
             sm = dr.session_metrics(entries, prompt)
             dm = dr.doc_metrics(res["rows"])
             audit = self.box.audit_since(self.project, t0_ms - 2000)
@@ -231,6 +269,18 @@ class Lane(threading.Thread):
             if turn.get("expect_secret_request") and not res.get("secret_requests_decided"):
                 g["ok"] = False
                 g["reasons"].append("no secret access request (approval card) appeared for the driver to decide")
+            if turn.get("secret_digest_check") and task_state.get("secret_value"):
+                import hashlib
+                v = task_state["secret_value"]
+                sha = hashlib.sha256(v.encode()).hexdigest()
+                g["truth"]["expected_len"] = len(v)
+                g["truth"]["expected_sha_prefix"] = sha[:16]
+                if sha not in (dm.get("all_text") or ""):
+                    g["ok"] = False
+                    g["reasons"].append(f"reply's SHA-256 does not match the stored secret (expected {sha[:12]}…)")
+                else:
+                    g["reasons"] = [x for x in g["reasons"] if not x.startswith("rubric")]
+                    g["ok"] = not g["reasons"]
             if turn.get("secret_must_not_leak") and task_state.get("secret_value"):
                 v = task_state["secret_value"]
                 if v in json.dumps(res.get("doc")) or v in (dm.get("all_text") or ""):

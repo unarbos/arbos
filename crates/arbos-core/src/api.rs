@@ -110,6 +110,10 @@ pub struct ProjectDto {
     /// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_handle: Option<Option<String>>,
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed; empty for everyone but the owner's own clients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_grants: Vec<MessageGrantDto>,
 }
 
 /// Project chat (`chat_json` / `chat_json_for`).
@@ -314,6 +318,36 @@ pub struct ProjectMembersDto {
     pub project_id: String,
     pub owner: String,
     pub members: Vec<ProjectMemberDto>,
+}
+
+/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
+/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrantDto {
+    pub project_id: String,
+    /// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
+    pub grantee: String,
+    pub kind: String,
+    pub id: String,
+    pub name: Option<String>,
+    pub handle: Option<String>,
+    pub avatar_url: Option<String>,
+    pub enabled: bool,
+    pub note: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    /// Last time a message came through this grant.
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_at: Option<i64>,
+}
+
+/// `GET /projects/{id}/message-access`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrantsDto {
+    pub project_id: String,
+    pub grants: Vec<MessageGrantDto>,
 }
 
 /// One entry in `group_json` → `participants_detail`.
@@ -739,6 +773,15 @@ pub struct CallDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub token_expires_at: Option<i64>,
+    /// `"open"` = anyone may speak; `"hosted"` = only the host and invited speakers (bigger groups).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speak_mode: Option<String>,
+    /// People the host invited to speak. The host is `started_by` and is not listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invited_speakers: Vec<SenderDto>,
+    /// Whether the requesting user may publish audio (set when a join token is minted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_speak: Option<bool>,
 }
 
 /// `POST …/calls` success: new call (201) or join the live one (200).
@@ -982,7 +1025,9 @@ pub struct SecretAccessDto {
     pub item_hosts: Option<Vec<VaultItemHostDto>>,
 }
 
-/// Director card on `secret.directors[]`.
+/// One person on a secret's People list (`secret.people[]`; `secret.directors[]` is the same
+/// list under its #1041 name, kept one release). The new fields are optional so a client built
+/// after this change still reads a relay built before it.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SecretDirectorDto {
@@ -993,6 +1038,21 @@ pub struct SecretDirectorDto {
     pub note: String,
     #[typeshare(serialized_as = "I54")]
     pub created_at: i64,
+    /// Row switch (absent = on).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub disabled_at: Option<i64>,
+    /// `all` or `chat` (absent = all).
+    #[serde(default)]
+    pub scope: Option<SecretAccessScopeDto>,
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_asked_at: Option<i64>,
+    /// `settings | card:<request id>` (absent = settings).
+    #[serde(default)]
+    pub created_from: Option<String>,
 }
 
 /// Secret as clients see it (`secret_json`). Never carries a secret value.
@@ -1023,7 +1083,14 @@ pub struct SecretDto {
     #[serde(rename = "ref")]
     pub secret_ref: String,
     pub agents: Vec<SecretAccessDto>,
+    /// Same list as `people`; the #1041 name, kept one release.
     pub directors: Vec<SecretDirectorDto>,
+    /// People who may ask an agent with access to use this secret (spec §7.7).
+    #[serde(default)]
+    pub people: Vec<SecretDirectorDto>,
+    /// `refuse | card`: what a non-listed person's ask does (absent = refuse).
+    #[serde(default)]
+    pub others_ask: Option<String>,
 }
 
 /// Target block on a secret request.
@@ -1058,6 +1125,13 @@ pub struct SecretRequestDto {
     pub decided_at: Option<i64>,
     #[typeshare(serialized_as = "I54")]
     pub expires_at: i64,
+    /// The person who asked the agent, when it was not the owner (spec §7.7).
+    #[serde(default)]
+    pub asked_by: Option<String>,
+    #[serde(default)]
+    pub asked_by_handle: Option<String>,
+    #[serde(default)]
+    pub asked_by_name: Option<String>,
 }
 
 /// One audit row (`activity[]`). `detail` stays free-form (`#[typeshare(skip)]`).

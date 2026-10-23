@@ -456,6 +456,7 @@ pub fn new_chat_sheet(
     }
 
     let title = match (&add_to, group_mode, &invite_into) {
+        (Some(target), _, _) if target.is_secret => "Give a person access".to_string(),
         (Some(target), _, _) => format!("Add members to {}", target.name),
         (None, true, _) => "New group".to_string(),
         (None, false, Some(name)) => format!("Invite to {name}"),

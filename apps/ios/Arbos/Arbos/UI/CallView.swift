@@ -253,15 +253,30 @@ struct CallScreen: View {
                 .foregroundStyle(theme.muted)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 24)
-            if !calls.tiles.isEmpty {
+            if calls.call?.isHostedSpeak == true, calls.call?.canSpeak == false {
+                Text("Waiting for the host to invite you to speak")
+                    .font(theme.font(Theme.small))
+                    .foregroundStyle(theme.muted)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            } else if !calls.tiles.isEmpty {
                 Text("\(calls.tiles.count + 1) in the call").font(theme.font(Theme.small)).foregroundStyle(theme.muted)
             }
         }
         .padding(.top, 12)
     }
 
+    private var iAmHost: Bool {
+        calls.call?.isHost(model.user?.id) == true
+    }
+
     private func personTile(_ person: CallPerson, videoTrack: VideoTrack?, cameraOn: Bool, micOn: Bool, speaking: Bool, height: CGFloat) -> some View {
         let avatar = min(64, max(28, height * 0.45))
+        let role = calls.call?.speakRole(of: person.id)
+        let canManage = iAmHost
+            && calls.call?.isHostedSpeak == true
+            && person.id != model.user?.id
+            && !person.isAgent
         return ZStack(alignment: .bottomLeading) {
             RoundedRectangle(cornerRadius: 20, style: .continuous).fill(theme.card)
                 .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -271,18 +286,36 @@ struct CallScreen: View {
             } else {
                 CallPersonAvatar(person: person, size: avatar).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            HStack(spacing: 5) {
-                if !micOn { Image(systemName: "mic.slash.fill").font(.system(size: 10, weight: .bold)) }
-                Text(person.displayName).font(theme.font(12, weight: .semibold)).lineLimit(1)
+            VStack(alignment: .leading, spacing: 4) {
+                if let role {
+                    Text(role)
+                        .font(theme.font(10, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(Capsule().fill(.black.opacity(0.45)))
+                }
+                HStack(spacing: 5) {
+                    if !micOn { Image(systemName: "mic.slash.fill").font(.system(size: 10, weight: .bold)) }
+                    Text(person.displayName).font(theme.font(12, weight: .semibold)).lineLimit(1)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Capsule().fill(.black.opacity(0.45)))
             }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Capsule().fill(.black.opacity(0.45)))
             .padding(8)
         }
         .frame(maxWidth: .infinity)
         .frame(height: height)
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .contextMenu {
+            if canManage {
+                if calls.call?.isInvitedSpeaker(person.id) == true {
+                    Button("Remove speak") { Task { await calls.revokeSpeaker(person.id) } }
+                } else {
+                    Button("Invite to speak") { Task { await calls.inviteSpeaker(person.id) } }
+                }
+            }
+        }
     }
 
     /// Our camera: the live track, or a quiet placeholder until it is published.
@@ -307,9 +340,18 @@ struct CallScreen: View {
         return p
     }
 
+    private var listenOnly: Bool {
+        calls.call?.isHostedSpeak == true && calls.call?.canSpeak == false
+    }
+
     private var controls: some View {
         HStack(spacing: 24) {
-            control(icon: calls.muted ? "mic.slash.fill" : "mic.fill", label: calls.muted ? "Unmute" : "Mute", on: calls.muted) {
+            control(
+                icon: (calls.muted || listenOnly) ? "mic.slash.fill" : "mic.fill",
+                label: listenOnly ? "Listen only" : (calls.muted ? "Unmute" : "Mute"),
+                on: calls.muted || listenOnly
+            ) {
+                guard !listenOnly else { return }
                 Task { await calls.toggleMute() }
             }
             control(icon: calls.cameraOn ? "video.fill" : "video.slash.fill", label: calls.cameraOn ? "Camera off" : "Camera on", on: !calls.cameraOn) {

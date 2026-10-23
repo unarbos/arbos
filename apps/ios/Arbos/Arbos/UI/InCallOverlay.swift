@@ -82,8 +82,17 @@ struct InCallOverlay: View {
         .accessibilityLabel(label)
     }
 
+    private var listenOnly: Bool {
+        calls.call?.isHostedSpeak == true && calls.call?.canSpeak == false
+    }
+
     private var muteButton: some View {
-        roundButton(calls.muted ? "mic.slash.fill" : "mic.fill", filled: calls.muted, label: calls.muted ? "Unmute" : "Mute") {
+        roundButton(
+            (calls.muted || listenOnly) ? "mic.slash.fill" : "mic.fill",
+            filled: calls.muted || listenOnly,
+            label: listenOnly ? "Listen only" : (calls.muted ? "Unmute" : "Mute")
+        ) {
+            guard !listenOnly else { return }
             Task { await calls.toggleMute() }
         }
     }

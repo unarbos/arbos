@@ -573,6 +573,30 @@ final class RelayAPI {
         return (resp.ended, Int(resp.duration_s))
     }
 
+    /// `POST /calls/{id}/speakers {user_id}` — host invites someone to speak on a hosted group call.
+    func inviteSpeaker(callId: String, userId: String) async throws -> Call {
+        let data = try await request("POST", "/calls/\(callId)/speakers", body: ["user_id": userId]).0
+        do {
+            let env = try JSONDecoder().decode(CallEnvelopeDto.self, from: data)
+            return Call(dto: env.call)
+        } catch {
+            NSLog("CallEnvelopeDto inviteSpeaker: \(error)")
+            throw RelayError(status: 0, message: "Bad call response")
+        }
+    }
+
+    /// `DELETE /calls/{id}/speakers/{user_id}` — host revokes speak permission.
+    func revokeSpeaker(callId: String, userId: String) async throws -> Call {
+        let data = try await request("DELETE", "/calls/\(callId)/speakers/\(userId)").0
+        do {
+            let env = try JSONDecoder().decode(CallEnvelopeDto.self, from: data)
+            return Call(dto: env.call)
+        } catch {
+            NSLog("CallEnvelopeDto revokeSpeaker: \(error)")
+            throw RelayError(status: 0, message: "Bad call response")
+        }
+    }
+
     /// `GET /calls/{id}` → the call, also after it ended (no token then).
     func call(_ callId: String) async throws -> Call {
         let data = try await request("GET", "/calls/\(callId)").0

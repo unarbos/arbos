@@ -227,6 +227,23 @@ impl Agent {
                     tracing::warn!(error = %e, "group_message push failed");
                 }
             }
+            // Agent-to-agent messaging: another agent wrote into this chat / answered this agent /
+            // the pair hit its hourly cap.
+            "agent_message" => {
+                if let Err(e) = self.handle_agent_message(payload).await {
+                    tracing::warn!(error = %e, "agent_message push failed");
+                }
+            }
+            "agent_reply" => {
+                if let Err(e) = self.handle_agent_reply(payload).await {
+                    tracing::warn!(error = %e, "agent_reply push failed");
+                }
+            }
+            "agent_message_paused" => {
+                if let Err(e) = self.handle_agent_message_paused(payload).await {
+                    tracing::warn!(error = %e, "agent_message_paused push failed");
+                }
+            }
             // D83: the owner flipped a switch, paused everything, replaced a value or answered
             // a card; the grants come from the relay again at once.
             "secret_access_changed"

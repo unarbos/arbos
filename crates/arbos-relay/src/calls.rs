@@ -5,7 +5,11 @@
 //! Endpoints (bearer = device access token): `POST /chats/{id}/calls` and
 //! `POST /projects/{p}/chats/{c}/calls` (start, or join the live one), `GET /chats/{id}/call`
 //! (+ projects form), `GET /calls/{id}`, `POST /calls/{id}/join`, `POST /calls/{id}/leave`,
+//! `POST /calls/{id}/speakers`, `DELETE /calls/{id}/speakers/{user_id}`,
 //! `POST/DELETE /devices/{id}/voip`, `POST /livekit/webhook`, `GET /admin/calls`.
+//!
+//! Bigger group calls use hosted speak: the starter is the host speaker; they invite others
+//! with `POST …/speakers`. Everyone else joins listen-only (`canPublish: false`).
 //!
 //! Signalling: `call_started` / `call_ended` on `/me/pushes`, an APNs alert with category
 //! `ARBOS_CALL`, and a PushKit VoIP push on start. System lines in the chat are written by the
@@ -156,6 +160,45 @@ pub fn call_json_public(state: &AppState, call: &CallRow) -> Value {
     serde_json::to_value(call_dto(state, call, None, None)).expect("CallDto")
 }
 
+/// Bigger group calls use hosted speak: only the host and invited speakers may publish.
+/// 1:1 and tiny chats stay open-mic (`speak_mode: "open"`).
+fn speak_hosted(state: &AppState, call: &CallRow) -> bool {
+    let chat = chat_ref_of(call);
+    let humans = members(state, &chat);
+    if humans.len() >= 3 {
+        return true;
+    }
+    if call.project_id.is_none() {
+        if let Ok(Some(c)) = state.db.people_chat(&call.chat_id) {
+            return c.kind == "group";
+        }
+    }
+    false
+}
+
+fn invited_speaker_ids(state: &AppState, call_id: &str) -> Vec<String> {
+    state.db.call_speakers(call_id).unwrap_or_default()
+}
+
+fn user_can_speak(state: &AppState, call: &CallRow, user_id: &str) -> bool {
+    if !speak_hosted(state, call) {
+        return true;
+    }
+    if user_id == call.started_by {
+        return true;
+    }
+    invited_speaker_ids(state, &call.id)
+        .iter()
+        .any(|u| u == user_id)
+}
+
+fn invited_speakers_dto(state: &AppState, call: &CallRow) -> Vec<SenderDto> {
+    invited_speaker_ids(state, &call.id)
+        .iter()
+        .map(|u| Sender::user(state, u).dto())
+        .collect()
+}
+
 /// The call object; with a fresh token for `for_user` when the call is live.
 /// `platform` (from `X-Arbos-Client`) is written into LiveKit participant metadata so the
 /// voice agent can say where each person is calling from.
@@ -165,6 +208,7 @@ pub(crate) fn call_dto(
     for_user: Option<&str>,
     platform: Option<&str>,
 ) -> CallDto {
+    let hosted = speak_hosted(state, call);
     let mut dto = CallDto {
         call_id: call.id.clone(),
         chat_id: call.chat_id.clone(),
@@ -190,6 +234,13 @@ pub(crate) fn call_dto(
         app_version: call.app_version.clone(),
         token: None,
         token_expires_at: None,
+        speak_mode: Some(if hosted { "hosted" } else { "open" }.into()),
+        invited_speakers: if hosted {
+            invited_speakers_dto(state, call)
+        } else {
+            Vec::new()
+        },
+        can_speak: None,
     };
     if let (Some(lk), Some(user), true) = (&state.livekit, for_user, call.active()) {
         let me = Sender::user(state, user);
@@ -205,7 +256,10 @@ pub(crate) fn call_dto(
         if let Some(p) = plat {
             meta["platform"] = json!(p);
         }
-        let (token, exp) = lk.join_token(&call.room, &identity_of(user), &me.name, &meta);
+        let can_speak = user_can_speak(state, call, user);
+        dto.can_speak = Some(can_speak);
+        let (token, exp) =
+            lk.join_token(&call.room, &identity_of(user), &me.name, &meta, can_speak);
         dto.token = Some(token);
         dto.token_expires_at = Some(exp);
     }
@@ -868,6 +922,109 @@ pub async fn leave_call(
     .into_response()
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct SpeakerBody {
+    pub user_id: Option<String>,
+}
+
+/// `POST /calls/{id}/speakers {"user_id"}` — host invites someone to speak on a hosted group call.
+pub async fn invite_speaker(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Option<Json<SpeakerBody>>,
+) -> Response {
+    let (device, me, call) = match member_call(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if !call.active() {
+        return api_error(StatusCode::GONE, "call_ended", "this call has ended");
+    }
+    if me != call.started_by {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_host",
+            "only the host can invite speakers",
+        );
+    }
+    if !speak_hosted(&state, &call) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "open_mic",
+            "this call lets everyone speak",
+        );
+    }
+    let Some(user_id) = body
+        .and_then(|b| b.0.user_id)
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+    else {
+        return api_error(StatusCode::BAD_REQUEST, "bad_request", "user_id required");
+    };
+    if user_id == call.started_by {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "already_host",
+            "the host already speaks",
+        );
+    }
+    if !is_member(&state, &chat_ref_of(&call), &user_id) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "not_member",
+            "that person is not in this chat",
+        );
+    }
+    let _ = state.db.add_call_speaker(&call.id, &user_id);
+    if let Some(lk) = &state.livekit {
+        lk.update_publish(&state.http, &call.room, &identity_of(&user_id), true)
+            .await;
+    }
+    let (platform, _) = client_identity(&state, &headers, &device);
+    Json(to_json(CallEnvelopeDto {
+        call: call_dto(&state, &call, Some(&me), platform.as_deref()),
+    }))
+    .into_response()
+}
+
+/// `DELETE /calls/{id}/speakers/{user_id}` — host revokes speak permission.
+pub async fn revoke_speaker(
+    State(state): State<AppState>,
+    principal: Principal,
+    Path((id, user_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let (device, me, call) = match member_call(&state, &principal, &id) {
+        Ok(v) => v,
+        Err(r) => return *r,
+    };
+    if !call.active() {
+        return api_error(StatusCode::GONE, "call_ended", "this call has ended");
+    }
+    if me != call.started_by {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "not_host",
+            "only the host can change who speaks",
+        );
+    }
+    if user_id == call.started_by {
+        return api_error(StatusCode::BAD_REQUEST, "is_host", "the host always speaks");
+    }
+    let _ = state.db.remove_call_speaker(&call.id, &user_id);
+    if let Some(lk) = &state.livekit {
+        lk.update_publish(&state.http, &call.room, &identity_of(&user_id), false)
+            .await;
+    }
+    let (platform, _) = client_identity(&state, &headers, &device);
+    Json(to_json(CallEnvelopeDto {
+        call: call_dto(&state, &call, Some(&me), platform.as_deref()),
+    }))
+    .into_response()
+}
+
 // ---- VoIP tokens ----------------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -1365,6 +1522,9 @@ mod tests {
         assert_eq!(v["call"]["participants"].as_array().unwrap().len(), 2);
         let claims = crate::livekit::claims_of(v["call"]["token"].as_str().unwrap()).unwrap();
         assert_eq!(claims["sub"], format!("u_{bob}"));
+        assert_eq!(v["call"]["speak_mode"], "open");
+        assert_eq!(v["call"]["can_speak"], true);
+        assert_eq!(claims["video"]["canPublish"], true);
 
         // Carol can neither join nor read it.
         let r = join_call(
@@ -1430,6 +1590,148 @@ mod tests {
         assert_eq!(r.status(), StatusCode::GONE);
         let r = people_chat_call(State(state.clone()), alice_dev, Path(chat)).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Hosted speak on a group call: only the host publishes until they invite someone.
+    #[tokio::test]
+    async fn group_call_host_invites_speakers() {
+        let mut state = test_state(AuthMode::Github);
+        with_livekit(&mut state);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, bob_dev) = person(&state, 2);
+        let (_carol, carol_dev) = person(&state, 3);
+        let r = crate::people::chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(crate::people::CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user2".into(), "user3".into()],
+                agent_ids: vec![],
+                title: Some("Speakers".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .expect("group")
+            .chat
+            .id;
+
+        let v = body_json(
+            start_people_call(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(chat.clone()),
+                HeaderMap::new(),
+                Some(Json(StartBody {
+                    kind: Some("voice".into()),
+                })),
+            )
+            .await,
+        )
+        .await;
+        let call_id = v["call"]["call_id"].as_str().unwrap().to_owned();
+        assert_eq!(v["call"]["speak_mode"], "hosted");
+        assert_eq!(v["call"]["can_speak"], true);
+        assert!(v["call"]["invited_speakers"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .is_empty());
+        let host_claims = crate::livekit::claims_of(v["call"]["token"].as_str().unwrap()).unwrap();
+        assert_eq!(host_claims["video"]["canPublish"], true);
+
+        let v = body_json(
+            join_call(
+                State(state.clone()),
+                bob_dev.clone(),
+                Path(call_id.clone()),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["call"]["speak_mode"], "hosted");
+        assert_eq!(v["call"]["can_speak"], false);
+        let bob_claims = crate::livekit::claims_of(v["call"]["token"].as_str().unwrap()).unwrap();
+        assert_eq!(bob_claims["video"]["canPublish"], false);
+
+        // Non-host cannot invite.
+        let r = invite_speaker(
+            State(state.clone()),
+            bob_dev.clone(),
+            Path(call_id.clone()),
+            HeaderMap::new(),
+            Some(Json(SpeakerBody {
+                user_id: Some(bob.clone()),
+            })),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        let v = body_json(
+            invite_speaker(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path(call_id.clone()),
+                HeaderMap::new(),
+                Some(Json(SpeakerBody {
+                    user_id: Some(bob.clone()),
+                })),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["call"]["invited_speakers"].as_array().unwrap().len(), 1);
+        assert_eq!(v["call"]["invited_speakers"][0]["id"], bob);
+
+        let v = body_json(
+            join_call(
+                State(state.clone()),
+                bob_dev.clone(),
+                Path(call_id.clone()),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["call"]["can_speak"], true);
+        let bob_claims = crate::livekit::claims_of(v["call"]["token"].as_str().unwrap()).unwrap();
+        assert_eq!(bob_claims["video"]["canPublish"], true);
+
+        let v = body_json(
+            revoke_speaker(
+                State(state.clone()),
+                alice_dev.clone(),
+                Path((call_id.clone(), bob.clone())),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert!(v["call"]["invited_speakers"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .is_empty());
+
+        // Carol still listen-only; open-mic DMs stay open (covered above).
+        let v = body_json(
+            join_call(
+                State(state.clone()),
+                carol_dev.clone(),
+                Path(call_id),
+                HeaderMap::new(),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(v["call"]["can_speak"], false);
     }
 
     #[tokio::test]

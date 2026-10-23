@@ -40,6 +40,7 @@ gpui_platform = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb
 gpui_tokio = { git = "https://github.com/zeronsh/zui", rev = "361ff20b919fdfb80199ee6d9aed725300cb7d54" }
 
 unicode-segmentation = "1"
+unicode-normalization = "0.1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico", "gif", "webp"] }
 env_logger = "0.11"
 

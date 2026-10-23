@@ -410,9 +410,9 @@ fn access_json(state: &AppState, a: &Access) -> Value {
     to_json(access_dto(state, a))
 }
 
-/// One director row for Settings / the box: id, handle, name, and the usage note the agent sees.
-pub(crate) fn director_dto(state: &AppState, d: &SecretDirector) -> SecretDirectorDto {
-    let card = state.db.user_card(&d.user_id).ok().flatten();
+/// Handle (no `@`) and display name of a user, for People rows and "asked by" lines.
+pub(crate) fn user_handle_name(state: &AppState, user_id: &str) -> (String, Option<String>) {
+    let card = state.db.user_card(user_id).ok().flatten();
     let handle = card
         .as_ref()
         .map(|c| c.handle.trim_start_matches('@').to_owned())
@@ -421,6 +421,14 @@ pub(crate) fn director_dto(state: &AppState, d: &SecretDirector) -> SecretDirect
         .as_ref()
         .and_then(|c| c.name.clone())
         .filter(|n| !n.is_empty());
+    (handle, name)
+}
+
+/// One People row for Settings / the box: id, handle, name, switch, scope, and the usage note
+/// the agent sees.
+pub(crate) fn director_dto(state: &AppState, d: &SecretDirector) -> SecretDirectorDto {
+    let card = state.db.user_card(&d.user_id).ok().flatten();
+    let (handle, name) = user_handle_name(state, &d.user_id);
     let avatar_url = card.as_ref().and_then(|c| c.avatar_url.clone());
     SecretDirectorDto {
         user_id: d.user_id.clone(),
@@ -429,6 +437,14 @@ pub(crate) fn director_dto(state: &AppState, d: &SecretDirector) -> SecretDirect
         avatar_url,
         note: d.note.clone(),
         created_at: d.created_at,
+        enabled: Some(d.enabled),
+        disabled_at: d.disabled_at,
+        scope: Some(SecretAccessScopeDto {
+            kind: d.scope_kind.clone(),
+            chat_id: d.scope_chat_id.clone(),
+        }),
+        last_asked_at: d.last_asked_at,
+        created_from: Some(d.created_from.clone()),
     }
 }
 
@@ -484,7 +500,9 @@ pub(crate) fn secret_dto(state: &AppState, s: &Secret) -> SecretDto {
             },
         ),
         agents,
+        people: directors.clone(),
         directors,
+        others_ask: Some(s.others_ask.clone()),
     }
 }
 
@@ -500,6 +518,7 @@ fn secret_envelope(state: &AppState, s: &Secret) -> SecretEnvelopeDto {
 }
 
 pub(crate) fn request_dto(state: &AppState, r: &SecretRequest) -> SecretRequestDto {
+    let asked = r.asked_by.as_deref().map(|u| user_handle_name(state, u));
     let project_name = state
         .db
         .project(&r.project_id)
@@ -525,6 +544,9 @@ pub(crate) fn request_dto(state: &AppState, r: &SecretRequest) -> SecretRequestD
         created_at: r.created_at,
         decided_at: r.decided_at,
         expires_at: r.expires_at,
+        asked_by: r.asked_by.clone(),
+        asked_by_handle: asked.as_ref().map(|(h, _)| h.clone()),
+        asked_by_name: asked.and_then(|(_, n)| n),
     }
 }
 
@@ -617,6 +639,7 @@ pub(crate) fn paused_dto(settings: &SecretsSettings) -> SecretsPausedDto {
 // ---- the one rule: Access on, host allowed, not paused ---------------------------------------
 
 /// Why a use was refused (strings from spec §8.8, never a value).
+#[derive(Debug)]
 pub enum Refusal {
     Paused,
     NoSuch,
@@ -626,8 +649,11 @@ pub enum Refusal {
     HostNotAllowed(Vec<String>),
     Expired,
     AskEveryTime,
-    /// A non-owner directed the agent and is not on this secret's directors list.
+    /// A non-owner asked the agent and is not on this secret's People list (row on, scope fits).
     NotDirector,
+    /// Same, but the secret's `others_ask` is `card`: the agent must call `secrets_request` so
+    /// the owner gets a card naming who asked.
+    AskOwnerFirst,
 }
 
 impl Refusal {
@@ -653,7 +679,10 @@ impl Refusal {
                 format!("{name}: asks every time — call secrets_request first.")
             }
             Refusal::NotDirector => format!(
-                "{name}: the person directing you is not allowed to use this secret. Only the owner, or people the owner added under Who can direct, may. Tell them, and do not retry with this secret."
+                "{name}: the person asking you is not on this secret's People list. Only the owner, or people the owner added under People on the secret's page, may ask for it. Tell them plainly, and do not retry with this secret for them."
+            ),
+            Refusal::AskOwnerFirst => format!(
+                "{name}: the person asking you is not on this secret's People list — call secrets_request first so the owner gets a card, then wait for the answer."
             ),
         }
     }
@@ -662,24 +691,41 @@ impl Refusal {
         match self {
             Refusal::Paused => "paused",
             Refusal::NoSuch => "not_found",
-            Refusal::NoAccess
-            | Refusal::TurnedOff
-            | Refusal::WrongChat
-            | Refusal::AskEveryTime
-            | Refusal::NotDirector => "no_access",
+            Refusal::NoAccess | Refusal::TurnedOff | Refusal::WrongChat | Refusal::AskEveryTime => {
+                "no_access"
+            }
+            Refusal::NotDirector | Refusal::AskOwnerFirst => "not_allowed_person",
             Refusal::HostNotAllowed(_) => "host_not_allowed",
             Refusal::Expired => "expired",
         }
     }
 }
 
-/// May `asked_by` direct use of `s`? The owner always may. Anyone else needs a directors row.
-/// `None` means no other person is directing (owner 1:1 chat, or asker unknown) — allowed.
-pub(crate) fn may_direct(state: &AppState, s: &Secret, asked_by: Option<&str>) -> bool {
+/// May `asked_by` ask for `s` in `chat_id`? The owner always may. Anyone else needs a People
+/// row that is on and whose scope covers the chat. `None` means no other person is asking
+/// (owner 1:1 chat, or asker unknown) — allowed.
+pub(crate) fn may_direct(
+    state: &AppState,
+    s: &Secret,
+    asked_by: Option<&str>,
+    chat_id: Option<&str>,
+) -> bool {
     match asked_by.map(str::trim).filter(|u| !u.is_empty()) {
         None => true,
         Some(uid) if uid == s.user_id => true,
-        Some(uid) => state.db.is_secret_director(&s.id, uid).unwrap_or(false),
+        Some(uid) => state
+            .db
+            .is_secret_director(&s.id, uid, chat_id)
+            .unwrap_or(false),
+    }
+}
+
+/// The refusal for a person who is not on the list: refuse flat, or send the agent to ask.
+pub(crate) fn not_listed(s: &Secret) -> Refusal {
+    if s.others_ask == "card" {
+        Refusal::AskOwnerFirst
+    } else {
+        Refusal::NotDirector
     }
 }
 
@@ -708,11 +754,14 @@ pub(crate) fn decide_use(
         return Err(Refusal::Expired);
     }
     let access = state.db.access(project_id, "secret", &s.id).ok().flatten();
+    let asker = asked_by.map(str::trim).filter(|u| !u.is_empty());
     let once = state
         .db
         .allowed_once_for(project_id, &s.id, Some(host), use_kind)
         .ok()
-        .flatten();
+        .flatten()
+        // A once-grant given for one person's ask is spent only by that person's ask.
+        .filter(|r| r.asked_by.is_none() || r.asked_by.as_deref() == asker);
     // Owner already approved this specific request card — that decision stands.
     if let Some(once) = once {
         return Ok(Allowed {
@@ -721,8 +770,8 @@ pub(crate) fn decide_use(
             pin_host: false,
         });
     }
-    if !may_direct(state, s, asked_by) {
-        return Err(Refusal::NotDirector);
+    if !may_direct(state, s, asked_by, chat_id) {
+        return Err(not_listed(s));
     }
     let Some(a) = access else {
         return Err(Refusal::NoAccess);
@@ -757,6 +806,9 @@ pub(crate) fn decide_use(
 }
 
 /// After an allowed use: spend a one-time grant, pin a first host, touch timestamps, audit.
+/// `asked_by` is the person whose ask this use served (None = the owner); it lands on the
+/// audit row and stamps their People row.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn after_use(
     state: &AppState,
     s: &Secret,
@@ -764,8 +816,15 @@ pub(crate) fn after_use(
     host: &str,
     use_kind: &str,
     chat_id: Option<&str>,
+    asked_by: Option<&str>,
     allowed: &Allowed,
 ) {
+    let asked_by = asked_by
+        .map(str::trim)
+        .filter(|u| !u.is_empty() && *u != s.user_id);
+    if let Some(uid) = asked_by {
+        let _ = state.db.touch_secret_director(&s.id, uid);
+    }
     if let Some(once) = &allowed.once {
         let _ = state.db.consume_allowed_once(&once.id);
     }
@@ -814,9 +873,21 @@ pub(crate) fn after_use(
             access_id: allowed.access.as_ref().map(|a| a.id.clone()),
             use_kind: Some(use_kind.to_owned()),
             host: Some(host.to_owned()),
+            detail: asked_by_detail(state, asked_by),
             ..entry("used", s, &format!("agent:{project_id}"))
         },
     );
+}
+
+/// `{ asked_by, asked_by_handle }` for an audit row, or `{}` when the owner asked.
+pub(crate) fn asked_by_detail(state: &AppState, asked_by: Option<&str>) -> Value {
+    match asked_by {
+        Some(uid) => {
+            let (handle, _) = user_handle_name(state, uid);
+            json!({ "asked_by": uid, "asked_by_handle": handle })
+        }
+        None => json!({}),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -828,8 +899,11 @@ pub(crate) fn audit_refusal(
     project_id: &str,
     host: &str,
     use_kind: &str,
+    asked_by: Option<&str>,
     why: &Refusal,
 ) {
+    let mut detail = asked_by_detail(state, asked_by.filter(|u| *u != user_id));
+    detail["reason"] = json!(why.kind());
     audit(
         state,
         user_id,
@@ -844,7 +918,7 @@ pub(crate) fn audit_refusal(
             use_kind: Some(use_kind.to_owned()),
             host: Some(host.to_owned()),
             by: format!("agent:{project_id}"),
-            detail: json!({ "reason": why.kind() }),
+            detail,
             ..Default::default()
         },
     );
@@ -1112,6 +1186,7 @@ pub async fn create(
         // Real value in the environment is a choice the owner makes; it also turns off
         // Ask every time, which has nothing to ask once the value is just there.
         inject_env: b.inject_env.unwrap_or(false),
+        others_ask: "refuse".into(),
     };
     let v1 = SecretVersion {
         secret_id: id.clone(),
@@ -1262,6 +1337,9 @@ pub struct PatchBody {
     /// time are exclusive: turning either on turns the other off.
     #[serde(default)]
     pub inject_env: Option<bool>,
+    /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
+    #[serde(default)]
+    pub others_ask: Option<String>,
     /// `null` clears; absent keeps.
     #[serde(default, deserialize_with = "deserialize_double_option")]
     pub expires_at: Option<Option<i64>>,
@@ -1326,12 +1404,26 @@ pub async fn patch(
     if let Some(e) = b.expires_at {
         s.expires_at = e;
     }
+    let others_changed = b.others_ask.as_deref().is_some_and(|o| o != s.others_ask);
+    if let Some(o) = b.others_ask.as_deref() {
+        s.others_ask = match o {
+            "card" | "ask" | "ask_me" => "card".to_owned(),
+            "refuse" => "refuse".to_owned(),
+            _ => {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    "others_ask must be refuse or card",
+                ))
+            }
+        };
+    }
     state.db.update_secret(&s).map_err(internal)?;
     audit(
         &state,
         &user_id,
         AuditEntry {
-            detail: json!({ "hosts": s.hosts, "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at }),
+            detail: json!({ "hosts": s.hosts, "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at, "others_ask": s.others_ask }),
             ..entry(
                 if inject_changed {
                     if s.inject_env {
@@ -1347,7 +1439,7 @@ pub async fn patch(
             )
         },
     );
-    if hosts_changed || inject_changed {
+    if hosts_changed || inject_changed || others_changed {
         for a in state
             .db
             .accesses_of_target("secret", &s.id)
@@ -1562,14 +1654,77 @@ pub struct DirectorBody {
     /// Optional: resolve the person by GitHub handle when the path has no user id yet.
     #[serde(default)]
     pub handle: Option<String>,
-    /// Constraints the agent must honour when this person directs use
+    /// Constraints the agent must honour when this person asks
     /// (e.g. "only 1k usd of credit usage per day").
     #[serde(default)]
     pub note: Option<String>,
+    /// The row's switch (absent = leave as is; a new row is on).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// `{ "kind": "all" | "chat", "chat_id"? }` (absent = leave as is; a new row is `all`).
+    #[serde(default)]
+    pub scope: Option<Value>,
 }
 
-/// `PUT /secrets/{id}/directors/{director_user_id}` → `{ secret }`.
-/// Body may carry `note`. The owner cannot add themselves (they always may direct).
+/// Create or update one People row from Settings (`PUT …/people/{user_id}` and the legacy
+/// `PUT …/directors/{user_id}`): note, switch, scope. The owner cannot add themselves.
+fn upsert_person(
+    state: &AppState,
+    user_id: &str,
+    s: &Secret,
+    person_id: &str,
+    b: DirectorBody,
+    handle_for_audit: Option<&str>,
+) -> Result<(), ApiErr> {
+    let now = now_ms();
+    let existing = state
+        .db
+        .secret_director(&s.id, person_id)
+        .map_err(internal)?;
+    let mut d = existing
+        .clone()
+        .unwrap_or_else(|| SecretDirector::new(&s.id, person_id, "", now));
+    if let Some(n) = b.note {
+        d.note = n.chars().take(500).collect();
+    }
+    if let Some(sc) = b.scope.as_ref() {
+        let kind = sc.get("kind").and_then(Value::as_str).unwrap_or("all");
+        d.scope_kind = if kind == "chat" { "chat" } else { "all" }.into();
+        d.scope_chat_id = if kind == "chat" {
+            sc.get("chat_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .filter(|c| !c.is_empty())
+        } else {
+            None
+        };
+    }
+    let was_on = existing.as_ref().is_none_or(|e| !e.enabled);
+    if let Some(on) = b.enabled {
+        d.enabled = on;
+        d.disabled_at = if on { None } else { Some(now) };
+    }
+    state.db.upsert_secret_director(&d).map_err(internal)?;
+    let flipped = existing.as_ref().map(|e| e.enabled) != Some(d.enabled);
+    if existing.is_none() || flipped || was_on {
+        audit(
+            state,
+            user_id,
+            AuditEntry {
+                detail: json!({ "person_user_id": person_id, "handle": handle_for_audit, "note": d.note, "scope": d.scope_kind }),
+                ..entry(
+                    if d.enabled { "person_on" } else { "person_off" },
+                    s,
+                    &format!("user:{user_id}"),
+                )
+            },
+        );
+    }
+    Ok(())
+}
+
+/// `PUT /secrets/{id}/people/{user_id}` (alias `…/directors/{user_id}`) → `{ secret }`.
+/// Body may carry `note`, `enabled`, `scope`. The owner cannot add themselves (they always may ask).
 pub async fn put_director(
     State(state): State<AppState>,
     principal: Principal,
@@ -1583,51 +1738,28 @@ pub async fn put_director(
         .secret(&user_id, &id)
         .map_err(internal)?
         .ok_or_else(not_found)?;
-    let director_id = director_user_id.trim().to_owned();
-    if director_id.is_empty() || director_id == user_id {
+    let person_id = director_user_id.trim().to_owned();
+    if person_id.is_empty() || person_id == user_id {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "pick someone other than yourself; you already may direct every secret you own",
+            "pick someone other than yourself; you already may ask for every secret you own",
         ));
     }
-    if state.db.user(&director_id).map_err(internal)?.is_none() {
+    if state.db.user(&person_id).map_err(internal)?.is_none() {
         return Err(err(
             StatusCode::NOT_FOUND,
             "not_found",
             "no such person on Arbos",
         ));
     }
-    let now = now_ms();
-    let existing = state
-        .db
-        .secret_directors(&s.id)
-        .map_err(internal)?
-        .into_iter()
-        .find(|d| d.user_id == director_id);
-    let d = SecretDirector {
-        secret_id: s.id.clone(),
-        user_id: director_id.clone(),
-        note: b
-            .note
-            .map(|n| n.chars().take(500).collect())
-            .or_else(|| existing.as_ref().map(|e| e.note.clone()))
-            .unwrap_or_default(),
-        created_at: existing.map(|e| e.created_at).unwrap_or(now),
-    };
-    state.db.upsert_secret_director(&d).map_err(internal)?;
-    audit(
-        &state,
-        &user_id,
-        AuditEntry {
-            detail: json!({ "director_user_id": director_id, "note": d.note }),
-            ..entry("director_on", &s, &format!("user:{user_id}"))
-        },
-    );
+    let (handle, _) = user_handle_name(&state, &person_id);
+    upsert_person(&state, &user_id, &s, &person_id, b, Some(&handle))?;
     Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
-/// `POST /secrets/{id}/directors` → `{ secret }` with body `{ handle, note? }` for the people picker.
+/// `POST /secrets/{id}/people` (alias `…/directors`) → `{ secret }` with body `{ handle, note? }`
+/// for the people picker.
 pub async fn post_director(
     State(state): State<AppState>,
     principal: Principal,
@@ -1645,10 +1777,11 @@ pub async fn post_director(
         .as_deref()
         .map(|h| h.trim().trim_start_matches('@'))
         .filter(|h| !h.is_empty())
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "bad_request", "handle is required"))?;
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "bad_request", "handle is required"))?
+        .to_owned();
     let person = state
         .db
-        .user_by_handle(handle)
+        .user_by_handle(&handle)
         .map_err(internal)?
         .ok_or_else(|| {
             err(
@@ -1657,46 +1790,26 @@ pub async fn post_director(
                 format!("@{handle} is not on Arbos yet"),
             )
         })?;
-    let director_id = person.id.clone();
-    if director_id.is_empty() || director_id == user_id {
+    let person_id = person.id.clone();
+    if person_id.is_empty() || person_id == user_id {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "pick someone other than yourself; you already may direct every secret you own",
+            "pick someone other than yourself; you already may ask for every secret you own",
         ));
     }
-    let now = now_ms();
-    let existing = state
-        .db
-        .secret_directors(&s.id)
-        .map_err(internal)?
-        .into_iter()
-        .find(|d| d.user_id == director_id);
-    let d = SecretDirector {
-        secret_id: s.id.clone(),
-        user_id: director_id.clone(),
-        note: b
-            .note
-            .unwrap_or_default()
-            .chars()
-            .take(500)
-            .collect::<String>(),
-        created_at: existing.map(|e| e.created_at).unwrap_or(now),
+    // Adding from the picker turns the row on and sets the note (empty note overwrites).
+    let body = DirectorBody {
+        handle: None,
+        note: Some(b.note.unwrap_or_default()),
+        enabled: Some(true),
+        scope: b.scope,
     };
-    // Empty note on POST still overwrites when re-adding; owner is setting the constraint.
-    state.db.upsert_secret_director(&d).map_err(internal)?;
-    audit(
-        &state,
-        &user_id,
-        AuditEntry {
-            detail: json!({ "director_user_id": director_id, "handle": handle, "note": d.note }),
-            ..entry("director_on", &s, &format!("user:{user_id}"))
-        },
-    );
+    upsert_person(&state, &user_id, &s, &person_id, body, Some(&handle))?;
     Ok(Json(secret_envelope(&state, &s)).into_response())
 }
 
-/// `DELETE /secrets/{id}/directors/{director_user_id}` → `{ secret }`.
+/// `DELETE /secrets/{id}/people/{user_id}` (alias `…/directors/{user_id}`) → `{ secret }`.
 pub async fn delete_director(
     State(state): State<AppState>,
     principal: Principal,
@@ -1708,17 +1821,19 @@ pub async fn delete_director(
         .secret(&user_id, &id)
         .map_err(internal)?
         .ok_or_else(not_found)?;
+    let person_id = director_user_id.trim().to_owned();
+    let (handle, _) = user_handle_name(&state, &person_id);
     let removed = state
         .db
-        .delete_secret_director(&s.id, director_user_id.trim())
+        .delete_secret_director(&s.id, &person_id)
         .map_err(internal)?;
     if removed {
         audit(
             &state,
             &user_id,
             AuditEntry {
-                detail: json!({ "director_user_id": director_user_id }),
-                ..entry("director_off", &s, &format!("user:{user_id}"))
+                detail: json!({ "person_user_id": person_id, "handle": handle, "removed": true }),
+                ..entry("person_off", &s, &format!("user:{user_id}"))
             },
         );
     }
@@ -2059,6 +2174,42 @@ pub(crate) async fn decide(
             state.db.upsert_access(&a).map_err(internal)?;
             after_access_change(state, s, &a);
             access = Some(a);
+            // The ask came from a person who is not the owner: the answer also puts them on
+            // the People list — for this chat, or standing (Jacob, 2026-10-23: "Always allow
+            // @person" adds them).
+            if let Some(person) = rq.asked_by.as_deref().filter(|p| *p != user_id) {
+                let now = now_ms();
+                let existing = state.db.secret_director(&s.id, person).map_err(internal)?;
+                let is_new = existing.is_none();
+                let mut d = existing.unwrap_or_else(|| SecretDirector::new(&s.id, person, "", now));
+                d.enabled = true;
+                d.disabled_at = None;
+                if status == "allowed_chat" {
+                    // A standing row stays standing; a new or chat row covers this chat now.
+                    if is_new || d.scope_kind == "chat" {
+                        d.scope_kind = "chat".into();
+                        d.scope_chat_id = Some(rq.chat_id.clone());
+                    }
+                } else {
+                    d.scope_kind = "all".into();
+                    d.scope_chat_id = None;
+                }
+                if is_new {
+                    d.created_from = format!("card:{}", rq.id);
+                }
+                state.db.upsert_secret_director(&d).map_err(internal)?;
+                let (handle, _) = user_handle_name(state, person);
+                audit(
+                    state,
+                    user_id,
+                    AuditEntry {
+                        request_id: Some(rq.id.clone()),
+                        chat_id: Some(rq.chat_id.clone()),
+                        detail: json!({ "person_user_id": person, "handle": handle, "scope": d.scope_kind }),
+                        ..entry("person_on", s, decided_by)
+                    },
+                );
+            }
         }
     } else if rq.target_kind == "vault" {
         access = crate::vaults::decide_vault_request(state, user_id, &rq, status).await?;
@@ -2108,20 +2259,20 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
         hosts.dedup();
         let enabled = access.as_ref().is_some_and(|a| a.enabled)
             && !s.expires_at.is_some_and(|t| t < now_ms());
-        let directors: Vec<Value> = state
-            .db
-            .secret_directors(&s.id)
-            .unwrap_or_default()
+        let people_rows = state.db.secret_directors(&s.id).unwrap_or_default();
+        // The box only hears about rows that are on; an off row is as if it were not there.
+        let directors: Vec<Value> = people_rows
             .iter()
+            .filter(|d| d.enabled)
             .map(|d| director_json(state, d))
             .collect();
-        // Constraints the agent must honour when a listed director asks: secret note + each
-        // director note (e.g. "only 1k usd of credit usage per day").
+        // Constraints the agent must honour when a listed person asks: secret note + each
+        // person's note (e.g. "only 1k usd of credit usage per day").
         let mut use_notes: Vec<String> = Vec::new();
         if !s.note.trim().is_empty() {
             use_notes.push(s.note.trim().to_owned());
         }
-        for d in state.db.secret_directors(&s.id).unwrap_or_default() {
+        for d in people_rows.iter().filter(|d| d.enabled) {
             let note = d.note.trim();
             if note.is_empty() {
                 continue;
@@ -2137,8 +2288,13 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
                         .unwrap_or_else(|| c.handle.trim_start_matches('@').to_owned())
                 })
                 .unwrap_or_else(|| d.user_id.clone());
-            use_notes.push(format!("When {who} directs you: {note}"));
+            use_notes.push(format!("When {who} asks you: {note}"));
         }
+        let who_may_direct = if s.others_ask == "card" {
+            "the owner, and the people listed (rows that are on). Anyone else: call secrets_request first — the owner gets a card naming who asked."
+        } else {
+            "the owner, and the people listed (rows that are on). Anyone else cannot use this secret; tell them so."
+        };
         items.push(json!({
             "id": s.id, "name": s.name, "env": s.env, "kind": s.kind, "note": s.note, "hosts": hosts,
             "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
@@ -2147,8 +2303,10 @@ pub(crate) fn box_items(state: &AppState, user_id: &str, project_id: &str) -> Ve
             "ask_every_time": s.ask_every_time, "inject_env": s.inject_env, "expires_at": s.expires_at,
             "scope": access.as_ref().map(|a| json!({ "kind": a.scope_kind, "chat_id": a.scope_chat_id })),
             "directors": directors,
+            "people": directors,
+            "others_ask": s.others_ask,
             "use_notes": use_notes,
-            "who_may_direct": "owner, and people listed in directors (everyone else cannot use this secret)",
+            "who_may_direct": who_may_direct,
         }));
     }
     items.extend(crate::vaults::box_items(state, user_id, project_id));
@@ -2380,6 +2538,26 @@ pub async fn box_request(
         .as_deref()
         .map(str::trim)
         .filter(|u| !u.is_empty());
+    // A person who is not on the People list: refuse flat (default), or card the owner.
+    if !may_direct(&state, &s, asked_by, chat_id) && s.others_ask != "card" {
+        let why = Refusal::NotDirector;
+        audit_refusal(
+            &state,
+            &user_id,
+            &s.env,
+            Some(&s),
+            &project_id,
+            host.as_deref().unwrap_or(""),
+            &use_kind,
+            asked_by,
+            &why,
+        );
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            why.kind(),
+            why.message(&s.env, host.as_deref().unwrap_or("")),
+        ));
+    }
     // Standing access covers it: no card, but a decided request row so `values` has a window.
     if !s.ask_every_time {
         if let Ok(allowed) = decide_use(
@@ -2410,6 +2588,7 @@ pub async fn box_request(
                         created_at: now,
                         decided_at: Some(now),
                         expires_at: i64::MAX,
+                        asked_by: None,
                     };
                     state.db.insert_secret_request(&rq).map_err(internal)?;
                     if allowed.pin_host {
@@ -2420,6 +2599,7 @@ pub async fn box_request(
                             host.as_deref().unwrap_or(""),
                             &use_kind,
                             chat_id,
+                            asked_by,
                             &Allowed {
                                 access: Some(a.clone()),
                                 once: None,
@@ -2459,8 +2639,11 @@ pub async fn box_request(
         created_at: now,
         decided_at: None,
         expires_at: now + REQUEST_PENDING_MS,
+        asked_by: asked_by.filter(|u| *u != user_id).map(str::to_owned),
     };
     state.db.insert_secret_request(&rq).map_err(internal)?;
+    let mut detail = asked_by_detail(&state, rq.asked_by.as_deref());
+    detail["purpose"] = json!(rq.purpose);
     audit(
         &state,
         &user_id,
@@ -2470,7 +2653,7 @@ pub async fn box_request(
             request_id: Some(rq.id.clone()),
             use_kind: Some(use_kind.clone()),
             host: host.clone(),
-            detail: json!({ "purpose": rq.purpose }),
+            detail,
             ..entry("requested", &s, &format!("agent:{project_id}"))
         },
     );
@@ -2583,7 +2766,7 @@ pub async fn box_request_values(
         .and_then(|i| state.db.secret(&user_id, i).ok().flatten())
         .ok_or_else(|| err(StatusCode::GONE, "not_found", "the secret was deleted"))?;
     let host = rq.host.clone().unwrap_or_default();
-    // The standing rule still applies at the moment of use. Director was already judged when
+    // The standing rule still applies at the moment of use. The asker was already judged when
     // the owner answered the card (`asked_by` is not re-checked here).
     let allowed = match decide_use(
         &state,
@@ -2595,15 +2778,16 @@ pub async fn box_request_values(
         None,
     ) {
         Ok(a) => a,
-        Err(Refusal::NoAccess | Refusal::AskEveryTime | Refusal::NotDirector)
-            if rq.status == "allowed_once" || rq.status == "allowed_chat" =>
-        {
-            Allowed {
-                access: None,
-                once: None,
-                pin_host: false,
-            }
-        }
+        Err(
+            Refusal::NoAccess
+            | Refusal::AskEveryTime
+            | Refusal::NotDirector
+            | Refusal::AskOwnerFirst,
+        ) if rq.status == "allowed_once" || rq.status == "allowed_chat" => Allowed {
+            access: None,
+            once: None,
+            pin_host: false,
+        },
         Err(why) => {
             audit_refusal(
                 &state,
@@ -2613,6 +2797,7 @@ pub async fn box_request_values(
                 &project_id,
                 &host,
                 "browser_fill",
+                rq.asked_by.as_deref(),
                 &why,
             );
             return Err(err(
@@ -2631,6 +2816,7 @@ pub async fn box_request_values(
         &host,
         "browser_fill",
         Some(rq.chat_id.as_str()),
+        rq.asked_by.as_deref(),
         &allowed,
     );
     Ok(Json(
@@ -2691,6 +2877,7 @@ pub(crate) fn plan_egress(
                     project_id,
                     host,
                     "header",
+                    asked_by,
                     &Refusal::NoSuch,
                 );
                 continue;
@@ -2730,6 +2917,7 @@ pub(crate) fn plan_egress(
                         project_id,
                         host,
                         "header",
+                        asked_by,
                         &why,
                     );
                 }
@@ -2850,6 +3038,7 @@ pub fn migrate_f8(state: &AppState) -> anyhow::Result<()> {
                 last_used_at: it.last_used_at,
                 daytona_secrets: it.daytona_secrets.clone(),
                 inject_env: false,
+                others_ask: "refuse".into(),
             };
             let v1 = SecretVersion {
                 secret_id: s.id.clone(),
@@ -2899,6 +3088,7 @@ pub fn migrate_f8(state: &AppState) -> anyhow::Result<()> {
                             created_at: rq.created_at,
                             decided_at: None,
                             expires_at: now + REQUEST_PENDING_MS,
+                            asked_by: None,
                         })?;
                     }
                     other => audit(
@@ -3124,6 +3314,7 @@ mod tests {
             last_used_at: Some(FIXED_AT + 1_000),
             daytona_secrets: json!({}),
             inject_env: false,
+            others_ask: "refuse".into(),
         };
         let v1 = SecretVersion {
             secret_id: s.id.clone(),
@@ -3159,6 +3350,7 @@ mod tests {
             last_used_at: None,
             daytona_secrets: json!({}),
             inject_env: false,
+            others_ask: "refuse".into(),
         };
         let v1 = SecretVersion {
             secret_id: s.id.clone(),
@@ -3207,10 +3399,8 @@ mod tests {
         state
             .db
             .upsert_secret_director(&SecretDirector {
-                secret_id: secret.id.clone(),
-                user_id: director_id.clone(),
-                note: "Only fixture spend.".into(),
-                created_at: FIXED_AT,
+                last_asked_at: Some(FIXED_AT + 3_000),
+                ..SecretDirector::new(&secret.id, &director_id, "Only fixture spend.", FIXED_AT)
             })
             .unwrap();
 
@@ -3230,6 +3420,7 @@ mod tests {
             created_at: FIXED_AT,
             decided_at: None,
             expires_at: FIXED_AT + REQUEST_PENDING_MS,
+            asked_by: None,
         };
         state.db.insert_secret_request(&request).unwrap();
 
@@ -3502,15 +3693,287 @@ mod tests {
         );
         assert!(Refusal::NotDirector
             .message("LIUM_ALI", "")
-            .contains("not allowed to use this secret"));
+            .contains("not on this secret's People list"));
+        assert!(Refusal::AskOwnerFirst
+            .message("LIUM_ALI", "")
+            .contains("secrets_request first"));
+        assert_eq!(Refusal::NotDirector.kind(), "not_allowed_person");
         assert_eq!(status_for("always"), Some("allowed_always"));
         assert_eq!(status_for("nope"), None);
     }
 
+    /// Owner, agent with standing Access, and three people: Sam (row on), Samir (row off),
+    /// Jules (no row). Returns (state, owner, secret, sam, samir, jules).
+    fn people_setup() -> (AppState, String, Secret, String, String, String) {
+        let state = test_state(AuthMode::Github);
+        let (owner, _) = person(&state, 601);
+        let (sam, _) = person(&state, 602);
+        let (samir, _) = person(&state, 603);
+        let (jules, _) = person(&state, 604);
+        insert_project(&state, &owner, "proj_people", "GigChadAgent");
+        let secret = insert_key_secret(&state, &owner, "sec_people", "Engy", "ENGY_API_KEY");
+        state
+            .db
+            .upsert_access(&Access {
+                id: "acc_people".into(),
+                user_id: owner.clone(),
+                project_id: "proj_people".into(),
+                target_kind: "secret".into(),
+                target_id: secret.id.clone(),
+                note: String::new(),
+                hosts: vec!["api.engy.com".into()],
+                scope_kind: "all".into(),
+                scope_chat_id: None,
+                enabled: true,
+                created_from: "settings".into(),
+                created_at: FIXED_AT,
+                disabled_at: None,
+                last_used_at: None,
+            })
+            .unwrap();
+        state
+            .db
+            .upsert_secret_director(&SecretDirector::new(
+                &secret.id,
+                &sam,
+                "reports only",
+                FIXED_AT,
+            ))
+            .unwrap();
+        state
+            .db
+            .upsert_secret_director(&SecretDirector {
+                enabled: false,
+                disabled_at: Some(FIXED_AT + 1),
+                ..SecretDirector::new(&secret.id, &samir, "", FIXED_AT)
+            })
+            .unwrap();
+        (state, owner, secret, sam, samir, jules)
+    }
+
+    fn verdict(state: &AppState, s: &Secret, asked_by: Option<&str>) -> Result<(), String> {
+        decide_use(
+            state,
+            s,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            asked_by,
+        )
+        .map(|_| ())
+        .map_err(|r| r.kind().to_owned())
+    }
+
     #[test]
-    fn may_direct_owner_and_listed_only() {
-        // Pure shape of the rule without a DB: owner and absent asker always pass;
-        // a stranger needs a directors row (tested via may_direct with live DB elsewhere).
-        assert!(matches!(Refusal::NotDirector.kind(), "no_access"));
+    fn people_list_decides_who_may_ask() {
+        let (state, owner, secret, sam, samir, jules) = people_setup();
+        // Refuse (default): owner and Sam pass; Samir (row off) and Jules (no row) are refused flat.
+        assert!(verdict(&state, &secret, None).is_ok());
+        assert!(verdict(&state, &secret, Some(&owner)).is_ok());
+        assert!(verdict(&state, &secret, Some(&sam)).is_ok());
+        assert_eq!(
+            verdict(&state, &secret, Some(&samir)),
+            Err("not_allowed_person".into())
+        );
+        assert_eq!(
+            verdict(&state, &secret, Some(&jules)),
+            Err("not_allowed_person".into())
+        );
+        assert!(matches!(not_listed(&secret), Refusal::NotDirector));
+
+        // Ask me: the same people are refused, but the agent is sent to ask first.
+        let mut card = secret.clone();
+        card.others_ask = "card".into();
+        state.db.update_secret(&card).unwrap();
+        assert!(verdict(&state, &card, Some(&sam)).is_ok());
+        assert!(matches!(not_listed(&card), Refusal::AskOwnerFirst));
+        assert!(verdict(&state, &card, Some(&jules)).is_err());
+
+        // A chat-scoped row covers only its chat.
+        state
+            .db
+            .upsert_secret_director(&SecretDirector {
+                scope_kind: "chat".into(),
+                scope_chat_id: Some("chat_other".into()),
+                ..SecretDirector::new(&secret.id, &jules, "", FIXED_AT)
+            })
+            .unwrap();
+        assert!(verdict(&state, &card, Some(&jules)).is_err());
+        assert!(state
+            .db
+            .is_secret_director(&secret.id, &jules, Some("chat_other"))
+            .unwrap());
+
+        // The box hears only rows that are on, and the switch.
+        let items = box_items(&state, &owner, "proj_people");
+        let item = items
+            .iter()
+            .find(|v| v["env"] == "ENGY_API_KEY")
+            .expect("item");
+        assert_eq!(item["others_ask"], "card");
+        let listed: Vec<&str> = item["people"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p["user_id"].as_str())
+            .collect();
+        assert!(listed.contains(&sam.as_str()));
+        assert!(listed.contains(&jules.as_str()));
+        assert!(!listed.contains(&samir.as_str()));
+    }
+
+    #[test]
+    fn a_used_row_names_who_asked() {
+        let (state, owner, secret, sam, _samir, _jules) = people_setup();
+        let allowed = decide_use(
+            &state,
+            &secret,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            Some(&sam),
+        )
+        .unwrap();
+        after_use(
+            &state,
+            &secret,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            Some(&sam),
+            &allowed,
+        );
+        let rows = state
+            .db
+            .list_audit(
+                &owner,
+                &crate::db_secrets::AuditQuery {
+                    target_id: Some(secret.id.clone()),
+                    project_id: None,
+                    before: None,
+                    since: None,
+                    limit: 10,
+                },
+            )
+            .unwrap();
+        let used = rows.iter().find(|a| a.action == "used").expect("used row");
+        assert_eq!(used.detail["asked_by"], sam);
+        assert_eq!(used.detail["asked_by_handle"], "user602");
+        let row = state.db.secret_director(&secret.id, &sam).unwrap().unwrap();
+        assert!(row.last_asked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn always_allow_on_a_persons_card_adds_them_to_the_list() {
+        let (state, owner, secret, _sam, _samir, jules) = people_setup();
+        let rq = SecretRequest {
+            id: "req_jules".into(),
+            user_id: owner.clone(),
+            project_id: "proj_people".into(),
+            chat_id: "chat_arbonites".into(),
+            target_kind: "secret".into(),
+            target_id: Some(secret.id.clone()),
+            target_ref: secret.env.clone(),
+            purpose: "rent a GPU box".into(),
+            use_kind: "header".into(),
+            host: Some("api.engy.com".into()),
+            status: "pending".into(),
+            decided_by: None,
+            created_at: FIXED_AT,
+            decided_at: None,
+            expires_at: now_ms() + REQUEST_PENDING_MS,
+            asked_by: Some(jules.clone()),
+        };
+        state.db.insert_secret_request(&rq).unwrap();
+        let dto = request_dto(&state, &rq);
+        assert_eq!(dto.asked_by_handle.as_deref(), Some("user604"));
+
+        // Allow for this chat → a chat-scoped row.
+        let (decided, _) = decide(&state, &owner, "req_jules", "chat", "card:req_jules")
+            .await
+            .unwrap();
+        assert_eq!(decided.status, "allowed_chat");
+        let row = state
+            .db
+            .secret_director(&secret.id, &jules)
+            .unwrap()
+            .unwrap();
+        assert!(row.enabled);
+        assert_eq!(row.scope_kind, "chat");
+        assert_eq!(row.scope_chat_id.as_deref(), Some("chat_arbonites"));
+        assert_eq!(row.created_from, "card:req_jules");
+        assert!(verdict(&state, &secret, Some(&jules)).is_ok());
+
+        // Always allow → standing.
+        let mut rq2 = rq.clone();
+        rq2.id = "req_jules_2".into();
+        state.db.insert_secret_request(&rq2).unwrap();
+        decide(&state, &owner, "req_jules_2", "always", "card:req_jules_2")
+            .await
+            .unwrap();
+        let row = state
+            .db
+            .secret_director(&secret.id, &jules)
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.scope_kind, "all");
+    }
+
+    #[test]
+    fn a_once_grant_is_bound_to_its_asker() {
+        let (state, owner, secret, sam, _samir, jules) = people_setup();
+        let mut card = secret.clone();
+        card.others_ask = "card".into();
+        state.db.update_secret(&card).unwrap();
+        state
+            .db
+            .insert_secret_request(&SecretRequest {
+                id: "req_once".into(),
+                user_id: owner.clone(),
+                project_id: "proj_people".into(),
+                chat_id: "chat_arbonites".into(),
+                target_kind: "secret".into(),
+                target_id: Some(card.id.clone()),
+                target_ref: card.env.clone(),
+                purpose: "once".into(),
+                use_kind: "header".into(),
+                host: Some("api.engy.com".into()),
+                status: "allowed_once".into(),
+                decided_by: Some("card:req_once".into()),
+                created_at: now_ms(),
+                decided_at: Some(now_ms()),
+                expires_at: now_ms() + crate::db_secrets::ALLOW_ONCE_MS,
+                asked_by: Some(jules.clone()),
+            })
+            .unwrap();
+        // Sam's ask does not spend Jules's once-grant (Sam passes on her own row anyway);
+        // Jules's does.
+        let sam_ok = verdict(&state, &card, Some(&sam));
+        assert!(sam_ok.is_ok());
+        let jules_ok = decide_use(
+            &state,
+            &card,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            Some(&jules),
+        )
+        .unwrap();
+        assert!(jules_ok.once.is_some());
+        let owner_use = decide_use(
+            &state,
+            &card,
+            "proj_people",
+            "api.engy.com",
+            "header",
+            Some("chat_arbonites"),
+            None,
+        )
+        .unwrap();
+        assert!(owner_use.once.is_none());
     }
 }

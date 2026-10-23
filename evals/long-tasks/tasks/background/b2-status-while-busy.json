@@ -15,7 +15,7 @@
       "prompt": "How is the background job going? Is it still running?",
       "latency_max_s": 10,
       "rubric": {
-        "criteria": "Judge the reply text only (no files are expected for this turn). The reply gives a real status of the background job (running / finished / progress or result), not a generic 'working on it' and not a refusal; it does not pretend to know a result it cannot know.",
+        "criteria": "Judge the reply text only; do not penalise unverifiable claims (the programmatic check verifies the file separately). The reply gives a real status of the background job (running / finished / progress or result), not a generic 'working on it' and not a refusal; it does not contradict itself.",
         "min": 3
       },
       "timeout_s": 120

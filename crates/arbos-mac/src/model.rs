@@ -110,6 +110,37 @@ pub struct Project {
     /// the avatar loader can fetch; `None` = the initials disc.
     #[serde(default)]
     pub image_url: Option<String>,
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed to message this agent. Empty unless I own it.
+    #[serde(default)]
+    pub message_grants: Vec<MessageGrant>,
+}
+
+/// One row of an agent's "Who may message X" card (`message_grants` on the project).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrant {
+    /// `user:<id>` / `project:<id>`: the key for PUT / DELETE.
+    #[serde(default)]
+    pub grantee: String,
+    /// `person` or `agent`.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub handle: Option<String>,
+    #[serde(default, deserialize_with = "null_to_empty")]
+    pub avatar_url: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_at: Option<i64>,
 }
 
 /// One entry of `GET /voices`: a voice the agent can speak with on calls.
@@ -609,6 +640,15 @@ pub struct Call {
     /// Project agents that belong to this chat (Phase 2).
     #[serde(default)]
     pub agents: Vec<Sender>,
+    /// `"open"` or `"hosted"` (bigger group calls: host + invited speakers only).
+    #[serde(default)]
+    pub speak_mode: Option<String>,
+    /// Invited speakers (host is `started_by`).
+    #[serde(default)]
+    pub invited_speakers: Vec<Sender>,
+    /// Whether this device may publish audio (from the join token reply).
+    #[serde(default)]
+    pub can_speak: Option<bool>,
 }
 
 impl Call {
@@ -1456,6 +1496,10 @@ pub struct Message {
     /// Messages exchanged with the subagent on a hand-off row (1 = brief sent, 2 = result back).
     #[serde(default)]
     pub handoff_messages: Option<u32>,
+    /// Agent-to-agent messaging: this reply answered a message another agent sent into the
+    /// chat; the name drawn in the "Replied to ◉ X" line under the bubble.
+    #[serde(default)]
+    pub agent_reply_to: Option<String>,
     /// Emoji reactions, the iPhone's shape: `{ emoji: { "user:<id>": true } }`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub reactions: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>>,
@@ -1633,7 +1677,12 @@ impl Message {
     /// else the newest `Working` / `Step` status message (visible or hidden).
     /// Generic placeholders ("Working…", "thinking") fall through so the line
     /// reads "<name> is working" — same rule as the iPhone (`AppModel.currentActivity`).
+    /// A pending approval card wins over a stale tool label ("Removing files" while
+    /// nothing has run yet).
     pub fn current_activity(&self) -> Option<String> {
+        if self.waiting_approval || self.pending_approvals().next().is_some() {
+            return Some("Waiting for approval".to_string());
+        }
         if let Some(a) = self
             .activity
             .as_deref()
@@ -1904,7 +1953,8 @@ pub struct SecretAgent {
     pub disabled_at: Option<i64>,
 }
 
-/// A person the owner authorized to direct agents to use this secret (`secret.directors[]`).
+/// A person on the secret's People list (`secret.people[]`): they may ask any agent with
+/// Access to use it, with no card to the owner (spec §7.7).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SecretDirector {
     pub user_id: Id,
@@ -1918,6 +1968,24 @@ pub struct SecretDirector {
     pub note: String,
     #[serde(default)]
     pub created_at: i64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub disabled_at: Option<i64>,
+    #[serde(default)]
+    pub scope: SecretScope,
+    #[serde(default)]
+    pub last_asked_at: Option<i64>,
+}
+
+impl SecretDirector {
+    /// Display name, else the handle.
+    pub fn display_name(&self) -> String {
+        self.name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| self.handle.clone())
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1964,8 +2032,12 @@ pub struct Secret {
     pub vault_name: String,
     #[serde(default)]
     pub agents: Vec<SecretAgent>,
+    /// The People list (`people[]`; the relay also sends it as `directors[]`).
     #[serde(default)]
     pub directors: Vec<SecretDirector>,
+    /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
+    #[serde(default)]
+    pub others_ask: String,
 }
 
 impl Secret {
@@ -2023,11 +2095,24 @@ pub struct SecretRequest {
     pub created_at: i64,
     #[serde(default)]
     pub decided_at: Option<i64>,
+    /// The person who asked the agent, when it was not the owner (spec §7.7).
+    #[serde(default)]
+    pub asked_by_handle: Option<String>,
+    #[serde(default)]
+    pub asked_by_name: Option<String>,
 }
 
 impl SecretRequest {
     pub fn is_pending(&self) -> bool {
         self.status == "pending"
+    }
+
+    /// `@sam` for a request a person made through the agent; empty for the owner's own.
+    pub fn for_whom(&self) -> Option<String> {
+        self.asked_by_handle
+            .as_ref()
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("@{h}"))
     }
 }
 
@@ -2066,10 +2151,20 @@ impl SecretActivity {
             .map(|h| format!(" · {h}"))
             .unwrap_or_default();
         let name = &self.name;
+        let person = self.detail["handle"]
+            .as_str()
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("@{h}"))
+            .unwrap_or_else(|| "someone".into());
         match self.action.as_str() {
             "used" => format!("{agent} used {name}{at}"),
             "refused" => format!("Refused: {agent} · {name}{at}"),
             "requested" => format!("{agent} asked for {name}{at}"),
+            "person_on" | "director_on" if self.by.starts_with("card:") => {
+                format!("You let {person} ask for {name}")
+            }
+            "person_on" | "director_on" => format!("You let {person} ask for {name}"),
+            "person_off" | "director_off" => format!("You turned {name} off for {person}"),
             "decided" => match self.detail["decision"].as_str().unwrap_or("") {
                 "denied" => format!("{agent} asked for {name}. Denied."),
                 "allowed_once" => format!("You let {agent} use {name} once"),
@@ -2097,6 +2192,30 @@ impl SecretActivity {
             "injected" => format!("{name} went into {agent}'s environment"),
             other => format!("{} · {name}", other.replace('_', " ")),
         }
+    }
+
+    /// "asked by @sam · 2 min ago" when a person other than the owner asked; else the time.
+    pub fn when_line(&self) -> String {
+        match self.detail["asked_by_handle"]
+            .as_str()
+            .filter(|h| !h.is_empty())
+        {
+            Some(h) => format!("asked by @{h} · {}", ago(self.at)),
+            None => ago(self.at),
+        }
+    }
+}
+
+/// "asked 2 min ago" · "never asked" · "turned off Oct 12" for a People row.
+pub fn person_usage(last_asked_at: Option<i64>, disabled_at: Option<i64>, enabled: bool) -> String {
+    if !enabled {
+        if let Some(d) = disabled_at {
+            return format!("turned off {}", short_date(d));
+        }
+    }
+    match last_asked_at {
+        Some(t) => format!("asked {}", ago(t)),
+        None => "never asked".into(),
     }
 }
 

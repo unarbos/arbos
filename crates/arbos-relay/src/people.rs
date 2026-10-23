@@ -2600,6 +2600,23 @@ pub fn notify_members(state: &AppState, cm: &ChatWithMembers, skip: &str, event:
     }
 }
 
+/// After a project rename (#1481): every people chat that has this agent pushes
+/// `people_chat_updated` so clients refresh `AgentMember.handle` from the live name
+/// (handles are not stored on the membership row — they are derived at DTO time).
+pub fn notify_agent_renamed(state: &AppState, project_id: &str) {
+    let member = format!("agent:{project_id}");
+    let Ok(chats) = state.db.chats_of_member(&member) else {
+        return;
+    };
+    for cm in chats {
+        let event = PushEventDto::PeopleChatUpdated(PeopleChatUpdatedPayloadDto {
+            chat_id: cm.chat.id.clone(),
+        });
+        // Empty skip → every human member (including the renamer's other devices).
+        notify_members(state, &cm, "", &event);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! ACL invariant: only a member's devices (and the box of a project whose agent is in the

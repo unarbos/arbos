@@ -75,6 +75,8 @@
 		A1BC00000000000000000002 /* MessageMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000001 /* MessageMenu.swift */; };
 		A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BC00000000000000000003 /* MessageMenuTests.swift */; };
 		A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */; };
+		A15E00000000000000000002 /* HomeSearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E00000000000000000001 /* HomeSearch.swift */; };
+		A15E00000000000000000004 /* HomeSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15E00000000000000000003 /* HomeSearchTests.swift */; };
 		A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C100000000000000000001 /* SenderNameRowTests.swift */; };
 		A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BD00000000000000000001 /* NewMessageSheetTests.swift */; };
 		A15A00000000000000000031 /* ProfilePaneStructureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000030 /* ProfilePaneStructureTests.swift */; };
@@ -197,6 +199,8 @@
 		A1BC00000000000000000001 /* MessageMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenu.swift; sourceTree = "<group>"; };
 		A1BC00000000000000000003 /* MessageMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageMenuTests.swift; sourceTree = "<group>"; };
 		A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LongTranscriptPerfTests.swift; sourceTree = "<group>"; };
+		A15E00000000000000000001 /* HomeSearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSearch.swift; sourceTree = "<group>"; };
+		A15E00000000000000000003 /* HomeSearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSearchTests.swift; sourceTree = "<group>"; };
 		A1C100000000000000000001 /* SenderNameRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SenderNameRowTests.swift; sourceTree = "<group>"; };
 		A1BD00000000000000000001 /* NewMessageSheetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMessageSheetTests.swift; sourceTree = "<group>"; };
 		A15A00000000000000000030 /* ProfilePaneStructureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePaneStructureTests.swift; sourceTree = "<group>"; };
@@ -298,6 +302,7 @@
 				A19AC72230E7AD9814A783A6,
 				A159B0F38B1AA8C313A060FD,
 				A1D8800000000000000000C1,
+				A15E00000000000000000001 /* HomeSearch.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -397,6 +402,7 @@
 				A1BC00000000000000000003 /* MessageMenuTests.swift */,
 				A1BD00000000000000000001 /* NewMessageSheetTests.swift */,
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
+				A15E00000000000000000003 /* HomeSearchTests.swift */,
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
 			);
 			path = ArbosTests;
@@ -552,6 +558,7 @@
 				A134D74DFA78D38A472BF229 /* Call.swift in Sources */,
 				A1547843CA4E6FD14D625E8D /* Model.swift in Sources */,
 				A117280222D51C2ECDBA9FC8 /* People.swift in Sources */,
+				A15E00000000000000000002 /* HomeSearch.swift in Sources */,
 				A1F3867FABDB2908FFF6F2F0 /* Secrets.swift in Sources */,
 				A1D8800000000000000000C2 /* Servers.swift in Sources */,
 				A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */,
@@ -628,6 +635,7 @@
 				A1BC00000000000000000004 /* MessageMenuTests.swift in Sources */,
 				A1BD00000000000000000002 /* NewMessageSheetTests.swift in Sources */,
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
+				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

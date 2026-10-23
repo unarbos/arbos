@@ -23,10 +23,10 @@ use crate::model::{
     AccountView, AgentMember, BoxState, Call, CallKind, ChannelBinding, ChannelPairing,
     ChannelPlatform, ChannelPlatformState, ChannelsView, Chat, ChatKind, ConnectedVault, Connector,
     ConnectorAction, ConnectorProvider, ConnectorStatus, ConnectorsView, Effort, Id, LocalDevice,
-    LocalView, Machine, MachineState, Person, Project, ProjectMachine, ProjectSecretAccess,
-    ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
-    SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
+    LocalView, Machine, MachineState, MessageGrant, Person, Project, ProjectMachine,
+    ProjectSecretAccess, ProjectSecrets, Reachable, ReachableDevice, ReplyPolicy, Routine,
+    RoutineRun, RoutineRunStatus, RoutineTrigger, Secret, SecretActivity, SecretAgent,
+    SecretDirector, SecretRequest, SecretScope, SecretsView, Sender, Skill, SpaceKind, Voice,
 };
 use crate::sync::credentials::{AccountUser, DeviceCredentials};
 
@@ -255,6 +255,9 @@ impl From<&CallDto> for Call {
             reason: c.reason.clone(),
             participants: c.participants.iter().map(Sender::from).collect(),
             agents: c.agents.iter().map(Sender::from).collect(),
+            speak_mode: c.speak_mode.clone(),
+            invited_speakers: c.invited_speakers.iter().map(Sender::from).collect(),
+            can_speak: c.can_speak,
         }
     }
 }
@@ -313,6 +316,17 @@ impl From<&SecretDirectorDto> for SecretDirector {
             avatar_url: d.avatar_url.clone(),
             note: d.note.clone(),
             created_at: d.created_at,
+            enabled: d.enabled.unwrap_or(true),
+            disabled_at: d.disabled_at,
+            scope: d
+                .scope
+                .as_ref()
+                .map(|s| SecretScope {
+                    kind: s.kind.clone(),
+                    chat_id: s.chat_id.clone(),
+                })
+                .unwrap_or_default(),
+            last_asked_at: d.last_asked_at,
         }
     }
 }
@@ -335,7 +349,12 @@ impl From<&SecretDto> for Secret {
             username: d.username.clone(),
             vault_name: d.vault_name.clone(),
             agents: d.agents.iter().map(SecretAgent::from).collect(),
-            directors: d.directors.iter().map(SecretDirector::from).collect(),
+            directors: if d.people.is_empty() {
+                d.directors.iter().map(SecretDirector::from).collect()
+            } else {
+                d.people.iter().map(SecretDirector::from).collect()
+            },
+            others_ask: d.others_ask.clone().unwrap_or_else(|| "refuse".into()),
         }
     }
 }
@@ -354,6 +373,8 @@ impl From<&SecretRequestDto> for SecretRequest {
             status: r.status.clone(),
             created_at: r.created_at,
             decided_at: r.decided_at,
+            asked_by_handle: r.asked_by_handle.clone(),
+            asked_by_name: r.asked_by_name.clone(),
         }
     }
 }
@@ -410,6 +431,7 @@ fn secret_from_summary(s: &ProjectSecretSummaryDto) -> Secret {
         vault_name: s.vault_name.clone(),
         agents: Vec::new(),
         directors: Vec::new(),
+        others_ask: "refuse".into(),
     }
 }
 
@@ -671,6 +693,22 @@ pub(crate) fn project_from_dto(
         avatar_leaf: p.avatar_leaf.and_then(leaf_index),
         avatar_leaf_color: p.avatar_leaf_color.and_then(leaf_index),
         image_url: None,
+        message_grants: p.message_grants.iter().map(message_grant_from).collect(),
+    }
+}
+
+fn message_grant_from(g: &arbos_core::api::MessageGrantDto) -> MessageGrant {
+    MessageGrant {
+        grantee: g.grantee.clone(),
+        kind: g.kind.clone(),
+        id: g.id.clone(),
+        name: g.name.clone().filter(|n| !n.is_empty()),
+        handle: g.handle.clone().filter(|h| !h.is_empty()),
+        avatar_url: g.avatar_url.clone().unwrap_or_default(),
+        enabled: g.enabled,
+        note: g.note.clone(),
+        created_at: g.created_at,
+        last_at: g.last_at,
     }
 }
 
@@ -957,6 +995,7 @@ pub(crate) fn people_space_from(
             .as_deref()
             .and_then(non_empty)
             .map(|k| format!("{http_url}/blob/people:{id}/{k}?token={token}")),
+        message_grants: Vec::new(),
     };
     let chat = Chat {
         id: id.clone(),
@@ -1461,6 +1500,18 @@ mod tests {
         assert_eq!(s.agents.len(), 1);
         assert_eq!(s.directors.len(), 1);
         assert_eq!(s.directors[0].handle, "user502");
+        assert!(s.directors[0].enabled);
+        assert_eq!(s.directors[0].last_asked_at, Some(1_700_000_003_000));
+        assert_eq!(s.others_ask, "refuse");
+        // A relay from before #1442 sends only `directors[]` and no switch: still on, still refuse.
+        let mut old = secret.clone();
+        old.people.clear();
+        old.others_ask = None;
+        old.directors[0].enabled = None;
+        let s_old = Secret::from(&old);
+        assert_eq!(s_old.directors.len(), 1);
+        assert!(s_old.directors[0].enabled);
+        assert_eq!(s_old.others_ask, "refuse");
 
         let login: SecretDto = load_json("secret_login_json.json");
         let s = Secret::from(&login);

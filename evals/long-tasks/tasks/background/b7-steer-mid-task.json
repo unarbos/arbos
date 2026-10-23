@@ -1,0 +1,39 @@
+{
+  "id": "b7-steer-mid-task",
+  "lane": "c",
+  "category": "background",
+  "title": "Steer a running task mid-way: the agent takes the correction into the work that is running",
+  "turns": [
+    {
+      "prompt": "Write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds (so it takes about two minutes). Then tell me the last number written.",
+      "seed": "mkdir -p {D}",
+      "background": true,
+      "latency_max_s": 10,
+      "timeout_s": 60
+    },
+    {
+      "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
+      "pre_wait_s": 15,
+      "latency_max_s": 8,
+      "background": true,
+      "rubric": {
+        "criteria": "Judge the reply only: the agent acknowledges the change (stop at 20) and says it applies to the running job, without claiming it is already done.",
+        "min": 3
+      },
+      "timeout_s": 60
+    },
+    {
+      "prompt": "Done? What was the last number?",
+      "pre_wait_s": 110,
+      "reply_regex": "\\b20\\b",
+      "reply_regex_not": "\\b40\\b(?! to 20)",
+      "timeout_s": 180,
+      "verify": "f={D}/count.txt; test -f $f || { echo FAIL: no count.txt; exit 0; }; last=$(tail -1 $f | tr -dc 0-9); n=$(grep -c . $f); echo \"SHOW lines=$n last=$last\"; if [ \"$last\" = 20 ] && [ $n -le 22 ]; then echo PASS; else echo FAIL: last=$last lines=$n; fi"
+    }
+  ],
+  "doc_checks": {
+    "no_truncated_reply": true,
+    "no_repeated_sentence": true
+  },
+  "regression": "steer path (bc-d117b386 [guide] side)"
+}
