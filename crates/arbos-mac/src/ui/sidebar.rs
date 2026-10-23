@@ -287,29 +287,44 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let open_server_admin = open_server.as_ref().is_some_and(ServerInfo::can_admin);
     let waitlist_position = state.machine.waitlist_position;
 
+    let open_archived = state.open_archived;
+    let archived_count = state.archived_space_count();
     let mut rows: Vec<(u64, ListEntry)> = Vec::new();
-    for s in state.servers.iter() {
-        if !query.is_empty() && !server_matches_query(s, &query) {
-            continue;
+    // Servers stay on the main list (and while searching); the Archived folder
+    // only holds agents and people chats.
+    if !open_archived {
+        for s in state.servers.iter() {
+            if !query.is_empty() && !server_matches_query(s, &query) {
+                continue;
+            }
+            let selected = state.open_server.as_deref() == Some(s.id.as_str())
+                || state
+                    .selected_channel
+                    .as_ref()
+                    .is_some_and(|c| c.server_id == s.id);
+            let at = state.server_last_activity(s);
+            rows.push((
+                at,
+                ListEntry::Server(Box::new(ServerRowView {
+                    selected,
+                    unread: state.space_row(s).is_some_and(|r| r.unread > 0),
+                    preview: server_preview(state, s),
+                    time: time_label(at),
+                    server: s.clone(),
+                })),
+            ));
         }
-        let selected = state.open_server.as_deref() == Some(s.id.as_str())
-            || state
-                .selected_channel
-                .as_ref()
-                .is_some_and(|c| c.server_id == s.id);
-        let at = state.server_last_activity(s);
-        rows.push((
-            at,
-            ListEntry::Server(Box::new(ServerRowView {
-                selected,
-                unread: state.space_row(s).is_some_and(|r| r.unread > 0),
-                preview: server_preview(state, s),
-                time: time_label(at),
-                server: s.clone(),
-            })),
-        ));
     }
     for p in state.projects.iter() {
+        let archived = state.is_space_archived(&p.id);
+        // Main list: hide archived until search. Archived folder: only those.
+        if open_archived {
+            if !archived {
+                continue;
+            }
+        } else if archived && query.is_empty() {
+            continue;
+        }
         // Name, @handle, chat title, or any loaded message text.
         if !query.is_empty() && !state.space_matches_query(p, &query) {
             continue;
@@ -599,7 +614,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                         .child(line),
                 ),
         );
-    } else if rows.is_empty() {
+    } else if rows.is_empty() && (query.is_empty() && archived_count == 0 || !query.is_empty()) {
         list = list.child(
             div()
                 .pt(px(40.0))
@@ -608,6 +623,10 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .text_color(theme.text_muted)
                 .child(format!("Nothing matches “{query}”.")),
         );
+    }
+    // Archived folder at the top of the chat list (when something is archived).
+    if query.is_empty() && archived_count > 0 {
+        list = list.child(archived_folder_row(archived_count, &theme, cx));
     }
     for (_, entry) in rows {
         list = match entry {
@@ -765,11 +784,17 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         .border_r_1()
         .border_color(theme.border)
         .child(strip)
-        .when(search_shown && open_server.is_none(), |el| el.child(search))
-        .child(match open_server.as_ref() {
+        .when(
+            search_shown && open_server.is_none() && !open_archived,
+            |el| el.child(search),
+        )
+        .child(if let Some(server) = open_server.as_ref() {
             // Inside a server the left pane shows its channels (mockup h).
-            Some(server) => faded_list(server_channels(server, shell, &theme, cx)),
-            None => faded_list(list),
+            faded_list(server_channels(server, shell, &theme, cx))
+        } else if open_archived {
+            faded_list(archived_folder(shell, &theme, cx))
+        } else {
+            faded_list(list)
         });
     if let Some(update) = shell.render_update_button(cx) {
         column = column.child(div().px(px(12.0)).pb(px(8.0)).child(update));
@@ -907,6 +932,194 @@ fn render_server_row(
                         }),
                 ),
         )
+}
+
+/// Folder row at the top of the chat list: opens the Archived pane.
+fn archived_folder_row(
+    count: usize,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> gpui::Stateful<Div> {
+    div()
+        .id("sidebar-archived-folder")
+        .flex()
+        .items_center()
+        .gap(px(identity::ROW_GAP))
+        .px(px(12.0))
+        .py(px(11.0))
+        .rounded(px(PANEL_RADIUS - 4.0))
+        .cursor_pointer()
+        .hover(|s| s.bg(Theme::with_alpha(theme.surface_2, 0.55)))
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.menu_open = false;
+            this.row_menu = None;
+            this.chat_menu = None;
+            this.state.update(cx, |s, cx| s.enter_archived(cx));
+        }))
+        .child(
+            div()
+                .size(px(AVATAR_ROW))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(theme.surface_2)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("archive", 18.0, theme.text_muted)),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(TEXT_BODY))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child("Archived"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(TEXT_TINY))
+                                .text_color(theme.text_muted)
+                                .child(format!("{count}")),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(TEXT_SMALL))
+                        .text_color(theme.text_muted)
+                        .child(if count == 1 {
+                            "1 chat".into()
+                        } else {
+                            format!("{count} chats")
+                        }),
+                ),
+        )
+}
+
+/// Inside the Archived folder: back to the chat list, then every archived space.
+fn archived_folder(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> gpui::Stateful<Div> {
+    let rows: Vec<(u64, RowView)> = {
+        let state = shell.state.read(cx);
+        let selected = state.selected_project.clone();
+        let mut rows: Vec<(u64, RowView)> = state
+            .projects
+            .iter()
+            .filter(|p| state.is_space_archived(&p.id))
+            .map(|p| {
+                let shown_people: Vec<_> = if p.is_people_group() {
+                    Vec::new()
+                } else if p.is_guest() {
+                    p.owner().cloned().into_iter().collect()
+                } else {
+                    p.guests().cloned().collect()
+                };
+                let row = RowView {
+                    selected: selected.as_deref() == Some(p.id.as_str()),
+                    streaming: state.project_is_streaming(&p.id),
+                    unread: state.project_unread(&p.id) > 0,
+                    typing: !state.typing_in(&p.id).is_empty(),
+                    preview: preview(state, p),
+                    time: time_label(last_activity(state, p)),
+                    person_image: p.person().and_then(|x| state.avatar(&x.avatar_url)),
+                    guests: shown_people
+                        .into_iter()
+                        .map(|person| {
+                            let img = state.avatar(&person.avatar_url);
+                            (person, img)
+                        })
+                        .collect(),
+                    avatar_state: state.avatar_state(&p.id),
+                    space: p.clone(),
+                };
+                (last_activity(state, p), row)
+            })
+            .collect();
+        rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        rows
+    };
+
+    let back = div()
+        .id("archived-back")
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(8.0))
+        .pt(px(4.0))
+        .pb(px(10.0))
+        .child(
+            glass::circle("archived-back-circle", 30.0, theme)
+                .child(icon("chevron-left", 14.0, theme.text))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.update(cx, |s, cx| s.close_archived(cx));
+                })),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .size(px(26.0))
+                        .rounded_full()
+                        .bg(theme.surface_2)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(icon("archive", 14.0, theme.text_muted)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(TEXT_BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child("Archived"),
+                ),
+        );
+
+    let mut list = div()
+        .id("archived-list")
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .px(px(8.0))
+        .pt(px(LIST_FADE_BAND + 6.0))
+        .pb(px(12.0))
+        .overflow_y_scroll()
+        .child(back);
+    if rows.is_empty() {
+        list = list.child(
+            div()
+                .pt(px(40.0))
+                .text_center()
+                .text_size(px(TEXT_SMALL))
+                .text_color(theme.text_muted)
+                .child("No archived chats"),
+        );
+    }
+    for (_, row) in rows {
+        list = list.child(render_row(row, shell, theme, cx));
+    }
+    list
 }
 
 /// The server's channel list (D88 rule 2): `‹` back to chats, the server's disc and name
@@ -1548,6 +1761,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let state = shell.state.read(cx);
     let space = state.projects.iter().find(|p| p.id == space_id)?.clone();
     let muted = state.is_muted(&space.id);
+    let archived = state.is_space_archived(&space.id);
     let is_people = space.is_people();
     let can_fork = !is_people && !space.shared;
     let can_delete = is_people || !space.shared;
@@ -1575,6 +1789,7 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     };
     let mute_id = space.id.clone();
     let fork_id = space.id.clone();
+    let archive_id = space.id.clone();
     let delete_id = space.id.clone();
     let delete_people = is_people;
     // A group (redesign 2026-10-20): one item, "Delete group". The owner
@@ -1668,7 +1883,24 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_group {
-        // Mockup f: the group row's menu is "Delete group" and nothing else.
+        // Group row: Archive / Unarchive, then Delete group.
+        body = body.child(
+            glass::menu_row(
+                "row-menu-archive",
+                if archived { "tray-up" } else { "archive" },
+                if archived { "Unarchive" } else { "Archive" },
+                false,
+                &theme,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.row_menu = None;
+                let id = archive_id.clone();
+                let next = !archived;
+                this.state
+                    .update(cx, |s, cx| s.set_space_archived(id, next, cx));
+            })),
+        );
+        body = body.child(glass::menu_divider(&theme));
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete group", true, &theme).on_click(
                 cx.listener(|this, _, _, cx| {
@@ -1729,6 +1961,22 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
             ),
         );
     }
+    body = body.child(
+        glass::menu_row(
+            "row-menu-archive",
+            if archived { "tray-up" } else { "archive" },
+            if archived { "Unarchive" } else { "Archive" },
+            false,
+            &theme,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.row_menu = None;
+            let id = archive_id.clone();
+            let next = !archived;
+            this.state
+                .update(cx, |s, cx| s.set_space_archived(id, next, cx));
+        })),
+    );
     if can_delete {
         body = body.child(glass::menu_divider(&theme));
         body = body.child(

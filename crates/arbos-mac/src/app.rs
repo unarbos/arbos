@@ -127,6 +127,10 @@ fn muted_path() -> PathBuf {
     crate::sync::credentials::config_dir().join("muted.json")
 }
 
+fn archived_spaces_path() -> PathBuf {
+    crate::sync::credentials::config_dir().join("archived_spaces.json")
+}
+
 /// Multi-chat (several chats per agent: tabs, "+", ⌘T, archive) is on by
 /// default. `ARBOS_MULTI_CHAT=0` or `{"multi_chat": false}` in
 /// `<config>/settings.json` turns it off (one chat per agent).
@@ -153,6 +157,21 @@ fn save_muted(muted: &HashSet<Id>) {
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(json) = serde_json::to_string(&muted.iter().collect::<Vec<_>>()) {
         let _ = std::fs::write(muted_path(), json);
+    }
+}
+
+fn load_archived_spaces() -> HashSet<Id> {
+    std::fs::read_to_string(archived_spaces_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_archived_spaces(archived: &HashSet<Id>) {
+    let dir = crate::sync::credentials::config_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(json) = serde_json::to_string(&archived.iter().collect::<Vec<_>>()) {
+        let _ = std::fs::write(archived_spaces_path(), json);
     }
 }
 
@@ -497,6 +516,10 @@ pub struct AppState {
     pub renaming_project: Option<Id>,
     /// Spaces whose notifications are muted (`<config>/muted.json`).
     pub muted: HashSet<Id>,
+    /// Agents and people chats hidden from the chat list until opened or
+    /// unarchived (`<config>/archived_spaces.json`). Device-local, like iOS
+    /// home archive — not the per-tab `archived_chats` set.
+    pub archived_spaces: HashSet<Id>,
     /// Last presence frame seen per handle (ms): "online" while fresh.
     pub presence_seen: HashMap<String, u64>,
     /// Answered this session: never re-arm it on a later sync, even when the
@@ -584,6 +607,8 @@ pub struct AppState {
     pub selected_channel: Option<ChannelSel>,
     /// D88: the server whose channel list the left pane slid into.
     pub open_server: Option<Id>,
+    /// The chat list's Archived folder is open (left pane shows archived spaces).
+    pub open_archived: bool,
     /// D88: the sheet open over the shell (new server / join / new channel).
     pub server_sheet: Option<ServerSheet>,
     /// D88: a server write is in flight (sheet buttons dim) and its last failure.
@@ -814,6 +839,7 @@ impl AppState {
             profile_editing_name: false,
             renaming_project: None,
             muted: load_muted(),
+            archived_spaces: load_archived_spaces(),
             presence_seen: HashMap::new(),
             notify_prompt_answered: false,
             focus_sent: None,
@@ -859,6 +885,7 @@ impl AppState {
             channel_paged: HashSet::new(),
             selected_channel: None,
             open_server: None,
+            open_archived: false,
             server_sheet: None,
             server_busy: false,
             server_error: None,
@@ -2546,6 +2573,11 @@ impl AppState {
             || self.selected_channel.is_some();
         // A chat replaces the channel in the centre (D88).
         self.selected_channel = None;
+        // Opening a space restores it to the chat list (same as iOS home archive).
+        self.unarchive_space(&project_id);
+        if self.open_archived {
+            self.open_archived = false;
+        }
         if switching {
             self.search_chat = None;
             // The right pane belongs to the chat it was opened from; a new
@@ -2607,6 +2639,10 @@ impl AppState {
             return;
         };
         self.search_chat = Some(chat_id.clone());
+        self.unarchive_space(&project_id);
+        if self.open_archived {
+            self.open_archived = false;
+        }
         if self.archived_chats.remove(&chat_id) {
             self.command(ClientCommand::ArchiveChat {
                 chat_id: chat_id.clone(),
@@ -3152,6 +3188,7 @@ impl AppState {
         let Some(server) = self.server(&server_id).cloned() else {
             return;
         };
+        self.open_archived = false;
         self.open_server = Some(server_id.clone());
         self.sidebar_overlay = false;
         if let Some(general) = server.general() {
@@ -3166,6 +3203,56 @@ impl AppState {
     /// centre stays until a chat is picked.
     pub fn close_server_pane(&mut self, cx: &mut Context<Self>) {
         if self.open_server.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Whether this agent or people chat is hidden in the Archived folder.
+    pub fn is_space_archived(&self, space_id: &str) -> bool {
+        self.archived_spaces.contains(space_id)
+    }
+
+    /// How many spaces sit in the Archived folder.
+    pub fn archived_space_count(&self) -> usize {
+        self.projects
+            .iter()
+            .filter(|p| self.archived_spaces.contains(&p.id))
+            .count()
+    }
+
+    /// Hide a chat-list row in the Archived folder (device-local).
+    pub fn archive_space(&mut self, space_id: Id, cx: &mut Context<Self>) {
+        if !self.archived_spaces.insert(space_id) {
+            return;
+        }
+        save_archived_spaces(&self.archived_spaces);
+        cx.notify();
+    }
+
+    /// Bring a space back to the main chat list.
+    pub fn unarchive_space(&mut self, space_id: &str) {
+        if !self.archived_spaces.remove(space_id) {
+            return;
+        }
+        save_archived_spaces(&self.archived_spaces);
+        // Empty folder: leave the Archived view so the main list returns.
+        if self.open_archived && self.archived_space_count() == 0 {
+            self.open_archived = false;
+        }
+    }
+
+    /// Open the Archived folder in the left pane.
+    pub fn enter_archived(&mut self, cx: &mut Context<Self>) {
+        self.open_server = None;
+        self.open_archived = true;
+        self.sidebar_overlay = false;
+        cx.notify();
+    }
+
+    /// Back from the Archived folder to the main chat list.
+    pub fn close_archived(&mut self, cx: &mut Context<Self>) {
+        if self.open_archived {
+            self.open_archived = false;
             cx.notify();
         }
     }
@@ -4842,6 +4929,16 @@ impl AppState {
         cx.notify();
     }
 
+    /// Right-click Archive / Unarchive on a chat-list row.
+    pub fn set_space_archived(&mut self, space_id: Id, archived: bool, cx: &mut Context<Self>) {
+        if archived {
+            self.archive_space(space_id, cx);
+        } else {
+            self.unarchive_space(&space_id);
+            cx.notify();
+        }
+    }
+
     /// Call a person (their DM) or an agent (its chat; Calls Phase 2). The
     /// panes no longer offer it (2026-10-21); the composer's call button does.
     #[allow(dead_code)]
@@ -5303,10 +5400,11 @@ impl AppState {
         };
         Gate {
             streaming: self.project_is_streaming(project_id),
-            // Muted spaces are treated as "already seen": dropped, not queued.
+            // Muted / archived spaces are treated as "already seen": dropped, not queued.
             // Honour the relay's per-chat muted (people) as well as muted.json.
             visible: (self.window_active && project_shown && chat_shown)
-                || self.is_muted(project_id),
+                || self.is_muted(project_id)
+                || self.is_space_archived(project_id),
         }
     }
 
@@ -6300,6 +6398,8 @@ impl AppState {
         self.archived_chats.remove(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
+        self.archived_spaces.remove(&chat_id);
+        save_archived_spaces(&self.archived_spaces);
         self.command(ClientCommand::LeaveChat { chat_id });
         self.select_next_if_none(cx);
         cx.notify();
@@ -6311,7 +6411,12 @@ impl AppState {
         if self.selected_project.is_some() {
             return;
         }
-        if let Some(id) = self.projects.first().map(|p| p.id.clone()) {
+        if let Some(id) = self
+            .projects
+            .iter()
+            .find(|p| !self.archived_spaces.contains(&p.id))
+            .map(|p| p.id.clone())
+        {
             self.select_project(id, cx);
         }
     }
@@ -6497,6 +6602,8 @@ impl AppState {
         self.last_chats.remove(&project_id);
         self.projects.retain(|p| p.id != project_id);
         self.muted.remove(&project_id);
+        self.archived_spaces.remove(&project_id);
+        save_archived_spaces(&self.archived_spaces);
         self.command(ClientCommand::DeleteProject { project_id });
         cx.notify();
     }
@@ -6515,6 +6622,8 @@ impl AppState {
         self.archived_chats.remove(&chat_id);
         self.projects.retain(|p| p.id != chat_id);
         self.muted.remove(&chat_id);
+        self.archived_spaces.remove(&chat_id);
+        save_archived_spaces(&self.archived_spaces);
         self.command(ClientCommand::DeletePeopleChat { chat_id });
         self.select_next_if_none(cx);
         cx.notify();
