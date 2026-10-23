@@ -115,14 +115,51 @@ enum RowKind: Equatable {
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
     case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
-    /// A file card; tap opens the media viewer on it (Open → Quick Look).
-    case file(item: MediaItem, subtitle: String)
+    /// A file card; tap opens the media viewer on it (Open → Quick Look). Dressed like the
+    /// message's text rows (`MediaChrome`, media-sender-attribution-2026-10-23).
+    case file(item: MediaItem, subtitle: String, chrome: MediaChrome)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
     /// A picture; tap opens the media viewer at its place in the chat's album.
-    case image(item: MediaItem, fromUser: Bool)
+    case image(item: MediaItem, chrome: MediaChrome)
     /// "Forwarded from <name>" under a forwarded attachment (media-viewer-2026-10-23).
     case forwardHint(text: String, fromUser: Bool)
     case error(code: String, message: String)
+}
+
+/// Who sent a media row and how it is dressed — the same rules as the text rows
+/// (feedback media-sender-attribution-2026-10-23): my sends sit right with no
+/// chrome; another sender's picture / card sits on the avatar column, the sender's
+/// avatar beside the message's last media row when no text row follows, the name
+/// above the first row in chats that name their senders (`rows(multiParty:)`).
+struct MediaChrome: Equatable {
+    enum Sender: Equatable {
+        /// My send (right, no chrome).
+        case mine
+        /// The agent of a 1:1 agent chat (left, no avatar, no name — like its bubble).
+        case plain
+        /// Another person in a people chat.
+        case person(handle: String, avatar: String?)
+        /// An agent in a people chat (`agentId` opens its pane).
+        case agent(handle: String, avatar: String?, agentId: String?)
+    }
+    var sender: Sender
+    /// The name sits above this row (first row of a named message).
+    var named: Bool
+    /// This row draws the sender's avatar (the message ends here).
+    var avatar: Bool
+    /// "8:05 AM" — only on the row that draws the avatar, groups / channels.
+    var time: String?
+
+    static let mine = MediaChrome(sender: .mine, named: false, avatar: false, time: nil)
+    static let plain = MediaChrome(sender: .plain, named: false, avatar: false, time: nil)
+    var fromUser: Bool { sender == .mine }
+    /// The row keeps the avatar column free (and may draw the avatar).
+    var hasLane: Bool {
+        switch sender {
+        case .person, .agent: return true
+        case .mine, .plain: return false
+        }
+    }
 }
 
 struct Row: Identifiable, Equatable {
@@ -184,35 +221,43 @@ enum Transcript {
             let inlineTime = multiParty ? Self.clockLabel(message.createdAt) : nil
             switch message.role {
             case .user:
-                var hasImage = false
-                var hasAttachment = false
                 let mine = !people || me == nil || message.sender == me || message.sender == "user"
-                for part in message.parts {
-                    if case .attachment(let id, let a) = part {
-                        if a.isImage { hasImage = true }
-                        hasAttachment = true
-                        // Another person's picture / file sits left like their bubble.
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: mine, agentNames: agentNames))
-                    }
+                let attachments: [(Id, Attachment)] = message.parts.compactMap {
+                    if case .attachment(let id, let a) = $0 { return (id, a) }
+                    return nil
                 }
+                let hasImage = attachments.contains { $0.1.isImage }
+                let hasAttachment = !attachments.isEmpty
                 let text = message.plainText
                 // A forwarded attachment's "Forwarded from …" line is a hint under
                 // the card, not a bubble of its own.
                 let forwarded = hasAttachment ? MediaAlbum.forwardedFrom(text) : nil
+                // Generic labels ("Image", "Photo", …) are not prose — the attachment
+                // row already carries the media. Showing them as a bubble is noise.
+                let textRow = !text.isEmpty && forwarded == nil && !(hasImage && Self.isGenericMediaLabel(text))
+                // Another person's picture / file is dressed like their bubble: the name
+                // above the first one, their avatar beside the last one when no caption
+                // follows (the caption's bubble carries it otherwise).
+                let sender: MediaChrome.Sender = mine ? .mine : .person(handle: message.senderHandle ?? "someone", avatar: message.senderAvatar)
+                for (i, (id, a)) in attachments.enumerated() {
+                    let tail = i == attachments.count - 1 && !textRow
+                    let chrome = mine ? .mine : MediaChrome(sender: sender, named: named && i == 0, avatar: tail,
+                                                            time: tail ? inlineTime : nil)
+                    chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, chrome: chrome, agentNames: agentNames))
+                }
                 if let forwarded {
                     chunk.append(Row(id: "\(message.id)#forwarded", messageId: message.id, role: mine ? .user : .project,
                                      kind: .forwardHint(text: forwarded, fromUser: mine)))
                 }
-                // Generic labels ("Image", "Photo", …) are not prose — the attachment
-                // row already carries the media. Showing them as a bubble is noise.
-                if !text.isEmpty, forwarded == nil, !(hasImage && Self.isGenericMediaLabel(text)) {
+                if textRow {
                     let quote = message.replyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
                     if mine {
                         chunk.append(Row(id: "\(message.id)#user", messageId: message.id, role: .user,
                                          kind: .user(text: text, pending: message.pending, quote: quote)))
                     } else {
+                        // The name went above the first picture; the caption does not repeat it.
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote, time: inlineTime)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named && !hasAttachment, quote: quote, time: inlineTime)))
                     }
                 }
             case .system:
@@ -236,6 +281,23 @@ enum Transcript {
                 }
                 let lastTextPart = message.parts.lastIndex { $0.textValue != nil }
                 let firstTextPart = message.parts.firstIndex { $0.textValue != nil }
+                // Media rows are dressed like `.member` (people chat) or `.assistant` (1:1):
+                // the name above the first row when no text precedes it, the avatar beside
+                // the last attachment when the message has no text row (text draws its own).
+                let hasTextRow = message.parts.contains { part in
+                    if let t = part.textValue { return !Self.proseBlocks(t, people: people).isEmpty }
+                    return false
+                }
+                let firstVisiblePart = message.parts.firstIndex { part in
+                    if case .attachment = part { return true }
+                    if let t = part.textValue { return !Self.proseBlocks(t, people: people).isEmpty }
+                    return false
+                }
+                let lastAttachmentPart = message.parts.lastIndex { if case .attachment = $0 { return true }; return false }
+                let mediaSender: MediaChrome.Sender = {
+                    guard people, let h = message.senderHandle else { return .plain }
+                    return .agent(handle: h, avatar: message.senderAvatar, agentId: message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil)
+                }()
                 let agentId: String? = message.sender.hasPrefix("agent:") ? String(message.sender.dropFirst(6)) : nil
                 // Quote the user message this answers (`inReplyTo`); same chip as a human reply.
                 let replyQuote = message.inReplyTo.flatMap { $0.isEmpty ? nil : Quote.forReply($0, in: byId) }
@@ -254,7 +316,7 @@ enum Transcript {
                         if people, let h = message.senderHandle {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: h,
-                                                           avatar: message.senderAvatar, named: named && pix == firstTextPart,
+                                                           avatar: message.senderAvatar, named: named && pix == firstTextPart && pix == firstVisiblePart,
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil,
                                                            time: pix == lastTextPart ? inlineTime : nil)))
@@ -282,7 +344,10 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .system,
                                          kind: .system(icon: "stop.circle", text: "Stopped", avatarProject: nil)))
                     case .attachment(let id, let a):
-                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, fromUser: false, agentNames: agentNames))
+                        let tail = pix == lastAttachmentPart && !hasTextRow
+                        let chrome = MediaChrome(sender: mediaSender, named: named && pix == firstVisiblePart,
+                                                 avatar: tail, time: tail ? inlineTime : nil)
+                        chunk.append(attachmentRow(id: "\(message.id)#\(id)", message: message, a: a, projectId: projectId, chrome: chrome, agentNames: agentNames))
                     case .error(let id, let code, let text):
                         errors.append((id: id, code: code, text: text))
                     case .status, .tool, .subagentResult, .reasoning, .unknown:
@@ -438,8 +503,9 @@ enum Transcript {
         return "\(total) messages with \(joined)"
     }
 
-    private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, fromUser: Bool,
+    private static func attachmentRow(id: String, message: Message, a: Attachment, projectId: Id, chrome: MediaChrome,
                                       agentNames: [String: String]) -> Row {
+        let fromUser = chrome.fromUser
         guard let kind = MediaAlbum.kind(of: a) else {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
                        kind: .voiceMemo(name: a.name, projectId: projectId, ref: a.blobRef, fromUser: fromUser))
@@ -448,11 +514,11 @@ enum Transcript {
                                    projectName: { agentNames[$0] })
         if kind == .image {
             return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                       kind: .image(item: item, fromUser: fromUser))
+                       kind: .image(item: item, chrome: chrome))
         }
         // Video shows as a file card in the bubble (poster + Play live in the viewer).
         return Row(id: id, messageId: message.id, role: fromUser ? .user : .assistant,
-                   kind: .file(item: item, subtitle: subtitle(for: a)))
+                   kind: .file(item: item, subtitle: subtitle(for: a), chrome: chrome))
     }
 
     /// UTType-style labels some clients leave as the only text on a media-only send.
@@ -1029,12 +1095,10 @@ struct RowView: View {
                     .frame(maxWidth: maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
-        case .file(let item, let subtitle):
-            HStack {
-                if row.role == .user { Spacer(minLength: 0) }
-                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: row.role == .user)
-                    .frame(maxWidth: maxBubble, alignment: row.role == .user ? .trailing : .leading)
-                if row.role != .user { Spacer(minLength: 0) }
+        case .file(let item, let subtitle, let chrome):
+            mediaRow(chrome) {
+                FileCard(item: item, subtitle: subtitle, chatId: chatId, fromUser: chrome.fromUser)
+                    .frame(maxWidth: maxBubble - (chrome.hasLane ? Theme.memberLane : 0), alignment: chrome.fromUser ? .trailing : .leading)
             }
         case .forwardHint(let text, let fromUser):
             HStack {
@@ -1050,11 +1114,10 @@ struct RowView: View {
                     .frame(maxWidth: maxBubble, alignment: fromUser ? .trailing : .leading)
                 if !fromUser { Spacer(minLength: 0) }
             }
-        case .image(let item, let fromUser):
-            HStack {
-                if fromUser { Spacer(minLength: 0) }
-                ImageBubble(item: item, chatId: chatId, fromUser: fromUser, maxWidth: maxBubble)
-                if !fromUser { Spacer(minLength: 0) }
+        case .image(let item, let chrome):
+            mediaRow(chrome) {
+                ImageBubble(item: item, chatId: chatId, fromUser: chrome.fromUser,
+                            maxWidth: maxBubble - (chrome.hasLane ? Theme.memberLane : 0))
             }
         case .error(let code, let message):
             HStack(spacing: 10) {
@@ -1122,6 +1185,50 @@ struct RowView: View {
     }
 
     /// Avatar for a people-chat agent: project tree when we know it, else sender slug / initials.
+    /// A picture / file card dressed like the message's text rows (media-sender-
+    /// attribution-2026-10-23): my sends sit right; another sender's card sits on the
+    /// avatar column — the avatar beside it on the message's last row (earlier rows
+    /// keep the lane free), the name above the first row through the same
+    /// `memberName` / `LiveSenderName` the bubbles use, the time under it.
+    @ViewBuilder
+    private func mediaRow<Content: View>(_ chrome: MediaChrome, @ViewBuilder content: () -> Content) -> some View {
+        switch chrome.sender {
+        case .mine:
+            HStack { Spacer(minLength: 0); content() }
+        case .plain:
+            HStack { content(); Spacer(minLength: 0) }
+        case .person(let handle, let avatar), .agent(let handle, let avatar, _):
+            let agentId: String? = { if case .agent(_, _, let id) = chrome.sender { return id }; return nil }()
+            let open = {
+                if let agentId { model.showProfile(.agent(projectId: agentId)) }
+                else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
+            }
+            HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
+                if chrome.avatar {
+                    Button(action: open) { peopleAvatar(handle: handle, avatar: avatar) }
+                        .buttonStyle(.plain)
+                        .padding(.leading, Theme.avatarColumnInset)
+                        .accessibilityLabel("@\(handle), profile")
+                } else {
+                    Color.clear.frame(width: Theme.memberAvatar, height: 1).padding(.leading, Theme.avatarColumnInset)
+                }
+                VStack(alignment: .leading, spacing: Self.nameToTextGap) {
+                    if chrome.named {
+                        Button(action: open) { memberName(handle: handle, avatar: avatar, agentId: agentId) }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("bubble-name")
+                    }
+                    content()
+                    if let time = chrome.time {
+                        timeLabel(time).padding(.leading, 4)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .task(id: avatar) { if memberProject(handle: handle) == nil { SenderAccents.shared.load(url: avatar) } }
+        }
+    }
+
     @ViewBuilder
     private func peopleAvatar(handle: String, avatar: String?) -> some View {
         if let project = memberProject(handle: handle) {

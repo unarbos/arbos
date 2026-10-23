@@ -90,6 +90,9 @@ const BOTTOM_INSET: f32 = 54.0 - ROW_GAP_HALF - 6.0;
 pub const AVATAR_COLUMN_INSET: f32 = 1.0 + (COMPOSER_HEIGHT - 2.0 - PLUS_BUTTON) / 2.0;
 pub const SENDER_DISC: f32 = PLUS_BUTTON;
 pub const SENDER_DISC_GAP: f32 = 14.0;
+/// Where another sender's bubble (or picture / file card) starts: the column
+/// inset, the disc and its gap. Media rows pad the same way (`media_row`).
+#[cfg(test)]
 pub const SENDER_LANE: f32 = AVATAR_COLUMN_INSET + SENDER_DISC + SENDER_DISC_GAP;
 /// Messages for Mac fades a row's hover-only affordances (time, react glyph)
 /// in and out rather than snapping them.
@@ -256,6 +259,32 @@ pub fn quote_text(message: &Message) -> String {
     message_line(message, QUOTE_CHARS)
 }
 
+/// Who sent a media row, mirroring the text rows' decoration.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MediaSender {
+    /// My send: right-aligned, no chrome (like my bubble).
+    Mine,
+    /// Another person in a people chat: their disc on the avatar column,
+    /// their name when the chat names its senders (like `RowKind::User.from`).
+    Person(Person),
+    /// An agent in its own lane (people chat / Project): disc and name from the
+    /// seed, like `RowKind::Markdown.lane`.
+    Agent(String),
+    /// The agent of a 1:1 agent chat: left-aligned, no disc, no name.
+    Plain,
+}
+
+impl MediaSender {
+    /// The row leaves the avatar column free (and the last row draws a disc).
+    #[cfg(test)]
+    pub fn has_lane(&self) -> bool {
+        matches!(self, MediaSender::Person(_) | MediaSender::Agent(_))
+    }
+}
+
+/// Who draws a media row's chrome: avatar, name, identity colour, `agent` tag, click → profile.
+type MediaIdentity = (AnyElement, String, gpui::Hsla, bool, Box<dyn Fn(&mut App)>);
+
 #[derive(Clone, Debug)]
 pub enum RowKind {
     User {
@@ -301,6 +330,10 @@ pub enum RowKind {
         /// First block of a message whose sender is named, in a chat that names
         /// its senders: the agent's name sits inside this bubble, at the top.
         named: bool,
+        /// The message ends with this block (no attachment follows): the
+        /// sender's disc and the hover rail sit here. `last` alone only rounds
+        /// the corners — a picture after the text takes the disc instead.
+        tail: bool,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -331,15 +364,24 @@ pub enum RowKind {
         names: Vec<String>,
         total: u32,
     },
-    /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
+    /// An image or file in the chat (agent or user). Drawn with the same
+    /// sender decoration as the message's text rows (feedback
+    /// media-sender-attribution-2026-10-23): the avatar column, the sender's
+    /// disc on the message's last row, the name above the first row in chats
+    /// that name their senders, the hover rail on the last row.
     Attachment {
         attachment: Attachment,
         /// The `parts[]` id: the viewer opens on this picture of the album.
         part_id: Id,
-        mine: bool,
-        /// Someone else's (person or agent) in a people chat: keep the
-        /// sender's avatar lane free, like the message's bubble.
-        lane: bool,
+        /// Who sent it — decides the side, the lane and the disc.
+        sender: MediaSender,
+        /// First row of a message whose sender is named (`names_senders`):
+        /// the name sits above this picture / card, in the sender's colour.
+        named: bool,
+        /// Last row of its message: draws the disc and carries the hover rail.
+        last: bool,
+        /// "9:41 PM" for the hover rail / inline time.
+        time: Option<String>,
         /// The message's "Forwarded from …" line, drawn on the card.
         forwarded_from: Option<String>,
     },
@@ -1166,6 +1208,7 @@ impl Transcript {
         lane: Option<String>,
         quote: Option<Quote>,
         named: bool,
+        tail: bool,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1215,7 +1258,7 @@ impl Transcript {
             }
             _ => None,
         };
-        let inline_time = self.multi_party && lane.is_some() && last && !live;
+        let inline_time = self.multi_party && lane.is_some() && tail && !live;
         let time_el = inline_time
             .then(|| {
                 time.clone()
@@ -1268,13 +1311,13 @@ impl Transcript {
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
         // Hover: reply + copy. The react glyph that opened the emoji bar is
         // gone with the bar itself (#1370).
-        let hover_actions = (last && !live).then(|| {
+        let hover_actions = (tail && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
         });
         // Messages for Mac: the bubble's time shows beside the glyph on hover
         // (1:1 chats; a group / channel bubble already carries it after the text).
-        let hover_time = (last && !live && !inline_time)
+        let hover_time = (tail && !live && !inline_time)
             .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
             .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
@@ -1295,7 +1338,7 @@ impl Transcript {
         // People chats: the sender's disc at the bubble's bottom-left on
         // the last block; earlier blocks keep the lane free (mocks a/f).
         let disc = lane.as_deref().map(|seed| {
-            if last {
+            if tail {
                 // The disc opens the agent's profile, pushed over the group's pane.
                 let (_, _, _, agent_pid) = self.agent_identity(seed, "Agent", cx);
                 let open_state = self.state.clone();
@@ -1329,6 +1372,174 @@ impl Transcript {
             })
             .children(disc)
             .child(assistant_slot(bubble))
+            .into_any_element()
+    }
+
+    /// A picture / file card dressed like the message's text rows (feedback
+    /// media-sender-attribution-2026-10-23): my sends sit right with the hover
+    /// rail on the left; another sender's card sits on the avatar column with
+    /// the sender's disc on the message's last row (earlier rows keep the lane
+    /// free, like text blocks), the name above the first row in chats that
+    /// name their senders (`sender_name_label` — the same label the bubbles
+    /// use), the reply · copy rail and the time on the last row.
+    #[allow(clippy::too_many_arguments)]
+    fn media_row(
+        &mut self,
+        row_id: &str,
+        message_id: &Id,
+        card: AnyElement,
+        sender: MediaSender,
+        named: bool,
+        last: bool,
+        time: Option<String>,
+        now: Instant,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
+        let rail = last.then(|| {
+            let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
+            let time = hover_time(time.clone(), reveal, theme);
+            (actions, time)
+        });
+        if sender == MediaSender::Mine {
+            // My bubble sits right, so its outer edge (and time) is on the left.
+            return div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_end()
+                .py(px(ROW_GAP_HALF))
+                .child(match rail {
+                    Some((actions, time)) => row_el
+                        .justify_end()
+                        .items_center()
+                        .children(time.map(|t| t.mr(px(8.0))))
+                        .child(actions.mr(px(6.0)))
+                        .child(card),
+                    None => row_el.justify_end().child(card),
+                })
+                .into_any_element();
+        }
+        // Who: disc + name + colour from the person or the agent's seed.
+        let identity: Option<MediaIdentity> = match &sender {
+            MediaSender::Person(person) => {
+                let state = self.state.read(cx);
+                let image = state.avatar(&person.avatar_url);
+                let color = state.sender_accent(person, theme);
+                let open_state = self.state.clone();
+                let handle = person.handle.clone();
+                let sid = self.chat_id.as_ref().and_then(|c| {
+                    state.chats.iter().find_map(|(pid, tabs)| {
+                        tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                    })
+                });
+                let open = move |cx: &mut App| {
+                    let (handle, sid) = (handle.clone(), sid.clone());
+                    open_state.update(cx, |s, cx| {
+                        s.push_profile(
+                            crate::app::ProfilePage::User {
+                                handle,
+                                space_id: sid,
+                            },
+                            cx,
+                        )
+                    });
+                };
+                Some((
+                    people::avatar(image, person, SENDER_DISC, theme).into_any_element(),
+                    person.display_name(),
+                    color,
+                    false,
+                    Box::new(open),
+                ))
+            }
+            MediaSender::Agent(seed) => {
+                let a = self.agent_identity_full(seed, "Agent", cx);
+                let color =
+                    avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme);
+                let open_state = self.state.clone();
+                let pid = a.project_id.clone();
+                let open = move |cx: &mut App| {
+                    if let Some(pid) = pid.clone() {
+                        open_state.update(cx, |s, cx| {
+                            s.push_profile(crate::app::ProfilePage::Agent { project_id: pid }, cx)
+                        });
+                    }
+                };
+                Some((
+                    self.agent_disc(seed, cx).into_any_element(),
+                    a.name,
+                    color,
+                    true,
+                    Box::new(open),
+                ))
+            }
+            MediaSender::Mine | MediaSender::Plain => None,
+        };
+        let has_lane = identity.is_some();
+        let (disc, name_el) = match identity {
+            Some((avatar, name, color, agent, open)) => {
+                let open = Rc::new(open);
+                let disc: AnyElement = if last {
+                    let open = open.clone();
+                    div()
+                        .id(SharedString::from(format!("{row_id}#disc")))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .child(avatar)
+                        .on_click(move |_, _, cx| open(cx))
+                        .into_any_element()
+                } else {
+                    div().w(px(SENDER_DISC)).flex_shrink_0().into_any_element()
+                };
+                let name_el = named.then(|| {
+                    self.sender_name_label(row_id, name, color, agent)
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| open(cx))
+                });
+                (Some(disc), name_el)
+            }
+            None => (None, None),
+        };
+        // The card, the name above it, and the rail hanging off its right edge.
+        let stack = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(2.0))
+            .children(name_el)
+            .child(card)
+            .children(rail.map(|(actions, time)| {
+                div()
+                    .absolute()
+                    .left(relative_width(1.0))
+                    .top_0()
+                    .bottom_0()
+                    .pl(px(6.0))
+                    .flex()
+                    .items_center()
+                    .child(actions)
+                    .children(time.map(|t| t.ml(px(8.0))))
+            }));
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_start()
+            .py(px(ROW_GAP_HALF))
+            .child(
+                row_el
+                    .justify_start()
+                    .items_end()
+                    .when(has_lane, |el| {
+                        el.pl(px(AVATAR_COLUMN_INSET)).gap(px(SENDER_DISC_GAP))
+                    })
+                    .children(disc)
+                    .child(assistant_slot(stack)),
+            )
             .into_any_element()
     }
 
@@ -1538,6 +1749,7 @@ impl Transcript {
                 lane,
                 quote,
                 named,
+                tail,
             } => self.markdown_bubble(
                 &row.id,
                 &row.message_id,
@@ -1551,6 +1763,7 @@ impl Transcript {
                 lane,
                 quote,
                 named,
+                tail,
                 now,
                 &theme,
                 &selectable,
@@ -1587,6 +1800,7 @@ impl Transcript {
                     lane,
                     quote,
                     named,
+                    true,
                     now,
                     &theme,
                     &selectable,
@@ -1732,8 +1946,10 @@ impl Transcript {
             RowKind::Attachment {
                 attachment,
                 part_id,
-                mine,
-                lane,
+                sender,
+                named,
+                last,
+                time,
                 forwarded_from,
             } => {
                 let preview = match attachment.blob_ref.as_ref() {
@@ -1759,22 +1975,28 @@ impl Transcript {
                         });
                     }) as attachments::OpenFn
                 });
-                div()
-                    .w_full()
-                    .py(px(4.0))
-                    .flex()
-                    .when(mine, |el| el.justify_end())
-                    .when(lane, |el| el.pl(px(SENDER_LANE)))
-                    .child(attachments::card(
-                        &row.id,
-                        &attachment,
-                        preview,
-                        forwarded_from.as_deref(),
-                        open,
-                        self.state.clone(),
-                        &theme,
-                    ))
-                    .into_any_element()
+                let card = attachments::card(
+                    &row.id,
+                    &attachment,
+                    preview,
+                    forwarded_from.as_deref(),
+                    open,
+                    self.state.clone(),
+                    &theme,
+                );
+                self.media_row(
+                    &row.id,
+                    &row.message_id,
+                    card,
+                    sender,
+                    named,
+                    last,
+                    time,
+                    now,
+                    &theme,
+                    window,
+                    cx,
+                )
             }
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
@@ -2257,18 +2479,32 @@ pub fn build_rows(
                 let named = names_senders
                     && from.is_some()
                     && prev_sender.as_deref() != Some(message.sender.as_str());
-                // Image preview / file card rows (same cards as agent attachments).
+                // Image preview / file card rows (same cards as agent attachments),
+                // decorated like the text bubble: the sender's disc on the message's
+                // last row, the name above its first row, my sends on the right.
                 let is_mine = from.is_none();
                 // A forwarded attachment's "Forwarded from …" line is the card's
                 // hint, not a bubble of its own.
                 let forwarded = (!attachment_parts.is_empty())
                     .then(|| attachments::forwarded_from(&text).map(str::to_owned))
                     .flatten();
-                for (part_id, attachment) in &attachment_parts {
+                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
+                let show_text = !text.is_empty()
+                    && !(has_image && is_generic_media_label(&text))
+                    && forwarded.is_none();
+                let text_row = show_text || attachment_parts.is_empty();
+                let media_sender = match &from {
+                    Some(person) => MediaSender::Person(person.clone()),
+                    None => MediaSender::Mine,
+                };
+                let n_att = attachment_parts.len();
+                for (i, (part_id, attachment)) in attachment_parts.iter().enumerate() {
                     let has_thumb = attachment
                         .blob_ref
                         .as_deref()
                         .is_some_and(|k| thumb_keys.contains(k));
+                    let first_row = i == 0;
+                    let last_row = i + 1 == n_att && !text_row;
                     rows.push(Row {
                         version: hash_version(
                             &(
@@ -2279,6 +2515,8 @@ pub fn build_rows(
                                 is_mine,
                                 has_thumb,
                                 &forwarded,
+                                named && first_row,
+                                last_row,
                             ),
                             false,
                         ),
@@ -2287,17 +2525,18 @@ pub fn build_rows(
                         kind: RowKind::Attachment {
                             attachment: attachment.clone(),
                             part_id: part_id.clone(),
-                            mine: is_mine,
-                            lane: !is_mine,
+                            sender: media_sender.clone(),
+                            named: named && first_row,
+                            last: last_row,
+                            time: clock_label(message.created_at),
                             forwarded_from: forwarded.clone(),
                         },
                     });
                 }
-                // Skip a bare "Image"/"Photo" bubble when the attachment already shows it.
-                let show_text = !text.is_empty()
-                    && !(has_image && is_generic_media_label(&text))
-                    && forwarded.is_none();
-                if show_text || attachment_parts.is_empty() {
+                // The name went above the first picture; the text bubble below it
+                // does not repeat it.
+                let named = named && attachment_parts.is_empty();
+                if text_row {
                     let quote = message
                         .reply_to
                         .as_deref()
@@ -2456,8 +2695,30 @@ pub fn build_rows(
                     })
                     .collect();
                 let bubble_texts = BubbleText::for_blocks(&bubble_blocks, false);
+                // The message's last visible part: a text part with words, or an
+                // attachment. The disc and the hover rail go on that row.
+                let last_visible_part =
+                    message
+                        .parts
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find_map(|(i, p)| match p {
+                            Part::Attachment { .. } => Some(i),
+                            Part::Text { id, .. } => polished
+                                .iter()
+                                .find(|(pid, _)| pid == id)
+                                .filter(|(_, t)| {
+                                    split_blocks(t).into_iter().any(|b| !is_json_block(&b))
+                                })
+                                .map(|_| i),
+                            _ => None,
+                        });
+                let ends_with_text = last_visible_part
+                    .is_some_and(|i| matches!(message.parts[i], Part::Text { .. }));
                 let mut block_ix = 0usize;
                 let mut had_prose = false;
+                let mut had_attachment = false;
                 // Error parts wait until the prose is known: under a real answer they stay
                 // the chip with Retry; on an answer with no words they become the words.
                 let mut errors: Vec<(String, String, String)> = Vec::new();
@@ -2489,10 +2750,11 @@ pub fn build_rows(
                                     bubble_texts.get(block_ix).cloned().unwrap_or_else(|| {
                                         BubbleText::single(block_plain(&block, false))
                                     });
-                                let named = sender_named && first;
+                                let named = sender_named && first && !had_attachment;
+                                let tail = last && ends_with_text;
                                 rows.push(Row {
                                     version: hash_version(
-                                        &(&block, first, last, fill, &reply_quote, named),
+                                        &(&block, first, last, fill, &reply_quote, named, tail),
                                         live,
                                     ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
@@ -2508,6 +2770,7 @@ pub fn build_rows(
                                         lane: lane.clone(),
                                         quote: if first { reply_quote.clone() } else { None },
                                         named,
+                                        tail,
                                     },
                                 });
                                 block_ix += 1;
@@ -2518,6 +2781,12 @@ pub fn build_rows(
                                 .blob_ref
                                 .as_deref()
                                 .is_some_and(|k| thumb_keys.contains(k));
+                            // Named when it is the message's first visible row
+                            // (no text block before it); last when no text block
+                            // or attachment follows — the disc sits there.
+                            let first_row = block_ix == 0 && !had_attachment;
+                            let last_row = Some(pix) == last_visible_part;
+                            had_attachment = true;
                             rows.push(Row {
                                 version: hash_version(
                                     &(
@@ -2526,6 +2795,8 @@ pub fn build_rows(
                                         attachment.bytes,
                                         &attachment.blob_ref,
                                         has_thumb,
+                                        sender_named && first_row,
+                                        last_row,
                                     ),
                                     false,
                                 ),
@@ -2534,8 +2805,13 @@ pub fn build_rows(
                                 kind: RowKind::Attachment {
                                     attachment: attachment.clone(),
                                     part_id: id.clone(),
-                                    mine: false,
-                                    lane: lane.is_some(),
+                                    sender: match &lane {
+                                        Some(seed) => MediaSender::Agent(seed.clone()),
+                                        None => MediaSender::Plain,
+                                    },
+                                    named: sender_named && first_row,
+                                    last: last_row,
+                                    time: clock_label(message.created_at),
                                     forwarded_from: None,
                                 },
                             })
@@ -2673,6 +2949,7 @@ pub fn build_rows(
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
                             named: sender_named,
+                            tail: true,
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
@@ -4679,6 +4956,220 @@ mod presence_rows_tests {
                 .count(),
             1,
             "one name, inside the first bubble"
+        );
+    }
+}
+
+#[cfg(test)]
+mod media_attribution_tests {
+    //! feedback media-sender-attribution-2026-10-23 (#1426 follow-up): a picture or
+    //! file row carries the same sender decoration as a text row — avatar column
+    //! and disc, the name in chats that name their senders, none in 1:1 — and
+    //! consecutive media from one sender group like text.
+    use std::collections::{HashMap, HashSet};
+
+    use super::*;
+
+    fn with_photo(role: &str, sender: &str, text: &str, at: u64, photos: usize) -> Message {
+        let mut parts: Vec<serde_json::Value> = (0..photos)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("a-{at}-{i}"),
+                    "kind": "attachment",
+                    "attachment": { "name": format!("scout-{i}.jpg"), "mime": "image/jpeg", "ref": format!("blob-{at}-{i}") }
+                })
+            })
+            .collect();
+        if !text.is_empty() {
+            parts
+                .push(serde_json::json!({ "id": format!("p-{at}"), "kind": "text", "text": text }));
+        }
+        let mut v = serde_json::json!({
+            "id": format!("m-{at}"),
+            "chatId": "chat_group",
+            "role": role,
+            "sender": sender,
+            "status": "done",
+            "createdAt": at,
+            "parts": parts,
+        });
+        if sender.starts_with("user:") {
+            v["senderHandle"] = "scout".into();
+            v["senderName"] = "Scout".into();
+        } else if sender.starts_with("agent:") {
+            v["senderHandle"] = "scout".into();
+            v["senderName"] = "Scout".into();
+            v["askedByHandle"] = "jacob".into();
+        }
+        serde_json::from_value(v).expect("message")
+    }
+
+    fn rows(messages: &[Message], names_senders: bool) -> Vec<Row> {
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        build_rows(
+            messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            names_senders,
+        )
+    }
+
+    fn media(rows: &[Row]) -> Vec<(&MediaSender, bool, bool)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Attachment {
+                    sender,
+                    named,
+                    last,
+                    ..
+                } => Some((sender, *named, *last)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_persons_photo_in_a_group_is_named_and_sits_on_the_avatar_column() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows(&[with_photo("user", "user:gh_scout", "", t, 1)], true);
+        let m = media(&rows);
+        assert_eq!(m.len(), 1);
+        let (sender, named, last) = m[0];
+        assert!(matches!(sender, MediaSender::Person(p) if p.handle == "scout"));
+        assert!(sender.has_lane(), "the disc column, like a text bubble");
+        assert!(
+            named,
+            "the name above the picture (group names its senders)"
+        );
+        assert!(last, "the only row draws the disc and carries the rail");
+    }
+
+    #[test]
+    fn an_agents_photo_in_a_group_is_named_from_its_lane() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows(&[with_photo("assistant", "agent:scout", "", t, 1)], true);
+        let m = media(&rows);
+        assert_eq!(m.len(), 1);
+        assert!(matches!(m[0].0, MediaSender::Agent(seed) if seed == "agent:scout"));
+        assert!(m[0].1 && m[0].2);
+    }
+
+    #[test]
+    fn a_photo_in_a_one_to_one_chat_has_no_name_but_keeps_the_avatar() {
+        let t = 1_700_000_000_000u64;
+        // DM with a person: avatar column, no name (names_senders = false).
+        let rows = rows(&[with_photo("user", "user:gh_scout", "", t, 1)], false);
+        let m = media(&rows);
+        assert!(matches!(m[0].0, MediaSender::Person(_)));
+        assert!(!m[0].1, "1:1 chats show no name label");
+        // Me ↔ agent: the agent's picture is plain — no lane, no name, like its bubble.
+        let plain = rows_plain();
+        assert_eq!(media(&plain)[0].0, &MediaSender::Plain);
+        assert!(!media(&plain)[0].1);
+    }
+
+    fn rows_plain() -> Vec<Row> {
+        let t = 1_700_000_000_000u64;
+        let mut m = with_photo("assistant", "agent", "", t, 1);
+        m.asked_by_handle = None;
+        rows(&[m], false)
+    }
+
+    #[test]
+    fn consecutive_photos_from_one_sender_group_like_text() {
+        let t = 1_700_000_000_000u64;
+        // Two photos in one message, then a text-only message from the same sender:
+        // the name once (above the first picture), the disc on each message's last row.
+        let rows = rows(
+            &[
+                with_photo("user", "user:gh_scout", "", t, 2),
+                with_photo("user", "user:gh_scout", "and a caption", t + 1_000, 0),
+            ],
+            true,
+        );
+        let m = media(&rows);
+        assert_eq!(
+            m.iter().map(|(_, n, l)| (*n, *l)).collect::<Vec<_>>(),
+            [(true, false), (false, true)]
+        );
+        let named_text: Vec<bool> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { named, .. } => Some(*named),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            named_text,
+            [false],
+            "same sender run: the caption is not named again"
+        );
+    }
+
+    #[test]
+    fn a_photo_with_a_caption_puts_the_name_on_the_photo_and_the_disc_on_the_text() {
+        let t = 1_700_000_000_000u64;
+        let rows = rows(
+            &[with_photo("user", "user:gh_scout", "look at this", t, 1)],
+            true,
+        );
+        let m = media(&rows);
+        assert_eq!((m[0].1, m[0].2), (true, false));
+        let text_named: Vec<bool> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { named, .. } => Some(*named),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text_named,
+            [false],
+            "the name is above the picture, not repeated in the bubble"
+        );
+    }
+
+    #[test]
+    fn an_agents_text_then_photo_moves_the_disc_to_the_photo() {
+        let t = 1_700_000_000_000u64;
+        let mut m = with_photo("assistant", "agent:scout", "here it is", t, 1);
+        // Text first, then the picture (the agent's usual order).
+        m.parts.reverse();
+        let rows = rows(&[m], true);
+        let tails: Vec<bool> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::Markdown { tail, named, .. } => Some(*tail && !*named),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tails,
+            [false],
+            "the text block rounds its corners but the disc moves on"
+        );
+        let named_text = rows
+            .iter()
+            .any(|r| matches!(&r.kind, RowKind::Markdown { named: true, .. }));
+        assert!(
+            named_text,
+            "the name stays on the first row — the text bubble"
+        );
+        let m = media(&rows);
+        assert_eq!(
+            (m[0].1, m[0].2),
+            (false, true),
+            "the picture is the message's tail"
         );
     }
 }
