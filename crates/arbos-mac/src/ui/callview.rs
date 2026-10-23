@@ -206,7 +206,7 @@ pub mod strip_layout {
 
     /// Tile avatar size for a strip this tall (name row and paddings taken off).
     pub fn avatar_size(strip_height: f32) -> f32 {
-        (strip_height - 72.0).clamp(28.0, 96.0)
+        (strip_height - 100.0).clamp(28.0, 96.0)
     }
 
     /// Is the strip shown in the column of `space_id`? Only while MY call is live there and
@@ -280,28 +280,38 @@ fn strip_tile(
     } else {
         p.sender.display_name()
     };
+    // Name (truncated to the tile), the muted mic before it, "Ringing…" under it.
     card = card.child(
         div()
-            .flex()
-            .items_center()
-            .gap(px(4.0))
+            .max_w_full()
             .px(px(8.0))
-            .py(px(2.0))
-            .rounded_full()
-            .when(p.video.is_some(), |el| {
-                el.bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
-            })
-            .text_size(px(TEXT_SMALL))
-            .text_color(theme.text)
-            .when(p.muted, |el| {
-                el.child(icon("mic-off", 11.0, theme.text_muted))
-            })
-            .child(name)
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(
+                div()
+                    .max_w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded_full()
+                    .when(p.video.is_some(), |el| {
+                        el.bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                    })
+                    .text_size(px(TEXT_SMALL))
+                    .text_color(theme.text)
+                    .when(p.muted, |el| {
+                        el.child(icon("mic-off", 11.0, theme.text_muted))
+                    })
+                    .child(div().truncate().child(name)),
+            )
             .children(caption.map(|c| {
                 div()
                     .text_size(px(TEXT_TINY))
                     .text_color(theme.text_muted)
-                    .child(format!("· {c}"))
+                    .child(c.to_string())
             })),
     );
     card
@@ -1196,8 +1206,8 @@ mod strip_tests {
         assert_eq!(max_height(200.0), MIN_HEIGHT);
         assert_eq!(clamp_height(999.0, 200.0), MIN_HEIGHT);
         // Avatars follow the strip height between sensible sizes.
-        assert_eq!(avatar_size(MIN_HEIGHT), 40.0);
-        assert_eq!(avatar_size(DEFAULT_HEIGHT), 96.0);
+        assert_eq!(avatar_size(MIN_HEIGHT), 28.0);
+        assert_eq!(avatar_size(DEFAULT_HEIGHT), 68.0);
         assert_eq!(avatar_size(600.0), 96.0);
     }
 }
