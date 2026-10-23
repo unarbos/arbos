@@ -343,9 +343,12 @@ struct ChatView: View {
         }
         let list = messages
         let byId = Transcript.index(list)
+        // Sender names inside the bubbles: groups and channels only — never a 1:1 chat.
+        let multiParty = isChannel || (people?.isGroup ?? false)
         let next = Transcript.rows(list, byId: byId, projectId: slot,
                                    me: isChannel ? model.channelMe : model.myUserId,
-                                   people: isPeople || isChannel, agentNames: agentNames)
+                                   people: isPeople || isChannel, agentNames: agentNames,
+                                   multiParty: multiParty)
         // Rows appended after the last one we had (new messages) join the window, so the
         // oldest row on screen does not fall out of the view tree when a new one lands.
         // History that arrives above it — the first snapshot, a backfill, an older
@@ -637,6 +640,14 @@ struct ChatView: View {
                             model.fixtureAppendAssistant(chatId: chatId, text: AppModel.longReview)
                             replyTo = model.messages[chatId]?.last { $0.role == .assistant }
                             composerFocused = true
+                        }
+                        #endif
+                    case "agent-message", "agent-message-received":
+                        // Rig: agent-to-agent messaging rows (fixture only) — the sender's
+                        // hand-off + confirm + relayed reply, or the receiver's labelled row.
+                        #if DEBUG
+                        if model.isFixture {
+                            model.fixtureAgentMessage(chatId: chatId, received: show == "agent-message-received")
                         }
                         #endif
                     case "replied":
@@ -1177,8 +1188,8 @@ struct ChatView: View {
     }
 
     /// A real message in the shared chat doc (the full menu: Copy, Reply,
-    /// Forward, Delete) — not a date / join / system line. Channels carry no
-    /// replies or deletes yet (C1 scope): Copy only.
+    /// Forward, Reply in DM, Delete) — not a date / join / system line.
+    /// Channels carry no replies or deletes yet (C1 scope): Copy only.
     private func isMessageRow(_ row: Row) -> Bool {
         if isChannel { return false }
         switch row.kind {
@@ -1191,7 +1202,8 @@ struct ChatView: View {
 
     /// The long-press menu's actions (`MessageMenu`): Copy the text, Reply
     /// (in a people chat the agent that wrote it becomes the recipient),
-    /// Forward to another chat, Delete for everyone.
+    /// Forward to another chat, Reply in DM (open a private chat with the human
+    /// who wrote it), Delete for everyone.
     private func runMessageMenu(_ item: MessageMenuItem, row: Row) {
         switch item {
         case .copy:
@@ -1200,6 +1212,16 @@ struct ChatView: View {
             beginReply(to: row)
         case .forward:
             beginForward(row)
+        case .replyInDM:
+            // Same path as the group member "Send private message" (#1455): open
+            // (or create) the DM with that person's handle. Agents and your own
+            // messages have no peer to DM.
+            guard let m = messageById[row.messageId],
+                  let handle = m.senderHandle, !handle.isEmpty,
+                  m.sender.hasPrefix("user:"),
+                  m.sender != model.myUserId
+            else { return }
+            Task { _ = await model.openDM(handle: handle) }
         case .delete:
             model.deleteMessage(chatId: chatId, messageId: row.messageId)
         }

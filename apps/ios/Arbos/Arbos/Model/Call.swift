@@ -168,10 +168,17 @@ struct Call: Identifiable, Equatable {
     var agents: [CallPerson] = []
     /// Only on the 201 start response.
     var reachable: [CallReachability] = []
+    /// `"open"` = anyone may speak; `"hosted"` = host + invited speakers only (bigger groups).
+    var speakMode: String?
+    /// People the host invited to speak (host is `startedBy`).
+    var invitedSpeakers: [CallPerson] = []
+    /// Whether this device may publish audio (from the join reply).
+    var canSpeak: Bool?
 
     var id: String { callId }
     var isPeople: Bool { projectId == peopleSlot || projectId.isEmpty }
     var ended: Bool { endedAt != nil }
+    var isHostedSpeak: Bool { speakMode == "hosted" }
 
     init(
         callId: String,
@@ -188,7 +195,10 @@ struct Call: Identifiable, Equatable {
         reason: String? = nil,
         participants: [CallPerson] = [],
         agents: [CallPerson] = [],
-        reachable: [CallReachability] = []
+        reachable: [CallReachability] = [],
+        speakMode: String? = nil,
+        invitedSpeakers: [CallPerson] = [],
+        canSpeak: Bool? = nil
     ) {
         self.callId = callId
         self.chatId = chatId
@@ -205,6 +215,9 @@ struct Call: Identifiable, Equatable {
         self.participants = participants
         self.agents = agents
         self.reachable = reachable
+        self.speakMode = speakMode
+        self.invitedSpeakers = invitedSpeakers
+        self.canSpeak = canSpeak
     }
 
     init(dto: CallDto, reachable: [CallReachability] = []) {
@@ -223,8 +236,27 @@ struct Call: Identifiable, Equatable {
             reason: dto.reason,
             participants: dto.participants.map(CallPerson.init(dto:)),
             agents: dto.agents.map(CallPerson.init(dto:)),
-            reachable: reachable
+            reachable: reachable,
+            speakMode: dto.speak_mode.flatMap { $0.isEmpty ? nil : $0 },
+            invitedSpeakers: (dto.invited_speakers ?? []).map(CallPerson.init(dto:)),
+            canSpeak: dto.can_speak
         )
+    }
+
+    func isHost(_ userId: String?) -> Bool {
+        guard let userId, let startedBy else { return false }
+        return startedBy.id == userId
+    }
+
+    func isInvitedSpeaker(_ userId: String) -> Bool {
+        invitedSpeakers.contains { $0.id == userId }
+    }
+
+    func speakRole(of userId: String) -> String? {
+        guard isHostedSpeak else { return nil }
+        if startedBy?.id == userId { return "Host" }
+        if isInvitedSpeaker(userId) { return "Speaker" }
+        return nil
     }
 
     static func parse(_ raw: Any?) -> Call? {

@@ -297,7 +297,7 @@ export default function arbosPiExt(pi: ExtensionAPI) {
       }
     }
     if (state === "pending") {
-      // Stopped waiting: agentd turns a late decision into a follow-up turn with a re-run grant.
+      // Stopped waiting: agentd expires the card so the UI shows the timeout promptly.
       void hook("/hook/approval-abandon", { approvalId });
     }
     audit({ kind: "approval_result", session: sessionId, tool, call_id: callId, approval_id: approvalId, state });

@@ -14,7 +14,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-OUT_DIR="${OUT_DIR:-$ROOT/target/xcframework}"
+# Where cargo writes: honour CARGO_TARGET_DIR. The gate exports it (rust-gate.sh builds into
+# ~/arbos-rust-gate-target) and this script read $ROOT/target regardless, so every FFI change
+# went through the gate with a stale libarbos_ffi.a and stale Swift bindings (2026-10-23,
+# #1540: "RoomAction has no member healCheck" against a lib built at 19:13).
+TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+OUT_DIR="${OUT_DIR:-$TARGET_DIR/xcframework}"
 PKG_DIR="$ROOT/packages/ArbosFFI"
 FFI_CRATE=arbos-ffi
 LIB_NAME=arbos_ffi
@@ -37,7 +42,7 @@ echo "==> rustup targets (${DEVICE_TARGET}, ${SIM_TARGET}, ${SIM_X86_TARGET})"
 rustup target add "$DEVICE_TARGET" "$SIM_TARGET" "$SIM_X86_TARGET"
 
 echo "==> uniffi-bindgen ${UNIFFI_VERSION}"
-TOOLS_ROOT="$ROOT/target/uniffi-tools"
+TOOLS_ROOT="$TARGET_DIR/uniffi-tools"
 BINDGEN="$TOOLS_ROOT/bin/uniffi-bindgen"
 if [[ ! -x "$BINDGEN" ]] || ! "$BINDGEN" --version 2>/dev/null | grep -q "$UNIFFI_VERSION"; then
   cargo install uniffi --version "$UNIFFI_VERSION" --features cli \
@@ -49,16 +54,16 @@ cargo build -p "$FFI_CRATE" --release --locked --target "$DEVICE_TARGET"
 cargo build -p "$FFI_CRATE" --release --locked --target "$SIM_TARGET"
 cargo build -p "$FFI_CRATE" --release --locked --target "$SIM_X86_TARGET"
 
-DEVICE_LIB="$ROOT/target/${DEVICE_TARGET}/release/lib${LIB_NAME}.a"
-SIM_ARM_LIB="$ROOT/target/${SIM_TARGET}/release/lib${LIB_NAME}.a"
-SIM_X86_LIB="$ROOT/target/${SIM_X86_TARGET}/release/lib${LIB_NAME}.a"
+DEVICE_LIB="$TARGET_DIR/${DEVICE_TARGET}/release/lib${LIB_NAME}.a"
+SIM_ARM_LIB="$TARGET_DIR/${SIM_TARGET}/release/lib${LIB_NAME}.a"
+SIM_X86_LIB="$TARGET_DIR/${SIM_X86_TARGET}/release/lib${LIB_NAME}.a"
 test -f "$DEVICE_LIB"
 test -f "$SIM_ARM_LIB"
 test -f "$SIM_X86_LIB"
 
 # Name must stay lib${LIB_NAME}.a: xcodebuild -create-xcframework keeps the
 # basename inside the xcframework, and the iOS gate looks for that file.
-UNIVERSAL_SIM_DIR="$ROOT/target/arbos-ffi-ios-sim-universal"
+UNIVERSAL_SIM_DIR="$TARGET_DIR/arbos-ffi-ios-sim-universal"
 rm -rf "$UNIVERSAL_SIM_DIR"
 mkdir -p "$UNIVERSAL_SIM_DIR"
 UNIVERSAL_SIM_LIB="$UNIVERSAL_SIM_DIR/lib${LIB_NAME}.a"

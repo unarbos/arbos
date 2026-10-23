@@ -99,20 +99,24 @@ struct Quote: Equatable, Hashable {
 enum RowKind: Equatable {
     case user(text: String, pending: Bool, quote: Quote?)
     /// Another person's message in a people chat: left bubble with avatar; the name above
-    /// only when the sender changed (`named`, Grok Bot's group style).
-    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?)
+    /// only when the sender changed (`named`, Grok Bot's group style) and the chat names its
+    /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
+    /// and `time` follows the text (Jacob, 2026-10-23).
+    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, time: String?)
     case assistant(blocks: [Block], live: Bool, caption: String?)
     /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
     /// reply — consecutive answers from the same agent must not merge, #1447). No
     /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
     /// `quote` is the user message this answers (`inReplyTo`).
-    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, quote: Quote?)
+    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, quote: Quote?, time: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
     /// `questionId` is nil for a legacy `waiting_user` status line (no `question` part).
-    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool)
+    /// `lane`: in a people chat the card sits after the sender's avatar lane, like the bubble it
+    /// belongs to (#1440 follow-up: the card must share the bubble's left edge and cap width).
+    case question(questionId: String?, text: String, options: [ChoiceOption], multi: Bool, picked: [String], open: Bool, lane: Bool)
     /// A file card; tap opens the media viewer on it (Open → Quick Look).
     case file(item: MediaItem, subtitle: String)
     case voiceMemo(name: String, projectId: Id, ref: String?, fromUser: Bool)
@@ -149,12 +153,14 @@ enum Transcript {
     /// messages in the doc (#1349); nothing is synthesised here.
     /// `agentNames`: agent project id → display name from the chat's member list, the
     /// fallback when a reply row carries no `senderName` (older boxes).
-    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:]) -> [Row] {
-        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames)
+    static func rows(_ messages: [Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false) -> [Row] {
+        rows(messages, byId: index(messages), projectId: projectId, subagentNames: subagentNames, me: me, people: people, agentNames: agentNames, multiParty: multiParty)
     }
 
     /// Same, with the caller's `index(messages)` (the chat keeps it for its own lookups).
-    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:]) -> [Row] {
+    /// `multiParty`: the chat names its senders — a group or a server channel (people and
+    /// agents alike); a 1:1 chat (me ↔ person, me ↔ agent) labels nobody (Jacob, 2026-10-23).
+    static func rows(_ messages: [Message], byId: [Id: Message], projectId: Id, subagentNames: [String: String] = [:], me: String? = nil, people: Bool = false, agentNames: [String: String] = [:], multiParty: Bool = false) -> [Row] {
         var rows: [Row] = []
         rows.reserveCapacity(messages.count + messages.count / 8)
         var lastAt: Int64 = 0
@@ -176,7 +182,8 @@ enum Transcript {
             // People-chat agent replies always name the sender (#1447): two answers in a
             // row from the same agent must not look like one run.
             let agentInPeople = people && (message.role == .assistant || message.role == .project)
-            let named = dateBreak || prevSender != message.sender || agentInPeople
+            let named = multiParty && (dateBreak || prevSender != message.sender || agentInPeople)
+            let inlineTime = multiParty ? Self.clockLabel(message.createdAt) : nil
             switch message.role {
             case .user:
                 var hasImage = false
@@ -207,7 +214,7 @@ enum Transcript {
                                          kind: .user(text: text, pending: message.pending, quote: quote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote, time: inlineTime)))
                     }
                 }
             case .system:
@@ -251,7 +258,15 @@ enum Transcript {
                                              kind: .member(blocks: blocks, live: live, handle: h,
                                                            avatar: message.senderAvatar, named: named && pix == firstTextPart,
                                                            agentId: agentId,
-                                                           quote: pix == firstTextPart ? replyQuote : nil)))
+                                                           quote: pix == firstTextPart ? replyQuote : nil,
+                                                           time: pix == lastTextPart ? inlineTime : nil)))
+                        } else if message.role == .project, let from = Self.projectSender(message) {
+                            // Another agent wrote into this chat (agent-to-agent messaging):
+                            // the group member bubble — its avatar, its colour, its name above.
+                            chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
+                                             kind: .member(blocks: blocks, live: live, handle: from.handle,
+                                                           avatar: nil, named: pix == firstTextPart, agentId: from.projectId,
+                                                           quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil)))
@@ -260,12 +275,14 @@ enum Transcript {
                         // agentd writes a `question` part and this status line; the part wins.
                         if message.questions.isEmpty {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true)))
+                                             kind: .question(questionId: nil, text: text, options: [], multi: false, picked: [], open: true,
+                                                             lane: people && message.senderHandle != nil)))
                         }
                     case .question(let id, let q):
                         chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                          kind: .question(questionId: q.questionId, text: q.question, options: q.options,
-                                                         multi: q.multi, picked: q.answer, open: q.open)))
+                                                         multi: q.multi, picked: q.answer, open: q.open,
+                                                         lane: people && message.senderHandle != nil)))
                     case .status(let id, .handoff, let text):
                         // Legacy status line; the turn-based row above already covers it.
                         if handoffName == nil {
@@ -315,7 +332,7 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .member(blocks: blocks, live: false, handle: h,
                                                        avatar: message.senderAvatar, named: named, agentId: agentId,
-                                                       quote: replyQuote)))
+                                                       quote: replyQuote, time: inlineTime)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .assistant(blocks: blocks, live: false, caption: nil)))
@@ -325,6 +342,12 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#\(e.id)", messageId: message.id, role: .assistant, kind: .error(code: e.code, message: e.text)))
                     }
                 }
+            }
+            // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+            if !streaming, let to = message.agentReplyTo?.trimmingCharacters(in: .whitespaces), !to.isEmpty,
+               message.role == .assistant {
+                chunk.append(Row(id: "\(message.id)#replied", messageId: message.id, role: .system,
+                                 kind: .system(icon: nil, text: "Replied to \u{FFFC}\(to)", avatarProject: nil)))
             }
             guard !chunk.isEmpty else { continue }
             for i in chunk.indices { chunk[i].createdAt = message.createdAt }
@@ -353,6 +376,12 @@ enum Transcript {
     /// Blocks for one text part — polished, split, JSON dropped. Cached by text: a rebuild
     /// runs for every streaming delta, and re-parsing every finished answer in a long group
     /// on each one kept the main thread busy. Only the streaming part misses the cache.
+    /// "8:05 AM" for the time after a group / channel bubble's text.
+    static func clockLabel(_ ms: Int64) -> String? {
+        guard ms > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(ms) / 1000).formatted(date: .omitted, time: .shortened)
+    }
+
     static func proseBlocks(_ text: String, people: Bool) -> [Block] {
         let key = (people ? "p\u{1}" : "a\u{1}") + text
         if let hit = blockCache.object(forKey: key as NSString) { return hit.blocks }
@@ -402,6 +431,15 @@ enum Transcript {
         }
         flush()
         return out
+    }
+
+    /// `sender: project:<id>` plus the row's `senderHandle` (or a slug of `senderName`): the
+    /// handle the member bubble is drawn with and the agent id its tap opens.
+    static func projectSender(_ message: Message) -> (handle: String, projectId: String)? {
+        guard message.sender.hasPrefix("project:") else { return nil }
+        let pid = String(message.sender.dropFirst("project:".count))
+        let handle = message.senderHandle ?? message.senderName.map { mentionSlug($0) } ?? pid
+        return (handle, pid)
     }
 
     /// Grok's wording: "Messaged ◉ A" (brief only), "Messaged ◉ A and ◉ B", or
@@ -875,76 +913,95 @@ struct RowView: View {
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(pending ? 0.6 : 1)
             }
-        case .other(let text, let handle, let avatar, let named, let quote):
+        case .other(let text, let handle, let avatar, let named, let quote, let time):
+            let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
+                Button(action: openPerson) {
                     PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
                 }
                 .buttonStyle(.plain)
                 .padding(.leading, Theme.avatarColumnInset)
                 .accessibilityLabel("@\(handle), profile")
-                VStack(alignment: .leading, spacing: 3) {
+                // Group / channel: the name inside the bubble, in the sender's colour,
+                // then the reply quote, then the text with the time after it.
+                VStack(alignment: .leading, spacing: 0) {
                     if named {
-                        Button { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) } label: {
-                            Text(model.personName(handle: handle) ?? "@\(handle)")
-                                .font(theme.font(Theme.tiny, weight: .medium))
-                                .foregroundStyle(theme.muted)
-                                .padding(.leading, 4)
+                        Button(action: openPerson) {
+                            LiveSenderName(name: model.personName(handle: handle) ?? "@\(handle)",
+                                           url: avatar, seed: model.personId(handle: handle) ?? handle, agent: false)
                         }
                         .buttonStyle(.plain)
+                        .padding(.bottom, Self.nameToTextGap)
+                        .accessibilityIdentifier("bubble-name")
                     }
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let quote {
-                            quoteHeader(quote, color: theme.text)
-                        }
-                        Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
-                            .font(theme.font(Theme.body))
-                            .lineSpacing(Theme.bodyLineSpacing)
-                            .tint(theme.accent)
-                            .textSelection(.enabled)
+                    if let quote {
+                        quoteHeader(quote, color: theme.text)
+                            .padding(.bottom, Self.quoteToTextGap)
                     }
-                    .padding(.horizontal, Theme.bubbleHPad)
-                    .padding(.vertical, Theme.bubbleVPad)
-                    .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                    .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
+                    inlineText(Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions), time: time)
+                        .font(theme.font(Theme.body))
+                        .lineSpacing(Theme.bodyLineSpacing)
+                        .tint(theme.accent)
+                        .textSelection(.enabled)
                 }
+                .padding(.horizontal, Theme.bubbleHPad)
+                .padding(.vertical, Theme.bubbleVPad)
+                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
+                .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
                 .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let quote):
+        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let quote, let time):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             }
+            // The time rides the last paragraph's line; any other last block gets it on
+            // a line of its own, right-aligned.
+            let lastParagraph: String? = {
+                if !live, case .paragraph(let t)? = blocks.last { return t }
+                return nil
+            }()
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
                     .padding(.leading, Theme.avatarColumnInset)
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
-                VStack(alignment: .leading, spacing: 3) {
-                    if named {
-                        Button(action: openMember) {
-                            Text(memberProject(handle: handle)?.name ?? agentId.flatMap { model.foreignAgent($0)?.name } ?? "@\(handle)")
-                                .font(theme.font(Theme.tiny, weight: .medium))
-                                .foregroundStyle(theme.muted)
-                                .padding(.leading, 4)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    memberBubble(
-                        handle: handle,
-                        avatar: avatar,
-                        content: VStack(alignment: .leading, spacing: 8) {
-                            if let quote {
-                                quoteHeader(quote, color: theme.text)
+                memberBubble(
+                    handle: handle,
+                    avatar: avatar,
+                    content: VStack(alignment: .leading, spacing: 0) {
+                        if named {
+                            Button(action: openMember) {
+                                memberName(handle: handle, avatar: avatar, agentId: agentId)
                             }
+                            .buttonStyle(.plain)
+                            .padding(.bottom, Self.nameToTextGap)
+                            .accessibilityIdentifier("bubble-name")
+                        }
+                        if let quote {
+                            quoteHeader(quote, color: theme.text)
+                                .padding(.bottom, Self.quoteToTextGap)
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                                BlockView(block: block, live: live && i == blocks.count - 1)
+                                if i == blocks.count - 1, let lastParagraph, time != nil {
+                                    inlineText(Markdown.inlineText(lastParagraph, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions), time: time)
+                                        .font(theme.font(Theme.body))
+                                        .lineSpacing(Theme.bodyLineSpacing)
+                                        .tint(theme.accent)
+                                        .textSelection(.enabled)
+                                } else {
+                                    BlockView(block: block, live: live && i == blocks.count - 1)
+                                }
+                            }
+                            if let time, lastParagraph == nil {
+                                HStack { Spacer(minLength: 0); timeLabel(time) }
                             }
                         }
-                    )
-                }
+                    }
+                )
                 .frame(maxWidth: maxBubble - Theme.memberLane, alignment: .leading)
                 Spacer(minLength: 0)
             }
@@ -991,11 +1048,14 @@ struct RowView: View {
             .foregroundStyle(theme.muted)
             .frame(maxWidth: .infinity)
             .multilineTextAlignment(.center)
-        case .question(let questionId, let text, let options, let multi, let picked, let open):
-            HStack {
+        case .question(let questionId, let text, let options, let multi, let picked, let open, let lane):
+            // The card is a transcript row like a bubble: the same left edge (after the avatar
+            // lane in a people chat) and the same cap width as an incoming bubble.
+            HStack(spacing: 0) {
+                if lane { Color.clear.frame(width: Theme.memberLane, height: 1) }
                 QuestionCard(rowId: row.id, chatId: chatId, questionId: questionId, title: text, options: options,
                              multi: multi, picked: picked, open: open)
-                    .frame(maxWidth: maxBubble, alignment: .leading)
+                    .frame(maxWidth: lane ? maxBubble - Theme.memberLane : maxBubble, alignment: .leading)
                 Spacer(minLength: 0)
             }
         case .file(let item, let subtitle):
@@ -1081,6 +1141,7 @@ struct RowView: View {
     private var reactionLeading: CGFloat {
         switch row.kind {
         case .other, .member: return Theme.memberLane
+        case .question(_, _, _, _, _, _, let lane): return lane ? Theme.memberLane : 0
         default: return 0
         }
     }
@@ -1100,6 +1161,35 @@ struct RowView: View {
         } else {
             PersonAvatar(url: nil, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
         }
+    }
+
+    /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
+    /// 6 from the reply quote to the text (#1393).
+    static let nameToTextGap: CGFloat = 2
+    static let quoteToTextGap: CGFloat = 6
+
+    /// A people-chat member's name inside its bubble, in the same colour as its bar
+    /// (`memberBubble`), with the `agent` tag for agents.
+    @ViewBuilder
+    private func memberName(handle: String, avatar: String?, agentId: String?) -> some View {
+        let name = memberProject(handle: handle)?.name ?? agentId.flatMap { model.foreignAgent($0)?.name } ?? "@\(handle)"
+        if let project = memberProject(handle: handle), LeafAvatarsFlag.shared.on {
+            LiveSenderName(name: name, url: nil, seed: project.id, fixed: LeafArt.accent(project, dark: theme.isDark), agent: true)
+        } else if let project = memberProject(handle: handle) {
+            LiveSenderName(name: name, url: nil, seed: project.id, override: project.effectiveAvatarColorIndex, agent: true)
+        } else {
+            LiveSenderName(name: name, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: agentId != nil)
+        }
+    }
+
+    /// The text with the time after its last word ("… Discord.  8:05 AM"), muted and small.
+    private func inlineText(_ text: Text, time: String?) -> Text {
+        guard let time else { return text }
+        return text + Text("  ") + Text(time).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+    }
+
+    private func timeLabel(_ time: String) -> some View {
+        Text(time).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
     }
 
     /// Mac parity: an agent's bubbles in a people chat carry its disc colour
@@ -1341,6 +1431,38 @@ final class SenderAccents: ObservableObject {
         }
         guard drawn else { return nil }
         return avatarDominantAccent(rgba: Data(pixels), width: UInt32(side), height: UInt32(side))
+    }
+}
+
+/// The sender's name inside a group / channel bubble (Jacob's Discord-style reference,
+/// 2026-10-23): semibold in the sender's identity colour — the same colour as the bubble's
+/// bar — with a small `agent` tag for agents. Observes `SenderAccents` for this one label only.
+private struct LiveSenderName: View {
+    @ObservedObject private var accents = SenderAccents.shared
+    @Environment(\.theme) private var theme
+    let name: String
+    let url: String?
+    let seed: String
+    var override: Int? = nil
+    var fixed: Color? = nil
+    let agent: Bool
+
+    var body: some View {
+        let color = fixed ?? accents.color(url: url, seed: seed, override: override, dark: theme.isDark)
+        HStack(spacing: 6) {
+            Text(name)
+                .font(theme.font(Theme.small, weight: .semibold))
+                .foregroundStyle(color)
+                .lineLimit(1)
+            if agent {
+                Text("agent")
+                    .font(theme.font(10, weight: .semibold))
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 5)
+                    .frame(height: 16)
+                    .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(color.opacity(0.16)))
+            }
+        }
     }
 }
 

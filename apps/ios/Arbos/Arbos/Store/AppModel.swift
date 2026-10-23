@@ -3379,9 +3379,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Lowercased blob of every loaded message in a chat (for home search).
-    /// Falls back to a one-shot doc read when the published array is still nil.
-    func searchableMessageText(of chatId: Id) -> String {
+    /// Every loaded user / assistant / project message with prose in a chat
+    /// (home search; system lines never count). Falls back to a one-shot doc
+    /// read when the published array is still nil.
+    func searchableMessages(of chatId: Id) -> [Message] {
         let list: [Message]
         if let published = messages[chatId] {
             list = published
@@ -3390,7 +3391,7 @@ final class AppModel: ObservableObject {
         } else {
             list = []
         }
-        return list.map(\.plainText).joined(separator: "\n").lowercased()
+        return list.filter { $0.role != .system && !$0.plainText.isEmpty }
     }
 
     /// S8: the last assistant message asked a question and nothing was sent since.

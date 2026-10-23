@@ -717,6 +717,9 @@ struct GroupProfileView: View {
     @State private var pendingRemoveName: String?
     /// Human member (not you) whose row was tapped: offer View profile / Send private message.
     @State private var memberActions: ProfilePerson?
+    /// Footer confirm: leave (member) or delete (owner) this people group.
+    @State private var confirmLeave = false
+    @State private var confirmDelete = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -776,6 +779,20 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
+    /// Footer on every tab for a people group: Leave group chat for members,
+    /// Delete group chat for the owner (same rule as the chat list).
+    private var leaveFooter: [PaneSection] {
+        guard let people, people.isGroup else { return [] }
+        if model.ownsGroup(people) {
+            return [.card([AnyView(ProfileLinkRow(title: "Delete group chat", destructive: true) {
+                confirmDelete = true
+            })])]
+        }
+        return [.card([AnyView(ProfileLinkRow(title: "Leave group chat", destructive: true) {
+            confirmLeave = true
+        })])]
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
@@ -784,8 +801,8 @@ struct GroupProfileView: View {
                     Color.clear.frame(height: 80)
                     // The shared pane (D93): picture (crayon when a people group — it
                     // opens the edit sheet), name, member count, Members | Library.
-                    // No Mute / Leave footer (Jacob, 2026-10-20, same as the Mac):
-                    // leaving or deleting a group is the chat list's Delete.
+                    // Leave / Delete group chat in the footer (same rule as the chat
+                    // list: members leave, owners delete).
                     ProfilePane(
                         hero: PaneHero(
                             picture: .image(AnyView(heroPicture)),
@@ -794,7 +811,8 @@ struct GroupProfileView: View {
                         ),
                         tabs: PaneKinds.group,
                         selected: $tab,
-                        body: tab == "Members" ? membersSections : librarySections
+                        body: tab == "Members" ? membersSections : librarySections,
+                        footer: leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
@@ -824,6 +842,32 @@ struct GroupProfileView: View {
                 pendingRemoveId = nil
                 pendingRemoveName = nil
             }
+        }
+        .confirmationDialog(
+            "Leave \(title)?",
+            isPresented: $confirmLeave,
+            titleVisibility: .visible
+        ) {
+            Button("Leave group chat", role: .destructive) {
+                model.leavePeopleChat(chatId)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You leave the group. It stays for everyone else.")
+        }
+        .confirmationDialog(
+            "Delete \(title)?",
+            isPresented: $confirmDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Delete group chat", role: .destructive) {
+                model.deletePeopleChat(chatId)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes the group for everyone in it.")
         }
         .confirmationDialog(
             memberActions.map { $0.displayName } ?? "Member",
@@ -967,7 +1011,7 @@ struct GroupProfileView: View {
         // Send private message (other people), and for whoever may remove this member a
         // divider and Remove from group — which asks first (the confirm above) and then
         // lets the relay write "<me> removed X". Your own row never offers Remove;
-        // leaving is the chat list's Delete.
+        // leaving is the pane footer's Leave group chat (or Delete for the owner).
         .contextMenu {
             if r.agent == nil && !isMe {
                 Button {

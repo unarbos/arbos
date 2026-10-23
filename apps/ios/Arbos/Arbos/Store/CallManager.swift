@@ -627,7 +627,9 @@ final class CallManager: NSObject, ObservableObject {
         // Late joiner: the agent's attribute mirrors its last agent_vision event.
         for p in room.remoteParticipants.values { handleAttributes(p.attributes, of: p) }
         if let uuid = cxUUID { provider.reportOutgoingCall(with: uuid, connectedAt: Date()) }
-        try? await room.localParticipant.setMicrophone(enabled: !muted)
+        // Hosted group calls: stay muted until the host invites you to speak.
+        if c.canSpeak == false { muted = true }
+        try? await room.localParticipant.setMicrophone(enabled: !muted && c.canSpeak != false)
         #if DEBUG
         micInjector?.start()
         #endif
@@ -727,9 +729,57 @@ final class CallManager: NSObject, ObservableObject {
     }
 
     func toggleMute() async {
+        // Listen-only on a hosted group call: the host has not invited you yet.
+        if muted, call?.canSpeak == false { return }
         muted.toggle()
         try? await room.localParticipant.setMicrophone(enabled: !muted)
         if let uuid = cxUUID { try? await callController.request(CXTransaction(action: CXSetMutedCallAction(call: uuid, muted: muted))) }
+    }
+
+    /// Host invites `userId` to speak (hosted group calls). Updates local call state.
+    func inviteSpeaker(_ userId: String) async {
+        guard let api, let c = call, c.isHostedSpeak, c.isHost(me()?.id) else { return }
+        do {
+            let fresh = try await api.inviteSpeaker(callId: c.callId, userId: userId)
+            applySpeakState(fresh)
+        } catch {
+            self.error = CallManager.describe(error)
+        }
+    }
+
+    /// Host revokes speak permission for `userId`.
+    func revokeSpeaker(_ userId: String) async {
+        guard let api, let c = call, c.isHostedSpeak, c.isHost(me()?.id) else { return }
+        do {
+            let fresh = try await api.revokeSpeaker(callId: c.callId, userId: userId)
+            applySpeakState(fresh)
+        } catch {
+            self.error = CallManager.describe(error)
+        }
+    }
+
+    /// Merge speak-role fields from a fresh call reply without dropping the LiveKit session.
+    private func applySpeakState(_ fresh: Call) {
+        guard var current = call, current.callId == fresh.callId else { return }
+        current.speakMode = fresh.speakMode
+        current.invitedSpeakers = fresh.invitedSpeakers
+        if let can = fresh.canSpeak { current.canSpeak = can }
+        call = current
+        if current.canSpeak == false, !muted {
+            muted = true
+            Task { try? await room.localParticipant.setMicrophone(enabled: false) }
+        }
+    }
+
+    /// LiveKit granted or revoked publish after a mid-call invite/revoke.
+    func notePublishPermission(_ canPublish: Bool) {
+        guard var current = call, current.isHostedSpeak else { return }
+        current.canSpeak = canPublish
+        call = current
+        if !canPublish, !muted {
+            muted = true
+            Task { try? await room.localParticipant.setMicrophone(enabled: false) }
+        }
     }
 
     func toggleCamera() async {
@@ -1189,6 +1239,13 @@ extension CallManager: RoomDelegate {
 
     nonisolated func room(_ room: LiveKit.Room, participant: RemoteParticipant?, didReceiveData data: Data, forTopic topic: String, encryptionType: EncryptionType) {
         Task { @MainActor in self.handleData(data, topic: topic, from: participant) }
+    }
+
+    nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdatePermissions permissions: ParticipantPermissions) {
+        Task { @MainActor in
+            guard participant is LocalParticipant else { return }
+            self.notePublishPermission(permissions.canPublish)
+        }
     }
 
     nonisolated func room(_ room: LiveKit.Room, participant: Participant, didUpdateAttributes attributes: [String: String]) {

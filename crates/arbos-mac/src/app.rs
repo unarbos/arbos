@@ -25,6 +25,8 @@ use crate::model::{
     RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
     StatusKind,
 };
+use crate::search;
+use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
@@ -194,8 +196,12 @@ pub enum SignInMode {
 pub struct Pairing {
     pub relay_url: String,
     pub mode: SignInMode,
+    /// Pairing-code mode: the code is being exchanged.
     pub busy: bool,
+    /// Pairing-code mode: the last failure.
     pub error: Option<String>,
+    /// GitHub mode: the pill's state machine (copy, Cancel / Retry, timeout).
+    pub flow: sign_in::Flow,
 }
 
 /// A downloaded blob shown in the Details drawer.
@@ -364,6 +370,9 @@ pub struct AppState {
     awaiting_group: Option<Vec<String>>,
     /// The sheet invites into this project instead of starting a DM (step 3).
     pub invite_target: Option<Id>,
+    /// "Who may message X" (agent-to-agent messaging): the agent whose grant list a pick in
+    /// the people sheet adds to.
+    pub message_grant_target: Option<Id>,
     /// The group picker adds to this people group instead of creating one
     /// (the group pane's "Add members").
     pub add_members_target: Option<Id>,
@@ -759,6 +768,7 @@ impl AppState {
             awaiting_dm: None,
             awaiting_group: None,
             invite_target: None,
+            message_grant_target: None,
             add_members_target: None,
             add_members_server: None,
             add_members_secret: None,
@@ -1175,6 +1185,7 @@ impl AppState {
                     mode,
                     busy: false,
                     error: None,
+                    flow: sign_in::Flow::default(),
                 });
                 self.device_id = None;
                 self.room_links.clear();
@@ -1338,7 +1349,9 @@ impl AppState {
             SyncEvent::PairingFailed(err) => {
                 if let Some(p) = &mut self.pairing {
                     p.busy = false;
-                    p.error = Some(err);
+                    p.error = Some(err.clone());
+                    let attempt = p.flow.attempt;
+                    p.flow.failed(attempt, err);
                 }
                 cx.notify();
             }
@@ -2604,7 +2617,7 @@ impl AppState {
     /// Home-search row click: open the chat that holds the matching message and
     /// ask the transcript to scroll to it. Name-only matches open normally.
     pub fn open_from_home_search(&mut self, project_id: Id, query: &str, cx: &mut Context<Self>) {
-        let q = query.trim().to_lowercase();
+        let q = search::normalize_query(query);
         let hit = if q.is_empty() {
             None
         } else {
@@ -2665,60 +2678,54 @@ impl AppState {
         .detach();
     }
 
-    /// Newest user/assistant/project message whose prose contains `query`
-    /// (already lowercased). Searches every chat under the space.
+    /// The message a `Message` search hit points at: newest user/assistant/
+    /// project message under the space whose prose contains `query`
+    /// (already normalized). Name / title / member hits carry no message.
     fn find_message_match(&self, project_id: &str, query: &str) -> Option<(Id, Id)> {
-        let mut best: Option<(u64, Id, Id)> = None;
+        let space = self.project(project_id)?;
+        self.space_search_hit(space, query)?.message
+    }
+
+    /// Every user/assistant/project message with prose under the space, as
+    /// the search module reads them (system lines never count).
+    fn searchable_messages(&self, project_id: &str) -> Vec<search::MessageText> {
+        let mut out = Vec::new();
         for chat in self.tabs(project_id) {
             for m in self.messages_of(&chat.id) {
                 match m.role {
                     Role::User | Role::Assistant | Role::Project => {}
                     Role::System => continue,
                 }
-                let text = m.plain_text();
-                if text.trim().is_empty() {
+                let text = crate::ui::sidebar::plain(&m.plain_text());
+                if text.is_empty() {
                     continue;
                 }
-                if !text.to_lowercase().contains(query) {
-                    continue;
-                }
-                let better = best
-                    .as_ref()
-                    .map(|(at, _, _)| m.created_at >= *at)
-                    .unwrap_or(true);
-                if better {
-                    best = Some((m.created_at, chat.id.clone(), m.id.clone()));
-                }
+                out.push(search::MessageText {
+                    chat_id: chat.id.clone(),
+                    message_id: m.id.clone(),
+                    created_at: m.created_at,
+                    text,
+                });
             }
         }
-        best.map(|(_, chat, msg)| (chat, msg))
+        out
     }
 
-    /// Whether the space name, a chat title, or any loaded message matches `query`.
-    pub fn space_matches_query(&self, space: &Project, query: &str) -> bool {
-        let q = query.trim().to_lowercase();
-        if q.is_empty() {
-            return true;
-        }
-        let hay = format!(
-            "{} {}",
-            space.name.to_lowercase(),
-            space
-                .person()
-                .map(|x| x.handle.to_lowercase())
-                .unwrap_or_default()
-        );
-        if hay.contains(&q) {
-            return true;
-        }
-        if self
-            .tabs(&space.id)
-            .iter()
-            .any(|c| c.title.to_lowercase().contains(&q))
-        {
-            return true;
-        }
-        self.find_message_match(&space.id, &q).is_some()
+    /// How the sidebar row for `space` matches `query` (`search::normalize_query`
+    /// output): the person's display name / @handle, the title, a member, a
+    /// chat title, or a loaded message — `None` when it does not match at all.
+    pub fn space_search_hit(&self, space: &Project, query: &str) -> Option<search::SearchHit> {
+        let me = self.me_handle();
+        search::space_hit(
+            space,
+            &me,
+            self.tabs(&space.id)
+                .iter()
+                .filter(|c| !c.is_system)
+                .map(|c| (c.id.as_str(), c.title.as_str())),
+            || self.searchable_messages(&space.id),
+            query,
+        )
     }
 
     pub fn select_tab(&mut self, chat_id: Id, cx: &mut Context<Self>) {
@@ -3020,6 +3027,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -3743,6 +3751,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -4135,6 +4144,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 usage: None,
@@ -4734,6 +4744,15 @@ impl AppState {
             }
             p.name = name.clone();
         }
+        // People-group AgentMember.handle is the @mention slug; refresh it so
+        // a mid-chat rename does not leave mentions pointed at the old name.
+        let handle = Project::mention_slug(&name);
+        for space in self.projects.iter_mut().filter(|p| p.is_people()) {
+            if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                a.name = name.clone();
+                a.handle = handle.clone();
+            }
+        }
         self.renaming_project = None;
         self.profile_editing_name = false;
         self.command(ClientCommand::SetProjectName { project_id, name });
@@ -5260,6 +5279,7 @@ impl AppState {
                 subagent_id: None,
                 subagent_name: None,
                 handoff_messages: None,
+                agent_reply_to: None,
                 reactions: Default::default(),
                 in_reply_to: None,
                 routine_name: None,
@@ -5781,41 +5801,117 @@ impl AppState {
         cx.notify();
     }
 
-    /// "Sign in with GitHub": run the browser leg, then exchange the grant.
+    /// "Sign in with GitHub" (and Retry): run the browser leg, then exchange
+    /// the grant. The pill follows `pairing.flow`; a 60-s soft timeout offers
+    /// Retry / Open in browser without closing a sheet that is merely slow.
     pub fn sign_in(&mut self, cx: &mut Context<Self>) {
         let Some(p) = &mut self.pairing else {
             return;
         };
-        if p.busy {
+        let Some(attempt) = p.flow.start(now_ms()) else {
             return;
-        }
-        p.busy = true;
-        p.error = None;
+        };
         let relay = p.relay_url.clone();
         cx.notify();
+        self.arm_sign_in_timeout(attempt, cx);
         let this = cx.entity().downgrade();
-        auth::begin(relay, device_name(), cx, move |outcome, cx| {
+        auth::begin(relay, device_name(), cx, move |event, cx| {
             let _ = this.update(cx, |state, cx| {
-                match outcome {
-                    Ok(auth::SignIn::Grant(grant_code)) => {
-                        state.command(ClientCommand::SignIn { grant_code });
-                    }
-                    Ok(auth::SignIn::PairCodeMode) => {
-                        if let Some(p) = &mut state.pairing {
-                            p.mode = SignInMode::PairCode;
-                            p.busy = false;
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(p) = &mut state.pairing {
-                            p.busy = false;
-                            p.error = Some(format!("{err:#}"));
-                        }
-                    }
-                }
+                state.on_sign_in_event(attempt, event);
                 cx.notify();
             });
         });
+    }
+
+    fn on_sign_in_event(&mut self, attempt: u64, event: auth::Event) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        match event {
+            auth::Event::Opened { in_browser } => p.flow.opened(attempt, in_browser),
+            auth::Event::Finished(Ok(auth::SignIn::Grant(grant_code))) => {
+                if p.flow.grant(attempt) {
+                    self.command(ClientCommand::SignIn { grant_code });
+                }
+            }
+            auth::Event::Finished(Ok(auth::SignIn::PairCodeMode)) => {
+                if attempt == p.flow.attempt {
+                    p.mode = SignInMode::PairCode;
+                    p.flow.cancelled(attempt);
+                }
+            }
+            auth::Event::Finished(Ok(auth::SignIn::Cancelled)) => p.flow.cancelled(attempt),
+            auth::Event::Finished(Err(err)) => p.flow.failed(attempt, format!("{err:#}")),
+        }
+    }
+
+    /// `sign_in::SOFT_TIMEOUT_MS` after the click: Retry / Open in browser.
+    fn arm_sign_in_timeout(&mut self, attempt: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(sign_in::SOFT_TIMEOUT_MS))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(p) = &mut state.pairing {
+                    if p.flow.tick(attempt, now_ms()) {
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Cancel on the pill: close the sheet (its block reports Cancelled) and
+    /// go back to "Sign in with GitHub" at once.
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        auth::cancel();
+        if let Some(p) = &mut self.pairing {
+            let attempt = p.flow.attempt;
+            p.flow.cancelled(attempt);
+        }
+        cx.notify();
+    }
+
+    /// "Open in browser" on the pill: hand the GitHub page to the default
+    /// browser; the relay's `arbos://auth/callback` comes back through
+    /// LaunchServices (`sign_in_callback`).
+    pub fn sign_in_in_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        let Some(attempt) = p.flow.continue_in_browser(now_ms()) else {
+            return;
+        };
+        auth::cancel();
+        let url = auth::start_url(&p.relay_url, &device_name());
+        if let Err(err) = auth::open_in_browser(&url) {
+            p.flow.failed(attempt, format!("{err:#}"));
+        } else {
+            self.arm_sign_in_timeout(attempt, cx);
+        }
+        cx.notify();
+    }
+
+    /// `arbos://auth/callback?code=…` delivered by the platform (the browser
+    /// leg). Ignored when no sign-in is in flight.
+    pub fn sign_in_callback(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        let attempt = p.flow.attempt;
+        if !p.flow.busy() {
+            return;
+        }
+        match auth::parse_callback(url) {
+            Ok(grant_code) => {
+                if p.flow.grant(attempt) {
+                    self.command(ClientCommand::SignIn { grant_code });
+                }
+            }
+            Err(err) => p.flow.failed(attempt, format!("{err:#}")),
+        }
+        cx.notify();
     }
 
     // ----- people chats (D72)
@@ -5871,6 +5967,7 @@ impl AppState {
         self.new_group_picked.clear();
         self.new_group_agents.clear();
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -5902,6 +5999,50 @@ impl AppState {
         cx.notify();
     }
 
+    /// Agent pane › "Give a person access…": the same sheet; a pick lets that person's agents
+    /// message this agent (`PUT /projects/{id}/message-access`).
+    pub fn open_message_grant_picker(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.open_new_chat(cx);
+        self.message_grant_target = Some(project_id);
+        cx.notify();
+    }
+
+    pub fn set_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            if let Some(g) = p.message_grants.iter_mut().find(|g| g.grantee == grantee) {
+                g.enabled = enabled;
+            }
+        }
+        self.command(ClientCommand::SetMessageGrant {
+            project_id,
+            grantee,
+            enabled,
+        });
+        cx.notify();
+    }
+
+    pub fn remove_message_grant(
+        &mut self,
+        project_id: Id,
+        grantee: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.projects.iter_mut().find(|p| p.id == project_id) {
+            p.message_grants.retain(|g| g.grantee != grantee);
+        }
+        self.command(ClientCommand::RemoveMessageGrant {
+            project_id,
+            grantee,
+        });
+        cx.notify();
+    }
+
     pub fn close_new_chat(&mut self, cx: &mut Context<Self>) {
         self.new_chat_open = false;
         self.new_group_open = false;
@@ -5910,6 +6051,7 @@ impl AppState {
         self.awaiting_dm = None;
         self.awaiting_group = None;
         self.invite_target = None;
+        self.message_grant_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
         self.add_members_secret = None;
@@ -6254,6 +6396,19 @@ impl AppState {
             {
                 self.toggle_group_person(person, cx);
             }
+            return;
+        }
+        if let Some(project_id) = self.message_grant_target.take() {
+            self.new_chat_open = false;
+            let handle = handle.trim().trim_start_matches('@').to_string();
+            if !handle.is_empty() {
+                self.command(ClientCommand::SetMessageGrant {
+                    project_id,
+                    grantee: format!("@{handle}"),
+                    enabled: true,
+                });
+            }
+            cx.notify();
             return;
         }
         match self.invite_target.clone() {
@@ -7446,6 +7601,10 @@ impl AppState {
 
     pub fn toggle_call_mute(&mut self, cx: &mut Context<Self>) {
         if let Some(c) = self.my_call.as_mut() {
+            // Hosted group calls: listen-only until the host invites you to speak.
+            if c.call.can_speak == Some(false) {
+                return;
+            }
             c.muted = !c.muted;
             let _ = self.call_commands.send(CallCmd::SetMuted(c.muted));
             cx.notify();
@@ -7521,10 +7680,11 @@ impl AppState {
             cx.notify();
             return;
         };
+        let listen_only = call.can_speak == Some(false);
         let active = self.my_call.get_or_insert_with(|| ActiveCall {
             call: call.clone(),
             status: CallStatus::Connecting,
-            muted: false,
+            muted: listen_only,
             camera,
             participants: Vec::new(),
             local_video: None,
@@ -7537,6 +7697,9 @@ impl AppState {
         });
         active.call = call.clone();
         active.status = CallStatus::Connecting;
+        if listen_only {
+            active.muted = true;
+        }
         if created {
             active.outgoing = true;
             active.reachable = reachable_line(&reachable);
@@ -7546,6 +7709,9 @@ impl AppState {
             token,
             camera,
         });
+        if listen_only {
+            let _ = self.call_commands.send(CallCmd::SetMuted(true));
+        }
         self.incoming_call = None;
         self.sync_tones();
         cx.notify();
@@ -7950,14 +8116,36 @@ pub fn decode_image(bytes: &[u8]) -> Option<RenderImage> {
     decode_rgba(bytes).and_then(bgra_frame)
 }
 
+/// Longest side kept for chat-bubble (and lightbox) bitmaps.
+/// Bubbles paint at most ~360×420 pt; 2× covers Retina. Caps GPU memory so
+/// scrolling a chat full of screenshots stays smooth (feedback
+/// app-01M5MXPJZARN5QMCE3EZ3EMSGW).
+pub const CHAT_IMAGE_MAX_SIDE: u32 = 840;
+
+/// Shrink `img` so its longer side is at most `CHAT_IMAGE_MAX_SIDE`.
+pub fn downscale_for_chat(img: image::RgbaImage) -> image::RgbaImage {
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if long <= CHAT_IMAGE_MAX_SIDE {
+        return img;
+    }
+    let scale = CHAT_IMAGE_MAX_SIDE as f32 / long as f32;
+    let nw = ((w as f32) * scale).round().max(1.0) as u32;
+    let nh = ((h as f32) * scale).round().max(1.0) as u32;
+    image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Triangle)
+}
+
 /// The picture, plus a copy with its uniform border trimmed when there is one
 /// (feedback chat-preview-cards-2026-10-23: a screenshot's empty page margin
-/// must not become a white band in the bubble). The viewer shows the full picture.
+/// must not become a white band in the bubble). The viewer shows the untrimmed
+/// picture. Both are capped to [`CHAT_IMAGE_MAX_SIDE`] so the transcript can
+/// scroll without holding full-resolution textures.
 pub fn decode_image_pair(bytes: &[u8]) -> Option<(RenderImage, Option<RenderImage>)> {
     let rgba = decode_rgba(bytes)?;
     let trimmed = trim_rect(&rgba)
-        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image());
-    let full = bgra_frame(rgba)?;
+        .map(|(x, y, w, h)| image::imageops::crop_imm(&rgba, x, y, w, h).to_image())
+        .map(downscale_for_chat);
+    let full = bgra_frame(downscale_for_chat(rgba))?;
     Some((full, trimmed.and_then(bgra_frame)))
 }
 
@@ -8402,5 +8590,31 @@ mod trim_tests {
             }
         });
         assert!(trim_rect(&img).is_none());
+    }
+}
+
+#[cfg(test)]
+mod chat_image_scale_tests {
+    use super::{downscale_for_chat, CHAT_IMAGE_MAX_SIDE};
+    use image::{Rgba, RgbaImage};
+
+    #[test]
+    fn a_small_picture_is_left_alone() {
+        let img = RgbaImage::from_pixel(320, 200, Rgba([10, 20, 30, 255]));
+        let out = downscale_for_chat(img);
+        assert_eq!(out.dimensions(), (320, 200));
+    }
+
+    #[test]
+    fn a_huge_screenshot_fits_the_chat_budget() {
+        // Typical Retina capture: far past the bubble's paint size.
+        let img = RgbaImage::from_pixel(3024, 1964, Rgba([40, 40, 40, 255]));
+        let out = downscale_for_chat(img);
+        let (w, h) = out.dimensions();
+        assert_eq!(w.max(h), CHAT_IMAGE_MAX_SIDE);
+        assert!(w.min(h) < CHAT_IMAGE_MAX_SIDE);
+        // Aspect ≈ 3024/1964.
+        let ratio = w as f32 / h as f32;
+        assert!((ratio - 3024.0 / 1964.0).abs() < 0.02);
     }
 }

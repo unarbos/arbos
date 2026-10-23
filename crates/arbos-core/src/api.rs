@@ -110,6 +110,10 @@ pub struct ProjectDto {
     /// `list_projects` shared rows only; `None` omits, `Some(None)` is JSON null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_handle: Option<Option<String>>,
+    /// "Who may message X" (agent-to-agent messaging): other owners' people / agents the
+    /// owner allowed; empty for everyone but the owner's own clients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub message_grants: Vec<MessageGrantDto>,
 }
 
 /// Project chat (`chat_json` / `chat_json_for`).
@@ -314,6 +318,36 @@ pub struct ProjectMembersDto {
     pub project_id: String,
     pub owner: String,
     pub members: Vec<ProjectMemberDto>,
+}
+
+/// One row of an agent's "Who may message X" card (agent-to-agent messaging): a person
+/// (`kind: "person"`, every agent of theirs) or one agent (`kind: "agent"`) of another owner.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrantDto {
+    pub project_id: String,
+    /// `user:<id>` or `project:<id>`, the key for PUT / DELETE.
+    pub grantee: String,
+    pub kind: String,
+    pub id: String,
+    pub name: Option<String>,
+    pub handle: Option<String>,
+    pub avatar_url: Option<String>,
+    pub enabled: bool,
+    pub note: String,
+    #[typeshare(serialized_as = "I54")]
+    pub created_at: i64,
+    /// Last time a message came through this grant.
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_at: Option<i64>,
+}
+
+/// `GET /projects/{id}/message-access`.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessageGrantsDto {
+    pub project_id: String,
+    pub grants: Vec<MessageGrantDto>,
 }
 
 /// One entry in `group_json` → `participants_detail`.
@@ -739,6 +773,15 @@ pub struct CallDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[typeshare(serialized_as = "Option<I54>")]
     pub token_expires_at: Option<i64>,
+    /// `"open"` = anyone may speak; `"hosted"` = only the host and invited speakers (bigger groups).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speak_mode: Option<String>,
+    /// People the host invited to speak. The host is `started_by` and is not listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub invited_speakers: Vec<SenderDto>,
+    /// Whether the requesting user may publish audio (set when a join token is minted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_speak: Option<bool>,
 }
 
 /// `POST …/calls` success: new call (201) or join the live one (200).

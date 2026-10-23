@@ -10,6 +10,8 @@ enum DebugHooks {
     static var openPeople: Id? { value("ARBOS_OPEN_PEOPLE") }
     /// D88: `<name or id>[:list|:home|:page|:page-settings|:#channel]` — land in a server (screenshot rig).
     static var openServer: String? { value("ARBOS_OPEN_SERVER") }
+    /// Home search opened with this query (search-name-matching rig).
+    static var search: String? { value("ARBOS_SEARCH").flatMap { $0.isEmpty ? nil : $0 } }
     /// With `ARBOS_OPEN_SERVER=…:panel`: the server page's tab to land on (Channels | Members | Settings).
     static var panelTab: String? { value("ARBOS_PANEL_TAB") }
     static var autoSend: String? { value("ARBOS_AUTO_SEND") }

@@ -12,10 +12,17 @@
       },
       "reply_regex_not": "(?<!not )(?<!no )(?<!isn't )(?<!aren't )(?<!without )(?<!lacks )(?<!never )\\b(is|are|chats? (is|are)|messages? (is|are)|fully|uses|has|with|provides|offers)\\s+(end[- ]to[- ]end[- ]encrypt\\w*|E2EE?\\b)",
       "rubric": {
-        "criteria": "The reply answers from Arbos's own source tree (available read-only under /opt/arbos/src): it names at least one real file (docs/… or crates/…) and what that file says about transport/storage/privacy; it does not claim end-to-end encryption (the relay can read chats); it is honest about what is and is not encrypted. Vague marketing or an invented feature scores 0.",
+        "criteria": "The reply answers from Arbos's own source tree (/opt/arbos/src): it names at least one real file (docs/… or crates/…) for the facts it states and says what that file does; it does not claim end-to-end encryption; it is honest about what it did not check. An answer from memory with no file paths, or an invented file, scores 0–2.",
         "min": 3
       },
-      "timeout_s": 300
+      "timeout_s": 300,
+      "prompt_variants": [
+        "Is this chat encrypted? What privacy features does Arbos have? Name the source files you base each statement on.",
+        "Where in Arbos's code is a user's daily spend cap enforced, and what happens when it is hit? Cite the files.",
+        "What happens to a secret's value when an agent's request to use it is denied? Point me to the file that implements it.",
+        "Which part of Arbos decides that a shell command is risky enough to need my approval? Cite the file and describe the rule.",
+        "How does Arbos keep one agent's workspace from reading another's on the same machine? Cite the code."
+      ]
     }
   ],
   "regression": "agent self-reference to its repo (bc-b07f76af, docs/agent-self-reference-repo.md); needs image ≥ 0.1.93"

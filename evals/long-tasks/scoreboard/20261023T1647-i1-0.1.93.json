@@ -1,0 +1,161 @@
+{
+ "meta": {
+  "run_id": "20261023T1647-i1-0.1.93",
+  "started_at": "2026-10-23T16:46:37Z",
+  "image": "arbos-agent-0.1.93",
+  "agentd": "arbos-agentd 0.6.173",
+  "provider": "gvisor",
+  "user": "test_01M5JHWC586GYNTC3KCZZKS7NF",
+  "projects": {
+   "a": "01M5JHWMMJ65A7CXQW47G9NCPA"
+  },
+  "tasks": 1,
+  "budget_usd": 8.0,
+  "spent_today_at_start": 1.156744429,
+  "judge_model": "anthropic/claude-haiku-5.5",
+  "ended_at": "2026-10-23T16:47:28Z",
+  "spent_today_at_end": 1.161943355,
+  "run_cost_usd": 0.0052,
+  "judge_cost_usd": 0
+ },
+ "summary": {
+  "tasks": 1,
+  "run": 1,
+  "passed": 1,
+  "failed": 0,
+  "skipped": 0,
+  "pass_pct": 100.0,
+  "ttfr_p50_s": 2.53,
+  "ttfr_all_p50_s": 3.47,
+  "total_p50_s": 50.7,
+  "tool_errors": 0,
+  "stalls": 0,
+  "cost_usd": 0.0052,
+  "run_cost_usd": 0.0052,
+  "judge_cost_usd": 0,
+  "categories": {
+   "identity": {
+    "tasks": 1,
+    "passed": 1,
+    "pass_pct": 100.0
+   }
+  }
+ },
+ "results": [
+  {
+   "task": "i1-rename-identity",
+   "title": "Renamed mid-task: the agent answers with its new name, never the old one",
+   "category": "identity",
+   "categories": [
+    "identity"
+   ],
+   "lane": "a",
+   "regression": "agent identity drift after rename (bc-eca4dc4f)",
+   "success": true,
+   "reasons": [],
+   "ttfr_s": 2.53,
+   "route_t1": "reply",
+   "ttfr_all_s": [
+    2.53,
+    3.47,
+    3.92
+   ],
+   "total_s": 50.7,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.005199,
+   "judge_usd": 0,
+   "relay": {
+    "calls": 15,
+    "input": 18336,
+    "output": 2305,
+    "cache_read": 23326,
+    "cache_write": 26752,
+    "usd": 0.005199
+   },
+   "rubric_min": null,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5MTGHKXXHBV7GWQSB1T0772",
+     "prompt": "Quick one: what is your name?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 2.53,
+     "first_status_s": 0.49,
+     "wall_s": 7.2,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "I'm lane-a, your agent in this Arbos project. The earlier chats mention a rename, but none of them records a new name, so I still answer to lane-a. Tell me the new name and I'll use it from here on.",
+     "excerpt": "**User:** Quick one: what is your name?\n\n**Assistant** (result, route=reply, status=done)\n\nI'm lane-a, your agent in this Arbos project. The earlier chats mention a rename, but none of them records a new name, so I still answer to lane-a. Tell me the new name and I'll use it from here on.\n\nmain-agent tool calls: route (errors 0)"
+    },
+    {
+     "turn": 2,
+     "chat_id": "01M5MTGHKXXHBV7GWQSB1T0772",
+     "prompt": "I just renamed you. What is your name now, and what were you called a moment ago?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 3.47,
+     "first_status_s": 0.47,
+     "wall_s": 6.7,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "I'm Quill now. Before the rename I was called lane-a. The older chat records still say lane-a because they predate the change.",
+     "excerpt": "**User:** I just renamed you. What is your name now, and what were you called a moment ago?\n\n**Assistant** (result, route=reply, status=done)\n\nI'm Quill now. Before the rename I was called lane-a. The older chat records still say lane-a because they predate the change.\n\nmain-agent tool calls: route (errors 0)"
+    },
+    {
+     "turn": 3,
+     "chat_id": "01M5MTHMWTRZ6FS2S1N22WBC5C",
+     "prompt": "Hi \u2014 who am I talking to?",
+     "ok": true,
+     "reasons": [],
+     "ttfr_s": 3.92,
+     "first_status_s": 0.44,
+     "wall_s": 6.8,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "reply"
+     ],
+     "tool_calls": 1,
+     "tool_errors": 0,
+     "model_calls": 1,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": null,
+     "truth": {},
+     "verify_out": "",
+     "reply": "You're talking to Quill, your agent in this Arbos project. I was previously called lane-a. I don't have your name on record, so tell me what you'd like me to call you.",
+     "excerpt": "**User:** Hi \u2014 who am I talking to?\n\n**Assistant** (result, route=reply, status=done)\n\nYou're talking to Quill, your agent in this Arbos project. I was previously called lane-a. I don't have your name on record, so tell me what you'd like me to call you.\n\nmain-agent tool calls: route (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMMJ65A7CXQW47G9NCPA/lt-i1-rename-identity-20261023T1647-i1-0.1.93"
+  }
+ ]
+}

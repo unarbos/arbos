@@ -259,7 +259,33 @@ impl Agent {
                 waiter,
             },
         );
+        // Working line / quick-reply status: "Waiting for approval", not the gated tool's
+        // label ("Removing files") — nothing has run yet.
+        self.set_approval_wait_activity(chat_id, true).await;
         Ok(approval_id)
+    }
+
+    /// Activity while a card of `chat_id` waits for Approve/Reject (or clear when none do).
+    async fn set_approval_wait_activity(&self, chat_id: &str, waiting: bool) {
+        let label = waiting.then(|| "Waiting for approval".to_owned());
+        let (msg_id, row_closed) = {
+            let mut tl = self.turn.lock().await;
+            let Some(t) = tl.as_mut().filter(|t| t.chat_id == chat_id) else {
+                return;
+            };
+            if t.activity == label {
+                return;
+            }
+            t.activity = label.clone();
+            (t.assistant_msg_id.clone(), t.row_closed)
+        };
+        if !row_closed {
+            if let Some(host) = self.sync.host(chat_id).await {
+                let h = host.lock().await;
+                h.doc.set_activity(&msg_id, label.as_deref());
+            }
+        }
+        self.post_activity(chat_id, label);
     }
 
     /// The shared entry point (brief §4): write the card, wait for `approve`/`reject` (or the
@@ -341,6 +367,10 @@ impl Agent {
                 h.doc
                     .set_message_fields(&msg_id, &[("waitingApproval", json!(false))]);
             }
+        }
+        // Drop the waiting activity once this chat has no undecided cards left.
+        if !self.approval_pending_for(&chat_id).await {
+            self.set_approval_wait_activity(&chat_id, false).await;
         }
         let _ = self.store.t3_append(
             &chat_id,
@@ -704,16 +734,15 @@ impl Agent {
     }
 
     /// `/hook/approval-abandon`: the extension stopped polling (its wait cap passed) and the
-    /// blocked call was not executed. A later decision now runs the deferred follow-up, which
-    /// grants a re-run of the same call.
-    pub async fn abandon_approval(&self, approval_id: &str) -> Value {
-        let mut pending = self.approvals.pending.lock().await;
-        match pending.get_mut(approval_id) {
-            Some(p) => {
-                p.mode = WaitMode::Deferred;
-                json!({ "ok": true })
-            }
-            None => json!({ "ok": false, "error": "not pending" }),
+    /// blocked call was not executed. Expire the card so the UI surfaces the timeout promptly
+    /// instead of leaving a pending card and a "still working" status for hours.
+    pub async fn abandon_approval(self: &Arc<Self>, approval_id: &str) -> Value {
+        match self
+            .decide_approval(approval_id, ApprovalOutcome::Expired, "arbos:timeout")
+            .await
+        {
+            Ok(()) => json!({ "ok": true, "state": "expired" }),
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
         }
     }
 

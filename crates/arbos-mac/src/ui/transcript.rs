@@ -15,8 +15,8 @@ use gpui::{
 
 use crate::app::{AppEvent, AppState, DetailsTarget};
 use crate::model::{
-    now_ms, Attachment, AttachmentKind, Id, Message, MessageStatus, Part, Person, Role, StatusKind,
-    TurnKind,
+    now_ms, Attachment, AttachmentKind, Chat, Id, Message, MessageStatus, Part, Person, Project,
+    Role, SpaceKind, StatusKind, TurnKind,
 };
 use crate::ui::approve::{approval_card, ApprovalView};
 use crate::ui::attachments;
@@ -263,8 +263,9 @@ pub enum RowKind {
         pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
-        /// Another person's bubble shows their name above it only when the sender
-        /// changed (Grok Bot's group style).
+        /// Another person's bubble carries their name inside it, at the top, when
+        /// the chat names its senders (group / channel, see [`names_senders`]) and
+        /// the sender changed (Grok Bot's group style for the run).
         named: bool,
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
@@ -297,6 +298,9 @@ pub enum RowKind {
         /// People / group reply: quote of the user message this answers
         /// (`replyTo`, else `inReplyTo`). Only set on the first block of the bubble.
         quote: Option<Quote>,
+        /// First block of a message whose sender is named, in a chat that names
+        /// its senders: the agent's name sits inside this bubble, at the top.
+        named: bool,
     },
     /// A finished reply with no words, cards or attachments: one plain line in the
     /// agent's bubble. `name` is the row's `senderName`; the agent id in `seed` resolves
@@ -308,6 +312,7 @@ pub enum RowKind {
         lane: Option<String>,
         /// People / group reply: quote of the user message this would have answered.
         quote: Option<Quote>,
+        named: bool,
     },
     /// Centered muted time line ("Today 9:39 PM").
     Stamp {
@@ -325,6 +330,11 @@ pub enum RowKind {
     Handoff {
         names: Vec<String>,
         total: u32,
+    },
+    /// Agent-to-agent messaging: this reply went back to the agent that wrote in —
+    /// "Replied to ◉ hjkb", the same line style as a hand-off.
+    RepliedTo {
+        name: String,
     },
     /// An image or file in the chat (agent or user). `mine` right-aligns my sends.
     Attachment {
@@ -345,11 +355,15 @@ pub enum RowKind {
     /// S18: draft-and-approve card.
     Approval {
         view: ApprovalView,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     /// Error: one line, red glyph, Retry.
     /// A typed question widget (design §10): rendered by a [`QuestionCard`] view.
     Question {
         question_id: String,
+        /// People chat: the card sits after the sender's avatar lane, like its bubble.
+        lane: bool,
     },
     Error {
         code: String,
@@ -361,17 +375,6 @@ pub enum RowKind {
     },
     /// Debug-only "Show details" disclosure under a finished reply.
     Details,
-    /// F6: who speaks next — another Project's glyph and name above its message.
-    Sender {
-        name: String,
-        icon: Option<String>,
-        /// Stable seed for the chip colour (the sender id).
-        seed: String,
-        /// Tree-character slug the relay put on the reply (`senderAvatar`).
-        avatar: Option<String>,
-        /// Its colour (`senderAvatarColor`); `None` = look it up / mono.
-        avatar_color: Option<String>,
-    },
     /// F11: small speaker under a reply; click speaks it (again).
     Speaker {
         /// The speech is already cached (instant replay) vs. will be synthesised.
@@ -450,9 +453,16 @@ pub const STICK_THRESHOLD_PX: f32 = 70.0;
 const JUMP_BUTTON_AFTER_PX: f32 = 160.0;
 
 /// Right-click on a bubble: the shell opens the message menu there.
+/// Hover face-smile: the shell opens the quick-react emoji bar there.
 /// Hover reply: the shell sets the composer's reply target.
 pub enum TranscriptEvent {
     MessageMenu {
+        chat_id: Id,
+        message_id: Id,
+        position: gpui::Point<gpui::Pixels>,
+    },
+    /// Hover react glyph → the six-emoji bar (`react_menu`).
+    ReactMenu {
         chat_id: Id,
         message_id: Id,
         position: gpui::Point<gpui::Pixels>,
@@ -492,6 +502,9 @@ pub struct Transcript {
     /// Messages whose sender differs from the one before: their first row opens
     /// the wider turn gap.
     turn_starts: HashSet<Id>,
+    /// The open chat names its senders (group / channel, [`names_senders`]):
+    /// others' bubbles carry the name inside and the time after the text.
+    multi_party: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
@@ -540,6 +553,7 @@ impl Transcript {
             hover: HoverFade::default(),
             selection,
             turn_starts: HashSet::new(),
+            multi_party: false,
             copied_feedback: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
@@ -714,6 +728,11 @@ impl Transcript {
         };
         let me_id = state.me_id();
         let thumb_keys: HashSet<&str> = state.thumbnails.keys().map(|k| k.as_str()).collect();
+        let multi_party = names_senders(
+            state.selected(),
+            state.active_chat(),
+            state.selected_channel.is_some(),
+        );
         let new_rows = build_rows(
             &messages,
             show_details,
@@ -721,7 +740,9 @@ impl Transcript {
             &me_id,
             &thumb_keys,
             &self.mentions,
+            multi_party,
         );
+        self.multi_party = multi_party;
         // A sender change opens the turn gap. So does every new assistant /
         // project message — consecutive replies from the same agent (quick ack
         // then the answer, or two answers in a row) must not read as one bubble
@@ -752,9 +773,9 @@ impl Transcript {
         self.veils
             .retain(|id, _| new_rows.iter().any(|r| r.id == *id));
         self.cards.retain(|qid, _| {
-            new_rows
-                .iter()
-                .any(|r| matches!(&r.kind, RowKind::Question { question_id } if question_id == qid))
+            new_rows.iter().any(
+                |r| matches!(&r.kind, RowKind::Question { question_id, .. } if question_id == qid),
+            )
         });
 
         if chat_changed {
@@ -939,8 +960,9 @@ impl Transcript {
             })
     }
 
-    /// Hover-only reply + copy glyphs beside a bubble (fade with the row).
-    /// After a successful copy the glyph becomes a checkmark for a moment.
+    /// Hover-only reply · copy · react glyphs beside a bubble (fade with the
+    /// row). After a successful copy the glyph becomes a checkmark for a
+    /// moment. The face-smile opens the six-emoji bar (`react_menu`).
     fn hover_reply_copy(
         &self,
         row_id: &str,
@@ -952,6 +974,8 @@ impl Transcript {
         let chat_id = self.chat_id.clone();
         let reply_msg = message_id.clone();
         let copy_msg = message_id.clone();
+        let react_chat = self.chat_id.clone();
+        let react_msg = message_id.clone();
         let just_copied = self.copied_feedback.as_ref().is_some_and(|(id, at)| {
             id == message_id && at.elapsed() < Duration::from_millis(COPY_FEEDBACK_MS)
         });
@@ -1005,6 +1029,25 @@ impl Transcript {
                     copy_color,
                 )
                 .on_click(cx.listener(move |this, _, _, cx| this.copy_message(&copy_msg, cx))),
+            )
+            .child(
+                btn(
+                    SharedString::from(format!("{row_id}#react")),
+                    "face-smile",
+                    opacity,
+                    theme.text_muted,
+                )
+                .on_click(cx.listener(
+                    move |_, event: &gpui::ClickEvent, _, cx| {
+                        if let Some(chat_id) = react_chat.clone() {
+                            cx.emit(TranscriptEvent::ReactMenu {
+                                chat_id,
+                                message_id: react_msg.clone(),
+                                position: event.position(),
+                            });
+                        }
+                    },
+                )),
             )
     }
 
@@ -1076,6 +1119,71 @@ impl Transcript {
         }
     }
 
+    /// Grok's centred agent line: `lead` then "◉ A, ◉ B and ◉ C" with 16 pt discs. A name that
+    /// is one of my agents is a link to that agent's chat (the "open Doug" affordance).
+    fn agent_line(
+        &self,
+        lead: &str,
+        names: &[String],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.state.read(cx);
+        let mut line = div()
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(px(TEXT_SMALL))
+            .text_color(theme.text_muted)
+            .child(lead.to_owned());
+        let n = names.len();
+        for (i, name) in names.iter().enumerate() {
+            let mine = state
+                .projects
+                .iter()
+                .find(|p| p.name.eq_ignore_ascii_case(name) && p.kind == SpaceKind::Project);
+            let glyph: AnyElement = match mine {
+                Some(space) => crate::ui::avatars::project(space, 16.0, theme).into_any_element(),
+                // Not one of my projects (a subagent): initials on the name's gradient.
+                None => {
+                    crate::ui::avatars::element(name, name, None, 16.0, theme).into_any_element()
+                }
+            };
+            let mut who = div()
+                .id(SharedString::from(format!("agent-line-{lead}-{i}-{name}")))
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .child(glyph)
+                .child(div().child(name.clone()));
+            if let Some(space) = mine {
+                let pid = space.id.clone();
+                let state_entity = self.state.clone();
+                who = who
+                    .cursor_pointer()
+                    .hover(|el| el.text_color(theme.text))
+                    .on_click(move |_, _, cx| {
+                        let pid = pid.clone();
+                        state_entity.update(cx, |s, cx| s.select_project(pid, cx));
+                    });
+            }
+            line = line.child(who);
+            if n >= 2 && i + 2 == n {
+                line = line.child(div().child("and"));
+            } else if i + 2 < n {
+                line = line.child(div().ml(px(-5.0)).child(","));
+            }
+        }
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .pt(px(10.0))
+            .pb(px(6.0))
+            .child(line)
+            .into_any_element()
+    }
+
     /// The 24 pt disc for an agent's message in a people chat.
     fn agent_disc(&self, seed: &str, cx: &Context<Self>) -> Div {
         let theme = Theme::of(cx).clone();
@@ -1104,6 +1212,47 @@ impl Transcript {
         )
     }
 
+    /// The sender's name inside a group / channel bubble (Jacob's Discord-style
+    /// reference, 2026-10-23): semibold in the sender's identity colour, with a
+    /// small `agent` tag for agents. The caller adds the click → profile.
+    fn sender_name_label(
+        &self,
+        row_id: &str,
+        name: String,
+        color: gpui::Hsla,
+        agent: bool,
+    ) -> Stateful<Div> {
+        div()
+            .id(SharedString::from(format!("{row_id}#who")))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(CHAT_BODY))
+                    .line_height(px(CHAT_LINE_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(name),
+            )
+            .when(agent, |el| {
+                el.child(
+                    div()
+                        .h(px(16.0))
+                        .px(px(5.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(4.0))
+                        .bg(Theme::with_alpha(color, 0.16))
+                        .text_size(px(10.0))
+                        .line_height(px(12.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child("agent"),
+                )
+            })
+    }
+
     /// One assistant bubble block (the Markdown row and the no-answer line share it).
     #[allow(clippy::too_many_arguments)]
     fn markdown_bubble(
@@ -1119,6 +1268,7 @@ impl Transcript {
         time: Option<String>,
         lane: Option<String>,
         quote: Option<Quote>,
+        named: bool,
         now: Instant,
         theme: &Theme,
         selectable: &Selectable,
@@ -1138,14 +1288,47 @@ impl Transcript {
         // rounds the top, the last the bottom, the rest run straight.
         // People-chat agent bubbles get the same coloured left-edge
         // sliver as person messages, from the agent's disc colour.
-        let agent_accent = lane.as_deref().map(|seed| {
-            let a = self.agent_identity_full(seed, "Agent", cx);
-            avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme)
-        });
+        let identity = lane
+            .as_deref()
+            .map(|seed| self.agent_identity_full(seed, "Agent", cx));
+        let agent_accent = identity
+            .as_ref()
+            .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
+        // Group / channel: the agent's name inside its first bubble, in its
+        // colour, with the `agent` tag; the time after the last block's text.
+        let name_el = match (&identity, agent_accent) {
+            (Some(a), Some(color)) if named => {
+                let open_state = self.state.clone();
+                let pid = a.project_id.clone();
+                Some(
+                    self.sender_name_label(row_id, a.name.clone(), color, true)
+                        .when_some(pid, |el, pid| {
+                            el.cursor_pointer().on_click(move |_, _, cx| {
+                                let pid = pid.clone();
+                                open_state.update(cx, |s, cx| {
+                                    s.push_profile(
+                                        crate::app::ProfilePage::Agent { project_id: pid },
+                                        cx,
+                                    )
+                                });
+                            })
+                        })
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        };
+        let inline_time = self.multi_party && lane.is_some() && last && !live;
+        let time_el = inline_time
+            .then(|| {
+                time.clone()
+                    .map(|t| inline_time_label(t, theme).into_any_element())
+            })
+            .flatten();
         let r = px(BUBBLE_RADIUS);
         let quote_header = quote
             .filter(|_| first)
-            .map(|q| self.quote_header(row_id, q, theme.text));
+            .map(|q| self.quote_header(row_id, q, theme.text).into_any_element());
         let bubble = self
             .menu_target(
                 div().id(SharedString::from(format!("{}#bubble", row_id))),
@@ -1162,9 +1345,6 @@ impl Transcript {
             .min_w_0()
             .relative()
             .when(fill, |el| el.w_full())
-            .when(quote_header.is_some(), |el| {
-                el.flex().flex_col().gap(px(6.0))
-            })
             .px(px(BUBBLE_PAD_X))
             .when(first, |el| el.pt(px(BUBBLE_PAD_Y)).rounded_t(r))
             .when(!first, |el| el.pt(px(3.0)))
@@ -1174,25 +1354,29 @@ impl Transcript {
             .when_some(agent_accent, |el, color| {
                 el.border_l_2().border_color(Theme::with_alpha(color, 0.7))
             })
-            .children(quote_header)
-            .child(render_block(
-                row_id,
-                &block,
-                bubble_text.at,
-                veil.as_ref(),
-                now,
-                theme,
-                &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
+            .child(sender_bubble_column(
+                name_el,
+                quote_header,
+                render_block(
+                    row_id,
+                    &block,
+                    bubble_text.at,
+                    veil.as_ref(),
+                    now,
+                    theme,
+                    &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
+                ),
+                time_el,
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: reply + copy. The react glyph that opened the emoji bar is
-        // gone with the bar itself (#1370).
+        // Hover: reply · copy · react (face-smile opens the emoji bar).
         let hover_actions = (last && !live).then(|| {
             let actions = self.hover_reply_copy(row_id, message_id, reveal, theme, cx);
             div().flex().items_center().gap(px(2.0)).child(actions)
         });
-        // Messages for Mac: the bubble's time shows beside the glyph on hover.
-        let hover_time = (last && !live)
+        // Messages for Mac: the bubble's time shows beside the glyph on hover
+        // (1:1 chats; a group / channel bubble already carries it after the text).
+        let hover_time = (last && !live && !inline_time)
             .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
             .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
@@ -1287,15 +1471,61 @@ impl Transcript {
                 // Bare `http(s)://…` URLs are still accented and clickable.
                 let body =
                     user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
+                // Someone else's bubble in a group / channel: their name inside
+                // it (their colour), the time after the text (`multi_party`).
+                let (image, color) = match &from {
+                    Some(person) => {
+                        let state = self.state.read(cx);
+                        (
+                            state.avatar(&person.avatar_url),
+                            Some(state.sender_accent(person, &theme)),
+                        )
+                    }
+                    None => (None, None),
+                };
+                let open_person = |this: &Self, person: &Person, cx: &Context<Self>| {
+                    let open_state = this.state.clone();
+                    let handle = person.handle.clone();
+                    let sid = this.chat_id.as_ref().and_then(|c| {
+                        this.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
+                            tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
+                        })
+                    });
+                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                        let (handle, sid) = (handle.clone(), sid.clone());
+                        open_state.update(cx, |s, cx| {
+                            s.push_profile(
+                                crate::app::ProfilePage::User {
+                                    handle,
+                                    space_id: sid,
+                                },
+                                cx,
+                            )
+                        });
+                    }
+                };
+                let name_el = match (&from, color) {
+                    (Some(person), Some(color)) if named => Some(
+                        self.sender_name_label(&row.id, person.display_name(), color, false)
+                            .cursor_pointer()
+                            .on_click(open_person(self, person, cx))
+                            .into_any_element(),
+                    ),
+                    _ => None,
+                };
+                let inline_time = self.multi_party && from.is_some();
+                let time_el = inline_time
+                    .then(|| {
+                        time.clone()
+                            .map(|t| inline_time_label(t, &theme).into_any_element())
+                    })
+                    .flatten();
                 let bubble = self
                     .menu_target(
                         div().id(SharedString::from(format!("{}#bubble", row.id))),
                         &row.message_id,
                         cx,
                     )
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.0))
                     .max_w(relative_width(0.72))
                     .px(px(BUBBLE_PAD_X))
                     .py(px(BUBBLE_PAD_Y))
@@ -1304,64 +1534,26 @@ impl Transcript {
                     .text_color(theme.bubble_text())
                     .text_size(px(CHAT_BODY))
                     .line_height(px(CHAT_LINE_HEIGHT))
-                    .children(quote_header)
-                    .child(body);
+                    .child(sender_bubble_column(
+                        name_el,
+                        quote_header.map(|q| q.into_any_element()),
+                        body,
+                        time_el,
+                    ));
                 if let Some(person) = from {
-                    // Someone else: left-aligned, their avatar and name above.
-                    // A small coloured left-edge sliver marks a person message
-                    // so it reads apart from an agent bubble: the dominant
-                    // colour of their picture, else their D79 disc colour.
+                    // Someone else: left-aligned, their avatar beside the bubble on
+                    // the avatar column. A small coloured left-edge sliver marks a
+                    // person message so it reads apart from an agent bubble: the
+                    // dominant colour of their picture, else their D79 disc colour.
                     // Must not early-return: the match arm still needs the
                     // COLUMN_MARGIN wrapper (same padding as agent bubbles).
-                    let (image, color) = {
-                        let state = self.state.read(cx);
-                        (
-                            state.avatar(&person.avatar_url),
-                            state.sender_accent(&person, &theme),
-                        )
-                    };
+                    let color = color.unwrap_or(theme.text_muted);
                     div()
                         .w_full()
                         .flex()
                         .flex_col()
                         .items_start()
-                        .gap(px(6.0))
                         .py(px(ROW_GAP_HALF))
-                        .when(named, |el| {
-                            el.child({
-                                // Click the caption → the person's profile page (pushed; ‹ returns).
-                                let open_state = self.state.clone();
-                                let handle = person.handle.clone();
-                                let sid = self.chat_id.as_ref().and_then(|c| {
-                                    self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
-                                        tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
-                                    })
-                                });
-                                // The caption starts where the bubble's text does.
-                                div()
-                                    .id(SharedString::from(format!("{}#who", row.id)))
-                                    .pl(px(SENDER_LANE + BUBBLE_PAD_X))
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .text_size(px(TEXT_TINY))
-                                            .text_color(theme.text_muted)
-                                            .child(person.display_name()),
-                                    )
-                                    .on_click(move |_, _, cx| {
-                                        let (handle, sid) = (handle.clone(), sid.clone());
-                                        open_state.update(cx, |s, cx| {
-                                            s.push_profile(
-                                                crate::app::ProfilePage::User {
-                                                    handle,
-                                                    space_id: sid,
-                                                },
-                                                cx,
-                                            )
-                                        });
-                                    })
-                            })
-                        })
                         .child({
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
@@ -1371,33 +1563,15 @@ impl Transcript {
                                 .items_end()
                                 .pl(px(AVATAR_COLUMN_INSET))
                                 .gap(px(SENDER_DISC_GAP))
-                                .child({
+                                .child(
                                     // The disc opens the same profile as the name.
-                                    let open_state = self.state.clone();
-                                    let handle = person.handle.clone();
-                                    let sid = self.chat_id.as_ref().and_then(|c| {
-                                        self.state.read(cx).chats.iter().find_map(|(pid, tabs)| {
-                                            tabs.iter().any(|t| &t.id == c).then(|| pid.clone())
-                                        })
-                                    });
                                     div()
                                         .id(SharedString::from(format!("{}#disc", row.id)))
                                         .flex_shrink_0()
                                         .cursor_pointer()
                                         .child(people::avatar(image, &person, SENDER_DISC, &theme))
-                                        .on_click(move |_, _, cx| {
-                                            let (handle, sid) = (handle.clone(), sid.clone());
-                                            open_state.update(cx, |s, cx| {
-                                                s.push_profile(
-                                                    crate::app::ProfilePage::User {
-                                                        handle,
-                                                        space_id: sid,
-                                                    },
-                                                    cx,
-                                                )
-                                            });
-                                        })
-                                })
+                                        .on_click(open_person(self, &person, cx)),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -1414,7 +1588,12 @@ impl Transcript {
                                         )
                                         .child(actions.ml(px(6.0)))
                                         .children(
-                                            hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))),
+                                            (!inline_time)
+                                                .then(|| {
+                                                    hover_time(time, reveal, &theme)
+                                                        .map(|t| t.ml(px(8.0)))
+                                                })
+                                                .flatten(),
                                         ),
                                 )
                         })
@@ -1460,6 +1639,7 @@ impl Transcript {
                 time,
                 lane,
                 quote,
+                named,
             } => self.markdown_bubble(
                 &row.id,
                 &row.message_id,
@@ -1472,6 +1652,7 @@ impl Transcript {
                 time,
                 lane,
                 quote,
+                named,
                 now,
                 &theme,
                 &selectable,
@@ -1484,6 +1665,7 @@ impl Transcript {
                 time,
                 lane,
                 quote,
+                named,
             } => {
                 let hint = name.as_deref().unwrap_or("Agent");
                 let (resolved, _, _, _) = self.agent_identity(&seed, hint, cx);
@@ -1506,6 +1688,7 @@ impl Transcript {
                     time,
                     lane,
                     quote,
+                    named,
                     now,
                     &theme,
                     &selectable,
@@ -1605,49 +1788,14 @@ impl Transcript {
             RowKind::Handoff { names, total } => {
                 // "Messaged ◉ A" while only the brief went out; "N messages with
                 // ◉ A, ◉ B and ◉ C" once replies came back (Grok refs 13/58).
-                let state = self.state.read(cx);
                 let lead = if total <= names.len() as u32 {
                     "Messaged".to_string()
                 } else {
                     format!("{total} messages with")
                 };
-                let mut line = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .text_size(px(TEXT_SMALL))
-                    .text_color(theme.text_muted)
-                    .child(lead);
-                let n = names.len();
-                for (i, name) in names.iter().enumerate() {
-                    let glyph: AnyElement = match state
-                        .projects
-                        .iter()
-                        .find(|p| p.name.eq_ignore_ascii_case(name))
-                    {
-                        Some(space) => {
-                            crate::ui::avatars::project(space, 16.0, &theme).into_any_element()
-                        }
-                        // Not one of my projects (a subagent): initials on the name's gradient.
-                        None => crate::ui::avatars::element(name, name, None, 16.0, &theme)
-                            .into_any_element(),
-                    };
-                    line = line.child(glyph).child(div().child(name.clone()));
-                    if n >= 2 && i + 2 == n {
-                        line = line.child(div().child("and"));
-                    } else if i + 2 < n {
-                        line = line.child(div().ml(px(-5.0)).child(","));
-                    }
-                }
-                div()
-                    .w_full()
-                    .flex()
-                    .justify_center()
-                    .pt(px(10.0))
-                    .pb(px(6.0))
-                    .child(line)
-                    .into_any_element()
+                self.agent_line(&lead, &names, &theme, cx)
             }
+            RowKind::RepliedTo { name } => self.agent_line("Replied to", &[name], &theme, cx),
             RowKind::Attachment {
                 attachment,
                 part_id,
@@ -1698,7 +1846,7 @@ impl Transcript {
             RowKind::AskUser { text } => {
                 cards::status_row(StatusKind::AskUser, &text, false, &theme, cx).into_any_element()
             }
-            RowKind::Question { question_id } => {
+            RowKind::Question { question_id, lane } => {
                 let Some(chat_id) = self.chat_id.clone() else {
                     return div().into_any_element();
                 };
@@ -1728,14 +1876,9 @@ impl Transcript {
                         cx.new(|cx| QuestionCard::new(state, chat_id, question_id, &widget, cx))
                     })
                     .clone();
-                // Grok: the card is as wide as the assistant block.
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
-            RowKind::Approval { view } => {
+            RowKind::Approval { view, lane } => {
                 let chat_id = self.chat_id.clone().unwrap_or_default();
                 let approval_id = view.approval_id.clone();
                 let (state_a, chat_a, id_a) =
@@ -1760,11 +1903,7 @@ impl Transcript {
                         });
                     },
                 );
-                div()
-                    .w_full()
-                    .flex()
-                    .child(assistant_slot(card))
-                    .into_any_element()
+                card_row(card, lane).into_any_element()
             }
             RowKind::Error { code, message } => {
                 let state = self.state.clone();
@@ -1782,50 +1921,6 @@ impl Transcript {
                 .text_color(theme.text_muted)
                 .child(glyph)
                 .into_any_element(),
-            RowKind::Sender {
-                name,
-                icon,
-                seed,
-                avatar,
-                avatar_color,
-            } => {
-                let _ = (&avatar, &avatar_color, &icon);
-                let (name, _disc_seed, _color_index, agent_pid) =
-                    self.agent_identity(&seed, &name, cx);
-                // The caption starts where the bubble's text does; the disc sits
-                // at the bubble's bottom-left (last Markdown row, mocks a/f).
-                let open_state = self.state.clone();
-                let caption = div()
-                    .id(SharedString::from(format!("{}#chip", row.id)))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .pl(px(SENDER_LANE + BUBBLE_PAD_X))
-                    // Same rhythm as a person's caption: the row gap above, 6 pt
-                    // to the bubble below (mock a).
-                    .pt(px(ROW_GAP_HALF))
-                    .pb(px(6.0 - ROW_GAP_HALF))
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.text_muted)
-                            .child(name),
-                    )
-                    .when(agent_pid.is_some(), |el| {
-                        el.cursor_pointer().on_click(move |_, _, cx| {
-                            if let Some(pid) = agent_pid.clone() {
-                                open_state.update(cx, |s, cx| {
-                                    s.push_profile(
-                                        crate::app::ProfilePage::Agent { project_id: pid },
-                                        cx,
-                                    )
-                                });
-                            }
-                        })
-                    });
-                caption.into_any_element()
-            }
             RowKind::Details => {
                 let state = self.state.clone();
                 let chat_id = self.chat_id.clone().unwrap_or_default();
@@ -1934,6 +2029,19 @@ fn assistant_slot(bubble: impl IntoElement) -> Div {
         .items_center()
         .debug_selector(|| "chat-bubble-slot".into())
         .child(bubble)
+}
+
+/// A question / approval card is a transcript row like a bubble (#1374, #1440 follow-up): the
+/// same left edge as an incoming bubble — after the sender's avatar lane in a people chat — and
+/// the same cap width (`assistant_slot`). The lane is left empty: the card belongs to the
+/// agent's run and the disc already sits on its bubble.
+pub fn card_row(card: impl IntoElement, lane: bool) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .when(lane, |el| el.pl(px(SENDER_LANE)))
+        .debug_selector(|| "chat-card-row".into())
+        .child(assistant_slot(card))
 }
 
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
@@ -2142,6 +2250,7 @@ pub fn build_rows(
     me_id: &str,
     thumb_keys: &HashSet<&str>,
     mentions: &Mentions,
+    names_senders: bool,
 ) -> Vec<Row> {
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
@@ -2156,8 +2265,9 @@ pub fn build_rows(
         .iter()
         .rposition(|m| m.role == Role::Assistant && !m.is_streaming());
     let mut last_stamp_at: u64 = 0;
-    // Who spoke last in a people chat: a name sits above a bubble only when the sender
-    // changed or a date stamp broke the run (Grok Bot's group style).
+    // Who spoke last in a people chat: a bubble carries its sender's name only when
+    // the sender changed or a date stamp broke the run (Grok Bot's group style), and
+    // only in chats that name their senders at all (`names_senders`).
     let mut prev_sender: Option<String> = None;
     for (mix, message) in messages.iter().enumerate() {
         let streaming = message.is_streaming();
@@ -2215,7 +2325,9 @@ pub fn build_rows(
                 } else {
                     sender_caption(message)
                 };
-                let named = prev_sender.as_deref() != Some(message.sender.as_str());
+                let named = names_senders
+                    && from.is_some()
+                    && prev_sender.as_deref() != Some(message.sender.as_str());
                 // Image preview / file card rows (same cards as agent attachments).
                 let is_mine = from.is_none();
                 // A forwarded attachment's "Forwarded from …" line is the card's
@@ -2352,11 +2464,6 @@ pub fn build_rows(
                     }
                 }
                 let mut lane: Option<String> = None;
-                // A caption with nothing under it (a stream that has no words yet)
-                // is dropped at the end of the message: the presence row already
-                // says who is working, and Jacob's Oct 23 shot showed the pair —
-                // "GigChadAgent" over "gigchadagent is working" — as a doubled notice.
-                let mut sender_row_ix: Option<usize> = None;
                 let in_people =
                     message.sender.starts_with("agent:") && message.asked_by_handle.is_some();
                 // Quote the user message this answers: prefer `replyTo` (platform
@@ -2369,49 +2476,22 @@ pub fn build_rows(
                     .or_else(|| message.in_reply_to.as_deref().filter(|id| !id.is_empty()))
                     .map(|id| Quote::for_reply(id, messages));
                 if message.role == Role::Project || in_people {
-                    // A people-chat agent (or another Project, F6) speaks in its own lane.
-                    // Each reply names its sender (#1447): consecutive answers from the same
-                    // agent must not merge into one unnamed run. No meta line —
-                    // "answering @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
+                    // A people-chat agent (or another Project, F6) speaks in its own lane;
+                    // the disc on the last block names it. No meta line — "answering
+                    // @x · owned by @y" moved to the profile pane (Jacob, 2026-10-22).
                     lane = Some(message.sender.clone());
-                    let name_this = in_people
-                        || message.role == Role::Project
-                        || prev_sender.as_deref() != Some(message.sender.as_str());
-                    if name_this {
-                        let fallback = if message.role == Role::Project {
-                            message
-                                .sender
-                                .strip_prefix("project:")
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| "Project".to_owned())
-                        } else {
-                            "Agent".to_owned()
-                        };
-                        let name = message.sender_name.clone().unwrap_or(fallback);
-                        sender_row_ix = Some(rows.len());
-                        rows.push(Row {
-                            version: hash_version(
-                                &(&name, &message.sender_icon, &message.sender_avatar_color),
-                                false,
-                            ),
-                            id: format!("{}#sender", message.id),
-                            message_id: message.id.clone(),
-                            kind: RowKind::Sender {
-                                name,
-                                icon: message.sender_icon.clone(),
-                                seed: message.sender.clone(),
-                                avatar: message
-                                    .sender_avatar
-                                    .clone()
-                                    .filter(|a| !a.is_empty() && !a.contains("://")),
-                                avatar_color: message
-                                    .sender_avatar_color
-                                    .clone()
-                                    .filter(|a| !a.is_empty()),
-                            },
-                        });
-                    }
                 }
+                // Group / channel: the agent's name sits inside its first bubble (the
+                // name resolves at render time from the seed, like the disc). Each
+                // people-chat reply names its sender (#1447): consecutive answers from
+                // the same agent must not merge into one unnamed run. A stream with no
+                // words yet has no bubble, so it shows no name either (the presence row
+                // says who is working).
+                let sender_named = names_senders
+                    && lane.is_some()
+                    && (in_people
+                        || message.role == Role::Project
+                        || prev_sender.as_deref() != Some(message.sender.as_str()));
                 let last_text_part = message
                     .parts
                     .iter()
@@ -2480,9 +2560,10 @@ pub fn build_rows(
                                     bubble_texts.get(block_ix).cloned().unwrap_or_else(|| {
                                         BubbleText::single(block_plain(&block, false))
                                     });
+                                let named = sender_named && first;
                                 rows.push(Row {
                                     version: hash_version(
-                                        &(&block, first, last, fill, &reply_quote),
+                                        &(&block, first, last, fill, &reply_quote, named),
                                         live,
                                     ),
                                     id: format!("{}#{}.{}", message.id, id, bix),
@@ -2497,6 +2578,7 @@ pub fn build_rows(
                                         time: clock_label(message.created_at),
                                         lane: lane.clone(),
                                         quote: if first { reply_quote.clone() } else { None },
+                                        named,
                                     },
                                 });
                                 block_ix += 1;
@@ -2558,6 +2640,7 @@ pub fn build_rows(
                                 message_id: message.id.clone(),
                                 kind: RowKind::Question {
                                     question_id: question_id.clone(),
+                                    lane: lane.is_some(),
                                 },
                             }),
                             None => rows.push(Row {
@@ -2599,7 +2682,10 @@ pub fn build_rows(
                                 ),
                                 id: format!("{}#{}", message.id, id),
                                 message_id: message.id.clone(),
-                                kind: RowKind::Approval { view },
+                                kind: RowKind::Approval {
+                                    view,
+                                    lane: lane.is_some(),
+                                },
                             });
                         }
                         Part::Status {
@@ -2661,6 +2747,7 @@ pub fn build_rows(
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
+                            named: sender_named,
                         },
                         None => RowKind::NoAnswer {
                             seed: message.sender.clone(),
@@ -2668,6 +2755,7 @@ pub fn build_rows(
                             time: clock_label(message.created_at),
                             lane: lane.clone(),
                             quote: reply_quote.clone(),
+                            named: sender_named,
                         },
                     };
                     rows.push(Row {
@@ -2677,6 +2765,7 @@ pub fn build_rows(
                                 &message.sender_name,
                                 errors.first().map(|(_, _, text)| text),
                                 &reply_quote,
+                                sender_named,
                             ),
                             false,
                         ),
@@ -2741,10 +2830,20 @@ pub fn build_rows(
                         kind: RowKind::Details,
                     });
                 }
-                if let Some(ix) = sender_row_ix {
-                    if rows.len() == ix + 1 {
-                        rows.pop();
-                    }
+                // Agent-to-agent messaging: the reply went back to the agent that wrote in.
+                if let Some(name) = message
+                    .agent_reply_to
+                    .as_deref()
+                    .filter(|n| !streaming && !n.trim().is_empty())
+                {
+                    rows.push(Row {
+                        version: hash_version(&name, false),
+                        id: format!("{}#replied", message.id),
+                        message_id: message.id.clone(),
+                        kind: RowKind::RepliedTo {
+                            name: name.to_owned(),
+                        },
+                    });
                 }
             }
         }
@@ -3397,6 +3496,102 @@ fn code_fence_card(
     card.into_any_element()
 }
 
+/// Gap from the sender's name to the text (Jacob's reference: tight) and from
+/// the reply quote header to the text (#1393).
+const NAME_TO_TEXT_GAP: f32 = 2.0;
+const QUOTE_TO_TEXT_GAP: f32 = 6.0;
+
+/// The inside of a bubble, in this order: sender name (group / channel,
+/// someone else) → reply quote header → the text, with the time after it.
+/// A short text keeps the time on its line; a wrapped one pushes it to the
+/// right of the next line. No `min_w_0` on the column or its items: taffy
+/// sizes a flex column from its items, and an item with `min-width: 0`
+/// contributes nothing, so the bubble would take the name's or the quote's
+/// width and wrap the body one word per line (bubble-quote-width-2026-10-23).
+///
+/// The text + time line is a flex *row*, and there the rule is the opposite:
+/// the text item must be `min_w_0`. GPUI measures a text's min-content width
+/// as its unwrapped width (`AvailableSpace::MinContent` → no wrap width), so
+/// without it the item's automatic minimum is the whole line, it cannot
+/// shrink to the bubble, and the text runs out of the bubble's right edge
+/// while the time drops to a line of its own (Jacob, 2026-10-23, v0.6.184:
+/// bubble-overflow-hotfix-2026-10-23). With `min_w_0` the row still reports
+/// the unwrapped width as its max-content size (a flex item's basis is its
+/// content; the minimum only matters when shrinking), so a short bubble is
+/// still content-sized, and a long one wraps at the bubble's width.
+fn sender_bubble_column(
+    name: Option<AnyElement>,
+    quote: Option<AnyElement>,
+    body: AnyElement,
+    time: Option<AnyElement>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .children(name.map(|n| {
+            div()
+                .pb(px(NAME_TO_TEXT_GAP))
+                .debug_selector(|| "bubble-name".into())
+                .child(n)
+        }))
+        .children(quote.map(|q| {
+            div()
+                .pb(px(QUOTE_TO_TEXT_GAP))
+                .debug_selector(|| "bubble-quote".into())
+                .child(q)
+        }))
+        .child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_end()
+                .child(
+                    div()
+                        .min_w_0()
+                        .debug_selector(|| "bubble-text".into())
+                        .child(body),
+                )
+                .children(time.map(|t| {
+                    div()
+                        .ml_auto()
+                        .pl(px(8.0))
+                        .debug_selector(|| "bubble-time".into())
+                        .child(t)
+                })),
+        )
+}
+
+/// "8:05 AM" after a group / channel bubble's text.
+fn inline_time_label(time: String, theme: &Theme) -> Div {
+    div()
+        .text_size(px(TEXT_TINY))
+        .line_height(px(CHAT_LINE_HEIGHT))
+        .text_color(theme.text_faint)
+        .whitespace_nowrap()
+        .child(time)
+}
+
+/// Whether the open chat shows who sent each bubble (Jacob, 2026-10-23):
+/// group chats and server channels do, people and agents alike; a 1:1 chat —
+/// me and a person, or me and an agent — never labels the other side. A DM
+/// with an agent added, an agent group, or a project with other humans in it
+/// has three parties and counts as a group.
+pub fn names_senders(space: Option<&Project>, chat: Option<&Chat>, channel: bool) -> bool {
+    if channel {
+        return true;
+    }
+    let Some(space) = space else {
+        return false;
+    };
+    match space.kind {
+        SpaceKind::Group => true,
+        SpaceKind::Dm => !space.agents.is_empty(),
+        SpaceKind::Project => {
+            chat.is_some_and(Chat::is_group) || space.shared || !space.people.is_empty()
+        }
+    }
+}
+
 #[cfg(test)]
 mod selection_tests {
     //! The bubble's plain text is one string through every block (#1389):
@@ -3722,6 +3917,17 @@ mod layout_tests {
                 queued: false,
             };
             let row_over_pill = presence::row(presence, &theme, cx).into_any_element();
+            // A question / approval card, framed by the real `card_row`: in an agent chat (no
+            // lane) and in a people chat (lane) — a card that wants more than any pane has.
+            let card = |sel: &'static str| {
+                div()
+                    .debug_selector(move || sel.into())
+                    .max_w_full()
+                    .min_w_0()
+                    .child(div().w(px(4000.0)).h(px(CHAT_LINE_HEIGHT)))
+            };
+            let card_plain = card_row(card("test-card"), false).into_any_element();
+            let card_people = card_row(card("test-people-card"), true).into_any_element();
             div()
                 .w(px(self.pane))
                 .h(px(400.0))
@@ -3729,6 +3935,8 @@ mod layout_tests {
                 .flex_col()
                 .child(column_row(row))
                 .child(column_row(people_row))
+                .child(column_row(card_plain))
+                .child(column_row(card_people))
                 .child(column_row(row_over_pill))
                 .child(column_row(pill))
         }
@@ -3752,6 +3960,8 @@ mod layout_tests {
         disc: gpui::Bounds<Pixels>,
         people_bubble_left: f32,
         composer_text_left: f32,
+        card: gpui::Bounds<gpui::Pixels>,
+        people_card: gpui::Bounds<gpui::Pixels>,
     }
 
     fn measure(cx: &mut TestAppContext, pane: f32) -> Edges {
@@ -3796,6 +4006,10 @@ mod layout_tests {
         let composer_text = vcx
             .debug_bounds("test-composer-text")
             .expect("composer text drawn");
+        let card = vcx.debug_bounds("test-card").expect("card drawn");
+        let people_card = vcx
+            .debug_bounds("test-people-card")
+            .expect("people card drawn");
         Edges {
             bubble_left: bubble.origin.x.into(),
             bubble_width: bubble.size.width.into(),
@@ -3814,6 +4028,43 @@ mod layout_tests {
             disc,
             people_bubble_left: people_bubble.origin.x.into(),
             composer_text_left: composer_text.origin.x.into(),
+            card,
+            people_card,
+        }
+    }
+
+    /// #1440 follow-up (Jacob, 2026-10-23 17:59): a question / approval card lines up with the
+    /// bubbles — card left == bubble left, card width ≤ the bubble cap — in an agent chat and,
+    /// after the avatar lane, in a people chat.
+    #[gpui::test]
+    fn cards_share_the_bubbles_left_edge_and_cap(cx: &mut TestAppContext) {
+        for pane in [REFERENCE_PANE, GROK_REF_57_PANE, 1400.0] {
+            let e = measure(cx, pane);
+            let (cx0, cw): (f32, f32) = (e.card.origin.x.into(), e.card.size.width.into());
+            assert!(
+                (cx0 - e.bubble_left).abs() <= 0.5,
+                "pane {pane}: card left {cx0} vs bubble left {}",
+                e.bubble_left
+            );
+            assert!(
+                cw <= e.bubble_width + 0.5,
+                "pane {pane}: card width {cw} over the bubble cap {}",
+                e.bubble_width
+            );
+            let (pcx, pcw): (f32, f32) = (
+                e.people_card.origin.x.into(),
+                e.people_card.size.width.into(),
+            );
+            assert!(
+                (pcx - e.people_bubble_left).abs() <= 0.5,
+                "pane {pane}: people card left {pcx} vs people bubble left {}",
+                e.people_bubble_left
+            );
+            let people_cap = e.bubble_width - SENDER_LANE;
+            assert!(
+                pcw <= people_cap + 0.5,
+                "pane {pane}: people card width {pcw} over the lane cap {people_cap}"
+            );
         }
     }
 
@@ -4023,6 +4274,65 @@ mod layout_tests {
         assert!((e.bubble_width - 612.0).abs() <= 1.0, "{}", e.bubble_width);
     }
 
+    struct NamedBubble;
+
+    impl gpui::Render for NamedBubble {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let line = |h: f32| div().w(px(120.0)).h(px(h));
+            div().w(px(400.0)).h(px(300.0)).child(
+                div()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(BUBBLE_PAD_Y))
+                    .child(sender_bubble_column(
+                        Some(line(CHAT_LINE_HEIGHT).into_any_element()),
+                        Some(line(32.0).into_any_element()),
+                        line(CHAT_LINE_HEIGHT).into_any_element(),
+                        Some(div().w(px(40.0)).h(px(CHAT_LINE_HEIGHT)).into_any_element()),
+                    )),
+            )
+        }
+    }
+
+    /// Jacob, 2026-10-23 (Discord-style reference): inside a group / channel
+    /// bubble the order is name → reply quote → text, 2 pt from the name to
+    /// what follows, 6 from the quote; the time sits after the text.
+    #[gpui::test]
+    fn a_named_bubble_stacks_name_quote_text_and_puts_the_time_after(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| NamedBubble);
+        vcx.run_until_parked();
+        let name = vcx.debug_bounds("bubble-name").expect("name drawn");
+        let quote = vcx.debug_bounds("bubble-quote").expect("quote drawn");
+        let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+        let time = vcx.debug_bounds("bubble-time").expect("time drawn");
+        let bottom = |b: gpui::Bounds<gpui::Pixels>| f32::from(b.origin.y + b.size.height);
+        let top = |b: gpui::Bounds<gpui::Pixels>| f32::from(b.origin.y);
+        assert_eq!(
+            bottom(name),
+            top(quote),
+            "name, then the quote (2 pt inside the name box)"
+        );
+        assert_eq!(
+            bottom(name) - top(name),
+            CHAT_LINE_HEIGHT + NAME_TO_TEXT_GAP,
+            "name box = one line + the 2 pt gap"
+        );
+        assert_eq!(bottom(quote), top(text), "quote, then the text");
+        assert_eq!(
+            bottom(quote) - top(quote),
+            32.0 + QUOTE_TO_TEXT_GAP,
+            "quote box = its height + the 6 pt gap"
+        );
+        assert_eq!(top(time), top(text), "the time shares the text's line");
+        assert!(
+            f32::from(time.origin.x) >= f32::from(text.origin.x + text.size.width) + 8.0,
+            "the time follows the text"
+        );
+    }
+
     /// A quoted agent bubble as `markdown_bubble` builds it: the bubble is a
     /// flex column (quote header over the text) in the slot, with and without
     /// the avatar lane.
@@ -4130,6 +4440,262 @@ mod layout_tests {
         }
     }
 
+    /// Which bubble a [`BubbleRow`] draws: my own (right, `RowKind::User`
+    /// without `from`), another person's in a group (left, name + inline
+    /// time, `RowKind::User` with `from`), or an agent's (`markdown_bubble`
+    /// with a lane and the inline time).
+    #[derive(Clone, Copy, Debug)]
+    enum Who {
+        Mine,
+        Other,
+        Agent,
+    }
+
+    /// One transcript row built from the same pieces the real rows use
+    /// (`sender_bubble_column`, `user_message_body` / `render_block`,
+    /// `inline_time_label`, `assistant_slot`, `column_row`) in a pane of
+    /// `pane` pt.
+    struct BubbleRow {
+        pane: f32,
+        who: Who,
+        text: &'static str,
+        selection: Entity<TextSelection>,
+    }
+
+    /// Longer than any bubble cap at a 1200 pt window (≈ 1,350 pt unwrapped).
+    const OVERFLOWING_LINE: &str = "When you think about it, most people are going to be \
+        blocked by how many tokens they can access pretty soon, and the ones who are not \
+        blocked will be the ones who already own the pipes, the chips and the power lines \
+        that the rest of us have to rent by the hour.";
+    const SHORT_LINE: &str = "Most people cant do what I am doing right now";
+
+    impl gpui::Render for BubbleRow {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let time = Some(inline_time_label("1:52 PM".to_string(), &theme).into_any_element());
+            let name = |name: &'static str| {
+                div()
+                    .text_size(px(CHAT_BODY))
+                    .line_height(px(CHAT_LINE_HEIGHT))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(name)
+                    .into_any_element()
+            };
+            let row = match self.who {
+                Who::Agent => {
+                    let bubble_sel =
+                        selectable.bubble("a#text".to_string(), SharedString::from(self.text));
+                    let bubble = div()
+                        .debug_selector(|| "test-bubble".into())
+                        .max_w_full()
+                        .min_w_0()
+                        .relative()
+                        .px(px(BUBBLE_PAD_X))
+                        .py(px(BUBBLE_PAD_Y))
+                        .child(sender_bubble_column(
+                            Some(name("Doug")),
+                            None,
+                            render_block(
+                                "a",
+                                &Block::Paragraph(self.text.to_string()),
+                                0,
+                                None,
+                                Instant::now(),
+                                &theme,
+                                &bubble_sel,
+                            ),
+                            time,
+                        ));
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_end()
+                        .pl(px(AVATAR_COLUMN_INSET))
+                        .gap(px(SENDER_DISC_GAP))
+                        .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                        .child(assistant_slot(bubble))
+                }
+                Who::Mine | Who::Other => {
+                    let body =
+                        user_message_body("u", self.text, theme.bubble_text(), &theme, &selectable);
+                    let other = matches!(self.who, Who::Other);
+                    let bubble = div()
+                        .debug_selector(|| "test-bubble".into())
+                        .max_w(relative_width(0.72))
+                        .px(px(BUBBLE_PAD_X))
+                        .py(px(BUBBLE_PAD_Y))
+                        .child(sender_bubble_column(
+                            other.then(|| name("Samir Haddad")),
+                            None,
+                            body,
+                            other.then_some(time).flatten(),
+                        ));
+                    if other {
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_end()
+                            .pl(px(AVATAR_COLUMN_INSET))
+                            .gap(px(SENDER_DISC_GAP))
+                            .child(div().size(px(SENDER_DISC)).flex_shrink_0())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .debug_selector(|| "test-bubble-parent".into())
+                                    .child(bubble)
+                                    .child(div().size(px(16.0)).ml(px(6.0))),
+                            )
+                    } else {
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_end()
+                            .justify_end()
+                            .debug_selector(|| "test-bubble-parent".into())
+                            .child(div().size(px(16.0)).mr(px(6.0)))
+                            .child(bubble)
+                    }
+                }
+            };
+            div()
+                .w(px(self.pane))
+                .h(px(600.0))
+                .text_size(px(CHAT_BODY))
+                .line_height(px(CHAT_LINE_HEIGHT))
+                .child(column_row(row.into_any_element()))
+        }
+    }
+
+    /// The cap a [`BubbleRow`] bubble may reach: the slot minus Grok's gap
+    /// for an agent; 72 % of the bubble's parent (the row, or the lane beside
+    /// the disc) for people — `relative_width(0.72)` is relative to the parent.
+    fn bubble_cap(vcx: &mut gpui::VisualTestContext, who: Who) -> f32 {
+        match who {
+            Who::Agent => {
+                let slot = vcx.debug_bounds("chat-bubble-slot").expect("slot drawn");
+                f32::from(slot.size.width) - ASSISTANT_RIGHT_GAP
+            }
+            Who::Mine | Who::Other => {
+                let parent = vcx
+                    .debug_bounds("test-bubble-parent")
+                    .expect("bubble parent drawn");
+                f32::from(parent.size.width) * 0.72
+            }
+        }
+    }
+
+    /// Jacob, 2026-10-23 20:18 (Mac v0.6.184, the Arbonites group): his own
+    /// bubbles ran off the right edge of the chat column, and another person's
+    /// bubble was wide with the text spilling past it and the time on a line
+    /// of its own. Cause: `sender_bubble_column` (v0.6.183, #1437) put the
+    /// text in a flex row with the time, and a text's automatic minimum width
+    /// in a row is its unwrapped width. Every bubble kind, at a 400 pt and a
+    /// 1200 pt window: the bubble stays inside the column and under its cap,
+    /// and the text wraps inside the bubble instead of running out of it.
+    #[gpui::test]
+    fn bubbles_stay_inside_the_column_and_wrap_their_text(cx: &mut TestAppContext) {
+        // 400 pt: the sidebar is hidden, the pane is the window; 1200 pt:
+        // the 296 pt sidebar is open.
+        for pane in [400.0_f32, 1200.0 - crate::ui::theme::SIDEBAR_WIDTH] {
+            for who in [Who::Mine, Who::Other, Who::Agent] {
+                let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                    pane,
+                    who,
+                    text: OVERFLOWING_LINE,
+                    selection: cx.new(TextSelection::new),
+                });
+                vcx.run_until_parked();
+                let column = vcx.debug_bounds("chat-column").expect("column drawn");
+                let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+                let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+                let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+                let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
+                let cap = bubble_cap(vcx, who);
+                let bw = f32::from(bubble.size.width);
+                assert!(
+                    right(bubble) <= right(column) + 0.5 && left(bubble) >= left(column) - 0.5,
+                    "pane {pane} {who:?}: bubble {}..{} runs out of the column {}..{}",
+                    left(bubble),
+                    right(bubble),
+                    left(column),
+                    right(column)
+                );
+                assert!(
+                    bw <= cap + 1.0,
+                    "pane {pane} {who:?}: bubble {bw} pt is wider than its cap {cap}"
+                );
+                assert!(
+                    right(text) <= right(bubble) - BUBBLE_PAD_X + 1.0,
+                    "pane {pane} {who:?}: the text box ends at {} but the bubble's inner edge is {}",
+                    right(text),
+                    right(bubble) - BUBBLE_PAD_X
+                );
+                // A 1,350 pt line never fits a bubble this size: it must have wrapped.
+                let th = f32::from(text.size.height);
+                assert!(
+                    th >= 2.0 * CHAT_LINE_HEIGHT,
+                    "pane {pane} {who:?}: the text is one {th} pt line — it did not wrap inside the bubble"
+                );
+                // … and a long bubble fills its cap (the text is what sizes it).
+                assert!(
+                    (bw - cap).abs() <= 1.0,
+                    "pane {pane} {who:?}: a long line fills the cap: bubble {bw}, cap {cap}"
+                );
+            }
+        }
+    }
+
+    /// A one-line bubble stays content-sized: no slack after a short text
+    /// (the row's max-content width is the text plus the time, never the cap).
+    #[gpui::test]
+    fn a_short_bubble_is_as_wide_as_its_text(cx: &mut TestAppContext) {
+        for who in [Who::Mine, Who::Other, Who::Agent] {
+            let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                pane: REFERENCE_PANE,
+                who,
+                text: SHORT_LINE,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            let text = vcx.debug_bounds("bubble-text").expect("text drawn");
+            let bw = f32::from(bubble.size.width);
+            let tw = f32::from(text.size.width);
+            let th = f32::from(text.size.height);
+            let cap = bubble_cap(vcx, who);
+            assert!(
+                th <= CHAT_LINE_HEIGHT + 0.5,
+                "{who:?}: a short line stays on one line ({th} pt tall)"
+            );
+            assert!(
+                bw < cap - 60.0,
+                "{who:?}: short bubble {bw} pt is at its cap ({cap})"
+            );
+            // The bubble is the text, the pads, and (groups) the time after it.
+            let time_w = match who {
+                Who::Mine => 0.0,
+                Who::Other | Who::Agent => f32::from(
+                    vcx.debug_bounds("bubble-time")
+                        .expect("time drawn")
+                        .size
+                        .width,
+                ),
+            };
+            assert!(
+                (bw - (tw + time_w + 2.0 * BUBBLE_PAD_X)).abs() <= 2.0,
+                "{who:?}: bubble {bw} ≠ text {tw} + time {time_w} + pads"
+            );
+        }
+    }
+
     #[test]
     fn the_column_is_the_composers_geometry() {
         let m = [
@@ -4214,6 +4780,7 @@ mod system_line_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            true,
         );
         let kinds: Vec<&RowKind> = rows.iter().map(|r| &r.kind).collect();
         // Date stamp, Bob (named), the notice, Bob again (named again).
@@ -4271,18 +4838,22 @@ mod system_line_tests {
             "gh_jacob",
             &HashSet::new(),
             &Mentions::empty(),
+            true,
         );
-        let sender_captions: Vec<&str> = rows
+        // The name sits inside each reply's first bubble (sender-name-in-bubble-2026-10-23).
+        let named_bubbles: Vec<bool> = rows
             .iter()
             .filter_map(|r| match &r.kind {
-                RowKind::Sender { name, .. } => Some(name.as_str()),
+                RowKind::Markdown {
+                    first: true, named, ..
+                } => Some(*named),
                 _ => None,
             })
             .collect();
         assert_eq!(
-            sender_captions,
-            ["Doug", "Doug", "Doug"],
-            "each agent reply names the sender: {sender_captions:?}"
+            named_bubbles,
+            [true, true, true],
+            "each agent reply names the sender: {named_bubbles:?}"
         );
         let quotes: Vec<(&str, &str)> = rows
             .iter()
@@ -4304,6 +4875,143 @@ mod system_line_tests {
             ],
             "each reply quotes the message it answers: {quotes:?}"
         );
+    }
+
+    fn speech<'a>(spoken: &'a HashSet<Id>, failed: &'a HashMap<Id, String>) -> SpeechRows<'a> {
+        SpeechRows {
+            enabled: false,
+            spoken,
+            failed,
+            voice_mode: false,
+        }
+    }
+
+    /// Which bubbles carry a sender name: `(text, named)` for people, `("agent", named)`
+    /// for an agent message's first block.
+    fn names(rows: &[Row]) -> Vec<(&str, bool)> {
+        rows.iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User {
+                    named, text, from, ..
+                } => Some((text.as_str(), *named && from.is_some())),
+                RowKind::Markdown { named, first, .. } if *first => Some(("agent", *named)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Jacob, 2026-10-23: the sender's name sits inside the bubble in group chats and
+    /// channels — people when the sender changed, agents on every reply (#1447) — and
+    /// never on my own bubble.
+    #[test]
+    fn group_and_channel_bubbles_name_their_sender_but_not_mine() {
+        let t = 1_700_000_000_000u64;
+        let messages = [
+            message("user", "user:gh_bob", "hi all", t),
+            message("user", "user:gh_bob", "second", t + 1_000),
+            message("user", "user:gh_me", "mine", t + 2_000),
+            agent_reply("a1", "on it", "m-1700000002000", t + 3_000),
+            agent_reply("a2", "done", "m-1700000002000", t + 4_000),
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            true,
+        );
+        assert_eq!(
+            names(&rows),
+            [
+                ("hi all", true),
+                ("second", false),
+                ("mine", false),
+                ("agent", true),
+                ("agent", true),
+            ]
+        );
+    }
+
+    /// … and a 1:1 chat (me ↔ person, me ↔ agent) labels nobody, and carries no
+    /// `#sender` caption row either.
+    #[test]
+    fn dm_and_agent_chat_bubbles_carry_no_name() {
+        let t = 1_700_000_000_000u64;
+        let messages = [
+            message("user", "user:gh_bob", "hi", t),
+            message("user", "user:gh_me", "hey", t + 1_000),
+            agent_reply("a1", "hello", "m-1700000001000", t + 2_000),
+        ];
+        let (spoken, failed) = (HashSet::new(), HashMap::new());
+        let rows = build_rows(
+            &messages,
+            false,
+            speech(&spoken, &failed),
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+        );
+        assert_eq!(
+            names(&rows),
+            [("hi", false), ("hey", false), ("agent", false)]
+        );
+        assert!(
+            rows.iter().all(|r| !r.id.ends_with("#sender")),
+            "no sender header row above a bubble any more"
+        );
+    }
+
+    /// The chat-kind rule behind `names_senders`.
+    #[test]
+    fn names_senders_follows_the_chat_kind() {
+        let dm = Project {
+            kind: SpaceKind::Dm,
+            ..Default::default()
+        };
+        let dm_with_agent = Project {
+            kind: SpaceKind::Dm,
+            agents: vec![Default::default()],
+            ..Default::default()
+        };
+        let group = Project {
+            kind: SpaceKind::Group,
+            ..Default::default()
+        };
+        let agent = Project::default();
+        let shared = Project {
+            shared: true,
+            ..Default::default()
+        };
+        let agent_group = Chat {
+            id: "c".into(),
+            project_id: "p".into(),
+            title: "Launch sync".into(),
+            is_pinned: false,
+            is_system: false,
+            kind: crate::model::ChatKind::Group,
+            participants: Vec::new(),
+            unread: false,
+            last_message_at: 0,
+            archived_at: None,
+        };
+        assert!(!names_senders(Some(&dm), None, false), "1:1 DM");
+        assert!(!names_senders(Some(&agent), None, false), "me ↔ agent");
+        assert!(names_senders(Some(&group), None, false), "people group");
+        assert!(
+            names_senders(Some(&dm_with_agent), None, false),
+            "DM + agent"
+        );
+        assert!(names_senders(Some(&shared), None, false), "shared project");
+        assert!(
+            names_senders(Some(&agent), Some(&agent_group), false),
+            "agent group"
+        );
+        assert!(names_senders(None, None, true), "channel");
+        assert!(!names_senders(None, None, false), "nothing open");
     }
 }
 
@@ -4353,6 +5061,7 @@ mod presence_rows_tests {
             "gh_me",
             &HashSet::new(),
             &Mentions::empty(),
+            true,
         )
     }
 
@@ -4361,9 +5070,11 @@ mod presence_rows_tests {
         let now = now_ms();
         let rows = rows_of(&[agent_message("streaming", "", now)]);
         assert!(
-            rows.iter()
-                .all(|r| !matches!(r.kind, RowKind::Sender { .. })),
-            "no sender caption without a bubble: {:?}",
+            rows.iter().all(|r| !matches!(
+                r.kind,
+                RowKind::Markdown { named: true, .. } | RowKind::NoAnswer { named: true, .. }
+            )),
+            "no sender name without a bubble: {:?}",
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>()
         );
         assert!(
@@ -4382,10 +5093,10 @@ mod presence_rows_tests {
         )]);
         assert_eq!(
             rows.iter()
-                .filter(|r| matches!(r.kind, RowKind::Sender { .. }))
+                .filter(|r| matches!(r.kind, RowKind::Markdown { named: true, .. }))
                 .count(),
             1,
-            "one caption over the first bubble"
+            "one name, inside the first bubble"
         );
     }
 }

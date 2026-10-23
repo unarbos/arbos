@@ -1,4 +1,5 @@
 mod admin;
+mod agent_messages;
 mod api;
 mod api_error_layer;
 #[cfg(test)]
@@ -16,6 +17,7 @@ mod credits;
 mod daytona;
 mod db;
 mod db_accounts;
+mod db_agent_messages;
 mod db_calls;
 mod db_fleet;
 mod db_inspect;
@@ -44,6 +46,7 @@ mod people;
 mod proxy;
 mod releases;
 mod restart;
+mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
@@ -416,6 +419,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/calls/{id}", get(calls::get_call))
         .route("/calls/{id}/join", post(calls::join_call))
         .route("/calls/{id}/leave", post(calls::leave_call))
+        .route("/calls/{id}/speakers", post(calls::invite_speaker))
+        .route(
+            "/calls/{id}/speakers/{user_id}",
+            axum::routing::delete(calls::revoke_speaker),
+        )
         .route(
             "/devices/{id}/voip",
             post(calls::register_voip).delete(calls::unregister_voip),
@@ -583,6 +591,21 @@ async fn main() -> anyhow::Result<()> {
             "/projects/{id}/members/{user_id}",
             delete(people::project_member_remove),
         )
+        // Agent-to-agent messaging (docs/agent-to-agent-messaging.md): the box sends for its
+        // agent, the target box answers; the owner edits "Who may message X" from the agent pane.
+        .route("/projects/{id}/agent-messages", post(agent_messages::send))
+        .route(
+            "/projects/{id}/agent-messages/{mid}/reply",
+            post(agent_messages::reply),
+        )
+        .route(
+            "/projects/{id}/message-access",
+            get(agent_messages::list_grants).put(agent_messages::put_grant),
+        )
+        .route(
+            "/projects/{id}/message-access/{grantee}",
+            delete(agent_messages::delete_grant),
+        )
         .route(
             "/blocks",
             get(people::blocks_list).post(people::block_create),
@@ -624,6 +647,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/relay-errors", get(debug_api::me_relay_errors))
         .route("/machine/debug", get(debug_api::machine_debug))
         .route("/chats/{id}/reads", get(debug_api::chat_reads))
+        .route("/chats/{id}/health", get(room_health::chat_health))
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),

@@ -15,12 +15,13 @@ use crate::app::SignInMode;
 use crate::app::{AppState, DetailsTarget, ProfilePage, ServerSheet};
 use crate::image_picker;
 use crate::model::{now_ms, CallKind, MachineState};
+use crate::sign_in;
 use crate::sync::PictureSource;
 use crate::ui::avatar_picker;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::callview;
 use crate::ui::channels::{ChannelsEvent, ChannelsPanel};
-use crate::ui::composer::{Composer, ComposerEvent, ComposerInput};
+use crate::ui::composer::{self, Composer, ComposerEvent, ComposerInput};
 use crate::ui::connectors::{ConnectorsEvent, ConnectorsPanel};
 use crate::ui::create_entity::{self, Kind as CreateKind};
 use crate::ui::dropzone;
@@ -37,6 +38,7 @@ use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
 use crate::ui::people;
 use crate::ui::profiles;
+use crate::ui::react_menu;
 use crate::ui::routines::{RoutinesEvent, RoutinesPanel};
 use crate::ui::secrets::{SecretsEvent, SecretsPanel};
 use crate::ui::servers;
@@ -57,7 +59,7 @@ actions!(
 );
 
 /// Left inset for the conversation header while the sidebar is hidden: the window's traffic lights.
-/// The sidebar's collapse control sits at the same inset, so it never moves when the pane folds.
+/// The expand control (when the rail is folded) sits at this inset beside the lights.
 pub(crate) const TRAFFIC_LIGHTS_INSET: f32 = 72.0;
 
 /// What the shared name field (`agent_name_input`) renames when Return is pressed.
@@ -203,6 +205,12 @@ pub struct Shell {
         crate::model::Id,
         gpui::Point<gpui::Pixels>,
     )>,
+    /// The quick-react emoji bar (`react_menu`): (chat, message, the click).
+    pub(crate) react_menu: Option<(
+        crate::model::Id,
+        crate::model::Id,
+        gpui::Point<gpui::Pixels>,
+    )>,
     /// `ARBOS_RIG_MESSAGE_MENU=x,y` (screenshot rig): opens the menu once the
     /// open chat has a message; cleared when it has.
     rig_message_menu: Option<gpui::Point<gpui::Pixels>>,
@@ -225,9 +233,6 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
-    /// The left pane's search field is shown (the magnifier in the top strip
-    /// toggles it; it stays while a query is typed).
-    pub(crate) search_open: bool,
     /// D88: the name/invite/channel field of the server sheets and the inline channel rename
     /// on the server page; `channel_rename` is the channel being renamed there.
     pub(crate) server_input: Entity<ComposerInput>,
@@ -345,6 +350,15 @@ impl Shell {
                 } => {
                     this.close_popovers(cx);
                     this.message_menu = Some((chat_id.clone(), message_id.clone(), *position));
+                    cx.notify();
+                }
+                TranscriptEvent::ReactMenu {
+                    chat_id,
+                    message_id,
+                    position,
+                } => {
+                    this.close_popovers(cx);
+                    this.react_menu = Some((chat_id.clone(), message_id.clone(), *position));
                     cx.notify();
                 }
                 TranscriptEvent::Reply {
@@ -611,6 +625,14 @@ impl Shell {
         if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| s.open_new_chat(cx));
         }
+        // Rig: `ARBOS_SEARCH=<text>` opens the sidebar search with that query
+        // (synthetic key events do not reach the GPUI field on the shared display).
+        let search_query = std::env::var("ARBOS_SEARCH")
+            .ok()
+            .filter(|q| !q.trim().is_empty());
+        if let Some(q) = &search_query {
+            search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
+        }
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -770,6 +792,7 @@ impl Shell {
             chat_menu: None,
             chat_delete_armed: false,
             message_menu: None,
+            react_menu: None,
             rig_message_menu: message_menu::rig_anchor(),
             renaming_tab: None,
             tab_rename_input,
@@ -787,7 +810,6 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
-            search_open: false,
             server_input,
             channel_rename: None,
             invite_expires: false,
@@ -868,6 +890,49 @@ impl Shell {
 
     fn send_feedback(&mut self, _: &SendFeedback, window: &mut Window, cx: &mut Context<Self>) {
         self.feedback.update(cx, |sheet, cx| sheet.open(window, cx));
+    }
+
+    /// Edit → Paste / ⌘V when focus is not already on a text field (e.g. after
+    /// selecting a bubble): land the clipboard in the chat composer.
+    fn paste_into_chat(
+        &mut self,
+        _: &composer::Paste,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A focused ComposerInput (chat, search, secrets, …) already handles
+        // Paste; running again here would insert the text twice.
+        if self.text_field_focused(window, cx) {
+            return;
+        }
+        Composer::focus(&self.composer, window, cx);
+        let input = self.composer.read(cx).input.clone();
+        input.update(cx, |input, cx| input.paste_clipboard(window, cx));
+    }
+
+    /// True when a one-line or chat text field owns the keyboard.
+    fn text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        let focused =
+            |input: &Entity<ComposerInput>| input.read(cx).focus_handle(cx).is_focused(window);
+        focused(&self.composer.read(cx).input)
+            || focused(&self.pairing_input)
+            || focused(&self.project_input)
+            || focused(&self.search_input)
+            || focused(&self.viewer_search)
+            || focused(&self.people_input)
+            || focused(&self.server_input)
+            || focused(&self.name_input)
+            || focused(&self.handle_input)
+            || focused(&self.agent_name_input)
+            || focused(&self.description_input)
+            || focused(&self.avatar_prompt_input)
+            || focused(&self.model_search_input)
+            || focused(&self.tab_rename_input)
+            || focused(&self.feedback.read(cx).note)
+            || self.connectors.read(cx).input_focused(window, cx)
+            || self.secrets.read(cx).input_focused(window, cx)
+            || self.skills.read(cx).has_focus(window, cx)
+            || (self.routines_open && self.routines.read(cx).has_focus(window, cx))
     }
 
     pub(crate) fn open_feedback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1845,16 +1910,14 @@ impl Shell {
             cx.notify();
             return;
         }
-        if self.search_open
-            && self
-                .search_input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
+        if self
+            .search_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
         {
-            // Escape in the search field clears and folds it.
+            // Escape in the Search field clears it and returns to the composer.
             self.search_input.update(cx, |i, cx| i.clear(cx));
-            self.search_open = false;
             Composer::focus(&self.composer, window, cx);
             cx.notify();
             return;
@@ -1891,7 +1954,8 @@ impl Shell {
             || self.tab_menu_open
             || self.row_menu.is_some()
             || self.chat_menu.is_some()
-            || self.message_menu.is_some();
+            || self.message_menu.is_some()
+            || self.react_menu.is_some();
         self.close_popovers(cx);
         if floating {
             return;
@@ -2047,6 +2111,7 @@ impl Shell {
         self.channel_menu = None;
         self.chat_menu = None;
         self.message_menu = None;
+        self.react_menu = None;
         self.member_remove_armed = None;
         self.member_menu = Some(member_menu::MemberMenu { space_id, key, at });
         cx.notify();
@@ -2063,6 +2128,7 @@ impl Shell {
             || self.channel_menu.is_some()
             || self.chat_menu.is_some()
             || self.message_menu.is_some()
+            || self.react_menu.is_some()
             || self.member_menu.is_some()
         {
             self.menu_open = false;
@@ -2079,6 +2145,7 @@ impl Shell {
             self.chat_menu = None;
             self.chat_delete_armed = false;
             self.message_menu = None;
+            self.react_menu = None;
             cx.notify();
         }
     }
@@ -3124,28 +3191,68 @@ impl Shell {
             );
         match pairing.mode {
             SignInMode::GitHub => {
-                let busy = pairing.busy;
-                let button = glass::primary_button(
-                    "sign-in-github",
-                    if busy {
-                        "Waiting for GitHub…"
-                    } else {
-                        "Sign in with GitHub"
-                    },
-                    &theme,
-                )
-                .mt(px(18.0))
-                .h(px(40.0))
-                .px(px(22.0))
-                .text_size(px(TEXT_BODY))
-                .when(busy, |el| el.opacity(0.7))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.state.update(cx, |s, cx| s.sign_in(cx));
-                }));
+                let flow = &pairing.flow;
+                let busy = flow.busy();
+                // The pill: "Sign in with GitHub" → "Opening GitHub sign-in…" →
+                // "Waiting for GitHub…" → "Finishing sign-in…"; after 60 s with
+                // no answer "GitHub did not answer." with Retry / Open in browser.
+                let button = glass::primary_button("sign-in-github", flow.label(), &theme)
+                    .h(px(40.0))
+                    .px(px(22.0))
+                    .text_size(px(TEXT_BODY))
+                    .when(busy, |el| el.opacity(0.7))
+                    .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, |s, cx| s.sign_in(cx));
+                    }));
+                let action_button = |id: &'static str, label: &str, theme: &Theme| {
+                    glass::quiet_button(id, label, theme)
+                        .h(px(40.0))
+                        .px(px(18.0))
+                        .text_size(px(TEXT_BODY))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                };
+                let mut row = div()
+                    .mt(px(18.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(button);
+                for action in flow.actions() {
+                    row = row.child(match action {
+                        sign_in::Action::Cancel => {
+                            action_button("sign-in-cancel", "Cancel", &theme).on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.cancel_sign_in(cx));
+                                },
+                            ))
+                        }
+                        sign_in::Action::Retry => action_button("sign-in-retry", "Retry", &theme)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.state.update(cx, |s, cx| s.sign_in(cx));
+                            })),
+                        sign_in::Action::OpenInBrowser => {
+                            action_button("sign-in-browser", "Open in browser", &theme).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.state.update(cx, |s, cx| s.sign_in_in_browser(cx));
+                                }),
+                            )
+                        }
+                    });
+                }
                 screen
-                    .child(button)
-                    .when_some(pairing.error.clone(), |el, err| {
+                    .child(row)
+                    .when_some(flow.hint(), |el, hint| {
+                        el.child(
+                            div()
+                                .max_w(px(420.0))
+                                .text_center()
+                                .text_size(px(TEXT_SMALL))
+                                .text_color(theme.text_muted)
+                                .child(hint),
+                        )
+                    })
+                    .when_some(flow.error.clone(), |el, err| {
                         el.child(
                             div()
                                 .max_w(px(420.0))
@@ -3423,6 +3530,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::toggle_rail))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
+            .on_action(cx.listener(Self::paste_into_chat))
             // Clicks on chrome must not strand keyboard focus: unless another
             // text field took it, the composer keeps it. Floating menus close.
             .on_mouse_down(
@@ -3570,6 +3678,9 @@ impl Render for Shell {
             }
         }
         if let Some(menu) = message_menu::render(self, window, cx) {
+            root = root.child(menu);
+        }
+        if let Some(menu) = react_menu::render(self, window, cx) {
             root = root.child(menu);
         }
         // Rig: the hook asked for the first other member's row menu on the group pane.

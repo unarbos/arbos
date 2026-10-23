@@ -1,0 +1,132 @@
+{
+ "meta": {
+  "run_id": "20261023T1715-p1",
+  "started_at": "2026-10-23T17:13:02Z",
+  "image": "arbos-agent-0.1.93",
+  "agentd": "arbos-agentd 0.6.173",
+  "provider": "gvisor",
+  "user": "test_01M5JHWC586GYNTC3KCZZKS7NF",
+  "projects": {
+   "a": "01M5JHWMMJ65A7CXQW47G9NCPA"
+  },
+  "tasks": 1,
+  "budget_usd": 8.0,
+  "spent_today_at_start": 1.164192655,
+  "judge_model": "anthropic/claude-haiku-5.5",
+  "ended_at": "2026-10-23T17:13:29Z",
+  "spent_today_at_end": 1.170285289,
+  "run_cost_usd": 0.0061,
+  "judge_cost_usd": 0.0001
+ },
+ "summary": {
+  "tasks": 1,
+  "run": 1,
+  "passed": 0,
+  "failed": 1,
+  "skipped": 0,
+  "pass_pct": 0.0,
+  "ttfr_p50_s": 3.59,
+  "ttfr_all_p50_s": 3.59,
+  "total_p50_s": 26.7,
+  "tool_errors": 0,
+  "stalls": 0,
+  "cost_usd": 0.0061,
+  "run_cost_usd": 0.0061,
+  "judge_cost_usd": 0.0001,
+  "categories": {
+   "research": {
+    "tasks": 1,
+    "passed": 0,
+    "pass_pct": 0.0
+   }
+  }
+ },
+ "results": [
+  {
+   "task": "p1-self-reference-cite-file",
+   "title": "Self-reference: a privacy question is answered from the product's own source tree, citing a real file, without claiming E2EE",
+   "category": "research",
+   "categories": [
+    "research"
+   ],
+   "lane": "a",
+   "regression": "agent self-reference to its repo (bc-b07f76af, docs/agent-self-reference-repo.md); needs image \u2265 0.1.93",
+   "success": false,
+   "reasons": [
+    "t1: reply matches forbidden /end[- ]to[- ]end[- ]encrypt|\\bE2EE?\\b|end-to-end/"
+   ],
+   "ttfr_s": 3.59,
+   "route_t1": "act",
+   "ttfr_all_s": [
+    3.59
+   ],
+   "total_s": 26.7,
+   "tool_errors": 0,
+   "stalls": 0,
+   "cost_usd": 0.006093,
+   "judge_usd": 0.00014,
+   "relay": {
+    "calls": 12,
+    "input": 38655,
+    "output": 5003,
+    "cache_read": 54510,
+    "cache_write": 15334,
+    "usd": 0.006093
+   },
+   "rubric_min": 5,
+   "turns": [
+    {
+     "turn": 1,
+     "chat_id": "01M5MW0XAN6BPVJP8MX32EFQ9X",
+     "prompt": "Is this chat encrypted? What privacy features does Arbos have?",
+     "ok": false,
+     "reasons": [
+      "reply matches forbidden /end[- ]to[- ]end[- ]encrypt|\\bE2EE?\\b|end-to-end/"
+     ],
+     "ttfr_s": 3.59,
+     "first_status_s": 0.47,
+     "wall_s": 14.0,
+     "timed_out": false,
+     "stalls": 0,
+     "approvals_rejected": [],
+     "routes": [
+      "act"
+     ],
+     "tool_calls": 4,
+     "tool_errors": 0,
+     "model_calls": 4,
+     "compactions": 0,
+     "audit_denied": 0,
+     "rubric": {
+      "score": 5,
+      "reason": "Names real source files (crates/arbos-matrix, docs/crdt-sync.md, secrets.rs, connectors/crypto.rs), correctly states no E2EE so relay can read chats, and honestly notes unchecked gaps like TLS. Fully meets criteria.",
+      "usd": 0.000142
+     },
+     "truth": {
+      "cited": [
+       "crates/arbos-matrix/src/lib.rs",
+       "crates/arbos-relay/src/connectors/crypto.rs",
+       "crates/arbos-relay/src/matrix/db.rs",
+       "crates/arbos-relay/src/secrets.rs",
+       "docs/crdt-sync.md",
+       "docs/self-host.md"
+      ],
+      "cited_existing": [
+       "crates/arbos-relay/src/connectors/crypto.rs",
+       "docs/crdt-sync.md",
+       "crates/arbos-matrix/src/lib.rs",
+       "crates/arbos-relay/src/secrets.rs",
+       "docs/self-host.md",
+       "crates/arbos-relay/src/matrix/db.rs"
+      ]
+     },
+     "verify_out": "",
+     "reply": "Not end-to-end encrypted, as far as the source shows. The Matrix client that carries app traffic is documented as having no E2EE: \"Nothing here is encrypted (stage D)\" (`crates/arbos-matrix/src/lib.rs`, and `docs/crdt-sync.md` says \"no E2EE\"). That means the relay can read chat content. I did not find a chat-at-rest encryption scheme, and I did not check TLS in transit.\n\nWhat Arbos does encrypt:\n\n- **Secrets (vault):** each secret value is AES-256-GCM under a per-user key, which is itself wrapped by the relay key. Values are write-only, never returned by the API, redacted from replies, and decrypted only for the moment of an approved request (`crates/arbos-relay/src/secrets.rs`).\n- **Connector tokens** (Gmail, Calendar, Slack, GitHub and others): AES-256-GCM at rest under one relay key (`crates/arbos-relay/src/connectors/crypto.rs`).\n- **Device tokens:** app device access tokens are stored encrypted (`crates/arbos-relay/src/matrix/db.rs`).\n\nOther privacy controls in the secrets design: an access switch per secret and per agent, a global \"pause all secrets\" kill switch, and an append-only audit log of every secret event (`secrets.rs` header).\n\nThe relay key is generated into the database on first boot if unset. `docs/self-host.md` warns that on a real server you should set `ARBOS_RELAY_KEY` from the environment.",
+     "excerpt": "**User:** Is this chat encrypted? What privacy features does Arbos have?\n\n**Assistant** (ack, route=None, status=done)\n\nOn it.\n\n**Assistant** (result, route=act, status=done) tools: bash, bash, bash\n\nNot end-to-end encrypted, as far as the source shows. The Matrix client that carries app traffic is documented as having no E2EE: \"Nothing here is encrypted (stage D)\" (`crates/arbos-matrix/src/lib.rs`, and `docs/crdt-sync.md` says \"no E2EE\"). That means the relay can read chat content. I did not find a chat-at-rest encryption scheme, and I did not check TLS in transit.\n\nWhat Arbos does encrypt:\n\n- **Secrets (vault):** each secret value is AES-256-GCM under a per-user key, which is itself wrapped by the relay key. Values are write-only, never returned by the API, redacted from replies, and decrypted only for the moment of an approved request (`crates/arbos-relay/src/secrets.rs`).\n- **Connector tokens** (Gmail, Calendar, Slack, GitHub and others): AES-256-GCM at rest under one relay key (`crates/arbos-relay/src/connectors/crypto.rs`).\n- **Device tokens:** app device access tokens are stor\n\nmain-agent tool calls: route, bash, bash, bash (errors 0)"
+    }
+   ],
+   "background": null,
+   "dir": "/work/01M5JHWMMJ65A7CXQW47G9NCPA/lt-p1-self-reference-cite-file-20261023T1715-p1"
+  }
+ ]
+}

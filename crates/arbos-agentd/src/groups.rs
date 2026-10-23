@@ -182,13 +182,39 @@ impl Agent {
         *self.groups.kinds.lock().expect("groups") = map;
     }
 
-    fn chat_kind(&self, chat_id: &str) -> Option<String> {
+    pub(crate) fn chat_kind(&self, chat_id: &str) -> Option<String> {
         self.groups
             .kinds
             .lock()
             .expect("groups")
             .get(chat_id)
             .cloned()
+    }
+
+    /// Does `name` (project name, @handle or id) belong to a participant of the group this
+    /// agent hosts in `chat_id`? Used by `send_message` to keep in-group words in the group.
+    pub(crate) async fn group_participant_named(&self, chat_id: &str, name: &str) -> bool {
+        let Ok(group) = self.relay_group(&self.cfg.project_id, chat_id).await else {
+            return false;
+        };
+        let wanted = name.trim().trim_start_matches('@').to_lowercase();
+        group
+            .get("participants_detail")
+            .and_then(Value::as_array)
+            .map(|ps| {
+                ps.iter().any(|p| {
+                    str_field(p, "id").is_some_and(|id| id == name.trim())
+                        || str_field(p, "name").is_some_and(|n| {
+                            n.to_lowercase() == wanted
+                                || n.to_lowercase()
+                                    .split_whitespace()
+                                    .collect::<Vec<_>>()
+                                    .join("-")
+                                    == wanted
+                        })
+                })
+            })
+            .unwrap_or(false)
     }
 
     async fn relay_group(&self, host_project_id: &str, group_chat_id: &str) -> Result<Value> {
@@ -534,7 +560,7 @@ impl Agent {
         extra
     }
 
-    async fn room(&self, chat_id: &str) -> Result<SharedHost> {
+    pub(crate) async fn room(&self, chat_id: &str) -> Result<SharedHost> {
         match self.sync.host(chat_id).await {
             Some(h) => Ok(h),
             None => self.sync.open_room(chat_id).await,
@@ -597,7 +623,7 @@ impl Agent {
     }
 
     /// The "Projects ⇄" tab of this Project, created through the relay when missing.
-    async fn ensure_projects_tab(&self) -> Result<String> {
+    pub(crate) async fn ensure_projects_tab(&self) -> Result<String> {
         if let Some(id) = self.groups.projects_tab.lock().expect("groups").clone() {
             return Ok(id);
         }

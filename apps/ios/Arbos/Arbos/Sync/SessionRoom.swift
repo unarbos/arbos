@@ -390,6 +390,14 @@ final class SessionRoom {
             onLinkState?(.live)
             onCaughtUp?()
             onCursorMoved?()
+        case .healCheck(let relayVv):
+            // The relay told us what it holds; if this replica has more (a lost checkpoint,
+            // #1518), push the difference back once so the room heals from this device.
+            let missing = doc.updatesBeyond(relayVv)
+            if !missing.isEmpty {
+                NSLog("relay room \(roomChat): history heal, pushing \(missing.count) bytes the relay lacked")
+                session.onHeal(bytes: missing)
+            }
         case .scheduleReconnect(let afterMs):
             applyScheduleReconnect(afterMs: afterMs)
         case .sessionError(let code, let message):

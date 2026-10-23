@@ -25,6 +25,45 @@ const ROWS_BATCH: i64 = 256;
 /// How long live rows are held for a socket that has not finished (or started) its catch-up.
 const CATCHUP_HOLD: Duration = Duration::from_secs(10);
 
+/// A device may push back history the relay lacks once per connection (`PushHeader.heal`).
+const HEALS_PER_CONNECTION: u32 = 1;
+
+/// Encoded version vector of the room's stored doc (checkpoint ∪ rows), cached on the room by
+/// head so a reconnect storm rebuilds it once per head change, not once per socket.
+fn room_version_vector(
+    state: &AppState,
+    room: &crate::state::Room,
+    room_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use arbos_core::doc::{encode_vv, ChatDoc};
+    let st = state.db.room_state(room_name)?;
+    let key = (st.head, st.floor);
+    if let Some((k, vv)) = room.vv_cache.lock().unwrap().as_ref() {
+        if *k == key {
+            return Ok(vv.clone());
+        }
+    }
+    let mut doc = match state.db.checkpoint_bytes(room_name)? {
+        Some((_, bytes)) => ChatDoc::from_snapshot(None, false, &bytes)?,
+        None => ChatDoc::new(None, false),
+    };
+    let mut after = 0;
+    loop {
+        let rows = state.db.rows_after(room_name, after, None, ROWS_BATCH)?;
+        let n = rows.len() as i64;
+        for r in rows {
+            after = r.seq;
+            let _ = doc.import(&r.bytes);
+        }
+        if n < ROWS_BATCH {
+            break;
+        }
+    }
+    let vv = encode_vv(&doc.oplog_vv());
+    *room.vv_cache.lock().unwrap() = Some((key, vv.clone()));
+    Ok(vv)
+}
+
 /// Per-socket row ordering (see `run`).
 struct Delivery {
     /// True from connect / HELLO until this socket's ROWS_REQ reply ended with ROWS_DONE.
@@ -33,6 +72,8 @@ struct Delivery {
     last_sent_seq: i64,
     /// Live rows that arrived while catching up, in arrival (= seq) order.
     held: Vec<RoomBroadcast>,
+    /// History-heal pushes accepted on this socket (`PushHeader.heal`); one per connection.
+    heals: u32,
 }
 
 impl Default for Delivery {
@@ -41,6 +82,7 @@ impl Default for Delivery {
             catching_up: true,
             last_sent_seq: 0,
             held: Vec::new(),
+            heals: 0,
         }
     }
 }
@@ -296,6 +338,7 @@ async fn handle_frame(
             if !h.device.is_empty() {
                 *device = h.device.clone();
             }
+            crate::room_health::note_hello(room, device, h.cursor);
             send_state(state, project_id, room_name, sink).await?;
         }
         FrameType::RowsReq => {
@@ -328,10 +371,15 @@ async fn handle_frame(
             // a row appended between the store read and now is broadcast live and arrives next,
             // and a client must not move its cursor beyond what it has been sent.
             delivery.catching_up = false;
+            crate::room_health::note_caught_up(room, device, after);
+            // The payload is the relay's version vector for the room (checkpoint ∪ rows): a
+            // device compares it with its own doc and pushes back what the relay lacks
+            // (`PushHeader.heal`), so one complete device heals a room whose rows were lost.
+            let relay_vv = room_version_vector(state, room, room_name).unwrap_or_default();
             sink.send(frame(
                 FrameType::RowsDone,
                 json!({ "headSeq": after }),
-                Bytes::new(),
+                Bytes::from(relay_vv),
             ))
             .await?;
         }
@@ -342,8 +390,30 @@ async fn handle_frame(
                     .await?;
                 return Ok(());
             }
+            if p.heal {
+                if delivery.heals >= HEALS_PER_CONNECTION {
+                    tracing::warn!(%room_name, %device, "history heal refused: one per connection");
+                    sink.send(error_frame("heal_limit", "one history heal per connection"))
+                        .await?;
+                    return Ok(());
+                }
+                delivery.heals += 1;
+                crate::room_health::note_heal(room, device, f.payload.len());
+                tracing::info!(
+                    %room_name, %device, bytes = f.payload.len(), batch_id = %p.batch_id,
+                    "history heal: a device pushed ops the relay lacked"
+                );
+            }
             let mut wake_owners = Vec::new();
-            if let Some(chat_id) = room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT)) {
+            // A heal carries other members' history, not a message of this device: the
+            // message gates (rate limit, blocks, member pushes) do not apply — the socket's ACL
+            // already does. 20:42 Oct 23: the first production heal (60 KB, Arbonites) was
+            // dropped because a member had blocked the healing user.
+            if p.heal {
+                // nothing to gate or wake
+            } else if let Some(chat_id) =
+                room_name.strip_prefix(&format!("{}/", people::PEOPLE_PROJECT))
+            {
                 match people::on_room_push(state, principal, chat_id) {
                     Ok(owners) => wake_owners = owners,
                     Err(r) => {
@@ -373,7 +443,10 @@ async fn handle_frame(
                     bytes: row,
                     seq,
                 });
-                if !is_box {
+                if p.heal {
+                    // History, not a new message: no read-cursor move, no notification, no
+                    // wake. The Matrix mirror resync picks the rows up on its own.
+                } else if !is_box {
                     // A person wrote without announcing a message (older apps): the fallback
                     // notifies the other members by name only.
                     if let Principal::Device { user_id, .. } = principal {
@@ -1112,6 +1185,8 @@ mod history_tests {
         doc: ChatDoc,
         cursor: i64,
         device: String,
+        /// Bytes this device pushed back as history heals.
+        healed_bytes: usize,
     }
 
     impl Device {
@@ -1120,6 +1195,17 @@ mod history_tests {
                 doc: ChatDoc::new(Some(9), false),
                 cursor: 0,
                 device: device.to_owned(),
+                healed_bytes: 0,
+            }
+        }
+
+        /// A device that already holds `doc` (it was live when the rows were written).
+        fn holding(device: &str, doc: ChatDoc, cursor: i64) -> Self {
+            Self {
+                doc,
+                cursor,
+                device: device.to_owned(),
+                healed_bytes: 0,
             }
         }
 
@@ -1202,6 +1288,35 @@ mod history_tests {
                     FrameType::RowsDone => {
                         let head = f.header["headSeq"].as_i64().unwrap();
                         self.cursor = self.cursor.max(head);
+                        // History heal: push what this replica holds beyond the relay's vv.
+                        if let Some(relay_vv) = arbos_core::doc::decode_vv(&f.payload) {
+                            let missing = self.doc.updates_beyond(&relay_vv);
+                            if !missing.is_empty() {
+                                self.healed_bytes += missing.len();
+                                sink.send(TMsg::Binary(
+                                    Frame::new(
+                                        FrameType::Push,
+                                        json!({ "batchId": format!("heal-{}", ulid()), "heal": true }),
+                                        bytes::Bytes::from(missing),
+                                    )
+                                    .encode(),
+                                ))
+                                .await
+                                .unwrap();
+                                // Wait for the ACK so the test knows the row is stored.
+                                loop {
+                                    let m = tokio::time::timeout_at(deadline, stream.next())
+                                        .await
+                                        .expect("ack in time");
+                                    let Some(Ok(m)) = m else { return false };
+                                    if let Some(f) = decode(m) {
+                                        if f.ty == FrameType::Ack {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         return true;
                     }
                     _ => {}
@@ -1420,5 +1535,126 @@ mod history_tests {
             checkpoint_covers_store(&state.db, &room, head, &partial.snapshot()).unwrap(),
             CheckpointVerdict::Incomplete(why) if why.contains("current checkpoint")
         ));
+    }
+
+    /// A heal is history, not a message: a healer that another member has blocked (or that is
+    /// over the message rate limit) still heals the room. The first production heal (Oct 23
+    /// 20:42, 60 KB) was dropped by the block gate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn blocked_member_can_still_heal() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let chat = crate::people::tests_support::dm(&state, &alice, &bob);
+        let room = format!("people/{chat}");
+        let token = device_token(&state, &bob);
+        let phone = write_rows(&state, &room, "dev:bob", 300);
+        // Alice blocks Bob; Bob's messages are refused, but his history is not.
+        state.db.block(&alice, &bob).unwrap();
+        let stale = {
+            let mut d = ChatDoc::new(None, false);
+            for r in state.db.rows_between(&room, 0, 101, 1000).unwrap() {
+                d.import(&r.bytes).unwrap();
+            }
+            d.snapshot()
+        };
+        assert!(state.db.put_checkpoint(&room, 201, &[], &stale).unwrap());
+        let addr = serve(state.clone()).await;
+        let mut bob_mac = Device::holding("dev:bob", phone, 301);
+        bob_mac.sync(addr, &room, &token, &state, None).await;
+        assert!(bob_mac.healed_bytes > 0);
+        assert_eq!(
+            state.db.room_state(&room).unwrap().head,
+            302,
+            "the heal row is stored"
+        );
+        let mut probe = Device::fresh("dev:probe");
+        let token_a = device_token(&state, &alice);
+        probe.sync(addr, &room, &token_a, &state, None).await;
+        assert_eq!(probe.message_ids(), expected_ids(300));
+    }
+
+    /// The Arbonites recovery (#1518 follow-up): the relay's history was cut to a stale
+    /// checkpoint (rows deleted, later rows parked as pending); a device that was live and still
+    /// holds every op reconnects, gets the relay's version vector in ROWS_DONE, pushes the
+    /// difference back as one `heal` row, and a brand-new device then sees the whole chat.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn live_device_heals_a_relay_that_lost_rows_and_a_fresh_device_converges() {
+        let state = test_state(AuthMode::Github);
+        let (alice, _) = person(&state, 1);
+        let project = project_of(&state, &alice, "Heal");
+        let chat = new_chat(&state, &project);
+        let room = format!("{project}/{chat}");
+        let token = device_token(&state, &alice);
+        // The phone writes 700 rows; the relay then gets a stale checkpoint covering 400 of them
+        // but built from a replica that only had the first 100 (what the old relay accepted),
+        // so 300 rows' ops are gone from the relay and the remaining 300 rows are pending.
+        let mut phone = write_rows(&state, &room, "dev:phone", ROWS);
+        let head_400 = 401;
+        let stale = {
+            let mut d = ChatDoc::new(None, false);
+            for r in state.db.rows_between(&room, 0, 101, 1000).unwrap() {
+                d.import(&r.bytes).unwrap();
+            }
+            d.snapshot()
+        };
+        assert!(state
+            .db
+            .put_checkpoint(&room, head_400, &[], &stale)
+            .unwrap());
+        let addr = serve(state.clone()).await;
+
+        // Before the heal: a fresh device gets 100 messages (the rest are parked).
+        let mut probe = Device::fresh("dev:probe");
+        probe.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(
+            probe.message_ids().len(),
+            100,
+            "damaged relay shows 100 of 700"
+        );
+
+        // The phone (holding everything) reconnects and heals the relay with one row.
+        let phone_vv_before = phone.oplog_vv();
+        let mut live = Device::holding(
+            "dev:phone",
+            std::mem::replace(&mut phone, ChatDoc::new(None, false)),
+            ROWS as i64 + 1,
+        );
+        live.sync(addr, &room, &token, &state, None).await;
+        assert!(live.healed_bytes > 0, "the live device pushed a heal row");
+        assert_eq!(
+            live.doc.oplog_vv(),
+            phone_vv_before,
+            "heal adds nothing to the healer"
+        );
+        let st = state.db.room_state(&room).unwrap();
+        let extra: Vec<(i64, String, usize)> = state
+            .db
+            .rows_between(&room, ROWS as i64 + 1, st.head, 100)
+            .unwrap()
+            .into_iter()
+            .map(|r| (r.seq, r.device, r.bytes.len()))
+            .collect();
+        assert_eq!(
+            st.head,
+            ROWS as i64 + 2,
+            "exactly one heal row stored; extra rows {extra:?}; probe healed {}",
+            probe.healed_bytes
+        );
+
+        // After the heal: a brand-new device gets all 700.
+        let mut mac = Device::fresh("dev:mac");
+        mac.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(mac.message_ids(), expected_ids(ROWS));
+        // And the probe, reconnecting, catches up to the full chat too.
+        probe.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(probe.message_ids(), expected_ids(ROWS));
+        // A second connect of the healer finds nothing to heal (relay vv now covers it).
+        let healed_before = live.healed_bytes;
+        live.sync(addr, &room, &token, &state, None).await;
+        assert_eq!(
+            live.healed_bytes, healed_before,
+            "no second heal once the relay is whole"
+        );
     }
 }

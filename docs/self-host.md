@@ -79,6 +79,7 @@ All optional unless noted.
 | `ARBOS_DAYTONA_DOCKERFILE`, `ARBOS_BOOTSTRAP_DIR` | dev-image path (§6) |
 | `ARBOS_AUTH_MODE` | `github` or `paircode` (§3) |
 | `ARBOS_GITHUB_CLIENT_ID`, `ARBOS_GITHUB_CLIENT_SECRET`, `ARBOS_PUBLIC_URL`, `ARBOS_JWT_KEY` | GitHub OAuth app and the relay's public origin (§3) |
+| `ARBOS_AUTH_REDIRECTS` | comma-separated URL prefixes `/auth/github/start?redirect=…` may send the browser to, besides the apps' `arbos://auth/callback`, loopback and the relay's own origin — your site's welcome page, e.g. `https://arbos.life`; anything else answers 400 `bad_redirect` (`relay-server.sh` writes `ARBOS_SITE_URL` by default) |
 | `ARBOS_DEFAULT_GRANT_USD` (100), `ARBOS_DEFAULT_DAILY_CAP_USD` (20), `ARBOS_GLOBAL_DAILY_CAP_USD` (500) | inference credits: welcome grant, per-user daily cap, relay-wide daily cap that trips the kill switch (`PUT /admin/killswitch`) |
 | `ARBOS_ALWAYS_ON` | machines stay on (default on in `github` mode): no auto-stop, a machine per signed-in user from sign-in; manual Stop and the kill switch are the only things that keep one down |
 | `ARBOS_MACHINE_USD_PER_HOUR` (0.332), `ARBOS_MACHINE_STOPPED_USD_PER_DAY` (0.013), `ARBOS_GLOBAL_MACHINE_DAILY_CAP_USD` (400) | machine time is metered into its own ledger bucket, outside the grant and caps; the global machine cap only logs a warning |

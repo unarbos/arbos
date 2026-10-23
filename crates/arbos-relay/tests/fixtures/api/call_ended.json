@@ -26,6 +26,7 @@
   "project_id": "people",
   "reason": "last_left",
   "room": "call_room_fixture",
+  "speak_mode": "open",
   "started_at": 1700000000000,
   "started_by": {
     "avatar": null,

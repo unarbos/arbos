@@ -228,6 +228,8 @@ struct AgentProfileView: View {
     @State private var descriptionDraft = ""
     @State private var showReasoning = false
     @State private var confirmDelete = false
+    @State private var showMessageGrantPicker = false
+    @State private var messageGrantError: String?
 
     private var project: Project? { model.project(projectId) ?? fallback }
     private var isMine: Bool { model.project(projectId) != nil && project?.shared != true }
@@ -287,11 +289,78 @@ struct AgentProfileView: View {
         .sheet(isPresented: $showReasoning) {
             if let project = model.project(projectId) { ReasoningPickerView(project: project).environmentObject(model).environment(\.theme, theme) }
         }
+        .sheet(isPresented: $showMessageGrantPicker) {
+            if let project = model.project(projectId) {
+                NavigationStack {
+                    AddMessageGrantSheet(project: project).environmentObject(model).environment(\.theme, theme)
+                }
+            }
+        }
+        .alert("Couldn't change who may message", isPresented: Binding(get: { messageGrantError != nil }, set: { if !$0 { messageGrantError = nil } })) {
+            Button("OK", role: .cancel) { }
+        } message: { Text(messageGrantError ?? "") }
         .alert("Description", isPresented: $showDescription) {
             TextField("One paragraph about this agent", text: $descriptionDraft)
             Button("Save") { model.updateProject(projectId, description: descriptionDraft.trimmingCharacters(in: .whitespacesAndNewlines)) }
             Button("Cancel", role: .cancel) { }
         } message: { Text("Shown to everyone who can see this agent (up to 500 characters).") }
+    }
+
+    /// One grant row: avatar · name / @handle · last message · switch; swipe-free, a long
+    /// press removes it (the switch only pauses it).
+    private func messageGrantRow(_ project: Project, _ g: MessageGrant) -> some View {
+        let subtitle: String = {
+            var s = g.handle.map { "@\($0)" } ?? g.kind
+            if g.kind == "agent" { s += " · agent" }
+            if let at = g.lastAt { s += " · messaged \(SecretsText.ago(at))" } else if !g.note.isEmpty { s += " · \(g.note)" }
+            return s
+        }()
+        let isOn = Binding<Bool>(
+            get: { model.project(project.id)?.messageGrants.first(where: { $0.grantee == g.grantee })?.enabled ?? g.enabled },
+            set: { on in Task { await setMessageGrant(project.id, grantee: g.grantee, enabled: on) } }
+        )
+        return PaneRow(
+            leading: .avatar(AnyView(
+                g.kind == "agent"
+                    ? AnyView(InitialsAvatar(name: g.displayName, handle: g.handle ?? g.id, id: g.id, override: nil, size: PaneKit.avatar))
+                    : AnyView(PersonAvatar(url: g.avatarUrl, handle: g.handle ?? g.id, size: PaneKit.avatar, name: g.name, id: g.id))
+            )),
+            title: g.displayName,
+            subtitle: subtitle,
+            trailing: AnyView(Toggle("", isOn: isOn).labelsHidden().tint(theme.online))
+        )
+        .contextMenu {
+            Button(role: .destructive) {
+                Task { await removeMessageGrant(project.id, grantee: g.grantee) }
+            } label: { Label("Remove", systemImage: "trash") }
+        }
+    }
+
+    private func setMessageGrant(_ pid: Id, grantee: String, enabled: Bool) async {
+        if let i = model.projects.firstIndex(where: { $0.id == pid }),
+           let j = model.projects[i].messageGrants.firstIndex(where: { $0.grantee == grantee }) {
+            model.projects[i].messageGrants[j].enabled = enabled
+        }
+        do {
+            let grants = try await model.relay.setMessageGrant(pid, grantee: grantee, enabled: enabled)
+            if let i = model.projects.firstIndex(where: { $0.id == pid }) { model.projects[i].messageGrants = grants }
+        } catch {
+            messageGrantError = error.localizedDescription
+            await model.refreshRegistry()
+        }
+    }
+
+    private func removeMessageGrant(_ pid: Id, grantee: String) async {
+        if let i = model.projects.firstIndex(where: { $0.id == pid }) {
+            model.projects[i].messageGrants.removeAll { $0.grantee == grantee }
+        }
+        do {
+            let grants = try await model.relay.removeMessageGrant(pid, grantee: grantee)
+            if let i = model.projects.firstIndex(where: { $0.id == pid }) { model.projects[i].messageGrants = grants }
+        } catch {
+            messageGrantError = error.localizedDescription
+            await model.refreshRegistry()
+        }
     }
 
     /// The hero picture: the leaf / photo, with the crayon → edit sheet for my own agent.
@@ -342,7 +411,20 @@ struct AgentProfileView: View {
                     .disabled(!isMine)
                 ),
             ]
-            return [.card(rows)]
+            guard isMine else { return [.card(rows)] }
+            // Agent-to-agent messaging: who else's agents may write into this agent's chat.
+            // My own agents always may; this card lists other people (the Mac's card, D83's
+            // People shape: avatar · name/@handle · last message · switch).
+            var grants: [AnyView] = project.messageGrants.map { g in AnyView(messageGrantRow(project, g)) }
+            grants.append(AnyView(Button { showMessageGrantPicker = true } label: {
+                PaneRow(leading: .glyph("person.badge.plus"), title: "Give a person access…", titleTint: theme.accent)
+            }.buttonStyle(.plain)))
+            return [
+                .card(rows),
+                .title("Who may message \(project.name)"),
+                .card(grants, separatorInset: PaneKit.separatorInset(.glyph(""))),
+                .footnote("Your own agents can always message \(project.name). People listed here may have their agents message it too; their messages land in this chat and \(project.name) answers them."),
+            ]
         case "Library":
             // Everything the agent's chats hold — images, files, voice memos, links
             // — in sections (the group pane's Library, plus links).
@@ -434,5 +516,96 @@ struct ReasoningPickerView: View {
             }
         }
         .presentationDetents([.medium])
+    }
+}
+
+/// "Give a person access…": pick an Arbos user; their agents may then message this agent
+/// (`PUT /projects/{id}/message-access`). The secrets' "Who can direct" picker, same shape.
+struct AddMessageGrantSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let project: Project
+    @State private var query = ""
+    @State private var remote: [Person] = []
+    @State private var busy = false
+    @State private var error: String?
+
+    private var already: Set<String> { Set(project.messageGrants.map(\.id)) }
+
+    private var candidates: [Person] {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var out = q.isEmpty
+            ? model.directory
+            : model.directory.filter { $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
+        for p in remote where !out.contains(where: { $0.id == p.id }) { out.append(p) }
+        return out.filter { $0.id != model.user?.id && !already.contains($0.id) }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("The person you add may have their agents message \(project.name). Their messages land in \(project.name)'s chat, and \(project.name) answers them. Your own agents can always message it.")
+                    .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                TextField("", text: $query, prompt: Text("Search by name or @handle").foregroundStyle(theme.placeholder))
+                    .font(theme.font(Theme.body))
+                    .foregroundStyle(theme.text)
+                    .padding(.horizontal, 14)
+                    .frame(height: Theme.fieldHeight)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                if candidates.isEmpty {
+                    Text(query.isEmpty ? "Nobody else on Arbos yet." : "No one named that.")
+                        .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(candidates.prefix(12))) { p in
+                            Button {
+                                Haptics.pick()
+                                Task { await grant(p) }
+                            } label: { PersonRow(person: p) }
+                            .buttonStyle(.plain)
+                            .disabled(busy)
+                        }
+                    }
+                }
+                if let error {
+                    Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(theme.bg)
+        .navigationTitle("Who may message \(project.name)")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
+            }
+        }
+        .task { await model.loadDirectory(force: false) }
+        .task(id: query) {
+            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard q.count >= 2 else { remote = []; return }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            remote = await model.searchPeople(q)
+        }
+    }
+
+    private func grant(_ p: Person) async {
+        busy = true
+        defer { busy = false }
+        do {
+            let grants = try await model.relay.setMessageGrant(project.id, grantee: "@\(p.handle)", enabled: true)
+            if let i = model.projects.firstIndex(where: { $0.id == project.id }) { model.projects[i].messageGrants = grants }
+            dismiss()
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 }

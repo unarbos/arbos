@@ -45,6 +45,11 @@ final class CoreChatDoc {
         doc.containsFrontier(frontier: frontier)
     }
 
+    /// Ops this replica holds beyond an encoded version vector (empty when none).
+    func updatesBeyond(_ vv: Data) -> Data {
+        doc.updatesBeyond(theirsVv: vv)
+    }
+
     /// Bytes for the on-device store.
     func exportSnapshot() throws -> Data {
         doc.snapshot()

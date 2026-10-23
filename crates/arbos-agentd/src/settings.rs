@@ -426,8 +426,9 @@ impl Agent {
 
     /// The relay renamed this project while the box runs: every place that spoke the old name
     /// now speaks the new one on the next turn (system prompt, owner note, group prelude, quick
-    /// reply), the memory tree gets a one-line fact so later walks attribute the old name to
-    /// this agent, and the pi session re-reads its prompt.
+    /// reply), people-chat `@slug` / member handles stay addressable under the new name, the
+    /// memory tree gets a one-line fact so later walks attribute the old name to this agent, and
+    /// the pi session re-reads its prompt.
     pub async fn on_renamed(self: &Arc<Self>, r: &crate::identity::Rename) {
         tracing::info!(from = %r.from, to = %r.to, "project renamed; identity refreshed");
         self.append_audit(
@@ -461,6 +462,9 @@ impl Agent {
             &note,
             Some(&json!({ "from": r.from, "to": r.to })),
         );
+        // People chats snapshotted the old @handle at join time; without this, @newname would
+        // not wake the agent and the prelude would still say @oldname (#1481).
+        self.refresh_people_identity_after_rename();
         // The prompt's memory block is debounced (D87); a rename is worth the prefix rewrite.
         if let Ok(mut held) = self.prompt_memory.lock() {
             *held = None;

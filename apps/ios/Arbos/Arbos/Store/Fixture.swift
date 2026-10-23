@@ -198,6 +198,22 @@ extension AppModel {
             }
         }
         caughtUp.insert("fx-group-launch")
+        // The DM carries two lines so the rig can show a 1:1 chat (no sender names,
+        // sender-name-in-bubble-2026-10-23).
+        messages["fx-dm-unconst"] = [
+            Message(id: "d1", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 9 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d1t", text: "Hey — are you around? I want to go over the beta invite copy before it ships.")], hiddenCount: 0,
+                    senderHandle: "unconst", senderName: "Unconst"),
+            Message(id: "d2", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 8 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d2t", text: "Here now. Paste what you have and I'll read it.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
+            Message(id: "d3", chatId: "fx-dm-unconst", role: .user, sender: "user:gh_32490803", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
+                    senderHandle: "unconst", senderName: "Unconst"),
+        ]
+        caughtUp.insert("fx-dm-unconst")
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),
@@ -330,6 +346,42 @@ extension AppModel {
             list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
         }
         list.append(assistant(newId(), chatId, text, at: nowMs()))
+        messages[chatId] = list
+    }
+
+    /// Rig (`ARBOS_SHOW=agent-message` / `agent-message-received`): the agent-to-agent
+    /// messaging rows exactly as agentd writes them — sender side: "send Affine a hello" →
+    /// the hand-off row ("2 messages with ◉ Affine") → "Sent to Affine." → the relayed reply;
+    /// receiving side: Comms's words as a `project` row (member bubble labelled "Comms"),
+    /// the reply, "Replied to ◉ Comms".
+    func fixtureAgentMessage(chatId: Id, received: Bool) {
+        var list = messages[chatId] ?? []
+        if let i = list.lastIndex(where: { $0.isStreaming }) {
+            list[i].status = .done
+            list[i].parts = [.text(id: "\(list[i].id)-t", text: "Got it.")]
+        }
+        let t = nowMs()
+        if received {
+            var from = Message(id: newId(), chatId: chatId, role: .project, sender: "project:fx-comms", status: .done, turn: nil,
+                               decision: nil, subagentId: nil, subagentName: nil, inReplyTo: nil, usage: [:], model: nil,
+                               createdAt: t, completedAt: t, pending: false,
+                               parts: [.text(id: newId(), text: "Hello, Affine — Jacob asked me to pass along a hello.")], hiddenCount: 0)
+            from.senderName = "Comms"
+            from.senderHandle = "comms"
+            var reply = assistant(newId(), chatId, "Hello back, Jacob — and hi Comms! Ready whenever you want the shortlist sent.", at: t + 15_000)
+            reply.agentReplyTo = "Comms"
+            list += [from, reply]
+        } else {
+            let sent = Message(id: newId(), chatId: chatId, role: .assistant, sender: "agent", status: .done, turn: .spawn, decision: "new",
+                               subagentId: nil, subagentName: "Affine", handoffMessages: 2, inReplyTo: nil, usage: [:], model: nil,
+                               createdAt: t + 5_000, completedAt: t + 5_000, pending: false, parts: [], hiddenCount: 1)
+            list += [
+                user(newId(), chatId, "send Affine a hello", at: t),
+                sent,
+                assistant(newId(), chatId, "Sent to Affine.", at: t + 6_000),
+                assistant(newId(), chatId, "Affine says hello back — and it's ready whenever you want the shortlist sent.", at: t + 40_000),
+            ]
+        }
         messages[chatId] = list
     }
 
