@@ -1026,6 +1026,25 @@ fn after_access_change(state: &AppState, s: &Secret, a: &Access) {
     spawn_remount(state.clone(), s.user_id.clone());
 }
 
+/// A People row or the Others-who-ask switch changed: every agent with Access on the secret
+/// re-reads its grants (the box keeps the list for its own pre-check, ≤ 5 s like an Access flip).
+fn after_people_change(state: &AppState, s: &Secret) {
+    for a in state
+        .db
+        .accesses_of_target("secret", &s.id)
+        .unwrap_or_default()
+    {
+        push_box(
+            state,
+            &a.project_id,
+            "secret_access_changed",
+            json!({ "access_id": a.id, "ref": placeholder(&s.env, if s.kind == "login" { "password" } else { "value" }),
+                "env": s.env, "name": s.name, "kind": s.kind, "enabled": a.enabled, "inject_env": s.inject_env,
+                "people": true }),
+        );
+    }
+}
+
 // ---- device: list, create, read, update, value, delete -----------------------------------------
 
 /// `GET /secrets` → `{ paused, vaults, secrets, requests_pending, requests, activity, providers, features }`.
@@ -1705,6 +1724,7 @@ fn upsert_person(
         d.disabled_at = if on { None } else { Some(now) };
     }
     state.db.upsert_secret_director(&d).map_err(internal)?;
+    after_people_change(state, s);
     let flipped = existing.as_ref().map(|e| e.enabled) != Some(d.enabled);
     if existing.is_none() || flipped || was_on {
         audit(
@@ -1828,6 +1848,7 @@ pub async fn delete_director(
         .delete_secret_director(&s.id, &person_id)
         .map_err(internal)?;
     if removed {
+        after_people_change(&state, &s);
         audit(
             &state,
             &user_id,
@@ -2198,6 +2219,7 @@ pub(crate) async fn decide(
                     d.created_from = format!("card:{}", rq.id);
                 }
                 state.db.upsert_secret_director(&d).map_err(internal)?;
+                after_people_change(state, s);
                 let (handle, _) = user_handle_name(state, person);
                 audit(
                     state,
@@ -3920,6 +3942,67 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.scope_kind, "all");
+    }
+
+    #[tokio::test]
+    async fn a_people_change_reaches_every_agent_with_access() {
+        let (state, owner, secret, _sam, samir, jules) = people_setup();
+        let _ = state.db.take_pushes("proj_people");
+        // Settings: flip Samir's row on.
+        let (handle, _) = user_handle_name(&state, &samir);
+        upsert_person(
+            &state,
+            &owner,
+            &secret,
+            &samir,
+            DirectorBody {
+                enabled: Some(true),
+                ..Default::default()
+            },
+            Some(&handle),
+        )
+        .unwrap();
+        let pushes = state.db.take_pushes("proj_people").unwrap();
+        assert_eq!(pushes.len(), 1, "{pushes:?}");
+        assert_eq!(pushes[0].1, "secret_access_changed");
+        assert_eq!(pushes[0].2["env"], "ENGY_API_KEY");
+        assert_eq!(pushes[0].2["people"], true);
+        // A card answer that adds a person pushes too.
+        state
+            .db
+            .insert_secret_request(&SecretRequest {
+                id: "req_push".into(),
+                user_id: owner.clone(),
+                project_id: "proj_people".into(),
+                chat_id: "chat_arbonites".into(),
+                target_kind: "secret".into(),
+                target_id: Some(secret.id.clone()),
+                target_ref: secret.env.clone(),
+                purpose: "x".into(),
+                use_kind: "header".into(),
+                host: Some("api.engy.com".into()),
+                status: "pending".into(),
+                decided_by: None,
+                created_at: FIXED_AT,
+                decided_at: None,
+                expires_at: now_ms() + REQUEST_PENDING_MS,
+                asked_by: Some(jules.clone()),
+            })
+            .unwrap();
+        decide(&state, &owner, "req_push", "always", "card:req_push")
+            .await
+            .unwrap();
+        let kinds: Vec<String> = state
+            .db
+            .take_pushes("proj_people")
+            .unwrap()
+            .into_iter()
+            .map(|(_, k, _)| k)
+            .collect();
+        assert!(
+            kinds.iter().any(|k| k == "secret_access_changed"),
+            "{kinds:?}"
+        );
     }
 
     #[test]
