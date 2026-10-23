@@ -3529,6 +3529,13 @@ impl Render for Shell {
                 if page == ProfilePage::Me && self.settings_open_at_bottom {
                     self.profile_scroll.scroll_to_bottom();
                 }
+            } else if page == ProfilePage::Me
+                && self.settings_open_at_bottom
+                && std::env::var("ARBOS_OPEN_SETTINGS_BOTTOM").is_ok_and(|v| v == "1")
+            {
+                // Rig only: a Settings subpage whose rows arrive after the pane opened (the
+                // Secret page waits for the secrets list) keeps its end in view.
+                self.profile_scroll.scroll_to_bottom();
             }
             if page == ProfilePage::Me && !self.settings_page_alive(cx) {
                 self.settings_page = SettingsPage::Root;
