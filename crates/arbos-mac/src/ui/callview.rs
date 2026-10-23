@@ -14,7 +14,7 @@ use gpui::{
 use crate::app::{ActiveCall, CallParticipant, CallStatus};
 use crate::model::{self, now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
-use crate::ui::glass::{self, WindowDrag};
+use crate::ui::glass;
 use crate::ui::icons::icon;
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
