@@ -791,7 +791,13 @@ impl AppState {
             relay_link: (LinkState::Live, 0),
             rail_collapsed: false,
             sidebar_width: crate::ui::theme::SidebarWidth::load(),
-            call_strip_height: crate::ui::callview::strip_layout::DEFAULT_HEIGHT,
+            // Rig: `ARBOS_CALL_STRIP_HEIGHT=<pt>` starts the strip at that height (the
+            // resized state, for screenshots without a pointer).
+            call_strip_height: std::env::var("ARBOS_CALL_STRIP_HEIGHT")
+                .ok()
+                .and_then(|v| v.trim().parse::<f32>().ok())
+                .map(|v| crate::ui::callview::strip_layout::clamp_height(v, 780.0))
+                .unwrap_or(crate::ui::callview::strip_layout::DEFAULT_HEIGHT),
             sidebar_overlay: false,
             details_open: None,
             media_viewer: None,
