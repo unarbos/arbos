@@ -982,7 +982,9 @@ pub struct SecretAccessDto {
     pub item_hosts: Option<Vec<VaultItemHostDto>>,
 }
 
-/// Director card on `secret.directors[]`.
+/// One person on a secret's People list (`secret.people[]`; `secret.directors[]` is the same
+/// list under its #1041 name, kept one release). The new fields are optional so a client built
+/// after this change still reads a relay built before it.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SecretDirectorDto {
@@ -993,6 +995,21 @@ pub struct SecretDirectorDto {
     pub note: String,
     #[typeshare(serialized_as = "I54")]
     pub created_at: i64,
+    /// Row switch (absent = on).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub disabled_at: Option<i64>,
+    /// `all` or `chat` (absent = all).
+    #[serde(default)]
+    pub scope: Option<SecretAccessScopeDto>,
+    #[serde(default)]
+    #[typeshare(serialized_as = "Option<I54>")]
+    pub last_asked_at: Option<i64>,
+    /// `settings | card:<request id>` (absent = settings).
+    #[serde(default)]
+    pub created_from: Option<String>,
 }
 
 /// Secret as clients see it (`secret_json`). Never carries a secret value.
@@ -1023,7 +1040,14 @@ pub struct SecretDto {
     #[serde(rename = "ref")]
     pub secret_ref: String,
     pub agents: Vec<SecretAccessDto>,
+    /// Same list as `people`; the #1041 name, kept one release.
     pub directors: Vec<SecretDirectorDto>,
+    /// People who may ask an agent with access to use this secret (spec §7.7).
+    #[serde(default)]
+    pub people: Vec<SecretDirectorDto>,
+    /// `refuse | card`: what a non-listed person's ask does (absent = refuse).
+    #[serde(default)]
+    pub others_ask: Option<String>,
 }
 
 /// Target block on a secret request.
@@ -1058,6 +1082,13 @@ pub struct SecretRequestDto {
     pub decided_at: Option<i64>,
     #[typeshare(serialized_as = "I54")]
     pub expires_at: i64,
+    /// The person who asked the agent, when it was not the owner (spec §7.7).
+    #[serde(default)]
+    pub asked_by: Option<String>,
+    #[serde(default)]
+    pub asked_by_handle: Option<String>,
+    #[serde(default)]
+    pub asked_by_name: Option<String>,
 }
 
 /// One audit row (`activity[]`). `detail` stays free-form (`#[typeshare(skip)]`).

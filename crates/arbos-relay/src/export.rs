@@ -298,6 +298,23 @@ pub async fn export_chat(
         Ok(d) => d,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "doc", e.to_string()),
     };
+    // Loud fail (#1518): rows the relay holds but cannot apply are messages this export cannot
+    // show. Say so instead of answering a silently short list.
+    let room_name = wire::room_name(PEOPLE_PROJECT, &id);
+    let room = state.room(&room_name).await;
+    let truncated = crate::room_health::doc_health(&state, &room, &room_name)
+        .ok()
+        .filter(|h| h.rows_pending > 0 || h.rows_bad > 0)
+        .map(|h| {
+            json!({
+                "pending_rows": h.rows_pending,
+                "first_pending_seq": h.first_pending_seq,
+                "reason": format!(
+                    "{} stored rows do not apply to the relay's doc (their dependencies were lost from the relay's history); the messages they carry are missing here until a device that holds them reconnects (history heal). See GET /chats/{id}/health.",
+                    h.rows_pending + h.rows_bad
+                ),
+            })
+        });
     let now = now_ms();
     let mut all = doc
         .as_ref()
@@ -351,6 +368,13 @@ pub async fn export_chat(
             })
             .collect();
         let mut md = render_md(&title, &owned);
+        if let Some(t) = &truncated {
+            md.push_str(&format!(
+                "<!-- truncated: true pending_rows={} reason={} -->\n",
+                t["pending_rows"],
+                t["reason"].as_str().unwrap_or("")
+            ));
+        }
         if let Some(n) = &next {
             md.push_str(&format!(
                 "<!-- next: since={} after_id={} has_more={has_more} -->\n",
@@ -369,6 +393,8 @@ pub async fn export_chat(
         "next": next,
         "has_more": has_more,
         "total": total,
+        "truncated": truncated.is_some(),
+        "truncation": truncated,
         "exported_at": now,
     }))
     .into_response()

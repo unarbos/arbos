@@ -57,6 +57,7 @@ fn write_frames(dir: &std::path::Path) {
     let push = Frame::new(
         FrameType::Push,
         serde_json::to_value(PushHeader {
+            heal: false,
             batch_id: "batch-push-1".into(),
         })
         .unwrap(),

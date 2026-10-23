@@ -327,8 +327,7 @@ fn link_pill(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
 }
 
 /// The expand control while the sidebar is hidden: the same 28 pt tile as the
-/// sidebar strip's collapse control, at the same spot (72 + 12 pt), so folding
-/// the pane swaps one for the other without a visible move
+/// sidebar strip's collapse control, beside the traffic lights (72 + 12 pt)
 /// ([feedback mac-collapsed-toggle-inline]).
 fn sidebar_toggle(shell: &Shell, theme: &Theme, cx: &mut Context<Shell>) -> Stateful<Div> {
     let _ = shell.state.read(cx).sidebar_overlay;

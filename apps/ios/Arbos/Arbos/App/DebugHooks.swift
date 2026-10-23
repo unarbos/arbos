@@ -49,6 +49,9 @@ enum DebugHooks {
     /// (`member` = the group page with its first other member pushed over it).
     /// `onboarding` shows the D82 first-login screen frozen on `ARBOS_ONBOARDING_STAGE` (1|2|3|fail).
     static var show: String? { value("ARBOS_SHOW") }
+    /// How long after the chat appears `ARBOS_SHOW` fires (ms, default 600): a loaded rig Mac
+    /// needs more before a sheet can be presented.
+    static var showDelayMs: Int { value("ARBOS_SHOW_DELAY_MS").flatMap(Int.init) ?? 600 }
     /// With `ARBOS_SHOW=newagent`: prefill the Create agent name (the "named" state on the rig).
     static var newAgentName: String? { value("ARBOS_NEW_AGENT_NAME") }
     static var onboardingStage: String? { value("ARBOS_ONBOARDING_STAGE") }
@@ -57,6 +60,11 @@ enum DebugHooks {
     static var onboardingProfile: Bool { value("ARBOS_ONBOARDING_PROFILE") == "1" }
     /// With `ARBOS_SHOW=settings`: the Settings page to land on — appearance, textsize, connectors, secrets, machine, credits, notifications, about, relay.
     static var settingsPage: String? { value("ARBOS_SETTINGS_PAGE") }
+    /// With a Settings page open: scroll to the card with this id (e.g. `people` on a Secret page).
+    static var settingsScroll: String? { value("ARBOS_SETTINGS_SCROLL") }
+    /// On a Secret page: open a sheet at once — `people` (Give a person access), `person` (the
+    /// first People row's note sheet).
+    static var secretSheet: String? { value("ARBOS_SECRET_SHEET") }
     /// Text Size factor for screenshot sweeps (one of TextScale.steps, e.g. 0.85 / 1.3).
     static var textScale: Double? { value("ARBOS_TEXT_SCALE").flatMap(Double.init) }
     /// `system | light | dark`: the theme for one launch, over the saved choice and the

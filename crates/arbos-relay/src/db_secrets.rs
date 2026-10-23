@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS secrets (
   kind TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', hosts TEXT NOT NULL DEFAULT '[]',
   ask_every_time INTEGER NOT NULL DEFAULT 0, expires_at INTEGER, current_version INTEGER NOT NULL DEFAULT 1,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_used_at INTEGER,
-  daytona_secrets TEXT NOT NULL DEFAULT '{}', inject_env INTEGER NOT NULL DEFAULT 0
+  daytona_secrets TEXT NOT NULL DEFAULT '{}', inject_env INTEGER NOT NULL DEFAULT 0,
+  others_ask TEXT NOT NULL DEFAULT 'refuse'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS secrets_user_name ON secrets(user_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS secrets_user_env ON secrets(user_id, env);
@@ -40,7 +41,7 @@ CREATE TABLE IF NOT EXISTS secret_requests (
   id TEXT PRIMARY KEY, user_id TEXT NOT NULL, project_id TEXT NOT NULL, chat_id TEXT NOT NULL DEFAULT '',
   target_kind TEXT NOT NULL, target_id TEXT, target_ref TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT '',
   use_kind TEXT NOT NULL, host TEXT, status TEXT NOT NULL DEFAULT 'pending', decided_by TEXT,
-  created_at INTEGER NOT NULL, decided_at INTEGER, expires_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL, decided_at INTEGER, expires_at INTEGER NOT NULL, asked_by TEXT
 );
 CREATE INDEX IF NOT EXISTS secret_requests_user ON secret_requests(user_id, created_at);
 CREATE TABLE IF NOT EXISTS user_keys (
@@ -85,12 +86,15 @@ CREATE TABLE IF NOT EXISTS vault_reads (
   vault_id TEXT NOT NULL, window TEXT NOT NULL, reads INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (vault_id, window)
 );
--- People the owner named who may direct an agent to use this secret (feedback AE67HJ7RnX).
--- The owner always may; everyone else needs a row. `note` is constraints the agent must honour
--- (e.g. "only 1k usd of credit usage per day") and is shown with the secret in the box.
+-- People the owner named who may ask an agent to use this secret (#1041, #1442; spec §7.7).
+-- The owner always may; everyone else needs a row with `enabled`. `note` is constraints the
+-- agent must honour (e.g. "only 1k usd of credit usage per day") and is shown with the secret
+-- in the box. `scope_kind` = all | chat; `created_from` = settings | card:<request id>.
 CREATE TABLE IF NOT EXISTS secret_directors (
   secret_id TEXT NOT NULL, user_id TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, disabled_at INTEGER,
+  scope_kind TEXT NOT NULL DEFAULT 'all', scope_chat_id TEXT, last_asked_at INTEGER,
+  created_from TEXT NOT NULL DEFAULT 'settings',
   PRIMARY KEY (secret_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS secret_directors_user ON secret_directors(user_id);
@@ -110,6 +114,24 @@ pub fn migrate_secrets(c: &rusqlite::Connection) {
          );
          CREATE INDEX IF NOT EXISTS secret_directors_user ON secret_directors(user_id);",
     );
+    let _ = c.execute(
+        "ALTER TABLE secrets ADD COLUMN others_ask TEXT NOT NULL DEFAULT 'refuse'",
+        [],
+    );
+    let _ = c.execute("ALTER TABLE secret_requests ADD COLUMN asked_by TEXT", []);
+    for col in [
+        "enabled INTEGER NOT NULL DEFAULT 1",
+        "disabled_at INTEGER",
+        "scope_kind TEXT NOT NULL DEFAULT 'all'",
+        "scope_chat_id TEXT",
+        "last_asked_at INTEGER",
+        "created_from TEXT NOT NULL DEFAULT 'settings'",
+    ] {
+        let _ = c.execute(
+            &format!("ALTER TABLE secret_directors ADD COLUMN {col}"),
+            [],
+        );
+    }
 }
 
 /// A pending request nobody answers expires after this long (D76: 10 min silence = denied).
@@ -141,6 +163,9 @@ pub struct Secret {
     /// "Real value in the agent's environment": agents with Access get the value itself as
     /// `$ENV` in their box, no card per use (D83 decision 2 as decided 2026-10-18).
     pub inject_env: bool,
+    /// What happens when someone who is neither the owner nor on the People list asks an agent
+    /// to use it: `refuse` (default) or `card` (the owner gets a card naming who asked).
+    pub others_ask: String,
 }
 
 #[derive(Debug, Clone)]
@@ -152,13 +177,45 @@ pub struct SecretVersion {
     pub retire_at: Option<i64>,
 }
 
-/// A person the owner authorized to direct agents to use one secret (with an optional note).
+/// A person the owner authorized to ask agents to use one secret (the People list; the API and
+/// the apps say "people", the table keeps its #1041 name). `note` is shown to the agent.
 #[derive(Debug, Clone, Serialize)]
 pub struct SecretDirector {
     pub secret_id: String,
     pub user_id: String,
     pub note: String,
     pub created_at: i64,
+    pub enabled: bool,
+    pub disabled_at: Option<i64>,
+    /// `all | chat`.
+    pub scope_kind: String,
+    pub scope_chat_id: Option<String>,
+    pub last_asked_at: Option<i64>,
+    /// `settings | card:<request id>`.
+    pub created_from: String,
+}
+
+impl SecretDirector {
+    /// A fresh standing row added from Settings.
+    pub fn new(secret_id: &str, user_id: &str, note: &str, now: i64) -> Self {
+        Self {
+            secret_id: secret_id.to_owned(),
+            user_id: user_id.to_owned(),
+            note: note.to_owned(),
+            created_at: now,
+            enabled: true,
+            disabled_at: None,
+            scope_kind: "all".into(),
+            scope_chat_id: None,
+            last_asked_at: None,
+            created_from: "settings".into(),
+        }
+    }
+
+    /// Does this row let its person ask in `chat_id` right now?
+    pub fn covers(&self, chat_id: Option<&str>) -> bool {
+        self.enabled && (self.scope_kind != "chat" || self.scope_chat_id.as_deref() == chat_id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,6 +261,8 @@ pub struct SecretRequest {
     pub created_at: i64,
     pub decided_at: Option<i64>,
     pub expires_at: i64,
+    /// The person (user id) who asked the agent, when it was not the owner (spec §7.7).
+    pub asked_by: Option<String>,
 }
 
 impl SecretRequest {
@@ -276,7 +335,7 @@ fn to_json_list(v: &[String]) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
-const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets, inject_env";
+const SECRET_COLS: &str = "id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version, created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask";
 
 fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
     Ok(Secret {
@@ -295,6 +354,7 @@ fn row_to_secret(r: &rusqlite::Row<'_>) -> rusqlite::Result<Secret> {
         last_used_at: r.get(12)?,
         daytona_secrets: serde_json::from_str(&r.get::<_, String>(13)?).unwrap_or_default(),
         inject_env: r.get::<_, i64>(14)? != 0,
+        others_ask: r.get(15)?,
     })
 }
 
@@ -319,7 +379,7 @@ fn row_to_access(r: &rusqlite::Row<'_>) -> rusqlite::Result<Access> {
     })
 }
 
-const REQUEST_COLS: &str = "id, user_id, project_id, chat_id, target_kind, target_id, target_ref, purpose, use_kind, host, status, decided_by, created_at, decided_at, expires_at";
+const REQUEST_COLS: &str = "id, user_id, project_id, chat_id, target_kind, target_id, target_ref, purpose, use_kind, host, status, decided_by, created_at, decided_at, expires_at, asked_by";
 
 fn row_to_request(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretRequest> {
     Ok(SecretRequest {
@@ -338,6 +398,7 @@ fn row_to_request(r: &rusqlite::Row<'_>) -> rusqlite::Result<SecretRequest> {
         created_at: r.get(12)?,
         decided_at: r.get(13)?,
         expires_at: r.get(14)?,
+        asked_by: r.get(15)?,
     })
 }
 
@@ -406,12 +467,12 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "INSERT INTO secrets(id, user_id, name, env, kind, note, hosts, ask_every_time, expires_at, current_version,
-                   created_at, updated_at, last_used_at, daytona_secrets, inject_env)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                   created_at, updated_at, last_used_at, daytona_secrets, inject_env, others_ask)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 params![
                     s.id, s.user_id, s.name, s.env, s.kind, s.note, to_json_list(&s.hosts),
                     s.ask_every_time as i64, s.expires_at, s.current_version, s.created_at, s.updated_at,
-                    s.last_used_at, s.daytona_secrets.to_string(), s.inject_env as i64
+                    s.last_used_at, s.daytona_secrets.to_string(), s.inject_env as i64, s.others_ask
                 ],
             )?;
             c.execute(
@@ -428,11 +489,11 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "UPDATE secrets SET name = ?3, env = ?4, note = ?5, hosts = ?6, ask_every_time = ?7, expires_at = ?8,
-                   updated_at = ?9, daytona_secrets = ?10, inject_env = ?11
+                   updated_at = ?9, daytona_secrets = ?10, inject_env = ?11, others_ask = ?12
                  WHERE id = ?1 AND user_id = ?2",
                 params![
                     s.id, s.user_id, s.name, s.env, s.note, to_json_list(&s.hosts), s.ask_every_time as i64,
-                    s.expires_at, now_ms(), s.daytona_secrets.to_string(), s.inject_env as i64
+                    s.expires_at, now_ms(), s.daytona_secrets.to_string(), s.inject_env as i64, s.others_ask
                 ],
             )
             .map(|_| ())
@@ -588,9 +649,27 @@ impl Db {
     pub fn upsert_secret_director(&self, d: &SecretDirector) -> Result<()> {
         self.with(|c| {
             c.execute(
-                "INSERT INTO secret_directors(secret_id, user_id, note, created_at) VALUES (?1,?2,?3,?4)
-                 ON CONFLICT(secret_id, user_id) DO UPDATE SET note = excluded.note",
-                params![d.secret_id, d.user_id, d.note, d.created_at],
+                "INSERT INTO secret_directors(secret_id, user_id, note, created_at, enabled, disabled_at,
+                   scope_kind, scope_chat_id, last_asked_at, created_from)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+                 ON CONFLICT(secret_id, user_id) DO UPDATE SET note = excluded.note, enabled = excluded.enabled,
+                   disabled_at = excluded.disabled_at, scope_kind = excluded.scope_kind,
+                   scope_chat_id = excluded.scope_chat_id, last_asked_at = excluded.last_asked_at",
+                params![
+                    d.secret_id, d.user_id, d.note, d.created_at, d.enabled as i64, d.disabled_at,
+                    d.scope_kind, d.scope_chat_id, d.last_asked_at, d.created_from
+                ],
+            )
+            .map(|_| ())
+        })
+    }
+
+    /// Stamp the time a person on the list last asked (an allowed use directed by them).
+    pub fn touch_secret_director(&self, secret_id: &str, user_id: &str) -> Result<()> {
+        self.with(|c| {
+            c.execute(
+                "UPDATE secret_directors SET last_asked_at = ?3 WHERE secret_id = ?1 AND user_id = ?2",
+                params![secret_id, user_id, now_ms()],
             )
             .map(|_| ())
         })
@@ -609,8 +688,9 @@ impl Db {
     pub fn secret_directors(&self, secret_id: &str) -> Result<Vec<SecretDirector>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT secret_id, user_id, note, created_at FROM secret_directors
-                 WHERE secret_id = ?1 ORDER BY created_at",
+                "SELECT secret_id, user_id, note, created_at, enabled, disabled_at, scope_kind, scope_chat_id,
+                   last_asked_at, created_from
+                 FROM secret_directors WHERE secret_id = ?1 ORDER BY created_at",
             )?;
             let rows = st.query_map(params![secret_id], |r| {
                 Ok(SecretDirector {
@@ -618,21 +698,40 @@ impl Db {
                     user_id: r.get(1)?,
                     note: r.get(2)?,
                     created_at: r.get(3)?,
+                    enabled: r.get::<_, i64>(4)? != 0,
+                    disabled_at: r.get(5)?,
+                    scope_kind: r.get(6)?,
+                    scope_chat_id: r.get(7)?,
+                    last_asked_at: r.get(8)?,
+                    created_from: r.get(9)?,
                 })
             })?;
             rows.collect()
         })
     }
 
-    pub fn is_secret_director(&self, secret_id: &str, user_id: &str) -> Result<bool> {
-        self.with(|c| {
-            let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM secret_directors WHERE secret_id = ?1 AND user_id = ?2",
-                params![secret_id, user_id],
-                |r| r.get(0),
-            )?;
-            Ok(n > 0)
-        })
+    /// The person's row on this secret's People list, if any (on or off, any scope).
+    pub fn secret_director(
+        &self,
+        secret_id: &str,
+        user_id: &str,
+    ) -> Result<Option<SecretDirector>> {
+        Ok(self
+            .secret_directors(secret_id)?
+            .into_iter()
+            .find(|d| d.user_id == user_id))
+    }
+
+    /// May `user_id` ask an agent to use this secret in `chat_id` right now? (Row on, scope fits.)
+    pub fn is_secret_director(
+        &self,
+        secret_id: &str,
+        user_id: &str,
+        chat_id: Option<&str>,
+    ) -> Result<bool> {
+        Ok(self
+            .secret_director(secret_id, user_id)?
+            .is_some_and(|d| d.covers(chat_id)))
     }
 
     /// Secrets whose expiry passed (for the sweeper that turns access off and tells the user).
@@ -751,11 +850,11 @@ impl Db {
         self.with(|c| {
             c.execute(
                 "INSERT INTO secret_requests(id, user_id, project_id, chat_id, target_kind, target_id, target_ref, purpose, use_kind, host,
-                   status, decided_by, created_at, decided_at, expires_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+                   status, decided_by, created_at, decided_at, expires_at, asked_by)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
                 params![
                     rq.id, rq.user_id, rq.project_id, rq.chat_id, rq.target_kind, rq.target_id, rq.target_ref, rq.purpose,
-                    rq.use_kind, rq.host, rq.status, rq.decided_by, rq.created_at, rq.decided_at, rq.expires_at
+                    rq.use_kind, rq.host, rq.status, rq.decided_by, rq.created_at, rq.decided_at, rq.expires_at, rq.asked_by
                 ],
             )
             .map(|_| ())
@@ -1261,6 +1360,7 @@ mod tests {
             last_used_at: None,
             daytona_secrets: serde_json::json!({}),
             inject_env: false,
+            others_ask: "refuse".into(),
         }
     }
 
@@ -1364,6 +1464,7 @@ mod tests {
             created_at: now,
             decided_at: None,
             expires_at: now + REQUEST_PENDING_MS,
+            asked_by: None,
         };
         db.insert_secret_request(&rq).unwrap();
         assert!(db

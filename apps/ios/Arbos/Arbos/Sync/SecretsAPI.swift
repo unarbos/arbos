@@ -59,26 +59,28 @@ extension RelayAPI {
         return SecretItem.parse(v?["secret"])
     }
 
-    /// `POST /secrets/{id}/directors { handle, note? }` — let this person direct agents to use the secret.
+    /// `POST /secrets/{id}/people { handle, note? }` — put this person on the secret's People
+    /// list (they may ask any agent with access to use it; spec §7.7).
     func addSecretDirector(_ id: String, handle: String, note: String?) async throws -> SecretItem {
         var body: [String: Any] = ["handle": handle]
         if let note { body["note"] = note }
-        let v = try await json("POST", "/secrets/\(id)/directors", body: body) as? [String: Any]
+        let v = try await json("POST", "/secrets/\(id)/people", body: body) as? [String: Any]
         guard let s = SecretItem.parse(v?["secret"]) else { throw RelayError(status: 0, message: "Bad secret reply") }
         return s
     }
 
-    /// `PUT /secrets/{id}/directors/{userId} { note? }` — update the director's usage note.
-    func setSecretDirector(_ id: String, userId: String, note: String?) async throws -> SecretItem {
+    /// `PUT /secrets/{id}/people/{userId} { note?, enabled? }` — the row's note and switch.
+    func setSecretDirector(_ id: String, userId: String, note: String?, enabled: Bool? = nil) async throws -> SecretItem {
         var body: [String: Any] = [:]
         if let note { body["note"] = note }
-        let v = try await json("PUT", "/secrets/\(id)/directors/\(userId)", body: body) as? [String: Any]
+        if let enabled { body["enabled"] = enabled }
+        let v = try await json("PUT", "/secrets/\(id)/people/\(userId)", body: body) as? [String: Any]
         guard let s = SecretItem.parse(v?["secret"]) else { throw RelayError(status: 0, message: "Bad secret reply") }
         return s
     }
 
     func deleteSecretDirector(_ id: String, userId: String) async throws -> SecretItem {
-        let v = try await json("DELETE", "/secrets/\(id)/directors/\(userId)") as? [String: Any]
+        let v = try await json("DELETE", "/secrets/\(id)/people/\(userId)") as? [String: Any]
         guard let s = SecretItem.parse(v?["secret"]) else { throw RelayError(status: 0, message: "Bad secret reply") }
         return s
     }

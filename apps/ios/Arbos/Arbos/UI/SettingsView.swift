@@ -516,15 +516,22 @@ struct SettingsPage<Content: View>: View {
     var body: some View {
         ZStack(alignment: .top) {
             theme.bg.ignoresSafeArea()
-            ScrollView {
-                VStack(spacing: 24) {
-                    // Clear the custom header + the soft end of `headerBlur`
-                    // so the first card (Credits Balance, etc.) is not frosted.
-                    Color.clear.frame(height: 82)
-                    content()
-                    Color.clear.frame(height: 24)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 24) {
+                        // Clear the custom header + the soft end of `headerBlur`
+                        // so the first card (Credits Balance, etc.) is not frosted.
+                        Color.clear.frame(height: 82)
+                        content()
+                        Color.clear.frame(height: 24)
+                    }
+                    .padding(.horizontal, PaneKit.inset)
                 }
-                .padding(.horizontal, PaneKit.inset)
+                .onAppear {
+                    // Rig hook: land on one card of a long page (`ARBOS_SETTINGS_SCROLL=people`).
+                    guard let anchor = DebugHooks.settingsScroll else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { proxy.scrollTo(anchor, anchor: .top) }
+                }
             }
             // Apple Account pull-down: frosted fade under the title so the
             // avatar softens as it scrolls / rubber-bands into the header.

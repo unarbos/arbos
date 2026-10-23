@@ -22,8 +22,10 @@ use crate::model::{
     new_id, now_ms, Attachment, AttachmentKind, BoxState, ChannelSel, ChannelsView, Chat, ChatKind,
     ConnectorsView, Effort, Id, Link, LinkState, LocalView, Machine, Message, MessageStatus,
     NewSecret, Part, Project, ProjectDocView, ProjectSecrets, QuestionState, Role, Routine,
-    RoutineRun, RoutineTrigger, SecretsView, ServerInfo, Skill, StatusKind,
+    RoutineRun, RoutineTrigger, SecretDirector, SecretScope, SecretsView, ServerInfo, Skill,
+    StatusKind,
 };
+use crate::sign_in;
 use crate::sync::{ClientCommand, SyncEvent, SyncSource};
 use crate::ui::notify::{self, Gate, Notifier, NotifyEvent, NotifyKind};
 use crate::ui::tones::{SamplePlayer, Tone, TonePlayer};
@@ -69,7 +71,11 @@ pub struct AddTarget {
     pub handles: Vec<String>,
     /// Agents already in (groups only; servers have none).
     pub agents: Vec<Id>,
+    /// People only: no agent rows (servers, and a secret's People list).
     pub is_server: bool,
+    /// Opened from a Secret page's "Give a person access…" (spec §7.7): the sheet is titled
+    /// for that and Add puts the picks on the secret's People list.
+    pub is_secret: bool,
 }
 
 /// Which server sheet is open over the shell (D88).
@@ -189,8 +195,12 @@ pub enum SignInMode {
 pub struct Pairing {
     pub relay_url: String,
     pub mode: SignInMode,
+    /// Pairing-code mode: the code is being exchanged.
     pub busy: bool,
+    /// Pairing-code mode: the last failure.
     pub error: Option<String>,
+    /// GitHub mode: the pill's state machine (copy, Cancel / Retry, timeout).
+    pub flow: sign_in::Flow,
 }
 
 /// A downloaded blob shown in the Details drawer.
@@ -364,6 +374,8 @@ pub struct AppState {
     pub add_members_target: Option<Id>,
     /// Server pane › Members › Add members (D88): the server the picks go into.
     pub add_members_server: Option<Id>,
+    /// Secret page › People › "Give a person access…": the secret the picks go onto.
+    pub add_members_secret: Option<Id>,
     /// An invite code handed over by `arbos://join/<code>`; the shell puts it in the Join sheet.
     pub pending_join_code: Option<String>,
     /// Avatar reply reaction window per project (ms): plays once after a turn.
@@ -754,6 +766,7 @@ impl AppState {
             invite_target: None,
             add_members_target: None,
             add_members_server: None,
+            add_members_secret: None,
             pending_join_code: None,
             avatar_reply_until: HashMap::new(),
             avatar_picker: None,
@@ -1167,6 +1180,7 @@ impl AppState {
                     mode,
                     busy: false,
                     error: None,
+                    flow: sign_in::Flow::default(),
                 });
                 self.device_id = None;
                 self.room_links.clear();
@@ -1330,7 +1344,9 @@ impl AppState {
             SyncEvent::PairingFailed(err) => {
                 if let Some(p) = &mut self.pairing {
                     p.busy = false;
-                    p.error = Some(err);
+                    p.error = Some(err.clone());
+                    let attempt = p.flow.attempt;
+                    p.flow.failed(attempt, err);
                 }
                 cx.notify();
             }
@@ -4726,6 +4742,15 @@ impl AppState {
             }
             p.name = name.clone();
         }
+        // People-group AgentMember.handle is the @mention slug; refresh it so
+        // a mid-chat rename does not leave mentions pointed at the old name.
+        let handle = Project::mention_slug(&name);
+        for space in self.projects.iter_mut().filter(|p| p.is_people()) {
+            if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                a.name = name.clone();
+                a.handle = handle.clone();
+            }
+        }
         self.renaming_project = None;
         self.profile_editing_name = false;
         self.command(ClientCommand::SetProjectName { project_id, name });
@@ -5773,41 +5798,117 @@ impl AppState {
         cx.notify();
     }
 
-    /// "Sign in with GitHub": run the browser leg, then exchange the grant.
+    /// "Sign in with GitHub" (and Retry): run the browser leg, then exchange
+    /// the grant. The pill follows `pairing.flow`; a 60-s soft timeout offers
+    /// Retry / Open in browser without closing a sheet that is merely slow.
     pub fn sign_in(&mut self, cx: &mut Context<Self>) {
         let Some(p) = &mut self.pairing else {
             return;
         };
-        if p.busy {
+        let Some(attempt) = p.flow.start(now_ms()) else {
             return;
-        }
-        p.busy = true;
-        p.error = None;
+        };
         let relay = p.relay_url.clone();
         cx.notify();
+        self.arm_sign_in_timeout(attempt, cx);
         let this = cx.entity().downgrade();
-        auth::begin(relay, device_name(), cx, move |outcome, cx| {
+        auth::begin(relay, device_name(), cx, move |event, cx| {
             let _ = this.update(cx, |state, cx| {
-                match outcome {
-                    Ok(auth::SignIn::Grant(grant_code)) => {
-                        state.command(ClientCommand::SignIn { grant_code });
-                    }
-                    Ok(auth::SignIn::PairCodeMode) => {
-                        if let Some(p) = &mut state.pairing {
-                            p.mode = SignInMode::PairCode;
-                            p.busy = false;
-                        }
-                    }
-                    Err(err) => {
-                        if let Some(p) = &mut state.pairing {
-                            p.busy = false;
-                            p.error = Some(format!("{err:#}"));
-                        }
-                    }
-                }
+                state.on_sign_in_event(attempt, event);
                 cx.notify();
             });
         });
+    }
+
+    fn on_sign_in_event(&mut self, attempt: u64, event: auth::Event) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        match event {
+            auth::Event::Opened { in_browser } => p.flow.opened(attempt, in_browser),
+            auth::Event::Finished(Ok(auth::SignIn::Grant(grant_code))) => {
+                if p.flow.grant(attempt) {
+                    self.command(ClientCommand::SignIn { grant_code });
+                }
+            }
+            auth::Event::Finished(Ok(auth::SignIn::PairCodeMode)) => {
+                if attempt == p.flow.attempt {
+                    p.mode = SignInMode::PairCode;
+                    p.flow.cancelled(attempt);
+                }
+            }
+            auth::Event::Finished(Ok(auth::SignIn::Cancelled)) => p.flow.cancelled(attempt),
+            auth::Event::Finished(Err(err)) => p.flow.failed(attempt, format!("{err:#}")),
+        }
+    }
+
+    /// `sign_in::SOFT_TIMEOUT_MS` after the click: Retry / Open in browser.
+    fn arm_sign_in_timeout(&mut self, attempt: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(sign_in::SOFT_TIMEOUT_MS))
+                .await;
+            let _ = this.update(cx, |state, cx| {
+                if let Some(p) = &mut state.pairing {
+                    if p.flow.tick(attempt, now_ms()) {
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Cancel on the pill: close the sheet (its block reports Cancelled) and
+    /// go back to "Sign in with GitHub" at once.
+    pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
+        auth::cancel();
+        if let Some(p) = &mut self.pairing {
+            let attempt = p.flow.attempt;
+            p.flow.cancelled(attempt);
+        }
+        cx.notify();
+    }
+
+    /// "Open in browser" on the pill: hand the GitHub page to the default
+    /// browser; the relay's `arbos://auth/callback` comes back through
+    /// LaunchServices (`sign_in_callback`).
+    pub fn sign_in_in_browser(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        let Some(attempt) = p.flow.continue_in_browser(now_ms()) else {
+            return;
+        };
+        auth::cancel();
+        let url = auth::start_url(&p.relay_url, &device_name());
+        if let Err(err) = auth::open_in_browser(&url) {
+            p.flow.failed(attempt, format!("{err:#}"));
+        } else {
+            self.arm_sign_in_timeout(attempt, cx);
+        }
+        cx.notify();
+    }
+
+    /// `arbos://auth/callback?code=…` delivered by the platform (the browser
+    /// leg). Ignored when no sign-in is in flight.
+    pub fn sign_in_callback(&mut self, url: &str, cx: &mut Context<Self>) {
+        let Some(p) = &mut self.pairing else {
+            return;
+        };
+        let attempt = p.flow.attempt;
+        if !p.flow.busy() {
+            return;
+        }
+        match auth::parse_callback(url) {
+            Ok(grant_code) => {
+                if p.flow.grant(attempt) {
+                    self.command(ClientCommand::SignIn { grant_code });
+                }
+            }
+            Err(err) => p.flow.failed(attempt, format!("{err:#}")),
+        }
+        cx.notify();
     }
 
     // ----- people chats (D72)
@@ -5865,6 +5966,7 @@ impl AppState {
         self.invite_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
+        self.add_members_secret = None;
         self.people_query.clear();
         self.people_error = None;
         // First frame = the known directory; the refetch behind it only repaints a change.
@@ -5903,6 +6005,19 @@ impl AppState {
         self.invite_target = None;
         self.add_members_target = None;
         self.add_members_server = None;
+        self.add_members_secret = None;
+        cx.notify();
+    }
+
+    /// Secret page › People → "Give a person access…": the same picker, people only, whose
+    /// Add puts the picks on the secret's People list (spec §7.7).
+    pub fn open_secret_people_picker(&mut self, secret_id: Id, cx: &mut Context<Self>) {
+        if !self.secrets.secrets.iter().any(|s| s.id == secret_id) {
+            return;
+        }
+        self.open_new_chat(cx);
+        self.new_group_open = true;
+        self.add_members_secret = Some(secret_id);
         cx.notify();
     }
 
@@ -5918,8 +6033,25 @@ impl AppState {
         cx.notify();
     }
 
-    /// Who the Add members picker adds to (a group or a server), with who is already in.
+    /// Who the Add members picker adds to (a group, a server, or a secret's People list),
+    /// with who is already in.
     pub fn add_members_target_info(&self) -> Option<AddTarget> {
+        if let Some(secret) = self
+            .add_members_secret
+            .as_deref()
+            .and_then(|id| self.secrets.secrets.iter().find(|s| s.id == id))
+        {
+            let mut handles: Vec<String> =
+                secret.directors.iter().map(|d| d.handle.clone()).collect();
+            handles.push(self.me_handle());
+            return Some(AddTarget {
+                name: secret.env.clone(),
+                handles,
+                agents: Vec::new(),
+                is_server: true,
+                is_secret: true,
+            });
+        }
         if let Some(server) = self
             .add_members_server
             .as_deref()
@@ -5933,6 +6065,7 @@ impl AppState {
                 handles,
                 agents: Vec::new(),
                 is_server: true,
+                is_secret: false,
             });
         }
         let group = self.add_members_group()?;
@@ -5943,6 +6076,7 @@ impl AppState {
             handles,
             agents: group.agents.iter().map(|a| a.project_id.clone()).collect(),
             is_server: false,
+            is_secret: false,
         })
     }
 
@@ -5972,6 +6106,9 @@ impl AppState {
     /// the relay's next list confirms. Returns whether the calls were sent (the
     /// sheet closes then; an empty pick keeps it open with a line why).
     pub fn add_members_to_group(&mut self, cx: &mut Context<Self>) -> bool {
+        if let Some(secret_id) = self.add_members_secret.clone() {
+            return self.add_people_to_secret(secret_id, cx);
+        }
         if let Some(server_id) = self.add_members_server.clone() {
             return self.add_members_to_server(server_id, cx);
         }
@@ -6005,6 +6142,50 @@ impl AppState {
             agent_ids: plan.agent_ids,
         });
         cx.notify();
+        true
+    }
+
+    /// "Add" in the picker opened from a Secret page: `POST /secrets/{id}/people` per new
+    /// person; people already on the list are skipped. The card shows them at once (rows on,
+    /// no note yet); the relay's next list confirms.
+    fn add_people_to_secret(&mut self, secret_id: Id, cx: &mut Context<Self>) -> bool {
+        let Some(secret) = self.secrets.secrets.iter().find(|s| s.id == secret_id) else {
+            return false;
+        };
+        let me = self.me_handle();
+        let new: Vec<Person> = self
+            .new_group_picked
+            .iter()
+            .filter(|p| {
+                !p.handle.eq_ignore_ascii_case(&me)
+                    && !secret
+                        .directors
+                        .iter()
+                        .any(|d| d.user_id == p.id || d.handle.eq_ignore_ascii_case(&p.handle))
+            })
+            .cloned()
+            .collect();
+        if new.is_empty() {
+            self.people_error = Some("Pick someone who is not on the list yet".into());
+            cx.notify();
+            return false;
+        }
+        let handles: Vec<String> = new.iter().map(|p| p.handle.clone()).collect();
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == secret_id) {
+            s.directors.extend(new.into_iter().map(|p| SecretDirector {
+                user_id: p.id,
+                handle: p.handle,
+                name: p.name,
+                avatar_url: Some(p.avatar_url),
+                note: String::new(),
+                created_at: now_ms() as i64,
+                enabled: true,
+                disabled_at: None,
+                scope: SecretScope::default(),
+                last_asked_at: None,
+            }));
+        }
+        self.secret_people_add(secret_id, handles, cx);
         true
     }
 
@@ -6784,6 +6965,9 @@ impl AppState {
             if let Some(n) = body.get("note").and_then(|v| v.as_str()) {
                 s.note = n.to_string();
             }
+            if let Some(o) = body.get("others_ask").and_then(|v| v.as_str()) {
+                s.others_ask = o.to_string();
+            }
         }
         self.command(ClientCommand::SecretPatch { id, body });
         cx.notify();
@@ -6834,6 +7018,50 @@ impl AppState {
             enabled,
             note,
         });
+        cx.notify();
+    }
+
+    /// One People row's switch or note. Optimistic; the relay's view follows.
+    pub fn secret_person(
+        &mut self,
+        id: Id,
+        user_id: Id,
+        enabled: bool,
+        note: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            if let Some(d) = s.directors.iter_mut().find(|d| d.user_id == user_id) {
+                d.enabled = enabled;
+                d.disabled_at = (!enabled).then(|| now_ms() as i64);
+                if let Some(n) = &note {
+                    d.note = n.clone();
+                }
+            }
+        }
+        self.command(ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        });
+        cx.notify();
+    }
+
+    /// People picked in the member picker join the list (rows on, no note yet).
+    pub fn secret_people_add(&mut self, id: Id, handles: Vec<String>, cx: &mut Context<Self>) {
+        if handles.is_empty() {
+            return;
+        }
+        self.command(ClientCommand::SecretPeopleAdd { id, handles });
+        cx.notify();
+    }
+
+    pub fn secret_person_remove(&mut self, id: Id, user_id: Id, cx: &mut Context<Self>) {
+        if let Some(s) = self.secrets.secrets.iter_mut().find(|s| s.id == id) {
+            s.directors.retain(|d| d.user_id != user_id);
+        }
+        self.command(ClientCommand::SecretPersonRemove { id, user_id });
         cx.notify();
     }
 

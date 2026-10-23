@@ -2613,7 +2613,13 @@ fn mentions_for(shared: &Shared, chat_id: &str, text: &str) -> Vec<String> {
         }
     }
     for a in &space.agents {
-        if lower.contains(&format!("@{}", a.handle.to_lowercase())) {
+        let handle = a.handle.to_lowercase();
+        let slug = Project::mention_slug(&a.name);
+        // Match cached handle or the live name slug so a mid-group rename
+        // still encodes `agent:<id>` before membership is refreshed.
+        if (!handle.is_empty() && text_has_at_token(&lower, &handle))
+            || (!slug.is_empty() && text_has_at_token(&lower, &slug))
+        {
             let id = format!("agent:{}", a.project_id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);
@@ -3160,6 +3166,25 @@ async fn perform_room_actions(
                     } else {
                         emit_snapshot(shared, key);
                         let _ = shared.events.send(SyncEvent::ChatSynced(key.to_string()));
+                    }
+                }
+                RoomAction::HealCheck { relay_vv } => {
+                    // The relay told us what it holds; if this replica has more (a lost
+                    // checkpoint, #1518), push the difference back once so the room heals.
+                    let missing = {
+                        let docs = shared.docs.lock().unwrap();
+                        match (docs.get(key), arbos_core::doc::decode_vv(&relay_vv)) {
+                            (Some(doc), Some(vv)) => doc.core.updates_beyond(&vv),
+                            _ => Vec::new(),
+                        }
+                    };
+                    if !missing.is_empty() {
+                        eprintln!(
+                            "relay room {}: history heal, pushing {} bytes the relay lacked",
+                            session.room(),
+                            missing.len()
+                        );
+                        session.on_heal(missing);
                     }
                 }
                 RoomAction::ScheduleReconnect { after } => {
@@ -5453,6 +5478,14 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
                     p.name = name.clone();
                 }
+                // Keep people-group @mention handles in sync with the new name.
+                let handle = Project::mention_slug(&name);
+                for space in projects.iter_mut().filter(|p| p.is_people()) {
+                    if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                        a.name = name.clone();
+                        a.handle = handle.clone();
+                    }
+                }
                 let snapshot = projects.clone();
                 drop(projects);
                 let _ = shared.events.send(SyncEvent::Projects(snapshot));
@@ -6082,6 +6115,56 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             tokio::spawn(async move {
                 if let Err(err) = shared
                     .post_json(&format!("/secrets/{id}/revoke-all"), json!({}))
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let mut body = json!({ "enabled": enabled });
+                if let Some(n) = note {
+                    body["note"] = Value::String(n);
+                }
+                if let Err(err) = shared
+                    .put_json(&format!("/secrets/{id}/people/{user_id}"), body)
+                    .await
+                {
+                    shared.notice(format!("Secrets: {}", relay_message(&err)));
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPeopleAdd { id, handles } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                for handle in handles {
+                    if let Err(err) = shared
+                        .post_json(
+                            &format!("/secrets/{id}/people"),
+                            json!({ "handle": handle }),
+                        )
+                        .await
+                    {
+                        shared.notice(format!("Secrets: @{handle}: {}", relay_message(&err)));
+                    }
+                }
+                refresh_secrets(&shared).await;
+            });
+        }
+        ClientCommand::SecretPersonRemove { id, user_id } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .delete(&format!("/secrets/{id}/people/{user_id}"))
                     .await
                 {
                     shared.notice(format!("Secrets: {}", relay_message(&err)));

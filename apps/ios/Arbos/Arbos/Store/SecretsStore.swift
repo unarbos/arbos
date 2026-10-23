@@ -113,19 +113,45 @@ extension AppModel {
                 secrets?.secrets[i].askEveryTime = ask
                 if ask { secrets?.secrets[i].injectEnv = false }
             }
+            if let others = body["others_ask"] as? String {
+                secrets?.secrets[i].othersAsk = others
+            }
         }
         Task { await secretsAction("Save") { _ = try await self.relay.patchSecret(secretId, body) } }
     }
 
-    func addSecretDirector(secretId: String, handle: String, note: String) {
+    /// One People row's switch (spec §7.7). Optimistic; the relay's reply follows.
+    func setSecretPerson(secretId: String, userId: String, enabled: Bool) {
+        if let i = secrets?.secrets.firstIndex(where: { $0.id == secretId }),
+           let j = secrets?.secrets[i].directors.firstIndex(where: { $0.userId == userId }) {
+            secrets?.secrets[i].directors[j].enabled = enabled
+            secrets?.secrets[i].directors[j].disabledAt = enabled ? nil : Int64(Date().timeIntervalSince1970 * 1000)
+        }
         Task {
-            await secretsAction("Add director") {
-                let s = try await self.relay.addSecretDirector(secretId, handle: handle, note: note.isEmpty ? nil : note)
+            await secretsAction("Save") {
+                let s = try await self.relay.setSecretDirector(secretId, userId: userId, note: nil, enabled: enabled)
                 if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
                     self.secrets?.secrets[i] = s
                 }
             }
         }
+    }
+
+    /// People picked in the member picker join the list (rows on, no note yet). Returns false
+    /// when any add failed (the notice says which).
+    func addSecretPeople(secretId: String, handles: [String]) async -> Bool {
+        var ok = true
+        for handle in handles {
+            if await secretsAction("Give access", {
+                let s = try await self.relay.addSecretDirector(secretId, handle: handle, note: nil)
+                if let i = self.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
+                    self.secrets?.secrets[i] = s
+                }
+            }) != nil {
+                ok = false
+            }
+        }
+        return ok
     }
 
     func updateSecretDirector(secretId: String, userId: String, note: String) {

@@ -1,6 +1,9 @@
 #!/bin/bash
 # Nightly hygiene for the EC2 Mac (runs as root from /Library/LaunchDaemons/sh.arbos.mac-clean.plist, 04:15 UTC).
 # Installed copy: /usr/local/bin/arbos-mac-clean.sh — keep it in step with this file (sudo install -m 755).
+#  - removes stale simulator Deleting-* dirs under /private/var/folders (every pass, even when not low)
+#  - prunes idle per-worker checkouts /Users/ec2-user/arbos-* (whole after 24 h idle, artifacts after 2 h;
+#    never one a process has open, never the gate's own trees)
 #  - removes cargo target/ dirs not modified for 2 days under the worker checkouts (never the protected trees)
 #  - clears CoreSimulator caches and deletes unavailable simulators
 #  - shuts down the gate user's lingering booted simulators (xcodebuild boots one per gate run and leaves
@@ -8,8 +11,9 @@
 #  - kills orphaned `rust-cache … save.js` processes (parent 1, older than 30 min: a cancelled release
 #    job's post step kept tar'ing at 43 % CPU for 1 h 23 min on 2026-10-21)
 #  - appends an ALERT line to the loop journal when the data volume has < 20 GB free
-#  - `--if-low`: runs only when < 10 GB free (launchd sh.arbos.mac-clean-low every 30 min; the Rust gate
-#    calls it when it refuses a release build under 6 GiB). The 20 GB alert threshold is unchanged.
+#  - `--if-low`: runs only when < 40 GB free (launchd sh.arbos.mac-clean-low every 30 min; the Rust gate
+#    calls it at every batch start under 40 GB and when it refuses a release build under 6 GiB). The
+#    20 GB alert threshold is unchanged.
 # Left alone on purpose: WirelessRadioManagerd (system daemon at ~140 % CPU on this Wi-Fi-less EC2 Mac;
 # shared machine, not ours to disable — see the feedback-loop runbook).
 # Log: /var/log/arbos-mac-clean.log. Journal: /Users/Shared/arbos-run/loop-journal.log (also `logger -t arbos-mac-clean`).
@@ -20,21 +24,64 @@ LOG=/var/log/arbos-mac-clean.log
 # 15 GB (was 10): the Rust gate refuses a release build at 4 GB and a Mac release build needs ~10 GB
 # of scratch, so at 10 GB the 30-min pass came too late (2026-10-23 16:50: 8 GB free, a gate build
 # refused that hour while the release lane's debug tree held 36 GB).
-LOW_FREE_GB=${LOW_FREE_GB:-15}
-if [ "${1:-}" = "--if-low" ]; then
-  f=$(df -g /System/Volumes/Data | awk 'NR==2 {print $4}')
-  [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0
-  printf '%s %s\n' "$(date -u +%FT%TZ)" "opportunistic run: ${f}G free (< ${LOW_FREE_GB}G)" >> "$LOG"
-fi
-JOURNAL=/Users/Shared/arbos-run/loop-journal.log
-MIN_FREE_GB=${MIN_FREE_GB:-20}
-TARGET_AGE_DAYS=${TARGET_AGE_DAYS:-2}
-PROTECT='(/Users/Shared/arbos-store-pending|/Users/ec2-user/arbos-parity|/Users/ec2-user/arbos-ios|/Users/ec2-user/arbos-refresh|/Users/arbosgui/actions-runner)'
+# 40 GB (was 15): the iOS gate's xcframework cross-build (three Rust targets) plus a Mac release build
+# want ~25 GB of scratch together; at 17 GB free #1466's gate died with ENOSPC (2026-10-23 20:4x). The
+# Rust gate also calls this mode at every batch start, so under 40 GB a batch begins with a sweep.
+LOW_FREE_GB=${LOW_FREE_GB:-40}
 ts() { date -u +%FT%TZ; }
 say() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
 free_gb() { df -g /System/Volumes/Data | awk 'NR==2 {print $4}'; }
 
+# CoreSimulator moves a deleted/erased device's data to $TMPDIR/Deleting-<uuid> and removes it later; on this
+# saturated box "later" never comes (20 of them = 69 GB on 2026-10-23 20:5x, re-created at ~4/10 min by the
+# rigs' create-shoot-delete cycle). Anything there older than 5 min is garbage by definition. Cheap: runs in
+# every pass, before the --if-low early exit.
+sweep_deleting() {
+  local n=0 d
+  while read -r d; do
+    rm -rf "$d" 2>/dev/null && n=$((n + 1))
+  done < <(find /private/var/folders -maxdepth 4 -type d -name 'Deleting-*' -mmin +5 2>/dev/null)
+  [ "$n" -gt 0 ] && say "removed $n stale simulator Deleting-* dir(s)"
+  return 0
+}
+sweep_deleting
+
+if [ "${1:-}" = "--if-low" ]; then
+  f=$(free_gb)
+  [ "${f:-99}" -lt "$LOW_FREE_GB" ] || exit 0
+  say "opportunistic run: ${f}G free (< ${LOW_FREE_GB}G)"
+fi
+JOURNAL=/Users/Shared/arbos-run/loop-journal.log
+MIN_FREE_GB=${MIN_FREE_GB:-20}
+TARGET_AGE_DAYS=${TARGET_AGE_DAYS:-2}
+PROTECT='(/Users/Shared/arbos-store-pending|/Users/Shared/arbos-tools|/Users/ec2-user/arbos-parity|/Users/ec2-user/arbos-ios|/Users/ec2-user/arbos-refresh|/Users/arbosgui/actions-runner)'
+
 say "start free=$(free_gb)G"
+
+# Per-worker checkouts under /Users/ec2-user/arbos-* (one per Cloud Agent rig: arbos-login, arbos-mv, …; ~90 GB
+# on 2026-10-23). Lock-aware prune, the policy agreed on 2026-10-23 01:30: a checkout no process has open
+# (pgrep -f on its path) and with no file touched for 24 h goes whole; one idle 2–24 h loses only its build
+# artifacts (target/, build/, the Xcode build dir, *-dd-* derived-data dirs). The gate's own trees and the
+# protected list above are never touched; neither is anything touched in the last 2 h.
+WORKER_KEEP='^(arbos-gate|arbos-rust-gate|arbos-rust-gate-target|arbos-rust-gate-runs|arbos-gate-dd-Release|arbos-gate-dd-Debug|arbos-parity|arbos-ios|arbos-refresh)$'
+for d in /Users/ec2-user/arbos-*; do
+  [ -d "$d" ] || continue
+  b=$(basename "$d")
+  echo "$b" | grep -qE "$WORKER_KEEP" && continue
+  pgrep -f "$d" >/dev/null 2>&1 && continue
+  gb=$(du -xsg "$d" 2>/dev/null | cut -f1)
+  if [ -z "$(find "$d" -type f -mtime -1 -print -quit 2>/dev/null)" ]; then
+    rm -rf "$d" && say "removed worker checkout $b (${gb:-?} GB, idle > 24 h)"
+    continue
+  fi
+  [ -z "$(find "$d" -type f -mmin -120 -print -quit 2>/dev/null)" ] || continue
+  case "$b" in
+    *-dd-*) rm -rf "$d" && say "removed worker derived data $b (${gb:-?} GB, idle > 2 h)"; continue ;;
+  esac
+  for a in target build apps/ios/Arbos/build; do
+    [ -d "$d/$a" ] && rm -rf "$d/$a" && say "removed $b/$a (idle > 2 h)"
+  done
+done
 
 # A build in flight owns its target dir: skip cargo targets while cargo/rustc/xcodebuild run.
 if pgrep -qx cargo || pgrep -qx rustc; then

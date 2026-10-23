@@ -308,7 +308,16 @@ pub async fn egress(
             .iter()
             .any(|k| k.starts_with(&format!("{}/", s.env)))
         {
-            secrets::after_use(&state, s, &project_id, &host, "header", chat_id, allowed);
+            secrets::after_use(
+                &state,
+                s,
+                &project_id,
+                &host,
+                "header",
+                chat_id,
+                asked_by,
+                allowed,
+            );
         }
     }
     for (r, allowed) in &op_plan.used {

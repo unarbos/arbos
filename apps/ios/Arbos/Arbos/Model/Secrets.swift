@@ -14,17 +14,24 @@ private enum SecretsDto {
     }
 }
 
-/// A person the owner authorized to direct agents to use this secret (`secret.directors[]`).
+/// A person on the secret's People list (`secret.people[]`, spec §7.7): they may ask any agent
+/// with access to use it, with no card to the owner.
 struct SecretDirector: Identifiable, Equatable {
     var id: String { userId }
     var userId: String
     var handle: String
     var name: String?
     var avatarUrl: String?
-    /// Constraints the agent must honour when this person directs use
+    /// Constraints the agent must honour when this person asks
     /// (e.g. "only 1k usd of credit usage per day").
     var note: String
     var createdAt: Int64
+    /// The row's switch.
+    var enabled: Bool
+    var disabledAt: Int64?
+    /// `all` or `chat`.
+    var scopeKind: String
+    var lastAskedAt: Int64?
 
     var displayName: String {
         if let name, !name.isEmpty { return name }
@@ -38,6 +45,10 @@ struct SecretDirector: Identifiable, Equatable {
         self.avatarUrl = dto.avatar_url
         self.note = dto.note
         self.createdAt = dto.created_at
+        self.enabled = dto.enabled ?? true
+        self.disabledAt = dto.disabled_at
+        self.scopeKind = dto.scope?.kind ?? "all"
+        self.lastAskedAt = dto.last_asked_at
     }
 
     static func parse(_ v: Any?) -> SecretDirector? {
@@ -98,8 +109,10 @@ struct SecretItem: Identifiable, Equatable {
     var username: String?
     var vaultName: String
     var agents: [SecretAgentAccess]
-    /// People (besides the owner) who may direct an agent to use this secret.
+    /// The People list: who (besides the owner) may ask an agent to use this secret.
     var directors: [SecretDirector]
+    /// `refuse | card`: what a non-listed person's ask does (spec §7.7).
+    var othersAsk: String
 
     var kindLabel: String {
         switch kind {
@@ -127,7 +140,9 @@ struct SecretItem: Identifiable, Equatable {
         self.username = dto.username
         self.vaultName = dto.vault_name
         self.agents = dto.agents.map(SecretAgentAccess.init(dto:))
-        self.directors = dto.directors.map(SecretDirector.init(dto:))
+        let people = dto.people ?? []
+        self.directors = (people.isEmpty ? dto.directors : people).map(SecretDirector.init(dto:))
+        self.othersAsk = dto.others_ask ?? "refuse"
     }
 
     /// Reduced project-page secret (`ProjectSecretSummaryDto`) with empty agents/directors.
@@ -148,6 +163,7 @@ struct SecretItem: Identifiable, Equatable {
         self.vaultName = summary.vault_name
         self.agents = []
         self.directors = []
+        self.othersAsk = "refuse"
     }
 
     static func parse(_ v: Any?) -> SecretItem? {
@@ -169,6 +185,10 @@ struct SecretActivity: Identifiable, Equatable {
     var by: String
     var reason: String?
     var decision: String?
+    /// The person who asked the agent (handle), when it was not the owner (spec §7.7).
+    var askedByHandle: String?
+    /// A People row's handle on `person_on` / `person_off`.
+    var personHandle: String?
 
     /// Typed fields from `SecretActivityDto`; `reason` / `decision` from raw `detail`
     /// (`#[typeshare(skip)]` on the Dto).
@@ -185,6 +205,14 @@ struct SecretActivity: Identifiable, Equatable {
         let detail = raw["detail"] as? [String: Any]
         self.reason = DocJSON.str(detail?["reason"])
         self.decision = DocJSON.str(detail?["decision"])
+        self.askedByHandle = DocJSON.str(detail?["asked_by_handle"])
+        self.personHandle = DocJSON.str(detail?["handle"])
+    }
+
+    /// "asked by @sam · 2 min ago" when a person other than the owner asked; else the time.
+    var whenLine: String {
+        if let h = askedByHandle, !h.isEmpty { return "asked by @\(h) · \(SecretsText.ago(at))" }
+        return SecretsText.ago(at)
     }
 
     static func parse(_ v: Any?) -> SecretActivity? {
@@ -224,8 +252,8 @@ struct SecretActivity: Identifiable, Equatable {
         case "env_on": return "You put the real value of \(name) in the environment"
         case "env_off": return "You took the real value of \(name) out of the environment"
         case "injected": return "\(name) went into \(agent)'s environment"
-        case "director_on": return "You let someone direct agents to use \(name)"
-        case "director_off": return "You removed a director from \(name)"
+        case "person_on", "director_on": return "You let \(personHandle.map { "@\($0)" } ?? "someone") ask for \(name)"
+        case "person_off", "director_off": return "You turned \(name) off for \(personHandle.map { "@\($0)" } ?? "someone")"
         default: return "\(action.replacingOccurrences(of: "_", with: " ")) · \(name)"
         }
     }
@@ -242,8 +270,17 @@ struct SecretRequestItem: Identifiable, Equatable {
     var host: String?
     var status: String
     var createdAt: Int64
+    /// The person who asked the agent, when it was not the owner (spec §7.7).
+    var askedByHandle: String?
+    var askedByName: String?
 
     var isPending: Bool { status == "pending" }
+
+    /// `@sam` for a request a person made through the agent; nil for the owner's own.
+    var forWhom: String? {
+        guard let h = askedByHandle, !h.isEmpty else { return nil }
+        return "@\(h)"
+    }
 
     init(dto: SecretRequestDto) {
         self.id = dto.id
@@ -255,6 +292,8 @@ struct SecretRequestItem: Identifiable, Equatable {
         self.host = dto.host
         self.status = dto.status
         self.createdAt = dto.created_at
+        self.askedByHandle = dto.asked_by_handle
+        self.askedByName = dto.asked_by_name
     }
 
     static func parse(_ v: Any?) -> SecretRequestItem? {
@@ -466,6 +505,13 @@ enum SecretsText {
         if !enabled, let d = disabledAt { return "turned off \(shortDate(d))" }
         guard let t = lastUsedAt else { return "never used" }
         return "used \(ago(t))"
+    }
+
+    /// "asked 2 min ago" · "never asked" · "turned off Oct 12" for a People row.
+    static func asked(lastAskedAt: Int64?, disabledAt: Int64? = nil, enabled: Bool = true) -> String {
+        if !enabled, let d = disabledAt { return "turned off \(shortDate(d))" }
+        guard let t = lastAskedAt else { return "never asked" }
+        return "asked \(ago(t))"
     }
 
     static func ago(_ ms: Int64) -> String {

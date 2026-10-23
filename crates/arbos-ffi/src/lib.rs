@@ -87,6 +87,10 @@ pub enum RoomAction {
         poll_machine: bool,
     },
     LinkLive,
+    /// Export the doc's updates since `relay_vv` and hand them to `on_heal` (history heal).
+    HealCheck {
+        relay_vv: Vec<u8>,
+    },
     ScheduleReconnect {
         after_ms: u64,
     },
@@ -143,6 +147,7 @@ impl From<ClientAction> for RoomAction {
                 poll_machine,
             },
             ClientAction::LinkLive => Self::LinkLive,
+            ClientAction::HealCheck { relay_vv } => Self::HealCheck { relay_vv },
             ClientAction::ScheduleReconnect { after } => Self::ScheduleReconnect {
                 after_ms: after.as_millis() as u64,
             },
@@ -345,6 +350,11 @@ impl RoomSession {
 
     pub fn on_local_commit(&self, bytes: Vec<u8>) {
         self.lock().on_local_commit(bytes);
+    }
+
+    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked (empty = none).
+    pub fn on_heal(&self, bytes: Vec<u8>) {
+        self.lock().on_heal(bytes);
     }
 
     pub fn on_tick(&self, now_ms: u64) {
@@ -596,6 +606,17 @@ impl ChatDoc {
     pub fn export_updates_since(&self, from_vv: Vec<u8>) -> Vec<u8> {
         let vv = decode_vv(&from_vv).unwrap_or_default();
         let out = self.lock_doc().export_updates_since(&vv);
+        self.flush_pending();
+        out
+    }
+
+    /// Ops this replica holds beyond an encoded version vector (the relay's `ROWS_DONE`
+    /// payload); empty when none — the history-heal payload.
+    pub fn updates_beyond(&self, theirs_vv: Vec<u8>) -> Vec<u8> {
+        let Some(vv) = decode_vv(&theirs_vv) else {
+            return Vec::new();
+        };
+        let out = self.lock_doc().updates_beyond(&vv);
         self.flush_pending();
         out
     }

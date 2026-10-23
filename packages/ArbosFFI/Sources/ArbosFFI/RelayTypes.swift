@@ -849,8 +849,12 @@ public struct SecretRequestDto: Codable {
 	public let created_at: Int64
 	public let decided_at: Int64?
 	public let expires_at: Int64
+	/// The person who asked the agent, when it was not the owner (spec §7.7).
+	public let asked_by: String?
+	public let asked_by_handle: String?
+	public let asked_by_name: String?
 
-	public init(id: String, project_id: String, project_name: String?, chat_id: String, target: SecretRequestTargetDto, name: String, purpose: String, use: String, host: String?, status: String, decided_by: String?, created_at: Int64, decided_at: Int64?, expires_at: Int64) {
+	public init(id: String, project_id: String, project_name: String?, chat_id: String, target: SecretRequestTargetDto, name: String, purpose: String, use: String, host: String?, status: String, decided_by: String?, created_at: Int64, decided_at: Int64?, expires_at: Int64, asked_by: String?, asked_by_handle: String?, asked_by_name: String?) {
 		self.id = id
 		self.project_id = project_id
 		self.project_name = project_name
@@ -865,6 +869,9 @@ public struct SecretRequestDto: Codable {
 		self.created_at = created_at
 		self.decided_at = decided_at
 		self.expires_at = expires_at
+		self.asked_by = asked_by
+		self.asked_by_handle = asked_by_handle
+		self.asked_by_name = asked_by_name
 	}
 }
 
@@ -1936,7 +1943,9 @@ public struct SecretActivityPageDto: Codable {
 	}
 }
 
-/// Director card on `secret.directors[]`.
+/// One person on a secret's People list (`secret.people[]`; `secret.directors[]` is the same
+/// list under its #1041 name, kept one release). The new fields are optional so a client built
+/// after this change still reads a relay built before it.
 public struct SecretDirectorDto: Codable {
 	public let user_id: String
 	public let handle: String
@@ -1944,14 +1953,27 @@ public struct SecretDirectorDto: Codable {
 	public let avatar_url: String?
 	public let note: String
 	public let created_at: Int64
+	/// Row switch (absent = on).
+	public let enabled: Bool?
+	public let disabled_at: Int64?
+	/// `all` or `chat` (absent = all).
+	public let scope: SecretAccessScopeDto?
+	public let last_asked_at: Int64?
+	/// `settings | card:<request id>` (absent = settings).
+	public let created_from: String?
 
-	public init(user_id: String, handle: String, name: String?, avatar_url: String?, note: String, created_at: Int64) {
+	public init(user_id: String, handle: String, name: String?, avatar_url: String?, note: String, created_at: Int64, enabled: Bool?, disabled_at: Int64?, scope: SecretAccessScopeDto?, last_asked_at: Int64?, created_from: String?) {
 		self.user_id = user_id
 		self.handle = handle
 		self.name = name
 		self.avatar_url = avatar_url
 		self.note = note
 		self.created_at = created_at
+		self.enabled = enabled
+		self.disabled_at = disabled_at
+		self.scope = scope
+		self.last_asked_at = last_asked_at
+		self.created_from = created_from
 	}
 }
 
@@ -1975,9 +1997,14 @@ public struct SecretDto: Codable {
 	public let vault_name: String
 	public let ref: String
 	public let agents: [SecretAccessDto]
+	/// Same list as `people`; the #1041 name, kept one release.
 	public let directors: [SecretDirectorDto]
+	/// People who may ask an agent with access to use this secret (spec §7.7).
+	public let people: [SecretDirectorDto]?
+	/// `refuse | card`: what a non-listed person's ask does (absent = refuse).
+	public let others_ask: String?
 
-	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto]) {
+	public init(id: String, name: String, env: String, kind: String, note: String, hosts: [String], ask_every_time: Bool, inject_env: Bool, expires_at: Int64?, version: Int64, created_at: Int64, updated_at: Int64, last_used_at: Int64?, username: String?, vault_name: String, ref: String, agents: [SecretAccessDto], directors: [SecretDirectorDto], people: [SecretDirectorDto]?, others_ask: String?) {
 		self.id = id
 		self.name = name
 		self.env = env
@@ -1996,6 +2023,8 @@ public struct SecretDto: Codable {
 		self.ref = ref
 		self.agents = agents
 		self.directors = directors
+		self.people = people
+		self.others_ask = others_ask
 	}
 }
 

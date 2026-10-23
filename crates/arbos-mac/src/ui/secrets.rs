@@ -12,8 +12,8 @@ use gpui::{
 
 use crate::app::AppState;
 use crate::model::{
-    ago, secret_env_name, secret_usage, ConnectedVault, Id, NewSecret, ProjectSecrets, Secret,
-    SecretActivity, SecretRequest, SecretsView,
+    ago, person_usage, secret_env_name, secret_usage, ConnectedVault, Id, NewSecret,
+    ProjectSecrets, Secret, SecretActivity, SecretRequest, SecretsView,
 };
 use crate::ui::avatars;
 use crate::ui::composer::ComposerInput;
@@ -663,7 +663,7 @@ impl SecretsPanel {
                         div()
                             .text_size(px(TEXT_TINY))
                             .text_color(theme.text_muted)
-                            .child(ago(a.at)),
+                            .child(a.when_line()),
                     )
             })
             .collect()
@@ -674,20 +674,30 @@ impl SecretsPanel {
             .project_name
             .clone()
             .unwrap_or_else(|| "this agent".to_string());
-        let title = match &r.host {
-            Some(h) => format!("{} at {h}", r.name),
-            None => r.name.clone(),
+        let for_whom = r.for_whom();
+        let title = match (&r.host, &for_whom) {
+            (Some(h), Some(w)) => format!("{} for {w} at {h}", r.name),
+            (Some(h), None) => format!("{} at {h}", r.name),
+            (None, Some(w)) => format!("{} for {w}", r.name),
+            (None, None) => r.name.clone(),
         };
         let mut sub: Vec<String> = vec![agent.clone()];
+        if let Some(n) = r.asked_by_name.as_ref().filter(|n| !n.is_empty()) {
+            sub.push(format!("{n} asked"));
+        }
         if !r.purpose.is_empty() {
             sub.push(r.purpose.clone());
         }
         sub.push(ago(r.created_at));
+        let always = match &for_whom {
+            Some(w) => format!("Always allow {w}"),
+            None => format!("Always allow {agent}"),
+        };
         let mut answers = div().flex().flex_wrap().gap(px(6.0)).pt(px(4.0));
         for (choice, label, danger) in [
             ("once", "Allow once".to_string(), false),
             ("chat", "Allow for this chat".to_string(), false),
-            ("always", format!("Always allow {agent}"), false),
+            ("always", always, false),
             ("deny", "Deny".to_string(), true),
         ] {
             let rid = r.id.clone();
@@ -1254,6 +1264,170 @@ impl SecretsPanel {
             );
         }
         body = body.child(Self::section("Agents", g, None, theme));
+
+        // People (spec §7.7): who may ask an agent with access to use it — a mirror of Agents.
+        let mut g = Self::group(theme);
+        for d in &s.directors {
+            let mut sub: Vec<String> = Vec::new();
+            if !d.handle.is_empty() {
+                sub.push(format!("@{}", d.handle));
+            }
+            if !d.note.is_empty() {
+                sub.push(d.note.clone());
+            }
+            if d.scope.kind == "chat" {
+                sub.push("this chat only".into());
+            }
+            sub.push(person_usage(d.last_asked_at, d.disabled_at, d.enabled));
+            // Shift-click / right-click arms removal; the next click takes them off the list.
+            let armed = self.confirm.as_deref() == Some(&format!("person:{}", d.user_id));
+            if armed {
+                sub = vec!["Click again to remove from the list".into()];
+            }
+            let (sid_p, uid_p, on) = (sid.clone(), d.user_id.clone(), d.enabled);
+            let uid_r = d.user_id.clone();
+            g = g.child(
+                div()
+                    .id(format!("person-{}", d.user_id))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .min_h(px(52.0))
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .relative()
+                    .child(kit::hairline_below(16.0, theme))
+                    .cursor_pointer()
+                    .hover(|st| st.bg(theme.surface_2))
+                    .child(avatars::element(
+                        &d.user_id,
+                        &d.display_name(),
+                        None,
+                        30.0,
+                        theme,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_BODY))
+                                    .text_color(theme.text)
+                                    .child(d.display_name()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(TEXT_TINY))
+                                    .text_color(theme.text_muted)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(sub.join(" · ")),
+                            ),
+                    )
+                    .child(glass::switch(on, theme))
+                    .on_mouse_down(gpui::MouseButton::Right, {
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.confirm = Some(format!("person:{uid_r}"));
+                            cx.notify();
+                        })
+                    })
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        let (id, uid) = (sid_p.clone(), uid_p.clone());
+                        let key = format!("person:{uid}");
+                        if this.confirm.as_deref() == Some(&key) {
+                            this.confirm = None;
+                            this.state
+                                .update(cx, |st, cx| st.secret_person_remove(id, uid, cx));
+                            return;
+                        }
+                        if event.modifiers().shift || event.modifiers().control {
+                            this.confirm = Some(key);
+                            cx.notify();
+                            return;
+                        }
+                        this.state
+                            .update(cx, |st, cx| st.secret_person(id, uid, !on, None, cx));
+                    })),
+            );
+        }
+        if s.directors.is_empty() {
+            g = g.child(Self::footnote("Only you right now.", theme).pb(px(8.0)));
+        }
+        let sid_people = sid.clone();
+        g = g.child(
+            Self::add_row("secret-give-person", "Give a person access…", theme).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    let id = sid_people.clone();
+                    this.state
+                        .update(cx, |st, cx| st.open_secret_people_picker(id, cx));
+                }),
+            ),
+        );
+        body = body.child(Self::section(
+            "People",
+            g,
+            Some(format!(
+                "People here can ask any agent that has access to use {}, with no card to you. They never see the value. What they spend is yours.",
+                s.env
+            )),
+            theme,
+        ));
+        // Others who ask: Refuse (default) | Ask me.
+        let card_mode = s.others_ask == "card";
+        let mut seg = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded_full()
+            .bg(theme.field);
+        for (value, label, on) in [
+            ("refuse", "Refuse", !card_mode),
+            ("card", "Ask me", card_mode),
+        ] {
+            let sid_o = sid.clone();
+            seg = seg.child(
+                glass::segment(format!("others-ask-{value}"), label, on, theme)
+                    .h(px(24.0))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let id = sid_o.clone();
+                        this.state.update(cx, |st, cx| {
+                            st.secret_patch(id, serde_json::json!({ "others_ask": value }), cx)
+                        });
+                    })),
+            );
+        }
+        let others = Self::group(theme).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .min_h(px(52.0))
+                .px(px(16.0))
+                .py(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(TEXT_BODY))
+                        .text_color(theme.text)
+                        .child("Others who ask"),
+                )
+                .child(seg),
+        );
+        body = body.child(div().flex().flex_col().child(others).child(Self::footnote(
+            if card_mode {
+                "Ask me: anyone else who asks gets you a card first."
+            } else {
+                "Refuse: anyone else who asks is told no."
+            },
+            theme,
+        )));
 
         // Activity for this secret (from the overview; the relay keeps 30 days).
         let mut g = Self::group(theme);

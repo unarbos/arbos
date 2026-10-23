@@ -287,11 +287,30 @@ pub async fn machine_debug(
         },
         None => json!({ "reachable": false, "error": "no box for this user" }),
     };
+    // Room health (#1470): every people chat the account is in, divergent ones first.
+    let mut rooms: Vec<Value> = Vec::new();
+    for cm in state
+        .db
+        .chats_of_member(&format!("user:{user_id}"))
+        .unwrap_or_default()
+    {
+        let room = people::room_of(&cm.chat.id);
+        let mut h = crate::room_health::health_of(&state, &cm.chat.id, &room).await;
+        if let Some(o) = h.as_object_mut() {
+            o.remove("rule");
+            o.remove("replicas");
+            o.insert("title".into(), json!(cm.chat.title));
+        }
+        rooms.push(h);
+    }
+    rooms.sort_by_key(|r| !r["divergent"].as_bool().unwrap_or(false));
     Json(json!({
         "user_id": user_id,
         "relay": relay_view,
         "timings": timings,
         "box": on_box,
+        "rooms": rooms,
+        "rooms_divergent": rooms.iter().filter(|r| r["divergent"].as_bool().unwrap_or(false)).count(),
     }))
     .into_response()
 }

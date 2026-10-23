@@ -444,6 +444,7 @@ impl SyncHub {
         // (its deps are missing here): a snapshot of such a doc must never become the relay's
         // checkpoint — the relay deletes the rows a checkpoint covers (Arbonites, 2026-10-23).
         let mut imports_clean = true;
+        let mut healed = false;
 
         loop {
             tokio::select! {
@@ -509,6 +510,21 @@ impl SyncHub {
                         }
                         FrameType::RowsDone => {
                             let head = f.header.get("headSeq").and_then(|v| v.as_i64()).unwrap_or(0);
+                            // History heal (#1518 follow-up): the payload is the relay's version
+                            // vector for the room. Ops this replica holds beyond it were lost on
+                            // the relay (a stale checkpoint); push them back once per session so
+                            // every other replica's parked rows can apply.
+                            if !healed && !f.payload.is_empty() {
+                                if let Some(relay_vv) = decode_vv(&f.payload) {
+                                    let missing = host.lock().await.doc.updates_beyond(&relay_vv);
+                                    if !missing.is_empty() && missing.len() <= wire::ROW_MAX {
+                                        healed = true;
+                                        tracing::info!(room = %room, bytes = missing.len(), "history heal: pushing ops the relay lacked");
+                                        let f = Frame::new(FrameType::Push, json!({ "batchId": ulid(), "heal": true }), Bytes::from(missing));
+                                        sink.send(Message::Binary(f.encode())).await?;
+                                    }
+                                }
+                            }
                             let (covered, cmds) = {
                                 let mut h = host.lock().await;
                                 h.caught_up = true;

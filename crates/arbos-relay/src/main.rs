@@ -44,6 +44,7 @@ mod people;
 mod proxy;
 mod releases;
 mod restart;
+mod room_health;
 mod rooms;
 mod routines;
 mod secrets;
@@ -624,6 +625,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/me/relay-errors", get(debug_api::me_relay_errors))
         .route("/machine/debug", get(debug_api::machine_debug))
         .route("/chats/{id}/reads", get(debug_api::chat_reads))
+        .route("/chats/{id}/health", get(room_health::chat_health))
         .route(
             "/projects/{id}/chats",
             get(api::list_chats).post(api::create_chat),
@@ -830,6 +832,12 @@ async fn main() -> anyhow::Result<()> {
             "/secrets/{id}/access/{project_id}",
             put(secrets::put_access).delete(secrets::delete_access),
         )
+        .route("/secrets/{id}/people", post(secrets::post_director))
+        .route(
+            "/secrets/{id}/people/{director_user_id}",
+            put(secrets::put_director).delete(secrets::delete_director),
+        )
+        // #1041 names, kept one release for clients built before #1442.
         .route("/secrets/{id}/directors", post(secrets::post_director))
         .route(
             "/secrets/{id}/directors/{director_user_id}",

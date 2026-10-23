@@ -12,7 +12,7 @@
 //! agent should reply (or stay quiet) so the right agent continues the thread — or none do. Each
 //! human message is labelled with the author's display name (falling back to bare handle) and role
 //! (`owner` | `guest`) in the prompt. Guests may direct ordinary work; they may not use the
-//! owner's secrets unless the owner added them under Who can direct for that secret. Agents
+//! owner's secrets unless the owner put them on that secret's People list. Agents
 //! address people by display name, never `@handle`. The owner's credits pay; audit lines carry
 //! `asked_by`.
 
@@ -607,6 +607,15 @@ impl PeopleState {
     pub fn set_current(&self, chat_id: Option<&str>) {
         *self.current.lock().expect("people") = chat_id.map(str::to_owned);
     }
+
+    /// Test-only: seed a people-chat snapshot (e.g. rename + @handle refresh).
+    #[cfg(test)]
+    pub(crate) fn test_insert(&self, chat_id: &str, info: PeopleChatInfo) {
+        self.chats
+            .lock()
+            .expect("people")
+            .insert(chat_id.to_owned(), info);
+    }
 }
 
 /// Is this human message for the agent `project_id` with the given slug and policy?
@@ -691,6 +700,31 @@ fn recent_people_context(messages: &[MessageView], up_to: &str, max: usize) -> V
 }
 
 impl Agent {
+    /// After a rename (#1481): patch every cached people-chat row so `@newslug` still wakes this
+    /// agent and the prelude / reply attribution speak the live name — without waiting for the
+    /// next `/box/projects` listing.
+    pub fn refresh_people_identity_after_rename(&self) {
+        let me = format!("agent:{}", self.cfg.project_id);
+        let handle = self.identity.handle();
+        let name = self.name();
+        let mut chats = self.people.chats.lock().expect("people");
+        for info in chats.values_mut() {
+            info.slug = handle.clone();
+            for m in &mut info.members {
+                if m["member"].as_str() != Some(me.as_str()) {
+                    continue;
+                }
+                m["handle"] = json!(handle.clone());
+                if let Some(obj) = m.as_object_mut() {
+                    obj.insert("name".into(), json!(name.clone()));
+                }
+                if m.get("project").map(|p| p.is_object()).unwrap_or(false) {
+                    m["project"]["name"] = json!(name.clone());
+                }
+            }
+        }
+    }
+
     /// The relay's list of people chats this agent is in (`people_chats` of `/box/projects`, or a
     /// single chat after an `people_agent_added` push): remember members and settings, open the
     /// rooms, and leave chats that are gone.
@@ -946,10 +980,19 @@ impl Agent {
         if !every && people_ping_not_for_agents(&msg, info) {
             return (false, "ping for a person, not for agents");
         }
+        // Prefer the live identity handle over a stale people-chat snapshot (#1481).
+        let slug = {
+            let live = self.identity.handle();
+            if live.is_empty() {
+                info.slug.clone()
+            } else {
+                live
+            }
+        };
         if addressed(
             &msg,
             &self.cfg.project_id,
-            &info.slug,
+            &slug,
             info.agents() == 1,
             every,
             replied_to_mine,
@@ -1177,14 +1220,23 @@ impl Agent {
         };
         let owner_spoken = info.spoken_name_of(&info.owner_user);
         let secrets_rule = if role == "guest" {
-            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are listed under Who can direct for that secret; if a director note sets a limit, honour it."
+            " Do not use the owner's secrets (egress, browser fill, or real values in the environment) for this person unless they are on that secret's People list (secrets_list shows it); when a secret's others_ask is card, ask through secrets_request and wait for the owner's card instead; if a person's note sets a limit, honour it."
         } else {
             ""
         };
+        // Live identity handle — not the join-time snapshot — so a mid-group rename does not
+        // tell the model it is still @oldname (#1481 / #1431).
+        let my_slug = {
+            let live = self.identity.handle();
+            if live.is_empty() {
+                info.slug.clone()
+            } else {
+                live
+            }
+        };
         let mut prelude = format!(
-            "[People chat with {}. You are @{} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.{secrets_rule}]\n",
+            "[People chat with {}. You are @{my_slug} (the agent of {owner_spoken}'s Project \"{}\"){}.{} This message is from {spoken} ({role}); treat it as a request from another person in the conversation and address them by their display name ({spoken}), never as an @handle. Your reply is read by everyone in the chat.{secrets_rule}]\n",
             people.join(", "),
-            info.slug,
             self.cfg.project_id,
             others_clause,
             visibility,
@@ -1238,7 +1290,7 @@ impl Agent {
         );
         self.people.set_current(Some(chat_id));
         Some(format!(
-            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner added them under Who can direct for that secret, and honour any director note (for example a daily credit limit).]\n\n"
+            "[This message is from {spoken}, a person the owner of this Project invited to work in it with you. Address them by their display name ({spoken}), never as an @handle. They may direct ordinary work here; do not use the owner's secrets for them unless the owner put them on that secret's People list (or, when its others_ask is card, the owner answered your secrets_request card), and honour any note on their row (for example a daily credit limit).]\n\n"
         ))
     }
 
@@ -1372,17 +1424,31 @@ impl Agent {
         let avatar_color = mine
             .and_then(|m| m["avatar_color"].as_str())
             .map(str::to_owned);
-        // The display name rides on the row so clients can name the agent without a member
-        // lookup ("Lium didn't answer. Ask again.", feedback agent-name-no-answer-2026-10-22).
-        let name = mine
-            .and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| self.name());
+        // Live identity first (#1481): a mid-group rename must not attribute the reply under
+        // the join-time name/handle. Fall back to the member row only when identity is empty.
+        let name = {
+            let live = self.name();
+            if live.trim().is_empty() {
+                mine.and_then(|m| m["project"]["name"].as_str().or_else(|| m["name"].as_str()))
+                    .map(str::trim)
+                    .filter(|n| !n.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            } else {
+                live
+            }
+        };
+        let handle = {
+            let live = self.identity.handle();
+            if live.is_empty() {
+                info.slug.clone()
+            } else {
+                live
+            }
+        };
         let fields = vec![
             ("sender", json!(format!("agent:{}", self.cfg.project_id))),
-            ("senderHandle", json!(info.slug)),
+            ("senderHandle", json!(handle)),
             ("senderName", json!(name)),
             ("senderAvatar", json!(avatar)),
             ("senderAvatarColor", json!(avatar_color)),

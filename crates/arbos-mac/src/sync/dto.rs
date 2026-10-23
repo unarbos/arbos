@@ -313,6 +313,17 @@ impl From<&SecretDirectorDto> for SecretDirector {
             avatar_url: d.avatar_url.clone(),
             note: d.note.clone(),
             created_at: d.created_at,
+            enabled: d.enabled.unwrap_or(true),
+            disabled_at: d.disabled_at,
+            scope: d
+                .scope
+                .as_ref()
+                .map(|s| SecretScope {
+                    kind: s.kind.clone(),
+                    chat_id: s.chat_id.clone(),
+                })
+                .unwrap_or_default(),
+            last_asked_at: d.last_asked_at,
         }
     }
 }
@@ -335,7 +346,12 @@ impl From<&SecretDto> for Secret {
             username: d.username.clone(),
             vault_name: d.vault_name.clone(),
             agents: d.agents.iter().map(SecretAgent::from).collect(),
-            directors: d.directors.iter().map(SecretDirector::from).collect(),
+            directors: if d.people.is_empty() {
+                d.directors.iter().map(SecretDirector::from).collect()
+            } else {
+                d.people.iter().map(SecretDirector::from).collect()
+            },
+            others_ask: d.others_ask.clone().unwrap_or_else(|| "refuse".into()),
         }
     }
 }
@@ -354,6 +370,8 @@ impl From<&SecretRequestDto> for SecretRequest {
             status: r.status.clone(),
             created_at: r.created_at,
             decided_at: r.decided_at,
+            asked_by_handle: r.asked_by_handle.clone(),
+            asked_by_name: r.asked_by_name.clone(),
         }
     }
 }
@@ -410,6 +428,7 @@ fn secret_from_summary(s: &ProjectSecretSummaryDto) -> Secret {
         vault_name: s.vault_name.clone(),
         agents: Vec::new(),
         directors: Vec::new(),
+        others_ask: "refuse".into(),
     }
 }
 
@@ -1461,6 +1480,18 @@ mod tests {
         assert_eq!(s.agents.len(), 1);
         assert_eq!(s.directors.len(), 1);
         assert_eq!(s.directors[0].handle, "user502");
+        assert!(s.directors[0].enabled);
+        assert_eq!(s.directors[0].last_asked_at, Some(1_700_000_003_000));
+        assert_eq!(s.others_ask, "refuse");
+        // A relay from before #1442 sends only `directors[]` and no switch: still on, still refuse.
+        let mut old = secret.clone();
+        old.people.clear();
+        old.others_ask = None;
+        old.directors[0].enabled = None;
+        let s_old = Secret::from(&old);
+        assert_eq!(s_old.directors.len(), 1);
+        assert!(s_old.directors[0].enabled);
+        assert_eq!(s_old.others_ask, "refuse");
 
         let login: SecretDto = load_json("secret_login_json.json");
         let s = Secret::from(&login);

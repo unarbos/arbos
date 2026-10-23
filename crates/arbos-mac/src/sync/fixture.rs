@@ -34,8 +34,8 @@ use crate::model::{
     ChatKind, ChoiceOption, Connector, ConnectorAction, ConnectorProvider, ConnectorStatus,
     ConnectorsView, Effort, FieldKind, FormField, Id, Link, LocalDevice, LocalView, Message,
     MessageStatus, Part, Project, QuestionState, Role, Routine, RoutineRun, RoutineRunStatus,
-    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretRequest, SecretScope, SecretsView,
-    Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
+    RoutineTrigger, Secret, SecretActivity, SecretAgent, SecretDirector, SecretRequest,
+    SecretScope, SecretsView, Skill, StatusKind, ToolCall, ToolStatus, TurnKind, Widget,
 };
 
 pub const STREAM_FRAME_MS: u64 = arbos_core::STREAM_COMMIT_MS;
@@ -1050,7 +1050,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
             {
                 let mut projects = shared.projects.lock().unwrap();
                 if let Some(p) = projects.iter_mut().find(|p| p.id == project_id) {
-                    p.name = name;
+                    p.name = name.clone();
+                }
+                // Keep people-group @mention handles in sync with the new name.
+                let handle = Project::mention_slug(&name);
+                for space in projects.iter_mut().filter(|p| p.is_people()) {
+                    if let Some(a) = space.agents.iter_mut().find(|a| a.project_id == project_id) {
+                        a.name = name.clone();
+                        a.handle = handle.clone();
+                    }
                 }
             }
             emit_projects(shared);
@@ -1360,6 +1368,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                     vault_name: "Arbos".into(),
                     agents,
                     directors: Vec::new(),
+                    others_ask: "refuse".into(),
                 });
                 view.secrets.sort_by(|a, b| a.env.cmp(&b.env));
             }
@@ -1434,6 +1443,51 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             note.as_deref().unwrap_or(""),
                         )),
                     }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretPerson {
+            id,
+            user_id,
+            enabled,
+            note,
+        } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    if let Some(d) = s.directors.iter_mut().find(|d| d.user_id == user_id) {
+                        d.enabled = enabled;
+                        d.disabled_at = (!enabled).then(|| now_ms() as i64);
+                        if let Some(n) = note {
+                            d.note = n;
+                        }
+                    }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretPeopleAdd { id, handles } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    for h in handles {
+                        if s.directors.iter().any(|d| d.handle == h) {
+                            continue;
+                        }
+                        if let Some(p) = directory().into_iter().find(|p| p.handle == h) {
+                            s.directors.push(fixture_person(&p, true, "", None));
+                        }
+                    }
+                }
+            }
+            emit_secrets(shared);
+        }
+        ClientCommand::SecretPersonRemove { id, user_id } => {
+            {
+                let mut view = shared.secrets.lock().unwrap();
+                if let Some(s) = view.secrets.iter_mut().find(|s| s.id == id) {
+                    s.directors.retain(|d| d.user_id != user_id);
                 }
             }
             emit_secrets(shared);
@@ -1844,9 +1898,30 @@ fn fixture_agent(project_id: &str, name: &str, enabled: bool, note: &str) -> Sec
     }
 }
 
+/// One People row for the fixture (spec §7.7).
+fn fixture_person(
+    p: &Person,
+    enabled: bool,
+    note: &str,
+    last_asked_ago_ms: Option<i64>,
+) -> SecretDirector {
+    SecretDirector {
+        user_id: p.id.clone(),
+        handle: p.handle.clone(),
+        name: p.name.clone(),
+        avatar_url: Some(p.avatar_url.clone()),
+        note: note.into(),
+        created_at: now_ms() as i64 - 9 * 86_400_000,
+        enabled,
+        disabled_at: (!enabled).then(|| now_ms() as i64 - 2 * 86_400_000),
+        scope: SecretScope::default(),
+        last_asked_at: last_asked_ago_ms.map(|ago| now_ms() as i64 - ago),
+    }
+}
+
 /// Settings → Secrets demo (D83): a Stripe key for Research and Comms, a Mailgun key for Comms,
 /// a GitHub login for Website, one pending request from Comms, recent activity. No value exists
-/// anywhere in the fixture.
+/// anywhere in the fixture. STRIPE_KEY has two people on its list (Sam on, Samir off).
 fn seed_secrets() -> SecretsView {
     let now = now_ms() as i64;
     let secret = |name: &str,
@@ -1871,6 +1946,7 @@ fn seed_secrets() -> SecretsView {
         vault_name: "Arbos".into(),
         agents,
         directors: Vec::new(),
+        others_ask: "refuse".into(),
     };
     let mut stripe = secret(
         "STRIPE_KEY",
@@ -1889,8 +1965,14 @@ fn seed_secrets() -> SecretsView {
         ],
         12,
     );
-    // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment.
+    // The iPhone fixture's twin: the Stripe key is a real value in the agents' environment,
+    // and Sam may ask for it (Samir's row is off).
     stripe.inject_env = true;
+    let dir = directory();
+    stripe.directors = vec![
+        fixture_person(&dir[0], true, "reports only", Some(120_000)),
+        fixture_person(&dir[1], false, "", None),
+    ];
     let secrets = vec![
         stripe,
         secret(
@@ -1932,6 +2014,8 @@ fn seed_secrets() -> SecretsView {
         status: "pending".into(),
         created_at: now - 180_000,
         decided_at: None,
+        asked_by_handle: None,
+        asked_by_name: None,
     }];
     let act = |action: &str,
                name: &str,
@@ -1950,7 +2034,7 @@ fn seed_secrets() -> SecretsView {
         by: by.into(),
         detail: serde_json::json!({}),
     };
-    let activity = vec![
+    let mut activity = vec![
         act(
             "used",
             "STRIPE_KEY",
@@ -1976,6 +2060,8 @@ fn seed_secrets() -> SecretsView {
             4_320,
         ),
     ];
+    // Sam asked Affine for the Stripe key (spec §7.7): the row names who asked.
+    activity[0].detail = serde_json::json!({ "asked_by": SAM_ID, "asked_by_handle": "sam" });
     // One connected 1Password vault (Phase 2), names only — the iPhone fixture's twin. Seeded only
     // with `ARBOS_FIXTURE_VAULT=1` (screenshot rig): the shipped default hides the connect flow
     // (`features.vault_connect` off) and no user has a vault, so the page shows secrets only.
@@ -5261,6 +5347,36 @@ fn seed_people_chat_docs() -> Vec<ChatDoc> {
         ),
     ];
     insert_message_via_core(&group, &page);
+    // Jacob's v0.6.184 shots (bubble-overflow-hotfix-2026-10-23): a one-line
+    // message longer than the bubble cap — his own and someone else's — so the
+    // rig shows whether the text wraps inside the bubble or runs out of it.
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &sara,
+            "Expected: holding my own message shows an Edit option in the menu alongside copy, reply and delete. Forward is missing here too.",
+            base + 450_000,
+        ),
+    );
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &me(),
+            "When you think about it, most people are going to be blocked by how many tokens they can access pretty soon, so the launch page should say what a seat includes.",
+            base + 452_000,
+        ),
+    );
+    insert_message_via_core(
+        &group,
+        &human_message(
+            GROUP_LAUNCH,
+            &me(),
+            "Most people cant do what I am doing right now",
+            base + 455_000,
+        ),
+    );
     out.push(group);
     out
 }
@@ -5300,7 +5416,11 @@ fn mentions_in(space: &Project, text: &str) -> Vec<String> {
         }
     }
     for a in &space.agents {
-        if lower.contains(&format!("@{}", a.handle)) {
+        let handle = a.handle.to_lowercase();
+        let slug = Project::mention_slug(&a.name);
+        if (!handle.is_empty() && text_has_at_token(&lower, &handle))
+            || (!slug.is_empty() && text_has_at_token(&lower, &slug))
+        {
             let id = format!("agent:{}", a.project_id);
             if !out.iter().any(|x| x == &id) {
                 out.push(id);
@@ -6290,6 +6410,9 @@ mod seed_parity_tests {
             "Assistant Error agent:01J9ARBOS00000000000000000 name=None h=Some(\"arbos\") asked=Some(\"samir\") turn=None wa=false [text] hidden=[] text=0 r=0 dt=133000 ct=Some(0)",
             "User Done user:gh_456 name=Some(\"Sam Rivera\") h=Some(\"sam\") asked=None turn=None wa=false [text] hidden=[] text=61 r=0 dt=140000 ct=Some(0)",
             "Assistant Done agent:01J9ARBOS00000000000000000 name=Some(\"Arbos\") h=Some(\"arbos\") asked=Some(\"sam\") turn=None wa=false [text,attachment:Screenshot 2026-10-23 at 7.55.41.png:Some(212000):Image] hidden=[] text=48 r=0 dt=145000 ct=Some(0)",
+            "User Done user:gh_458 name=Some(\"Sara Lind\") h=Some(\"sara\") asked=None turn=None wa=false [text] hidden=[] text=128 r=0 dt=150000 ct=Some(0)",
+            "User Done user:gh_1 name=Some(\"Jacob Steeves\") h=Some(\"jacob\") asked=None turn=None wa=false [text] hidden=[] text=160 r=0 dt=152000 ct=Some(0)",
+            "User Done user:gh_1 name=Some(\"Jacob Steeves\") h=Some(\"jacob\") asked=None turn=None wa=false [text] hidden=[] text=45 r=0 dt=155000 ct=Some(0)",
         ]),
         
     ];

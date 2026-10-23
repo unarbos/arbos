@@ -496,6 +496,21 @@ impl ChatDoc {
         self.doc.export(ExportMode::Snapshot).unwrap_or_default()
     }
 
+    /// Ops this doc holds that `theirs` (a peer's version vector, e.g. the relay's in
+    /// `ROWS_DONE`) does not: the history-heal payload. Empty when `theirs` already covers this
+    /// doc — a Loro export of nothing is still a few header bytes, so callers must not judge by
+    /// length alone.
+    pub fn updates_beyond(&self, theirs: &VersionVector) -> Vec<u8> {
+        if self.txn_depth.get() > 0 {
+            return Vec::new();
+        }
+        self.doc.commit();
+        if theirs.includes_vv(&self.doc.oplog_vv()) {
+            return Vec::new();
+        }
+        self.export_updates_since(theirs)
+    }
+
     /// True when every op in `vv` is already in this doc (checkpoint containment check, crdt-sync §7.3).
     pub fn contains_vv(&self, vv: &VersionVector) -> bool {
         self.doc.oplog_vv().includes_vv(vv)

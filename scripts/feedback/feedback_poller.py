@@ -1705,13 +1705,19 @@ class Loop:
             raise RuntimeError(f"Rust gate ssh failed ({r.returncode}): {(r.stdout or '') + (r.stderr or '')}"[-1500:])
         return r.stdout or ""
 
-    def pinned_waiting(self) -> list[str]:
-        """Pinned (gate-next) items that are neither gating nor merged: back with their owner after a conflict or a
-        red gate. While one exists the scheduler starts no other batch."""
+    def release_bounced_pins(self) -> list[str]:
+        """Pinned (gate-next) items that are neither gating nor merged are back with their owner after a conflict
+        or a red gate. The pin is dropped there and then: the owner's re-push re-enters the POOL, and the pool
+        keeps running meanwhile. (Until 2026-10-23 21:xx the scheduler held the whole pool while a pinned
+        item was with its owner — #1466, bounced by an ENOSPC on the Mac, kept 12+ ready branches from
+        batching for two hours. An operator who wants the item ahead again pins it again once it is pushed.)"""
         out = []
         for fid in self.store.items():
             st = self.store.state(fid)
             if st.get("gate_pinned") and st.get("status") in ("handed_off", "running"):
+                st.pop("gate_pinned", None)
+                self.store.save_state(fid, st)
+                self.store.event(fid, "gate_unpinned", by="bounce", status=st.get("status"))
                 out.append(fid)
         return out
 
@@ -1810,11 +1816,10 @@ class Loop:
         # pool AND ahead of bisect / conflict-retry plan halves — the pin survives a conflict → owner-merges-main
         # → re-push cycle (00:58 Oct 22: #1241 was merged third behind a retry half and hit a sibling conflict).
         members: dict[str, str] = {fid: st["branch_head"] for fid, st in ready if st.get("gate_pinned")}
-        if not members and self.pinned_waiting():
-            # A pinned item is back with its owner (conflict / red gate). Nothing else merges meanwhile: every merge
-            # moves main and hands the owner a fresh conflict (01:08 Oct 22, #1241's third). `gate-unpin` lifts it.
-            log(f"Gate: holding the pool for the pinned item(s) {', '.join(self.pinned_waiting())} (owner is repairing)")
-            return
+        if not members:
+            bounced = self.release_bounced_pins()
+            if bounced:
+                log(f"Gate: pinned item(s) {', '.join(bounced)} are back with their owner; pin released, the pool runs on")
         while plan and not members:
             half = plan.pop(0)
             # Match by item, gate at its CURRENT head: a bisected item whose owner pushed a repair meanwhile keeps
@@ -2515,6 +2520,21 @@ class Loop:
                 if mac_ok:
                     self.ship(fid, st)
                     return
+            # The carrying run may have flipped green in the same second the budget ran out (#1488, 2026-10-23
+            # 15:0x: failed "nothing shipped" while its TestFlight run had just completed): a successful run
+            # that contains the fix means the build exists and the ship checks adopt it on a later tick. Keep
+            # waiting for a bounded while (the processing-time budget) instead of failing.
+            carried = None
+            if st.get("expects_ios") and not st.get("ios_done"):
+                carried = self.gh.later_ios_build(sha, since)
+            if carried is None and st.get("expects_ci") and not st.get("release_done"):
+                carried = self.gh.later_release(sha, since)
+            if carried and waited <= self.cfg.ship_timeout_min + 45:
+                if st.get("ship_wait_noted") != carried["html_url"]:
+                    st["ship_wait_noted"] = carried["html_url"]
+                    log(f"[{fid}] ship budget passed but a green carrying run exists: {carried['html_url']}; waiting for the build to be adopted")
+                self.store.save_state(fid, st)
+                return
             if st.get("ios_done") or st.get("release_done"):
                 # Once per item: the partial ship leaves the item `pushed` so later ticks keep looking for the
                 # processed build, and must not repeat the "Shipped (partially)" comment every two minutes.
@@ -3239,11 +3259,44 @@ class Loop:
             Store._write(marker, rec)
             log(f"TestFlight reconcile: {rec['result']}")
 
+    def print_gate_queue(self, cur: dict) -> None:
+        """The Rust gate's order of play, so owners can read it instead of asking: the active run, the pinned
+        batches, then the pool (every other ready branch, oldest first — one batch unless an operator plans
+        otherwise), then what is with its owner. `gate-note` adds an operator line on top."""
+        def tag(fid: str) -> str:
+            st = self.store.state(fid)
+            issue = f"#{st['issue']}" if st.get("issue") else ""
+            return f"{fid}{' ' + issue if issue else ''}"
+        note = self.cfg.state_dir / "gate-note.txt"
+        print("gate queue:")
+        if note.is_file() and note.read_text().strip():
+            print(f"  note: {note.read_text().strip()}")
+        active = cur.get("rust_gate") or {}
+        if active and not active.get("warm"):
+            halves = " ".join(f"{h}={active.get(h)}" for h in ("linux", "mac", "ios"))
+            print(f"  running {active.get('id')} since {active.get('started')} ({halves}): " + ", ".join(tag(f) for f in active.get("members") or {}))
+        ready = self.rust_gate_ready()
+        gating = {fid for fid, _ in ready}
+        queued = set((active.get("members") or {}).keys())
+        pinned_batches = [b for b in (cur.get("rust_gate_plan") or []) if any(f in gating and self.store.state(f).get("gate_pinned") for f in b)]
+        for i, b in enumerate(pinned_batches, 1):
+            members = [f for f in b if f in gating and f not in queued]
+            if members:
+                print(f"  pinned batch {i}: " + ", ".join(tag(f) for f in members))
+                queued |= set(members)
+        pool = [fid for fid, _ in ready if fid not in queued]
+        if pool:
+            print(f"  pool (next batch after the pins, oldest first, {len(pool)}): " + ", ".join(tag(f) for f in pool))
+        with_owner = [fid for fid in self.store.items() if self.store.state(fid).get("status") == "handed_off" and self.store.state(fid).get("branch_head")]
+        if with_owner:
+            print(f"  with owner (red/conflict; a new commit on the branch re-enters the pool, {len(with_owner)}): " + ", ".join(tag(f) for f in with_owner))
+
     def status(self) -> None:
         cur = self.store.cursor()
         print(f"cursor since={cur.get('since')} checked={cur.get('checked')} seen={len(cur.get('seen', []))}")
         print(f"launches today={self.store.launches_today()}/{self.cfg.max_per_day} last={self.store.last_launch()}")
         print(f"kill file: {'PRESENT' if self.cfg.kill_file.exists() else 'absent'} ({self.cfg.kill_file})")
+        self.print_gate_queue(cur)
         for fid in self.store.items():
             st = self.store.state(fid)
             bits = [st.get("status", "?"), st.get("target", ""), st.get("tier", ""), st.get("tester", "")]
@@ -3733,6 +3786,15 @@ def main(argv: list[str]) -> int:
                     loop.gh.comment(st["issue"], f"Not a failure after all: the fix `{st['commit'][:8]}` is on `main`; the build that carries it was still in the runner queue ({why.rstrip('.')}). Back to tracking the builds.")
                     loop.gh.set_labels(st["issue"], [], ["needs-human"])
             print(f"{fid}: back to pushed")
+        return 0
+    if cmd == "gate-note":
+        # `gate-note <text>` / `gate-note --clear`: one operator line shown on top of `status`'s gate queue
+        # (e.g. "no more pins tonight; pool drains in one batch after #1466").
+        note = cfg.state_dir / "gate-note.txt"
+        if "--clear" in argv[2:]:
+            note.unlink(missing_ok=True); print("gate note cleared")
+        else:
+            note.write_text(" ".join(argv[2:]).strip() + "\n"); print(f"gate note: {note.read_text().strip()}")
         return 0
     if cmd == "gate-unpin":
         # `gate-unpin <fid>…`: drop the owner-priority pin (the pool runs again if the item is with its owner).

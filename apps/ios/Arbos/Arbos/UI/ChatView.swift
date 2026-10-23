@@ -570,7 +570,7 @@ struct ChatView: View {
                 }
             }
             if let show = DebugHooks.show {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(DebugHooks.showDelayMs)) {
                     switch show {
                     case "keyboard": composerFocused = true
                     case "settings": showSettings = true

@@ -185,13 +185,16 @@ struct SecretTextField: View {
 struct RequestAnswers: View {
     @Environment(\.theme) private var theme
     let agent: String
+    /// `@handle` when a person other than the owner asked: "Always allow" then adds them
+    /// to the secret's People list (spec §7.7).
+    var forWhom: String? = nil
     let decide: (String) -> Void
 
     var body: some View {
         WrapLayout(spacing: 8) {
             answer("Allow once", "once")
             answer("Allow for this chat", "chat")
-            answer("Always allow \(agent)", "always")
+            answer("Always allow \(forWhom ?? agent)", "always")
             answer("Deny", "deny", destructive: true)
         }
     }
@@ -254,17 +257,22 @@ struct SecretRequestRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(request.host.map { "\(request.name) at \($0)" } ?? request.name)
+                    Text(requestTitle)
                         .font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                    Text([request.projectName, request.purpose.isEmpty ? nil : request.purpose, SecretsText.ago(request.createdAt)].compactMap { $0 }.joined(separator: " · "))
+                    Text([request.projectName, request.askedByName.map { "\($0) asked" }, request.purpose.isEmpty ? nil : request.purpose, SecretsText.ago(request.createdAt)].compactMap { $0 }.joined(separator: " · "))
                         .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
                 }
                 Spacer()
             }
-            RequestAnswers(agent: request.projectName ?? "this agent", decide: decide)
+            RequestAnswers(agent: request.projectName ?? "this agent", forWhom: request.forWhom, decide: decide)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    private var requestTitle: String {
+        let who = request.forWhom.map { " for \($0)" } ?? ""
+        return request.host.map { "\(request.name)\(who) at \($0)" } ?? "\(request.name)\(who)"
     }
 }
 
@@ -280,7 +288,7 @@ struct ActivityRows: View {
                     .font(theme.font(Theme.small))
                     .foregroundStyle(a.action == "refused" ? theme.danger : theme.text)
                     .lineLimit(2)
-                Text(SecretsText.ago(a.at)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
+                Text(a.whenLine).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 16)
@@ -498,10 +506,11 @@ struct SecretPage: View {
                     }
                     SecretAddRow(title: "Give another agent access…") { showGive = true }
                 }
-                SettingsGroup(header: "Who can direct", footer: "Only you can direct agents to use this secret, unless you add someone here. A note (for example a daily credit limit) is shown to the agent whenever it sees the secret.") {
+                SettingsGroup(header: "People", footer: "People here can ask any agent that has access to use \(s.env), with no card to you. They never see the value. What they spend is yours.") {
+                    Color.clear.frame(height: 0).id("people")
                     ForEach(s.directors) { d in
                         Button { editingDirector = d } label: {
-                            directorRow(d)
+                            personRow(s, d)
                         }
                         .buttonStyle(.plain)
                     }
@@ -511,7 +520,16 @@ struct SecretPage: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 16).padding(.vertical, 12)
                     }
-                    SecretAddRow(title: "Add a person…") { showAddDirector = true }
+                    SecretAddRow(title: "Give a person access…") { showAddDirector = true }
+                }
+                SettingsGroup(footer: s.othersAsk == "card" ? "Ask me: anyone else who asks gets you a card first." : "Refuse: anyone else who asks is told no.") {
+                    HStack(spacing: 12) {
+                        Text("Others who ask").font(theme.font(Theme.body)).foregroundStyle(theme.text)
+                        Spacer(minLength: 8)
+                        OthersAskSegment(value: s.othersAsk) { model.patchSecret(s.id, ["others_ask": $0]) }
+                            .disabled(model.isFixture)
+                    }
+                    .padding(.horizontal, 16).frame(minHeight: SettingsRow.height)
                 }
                 SettingsGroup(header: "Activity") {
                     if activity.isEmpty {
@@ -552,6 +570,13 @@ struct SecretPage: View {
             }
         }
         .task { await load() }
+        .onAppear {
+            switch DebugHooks.secretSheet {
+            case "people": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAddDirector = true }
+            case "person": DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { editingDirector = secret?.directors.first }
+            default: break
+            }
+        }
         .confirmationDialog("Delete \(secret?.env ?? "secret")?", isPresented: $confirmDelete, titleVisibility: .visible) {
             Button("Delete secret", role: .destructive) {
                 model.deleteSecret(secretId)
@@ -591,10 +616,11 @@ struct SecretPage: View {
             }
         }
         .sheet(isPresented: $showAddDirector) {
+            // The standard member picker (New group / Add members), people only (spec §7.7).
             if let s = secret {
-                NavigationStack { AddDirectorSheet(secret: s) }
+                NavigationStack { NewGroupView(onDone: { showAddDirector = false }, addToSecret: s.id) }
+                    .tint(theme.text)
                     .environmentObject(model).environment(\.theme, theme)
-                    .presentationDetents([.medium, .large])
                     .presentationBackground(theme.bg).preferredColorScheme(theme.isDark ? .dark : .light)
             }
         }
@@ -616,20 +642,31 @@ struct SecretPage: View {
         }
     }
 
-    private func directorRow(_ d: SecretDirector) -> some View {
+    /// A People row: the mirror of an agent row — avatar, name, `@handle · note · asked 2 min ago`, switch.
+    private func personRow(_ s: SecretItem, _ d: SecretDirector) -> some View {
         HStack(spacing: 14) {
             PersonAvatar(url: d.avatarUrl, handle: d.handle.isEmpty ? d.userId : d.handle, size: SettingsRow.tile, name: d.name, id: d.userId)
             VStack(alignment: .leading, spacing: 2) {
                 Text(d.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                Text(d.note.isEmpty ? (d.handle.isEmpty ? "May direct agents to use this" : "@\(d.handle)") : d.note)
-                    .font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
+                Text(personSubtitle(d)).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted).lineLimit(2)
             }
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right").font(.system(size: 14, weight: .semibold)).foregroundStyle(theme.placeholder)
+            Toggle("", isOn: Binding(get: { d.enabled }, set: { model.setSecretPerson(secretId: s.id, userId: d.userId, enabled: $0) }))
+                .labelsHidden().tint(theme.online).disabled(model.isFixture)
+                .accessibilityLabel("\(d.displayName) may ask")
         }
         .padding(.horizontal, 16)
         .frame(minHeight: 56)
         .contentShape(Rectangle())
+    }
+
+    private func personSubtitle(_ d: SecretDirector) -> String {
+        var parts: [String] = []
+        if !d.handle.isEmpty { parts.append("@\(d.handle)") }
+        if !d.note.isEmpty { parts.append(d.note) }
+        if d.scopeKind == "chat" { parts.append("this chat only") }
+        parts.append(SecretsText.asked(lastAskedAt: d.lastAskedAt, disabledAt: d.disabledAt, enabled: d.enabled))
+        return parts.joined(separator: " · ")
     }
 
     private func agentRow(_ s: SecretItem, _ a: SecretAgentAccess) -> some View {
@@ -936,106 +973,39 @@ struct ReplaceValueSheet: View {
     }
 }
 
-/// `Add a person…`: let someone else direct agents to use this secret, with an optional limit note.
-struct AddDirectorSheet: View {
-    @EnvironmentObject private var model: AppModel
+/// Two-segment control: Refuse | Ask me (what a non-listed person's ask does).
+struct OthersAskSegment: View {
     @Environment(\.theme) private var theme
-    @Environment(\.dismiss) private var dismiss
-    let secret: SecretItem
-    @State private var query = ""
-    @State private var remote: [Person] = []
-    @State private var picked: Person?
-    @State private var note = ""
-    @State private var busy = false
-    @State private var error: String?
-
-    private var already: Set<String> { Set(secret.directors.map(\.userId)) }
-
-    private var candidates: [Person] {
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        var out = q.isEmpty
-            ? model.directory
-            : model.directory.filter {
-                $0.handle.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q)
-            }
-        for p in remote where !out.contains(where: { $0.id == p.id }) {
-            out.append(p)
-        }
-        return out.filter { $0.id != model.user?.id && !already.contains($0.id) }
-    }
+    let value: String
+    let set: (String) -> Void
 
     var body: some View {
-        SheetFrame(title: "Who can direct", action: "Add", canSave: picked != nil, busy: busy, save: { Task { await save() } }) {
-            Text("\(secret.env) stays yours. The person you add may ask your agents to use it; anyone else may not.")
-                .font(theme.font(Theme.small)).foregroundStyle(theme.muted)
-            SecretField(label: "Person") {
-                TextField("", text: $query, prompt: Text("Search by name or @handle").foregroundStyle(theme.placeholder))
-                    .font(theme.font(Theme.body))
-                    .foregroundStyle(theme.text)
-                    .padding(.horizontal, 14)
-                    .frame(height: Theme.fieldHeight)
-                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(theme.field))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.fieldBorder, lineWidth: 1))
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                if let picked {
-                    HStack(spacing: 10) {
-                        PersonAvatar(url: picked.avatarUrl, handle: picked.handle, size: 28, name: picked.name, id: picked.id, colorIndex: picked.avatarColorIndex)
-                        Text(picked.displayName).font(theme.font(Theme.body)).foregroundStyle(theme.text)
-                        Spacer()
-                        Button("Change") { self.picked = nil }.font(theme.font(Theme.small)).foregroundStyle(Color(hex: "#1084FE")!)
-                    }
-                    .padding(.top, 8)
-                } else if !candidates.isEmpty {
-                    VStack(spacing: 0) {
-                        ForEach(Array(candidates.prefix(8))) { p in
-                            Button {
-                                Haptics.pick()
-                                picked = p
-                                query = ""
-                            } label: {
-                                PersonRow(person: p)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.top, 4)
-                }
-            }
-            SecretField(label: "Note for the agent", hint: "Shown whenever the agent sees this secret. Example: only 1k usd of credit usage per day.") {
-                SecretTextField(placeholder: "only 1k usd of credit usage per day", text: $note, capitalization: .sentences)
-            }
-            if let error {
-                Text(error).font(theme.font(Theme.tiny)).foregroundStyle(theme.danger)
-            }
+        HStack(spacing: 2) {
+            segment("Refuse", "refuse")
+            segment("Ask me", "card")
         }
-        .task { await model.loadDirectory(force: false) }
-        .task(id: query) {
-            let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard q.count >= 2 else { remote = []; return }
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            remote = await model.searchPeople(q)
-        }
+        .padding(2)
+        .background(Capsule().fill(theme.field))
+        .fixedSize()
     }
 
-    private func save() async {
-        guard let picked else { return }
-        busy = true
-        defer { busy = false }
-        if let err = await model.secretsAction("Add director", {
-            let s = try await model.relay.addSecretDirector(secret.id, handle: picked.handle, note: note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : note)
-            if let i = model.secrets?.secrets.firstIndex(where: { $0.id == s.id }) {
-                model.secrets?.secrets[i] = s
-            }
-        }) {
-            error = err
-            return
+    private func segment(_ label: String, _ id: String) -> some View {
+        let on = value == id || (id == "refuse" && value != "card")
+        return Button { if !on { Haptics.pick(); set(id) } } label: {
+            Text(label)
+                .font(theme.font(Theme.small, weight: on ? .semibold : .regular))
+                .lineLimit(1)
+                .foregroundStyle(on ? theme.onPrimary : theme.muted)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .background(Capsule().fill(on ? theme.primary : Color.clear))
         }
-        dismiss()
+        .buttonStyle(.plain)
+        .accessibilityLabel("Others who ask: \(label)")
     }
 }
 
-/// Tap a director row: edit the note or remove them.
+/// Tap a People row (not its switch): edit the note or take them off the list.
 struct DirectorEditSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
@@ -1057,14 +1027,14 @@ struct DirectorEditSheet: View {
                 }
                 Spacer()
             }
-            SecretField(label: "Note for the agent", hint: "Shown whenever the agent sees this secret.") {
+            SecretField(label: "Note for the agent", hint: "Shown whenever the agent sees this secret, when \(director.displayName) asks. Allowed actions and spend limits, e.g. reports only · may spend up to $5 a day.") {
                 SecretTextField(placeholder: "only 1k usd of credit usage per day", text: $note, capitalization: .sentences)
             }
             Button(role: .destructive) {
                 model.removeSecretDirector(secretId: secret.id, userId: director.userId)
                 dismiss()
             } label: {
-                Text("Remove")
+                Text("Remove from the list")
                     .font(theme.font(Theme.body, weight: .semibold))
                     .foregroundStyle(theme.danger)
                     .frame(maxWidth: .infinity).frame(height: 48)
