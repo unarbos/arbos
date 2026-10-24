@@ -4180,8 +4180,13 @@ impl Agent {
                 // The ack (when the model wrote one) is settled before the first tool runs; no
                 // synthetic "On it." — the working row's activity label below is the status.
                 self.maybe_split_ack(host, t, true).await;
-                self.set_activity(host, t, crate::activity::label(tool_name, args))
-                    .await;
+                // A tool with no plain-words label keeps the row's current status (the act ack)
+                // rather than clearing it — clearing left `project.activity` null for a whole
+                // `sleep`-style turn (#1657); with nothing to keep, a generic line.
+                let label = crate::activity::label(tool_name, args)
+                    .or_else(|| t.activity.clone())
+                    .or_else(|| Some(crate::activity::generic_label(tool_name)));
+                self.set_activity(host, t, label).await;
                 t.tool_inputs.insert(tool_call_id.clone(), args.clone());
                 // A call a `codemode` script made (D86) is logged exactly like a direct call —
                 // T3, the hidden tool part, the audit line the extension writes — but counted apart.
