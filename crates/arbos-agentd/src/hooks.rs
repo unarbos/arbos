@@ -65,7 +65,9 @@ async fn ask_user(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) 
     }
 }
 
-/// `send_message(text, activity?)`: a progress bubble mid-turn (agent-flow contract §1).
+/// `send_message(text, activity?, to?)`: progress bubble mid-turn (no `to`), or a
+/// cross-subnet message to another agent when `to` is set — or when `text` is the
+/// antipattern `@Handle words` (feedback app-01M5NX3GHC37Y8FH3KKR0PRWG1).
 async fn send_message(State(a): State<S>, headers: HeaderMap, Json(b): Json<Value>) -> Response {
     if !authed(&a, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -76,6 +78,26 @@ async fn send_message(State(a): State<S>, headers: HeaderMap, Json(b): Json<Valu
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
+    let to = b
+        .get("to")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    // Explicit `to`, or `@Handle words` mistyped as a progress note in this chat.
+    let (agent_to, agent_text) = match to {
+        Some(t) => (Some(t), text.to_owned()),
+        None => match crate::agent_messages::mention_address(text) {
+            Some((handle, msg)) => (Some(handle), msg),
+            None => (None, String::new()),
+        },
+    };
+    if let Some(to) = agent_to {
+        return match a.send_message_from_turn(Some(&to), &agent_text).await {
+            Ok(note) => Json(json!({ "ok": true, "note": note })).into_response(),
+            Err(e) => err(e),
+        };
+    }
     match a.hook_send_message(text, activity).await {
         Ok(()) => ok(),
         Err(e) => err(e),

@@ -168,6 +168,9 @@ extension ChatMember {
             project?.avatarColorIndexEffective = Int(p.avatar_color_index_effective)
             project?.avatarLeaf = p.avatar_leaf.map(Int.init)
             project?.avatarLeafColor = p.avatar_leaf_color.map(Int.init)
+            // The uploaded / generated picture travels with the roster card (#1592); the
+            // fetch URL is built by `AppModel.agent(member:)` where the relay token lives.
+            project?.imageKey = p.image_key.flatMap { $0.isEmpty ? nil : $0 }
         }
         self.id = id
         self.kind = isAgent ? .agent : .user
@@ -199,6 +202,32 @@ extension ChatMember {
         } catch {
             NSLog("ChatMemberDto: \(error)")
             return nil
+        }
+    }
+}
+
+/// How long to mute a group chat's notifications (home row / group info).
+enum ChatMuteDuration: CaseIterable, Identifiable {
+    case oneHour
+    case eightHours
+    case untilTurnedOn
+
+    var id: String { title }
+
+    var title: String {
+        switch self {
+        case .oneHour: return "For 1 hour"
+        case .eightHours: return "For 8 hours"
+        case .untilTurnedOn: return "Until I turn it back on"
+        }
+    }
+
+    /// When this mute should end. `distantFuture` means until the user unmutes.
+    var endDate: Date {
+        switch self {
+        case .oneHour: return Date().addingTimeInterval(60 * 60)
+        case .eightHours: return Date().addingTimeInterval(8 * 60 * 60)
+        case .untilTurnedOn: return Date.distantFuture
         }
     }
 }

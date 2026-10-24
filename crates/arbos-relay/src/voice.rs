@@ -530,20 +530,29 @@ pub fn agent_participants_json(state: &AppState, call_id: &str) -> Vec<Value> {
 const DISPATCH_FRESH_MS: i64 = 30_000;
 
 /// A call began in a chat with agents: ask LiveKit to send the voice worker for each of them.
-/// Returns the agents dispatched (as `sender{}`), for the start response.
-pub async fn dispatch_agents(state: &AppState, call: &CallRow) -> Vec<Value> {
-    dispatch_missing(state, call).await
+/// `ring` — when `Some`, only agents whose project id is in the set are dispatched (a selective
+/// group start). `None` = every agent in the chat. Returns the agents dispatched (as `sender{}`).
+pub async fn dispatch_agents(
+    state: &AppState,
+    call: &CallRow,
+    ring: Option<&std::collections::HashSet<&str>>,
+) -> Vec<Value> {
+    dispatch_missing(state, call, ring).await
 }
 
 /// Someone joined a live call: any agent of the chat that is not in the room (it left when it
 /// was alone, or its job died) is dispatched again.
 pub async fn ensure_agents(state: &AppState, call: &CallRow) {
     if call.active() {
-        let _ = dispatch_missing(state, call).await;
+        let _ = dispatch_missing(state, call, None).await;
     }
 }
 
-async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
+async fn dispatch_missing(
+    state: &AppState,
+    call: &CallRow,
+    ring: Option<&std::collections::HashSet<&str>>,
+) -> Vec<Value> {
     let (Some(lk), true) = (&state.livekit, state.voice.enabled) else {
         return Vec::new();
     };
@@ -552,6 +561,11 @@ async fn dispatch_missing(state: &AppState, call: &CallRow) -> Vec<Value> {
     let now = now_ms();
     let mut out = Vec::new();
     for project in agents_in_chat(state, &chat) {
+        if let Some(want) = ring {
+            if !want.contains(project.id.as_str()) {
+                continue;
+            }
+        }
         if live.contains(&project.id) {
             continue;
         }

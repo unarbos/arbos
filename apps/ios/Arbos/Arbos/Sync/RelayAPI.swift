@@ -550,11 +550,15 @@ final class RelayAPI {
 
     // MARK: Calls v1
 
-    /// `POST /chats/{id}/calls` (or the projects form) `{kind}` → 201 new call / 200 join;
-    /// both carry a fresh LiveKit token. Returns the call and whether we started it.
-    func startCall(chatId: String, projectId: String?, kind: CallKind) async throws -> (Call, started: Bool) {
+    /// `POST /chats/{id}/calls` (or the projects form) `{kind, ring?}` → 201 new call / 200 join;
+    /// both carry a fresh LiveKit token. `ring` is an optional list of member ids to notify
+    /// (bare user ids and agent project ids); omit or empty = the whole group. Returns the
+    /// call and whether we started it.
+    func startCall(chatId: String, projectId: String?, kind: CallKind, ring: [String]? = nil) async throws -> (Call, started: Bool) {
         let path = (projectId == nil || projectId == peopleSlot) ? "/chats/\(chatId)/calls" : "/projects/\(projectId!)/chats/\(chatId)/calls"
-        let (data, http) = try await request("POST", path, body: ["kind": kind.rawValue], headers: ["X-Arbos-Client": RelayAPI.clientHeader])
+        var body: [String: Any] = ["kind": kind.rawValue]
+        if let ring, !ring.isEmpty { body["ring"] = ring }
+        let (data, http) = try await request("POST", path, body: body, headers: ["X-Arbos-Client": RelayAPI.clientHeader])
         let resp: StartCallResponseDto
         do {
             resp = try JSONDecoder().decode(StartCallResponseDto.self, from: data)

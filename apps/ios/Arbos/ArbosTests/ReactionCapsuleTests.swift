@@ -1,16 +1,16 @@
 import XCTest
 @testable import Arbos
 
-/// The reaction capsule is Grok Bot's five plus the add-emoji control; the
+/// The reaction capsule is the quick-react set plus the add-emoji control; the
 /// long-press menu under it is still Copy / Reply / Delete.
 final class ReactionCapsuleTests: XCTestCase {
-    func testPaletteIsGroksFiveInOrder() {
-        XCTAssertEqual(ReactionCapsule.palette, ["😂", "👍", "👎", "❤️", "🎉"])
+    func testPaletteIsQuickReactSetInOrder() {
+        XCTAssertEqual(ReactionCapsule.palette, ["❤️", "👍🏽", "💪🏽", "👎🏻", "👌🏾", "🤝", "🔥", "💯"])
         XCTAssertEqual(MessageReaction.palette, ReactionCapsule.palette)
     }
 
     func testCapsuleWidthCountsTheAddControl() {
-        XCTAssertEqual(ReactionCapsule.width, 2 * ReactionCapsule.padding + 6 * ReactionCapsule.cell)
+        XCTAssertEqual(ReactionCapsule.width, 2 * ReactionCapsule.padding + 9 * ReactionCapsule.cell)
         XCTAssertEqual(ReactionCapsule.height, 2 * ReactionCapsule.padding + ReactionCapsule.cell)
     }
 

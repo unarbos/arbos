@@ -11,7 +11,10 @@
 //! Pure arithmetic on decoded RGBA pixels; the caller owns image decoding.
 //!
 //! Agents without a photo draw a leaf instead of initials (D92): see [`leaf`].
+//! Which card an agent row is drawn from — roster, own project, or the row
+//! itself — is one rule for every surface: see [`identity`].
 
+pub mod identity;
 pub mod leaf;
 
 /// One Telegram gradient: light and dark top/bottom pairs (dark = lightness

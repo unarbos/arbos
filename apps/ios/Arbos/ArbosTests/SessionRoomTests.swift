@@ -236,6 +236,65 @@ final class SessionRoomTests: XCTestCase {
         room.stop()
     }
 
+    func testRateLimitedDoesNotOpenANewSocket() async throws {
+        let sockets = SocketFactory()
+        let room = SessionRoom(
+            projectId: "people",
+            key: "chat",
+            roomChat: "chat",
+            doc: CoreChatDoc(key: "chat"),
+            roomURL: { _ in URL(string: "wss://example.test/r")! },
+            makeSocket: { sockets.make($0) },
+            fetchCheckpoint: { _ in (0, Data()) },
+            pending: [("batch-1", Data("pending".utf8))],
+            deviceId: { "dev:me" }
+        )
+        room.start()
+        try await waitUntil { sockets.sockets.count == 1 }
+        let sock = try XCTUnwrap(sockets.current)
+        sock.fireOpen()
+        try await waitUntil { !sock.sent.isEmpty }
+
+        sock.deliver(try encodeState(checkpointSeq: 0, frontier: Data()))
+        try await waitUntil {
+            sock.sent.contains { data in
+                (try? decodeFrame(bytes: data))?.ty == .rowsReq
+            }
+        }
+
+        let rowsDone = try encodeFrame(
+            ty: .rowsDone,
+            headerJson: #"{"headSeq":0}"#,
+            payload: Data()
+        )
+        sock.deliver(rowsDone)
+        try await waitUntil {
+            sock.sent.contains { data in
+                (try? decodeFrame(bytes: data))?.ty == .push
+            }
+        }
+
+        let errHeader = try JSONSerialization.data(
+            withJSONObject: [
+                "code": "rate_limited",
+                "message": "slow down",
+                "batchId": "batch-1",
+                "retryS": Int64(5),
+            ] as [String: Any]
+        )
+        let errJson = try XCTUnwrap(String(data: errHeader, encoding: .utf8))
+        sock.deliver(try encodeFrame(ty: .error, headerJson: errJson, payload: Data()))
+
+        // Brief settle: must not dial again after rate_limited.
+        for _ in 0..<30 {
+            await Task.yield()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(sockets.sockets.count, 1, "rate_limited must not open a second socket")
+        XCTAssertEqual(room.reconnects, 0)
+        room.stop()
+    }
+
     // MARK: - Helpers
 
     private func encodeState(checkpointSeq: Int64, frontier: Data) throws -> Data {

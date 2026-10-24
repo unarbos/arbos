@@ -27,7 +27,7 @@ final class SenderNameRowTests: XCTestCase {
         rows.compactMap { row in
             switch row.kind {
             case .other(let text, _, _, let named, _, let time): return (text, named, time != nil)
-            case .member(_, _, _, _, let named, _, _, let time): return ("agent", named, time != nil)
+            case .member(_, _, _, _, _, let named, _, _, let time): return ("agent", named, time != nil)
             case .user: return ("mine", false, false)
             default: return nil
             }

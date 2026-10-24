@@ -1780,9 +1780,14 @@ mod address_tests {
 
 impl Agent {
     /// Fields on a reply in a people chat (called right after the assistant message starts).
+    ///
+    /// Always writes the agent's sender / handle / name / avatar so clients put the bubble
+    /// on the avatar column (#1604). Asker fields (`askedBy*`, `inReplyTo`, `replyTo`) are
+    /// added when this chat still has an asker — a late subagent-result turn may run after
+    /// the asker map was cleared, and must still look like this agent.
     pub fn people_reply_fields(&self, chat_id: &str) -> Option<ReplyAttribution> {
         let info = self.people.info(chat_id)?;
-        let asker = self.people.asker(chat_id)?;
+        let asker = self.people.asker(chat_id);
         let mine = info
             .members
             .iter()
@@ -1821,19 +1826,23 @@ impl Agent {
             ("senderAvatarColor", json!(avatar_color)),
             ("ownerHandle", json!(info.owner_handle())),
         ];
-        // An asker the row did not identify gets no `askedBy` (there is no account to point
-        // at); the handle label still says who the row claimed to be, if anything.
-        if asker.user_id != UNKNOWN_ASKER {
-            fields.push(("askedBy", json!(format!("user:{}", asker.user_id))));
+        // Asker fields when this chat still has an asker — a late subagent-result
+        // turn may run after the asker map was cleared (#1604). An asker the row
+        // did not identify gets no `askedBy` (there is no account to point at);
+        // the handle label still says who the row claimed to be, if anything.
+        if let Some(asker) = asker {
+            if asker.user_id != UNKNOWN_ASKER {
+                fields.push(("askedBy", json!(format!("user:{}", asker.user_id))));
+            }
+            fields.extend([
+                ("askedByHandle", json!(asker.handle)),
+                ("inReplyTo", json!(asker.message_id)),
+                // Platform reply feature: thread this bubble to the asker's message
+                // so everyone sees which line is being answered (feedback
+                // app-01M5MPKJ9K6HGHFH6BZWR9CME0).
+                ("replyTo", json!(asker.message_id)),
+            ]);
         }
-        fields.extend([
-            ("askedByHandle", json!(asker.handle)),
-            ("inReplyTo", json!(asker.message_id)),
-            // Platform reply feature: thread this bubble to the asker's message
-            // so everyone sees which line is being answered (feedback
-            // app-01M5MPKJ9K6HGHFH6BZWR9CME0).
-            ("replyTo", json!(asker.message_id)),
-        ]);
         Some(ReplyAttribution { fields })
     }
 

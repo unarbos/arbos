@@ -172,6 +172,26 @@ impl Mentions {
                 },
             );
         }
+        // Agents other people shared into my chats (#1592): their `@handle` is a chip
+        // too, drawn through the same identity the bubble and the presence row use.
+        for space in s.projects.iter().filter(|p| p.is_people()) {
+            for a in &space.agents {
+                let ident = avatars::member_identity(Some(space), &s.projects, a);
+                if ident.handle.is_empty() {
+                    continue;
+                }
+                add(
+                    ident.handle.clone(),
+                    Mention {
+                        page: Some(ProfilePage::Agent {
+                            project_id: ident.id.clone(),
+                        }),
+                        name: ident.name.clone(),
+                        picture: identity_picture(s, &ident, theme),
+                    },
+                );
+            }
+        }
         // People who sit in groups (and the search results) by handle.
         for person in s
             .projects
@@ -390,6 +410,19 @@ fn person_picture(s: &AppState, person: &crate::model::Person, theme: &Theme) ->
             person.avatar_color_index,
             theme,
         ),
+    }
+}
+
+/// The chip picture for a resolved agent: its uploaded picture, else its leaf (D92) or
+/// initials (D79) — the identity's own picks, never a guess from the handle.
+fn identity_picture(s: &AppState, a: &avatars::AgentIdentity, theme: &Theme) -> Picture {
+    if let Some(image) = a.image_key.as_deref().and_then(|url| s.avatar(url)) {
+        return Picture::Image(image);
+    }
+    if avatars::leaf_avatars_on() {
+        Picture::Leaf(a.leaf)
+    } else {
+        initials(&a.id, &a.name, Some(a.color_index), theme)
     }
 }
 

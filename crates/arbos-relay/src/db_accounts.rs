@@ -62,6 +62,8 @@ pub fn migrate_accounts(c: &Connection) {
         "ALTER TABLE boxes ADD COLUMN held_stopped INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE box_history ADD COLUMN row_json TEXT",
         "ALTER TABLE box_history ADD COLUMN archived_at INTEGER",
+        // Who may add this person to a people group: anyone | people_i_know | nobody.
+        "ALTER TABLE users ADD COLUMN group_add TEXT NOT NULL DEFAULT 'anyone'",
     ] {
         let _ = c.execute(stmt, []);
     }
@@ -396,6 +398,34 @@ impl Db {
             c.execute(
                 "UPDATE users SET avatar_url = ?2 WHERE id = ?1",
                 params![user_id, github_fallback],
+            )
+        })?;
+        if n == 0 {
+            return Err(anyhow!("no such user"));
+        }
+        Ok(())
+    }
+
+    /// Who may add this person to a people group (`anyone` | `people_i_know` | `nobody`).
+    /// Missing column / missing row → `anyone` (today's open default).
+    pub fn group_add_policy(&self, user_id: &str) -> Result<String> {
+        self.with(|c| {
+            c.query_row(
+                "SELECT COALESCE(group_add, 'anyone') FROM users WHERE id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(|v| v.unwrap_or_else(|| "anyone".into()))
+        })
+    }
+
+    /// `PATCH /me {group_add}` — store the group-add privacy choice.
+    pub fn set_group_add_policy(&self, user_id: &str, policy: &str) -> Result<()> {
+        let n = self.with(|c| {
+            c.execute(
+                "UPDATE users SET group_add = ?2 WHERE id = ?1",
+                params![user_id, policy],
             )
         })?;
         if n == 0 {

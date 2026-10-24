@@ -11,7 +11,7 @@ use gpui::{
     div, prelude::*, px, Context, Div, ElementId, FontWeight, RenderImage, SharedString, Stateful,
 };
 
-use crate::app::{ActiveCall, CallParticipant, CallStatus};
+use crate::app::{ActiveCall, AppState, CallParticipant, CallStatus};
 use crate::model::{self, now_ms, Call, CallKind, Project, Sender};
 use crate::ui::avatars;
 use crate::ui::glass::{self, WindowDrag};
@@ -38,6 +38,23 @@ fn mmss(ms: u64) -> String {
     } else {
         format!("{}:{:02}", s / 60, s % 60)
     }
+}
+
+/// The decoded picture the loader has for a participant: a person's GitHub photo, or an
+/// agent's uploaded / generated picture found through the shared identity rule (#1592) — the
+/// same picture its bubbles and the presence row show.
+fn sender_image(state: &AppState, sender: &Sender) -> Option<Arc<RenderImage>> {
+    if sender.kind == "agent" {
+        let a = avatars::agent_identity(
+            state.selected(),
+            &state.projects,
+            &sender.id,
+            Some(&sender.handle),
+            Some(&sender.name),
+        );
+        return a.image_key.as_deref().and_then(|url| state.avatar(url));
+    }
+    state.avatar(&sender.avatar_url)
 }
 
 /// A participant's picture: GitHub photo, coloured tree, or the initial.
@@ -207,7 +224,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
     let remote: Vec<(CallParticipant, Option<Arc<RenderImage>>)> = active
         .participants
         .iter()
-        .map(|p| (p.clone(), state.avatar(&p.sender.avatar_url)))
+        .map(|p| (p.clone(), sender_image(state, &p.sender)))
         .collect();
     // Who was rung and has not joined yet (#1430): a greyed tile each, "Ringing…", so a group
     // call shows the whole group while only the agent has picked up.
@@ -225,7 +242,7 @@ pub fn screen(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> Di
             model::still_ringing(&expected, &in_room)
                 .into_iter()
                 .map(|s| {
-                    let image = state.avatar(&s.avatar_url);
+                    let image = sender_image(state, &s);
                     (s, image)
                 })
                 .collect()
@@ -579,7 +596,7 @@ pub fn bar(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
     let first = active.participants.first().cloned();
     let picture_el = match &first {
         Some(p) => {
-            let image = state.avatar(&p.sender.avatar_url);
+            let image = sender_image(state, &p.sender);
             picture(&p.sender, image, 30.0, &theme)
         }
         None => div()
@@ -745,7 +762,7 @@ pub fn pip(shell: &Shell, active: &ActiveCall, cx: &mut Context<Shell>) -> State
                 .object_fit(gpui::ObjectFit::Cover),
         );
     } else if let Some(p) = active.participants.first() {
-        let image = state.avatar(&p.sender.avatar_url);
+        let image = sender_image(state, &p.sender);
         tile = tile.child(
             div()
                 .size_full()
@@ -945,7 +962,7 @@ pub fn ringing_line(names: &[String]) -> String {
 /// Ringing card (top-right): caller, "Incoming video call", Decline / Accept.
 pub fn ring_card(shell: &Shell, call: &Call, sender: &Sender, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
-    let image = shell.state.read(cx).avatar(&sender.avatar_url);
+    let image = sender_image(shell.state.read(cx), sender);
     PulseClock::request(cx);
     let phase = PulseClock::phase(cx, 1200);
     let card = div()

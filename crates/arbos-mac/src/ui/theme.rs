@@ -57,7 +57,7 @@ impl SidebarWidth {
         );
     }
 }
-/// The conversation header (the centred title pill) — also the window-drag
+/// The conversation header (the top-left title pill) — also the window-drag
 /// catchment at the top of the chat pane. Grok Mac, measured on the real app
 /// (ref 57, 2 px/pt): the hairline sits at 44 pt and the title row is centred
 /// at 22 pt, on the traffic lights' line. The doubling to 88 (#1226) made the
@@ -118,7 +118,9 @@ pub const TEXT_TINY: f32 = 11.5;
 pub const LINE_HEIGHT: f32 = 21.0;
 /// Avatar sizes: list row (Grok Mac: 33 pt blobs in a 58 pt row), header, inline sender.
 pub const AVATAR_ROW: f32 = 36.0;
-pub const AVATAR_HEADER: f32 = 22.0;
+/// Chat header pill picture ([feedback app-01M5MX8XS2BS7KZCNAS12BXNKD]: a
+/// notch above the earlier 22 so the name and picture read clearly).
+pub const AVATAR_HEADER: f32 = 26.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {

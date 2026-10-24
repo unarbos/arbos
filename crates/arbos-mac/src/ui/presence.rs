@@ -205,44 +205,36 @@ pub fn gather(state: &AppState, chat_id: &str, space: &Project, theme: &Theme) -
         if space.is_people() {
             let mut seen: Vec<String> = Vec::new();
             for m in messages.iter().rev().filter(|m| live(m)) {
-                let key = m
-                    .sender_handle
-                    .clone()
-                    .or_else(|| m.sender_name.clone())
-                    .unwrap_or_else(|| m.sender.clone());
-                if seen.contains(&key) {
+                // The same question the bubble asks (#1592): the row's sender, handle and
+                // name against the roster, my projects, the other rosters — one identity,
+                // so the row's picture is the bubble's disc and its words the caption.
+                let agent = avatars::agent_identity(
+                    Some(space),
+                    &state.projects,
+                    &m.sender,
+                    m.sender_handle.as_deref(),
+                    m.sender_name.as_deref(),
+                );
+                if seen.contains(&agent.id) {
                     continue;
                 }
-                seen.push(key.clone());
-                let agent = space
-                    .agents
-                    .iter()
-                    .find(|a| a.handle == key || a.name == key || a.project_id == key);
-                let (name, picture) = match agent {
-                    Some(a) => (
-                        a.name.clone(),
-                        avatars::agent_member(a, AVATAR, theme).into_any_element(),
-                    ),
-                    None => {
-                        let name = m.sender_name.clone().unwrap_or_else(|| key.clone());
-                        (
-                            name.clone(),
-                            avatars::agent(&m.sender, &name, None, None, None, AVATAR, theme)
-                                .into_any_element(),
-                        )
-                    }
-                };
+                seen.push(agent.id.clone());
+                let image = agent.image_key.as_deref().and_then(|url| state.avatar(url));
                 participants.push(Participant {
-                    name,
+                    name: agent.name.clone(),
                     activity: Activity::Working,
-                    picture,
+                    picture: avatars::agent_picture(&agent, image, AVATAR, theme)
+                        .into_any_element(),
                 });
             }
         } else {
+            let agent =
+                avatars::agent_identity(None, &state.projects, &space.id, None, Some(&space.name));
+            let image = agent.image_key.as_deref().and_then(|url| state.avatar(url));
             participants.push(Participant {
-                name: space.name.clone(),
+                name: agent.name.clone(),
                 activity: Activity::Working,
-                picture: avatars::project(space, AVATAR, theme).into_any_element(),
+                picture: avatars::agent_picture(&agent, image, AVATAR, theme).into_any_element(),
             });
         }
     }
@@ -429,5 +421,144 @@ mod text_tests {
             "Sam is typing… · Lium is working"
         );
         assert_eq!(sentence(&[], &[], None, false), "");
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    //! #1592: the presence row and the bubble disc ask one resolver with the same
+    //! row, so a foreign agent (someone else's TestAgent in Arbonites) gets the
+    //! same picture and the same words on both — the roster's leaf and its display
+    //! name, never a handle-seeded initials disc or the raw `@slug`.
+    use super::*;
+    use crate::model::{AgentMember, SpaceKind};
+    use crate::ui::avatars::{leaf, LeafPick};
+
+    fn roster_agent(id: &str, name: &str, image: Option<&str>) -> AgentMember {
+        AgentMember {
+            project_id: id.into(),
+            name: name.into(),
+            handle: Project::mention_slug(name),
+            owner_handle: "sami".into(),
+            avatar_leaf: Some(5),
+            avatar_leaf_color: Some(2),
+            image_url: image.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    fn arbonites(agents: Vec<AgentMember>) -> Project {
+        Project {
+            id: "chat_arbonites".into(),
+            name: "Arbonites".into(),
+            kind: SpaceKind::Group,
+            agents,
+            ..Default::default()
+        }
+    }
+
+    fn working_row(sender: &str, handle: &str, name: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": "m-1",
+            "chatId": "chat_arbonites",
+            "role": "assistant",
+            "sender": sender,
+            "senderHandle": handle,
+            "senderName": name,
+            "status": "streaming",
+            "createdAt": crate::model::now_ms(),
+            "parts": [{ "id": "s-1", "kind": "status", "code": "working", "message": "Working…" }],
+        }))
+        .expect("message")
+    }
+
+    /// What the bubble asks (`transcript::agent_identity_full`): the lane seed, no hint.
+    fn bubble(space: &Project, mine: &[Project], m: &Message) -> avatars::AgentIdentity {
+        avatars::agent_identity(Some(space), mine, &m.sender, None, None)
+    }
+
+    /// What the presence row asks (`gather`): the row's sender, handle and name.
+    fn presence(space: &Project, mine: &[Project], m: &Message) -> avatars::AgentIdentity {
+        avatars::agent_identity(
+            Some(space),
+            mine,
+            &m.sender,
+            m.sender_handle.as_deref(),
+            m.sender_name.as_deref(),
+        )
+    }
+
+    #[test]
+    fn a_foreign_agents_row_and_bubble_share_one_identity() {
+        let space = arbonites(vec![roster_agent("01TEST", "TestAgent", None)]);
+        let mine = [Project {
+            id: "01MINE".into(),
+            name: "Mine".into(),
+            ..Default::default()
+        }];
+        let m = working_row("agent:01TEST", "testagent", "TestAgent");
+        let b = bubble(&space, &mine, &m);
+        let p = presence(&space, &mine, &m);
+        assert_eq!(
+            b, p,
+            "one identity for the bubble disc and the presence picture"
+        );
+        assert!(p.known, "the roster answered, not a fallback");
+        assert_eq!(p.name, "TestAgent", "the display name, not the handle");
+        assert_eq!(p.handle, "testagent");
+        assert_eq!(
+            p.leaf,
+            LeafPick { leaf: 5, color: 2 },
+            "the roster's leaf picks"
+        );
+        assert_eq!(p.id, "01TEST", "seeded by the bare id");
+    }
+
+    #[test]
+    fn an_uploaded_picture_reaches_the_presence_row_too() {
+        let space = arbonites(vec![roster_agent(
+            "01TEST",
+            "TestAgent",
+            Some("https://relay/blob/01TEST/avatar-1.jpg?token=t"),
+        )]);
+        let m = working_row("agent:01TEST", "testagent", "TestAgent");
+        let p = presence(&space, &[], &m);
+        assert_eq!(
+            p.image_key.as_deref(),
+            Some("https://relay/blob/01TEST/avatar-1.jpg?token=t"),
+            "the presence row gets the same picture URL the bubble disc loads"
+        );
+        assert_eq!(bubble(&space, &[], &m), p);
+    }
+
+    #[test]
+    fn an_agent_missing_from_every_roster_still_agrees_with_itself() {
+        let space = arbonites(Vec::new());
+        let m = working_row("agent:01GHOST", "ghost", "Ghost Writer");
+        let b = bubble(&space, &[], &m);
+        let p = presence(&space, &[], &m);
+        assert_eq!(b.id, p.id);
+        assert_eq!(b.leaf, p.leaf, "both seed the leaf with the bare id");
+        assert_eq!(p.leaf, leaf::default_pick("01GHOST"));
+        assert_ne!(
+            p.leaf,
+            leaf::default_pick("agent:01GHOST"),
+            "the old presence fallback seeded with the prefixed sender"
+        );
+        assert_eq!(p.name, "Ghost Writer", "the row's own name, never `ghost`");
+        assert!(!p.known);
+    }
+
+    #[test]
+    fn the_rosters_card_wins_over_a_stale_copy_in_my_projects() {
+        let space = arbonites(vec![roster_agent("01HOME", "GigChadAgent", None)]);
+        let mine = [Project {
+            id: "01HOME".into(),
+            name: "Home".into(),
+            ..Default::default()
+        }];
+        let m = working_row("agent:01HOME", "gigchadagent", "GigChadAgent");
+        assert_eq!(presence(&space, &mine, &m).name, "GigChadAgent");
+        assert_eq!(bubble(&space, &mine, &m).name, "GigChadAgent");
     }
 }

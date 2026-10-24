@@ -40,6 +40,28 @@ enum Surface: String, CaseIterable, Identifiable {
     }
 }
 
+/// Who may add me to a people group (`PATCH /me {group_add}` / `GET /me` → `privacy`).
+enum GroupAddPolicy: String, CaseIterable, Identifiable {
+    case anyone
+    case peopleIKnow = "people_i_know"
+    case nobody
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+    var summary: String {
+        switch self {
+        case .anyone: return "Anyone"
+        case .peopleIKnow: return "People I message"
+        case .nobody: return "Nobody"
+        }
+    }
+}
+
 struct Notice: Identifiable, Equatable {
     let id = UUID()
     var text: String
@@ -104,6 +126,10 @@ final class AppModel: ObservableObject {
     @Published var surfaceSetting: String = UserDefaults.standard.string(forKey: "surface") ?? Surface.default.rawValue {
         didSet { UserDefaults.standard.set(surfaceSetting, forKey: "surface") }
     }
+
+    /// Who may add me to people groups (`anyone` | `people_i_know` | `nobody`).
+    /// Synced from `GET /me` → `privacy.group_add`; written with `PATCH /me`.
+    @Published var groupAddPolicy: String = GroupAddPolicy.anyone.rawValue
 
     @Published private(set) var credentials: DeviceCredentials?
     /// Self-serve sign-in (GitHub). `tokens` is the JWT pair; `credentials`
@@ -289,6 +315,11 @@ final class AppModel: ObservableObject {
     @Published var mutedChannelIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "mutedChannelIds") ?? []) {
         didSet { UserDefaults.standard.set(Array(mutedChannelIds), forKey: "mutedChannelIds") }
     }
+    /// People group chats muted on this phone until the given date (`distantFuture` = until unmuted).
+    /// Timed mutes live here; the relay's `me.muted` stays true while muted so other devices match.
+    @Published var peopleMutedUntil: [String: Date] = AppModel.loadPeopleMutedUntil() {
+        didSet { AppModel.savePeopleMutedUntil(peopleMutedUntil) }
+    }
     /// The shared Matrix client (crates/arbos-matrix through ArbosFFI): the rooms' data plane.
     var matrixClient: ArbosFFI.MatrixClient?
     /// Retains the UniFFI foreign listener for the client's lifetime.
@@ -310,7 +341,8 @@ final class AppModel: ObservableObject {
 
     /// Who the call screen shows before anyone joins: the DM peer, or (for a
     /// people group) every other human plus the agents in that chat; for a
-    /// project chat the project's agent (Calls Phase 2).
+    /// project chat the project's agent (Calls Phase 2). A selective group
+    /// start (`CallManager.ringIds`) narrows the group list to the people we named.
     func expectedCallPeople(_ c: Call) -> [CallPerson] {
         guard let chat = peopleChat(c.chatId) else {
             if !c.agents.isEmpty { return c.agents }
@@ -320,7 +352,11 @@ final class AppModel: ObservableObject {
         }
         let me = user?.id
         if chat.isGroup {
-            return chat.members.filter { $0.id != me }.map(CallPerson.from(member:))
+            let others = chat.members.filter { $0.id != me }
+            if let ring = CallManager.shared.ringIds, c.callId == CallManager.shared.call?.callId {
+                return others.filter { ring.contains($0.id) }.map(CallPerson.from(member:))
+            }
+            return others.map(CallPerson.from(member:))
         }
         guard let other = chat.counterpart(me: me) else { return [] }
         return [CallPerson.from(member: other)]
@@ -713,6 +749,7 @@ final class AppModel: ObservableObject {
             return self.visibleChatId
         }
         PushManager.shared.isHiddenChat = { [weak self] id in self?.isHiddenChat(id) ?? false }
+        PushManager.shared.isMutedChat = { [weak self] id in self?.isPeopleChatMuted(id) ?? false }
         NotificationCenter.default.addObserver(forName: PushManager.openChat, object: nil, queue: .main) { [weak self] n in
             guard let self, let cid = n.userInfo?["chat_id"] as? String else { return }
             let pid = (n.userInfo?["project_id"] as? String) ?? peopleSlot
@@ -1080,6 +1117,24 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Settings → Privacy: who may add me to groups (`PATCH /me {group_add}`).
+    @discardableResult
+    func updateGroupAddPolicy(_ policy: GroupAddPolicy) async -> String? {
+        let previous = groupAddPolicy
+        groupAddPolicy = policy.rawValue
+        guard !isFixture else { return nil }
+        do {
+            _ = try await api.patchMe(groupAdd: policy.rawValue)
+            return nil
+        } catch let e as RelayError {
+            groupAddPolicy = previous
+            return AuthError.humanize(e.type ?? "", e.message.isEmpty ? "Could not update privacy" : e.message)
+        } catch {
+            groupAddPolicy = previous
+            return error.localizedDescription
+        }
+    }
+
     private func adopt(tokens toks: AuthTokens, user who: AuthUser?, persist: Bool = true) {
         tokens = toks
         if let who { user = who }
@@ -1126,7 +1181,7 @@ final class AppModel: ObservableObject {
     func refreshAccount() async {
         guard credentials != nil, !isFixture else { return }
         if tokens?.isExpiringSoon == true { _ = await refreshTokens() }
-        if let (who, cr, summary, features) = try? await api.me() {
+        if let (who, cr, summary, features, privacy) = try? await api.me() {
             user = who
             credits = cr
             saveAccountCache()
@@ -1135,6 +1190,10 @@ final class AppModel: ObservableObject {
             LeafAvatarsFlag.shared.setLottie(features?.leaf_lottie ?? true)
             // Voice mode kill switch (absent on an older relay = off).
             VoiceModeFlag.shared.set(features?.voice_mode ?? false)
+            // Who may add me to groups (absent on an older relay = anyone).
+            if let policy = privacy?.group_add, GroupAddPolicy(rawValue: policy) != nil {
+                groupAddPolicy = policy
+            }
             let position = summary.waitlisted ? Int(summary.waitlist_position ?? 1) : nil
             if position != waitlistPosition { waitlistPosition = position }
             meAlwaysOn = summary.always_on
@@ -3228,6 +3287,8 @@ final class AppModel: ObservableObject {
     /// with `typing`; the presence row over the composer reads it
     /// ([feedback typing-indicator-left-2026-10-23], Mac `AppState.typing`).
     @Published var typing: [Id: [String: Int64]] = [:]
+    /// Last time we told the room we are typing, per chat (Mac `typing_sent_at`).
+    private var typingSentAt: [Id: Int64] = [:]
 
     /// Draft text for a chat, or `""` when none.
     func composerDraft(for chatId: Id) -> String {
@@ -3292,11 +3353,10 @@ final class AppModel: ObservableObject {
     /// people-chat member row (someone else's agent in a DM).
     func foreignAgent(_ projectId: Id) -> Project? {
         for c in peopleChats {
-            if let a = c.agents.first(where: { $0.id == projectId }), var p = a.project {
-                if p.ownerHandle == nil { p.ownerHandle = a.ownerHandle }
-                p.shared = true
-                if p.description.isEmpty, let d = a.description { p.description = d }
-                return p
+            if let a = c.agents.first(where: { $0.id == projectId }) {
+                // Through the shared identity (#1592): the same name, leaf and picture every
+                // other surface draws for this agent.
+                return agent(member: a, chatId: c.id)
             }
         }
         return nil
@@ -3312,7 +3372,9 @@ final class AppModel: ObservableObject {
     /// 6 s (the sender refreshes every 3 s), off → gone at once.
     func noteTyping(_ header: [String: Any], chatId: Id) {
         guard let handle = header["handle"] as? String, !handle.isEmpty,
-              let active = header["typing"] as? Bool else { return }
+              header["typing"] != nil else { return }
+        // `DocJSON.bool` accepts Bool and NSNumber; a bare `as? Bool` missed live frames.
+        let active = DocJSON.bool(header["typing"])
         if handle == user?.login { return }
         var chat = typing[chatId] ?? [:]
         if active {
@@ -3321,6 +3383,18 @@ final class AppModel: ObservableObject {
             chat[handle] = nil
         }
         typing[chatId] = chat.isEmpty ? nil : chat
+    }
+
+    /// Composer keystroke in a people chat (DM or group): at most one presence
+    /// typing ping per 3 s so peers see who is typing ([feedback
+    /// app-01M5N7WSA1VCYHE9BE3CX4V0R6], Mac `AppState::typed_in`).
+    func typedIn(chatId: Id) {
+        guard peopleChat(chatId) != nil else { return }
+        let now = nowMs()
+        let last = typingSentAt[chatId] ?? 0
+        guard now - last > 3_000 else { return }
+        typingSentAt[chatId] = now
+        rooms[chatId]?.setTyping(true)
     }
 
     /// Handles typing in `chatId` right now, the most recently seen first.
@@ -3337,6 +3411,57 @@ final class AppModel: ObservableObject {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].muted = muted }
         guard !isFixture else { return }
         Task { try? await api.chatSettings(chatId: chatId, muted: muted) }
+    }
+
+    private static let peopleMutedUntilKey = "peopleMutedUntil"
+
+    private static func loadPeopleMutedUntil() -> [String: Date] {
+        let raw = UserDefaults.standard.dictionary(forKey: peopleMutedUntilKey) as? [String: Double] ?? [:]
+        return Dictionary(uniqueKeysWithValues: raw.map { ($0.key, Date(timeIntervalSince1970: $0.value)) })
+    }
+
+    private static func savePeopleMutedUntil(_ map: [String: Date]) {
+        let raw = Dictionary(uniqueKeysWithValues: map.map { ($0.key, $0.value.timeIntervalSince1970) })
+        UserDefaults.standard.set(raw, forKey: peopleMutedUntilKey)
+    }
+
+    /// True while this people chat should not show banners (timed local mute or relay `me.muted`).
+    func isPeopleChatMuted(_ chatId: String) -> Bool {
+        if let until = peopleMutedUntil[chatId] {
+            if until > Date() { return true }
+            // Timed mute ended: clear local expiry and the relay flag.
+            peopleMutedUntil.removeValue(forKey: chatId)
+            if peopleChat(chatId)?.muted == true { setMuted(chatId: chatId, muted: false) }
+            return false
+        }
+        return peopleChat(chatId)?.muted == true
+    }
+
+    /// Mute a people group for a chosen length of time (1 hour, 8 hours, or until unmuted).
+    func mutePeopleChat(_ chatId: String, for duration: ChatMuteDuration) {
+        peopleMutedUntil[chatId] = duration.endDate
+        setMuted(chatId: chatId, muted: true)
+    }
+
+    /// Clear a people-chat mute (local expiry and relay flag).
+    func unmutePeopleChat(_ chatId: String) {
+        peopleMutedUntil.removeValue(forKey: chatId)
+        setMuted(chatId: chatId, muted: false)
+    }
+
+    /// Subtitle under Mute / Unmute on the group info page.
+    func peopleMuteSubtitle(_ chatId: String) -> String {
+        guard isPeopleChatMuted(chatId) else {
+            return "No banners for a while, or until you turn them back on"
+        }
+        if let until = peopleMutedUntil[chatId], until.timeIntervalSinceNow < 60 * 60 * 24 * 365 {
+            let f = DateFormatter()
+            f.doesRelativeDateFormatting = true
+            f.dateStyle = .short
+            f.timeStyle = .short
+            return "Muted until \(f.string(from: until))"
+        }
+        return "Muted until you turn it back on"
     }
 
     /// `GET /users/{id}` for a fresh presence line on a profile page.
@@ -3417,21 +3542,24 @@ final class AppModel: ObservableObject {
                 if !isWatching(cid) {
                     peopleUnread.insert(cid)
                     unarchiveOnActivity(chatId: cid)
-                    let sender = payload.sender
-                    let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
-                    // §7c sender{} first; the chat's member list fills any gap.
-                    let member = peopleChat(cid)?.members.first { $0.handle == from }
-                    let agent = member?.isAgent == true ? member?.project : nil
-                    let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
-                    let info = MessagePush.userInfo(
-                        chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
-                        body: "New message",
-                        senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
-                        senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
-                        avatar: sender.avatar,
-                        avatarColor: sender.avatar_color,
-                        avatarUrl: sender.avatar_url ?? member?.avatarUrl)
-                    Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    // Muted group: keep the unread flag, skip the local banner.
+                    if !isPeopleChatMuted(cid) {
+                        let sender = payload.sender
+                        let from = sender.handle.isEmpty ? (payload.from_handle.isEmpty ? "someone" : payload.from_handle) : sender.handle
+                        // §7c sender{} first; the chat's member list fills any gap.
+                        let member = peopleChat(cid)?.members.first { $0.handle == from }
+                        let agent = member?.isAgent == true ? member?.project : nil
+                        let kind = sender.kind.isEmpty ? (agent != nil ? "agent" : "user") : sender.kind
+                        let info = MessagePush.userInfo(
+                            chatId: cid, projectId: peopleSlot, title: sender.name.isEmpty ? (member?.displayName ?? "@\(from)") : sender.name,
+                            body: "New message",
+                            senderKind: kind, senderId: sender.id.isEmpty ? (member?.id ?? from) : sender.id,
+                            senderName: sender.name.isEmpty ? (member?.displayName ?? from) : sender.name, senderHandle: from,
+                            avatar: sender.avatar,
+                            avatarColor: sender.avatar_color,
+                            avatarUrl: sender.avatar_url ?? member?.avatarUrl)
+                        Task { await PushManager.shared.postMessage(id: p.id, info: info) }
+                    }
                     applyBadge()
                 }
             case .peopleChatCreated(let payload):

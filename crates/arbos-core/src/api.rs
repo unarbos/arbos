@@ -598,6 +598,23 @@ pub struct MeFeaturesDto {
     pub voice_mode: Option<bool>,
 }
 
+/// Privacy choices on `GET /me` / `PATCH /me`. Absent on an older relay → open defaults.
+/// Key names are a contract with shipped apps: only add, never rename.
+#[typeshare]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MePrivacyDto {
+    /// Who may add me to a people group: `anyone` | `people_i_know` | `nobody`.
+    pub group_add: String,
+}
+
+impl Default for MePrivacyDto {
+    fn default() -> Self {
+        Self {
+            group_add: "anyone".into(),
+        }
+    }
+}
+
 /// `GET /me` success body.
 #[typeshare]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -609,6 +626,8 @@ pub struct MeResponseDto {
     #[serde(default)]
     pub features: MeFeaturesDto,
     pub machine: MeMachineDto,
+    #[serde(default)]
+    pub privacy: MePrivacyDto,
 }
 
 /// `PATCH /me` and avatar route replies: `user`, optional `avatar_url`.

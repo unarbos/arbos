@@ -376,30 +376,37 @@ private struct ZoomableImagePage: View {
     private let maxScale: CGFloat = 5
 
     var body: some View {
-        ZStack {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .scaleEffect(scale)
-                    .offset(offset)
-                    .gesture(magnify)
-                    .simultaneousGesture(pan)
-                    .onTapGesture(count: 2, perform: toggleZoom)
-                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
-                    .accessibilityLabel("Image")
-                    .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
-            } else if failed {
-                VStack(spacing: 12) {
-                    Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
-                    Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+        // Fit the whole picture in the viewport at 1× (aspect-fit). Without an
+        // explicit size, a large photo can lay out at its pixel size inside the
+        // paged TabView and look like a zoomed-in crop.
+        GeometryReader { geo in
+            ZStack {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .scaleEffect(scale)
+                        .offset(offset)
+                        .gesture(magnify)
+                        .simultaneousGesture(pan)
+                        .onTapGesture(count: 2, perform: toggleZoom)
+                        .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose, enabled: scale <= minScale + 0.01))
+                        .accessibilityLabel("Image")
+                        .accessibilityHint("Pinch to zoom, double tap to zoom in or out, swipe down to close")
+                } else if failed {
+                    VStack(spacing: 12) {
+                        Image(systemName: "photo").font(.system(size: 44)).foregroundStyle(.white.opacity(0.35))
+                        Text("No preview").font(theme.font(13)).foregroundStyle(.white.opacity(0.67))
+                    }
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
+                } else {
+                    ProgressView().tint(.white)
+                        .frame(width: geo.size.width, height: geo.size.height)
                 }
-                .modifier(DismissDrag(progress: $dismissProgress, onClose: onClose))
-            } else {
-                ProgressView().tint(.white)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: item.blobRef) {
             if let (data, _) = await MediaFetch.bytes(for: item, model: model), let img = UIImage(data: data) {
                 image = img

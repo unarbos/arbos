@@ -35,6 +35,8 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     var visibleChatId: () -> String? = { nil }
     /// D78: an agent's hidden plain chats (not its one chat) never show a banner here.
     var isHiddenChat: (String) -> Bool = { _ in false }
+    /// People group muted for a duration (or until unmuted): no banners on this phone.
+    var isMutedChat: (String) -> Bool = { _ in false }
     private var registeredToken: String?
     /// chat_id → when a banner was shown (local post or APNs willPresent); swallows
     /// a matching APNs twin that lands a moment later for the same chat. Local
@@ -136,6 +138,7 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
     /// service extension builds remote ones.
     func postMessage(id: String, info: [AnyHashable: Any]) async {
         guard let push = MessagePush(userInfo: info) else { return }
+        if isMutedChat(push.chatId) || isHiddenChat(push.chatId) { return }
         // APNs already showed a banner for this chat a moment ago — skip the twin.
         if let at = localBannerAt[push.chatId], CFAbsoluteTimeGetCurrent() - at < PushManager.localBannerDedupe {
             return
@@ -179,7 +182,7 @@ final class PushManager: NSObject, ObservableObject, UNUserNotificationCenterDel
         let isRemote = notification.request.trigger is UNPushNotificationTrigger
         let silent = await MainActor.run { () -> Bool in
             guard let chatId else { return false }
-            if chatId == visibleChatId() || isHiddenChat(chatId) { return true }
+            if chatId == visibleChatId() || isHiddenChat(chatId) || isMutedChat(chatId) { return true }
             // Local `/me/pushes` banner already shown for this chat — skip the APNs twin.
             if isRemote,
                let at = localBannerAt[chatId],

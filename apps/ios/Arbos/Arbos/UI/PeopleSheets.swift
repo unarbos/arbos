@@ -1181,6 +1181,147 @@ extension View {
     func sheetSearchFieldChrome(_ theme: Theme) -> some View { modifier(SheetSearchFieldChrome(theme: theme)) }
 }
 
+/// Group-chat call picker: call everyone, or tick specific members (people and
+/// agents) and Call. `onCall(nil)` = whole group; `onCall([ids])` = those ids
+/// (bare user / project ids, same as `ChatMember.id`).
+struct GroupCallPickerSheet: View {
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    let people: PeopleChat
+    let meId: String?
+    let onCall: (_ ring: [String]?) -> Void
+    @State private var picked: Set<String> = []
+
+    /// Everyone else in the group who can join a call (agents without a live project omitted).
+    private var others: [ChatMember] {
+        people.members.filter { $0.id != meId && (!$0.isAgent || $0.project != nil) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Button {
+                    onCall(nil)
+                    dismiss()
+                } label: {
+                    HStack(spacing: SheetRow.gap) {
+                        GlassCircle(size: SheetRow.avatar) {
+                            Image(systemName: "person.3.fill")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(theme.text)
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Everyone")
+                                .font(theme.font(Theme.body, weight: .medium))
+                                .foregroundStyle(theme.text)
+                            Text("Call the whole group")
+                                .font(theme.font(Theme.tiny))
+                                .foregroundStyle(theme.muted)
+                        }
+                        Spacer()
+                        Image(systemName: "phone.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(theme.muted)
+                    }
+                    .padding(.horizontal, SheetRow.paddingX)
+                    .padding(.vertical, 12)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 18)
+                .accessibilityLabel("Call everyone")
+
+                if !others.isEmpty {
+                    Text("OR CHOOSE")
+                        .font(theme.font(12, weight: .medium))
+                        .kerning(0.4)
+                        .foregroundStyle(theme.muted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 8)
+
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(Array(others.enumerated()), id: \.element.id) { i, m in
+                                Button { toggle(m.id) } label: {
+                                    HStack(spacing: SheetRow.gap) {
+                                        if m.isAgent, let p = m.project {
+                                            AgentAvatar(project: p, theme: theme, size: SheetRow.avatar, still: true)
+                                        } else {
+                                            PersonAvatar(url: m.avatarUrl, handle: m.handle, size: SheetRow.avatar,
+                                                         name: m.name, id: m.id, colorIndex: m.avatarColorIndex)
+                                        }
+                                        Text(m.displayName)
+                                            .font(theme.font(Theme.body, weight: .medium))
+                                            .foregroundStyle(theme.text)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        Image(systemName: picked.contains(m.id) ? "checkmark.circle.fill" : "circle")
+                                            .font(.system(size: 22))
+                                            .foregroundStyle(picked.contains(m.id) ? theme.primary : theme.muted)
+                                    }
+                                    .padding(.horizontal, SheetRow.paddingX)
+                                    .padding(.vertical, 9)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(m.displayName)
+                                .accessibilityAddTraits(picked.contains(m.id) ? .isSelected : [])
+                                if i < others.count - 1 {
+                                    Rectangle().fill(theme.separator).frame(height: 0.5).padding(.leading, SheetRow.textInset)
+                                }
+                            }
+                        }
+                        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(theme.card))
+                        .padding(.horizontal, 16)
+                        Color.clear.frame(height: 24)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                Button {
+                    onCall(Array(picked))
+                    dismiss()
+                } label: {
+                    Text(picked.isEmpty ? "Call" : (picked.count == 1 ? "Call 1 person" : "Call \(picked.count) people"))
+                        .font(theme.font(Theme.body, weight: .semibold))
+                        .foregroundStyle(theme.onPrimary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .background(Capsule().fill(theme.primary))
+                }
+                .buttonStyle(.plain)
+                .disabled(picked.isEmpty)
+                .opacity(picked.isEmpty ? 0.45 : 1)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 12)
+                .accessibilityLabel("Call selected")
+            }
+            .background(theme.bg)
+            .navigationTitle("Start a call")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(theme.bg, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }.foregroundStyle(theme.text)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(theme.bg)
+    }
+
+    private func toggle(_ id: String) {
+        if picked.contains(id) { picked.remove(id) } else { picked.insert(id) }
+    }
+}
+
 /// One selected member in a picker (New group, Add members): the member's
 /// picture, `@handle`, and an × that removes it. People and agents share it,
 /// so an agent chip carries the agent's avatar exactly like a person chip.

@@ -436,23 +436,32 @@ export default function arbosPiExt(pi: ExtensionAPI) {
     },
   });
 
-  // ---- 2b. send_message: a progress bubble at a real milestone (agent-flow contract §1) ------
+  // ---- 2b. send_message: progress bubble (no `to`) or cross-subnet agent message (`to`) ------
   if (SESSION_ROLE === "main") pi.registerTool({
     name: "send_message",
     label: "Send message",
     description:
-      "Post a short progress message to the user now, as its own chat bubble, while you keep working. Only at a real milestone of longer work (something finished, something unexpected), never for each command. Optional `activity`: 2–5 plain words for the working line (\"Running tests\").",
-    promptSnippet: "send_message: post a short progress note to the user mid-task (real milestones only)",
+      "Two uses. (1) With `to` (agent name, @handle or id): message that agent — the text lands in their own chat and their reply comes back here; never write `@name …` as a chat bubble to reach them. (2) Without `to`: post a short progress note to the user mid-task (real milestones only). Optional `activity`: 2–5 plain words for the working line (\"Running tests\").",
+    promptSnippet: "send_message: with `to` = message another agent; without `to` = progress note to the user",
     parameters: Type.Object({
-      text: Type.String({ description: "One or two plain sentences" }),
-      activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense" })),
+      text: Type.String({ description: "The words for the other agent, or one or two plain sentences of progress" }),
+      to: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "Agent name, @handle or id — set this to message another agent" })),
+      activity: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "What you are doing next, 2-5 words, present tense (progress only)" })),
     }),
     exposure: "model-only",
     executionMode: "sequential",
     async execute(_toolCallId, params) {
-      const res = await hook("/hook/send_message", { session_id: sessionId, text: params.text, activity: params.activity ?? null });
+      const res = await hook("/hook/send_message", {
+        session_id: sessionId,
+        text: params.text,
+        to: params.to ?? null,
+        activity: params.activity ?? null,
+      });
       if (res && !res.ok) {
         return { content: [{ type: "text", text: `Not sent (${res.error ?? "unknown"}). Keep working; say it in your final result instead.` }], details: undefined };
+      }
+      if (typeof res?.note === "string" && res.note.trim()) {
+        return { content: [{ type: "text", text: res.note }], details: undefined };
       }
       return { content: [{ type: "text", text: "Sent. Keep working; do not repeat it in your final result." }], details: undefined };
     },

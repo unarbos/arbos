@@ -52,14 +52,10 @@ impl Identity {
     }
 }
 
-/// `@handle` of an agent in shared chats: the relay's `people::agent_slug` rule (lower-case,
-/// whitespace → `-`). Kept in step with the relay by the unit test below.
+/// `@handle` of an agent in shared chats: the shared rule in `arbos_core::avatar::identity`
+/// (lower-case, whitespace → `-`), the same one the relay roster and both clients run.
 pub fn agent_slug(name: &str) -> String {
-    name.trim()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
+    arbos_core::avatar::identity::agent_slug(name)
 }
 
 pub struct IdentityState {

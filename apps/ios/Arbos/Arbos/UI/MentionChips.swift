@@ -62,6 +62,18 @@ final class MentionTable {
                     picture: AnyView(PersonAvatar(url: m.avatarUrl, handle: m.handle, size: Self.picture, name: m.name, id: m.id, colorIndex: m.avatarColorIndex))
                 ))
             }
+            // Agents other people shared into my chats (#1592): their `@handle` is a chip
+            // too, drawn through the same identity the bubble and the presence row use.
+            for m in chat.agents {
+                let p = model.agent(member: m, chatId: chat.id)
+                let slug = mentionSlug(p.name)
+                guard !slug.isEmpty else { continue }
+                add(slug, MentionEntry(
+                    name: p.name,
+                    target: .agent(projectId: p.id),
+                    picture: AnyView(AgentAvatar(project: p, theme: theme, size: Self.picture, still: true))
+                ))
+            }
             if chat.isGroup {
                 let slug = mentionSlug(chat.title)
                 guard !slug.isEmpty else { continue }
@@ -131,6 +143,10 @@ final class MentionTable {
                     h.combine(m.handle)
                     h.combine(m.name)
                     h.combine(m.avatarUrl)
+                    h.combine(m.project?.name)
+                    h.combine(m.project?.avatarLeaf)
+                    h.combine(m.project?.avatarLeafColor)
+                    h.combine(m.project?.imageKey)
                     h.combine(m.isAgent)
                 }
             }

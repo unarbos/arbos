@@ -3275,6 +3275,7 @@ async fn perform_room_actions(
                 RoomAction::HealCheck { relay_vv } => {
                     // The relay told us what it holds; if this replica has more (a lost
                     // checkpoint, #1518), push the difference back once so the room heals.
+                    // Always answer (even empty) so the session can release the held pending resend.
                     let missing = {
                         let docs = shared.docs.lock().unwrap();
                         match (docs.get(key), arbos_core::doc::decode_vv(&relay_vv)) {
@@ -3288,8 +3289,8 @@ async fn perform_room_actions(
                             session.room(),
                             missing.len()
                         );
-                        session.on_heal(missing);
                     }
+                    session.on_heal(missing);
                 }
                 RoomAction::ScheduleReconnect { after } => {
                     reconnect = Some(after);

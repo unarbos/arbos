@@ -202,6 +202,12 @@ pub struct WakeHeader {
 pub struct ErrorHeader {
     pub code: String,
     pub message: String,
+    /// Present on people-push refusals (`rate_limited` / `not_available`).
+    #[serde(rename = "batchId", default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    /// Seconds to wait before retrying a `rate_limited` push.
+    #[serde(rename = "retryS", default, skip_serializing_if = "Option::is_none")]
+    pub retry_s: Option<i64>,
 }
 
 /// Room name for a chat doc: `{projectId}/{chatId}`. The project doc uses chat id `project`.

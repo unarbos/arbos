@@ -118,6 +118,28 @@ fn rate_limited(retry_s: i64) -> Response {
     r
 }
 
+/// May `adder` put `target` into a people group under the target's `group_add` privacy?
+fn may_add_to_group(state: &AppState, adder: &str, target: &str) -> bool {
+    let policy = state
+        .db
+        .group_add_policy(target)
+        .unwrap_or_else(|_| "anyone".into());
+    match policy.as_str() {
+        "nobody" => false,
+        "people_i_know" => state.db.dm_between(adder, target).ok().flatten().is_some(),
+        _ => true, // anyone (default)
+    }
+}
+
+/// Opaque "not available" when a group-add privacy check fails (same as a block).
+fn group_add_forbidden() -> Response {
+    api_error(
+        StatusCode::FORBIDDEN,
+        "not_available",
+        "this person is not available",
+    )
+}
+
 fn normalize_handle(h: &str) -> Option<String> {
     let h = h.trim().trim_start_matches('@').trim();
     let ok = !h.is_empty()
@@ -366,13 +388,10 @@ pub(crate) fn member_dto(state: &AppState, m: &Membership) -> ChatMemberDto {
     dto
 }
 
-/// The `@slug` a project agent answers to: its name lower-cased, spaces to hyphens.
+/// The `@slug` a project agent answers to — the shared rule (`arbos_core::avatar::identity`),
+/// so the roster's `handle`, agentd's attribution and both clients' lookups agree (#1592).
 pub fn agent_slug(name: &str) -> String {
-    name.trim()
-        .to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join("-")
+    arbos_core::avatar::identity::agent_slug(name)
 }
 
 /// An agent's `@slug` must not be a person's `@handle`: when Jacob (@unarbos) named an agent
@@ -819,6 +838,9 @@ pub async fn chats_create_group(
                 "not_available",
                 "this person is not available",
             );
+        }
+        if !may_add_to_group(&state, &me, &other_id) {
+            return group_add_forbidden();
         }
         other_ids.push(other_id);
     }
@@ -1830,6 +1852,9 @@ pub async fn member_add(
                 "not_available",
                 "this person is not available",
             );
+        }
+        if !may_add_to_group(&state, &me, &other_id) {
+            return group_add_forbidden();
         }
         people.push(other);
     }
@@ -4397,6 +4422,146 @@ mod create_group_tests {
             .unwrap()
             .len();
         assert_eq!(after, before, "a refused create leaves no half-made chat");
+    }
+}
+
+#[cfg(test)]
+mod group_add_privacy_tests {
+    //! A person's `group_add` privacy blocks others from putting them into a new group or
+    //! adding them to an existing one (spam-group guard).
+
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::person;
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn nobody_refuses_create_and_add() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+        state.db.set_group_add_policy(&bob, "nobody").unwrap();
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![bob_handle.clone()],
+                agent_ids: vec![],
+                title: Some("Spam".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // A group of Alice alone (plus an agent) so she can try Add members.
+        let alice_proj = {
+            use super::tests_support::project_of;
+            project_of(&state, &alice, "Home")
+        };
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![],
+                agent_ids: vec![alice_proj],
+                title: Some("Alice's".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat_id = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .unwrap()
+            .chat
+            .id;
+
+        let r = member_add(
+            State(state.clone()),
+            alice_dev,
+            Path(chat_id),
+            Json(AddMemberBody {
+                handle: Some(bob_handle),
+                handles: vec![],
+                agent_ids: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn people_i_know_allows_only_existing_dm() {
+        let state = test_state(AuthMode::Github);
+        let (_alice, alice_dev) = person(&state, 1);
+        let (bob, _) = person(&state, 2);
+        let (carol, _) = person(&state, 3);
+        let bob_handle = state.db.user(&bob).unwrap().unwrap().login.unwrap();
+        let carol_handle = state.db.user(&carol).unwrap().unwrap().login.unwrap();
+        state
+            .db
+            .set_group_add_policy(&bob, "people_i_know")
+            .unwrap();
+        state
+            .db
+            .set_group_add_policy(&carol, "people_i_know")
+            .unwrap();
+
+        // Open a DM with Bob so Alice "knows" him; Carol stays a stranger.
+        let r = dm_create(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(DmBody {
+                handle: bob_handle.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![bob_handle],
+                agent_ids: vec![],
+                title: Some("With Bob".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev,
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec![carol_handle],
+                agent_ids: vec![],
+                title: Some("With Carol".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 }
 

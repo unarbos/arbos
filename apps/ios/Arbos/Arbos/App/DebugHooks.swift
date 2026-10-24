@@ -30,6 +30,9 @@ enum DebugHooks {
     static var fixtureLongReply: Bool { value("ARBOS_FIXTURE_LONG_REPLY") == "1" }
     /// Presence-row rig (typing-indicator-left-2026-10-23): n agents working in the fixture group.
     static var fixtureWorking: Int { value("ARBOS_FIXTURE_WORKING").flatMap { Int($0) } ?? 0 }
+    /// #1592 rig: the fixture group holds someone else's agent ("TestAgent", run by @sami —
+    /// in the roster, not in my projects) with one bubble; with `ARBOS_FIXTURE_WORKING` it works.
+    static var fixtureForeignAgent: Bool { value("ARBOS_FIXTURE_FOREIGN_AGENT") == "1" }
     /// Presence-row rig: `1` (the chat's other person) or comma-separated handles typing.
     static var fixtureTyping: String? { value("ARBOS_FIXTURE_TYPING").flatMap { $0.isEmpty || $0 == "0" ? nil : $0 } }
     /// Join a call seen via presence automatically (two-simulator relay tests).

@@ -542,6 +542,122 @@ pub fn agent_member(a: &AgentMember, size: f32, theme: &Theme) -> Div {
     )
 }
 
+// ----- One identity for every surface (#1592) --------------------------------------
+
+pub use arbos_core::avatar::identity::{AgentCard, AgentIdentity, AgentQuery};
+
+/// A roster row as a card. On the Mac the card's `image_key` slot carries the picture's
+/// fetch URL (the relay client already resolved the key), so the identity hands back what
+/// `AppState::avatar` wants.
+fn member_card(a: &AgentMember) -> AgentCard {
+    AgentCard {
+        id: a.project_id.clone(),
+        name: a.name.clone(),
+        handle: a.handle.clone(),
+        leaf: a.avatar_leaf,
+        leaf_color: a.avatar_leaf_color,
+        color_index: a.avatar_color_index,
+        image_key: a.image_url.clone(),
+    }
+}
+
+fn project_card(p: &Project) -> AgentCard {
+    AgentCard {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        handle: Project::mention_slug(&p.name),
+        leaf: p.avatar_leaf,
+        leaf_color: p.avatar_leaf_color,
+        color_index: p.avatar_color_index,
+        image_key: p.image_url.clone(),
+    }
+}
+
+/// The cards an agent row is resolved against, in the rule's order: the open chat's
+/// roster (the relay's current truth for that chat), my projects, every other roster.
+pub fn agent_cards(chat: Option<&Project>, projects: &[Project]) -> Vec<AgentCard> {
+    let mut cards: Vec<AgentCard> = Vec::new();
+    if let Some(chat) = chat {
+        cards.extend(chat.agents.iter().map(member_card));
+    }
+    cards.extend(projects.iter().filter(|p| !p.is_people()).map(project_card));
+    cards.extend(
+        projects
+            .iter()
+            .filter(|p| p.is_people() && chat.map(|c| c.id != p.id).unwrap_or(true))
+            .flat_map(|p| p.agents.iter().map(member_card)),
+    );
+    cards
+}
+
+/// One agent, one answer: the bubble disc and caption, the presence row, the member
+/// lists, the chips and the call tiles all ask here with the row's `sender`,
+/// `senderHandle` and `senderName` (`arbos_core::avatar::identity::resolve`).
+pub fn agent_identity(
+    chat: Option<&Project>,
+    projects: &[Project],
+    sender: &str,
+    handle: Option<&str>,
+    name: Option<&str>,
+) -> AgentIdentity {
+    arbos_core::avatar::identity::resolve(
+        &AgentQuery {
+            sender,
+            handle,
+            name,
+        },
+        &agent_cards(chat, projects),
+    )
+}
+
+/// The identity of a roster member, drawn from the same rule (so its picture is the
+/// one its bubbles get, uploaded picture included).
+pub fn member_identity(
+    chat: Option<&Project>,
+    projects: &[Project],
+    a: &AgentMember,
+) -> AgentIdentity {
+    agent_identity(
+        chat,
+        projects,
+        &a.project_id,
+        Some(&a.handle),
+        Some(&a.name),
+    )
+}
+
+/// The picture for an identity: the uploaded / generated image when the loader has it,
+/// else the leaf (D92) or the initials disc (D79) from the identity's own picks.
+pub fn agent_picture(
+    a: &AgentIdentity,
+    image: Option<std::sync::Arc<gpui::RenderImage>>,
+    size: f32,
+    theme: &Theme,
+) -> Div {
+    if let Some(image) = image {
+        return div()
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded_full()
+            .overflow_hidden()
+            .child(
+                gpui::img(image)
+                    .size(px(size))
+                    .rounded_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+    }
+    agent(
+        &a.id,
+        &a.name,
+        Some(a.color_index),
+        Some(a.leaf.leaf),
+        Some(a.leaf.color),
+        size,
+        theme,
+    )
+}
+
 /// Who started a call / sits in it (users and agents).
 pub fn sender(s: &Sender, size: f32, theme: &Theme) -> Div {
     if s.kind == "agent" {

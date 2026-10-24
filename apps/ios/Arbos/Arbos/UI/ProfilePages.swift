@@ -740,6 +740,23 @@ struct UserProfileView: View {
 
 }
 
+// MARK: - Group invite share sheet
+
+/// Identifiable wrapper so `.sheet(item:)` can present the system share sheet.
+private struct ShareGroupInviteItem: Identifiable {
+    var id: String { url.absoluteString }
+    let url: URL
+}
+
+/// System share sheet for a group invite URL (Messages, Mail, copy, other apps).
+private struct GroupInviteShareSheet: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
 // MARK: - Group page
 
 struct GroupProfileView: View {
@@ -763,11 +780,16 @@ struct GroupProfileView: View {
     /// Footer confirm: leave (member) or delete (owner) this people group.
     @State private var confirmLeave = false
     @State private var confirmDelete = false
+    /// Mute notifications for 1 hour / 8 hours / until unmuted.
+    @State private var showMuteOptions = false
     /// People-group invite links (create / copy / share / revoke), same shape as server invites.
     @State private var groupInvites: [ServerInviteLink] = []
     @State private var inviteExpires = false
     @State private var inviteSingleUse = false
     @State private var inviteCopied = false
+    /// System share sheet for the group's invite link (reuses a usable link or mints one).
+    @State private var shareInviteURL: ShareGroupInviteItem?
+    @State private var sharingInvite = false
 
     private var people: PeopleChat? { model.peopleChat(chatId) }
     private var project: Project? { projectId.flatMap { model.project($0) } }
@@ -785,7 +807,7 @@ struct GroupProfileView: View {
     private var rows: [Row] {
         if let people {
             return people.members.map { m in
-                Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: m.isAgent ? m.project : nil)
+                Row(id: m.id, person: ProfilePerson(m), role: m.role, agent: m.isAgent ? model.agent(member: m, chatId: people.id) : nil)
             }
         }
         var out = projectMembers.map { Row(id: $0.id, person: ProfilePerson($0), role: $0.role, agent: nil) }
@@ -853,6 +875,23 @@ struct GroupProfileView: View {
         return others.isEmpty ? people.humans : others
     }
 
+    /// Mute / Unmute above Leave — people groups only (relay `me.muted` + local duration).
+    private var muteFooter: [PaneSection] {
+        guard people?.isGroup == true, projectId == nil else { return [] }
+        let muted = model.isPeopleChatMuted(chatId)
+        let row = AnyView(Button {
+            if muted { model.unmutePeopleChat(chatId) }
+            else { showMuteOptions = true }
+        } label: {
+            PaneRow(
+                leading: .tile(muted ? "bell" : "bell.slash"),
+                title: muted ? "Unmute notifications" : "Mute notifications",
+                subtitle: model.peopleMuteSubtitle(chatId)
+            )
+        }.buttonStyle(.plain))
+        return [.card([row], separatorInset: PaneKit.separatorInset(.tile("")))]
+    }
+
     /// Footer on every tab for a people group: Leave group chat for members,
     /// Delete group chat for the owner (same rule as the chat list).
     private var leaveFooter: [PaneSection] {
@@ -886,12 +925,24 @@ struct GroupProfileView: View {
                         tabs: PaneKinds.group,
                         selected: $tab,
                         body: tab == "Members" ? membersSections + groupInviteSections : librarySections,
-                        footer: leaveFooter
+                        footer: muteFooter + leaveFooter
                     )
                     Color.clear.frame(height: 40)
                 }
             }
             ProfileTopBar { EmptyView() }
+        }
+        .confirmationDialog(
+            "Mute notifications",
+            isPresented: $showMuteOptions,
+            titleVisibility: .visible
+        ) {
+            ForEach(ChatMuteDuration.allCases) { duration in
+                Button(duration.title) { model.mutePeopleChat(chatId, for: duration) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("No banners from this group for the time you pick.")
         }
         .confirmationDialog(
             pendingRemoveName.map { "Remove \($0) from \(title)?" } ?? "Remove from chat?",
@@ -1007,6 +1058,9 @@ struct GroupProfileView: View {
         }
         .sheet(isPresented: $showEdit) {
             GroupEditSheet(chatId: chatId).environmentObject(model).environment(\.theme, theme)
+        }
+        .sheet(item: $shareInviteURL) { item in
+            GroupInviteShareSheet(url: item.url)
         }
         .task {
             if let projectId { projectMembers = await model.projectMembers(projectId) }
@@ -1124,8 +1178,8 @@ struct GroupProfileView: View {
         }
     }
 
-    /// Members: Add members, then every person (name, @handle) and agent
-    /// ("Agent · run by …") as kit rows — the Mac group pane's list.
+    /// Members: Add members, Share invite link (people groups), then every person
+    /// (name, @handle) and agent ("Agent · run by …") as kit rows — the Mac group pane's list.
     /// Owners/admins also get a read-receipts policy card (members see who read).
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
@@ -1134,6 +1188,20 @@ struct GroupProfileView: View {
             }
             .buttonStyle(.plain)),
         ]
+        // People groups only (not a shared project): one-tap share of the invite link.
+        if project == nil, people?.kind == "group" {
+            list.append(AnyView(Button {
+                shareGroupInvite()
+            } label: {
+                PaneRow(
+                    leading: .glyph("square.and.arrow.up"),
+                    title: sharingInvite ? "Preparing link…" : "Share invite link"
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(sharingInvite)
+            .accessibilityLabel("Share invite link")))
+        }
         list += rows.map { r in AnyView(memberRow(r)) }
         var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
         if canManageMembers, people?.isGroup == true {
@@ -1149,6 +1217,29 @@ struct GroupProfileView: View {
             ))]), at: 0)
         }
         return out
+    }
+
+    /// Reuse a usable invite URL, or mint one, then open the system share sheet.
+    private func shareGroupInvite() {
+        guard !sharingInvite else { return }
+        sharingInvite = true
+        Task {
+            if let existing = groupInvites.first(where: { $0.usable }),
+               let url = URL(string: existing.url) {
+                shareInviteURL = ShareGroupInviteItem(url: url)
+                sharingInvite = false
+                return
+            }
+            if let inv = await model.createGroupInvite(
+                chatId, expires: inviteExpires, singleUse: inviteSingleUse
+            ) {
+                groupInvites.insert(inv, at: 0)
+                if let url = URL(string: inv.url) {
+                    shareInviteURL = ShareGroupInviteItem(url: url)
+                }
+            }
+            sharingInvite = false
+        }
     }
 
     private func memberSubtitle(_ r: Row) -> String {

@@ -28,8 +28,8 @@ use sha2::Sha256;
 
 use arbos_core::api::{
     AccountUserDto, ApiErrorBodyDto, ApiErrorDto, CreditsDto, MeDeviceDto, MeLimitsDto,
-    MeMachineDto, MeResponseDto, MeUserResponseDto, PeopleInviteAcceptedPayloadDto, PushEventDto,
-    TokenResponseDto,
+    MeMachineDto, MePrivacyDto, MeResponseDto, MeUserResponseDto, PeopleInviteAcceptedPayloadDto,
+    PushEventDto, TokenResponseDto,
 };
 use arbos_core::auth::hash;
 use arbos_core::ids::{now_ms, ulid};
@@ -715,13 +715,34 @@ fn avatar_file(state: &AppState, user_id: &str) -> std::path::PathBuf {
         .join(format!("{user_id}.jpg"))
 }
 
-/// `PATCH /me {name?, login?}`: set display name and/or handle. At least one field required.
+/// `PATCH /me {name?, login?, group_add?}`: profile and/or privacy. At least one field required.
 #[derive(Deserialize)]
 pub struct PatchMeBody {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub login: Option<String>,
+    /// Who may add me to groups: `anyone` | `people_i_know` | `nobody`.
+    #[serde(default)]
+    pub group_add: Option<String>,
+}
+
+fn parse_group_add(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "anyone" => Some("anyone"),
+        "people_i_know" => Some("people_i_know"),
+        "nobody" => Some("nobody"),
+        _ => None,
+    }
+}
+
+fn privacy_dto(state: &AppState, user_id: &str) -> MePrivacyDto {
+    MePrivacyDto {
+        group_add: state
+            .db
+            .group_add_policy(user_id)
+            .unwrap_or_else(|_| "anyone".into()),
+    }
 }
 
 fn valid_handle(handle: &str) -> bool {
@@ -745,11 +766,11 @@ pub async fn patch_me(
             return api_error(StatusCode::FORBIDDEN, "forbidden", "device token required")
         }
     };
-    if body.name.is_none() && body.login.is_none() {
+    if body.name.is_none() && body.login.is_none() && body.group_add.is_none() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "bad_request",
-            "provide name and/or login",
+            "provide name, login, and/or group_add",
         );
     }
 
@@ -788,20 +809,46 @@ pub async fn patch_me(
         }
     };
 
-    match state
-        .db
-        .set_user_profile(&user_id, name.as_deref(), login.as_deref())
-    {
-        Ok(()) => Json(MeUserResponseDto {
-            user: user_dto(&state, &user_id),
-            avatar_url: None,
-        })
-        .into_response(),
-        Err(e) if e.to_string() == "no such user" => {
-            api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
+    let group_add = match body.group_add.as_deref() {
+        None => None,
+        Some(raw) => match parse_group_add(raw) {
+            Some(v) => Some(v),
+            None => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_group_add",
+                    "group_add must be anyone, people_i_know, or nobody",
+                )
+            }
+        },
+    };
+
+    if name.is_some() || login.is_some() {
+        if let Err(e) = state
+            .db
+            .set_user_profile(&user_id, name.as_deref(), login.as_deref())
+        {
+            return if e.to_string() == "no such user" {
+                api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
+            } else {
+                api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string())
+            };
         }
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string()),
     }
+    if let Some(policy) = group_add {
+        if let Err(e) = state.db.set_group_add_policy(&user_id, policy) {
+            return if e.to_string() == "no such user" {
+                api_error(StatusCode::NOT_FOUND, "not_found", "no such user")
+            } else {
+                api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string())
+            };
+        }
+    }
+    Json(MeUserResponseDto {
+        user: user_dto(&state, &user_id),
+        avatar_url: None,
+    })
+    .into_response()
 }
 
 /// `PUT /me/avatar`: raw JPEG body → public `{public_url}/avatars/{user_id}.jpg?v=…`.
@@ -1007,6 +1054,7 @@ pub async fn me(State(state): State<AppState>, principal: Principal) -> Response
             waitlist_position: waitlist_position.map(|p| p as i64),
             evicted: crate::fleet::is_evicted(&state, &user_id).await,
         },
+        privacy: privacy_dto(&state, &user_id),
     })
     .into_response()
 }

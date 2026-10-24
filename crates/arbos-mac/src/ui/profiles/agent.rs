@@ -403,8 +403,8 @@ pub(super) fn page(
                 )));
                 body.push(Section::Footnote(
                     format!(
-                        "Your own agents can always message {}. People listed here may have their agents message it too; their messages land in this chat and {} answers them.",
-                        project.name, project.name
+                        "Your own agents message {} freely — no approval. People listed here may have their agents message it too; those messages land in this chat and {} answers them. When {} needs your OK for a risky action, the card appears in this chat.",
+                        project.name, project.name, project.name
                     )
                     .into(),
                 ));

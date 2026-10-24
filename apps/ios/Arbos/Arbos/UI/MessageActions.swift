@@ -3,14 +3,16 @@ import UIKit
 
 /// Long-press on a bubble (Grok Bot / iMessage shape, Jacob 2026-10-23): the chat
 /// blurs, the bubble stays where it is, the **reaction capsule** sits above it
-/// (😂 👍 👎 ❤️ 🎉 + add-emoji, which raises the system emoji keyboard) and the
-/// message menu (Copy · Reply · Delete, `MessageMenu`) below it. The Mac's
-/// `ui/reactions.rs` is the same capsule behind the hover rail's smiley.
+/// (❤️ 👍🏽 💪🏽 👎🏻 👌🏾 🤝 🔥 💯 + add-emoji, which raises the system emoji
+/// keyboard) and the message menu (Copy · Reply · Delete, `MessageMenu`) below
+/// it. The Mac's `ui/reactions.rs` is the same capsule behind the hover rail's
+/// smiley.
 enum ReactionCapsule {
-    /// Grok's five, in its order; anything else comes from the emoji keyboard.
+    /// Quick-react set; anything else comes from the emoji keyboard.
     static var palette: [String] { MessageReaction.palette }
-    static let cell: CGFloat = 44
-    static let emojiSize: CGFloat = 26
+    /// Sized so eight palette cells plus the add-emoji control fit a phone width.
+    static let cell: CGFloat = 36
+    static let emojiSize: CGFloat = 22
     static let padding: CGFloat = 4
     static var width: CGFloat { 2 * padding + CGFloat(palette.count + 1) * cell }
     static var height: CGFloat { 2 * padding + cell }

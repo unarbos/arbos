@@ -518,13 +518,51 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// `@Handle words` meant as an address to another agent (the antipattern from
+/// feedback app-01M5NX3GHC37Y8FH3KKR0PRWG1: posting `@testagent hi` in this chat
+/// instead of a cross-subnet `send_message(to, text)`). Short, one line, starts
+/// with `@slug` then the words for them.
+pub fn mention_address(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    if !t.starts_with('@') || t.contains('\n') || t.chars().count() > 160 {
+        return None;
+    }
+    let rest = &t[1..];
+    let (handle, msg) = rest.split_once(char::is_whitespace)?;
+    let handle: String = handle
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect();
+    let msg = msg.trim();
+    if handle.is_empty() || msg.is_empty() || !handle.chars().any(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some((handle, msg.to_owned()))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::clip;
+    use super::{clip, mention_address};
 
     #[test]
     fn clip_keeps_short_text_and_marks_long() {
         assert_eq!(clip("  hello ", 10), "hello");
         assert_eq!(clip("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn mention_address_parses_at_handle_message() {
+        assert_eq!(
+            mention_address("@testagent hi"),
+            Some(("testagent".into(), "hi".into()))
+        );
+        assert_eq!(
+            mention_address("  @TestAgent hello there  "),
+            Some(("TestAgent".into(), "hello there".into()))
+        );
+        assert_eq!(mention_address("hi @testagent"), None);
+        assert_eq!(mention_address("@testagent"), None);
+        assert_eq!(mention_address("Waiting on @testagent's reply"), None);
+        assert_eq!(mention_address(&format!("@x {}", "a".repeat(200))), None);
     }
 }

@@ -44,6 +44,7 @@ struct SettingsView: View {
     @State private var showMachinePage = DebugHooks.settingsPage == "machine"
     @State private var showCreditsPage = DebugHooks.settingsPage == "credits"
     @State private var showNotificationsPage = DebugHooks.settingsPage == "notifications"
+    @State private var showPrivacyPage = DebugHooks.settingsPage == "privacy"
     @State private var showAboutPage = DebugHooks.settingsPage == "about"
     @State private var showDevicesPage = DebugHooks.settingsPage == "devices"
     @State private var showRelayPage = DebugHooks.settingsPage == "relay"
@@ -144,6 +145,7 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $showMachinePage) { MachinePage() }
             .navigationDestination(isPresented: $showCreditsPage) { CreditsPage() }
             .navigationDestination(isPresented: $showNotificationsPage) { NotificationsPage() }
+            .navigationDestination(isPresented: $showPrivacyPage) { PrivacyPage() }
             .navigationDestination(isPresented: $showAboutPage) { AboutPage() }
             .navigationDestination(isPresented: $showDevicesPage) { DevicesPage() }
             .navigationDestination(isPresented: $showRelayPage) {
@@ -217,6 +219,9 @@ struct SettingsView: View {
         out.append(.card([
             AnyView(NavigationLink { NotificationsPage() } label: {
                 SettingsRow(icon: "bell.badge.fill", title: "Notifications", value: notificationsSummary)
+            }),
+            AnyView(NavigationLink { PrivacyPage() } label: {
+                SettingsRow(icon: "hand.raised.fill", title: "Privacy", value: privacySummary)
             }),
             AnyView(NavigationLink { AppearancePage() } label: {
                 SettingsRow(icon: "circle.lefthalf.filled", title: "Appearance", value: appearanceSummary)
@@ -353,6 +358,10 @@ struct SettingsView: View {
 
     private var appearanceSummary: String {
         return "\(model.appearance.label) · \(model.surface.label)"
+    }
+
+    private var privacySummary: String {
+        (GroupAddPolicy(rawValue: model.groupAddPolicy) ?? .anyone).summary
     }
 
     /// "12.4 MB · 23 chats" from the on-device store (#929).
@@ -1170,6 +1179,42 @@ struct NotificationsPage: View {
         case .denied: return "No"
         case .notDetermined: return "Not asked yet"
         @unknown default: return ""
+        }
+    }
+}
+
+/// Who may add me to people groups — stops random spam-group adds.
+struct PrivacyPage: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var error: String?
+
+    var body: some View {
+        SettingsPage(title: "Privacy") {
+            SettingsGroup(
+                header: "Groups",
+                footer: "Controls who can put you in a group without asking. “People I message” means anyone you already have a direct chat with."
+            ) {
+                ForEach(GroupAddPolicy.allCases) { policy in
+                    SettingsChoiceRow(
+                        title: policy.label,
+                        selected: model.groupAddPolicy == policy.rawValue
+                    ) {
+                        Task {
+                            if let err = await model.updateGroupAddPolicy(policy) {
+                                error = err
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .alert("Arbos", isPresented: Binding(
+            get: { error != nil },
+            set: { if !$0 { error = nil } }
+        )) {
+            Button("OK", role: .cancel) { error = nil }
+        } message: {
+            Text(error ?? "")
         }
     }
 }

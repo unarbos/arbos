@@ -1429,6 +1429,17 @@ public struct MeMachineDto: Codable {
 	}
 }
 
+/// Privacy choices on `GET /me` / `PATCH /me`. Absent on an older relay → open defaults.
+/// Key names are a contract with shipped apps: only add, never rename.
+public struct MePrivacyDto: Codable {
+	/// Who may add me to a people group: `anyone` | `people_i_know` | `nobody`.
+	public let group_add: String
+
+	public init(group_add: String) {
+		self.group_add = group_add
+	}
+}
+
 /// `GET /me` success body.
 public struct MeResponseDto: Codable {
 	public let user: AccountUserDto
@@ -1437,14 +1448,16 @@ public struct MeResponseDto: Codable {
 	public let limits: MeLimitsDto
 	public let features: MeFeaturesDto?
 	public let machine: MeMachineDto
+	public let privacy: MePrivacyDto?
 
-	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, features: MeFeaturesDto?, machine: MeMachineDto) {
+	public init(user: AccountUserDto, device: MeDeviceDto?, credits: CreditsDto, limits: MeLimitsDto, features: MeFeaturesDto?, machine: MeMachineDto, privacy: MePrivacyDto?) {
 		self.user = user
 		self.device = device
 		self.credits = credits
 		self.limits = limits
 		self.features = features
 		self.machine = machine
+		self.privacy = privacy
 	}
 }
 

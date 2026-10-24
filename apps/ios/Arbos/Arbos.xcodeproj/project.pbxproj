@@ -32,6 +32,8 @@
 		A17FC3E175B29A6CC8654F7C /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1D946C1D0D3D6797F9935E9 /* ChatView.swift */; };
 		A1C1E00000000000000000A2 /* PresenceRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000A1 /* PresenceRow.swift */; };
 		A1C1E00000000000000000B2 /* PresenceRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C1E00000000000000000B1 /* PresenceRowTests.swift */; };
+		A1A9D0000000000000000002 /* AgentIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000001 /* AgentIdentity.swift */; };
+		A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1A9D0000000000000000003 /* AgentIdentityTests.swift */; };
 		A10A6AAB1A89692C252B33E4 /* FeedbackSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19A848187E4B392C3266926 /* FeedbackSheet.swift */; };
 		A19DEA501A654ADE6E17D7D0 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */; };
 		A1269EB98439212913CF2C3D /* NotificationsPrimerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1C4ED1C31C4AB3EBEA672F1 /* NotificationsPrimerView.swift */; };
@@ -161,6 +163,8 @@
 		A1D946C1D0D3D6797F9935E9 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
 		A1C1E00000000000000000A1 /* PresenceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRow.swift; sourceTree = "<group>"; };
 		A1C1E00000000000000000B1 /* PresenceRowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceRowTests.swift; sourceTree = "<group>"; };
+		A1A9D0000000000000000001 /* AgentIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentity.swift; sourceTree = "<group>"; };
+		A1A9D0000000000000000003 /* AgentIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentIdentityTests.swift; sourceTree = "<group>"; };
 		A19A848187E4B392C3266926 /* FeedbackSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackSheet.swift; sourceTree = "<group>"; };
 		A1838A1C2D1E07CD3A2A2B9D /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		A1C4ED1C31C4AB3EBEA672F1 /* NotificationsPrimerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationsPrimerView.swift; sourceTree = "<group>"; };
@@ -311,6 +315,7 @@
 				A159B0F38B1AA8C313A060FD,
 				A1D8800000000000000000C1,
 				A15E00000000000000000001 /* HomeSearch.swift */,
+				A1A9D0000000000000000001 /* AgentIdentity.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -416,6 +421,7 @@
 				A1BE00000000000000000001 /* LongTranscriptPerfTests.swift */,
 				A15E00000000000000000003 /* HomeSearchTests.swift */,
 				A1C100000000000000000001 /* SenderNameRowTests.swift */,
+				A1A9D0000000000000000003 /* AgentIdentityTests.swift */,
 			);
 			path = ArbosTests;
 			sourceTree = "<group>";
@@ -571,6 +577,7 @@
 				A1547843CA4E6FD14D625E8D /* Model.swift in Sources */,
 				A117280222D51C2ECDBA9FC8 /* People.swift in Sources */,
 				A15E00000000000000000002 /* HomeSearch.swift in Sources */,
+				A1A9D0000000000000000002 /* AgentIdentity.swift in Sources */,
 				A1F3867FABDB2908FFF6F2F0 /* Secrets.swift in Sources */,
 				A1D8800000000000000000C2 /* Servers.swift in Sources */,
 				A17DC1D0E22C9438EC90011C /* AppModel.swift in Sources */,
@@ -653,6 +660,7 @@
 				A1BE00000000000000000002 /* LongTranscriptPerfTests.swift in Sources */,
 				A15E00000000000000000004 /* HomeSearchTests.swift in Sources */,
 				A1C100000000000000000002 /* SenderNameRowTests.swift in Sources */,
+				A1A9D0000000000000000004 /* AgentIdentityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -918,7 +926,7 @@
 			repositoryURL = "https://github.com/livekit/client-sdk-swift";
 			requirement = {
 				kind = exactVersion;
-				version = 2.17.0;
+				version = 2.18.0;
 			};
 		};
 		A1D8800000000000000000E1 /* XCRemoteSwiftPackageReference "lottie-spm" */ = {

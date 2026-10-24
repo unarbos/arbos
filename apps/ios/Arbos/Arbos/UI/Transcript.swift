@@ -117,7 +117,7 @@ enum RowKind: Equatable {
     /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
     /// `quote` is the user message this answers (`inReplyTo`).
-    case member(blocks: [Block], live: Bool, handle: String, avatar: String?, named: Bool, agentId: String?, quote: Quote?, time: String?)
+    case member(blocks: [Block], live: Bool, handle: String, name: String?, avatar: String?, named: Bool, agentId: String?, quote: Quote?, time: String?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
@@ -274,7 +274,7 @@ enum Transcript {
                         let live = streaming && pix == lastTextPart
                         if people, let h = message.senderHandle {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .member(blocks: blocks, live: live, handle: h,
+                                             kind: .member(blocks: blocks, live: live, handle: h, name: message.senderName,
                                                            avatar: message.senderAvatar, named: named && pix == firstTextPart,
                                                            agentId: agentId,
                                                            quote: pix == firstTextPart ? replyQuote : nil,
@@ -283,7 +283,7 @@ enum Transcript {
                             // Another agent wrote into this chat (agent-to-agent messaging):
                             // the group member bubble — its avatar, its colour, its name above.
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
-                                             kind: .member(blocks: blocks, live: live, handle: from.handle,
+                                             kind: .member(blocks: blocks, live: live, handle: from.handle, name: message.senderName,
                                                            avatar: nil, named: pix == firstTextPart, agentId: from.projectId,
                                                            quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
                         } else {
@@ -353,7 +353,7 @@ enum Transcript {
                     let blocks: [Block] = [.paragraph(line)]
                     if people, let h = message.senderHandle {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
-                                         kind: .member(blocks: blocks, live: false, handle: h,
+                                         kind: .member(blocks: blocks, live: false, handle: h, name: message.senderName,
                                                        avatar: message.senderAvatar, named: named, agentId: agentId,
                                                        quote: replyQuote, time: inlineTime)))
                     } else {
@@ -992,11 +992,14 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let avatar, let named, let agentId, let quote, let time):
+        case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote, let time):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             }
+            // One identity for the disc, the caption and the bar (#1592): the same resolver
+            // the presence row asks, with the same row fields.
+            let agent = model.agent(sender: agentId ?? "", handle: handle, name: name, chatId: chatId)
             // The time rides the last paragraph's line; any other last block gets it on
             // a line of its own, right-aligned.
             let lastParagraph: String? = {
@@ -1004,17 +1007,16 @@ struct RowView: View, Equatable {
                 return nil
             }()
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
-                Button(action: openMember) { peopleAvatar(handle: handle, avatar: avatar) }
+                Button(action: openMember) { memberAvatar(agent) }
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                     .buttonStyle(.plain)
                     .accessibilityLabel("@\(handle), profile")
                 memberBubble(
-                    handle: handle,
-                    avatar: avatar,
+                    agent,
                     content: VStack(alignment: .leading, spacing: 0) {
                         if named {
                             Button(action: openMember) {
-                                memberName(handle: handle, avatar: avatar, agentId: agentId)
+                                memberName(agent)
                             }
                             .buttonStyle(.plain)
                             .padding(.bottom, Self.nameToTextGap)
@@ -1044,9 +1046,6 @@ struct RowView: View, Equatable {
                 )
                 .frame(maxWidth: maxBubble - Theme.memberLane(composerInset: composerInset), alignment: .leading)
                 Spacer(minLength: 0)
-            }
-            .task(id: avatar) {
-                if memberProject(handle: handle) == nil { SenderAccents.shared.load(url: avatar) }
             }
         case .assistant(let blocks, let live, let caption, let quote):
             HStack {
@@ -1189,21 +1188,11 @@ struct RowView: View, Equatable {
         }
     }
 
-    /// A people-chat member handle that is one of my agents.
-    private func memberProject(handle: String) -> Project? {
-        model.projects.first { mentionSlug($0.name).caseInsensitiveCompare(handle) == .orderedSame }
-    }
-
-    /// Avatar for a people-chat agent: project tree when we know it, else sender slug / initials.
-    @ViewBuilder
-    private func peopleAvatar(handle: String, avatar: String?) -> some View {
-        if let project = memberProject(handle: handle) {
-            AgentAvatar(project: project, theme: theme, size: Theme.memberAvatar, still: true)
-        } else if let avatar, avatar.contains("://") {
-            PersonAvatar(url: avatar, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-        } else {
-            PersonAvatar(url: nil, handle: handle, size: Theme.memberAvatar, name: model.personName(handle: handle), id: model.personId(handle: handle))
-        }
+    /// The disc beside a people-chat agent's bubble: the agent's picture through the shared
+    /// identity (`AppModel.agent`) — its uploaded picture, its leaf, never initials seeded by
+    /// the handle (#1592).
+    private func memberAvatar(_ agent: Project) -> some View {
+        AgentAvatar(project: agent, theme: theme, size: Theme.memberAvatar, still: true)
     }
 
     /// Jacob's Discord-style reference (2026-10-23): 2 pt from the name to what follows,
@@ -1212,16 +1201,13 @@ struct RowView: View, Equatable {
     static let quoteToTextGap: CGFloat = 6
 
     /// A people-chat member's name inside its bubble, in the same colour as its bar
-    /// (`memberBubble`), with the `agent` tag for agents.
+    /// (`memberBubble`), with the `agent` tag: the identity's display name, never the handle.
     @ViewBuilder
-    private func memberName(handle: String, avatar: String?, agentId: String?) -> some View {
-        let name = memberProject(handle: handle)?.name ?? agentId.flatMap { model.foreignAgent($0)?.name } ?? "@\(handle)"
-        if let project = memberProject(handle: handle), LeafAvatarsFlag.shared.on {
-            LiveSenderName(name: name, url: nil, seed: project.id, fixed: LeafArt.accent(project, dark: theme.isDark), agent: true)
-        } else if let project = memberProject(handle: handle) {
-            LiveSenderName(name: name, url: nil, seed: project.id, override: project.effectiveAvatarColorIndex, agent: true)
+    private func memberName(_ agent: Project) -> some View {
+        if LeafAvatarsFlag.shared.on {
+            LiveSenderName(name: agent.name, url: nil, seed: agent.id, fixed: LeafArt.accent(agent, dark: theme.isDark), agent: true)
         } else {
-            LiveSenderName(name: name, url: avatar, seed: model.personId(handle: handle) ?? handle, agent: agentId != nil)
+            LiveSenderName(name: agent.name, url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex, agent: true)
         }
     }
 
@@ -1240,25 +1226,19 @@ struct RowView: View, Equatable {
     /// observation stays in `LiveSenderBar` so one new colour does not rebuild
     /// every bubble in a group chat.
     @ViewBuilder
-    private func memberBubble<Content: View>(handle: String, avatar: String?, content: Content) -> some View {
-        if let project = memberProject(handle: handle), LeafAvatarsFlag.shared.on {
+    private func memberBubble<Content: View>(_ agent: Project, content: Content) -> some View {
+        if LeafAvatarsFlag.shared.on {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .senderBar(LeafArt.accent(project, dark: theme.isDark))
-        } else if let project = memberProject(handle: handle) {
-            content
-                .padding(.horizontal, Theme.bubbleHPad)
-                .padding(.vertical, Theme.bubbleVPad)
-                .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .modifier(LiveSenderBar(url: nil, seed: project.id, override: project.effectiveAvatarColorIndex))
+                .senderBar(LeafArt.accent(agent, dark: theme.isDark))
         } else {
             content
                 .padding(.horizontal, Theme.bubbleHPad)
                 .padding(.vertical, Theme.bubbleVPad)
                 .background(RoundedRectangle(cornerRadius: Theme.bubbleRadius, style: .continuous).fill(theme.bubbleAssistant))
-                .modifier(LiveSenderBar(url: avatar, seed: model.personId(handle: handle) ?? handle))
+                .modifier(LiveSenderBar(url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex))
         }
     }
 

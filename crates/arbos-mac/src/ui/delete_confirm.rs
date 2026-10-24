@@ -60,12 +60,24 @@ pub fn overlay(shell: &Shell, focus: &FocusHandle, cx: &mut Context<Shell>) -> O
             .find(|m| m.id == confirm.message_id)
             .cloned();
         match message {
-            Some(m) => (
-                state.is_mine(&m),
-                state.viewer_sender_name(&m),
-                crate::ui::media_viewer::when_label(m.created_at),
-                message_line(&m, QUOTE_CHARS),
-            ),
+            Some(m) => {
+                // A project chat's own agent writes bare `agent` / `assistant`
+                // rows: name it after the chat's agent, not "Agent".
+                let sender = if matches!(m.sender.as_str(), "agent" | "assistant" | "project") {
+                    state
+                        .project(&state.space_of_chat(&confirm.chat_id))
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| state.viewer_sender_name(&m))
+                } else {
+                    state.viewer_sender_name(&m)
+                };
+                (
+                    state.is_mine(&m),
+                    sender,
+                    crate::ui::media_viewer::when_label(m.created_at),
+                    message_line(&m, QUOTE_CHARS),
+                )
+            }
             None => (true, String::new(), String::new(), String::new()),
         }
     };

@@ -2328,9 +2328,10 @@ impl Render for Composer {
         };
 
         // Hold to record a voice memo, or click to toggle recording. Idle it is
-        // Grok Mac's filled round mic (black on light, white on dark); while
-        // recording it stays mounted, tinted red like the iPhone, so a release
-        // (hold-to-talk) or a second click also finishes the memo.
+        // Grok's two-tone pair: grey mic next to the white phone / send
+        // ([feedback app-01M5NXFCS5N79WCN2C8PM6GTKE]); while recording it stays
+        // mounted, tinted red like the iPhone, so a release (hold-to-talk) or a
+        // second click also finishes the memo.
         let mic_button = div()
             .id("composer-mic")
             .size(px(SEND_BUTTON))
@@ -2342,10 +2343,8 @@ impl Render for Composer {
             .cursor_pointer()
             .bg(if recording {
                 theme.danger_soft
-            } else if transcribing {
-                theme.surface_2
             } else {
-                theme.primary
+                theme.surface_2
             })
             .hover(|s| s.opacity(0.88))
             .child(icon(
@@ -2356,7 +2355,7 @@ impl Render for Composer {
                 } else if transcribing {
                     theme.text_faint
                 } else {
-                    theme.on_primary
+                    theme.text_muted
                 },
             ))
             .on_mouse_down(

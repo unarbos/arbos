@@ -1,7 +1,7 @@
 //! Avatar colours for Swift: the D79 index rule and the sender accent bar
 //! (`arbos_core::avatar`), so the iPhone draws the same hex as the Mac.
 
-use arbos_core::avatar::{self, leaf};
+use arbos_core::avatar::{self, identity, leaf};
 
 /// A sender accent in both appearances, as `#RRGGBB`.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -210,4 +210,99 @@ pub fn leaf_lottie_json(index: u8, gust: bool) -> String {
 #[uniffi::export]
 pub fn leaf_accent(seed: String, leaf: Option<u8>, color: Option<u8>) -> AccentHex {
     leaf::accent(leaf::pick_for(&seed, leaf, color)).into()
+}
+
+// ---- One agent identity for every surface (#1592) ---------------------------------------------
+
+/// What a roster row or a project record knows about an agent (`identity::AgentCard`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentCard {
+    pub id: String,
+    pub name: String,
+    pub handle: String,
+    pub leaf: Option<u8>,
+    pub leaf_color: Option<u8>,
+    pub color_index: Option<u8>,
+    pub image_key: Option<String>,
+}
+
+impl From<AgentCard> for identity::AgentCard {
+    fn from(c: AgentCard) -> Self {
+        Self {
+            id: c.id,
+            name: c.name,
+            handle: c.handle,
+            leaf: c.leaf,
+            leaf_color: c.leaf_color,
+            color_index: c.color_index,
+            image_key: c.image_key,
+        }
+    }
+}
+
+/// The one answer every surface draws from (`identity::AgentIdentity`).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AgentIdentity {
+    pub id: String,
+    pub name: String,
+    pub handle: String,
+    pub leaf: LeafPick,
+    pub color_index: u8,
+    pub image_key: Option<String>,
+    pub known: bool,
+}
+
+impl From<identity::AgentIdentity> for AgentIdentity {
+    fn from(a: identity::AgentIdentity) -> Self {
+        Self {
+            id: a.id,
+            name: a.name,
+            handle: a.handle,
+            leaf: a.leaf.into(),
+            color_index: a.color_index,
+            image_key: a.image_key,
+            known: a.known,
+        }
+    }
+}
+
+/// Which card a row is drawn from: `sender` (`agent:<id>` / `project:<id>` / bare id), the
+/// row's `senderHandle` and `senderName`, against `cards` in the caller's order (the open
+/// chat's roster, then my projects, then other rosters). Never fails: an unknown agent gets
+/// the id-seeded leaf and the row's own name.
+#[uniffi::export]
+pub fn resolve_agent(
+    sender: String,
+    handle: Option<String>,
+    name: Option<String>,
+    cards: Vec<AgentCard>,
+) -> AgentIdentity {
+    let cards: Vec<identity::AgentCard> = cards.into_iter().map(Into::into).collect();
+    identity::resolve(
+        &identity::AgentQuery {
+            sender: &sender,
+            handle: handle.as_deref(),
+            name: name.as_deref(),
+        },
+        &cards,
+    )
+    .into()
+}
+
+/// `agent:<id>` / `project:<id>` → `<id>`.
+#[uniffi::export]
+pub fn agent_sender_id(sender: String) -> String {
+    identity::sender_id(&sender).to_owned()
+}
+
+/// The `@slug` an agent answers to (the relay roster's `handle` rule).
+#[uniffi::export]
+pub fn agent_slug(name: String) -> String {
+    identity::agent_slug(&name)
+}
+
+/// The words a surface shows: the name, else `@handle`, else "Agent".
+#[uniffi::export]
+pub fn agent_display_name(name: Option<String>, handle: Option<String>) -> String {
+    identity::display_name(name.as_deref(), handle.as_deref())
 }

@@ -1637,6 +1637,11 @@ fn render_row(
             .flex_shrink_0()
             .child(people::avatar(person_image, person, AVATAR_ROW, theme));
         if let Some(agent) = space.agents.first() {
+            // The agent's picture through the shared identity (#1592): the one its bubbles,
+            // the presence row and the member list show — uploaded picture included.
+            let state = shell.state.read(cx);
+            let a = avatars::member_identity(Some(&space), &state.projects, agent);
+            let image = a.image_key.as_deref().and_then(|url| state.avatar(url));
             pic = pic.child(
                 div()
                     .absolute()
@@ -1645,7 +1650,7 @@ fn render_row(
                     .p(px(2.0))
                     .rounded_full()
                     .bg(theme.bg)
-                    .child(people::agent_glyph(agent, 18.0, theme)),
+                    .child(avatars::agent_picture(&a, image, 18.0, theme)),
             );
         }
         pic

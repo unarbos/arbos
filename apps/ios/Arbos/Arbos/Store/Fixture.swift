@@ -145,6 +145,18 @@ extension AppModel {
         // `ARBOS_FIXTURE_WORKING=<n>` (presence-row rig): the group holds n agents so the
         // row over the composer can show several working at once.
         var groupAgents = [commsAgent]
+        // `ARBOS_FIXTURE_FOREIGN_AGENT=1` (#1592): someone else's agent, first so
+        // `ARBOS_FIXTURE_WORKING=1` shows it working. Roster record only — not in `projects`.
+        if DebugHooks.fixtureForeignAgent {
+            var testAgent = Project(id: "fx-foreign-testagent", name: "TestAgent", icon: "T", color: "#8b7cf6", state: .awake, stateSince: nil,
+                                    stateDetail: nil, model: "", effort: .low, spendTodayUsd: 0, spendCapUsd: 0, avatar: nil, avatarColor: nil)
+            testAgent.avatarLeaf = 3
+            testAgent.avatarLeafColor = 7
+            testAgent.avatarColorIndexEffective = 3
+            groupAgents.insert(ChatMember(id: testAgent.id, kind: .agent, member: "agent:\(testAgent.id)", role: "agent", handle: "testagent", avatarUrl: nil,
+                                          name: "TestAgent", status: "member", joinedAt: now - 86_400_000, project: testAgent, ownerId: "gh_459",
+                                          ownerHandle: "sami", replyPolicy: "mention"), at: 0)
+        }
         for p in list.dropFirst().prefix(max(0, DebugHooks.fixtureWorking - 1)) {
             groupAgents.append(ChatMember(id: p.id, kind: .agent, member: "agent:\(p.id)", role: "agent", handle: mentionSlug(p.name), avatarUrl: nil,
                                           name: p.name, status: "member", joinedAt: now - 86_400_000, project: p, ownerId: "fx-me", ownerHandle: "jacob", replyPolicy: "mention"))
@@ -188,6 +200,21 @@ extension AppModel {
         ]
         // Mira's second line replies to her first (quote header on another person's bubble).
         messages["fx-group-launch"]?[2].replyTo = "g1"
+        // #1592 rig: a question to someone else's agent and its first bubble — the shape of
+        // Jacob's Arbonites screenshot ("@testagent how many messages …" / "On it.").
+        if DebugHooks.fixtureForeignAgent {
+            messages["fx-group-launch", default: []].append(
+                Message(id: "g5", chatId: "fx-group-launch", role: .user, sender: "user:fx-u4", status: .done, turn: nil, decision: nil, subagentId: nil,
+                        subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 30 * 60_000, completedAt: nil, pending: false,
+                        parts: [.text(id: "g5t", text: "@testagent how many messages are there in this chat?")], hiddenCount: 0,
+                        senderHandle: "sam", senderName: "Sam Okafor"))
+            var reply = assistant("g6", "fx-group-launch", "On it.", at: now - 29 * 60_000)
+            reply.sender = "agent:fx-foreign-testagent"
+            reply.senderHandle = "testagent"
+            reply.senderName = "TestAgent"
+            reply.inReplyTo = "g5"
+            messages["fx-group-launch", default: []].append(reply)
+        }
         if let rows = DebugHooks.fixtureLongRows, rows > 0 {
             messages["fx-group-launch"] = Self.longGroupTranscript(rows: rows, before: now - 4 * 3_600_000)
                 + (messages["fx-group-launch"] ?? [])

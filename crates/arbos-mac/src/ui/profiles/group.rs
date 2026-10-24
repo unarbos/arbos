@@ -80,6 +80,17 @@ pub(super) fn page(
     let people = members(state, &space);
     let images: Vec<Option<Arc<RenderImage>>> =
         people.iter().map(|p| state.avatar(&p.avatar_url)).collect();
+    // Agents through the shared identity (#1592): the picture their bubbles, the presence
+    // row and the sidebar show — uploaded picture included.
+    let agent_pictures: Vec<(avatars::AgentIdentity, Option<Arc<RenderImage>>)> = space
+        .agents
+        .iter()
+        .map(|a| {
+            let ident = avatars::member_identity(Some(&space), &state.projects, a);
+            let image = ident.image_key.as_deref().and_then(|url| state.avatar(url));
+            (ident, image)
+        })
+        .collect();
     let is_people = space.is_people();
     let renaming = state.profile_editing_name && is_people;
     // A people group: any member names it or gives it a picture (relay
@@ -244,7 +255,7 @@ pub(super) fn page(
             }
             // Agents in the chat (people groups) — or the project's own agent.
             if is_people {
-                for a in space.agents.iter() {
+                for (ai, a) in space.agents.iter().enumerate() {
                     let pid = a.project_id.clone();
                     let mine = a.owner_handle == me_handle;
                     let sub = if mine {
@@ -275,7 +286,11 @@ pub(super) fn page(
                                 "profile-agent-{}",
                                 a.project_id
                             ))),
-                            avatars::agent_member(a, kit::AVATAR, &theme).into_any_element(),
+                            {
+                                let (ident, image) = &agent_pictures[ai];
+                                avatars::agent_picture(ident, image.clone(), kit::AVATAR, &theme)
+                                    .into_any_element()
+                            },
                             a.name.clone(),
                             sub,
                             theme.text_muted,

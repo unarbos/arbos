@@ -130,8 +130,8 @@ struct HomeView: View {
                                     .listRowSeparator(.hidden)
                                     .listRowBackground(theme.bg)
                             }
-                            if !model.openGoals.isEmpty {
-                                goalsSection
+                            if !plannedTasks.isEmpty {
+                                plannedTasksSection
                             }
                         }
                         ForEach(homeRows) { entry in
@@ -233,7 +233,7 @@ struct HomeView: View {
                                 .buttonStyle(.borderless)
                                 .contextMenu {
                                     // Long-press: Pin, reorder when pinned, Archive,
-                                    // Profile/Group info, Delete.
+                                    // Mute (groups), Profile/Group info, Delete.
                                     Button {
                                         withAnimation {
                                             if pinned { model.unpinHome(peopleChatId: chat.id) }
@@ -267,6 +267,23 @@ struct HomeView: View {
                                         withAnimation { model.archive(peopleChatId: chat.id) }
                                     } label: {
                                         Label("Archive", systemImage: "archivebox")
+                                    }
+                                    if chat.isGroup {
+                                        if model.isPeopleChatMuted(chat.id) {
+                                            Button { model.unmutePeopleChat(chat.id) } label: {
+                                                Label("Unmute", systemImage: "bell")
+                                            }
+                                        } else {
+                                            Menu {
+                                                ForEach(ChatMuteDuration.allCases) { duration in
+                                                    Button(duration.title) {
+                                                        model.mutePeopleChat(chat.id, for: duration)
+                                                    }
+                                                }
+                                            } label: {
+                                                Label("Mute", systemImage: "bell.slash")
+                                            }
+                                        }
                                     }
                                     if chat.kind == "dm", let other = chat.counterpart(me: model.user?.id) {
                                         Button { model.showProfile(.user(ProfilePerson(other))) } label: { Label("Profile", systemImage: "person.crop.circle") }
@@ -517,22 +534,56 @@ struct HomeView: View {
         return "Removes this chat from your list."
     }
 
-    /// Goals section: status, next step, last moved — tap opens the goal.
-    private var goalsSection: some View {
+    /// One planned task on Home: an agent's unfinished plan step (or next step / goal title).
+    private struct PlannedTask: Identifiable {
+        let id: String
+        let goalId: String
+        let projectId: String
+        let agentName: String
+        let text: String
+    }
+
+    /// Open goals → one planned task each (doing step, else first todo, else next_step, else title).
+    private var plannedTasks: [PlannedTask] {
+        model.openGoals.prefix(6).map { goal in
+            let agent = goal.projectName
+                ?? model.project(goal.projectId)?.name
+                ?? "Agent"
+            let doing = goal.plan.first { $0.status == "doing" }
+            let todo = goal.plan.first { $0.status == "todo" }
+            let text = doing?.title
+                ?? todo?.title
+                ?? (goal.nextStep.isEmpty ? goal.title : goal.nextStep)
+            return PlannedTask(
+                id: goal.id,
+                goalId: goal.id,
+                projectId: goal.projectId,
+                agentName: agent,
+                text: text
+            )
+        }
+    }
+
+    /// Planned tasks by agent: agent name, task text — tap opens the goal.
+    private var plannedTasksSection: some View {
         Section {
-            ForEach(model.openGoals.prefix(6)) { goal in
-                Button { openGoalId = goal.id } label: {
+            ForEach(plannedTasks) { task in
+                Button { openGoalId = task.goalId } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: "flag.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(theme.accent)
-                            .frame(width: 28, height: 28)
+                        if let project = model.project(task.projectId) {
+                            AgentAvatar(project: project, theme: theme, size: 28, still: true)
+                        } else {
+                            Image(systemName: "checklist")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(theme.accent)
+                                .frame(width: 28, height: 28)
+                        }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(goal.title)
+                            Text(task.agentName)
                                 .font(theme.font(Theme.body, weight: .medium))
                                 .foregroundStyle(theme.text)
                                 .lineLimit(1)
-                            Text(goalHomeSubtitle(goal))
+                            Text(task.text)
                                 .font(theme.font(Theme.tiny))
                                 .foregroundStyle(theme.muted)
                                 .lineLimit(1)
@@ -545,6 +596,7 @@ struct HomeView: View {
                 .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 22))
                 .listRowSeparator(.hidden)
                 .listRowBackground(theme.bg)
+                .accessibilityLabel("\(task.agentName), \(task.text)")
             }
             Button { showGoals = true } label: {
                 HStack(spacing: 8) {
@@ -564,18 +616,11 @@ struct HomeView: View {
             .listRowBackground(theme.bg)
             .accessibilityLabel("All goals")
         } header: {
-            Text("Goals")
+            Text("Planned tasks")
                 .font(theme.font(Theme.tiny, weight: .medium))
                 .foregroundStyle(theme.muted)
                 .textCase(nil)
         }
-    }
-
-    private func goalHomeSubtitle(_ goal: GoalItem) -> String {
-        var parts: [String] = [goal.statusLabel]
-        if !goal.nextStep.isEmpty { parts.append(goal.nextStep) }
-        if let moved = goal.lastMovedAt { parts.append(SecretsText.ago(moved)) }
-        return parts.joined(separator: " · ")
     }
 
     /// Grok's "Hidden chats  N  ›" line under the list (measured: 15 pt muted,
@@ -1351,13 +1396,13 @@ struct PeopleRow: View {
         return other?.displayName ?? chat.title
     }
 
-    /// Same-line muted label: @handle for a DM, member count for a group.
+    /// Same-line muted label: handle (no @) for a DM, member count for a group.
     private var label: String {
         if chat.isGroup {
             let n = chat.humans.count
             return "\(n) member\(n == 1 ? "" : "s")"
         }
-        return "@\(other?.handle ?? chat.title)"
+        return other?.handle ?? chat.title
     }
 
     /// Tokenised blob URL for the group's custom picture, when one is set.
@@ -1386,8 +1431,8 @@ struct PeopleRow: View {
                 } else {
                     PersonAvatar(url: other?.avatarUrl, handle: other?.handle ?? "?", size: Theme.rowAvatar, name: other?.name, id: other?.id, colorIndex: other?.avatarColorIndex)
                 }
-                if let a = chat.agents.first?.project {
-                    AgentAvatar(project: a, theme: theme, size: 18, still: true)
+                if let a = chat.agents.first {
+                    AgentAvatar(project: model.agent(member: a, chatId: chat.id), theme: theme, size: 18, still: true)
                         .overlay(Circle().strokeBorder(theme.bg, lineWidth: 2))
                         .offset(x: 3, y: 3)
                 }

@@ -130,9 +130,13 @@ pub struct RiskyRule {
 }
 
 /// Tools whose names look like sends but are box-internal or cross-project (D22): never gated.
+/// `send_message` is agent-to-agent (or an in-group speak): the owner's agents may message each
+/// other without a card. Risky work the *receiving* agent then does still raises a card in that
+/// agent's chat. External sends stay gated via connector / draft tools.
 pub const NOT_RISKY_TOOLS: &[&str] = &[
     "projects_send",
     "group_send",
+    "send_message",
     "draft_message",
     "ask_user",
     "route",
@@ -565,6 +569,8 @@ mod tests {
                 json!({ "channel": "email", "to": "a@b.c" }),
             ),
             ("projects_send", json!({ "to": "Comms", "text": "hi" })),
+            ("send_message", json!({ "to": "TestAgent", "text": "hi" })),
+            ("send_message", json!({ "text": "still working" })),
             ("local_devices", json!({})),
         ] {
             assert_eq!(

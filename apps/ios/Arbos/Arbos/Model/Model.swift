@@ -595,9 +595,9 @@ struct MessageReaction: Equatable, Hashable {
     var emoji: String
     var senders: [String]
 
-    /// The reaction capsule's set, in Grok Bot's order (the Mac's `REACTION_PALETTE`);
-    /// any other emoji comes from the emoji keyboard.
-    static let palette: [String] = ["😂", "👍", "👎", "❤️", "🎉"]
+    /// Quick-react set on the long-press capsule (Discord / Telegram / WhatsApp
+    /// style). Any other emoji comes from the emoji keyboard.
+    static let palette: [String] = ["❤️", "👍🏽", "💪🏽", "👎🏻", "👌🏾", "🤝", "🔥", "💯"]
 
     /// Toggle `sender` on/off for `emoji`, keeping other emoji reactions intact.
     static func toggling(_ list: [MessageReaction], emoji: String, sender: String) -> [MessageReaction] {

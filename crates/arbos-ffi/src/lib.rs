@@ -87,7 +87,8 @@ pub enum RoomAction {
         poll_machine: bool,
     },
     LinkLive,
-    /// Export the doc's updates since `relay_vv` and hand them to `on_heal` (history heal).
+    /// Export the doc's updates since `relay_vv` and always hand them to `on_heal`
+    /// (empty when nothing is missing) so the held pending resend can proceed.
     HealCheck {
         relay_vv: Vec<u8>,
     },
@@ -352,7 +353,8 @@ impl RoomSession {
         self.lock().on_local_commit(bytes);
     }
 
-    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked (empty = none).
+    /// Answer to `RoomAction::HealCheck`: the doc's updates the relay lacked.
+    /// Call even when empty so the session can release the held pending resend.
     pub fn on_heal(&self, bytes: Vec<u8>) {
         self.lock().on_heal(bytes);
     }

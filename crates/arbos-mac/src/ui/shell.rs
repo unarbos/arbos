@@ -531,8 +531,17 @@ impl Shell {
             project_input.update(cx, |input, _| {
                 input.set_placeholder("Name your agent");
                 input.set_text_center(true);
+                // Shared by Create agent and Create group (D93). Enter must match
+                // the sheet's action button: agent → create, group → Next (picker).
                 input.on_submit = Some(Rc::new(move |window, cx| {
-                    let _ = weak.update(cx, |this, cx| this.submit_project(window, cx));
+                    let _ = weak.update(cx, |this, cx| {
+                        let kind = if this.create_group_open {
+                            CreateKind::Group
+                        } else {
+                            CreateKind::Agent
+                        };
+                        this.submit_create(kind, window, cx);
+                    });
                 }));
             });
         }
@@ -1161,6 +1170,11 @@ impl Shell {
     }
 
     pub(crate) fn submit_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Create group reuses this field; never create an agent from a group sheet.
+        if self.create_group_open {
+            self.submit_create(CreateKind::Group, window, cx);
+            return;
+        }
         let name = self.project_input.read(cx).text().trim().to_string();
         if name.is_empty() {
             return;
@@ -1185,6 +1199,9 @@ impl Shell {
         self.create_group_open = true;
         self.create_leaf = None;
         self.create_leaf_color = None;
+        // Agent create wins the sheet if both flags are set; clear it so New
+        // group never opens as Create New Agent.
+        self.state.update(cx, |s, _| s.new_project_open = false);
         self.project_input.update(cx, |input, cx| {
             input.set_placeholder(CreateKind::Group.placeholder());
             input.clear(cx);
