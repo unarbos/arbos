@@ -144,6 +144,23 @@ pub(super) fn page(
         editor: None,
     };
 
+    // Grok's share disc beside the ×: the same picker as the "Add members"
+    // card ([feedback info-pane-chrome-2026-10-24]).
+    let share = (is_people || !space.is_guest()).then(|| {
+        let sid = space.id.clone();
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+            let id = sid.clone();
+            if is_people {
+                this.state.update(cx, |s, cx| s.open_add_members(id, cx));
+            } else {
+                this.state.update(cx, |s, cx| s.open_invite(id, cx));
+            }
+            let handle = this.people_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        Box::new(f) as HeroClick
+    });
+
     let body: Vec<Section> = match tab {
         0 => {
             // Mock b: "Add members" is a card of its own above the member list.
@@ -445,6 +462,7 @@ pub(super) fn page(
             body,
             footer: Vec::new(),
             done: None,
+            share,
         },
         shell,
         cx,
