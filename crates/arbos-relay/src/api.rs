@@ -1281,6 +1281,10 @@ pub async fn machine_start(State(state): State<AppState>, principal: Principal) 
         return Ok(crate::credits::refused_response(&r));
     }
     let _ = state.db.set_box_held(&user_id, false);
+    // The stop's secrets pause was for the downtime: starting lifts it (a user-set pause stays).
+    if crate::secrets::resume_after_stop(&state, &user_id).await {
+        tracing::info!(user = %user_id, "machine start: secrets pause set by stop_machine lifted");
+    }
     if state.db.user_box(&user_id).map_err(internal)?.is_none() {
         let provider = boxes::default_provider(&state);
         match boxes::ensure_user_box(&state, &user_id, provider).await {

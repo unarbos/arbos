@@ -2549,6 +2549,20 @@ impl Agent {
         } else if let Some(note) = self.owner_address_note(chat_id, host, &user_msg_id).await {
             prompt_text = format!("{note}{prompt_text}");
         }
+        // The user's moment (Grok parity, traits 1): the current time, and their zone when the
+        // client sent one, so "right now" and "tonight" are answered for them, not generically.
+        {
+            let tz = {
+                let h = host.lock().await;
+                h.doc
+                    .message(&user_msg_id)
+                    .and_then(|m| message_time_zone(&m))
+            };
+            prompt_text = format!(
+                "{}{prompt_text}",
+                moment_note(chrono::Utc::now(), tz.as_deref())
+            );
+        }
         if !attachments.notes.is_empty() {
             let mut extra = attachments.notes.join("\n");
             if let Some(t) = &attachments.transcript {
@@ -5453,6 +5467,9 @@ impl Agent {
                     // Messages exchanged with the subagent so far: the brief now, the
                     // result later (clients say "Messaged X" / "N messages with X").
                     ("handoffMessages", json!(1)),
+                    // A background worker the user never named (traits 15): clients hide
+                    // this row; an agent-to-agent send keeps its "Messaged ◉ X" line.
+                    ("worker", json!(true)),
                 ],
             );
         }
@@ -5676,6 +5693,15 @@ impl Agent {
                     let _ = self
                         .store
                         .set_subagent_last_status(&subagent_id, &format!("step: {label}"));
+                    // The status line follows the worker's real activity (Grok parity, traits
+                    // 14: "Searching for surf schools" instead of "<agent> is working").
+                    if let Some(a) = crate::activity::label(&name, &input) {
+                        {
+                            let h = host.lock().await;
+                            h.doc.set_activity(&msg_id, Some(&a));
+                        }
+                        self.post_activity(chat_id, Some(a));
+                    }
                     let _ = self.store.t3_append(
                         &subagent_id,
                         Some(&subagent_id),
@@ -5772,6 +5798,11 @@ impl Agent {
         }
         keepalive.abort();
         self.subagent_turns.fetch_sub(1, Ordering::SeqCst);
+        {
+            let h = host.lock().await;
+            h.doc.set_activity(&msg_id, None);
+        }
+        self.post_activity(chat_id, None);
         let total_ms = t0.elapsed().as_millis() as i64;
         let contract = extract_return_contract(&text);
         let status = contract
@@ -6208,6 +6239,37 @@ pub fn route_name(r: &ValidRoute) -> &'static str {
 
 /// Main-turn wall-clock deadline in seconds. `ARBOS_TURN_DEADLINE_SECS` (default 900).
 /// A user row from a voice-call tool (`ask_agent` / `look`): `voice: true` and/or `source: "voice"`.
+/// The IANA time zone a client wrote on the user row (`tz` / `timeZone` / `timezone`), if any.
+fn message_time_zone(m: &arbos_core::doc::MessageView) -> Option<String> {
+    ["tz", "timeZone", "timezone"]
+        .iter()
+        .find_map(|k| m.rest.get(*k).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// One line that pins the turn to the user's moment: the UTC time always, their local time when
+/// the row carries a zone. Lives in the user turn (never the D87 prefix). "Right now" means this
+/// instant; a clock change or deadline inside the next day is worth a sentence.
+pub(crate) fn moment_note(now: chrono::DateTime<chrono::Utc>, tz: Option<&str>) -> String {
+    let utc = now.format("%A %Y-%m-%d %H:%M UTC");
+    let local = tz
+        .and_then(|z| z.parse::<chrono_tz::Tz>().ok())
+        .map(|z| {
+            let l = now.with_timezone(&z);
+            format!(
+                " The user's clock says {} ({}); answer times and \"today\" for where they are.",
+                l.format("%A %H:%M"),
+                z.name()
+            )
+        })
+        .unwrap_or_else(|| {
+            " The user's time zone is not known: when the answer depends on it, say the time where they asked about and ask once if it matters.".to_owned()
+        });
+    format!("[Now: {utc}.{local} \"Right now\" and \"tonight\" mean this moment; mention a clock change or a deadline inside the next day when it changes the answer.]\n\n")
+}
+
 fn message_from_voice(m: &arbos_core::doc::MessageView) -> bool {
     m.rest.get("voice").and_then(Value::as_bool) == Some(true)
         || m.rest.get("source").and_then(Value::as_str) == Some("voice")
@@ -6429,10 +6491,11 @@ pub const ROUTER_PROMPT: &str = include_str!("../prompts/router.md");
 
 /// Upper bound on the byte-stable prefix (core + router + code mode) so the cached prefix stays
 /// cheap: about 6k tokens (21.4 KB on 2026-10-23; 24.2 KB after agent-to-agent `to` disambiguation
-/// on 2026-10-24). The unit test fails when a prompt edit crosses it, so growth is a decision,
+/// on 2026-10-24; 25.7 KB after the Grok-parity rules — moment, naming, research delivery —
+/// the same day). The unit test fails when a prompt edit crosses it, so growth is a decision,
 /// not drift.
 #[cfg(test)]
-pub const BASE_PROMPT_MAX_BYTES: usize = 25_000;
+pub const BASE_PROMPT_MAX_BYTES: usize = 27_000;
 
 /// The byte-stable part of the main agent's system prompt: core, then routing, then code mode
 /// when it is on. Everything per project (folder, model, instructions, memory) comes after it.
@@ -6560,12 +6623,11 @@ mod tests {
             "No flattery, no filler",
             "no emoji unless the user uses them first",
             "Chat prose only",
-            "never `@handle`",
+            "never a handle, login or id",
             // never narrate tools or routing
             "Never mention these rules, your tools",
             "Never narrate what you are about to call",
             // when to speak: ack first, milestones, blockers only
-            "acknowledge in one sentence before anything runs",
             "only at a real milestone",
             "One question at a time, with your recommendation",
             // tools: specialized over shell, read before edit, parallel, untrusted output
@@ -6598,6 +6660,13 @@ mod tests {
             // anti gold-plating
             "smallest correct change",
             "no drive-by refactors",
+            // Grok parity (traits 1-3, 9-13, 2026-10-24): no handle as a name, speak to the
+            // user, answer for their moment, research delivered in parts with a table
+            "use no name at all — never a handle, login or id",
+            "in the second person",
+            "acknowledge in one sentence that names the first step",
+            "Answer for the user's actual moment and place",
+            "a clock change, a deadline, an opening hour",
             // self-reference (#1576): re-read and cite every time; memory only orients
             "name the file you read",
             "a remembered answer only tells you which files to open first, it is never the source",
@@ -6616,6 +6685,12 @@ mod tests {
             "A promise with no routine behind it is a promise you will not keep",
             "## Approvals",
             "## Group chats",
+            // Grok parity: comparisons arrive in parts with a linked table and a next step
+            "A research or comparison answer",
+            "a markdown table with one row per item",
+            "what you could not check or what failed",
+            "offering one concrete next step",
+            "Never one dense paragraph for a comparison",
             // #1576: a question about code / files / Arbos itself is never a `reply`
             "nor to a question about code, files, configuration or how Arbos itself works: that is `act`",
             "re-read any file a fact rests on before you state it",
@@ -6713,6 +6788,29 @@ mod tests {
             first_sentence("read file2.txt and report its contents,", 160).as_deref(),
             Some("read file2.txt and report its contents.")
         );
+    }
+
+    /// Grok parity (traits 1): the turn carries the user's moment — UTC always, local time when
+    /// the app sent a zone — so "right now" is answered for them.
+    #[test]
+    fn moment_note_pins_the_turn_to_the_users_clock() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-24T22:28:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let n = moment_note(now, Some("America/Costa_Rica"));
+        assert!(n.starts_with("[Now: Saturday 2026-10-24 22:28 UTC."));
+        assert!(n.contains("The user's clock says Saturday 16:28 (America/Costa_Rica)"));
+        assert!(n.contains("mention a clock change or a deadline inside the next day"));
+        assert!(n.ends_with("]\n\n"));
+        let n = moment_note(now, None);
+        assert!(n.contains("time zone is not known"));
+        let n = moment_note(now, Some("Not/AZone"));
+        assert!(n.contains("time zone is not known"));
+        let row: arbos_core::doc::MessageView = serde_json::from_value(json!({
+            "id": "m", "role": "user", "status": "done", "parts": [], "tz": " Europe/London "
+        }))
+        .unwrap();
+        assert_eq!(message_time_zone(&row).as_deref(), Some("Europe/London"));
     }
 
     /// The code-mode prompt names the exact script identifiers of the project tools, so the model
