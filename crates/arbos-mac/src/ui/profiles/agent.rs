@@ -1,13 +1,19 @@
 //! An agent's page on the shared profile pane (D93): one [`ProfilePane`]
-//! spec — hero (leaf / photo with the owner's crayon, editable name,
+//! spec — hero (the plain leaf / photo with the owner's crayon, editable name,
 //! "working" or "Agent · run by @owner"), the tabs **Profile** (name, handle,
 //! description) | **Settings** (model, reasoning, call voice) | **Library**
-//! (images, files, links from the agent's chats), and a Delete agent footer
-//! for the owner. The same three tabs as the iPhone's agent page. Share
-//! project and Add to this chat left the pane on 2026-10-22 (Jacob: simple,
-//! consistent, powerful); the Voice row came back on 2026-10-23 (the call
-//! voice — spoken replies stay behind the voice-mode switch); the avatar
-//! picker opens from the hero while the pane is up.
+//! (images, files, links from the agent's chats). The same three tabs as the
+//! iPhone's agent page. Share project and Add to this chat left the pane on
+//! 2026-10-22 (Jacob: simple, consistent, powerful); the Voice row came back
+//! on 2026-10-23 (the call voice — spoken replies stay behind the voice-mode
+//! switch); the avatar picker opens from the hero while the pane is up.
+//!
+//! Grok Bot parity ([feedback info-pane-chrome-2026-10-24], Jacob 2026-10-24):
+//! no "Delete agent" button on the pane — deleting an agent is the sidebar
+//! row's menu (`sidebar::row_menu`, Delete, at once); the hero picture is the
+//! bare leaf, no pale disc behind it and no presence dot (presence stays on
+//! the sidebar row); the top bar carries Grok's share disc (the invite sheet:
+//! let a person in on this agent) beside the close disc.
 
 use gpui::{div, prelude::*, px, Context, Div, ElementId, Focusable, SharedString, Stateful};
 
@@ -18,7 +24,6 @@ use crate::ui::glass;
 use crate::ui::hoverpick;
 use crate::ui::motion::PulseClock;
 use crate::ui::shell::Shell;
-use crate::ui::sidebar::machine_dot;
 use crate::ui::theme::{Theme, TEXT_SMALL};
 
 use super::kit::{self, Leading};
@@ -129,9 +134,12 @@ pub(super) fn page(
     // ----- hero ----------------------------------------------------------------
     // The shared pane hero: owned agents get the crayon on the picture (the
     // avatar-colour picker) and the inline name field; others are read-only.
+    // Plain, like Grok's bot mark: the leaf alone (no pastel disc), a photo
+    // when one was uploaded, and no machine dot — presence is the sidebar
+    // row's ([feedback info-pane-chrome-2026-10-24]).
     let picture = div()
-        .relative()
         .size(px(HERO_AVATAR))
+        .debug_selector(|| "agent-hero-picture".into())
         .child(match hero_image {
             Some(image) => div()
                 .size(px(HERO_AVATAR))
@@ -144,26 +152,8 @@ pub(super) fn page(
                         .rounded_full()
                         .object_fit(gpui::ObjectFit::Cover),
                 ),
-            None => avatars::project_hero(&project, HERO_AVATAR, &theme),
+            None => avatars::project_hero_bare(&project, HERO_AVATAR, &theme),
         })
-        .child(
-            div()
-                .absolute()
-                .right(px(0.0))
-                .bottom(px(0.0))
-                .size(px(26.0))
-                .rounded_full()
-                .bg(theme.card())
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .size(px(16.0))
-                        .rounded_full()
-                        .bg(machine_dot(machine_state, &theme)),
-                ),
-        )
         .into_any_element();
     let p_pic = pid.clone();
     let pic_click = mine.then(|| {
@@ -190,8 +180,8 @@ pub(super) fn page(
     )
     .into_any_element();
     // ----- hero (D93): picture, name, one subtitle ---------------------------------
-    // "working" while a turn runs, else who runs the agent; the machine state
-    // sits on the disc's dot. The @slug lives on the Profile tab (Handle).
+    // "working" while a turn runs, else who runs the agent. The @slug lives on
+    // the Profile tab (Handle).
     let owner_handle = project
         .owner_handle
         .as_deref()
@@ -420,44 +410,25 @@ pub(super) fn page(
         }
     }
 
-    // ----- footer: Delete agent (owner) ------------------------------------------
-    // The one danger action, in its own card; the first click swaps the row
-    // for "Delete “Name”?" with Cancel / Delete (the sidebar's rule).
-    let footer: Vec<Section> = if mine {
-        let delete_id = pid.clone();
-        let row: gpui::AnyElement = if shell.agent_delete_armed {
-            kit::confirm_row(
-                &format!("Delete “{}”?", project.name),
-                "Delete",
-                kit::confirm_button("agent-delete-cancel", "Cancel", false, &theme).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.agent_delete_armed = false;
-                        cx.notify();
-                    }),
-                ),
-                kit::confirm_button("agent-delete-go", "Delete", true, &theme).on_click(
-                    cx.listener(move |this, _, window, cx| {
-                        this.agent_delete_armed = false;
-                        let id = delete_id.clone();
-                        this.state.update(cx, |s, cx| s.delete_project(id, cx));
-                        this.close_profile(window, cx);
-                    }),
-                ),
-                &theme,
-            )
-            .into_any_element()
-        } else {
-            kit::danger_row("agent-delete", "Delete agent", &theme)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.agent_delete_armed = true;
-                    cx.notify();
-                }))
-                .into_any_element()
-        };
-        vec![Section::Card(vec![row])]
-    } else {
-        Vec::new()
-    };
+    // No footer: "Delete agent" left the pane on Jacob's ask ([feedback
+    // info-pane-chrome-2026-10-24]); the sidebar row's menu deletes at once.
+    let footer: Vec<Section> = Vec::new();
+    // Grok's share disc beside the ×: the invite sheet — a pick lets that
+    // person in on this agent. Only the owner can share.
+    let share_id = pid.clone();
+    let share = mine.then(|| {
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+            let id = share_id.clone();
+            this.people_input.update(cx, |i, cx| {
+                i.clear(cx);
+                i.set_placeholder("Search people");
+            });
+            this.state.update(cx, |s, cx| s.open_invite(id, cx));
+            let handle = this.people_input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+        Box::new(f) as HeroClick
+    });
 
     // No "Edit" — click the avatar to change its colour; click the name or
     // the Description row to edit. "Done" only while editing.
@@ -476,6 +447,7 @@ pub(super) fn page(
             body,
             footer,
             done,
+            share,
         },
         shell,
         cx,

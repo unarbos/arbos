@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::ui::frost::{frosted, MENU_BLUR, PANEL_BLUR};
 use crate::ui::icons::icon;
-use crate::ui::theme::{Theme, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
+use crate::ui::theme::{Theme, CONTROL, PANEL_RADIUS, TEXT_BODY, TEXT_SMALL, TEXT_TINY};
 
 /// Drag this region to move the window.
 ///
@@ -90,6 +90,39 @@ pub trait WindowDrag: InteractiveElement + Sized {
 }
 
 impl<E: InteractiveElement> WindowDrag for E {}
+
+/// Glyph size for the right pane's close `×` in a [`CONTROL`] disc: the xmark
+/// spans 12 of the 24 grid, so 22 paints Grok Bot's 11 pt mark (measured on
+/// `grok-right-pane-details.png`, 2 px/pt: × 22 × 22 px, disc 72 px).
+pub const PANE_CLOSE_GLYPH: f32 = 22.0;
+/// Glyph size for the right pane's share disc: the `share` icon spans 16 of
+/// 24, so 21 paints Grok's 14 pt mark (28 × 28 px in the same shot).
+pub const PANE_SHARE_GLYPH: f32 = 21.0;
+
+/// One disc of the round-button family (Jacob 2026-10-24, "one button
+/// family"): the sidebar strip's search · + · collapse, the folded-sidebar
+/// toggle in the chat header and the right pane's share and close. [`CONTROL`]
+/// 36 pt, `surface_2` fill, the glyph in `text`, the hover lift. Grok Bot's
+/// `#1F1F1F` disc with an `#E0E0E0` glyph.
+pub fn control_disc(
+    id: impl Into<ElementId>,
+    glyph: &str,
+    glyph_size: f32,
+    theme: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(CONTROL))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .bg(theme.surface_2)
+        .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
+        .child(icon(glyph, glyph_size, theme.text))
+}
 
 /// A glass circle: field fill at 85 %, hairline rim. Content centred.
 pub fn circle(id: impl Into<ElementId>, size: f32, theme: &Theme) -> Stateful<Div> {

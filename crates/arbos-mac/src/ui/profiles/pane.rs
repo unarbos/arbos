@@ -18,8 +18,8 @@ use crate::ui::shell::Shell;
 use crate::ui::theme::{Theme, TEXT_TINY};
 
 use super::{
-    file_list, hero, kit, link_list, media_grid, pushed_frame, tab_bar, Found, Link, HERO_AVATAR,
-    PANE_FADE_BAND,
+    file_list, hero, kit, link_list, media_grid, pushed_frame, tab_bar, Found, HeroClick, Link,
+    HERO_AVATAR, PANE_FADE_BAND,
 };
 
 /// Everything a page declares. The component renders it.
@@ -37,6 +37,9 @@ pub struct ProfilePane {
     pub footer: Vec<Section>,
     /// Optional control beside the × (Done, Save).
     pub done: Option<Stateful<Div>>,
+    /// Grok's share disc, left of the ×, when the page has something to share
+    /// (an agent or a group: the invite sheet). `None` draws the × alone.
+    pub share: Option<HeroClick>,
 }
 
 pub struct Hero {
@@ -283,12 +286,16 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
     }
     // The body starts under the pinned block's bottom margin (pane_frame pulls
     // it up by PANE_FADE_BAND); this spacer puts the first card back where
-    // the margin had it, so only scrolled rows cross the fade.
+    // the margin had it, so only scrolled rows cross the fade. A section label
+    // first ("Coding") pulls the spacer in by its own top padding, so the
+    // label's text lands where a card's top edge would — Grok's 24 under the
+    // pill ([feedback info-pane-chrome-2026-10-24]).
+    let spacer = first_spacer(pane.body.first());
     let mut body = div()
         .flex()
         .flex_col()
         .pb(px(16.0))
-        .child(div().h(px(PANE_FADE_BAND)).flex_shrink_0());
+        .child(div().h(px(spacer)).flex_shrink_0());
     for part in pane.body {
         body = body.child(section(part, shell, &theme, cx));
     }
@@ -303,11 +310,27 @@ pub fn render(pane: ProfilePane, shell: &Shell, cx: &mut Context<Shell>) -> Stat
         Some(pinned),
         body,
         pane.done,
+        pane.share,
         Some(&shell.profile_scroll),
         shell,
         &theme,
         cx,
     )
+}
+
+/// A leading section label starts this much higher than a card would, so its
+/// glyphs (about 3 pt into the label's box, over `kit::SECTION_TITLE_TOP`)
+/// land Grok's 24 pt under the pill: 18 − 7 + 10 + 3 = 24
+/// (`grok-right-pane-details.png`: pill bottom 244, "Coding" top 268).
+pub(crate) const FIRST_TITLE_PULL: f32 = 7.0;
+
+/// The spacer over the first section: the fade band, pulled in when a section
+/// label leads (see [`FIRST_TITLE_PULL`]).
+pub(crate) fn first_spacer(first: Option<&Section>) -> f32 {
+    match first {
+        Some(Section::Title(_)) => PANE_FADE_BAND - FIRST_TITLE_PULL,
+        _ => PANE_FADE_BAND,
+    }
 }
 
 #[cfg(test)]

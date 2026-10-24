@@ -151,6 +151,21 @@ pub fn finish_cleanly(text: &str, truncated: bool) -> Option<String> {
     (!kept.is_empty()).then(|| kept.to_owned())
 }
 
+/// What the model's reading becomes. A `[status]` answer must read as a whole sentence
+/// (`finish_cleanly`), else it is not posted and the message queues (`Task`, `None`). A
+/// `[guide]` is a steer whatever the quick line looks like — the line is never shown, so a
+/// missing full stop must not demote the steer to a silent job (#1657). A `[task]` has no line.
+pub fn settle_quick(kind: SideKind, text: &str, truncated: bool) -> (SideKind, Option<String>) {
+    match kind {
+        SideKind::Status => match finish_cleanly(text, truncated) {
+            Some(clean) => (SideKind::Status, Some(clean)),
+            None => (SideKind::Task, None),
+        },
+        SideKind::Guide => (SideKind::Guide, None),
+        SideKind::Task => (SideKind::Task, None),
+    }
+}
+
 /// What the running work looks like, for the quick call.
 #[derive(Debug, Default, Clone)]
 pub struct BusySnapshot {
@@ -554,9 +569,10 @@ impl Agent {
                             .and_then(serde_json::Value::as_i64),
                         "quick reply from the model"
                     );
-                    match finish_cleanly(&text, truncated) {
-                        Some(clean) => (kind, clean),
-                        None => {
+                    match settle_quick(kind, &text, truncated) {
+                        (k, Some(clean)) => (k, clean),
+                        (SideKind::Guide, None) => (SideKind::Guide, String::new()),
+                        (_, None) => {
                             tracing::warn!(
                                 chat_id,
                                 truncated,
@@ -616,7 +632,9 @@ impl Agent {
             return QuickOutcome::Queued;
         }
         let text = crate::store::redact(text.trim());
-        if text.is_empty() {
+        // Only a status answer needs words; a guide has none to show and still steers (#1657:
+        // this early return demoted every guide whose line was dropped to a silent queue).
+        if kind == SideKind::Status && text.is_empty() {
             return QuickOutcome::Queued;
         }
         // The decision row for debugging readers (`inspect`, kind `quick_reply`): which side the
@@ -742,6 +760,39 @@ impl Agent {
 pub(crate) mod tests {
     use super::*;
 
+    /// #1657: a `[guide]` whose quick line lacks a full stop was demoted to a silent job; a guide
+    /// steers regardless of the line. A fragment `[status]` still queues instead of posting.
+    #[test]
+    fn a_guide_steers_whatever_its_line_looks_like() {
+        assert_eq!(
+            settle_quick(
+                SideKind::Guide,
+                "Stopping at 20 instead of 40 for the run that is going",
+                false
+            ),
+            (SideKind::Guide, None)
+        );
+        assert_eq!(
+            settle_quick(SideKind::Guide, "", false),
+            (SideKind::Guide, None)
+        );
+        assert_eq!(
+            settle_quick(SideKind::Status, "The run is at step 12 of 40,", true),
+            (SideKind::Task, None)
+        );
+        assert_eq!(
+            settle_quick(SideKind::Status, "The run is at step 12 of 40.", false),
+            (
+                SideKind::Status,
+                Some("The run is at step 12 of 40.".to_owned())
+            )
+        );
+        assert_eq!(
+            settle_quick(SideKind::Task, "Noted.", false),
+            (SideKind::Task, None)
+        );
+    }
+
     #[test]
     fn tags_parse_and_default_to_task() {
         assert_eq!(
@@ -840,7 +891,13 @@ pub(crate) mod tests {
     async fn mock_quick(axum::Json(body): axum::Json<Value>) -> axum::Json<Value> {
         tokio::time::sleep(Duration::from_millis(300)).await;
         let user = body["messages"][1]["content"].as_str().unwrap_or("");
-        let (content, finish) = if user.contains("did the logger") {
+        let (content, finish) = if user.contains("stop at 20, not 40") {
+            // The b7 shape: a guide whose one line has no full stop.
+            (
+                "[guide]\nStopping the run at 20 instead of 40 as you asked",
+                "stop",
+            )
+        } else if user.contains("did the logger") {
             ("[status]\nWhen I last reported, the 15-second UTC logger had started at 04:15:49Z with 3 lines written,", "length")
         } else if user.contains("what is going on") {
             (
@@ -864,11 +921,25 @@ pub(crate) mod tests {
         }))
     }
 
+    /// The last activity text the stub relay received (`POST /projects/{id}/activity`).
+    static LAST_ACTIVITY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    async fn mock_activity(axum::Json(body): axum::Json<Value>) -> axum::http::StatusCode {
+        *LAST_ACTIVITY.lock().unwrap() =
+            body.get("text").and_then(Value::as_str).map(str::to_owned);
+        axum::http::StatusCode::NO_CONTENT
+    }
+
     pub(crate) async fn test_agent() -> (Arc<Agent>, std::path::PathBuf) {
-        let app = axum::Router::new().route(
-            "/proxy/v1/chat/completions",
-            axum::routing::post(mock_quick),
-        );
+        let app = axum::Router::new()
+            .route(
+                "/proxy/v1/chat/completions",
+                axum::routing::post(mock_quick),
+            )
+            .route(
+                "/projects/{id}/activity",
+                axum::routing::post(mock_activity),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -1488,6 +1559,43 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("Running a command")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The exact b7 shape (#1657): a foreground turn runs; the user writes "stop at 20, not 40";
+    /// the quick model reads it as `[guide]` with a line that has no full stop. It must be
+    /// steered (not queued as a job) and the working row must say "Steering: …".
+    #[tokio::test]
+    async fn b7_guide_without_full_stop_is_steered_and_shown_on_the_working_row() {
+        let (agent, root) = test_agent().await;
+        let chat = "01TESTCHATQUICKREPLY000010";
+        let host = agent.sync.open_room(chat).await.unwrap();
+        let _busy = agent.test_hold_turn(chat).await;
+        *LAST_ACTIVITY.lock().unwrap() = None;
+        let (msg_id, cmd) = send_cmd(
+            &host,
+            "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
+        );
+        let outcome = agent.quick_reply(chat, &host, &cmd).await;
+        // No pi child in the test harness, so the steer itself cannot land; the decision must
+        // still be the steer path (never `Answered`, never a job), with nothing in the transcript.
+        assert!(
+            matches!(outcome, QuickOutcome::Steered | QuickOutcome::Queued),
+            "{outcome:?}"
+        );
+        assert!(
+            reply_rows(&host, &msg_id).is_empty(),
+            "no bubble for a steer"
+        );
+        let t0 = Instant::now();
+        let seen = loop {
+            if let Some(a) = LAST_ACTIVITY.lock().unwrap().clone() {
+                break a;
+            }
+            assert!(t0.elapsed() < Duration::from_secs(5), "no activity posted");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(seen.starts_with("Steering: Change of plan"), "{seen}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

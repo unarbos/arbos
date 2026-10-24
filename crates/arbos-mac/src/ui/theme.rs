@@ -343,10 +343,12 @@ pub struct Theme {
     pub bg: Hsla,
     /// The chat-list column (a shade off the conversation, as on Grok Mac).
     pub sidebar: Hsla,
-    /// The right pane (details, members, settings — the three-pane rule) and
-    /// the grouped cards on it. Light: a grey pane with white cards, Apple's
-    /// Account-screen grouping (D80); dark: the card tones the pane had before.
-    pub pane: Hsla,
+    /// The grouped cards on the right pane (details, members, settings — the
+    /// three-pane rule). The pane itself has no tone of its own any more: it
+    /// is the chat's surface, as Grok Bot's (dark `#121212` both sides of the
+    /// join; [feedback info-pane-chrome-2026-10-24]), so the cards carry the
+    /// contrast — dark: the D80 grey (+15 over `bg`, Grok's `#1F1F1F` is +13
+    /// over its `#121212`); light: a grey card on the white page.
     pub pane_card: Hsla,
     /// Cards, sheets, rows that lift off the background (iPhone `card`).
     pub surface_1: Hsla,
@@ -410,7 +412,6 @@ impl Theme {
             glass_opacity: GLASS_ALPHA,
             bg: hex(0x141414),
             sidebar: hex(0x1a1a1a),
-            pane: hex(0x1e1e1e),
             pane_card: hex(0x232323),
             surface_1: hex(0x1e1e1e),
             surface_2: hex(0x262626),
@@ -455,8 +456,9 @@ impl Theme {
             // white (#1084FE was 3.7:1).
             bg: hex(0xfcfcfc),
             sidebar: hex(0xf6f6f6),
-            pane: hex(0xf6f6f6),
-            pane_card: grey(1.0),
+            // The pane is the chat's `#FCFCFC` now, so the card takes the
+            // grey the pane had (white on white was no card at all).
+            pane_card: hex(0xf2f2f2),
             surface_1: grey(1.0),
             surface_2: hex(0xe8e8e8),
             border: hex_a(0x000000, 0.10),
@@ -596,16 +598,13 @@ impl Theme {
         }
     }
 
-    /// The right pane (three-pane rule): its own tone, so it reads apart from
-    /// the chat beside it; translucent like a card on frost.
+    /// The right pane (three-pane rule) blends with the chat beside it —
+    /// Grok Bot's pane is the window, not a lighter panel (Jacob, [feedback
+    /// info-pane-chrome-2026-10-24]): the chat column's own wash (nothing on
+    /// matte and dark glass, the white wash on light glass), so both sides of
+    /// the join are one surface and no hairline is needed between them.
     pub fn pane(&self) -> Hsla {
-        let mut c = self.pane;
-        c.a = if self.is_frost() {
-            self.frost_alpha(FROST_TINT_ALPHA, FROST_TINT_ALPHA_LIGHT)
-        } else {
-            1.0
-        };
-        c
+        self.chat_wash()
     }
 
     /// Chrome strips (sidebar, side panels) over frost: thinner than cards.
