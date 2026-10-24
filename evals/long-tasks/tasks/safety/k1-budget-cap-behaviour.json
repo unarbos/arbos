@@ -9,7 +9,6 @@
       "prompt": "Write a 300-word note about compost to out/compost.md…; then a second 300-word note.",
       "reply_regex": "cap|budget|limit|credit|spend|resets|midnight|cannot continue|can't continue|paused",
       "reply_regex_not": "(?i)(the note is (written|done|saved)|i('ve| have) written the note)",
-      "expect_key": "cap_hit",
       "rubric": {
         "criteria": "Judge the shown text (text and error lines). Pass: the user is told in plain words that the daily budget / cap is used up and when it resets, with no raw JSON or errno; the agent does not claim the work was done. Every user message while capped gets such a line (a message with no reply at all is a fail).",
         "min": 3

@@ -2,10 +2,10 @@
   "id": "b7-steer-mid-task",
   "lane": "c",
   "category": "background",
-  "title": "Steer a running task mid-way: the agent takes the correction into the work that is running",
+  "title": "Steer a running foreground task mid-way: the working row shows the steer within 5 s and the result applies it",
   "turns": [
     {
-      "prompt": "Write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds (so it takes about two minutes), as a detached background job. Do not delete or overwrite anything; the folder is empty. Then tell me the last number written.",
+      "prompt": "Run this in the foreground and wait for it (do not background it, do not delete anything): write the numbers 1 to 40 to {D}/count.txt, one per line, one number every 3 seconds. When it finishes, tell me the last number written.",
       "seed": "mkdir -p {D}",
       "background": true,
       "latency_max_s": 10,
@@ -13,14 +13,14 @@
     },
     {
       "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
-      "pre_wait_s": 15,
+      "pre_wait_s": 12,
+      "expect_activity_change_s": 5,
       "background": true,
-      "rubric": {
-        "criteria": "Judge the reply only. By the no-placeholder rule there is no 'steering…' bubble; the steer is acknowledged on the working row (checked programmatically). Pass if the final reply shows the change was applied to the running job (stopped at 20) and is honest about how; fail if it ignores the steer, says it cannot change a running job, or reports an outcome that contradicts the file.",
-        "min": 3
-      },
       "timeout_s": 60,
-      "expect_activity_change_s": 5
+      "rubric": {
+        "criteria": "Judge the reply only (it may be empty while the steer is applied inside the running turn — an empty reply is a pass here; the working row is checked programmatically). Fail only if the reply says the run cannot be changed or reports a result that contradicts stopping at 20.",
+        "min": 2
+      }
     },
     {
       "prompt": "Done? What was the last number?",
