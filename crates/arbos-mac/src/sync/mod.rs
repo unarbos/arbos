@@ -74,8 +74,8 @@ pub enum SyncEvent {
     },
     /// The avatar picker's generated picture is ready to preview (`url` fetches it; `image_key`
     /// is what "Set avatar" sends), or the generation failed (`error`).
-    ProjectImageGenerated {
-        project_id: Id,
+    ImageGenerated {
+        target: PictureTarget,
         image_key: Option<String>,
         url: Option<String>,
         error: Option<String>,
@@ -346,6 +346,22 @@ pub enum SyncEvent {
     },
 }
 
+/// Whose picture the avatar picker edits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PictureTarget {
+    Agent(Id),
+    Group(Id),
+    Server(Id),
+}
+
+impl PictureTarget {
+    pub fn id(&self) -> &Id {
+        match self {
+            PictureTarget::Agent(id) | PictureTarget::Group(id) | PictureTarget::Server(id) => id,
+        }
+    }
+}
+
 /// Where an agent's new picture comes from (`ClientCommand::SetProjectImage`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum PictureSource {
@@ -602,11 +618,28 @@ pub enum ClientCommand {
         project_id: Id,
         source: PictureSource,
     },
-    /// The avatar picker's Generate tab: `POST /projects/{id}/avatar/generate {prompt}`; the
-    /// answer arrives as `SyncEvent::ProjectImageGenerated` (not set until "Set avatar").
-    GenerateProjectImage {
-        project_id: Id,
+    /// The avatar picker's Generate tab: `POST /{projects|chats|servers}/{id}/avatar/generate
+    /// {prompt}`; the answer arrives as `SyncEvent::ImageGenerated` (not set until "Set avatar").
+    GenerateImage {
+        target: PictureTarget,
         prompt: String,
+    },
+    /// A people group's picture from a key the relay already holds (the Generate tab's answer):
+    /// `PATCH /chats/{id} {image_key}`.
+    SetGroupImageKey {
+        chat_id: Id,
+        key: String,
+    },
+    /// A server's picture from the avatar picker (owner / admins): a file uploaded into
+    /// `servers:{id}`, or a key the relay already holds; then `PATCH /servers/{id} {image_key}`.
+    SetServerImage {
+        server_id: Id,
+        source: PictureSource,
+    },
+    /// A server's leaf picture (`None` = initials; clears the uploaded picture too).
+    SetServerLeaf {
+        server_id: Id,
+        pick: Option<crate::ui::avatars::LeafPick>,
     },
     /// My own picture (`PUT /me/avatar`, JPEG ≤ 2 MB): overrides the GitHub
     /// avatar everywhere the relay serves me.

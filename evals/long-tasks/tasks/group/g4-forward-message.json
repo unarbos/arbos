@@ -1,0 +1,31 @@
+{
+  "id": "g4-forward-message",
+  "lane": "a",
+  "category": "group",
+  "title": "Forward a message to another agent and relay the answer (reply-to on both ends)",
+  "turns": [
+    {
+      "prompt": "Here is a note I got: \"The build server's disk is at 91 %; please clean the old target dirs tonight.\" Forward exactly that note to lane-b and ask lane-b to confirm it received it. Tell me when it is forwarded.",
+      "reply_regex": "forward|sent|passed|relayed",
+      "reply_regex_not": "which chat|can't|cannot|couldn't|group",
+      "timeout_s": 180
+    },
+    {
+      "prompt": "Did lane-b confirm?",
+      "pre_wait_s": 60,
+      "reply_regex": "lane-b",
+      "reply_regex_not": "I can't check|no way to|not able to see",
+      "rubric": {
+        "criteria": "The agent relays lane-b's confirmation (or says plainly it has not answered yet); it does not invent one and does not say it cannot know.",
+        "min": 4
+      },
+      "timeout_s": 180
+    }
+  ],
+  "peer_lane_checks": {
+    "lane": "lane-b",
+    "expect_text": "91 %",
+    "expect_reply_to": true
+  },
+  "regression": "agent-to-agent send with the message quoted; reply-to on the receiving side (#2847ce852 case)"
+}

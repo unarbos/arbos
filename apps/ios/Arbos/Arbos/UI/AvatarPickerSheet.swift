@@ -6,8 +6,8 @@
 // in its hue (pastel disc, darker leaf); the ten hues in two rows of five. The per-id
 // automatic default stays: Reset goes back to it. Generate: a short prompt → the relay paints one
 // picture (`POST /projects/{id}/avatar/generate`) → previewed here; Set keeps it. Upload: Photos
-// (images only), uploaded as a 512 px JPEG on Set. Groups open the same sheet for their picture
-// (Bot = the group's leaf, Upload = the group image); Generate is for agents.
+// (images only), uploaded as a 512 px JPEG on Set. Groups and servers open the same sheet with
+// the same three tabs (their own `/avatar/generate` route and blob slot).
 //
 // Grok's sizes from the 2x reference (612 × 794 px → 306 × 397 pt), inside the shipped
 // bottom-sheet frame: a 44 pt bar with a hairline, the Create sheet's 33 / 40 / 56 leaf grid,
@@ -23,6 +23,7 @@ import UIKit
 enum AvatarTarget: Equatable {
     case agent(Id)
     case group(String)
+    case server(String)
 }
 
 /// Which body is up.
@@ -68,10 +69,25 @@ struct AvatarPickerSheet: View {
     private let setBg = Color(white: 0xE5 / 255)
     private let title = Color(white: 0xF5 / 255)
 
-    private var isAgent: Bool { if case .agent = target { return true } else { return false } }
-    private var tabs: [AvatarPickerTab] { isAgent ? AvatarPickerTab.allCases : [.bot, .upload] }
+    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    static func tabs(for target: AvatarTarget) -> [AvatarPickerTab] {
+        switch target {
+        case .agent, .group, .server: return [.bot, .generate, .upload]
+        }
+    }
+    private var tabs: [AvatarPickerTab] { Self.tabs(for: target) }
     private var project: Project? { if case .agent(let id) = target { return model.project(id) } else { return nil } }
     private var people: PeopleChat? { if case .group(let id) = target { return model.peopleChats.first { $0.id == id } } else { return nil } }
+    private var server: Server? { if case .server(let id) = target { return model.servers.first { $0.id == id } } else { return nil } }
+    /// The blob slot a generated picture lands in (where the preview fetches it from).
+    private var slot: String {
+        switch target {
+        case .agent(let id): return id
+        case .group(let id): return "\(peopleSlot):\(id)"
+        case .server(let id): return "servers:\(id)"
+        }
+    }
 
     /// The entity's leaf + colour as it is now; the automatic pair under Reset.
     private var currentPick: LeafPick {
@@ -82,6 +98,9 @@ struct AvatarPickerSheet: View {
         case .group(let id):
             if reset { return LeafArt.pick(seed: id) }
             return people?.leafPick ?? LeafArt.pick(seed: id)
+        case .server(let id):
+            if reset { return LeafArt.pick(seed: id) }
+            return server?.leafPick ?? LeafArt.pick(seed: id)
         }
     }
     private var pick: LeafPick {
@@ -91,6 +110,7 @@ struct AvatarPickerSheet: View {
         switch target {
         case .agent: return project.map { $0.avatarLeaf != nil || $0.avatarLeafColor != nil || $0.imageKey != nil } ?? false
         case .group: return people.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
+        case .server: return server.map { $0.leafPick != nil || $0.imageKey != nil } ?? false
         }
     }
     private var dirty: Bool {
@@ -279,7 +299,7 @@ struct AvatarPickerSheet: View {
         .padding(.bottom, 24)
     }
 
-    private var canGenerate: Bool { !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !generating && isAgent }
+    private var canGenerate: Bool { !prompt.trimmingCharacters(in: .whitespaces).isEmpty && !generating }
     private var statusLine: String {
         if let errorText { return errorText }
         if generating { return "Painting a picture — a few seconds." }
@@ -288,7 +308,7 @@ struct AvatarPickerSheet: View {
     }
 
     private func generate() {
-        guard canGenerate, case .agent(let id) = target else { return }
+        guard canGenerate else { return }
         let text = prompt.trimmingCharacters(in: .whitespaces)
         generating = true
         errorText = nil
@@ -296,7 +316,11 @@ struct AvatarPickerSheet: View {
         promptFocused = false
         Task {
             do {
-                generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
+                switch target {
+                case .agent(let id): generatedKey = try await model.generateProjectAvatar(projectId: id, prompt: text)
+                case .group(let id): generatedKey = try await model.generateGroupAvatar(chatId: id, prompt: text)
+                case .server(let id): generatedKey = try await model.generateServerAvatar(id, prompt: text)
+                }
             } catch {
                 errorText = error.localizedDescription
             }
@@ -336,8 +360,8 @@ struct AvatarPickerSheet: View {
         if let uploadPreview, tab == .upload {
             Image(uiImage: uploadPreview).resizable().scaledToFill()
                 .frame(width: 114, height: 114).clipShape(Circle())
-        } else if tab == .generate, let generatedKey, case .agent(let id) = target,
-                  let url = model.blobURL(projectId: id, key: generatedKey) {
+        } else if tab == .generate, let generatedKey,
+                  let url = model.blobURL(projectId: slot, key: generatedKey) {
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
                     image.resizable().scaledToFill()
@@ -373,6 +397,12 @@ struct AvatarPickerSheet: View {
                     .frame(width: 114, height: 114).clipShape(Circle())
                 } else if let leaf = people?.leafPick {
                     LeafAvatar(pick: leaf, size: 114)
+                } else {
+                    LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
+                }
+            case .server:
+                if let server {
+                    ServerAvatar(server: server, size: 114)
                 } else {
                     LeafAvatar(pick: currentPick, size: 114).opacity(0.55)
                 }
@@ -427,7 +457,17 @@ struct AvatarPickerSheet: View {
                     switch tab {
                     case .bot: ok = await model.setGroupLeaf(chatId: id, pick: pick)
                     case .upload: if let uploadJpeg { ok = await model.setGroupImage(chatId: id, jpeg: uploadJpeg) }
-                    case .generate: break
+                    case .generate: if let generatedKey { ok = await model.setGroupImageKey(chatId: id, key: generatedKey) }
+                    }
+                }
+            case .server(let id):
+                if reset {
+                    ok = await model.setServerLeaf(id, pick: nil)
+                } else {
+                    switch tab {
+                    case .bot: ok = await model.setServerLeaf(id, pick: pick)
+                    case .upload: if let uploadJpeg { ok = await model.setServerImage(id, jpeg: uploadJpeg) }
+                    case .generate: if let generatedKey { ok = await model.setServerImageKey(id, key: generatedKey) }
                     }
                 }
             }

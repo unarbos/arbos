@@ -247,6 +247,18 @@ fn load(state: &AppState, me: &str, id: &str) -> Result<(Server, ServerMember), 
     }
 }
 
+/// The caller as a non-banned owner / admin of the server (the avatar generate route).
+pub(crate) fn admin_of(
+    state: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> Result<(String, Server), Box<Response>> {
+    let me = user_of(principal)?;
+    let (s, m) = load(state, &me, id)?;
+    admin_required(&m)?;
+    Ok((me, s))
+}
+
 fn admin_required(m: &ServerMember) -> Result<(), Box<Response>> {
     if m.can_admin() {
         Ok(())
@@ -449,6 +461,17 @@ pub struct PatchBody {
     /// `true` = anyone on Arbos can search and join without an invite link.
     #[serde(default)]
     pub open: Option<bool>,
+    /// D92 amendment: the server's leaf picture (`null` = none); set together.
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::api::deserialize_double_option_i64"
+    )]
+    pub avatar_leaf_color: Option<Option<i64>>,
 }
 
 /// `PATCH /servers/{id} {name?, image_key?, open?}` — owner/admins.
@@ -515,6 +538,27 @@ pub async fn patch(
         b.open,
     ) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+    }
+    if b.avatar_leaf.is_some() || b.avatar_leaf_color.is_some() {
+        let leaf = match (b.avatar_leaf, b.avatar_leaf_color) {
+            (Some(Some(l)), Some(Some(c))) => {
+                if let Err((st, msg)) = crate::avatar::check_leaf_pick(Some(l), Some(c)) {
+                    return api_error(st, "bad_leaf", msg);
+                }
+                Some((l, c))
+            }
+            (Some(Some(_)), _) | (_, Some(Some(_))) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "bad_leaf",
+                    "avatar_leaf and avatar_leaf_color go together",
+                )
+            }
+            _ => None,
+        };
+        if let Err(e) = state.db.update_server_leaf(&id, leaf) {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
+        }
     }
     state.matrix.touch_server(&state, &id);
     notify_server_members(
@@ -1672,6 +1716,8 @@ mod picture_tests {
                 name: None,
                 image_key: Some(key),
                 open: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
             }),
         )
         .await

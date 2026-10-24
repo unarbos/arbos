@@ -971,6 +971,7 @@ private struct ChatSession: View {
                     case "userprofile": if let c = counterpart { model.showProfile(.user(ProfilePerson(c))) }
                     // `addmembers`: the group pane opens its Add members sheet on appear.
                     case "groupprofile", "addmembers", "removemember": model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
+                    case let s where s.hasPrefix("groupavatar"): model.showProfile(.group(chatId: chatId, projectId: isPeople ? nil : projectId))
                     case "member":
                         // The group page, then its first other member pushed over it (rig).
                         openHeaderProfile()

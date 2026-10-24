@@ -272,6 +272,65 @@ extension AppModel {
         return (try? await relay.searchOpenServers(q)) ?? []
     }
 
+    /// D92 amendment: a server's leaf picture (nil = initials); drops the uploaded picture.
+    func setServerLeaf(_ id: Id, pick: LeafPick?) async -> Bool {
+        if let i = servers.firstIndex(where: { $0.id == id }) {
+            servers[i].avatarLeaf = pick.map { Int($0.leaf) }
+            servers[i].avatarLeafColor = pick.map { Int($0.color) }
+            servers[i].imageKey = nil
+        }
+        guard !isFixture else { return true }
+        do {
+            try await relay.setServerLeaf(id, pick: pick)
+            await refreshServers()
+            return true
+        } catch {
+            notice = Notice(text: "Server picture not saved: \(error.localizedDescription)")
+            await refreshServers()
+            return false
+        }
+    }
+
+    /// D92 amendment: a server picture — upload a JPEG into `servers:{id}` and set it.
+    func setServerImage(_ id: Id, jpeg: Data) async -> Bool {
+        let key = "server-\(Int(Date().timeIntervalSince1970 * 1000)).jpg"
+        if isFixture {
+            if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].imageKey = key }
+            return true
+        }
+        do {
+            _ = try await relay.putBlob(projectId: "servers:\(id)", key: key, mime: "image/jpeg", data: jpeg)
+            return await setServerImageKey(id, key: key)
+        } catch {
+            notice = Notice(text: "Could not upload the picture: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    /// A server picture from a key the relay already holds (the Generate tab's answer).
+    func setServerImageKey(_ id: Id, key: String) async -> Bool {
+        if let i = servers.firstIndex(where: { $0.id == id }) { servers[i].imageKey = key }
+        guard !isFixture else { return true }
+        do {
+            try await relay.patchServer(id, imageKey: key)
+            await refreshServers()
+            return true
+        } catch {
+            notice = Notice(text: "Server picture not saved: \(error.localizedDescription)")
+            await refreshServers()
+            return false
+        }
+    }
+
+    /// The Generate tab for a server (owner / admins): the relay paints one picture.
+    func generateServerAvatar(_ id: Id, prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await relay.generateServerAvatar(id, prompt: prompt)
+    }
+
     func renameServer(_ id: Id, name: String) async -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }

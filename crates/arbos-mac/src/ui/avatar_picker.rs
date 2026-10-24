@@ -11,8 +11,9 @@
 //! - **Upload**: the image-only file panel (PNG, JPEG, HEIC, GIF, WebP), uploaded as a 512 px
 //!   JPEG into the project's blob slot on Set.
 //!
-//! Groups open the same sheet for their picture (Bot = the group's leaf, Upload = the group
-//! image); Generate is for agents.
+//! Groups and servers open the same sheet for their picture with the same three tabs (Bot = their
+//! leaf, Generate through `/chats/{id}` / `/servers/{id}` `/avatar/generate`, Upload into their
+//! own blob slot).
 //!
 //! Sizes are Grok's, measured on the 2x reference (612 × 794 px → 306 × 397 pt): the bar 44 pt
 //! with a hairline, 32 pt icons on a 57 pt pitch (we keep the Create sheet's 33 / 40 / 56 so the
@@ -25,7 +26,7 @@ use gpui::{
 };
 
 use crate::app::AppState;
-use crate::model::{Id, Project};
+use crate::model::Project;
 use crate::ui::avatars::{self, leaf, LeafPick};
 use crate::ui::create_entity::{hex, palette};
 use crate::ui::frost::{frosted, PANEL_BLUR};
@@ -65,6 +66,12 @@ pub enum Tab {
 }
 
 impl Tab {
+    /// The tabs every target gets — agents, groups and servers alike (Jacob, 2026-10-24: the
+    /// group / server picker had lost Generate); Reset sits beside them in the bar.
+    pub fn for_target(_target: &Target) -> [Tab; 3] {
+        [Tab::Bot, Tab::Generate, Tab::Upload]
+    }
+
     fn label(self) -> &'static str {
         match self {
             Tab::Bot => "Bot",
@@ -74,20 +81,8 @@ impl Tab {
     }
 }
 
-/// Whose picture the sheet edits.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Target {
-    Agent(Id),
-    Group(Id),
-}
-
-impl Target {
-    pub fn id(&self) -> &Id {
-        match self {
-            Target::Agent(id) | Target::Group(id) => id,
-        }
-    }
-}
+/// Whose picture the sheet edits (the sync layer's `PictureTarget`).
+pub type Target = crate::sync::PictureTarget;
 
 /// The sheet's pending choice; applied by "Set avatar", dropped by Cancel.
 #[derive(Clone, Debug)]
@@ -229,15 +224,31 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let p = palette(&theme);
     let state = shell.state.read(cx);
-    let Some(project) = state.projects.iter().find(|x| &x.id == picker.target.id()) else {
-        return div();
+    // Agents and groups are `Project`s; a server is a `ServerInfo` dressed as one for the preview
+    // (id, name, leaf pick and picture URL are all the sheet reads).
+    let project: Project = match &picker.target {
+        Target::Agent(id) | Target::Group(id) => {
+            match state.projects.iter().find(|x| &x.id == id) {
+                Some(p) => p.clone(),
+                None => return div(),
+            }
+        }
+        Target::Server(id) => match state.servers.iter().find(|s| &s.id == id) {
+            Some(s) => Project {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                avatar_leaf: s.avatar_leaf,
+                avatar_leaf_color: s.avatar_leaf_color,
+                image_url: s.image_url.clone(),
+                ..Project::default()
+            },
+            None => return div(),
+        },
     };
-    let project = project.clone();
     let label_muted = match theme.appearance {
         Appearance::Dark => hex(0x9A9A9A),
         Appearance::Light => theme.text_muted,
     };
-    let is_agent = matches!(picker.target, Target::Agent(_));
     let can_reset = project.avatar_leaf.is_some()
         || project.avatar_leaf_color.is_some()
         || project.image_url.is_some();
@@ -251,12 +262,7 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
         .flex()
         .items_center()
         .gap(px(2.0));
-    let shown: &[Tab] = if is_agent {
-        &[Tab::Bot, Tab::Generate, Tab::Upload]
-    } else {
-        &[Tab::Bot, Tab::Upload]
-    };
-    for &tab in shown {
+    for tab in Tab::for_target(&picker.target) {
         let selected = picker.tab == tab;
         tabs = tabs.child(
             div()
@@ -651,4 +657,28 @@ pub fn sheet(shell: &Shell, picker: &Picker, cx: &mut Context<Shell>) -> Div {
             MouseButton::Left,
             cx.listener(|this, _, _, cx| this.close_avatar_picker(cx)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_target_gets_bot_generate_upload_and_reset() {
+        for target in [
+            Target::Agent("a".into()),
+            Target::Group("g".into()),
+            Target::Server("s".into()),
+        ] {
+            assert_eq!(
+                Tab::for_target(&target),
+                [Tab::Bot, Tab::Generate, Tab::Upload],
+                "{target:?}"
+            );
+            // Reset is live for every target once there is something to reset.
+            let mut pk = Picker::new(target);
+            pk.reset = true;
+            assert!(pk.dirty());
+        }
+    }
 }

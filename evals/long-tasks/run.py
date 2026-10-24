@@ -120,6 +120,18 @@ class Lane(threading.Thread):
         elif kind == "delete_secret":
             if st.get("secret_id"):
                 rl.delete_secret(st["secret_id"])
+        elif kind == "restart_machine":
+            rl.ctl("machine", "stop", "--force", timeout=180)
+            time.sleep(10)
+            rl.ctl("machine", "start", timeout=180)
+            for _ in range(30):
+                if rl.machine().get("state") == "awake":
+                    break
+                time.sleep(10)
+            time.sleep(act.get("settle_s", 60))
+        elif kind == "capped_user_turn":
+            # a scratch user with a tiny daily cap; one project; a message that must trip the cap
+            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240))
         elif kind == "people_dm":
             # a DM between the eval user and a second scratch user, with this lane's agent added
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
@@ -204,6 +216,24 @@ class Lane(threading.Thread):
                 if first_chat is None:
                     first_chat = chat_id
             t0_ms = int(time.time() * 1000)
+            if turn.get("assert_state"):
+                # a turn with no message: grade something the setup actions produced
+                st_key = turn["assert_state"]
+                val = task_state.get(st_key) or {}
+                reply = val.get("reply") or ""
+                reasons = []
+                if turn.get("reply_regex") and not re.search(turn["reply_regex"], reply, re.I | re.S):
+                    reasons.append(f"reply does not match /{turn['reply_regex'][:60]}/")
+                if turn.get("reply_regex_not") and re.search(turn["reply_regex_not"], reply, re.I):
+                    reasons.append(f"reply matches forbidden /{turn['reply_regex_not'][:40]}/")
+                if turn.get("expect_key") and not val.get(turn["expect_key"]):
+                    reasons.append(f"{st_key}.{turn['expect_key']} missing")
+                rb = gr.judge(turn.get("prompt", ""), turn["rubric"]["criteria"], reply, json.dumps(val)[:2000], "") if turn.get("rubric") else None
+                if rb and rb.get("score") is not None and rb["score"] < turn["rubric"].get("min", 3):
+                    reasons.append(f"rubric {rb['score']}/5: {rb['reason']}")
+                turns_out.append({"turn": i, "chat_id": val.get("chat_id"), "prompt": turn.get("prompt", "")[:300], "ok": not reasons, "reasons": reasons, "ttfr_s": val.get("ttfr_s"), "first_status_s": None, "wall_s": val.get("wall_s"), "timed_out": False, "stalls": 0, "approvals_rejected": [], "routes": val.get("routes") or [], "tool_calls": 0, "tool_errors": 0, "model_calls": 0, "compactions": 0, "audit_denied": 0, "rubric": rb, "truth": {k: v for k, v in val.items() if k not in ("reply",)}, "verify_out": "", "reply": reply[:1500], "excerpt": f"**User (capped):** {turn.get('prompt','')[:300]}\n\n**Assistant:** {reply[:900]}"})
+                self.say(f"{tid} state turn {i}: {'ok' if not reasons else 'FAIL ' + str(reasons)[:160]}")
+                continue
             if turn.get("peer"):
                 # the colleague writes in the DM; we watch the agent's reply by polling the doc
                 text = prompt.replace("[peer] ", "")
@@ -346,6 +376,23 @@ class Lane(threading.Thread):
                 if rb.get("score") is not None and rb["score"] < vw["rubric"].get("min", 3):
                     reasons.append(f"rubric {rb['score']}/5: {rb['reason']}")
             all_docs.append(doc)
+        plc = task.get("peer_lane_checks")
+        if plc and plc.get("lane"):
+            # the other lane's pinned chat must show the agent-to-agent row (and its reply-to)
+            peer_pid = next((pid for ln, pid in self.rs["projects"].items() if f"lane-{ln}" == plc["lane"]), None)
+            if peer_pid:
+                pin = rl.pinned_chat(peer_pid)
+                pdoc = rl.chat_dump(peer_pid, pin) if pin else {"messages": []}
+                recent = [m for m in pdoc.get("messages", []) if (m.get("createdAt") or 0) >= int(t_task0 * 1000) - 5000]
+                proj_rows = [m for m in recent if m.get("role") == "project" or str(m.get("sender", "")).startswith("project:")]
+                texts = " ".join(dr.text_of(m) for m in proj_rows)
+                if plc.get("expect_text") and plc["expect_text"] not in texts:
+                    reasons.append(f"lane-b's pinned chat shows no agent message carrying {plc['expect_text']!r} ({len(proj_rows)} project rows)")
+                if plc.get("expect_reply_to"):
+                    ids = {m.get("id") for m in proj_rows}
+                    answered = [m for m in recent if m.get("role") == "assistant" and m.get("inReplyTo") in ids]
+                    if not answered:
+                        reasons.append("lane-b's answer does not reply-to the agent message")
         dc = task.get("doc_checks")
         if dc:
             checks = doc_checks(all_docs, after_ms=task_state.get("renamed_at_ms"))
@@ -382,6 +429,10 @@ class Lane(threading.Thread):
                 self.driver_action(act, task_state)
             except Exception as e:
                 self.say(f"{tid}: cleanup action failed: {e}")
+        if not task.get("keep_dir"):
+            # the eval's own artefacts must not fill the 2 GiB workspace disk (#1641): the task dir
+            # and anything the agent installed into the workspace home for it go after grading
+            self.box.run_as_ws(self.project, f"rm -rf {D} 2>/dev/null; rm -rf {proj_dir}/.arbos/home/.rustup {proj_dir}/.arbos/home/.cargo 2>/dev/null; true", timeout=120)
         if task.get("cleanup"):
             self.box.run_as_ws(self.project, task["cleanup"].replace("{D}", D).replace("{P}", proj_dir), env=env, timeout=120)
         if task.get("cleanup_routines"):
@@ -492,6 +543,14 @@ def main():
             if rl.machine().get("state") == "awake":
                 break
     box = bx.Box()
+    code, out = box.root("df -m /work | tail -1 | awk '{print $4}'")
+    try:
+        free_mib = int(out.strip().splitlines()[-1])
+    except Exception:
+        free_mib = -1
+    print(f"preflight: /work free {free_mib} MiB", flush=True)
+    if 0 <= free_mib < 300:
+        raise SystemExit(f"preflight: only {free_mib} MiB free on /work — clean the box first (#1641)")
     spent, cap = rl.spent_today()
     if cap and cap - spent < args.budget_usd:
         print(f"WARNING: daily cap headroom ${cap - spent:.2f} < budget ${args.budget_usd}; the relay will stop the agent first", flush=True)
@@ -499,7 +558,9 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     log = (out_dir / "run.log").open("a")
     run_state = {"run_id": args.run_id, "budget": args.budget_usd, "spent_at_start": spent, "lock": threading.Lock()}
-    projects = {ln: rl.ensure_project(f"lane-{ln}") for ln in LANES if any(t["lane"] == ln for t in tasks)}
+    projects = {ln: rl.ensure_project(f"lane-{ln}") for ln in LANES}
+    run_state["projects"] = projects
+    projects = {ln: pid for ln, pid in projects.items() if any(t["lane"] == ln for t in tasks)}
     meta = {
         "run_id": args.run_id,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

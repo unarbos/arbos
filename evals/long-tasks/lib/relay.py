@@ -290,3 +290,54 @@ def people_send_as(peer, chat_id, text):
     env = dict(os.environ, ARBOSCTL_CONFIG=str(cfg))
     p = subprocess.run([ARBOSCTL, "chat", "send", "people", chat_id, text, "--timeout", "5"], capture_output=True, text=True, timeout=60, env=env)
     return p.returncode
+
+
+def capped_user_turn(handle, cap_usd, prompt, timeout_s=240):
+    """Create (once) a scratch user with a tiny daily cap, one project, send one message as them
+    and return what the chat showed. Lets the suite see the cap behaviour without capping lt-eval."""
+    st, users = admin("GET", "/admin/users")
+    users = users if isinstance(users, list) else (users or {}).get("users") or []
+    u = next((x for x in users if x.get("login") == handle), None)
+    if u is None:
+        st, v = admin("POST", "/admin/users/test", {"handle": handle, "name": "Long-task eval capped"})
+        if st != 201:
+            raise RuntimeError(f"create capped user: {st} {v}")
+        uid = v["user"]["id"]
+    else:
+        uid = u["id"]
+    st, tok = admin("POST", f"/admin/users/{uid}/devices", {"name": "lt eval capped driver"})
+    if st not in (200, 201):
+        raise RuntimeError(f"capped device: {st} {tok}")
+    cfg = STATE_DIR / "ctl-capped" / "arbosctl.json"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"relay_url": RELAY, "device_token": tok["access_token"], "device_id": tok.get("device_id", "")}))
+    env = dict(os.environ, ARBOSCTL_CONFIG=str(cfg))
+    subprocess.run([ARBOSCTL, "admin", "cap", uid, str(cap_usd)], capture_output=True, text=True, timeout=60, env=dict(os.environ, ARBOSCTL_CONFIG=str(CTL_CONFIG)))
+    st, projects_v = http("GET", f"{RELAY}/projects", token=tok["access_token"])
+    plist = projects_v if isinstance(projects_v, list) else (projects_v or {}).get("projects") or []
+    if not plist:
+        subprocess.run([ARBOSCTL, "project", "create", "--name", "capped-lane"], capture_output=True, text=True, timeout=120, env=env)
+        st, projects_v = http("GET", f"{RELAY}/projects", token=tok["access_token"])
+        plist = projects_v if isinstance(projects_v, list) else (projects_v or {}).get("projects") or []
+    pid = plist[0]["id"]
+    subprocess.run([ARBOSCTL, "machine", "start"], capture_output=True, text=True, timeout=120, env=env)
+    for _ in range(30):
+        st, m = http("GET", f"{RELAY}/machine", token=tok["access_token"])
+        if st == 200 and m.get("state") == "awake":
+            break
+        time.sleep(10)
+    time.sleep(20)
+    p = subprocess.run([ARBOSCTL, "chat", "open", pid, "--title", "cap check"], capture_output=True, text=True, timeout=60, env=env)
+    chat_id = p.stdout.strip().splitlines()[-1].split()[-1]
+    time.sleep(3)
+    t0 = time.time()
+    p = subprocess.run([ARBOSCTL, "chat", "send", pid, chat_id, prompt, "--stream", "--timeout", str(timeout_s)], capture_output=True, text=True, timeout=timeout_s + 60, env=env)
+    out = p.stdout + "\n" + p.stderr
+    p2 = subprocess.run([ARBOSCTL, "chat", "dump", pid, chat_id], capture_output=True, text=True, timeout=60, env=env)
+    s = p2.stdout
+    doc = json.loads(s[s.find("{"):]) if "{" in s else {"messages": []}
+    rows = [m for m in doc.get("messages", []) if m.get("role") == "assistant"]
+    reply = "\n\n".join("".join(pp.get("text", "") for pp in m.get("parts", []) if pp.get("kind") == "text") for m in rows)
+    errors = [pp.get("message") or pp.get("text") for m in rows for pp in m.get("parts", []) if pp.get("kind") in ("error", "status") and (pp.get("code") in ("failed", "error", "cap", "daily_cap") or "cap" in str(pp.get("message") or "").lower())]
+    st, me = http("GET", f"{RELAY}/me", token=tok["access_token"])
+    return {"user_id": uid, "project": pid, "chat_id": chat_id, "reply": reply, "errors": errors, "routes": [m.get("decision") for m in rows], "wall_s": round(time.time() - t0, 1), "stream_tail": out[-800:], "credits": (me or {}).get("credits"), "cap_hit": any("cap" in str(e).lower() for e in errors) or "cap" in reply.lower()}

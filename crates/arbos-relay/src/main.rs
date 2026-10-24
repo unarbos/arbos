@@ -806,6 +806,14 @@ async fn main() -> anyhow::Result<()> {
             post(images::avatar_generate),
         )
         .route(
+            "/chats/{id}/avatar/generate",
+            post(images::chat_avatar_generate),
+        )
+        .route(
+            "/servers/{id}/avatar/generate",
+            post(images::server_avatar_generate),
+        )
+        .route(
             "/proxy/v1/audio/transcriptions",
             post(proxy::audio_transcriptions),
         )
