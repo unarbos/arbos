@@ -46,6 +46,9 @@ final class SessionRoom {
     /// Relay rejected this room (HTTP 403/404); caller should refresh membership.
     var onUnavailable: (() -> Void)?
     var presenceUser: () -> (id: String, handle: String)? = { nil }
+    /// Read receipt (Mac `presence_header` `seen`): the newest message id of this people chat,
+    /// sent while it is focused so peers can lift their own bubbles to full opacity.
+    var newestMessageId: () -> String? = { nil }
     var inCall: String? {
         didSet {
             guard inCall != oldValue else { return }
@@ -528,7 +531,10 @@ final class SessionRoom {
     private func presenceHeaderJSON() -> String? {
         var header: [String: Any] = ["device": deviceId(), "at": nowMs()]
         if let u = presenceUser() { header["user"] = u.id; header["handle"] = u.handle }
-        if focused { header["focused_chat"] = roomChat }
+        if focused {
+            header["focused_chat"] = roomChat
+            if let seen = newestMessageId(), !seen.isEmpty { header["seen"] = seen }
+        }
         if let inCall { header["in_call"] = inCall }
         guard let data = try? JSONSerialization.data(withJSONObject: header),
               let json = String(data: data, encoding: .utf8) else { return nil }

@@ -1365,6 +1365,7 @@ final class AppModel: ObservableObject {
         projects = []
         chats = [:]
         messages = [:]
+        ReadReceipts.shared.clear()
         caughtUp = []
         unacked = [:]
         peopleChats = []
@@ -1965,9 +1966,11 @@ final class AppModel: ObservableObject {
             self.emitSnapshot(key)
         }
         if !isProjectDoc {
+            room.newestMessageId = { [weak self] in self?.messages[key]?.last?.id }
             room.onPresence = { [weak self] header in
                 self?.notePresence(header)
                 self?.noteTyping(header, chatId: key)
+                ReadReceipts.shared.note(header, chatId: key)
                 if let callId = header["in_call"] as? String { self?.peerInCall(callId, chatId: key) }
             }
         }

@@ -27,7 +27,7 @@ use crate::ui::icons::icon;
 use crate::ui::markdown::{
     has_fenced_code, inline_plain, inline_spans, polish_assistant_prose, split_blocks, Block,
 };
-use crate::ui::mention::Mentions;
+use crate::ui::mention::{self, Mentions};
 use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::select::{BubbleSelectable, Selectable, TextSelection};
@@ -41,18 +41,38 @@ use serde_json::Value;
 
 actions!(transcript, [Copy]);
 
-/// Delivery label inside my bubble footer: plain text only (not ticks).
+/// Where one of my own bubbles is on its way. No caption says it (Jacob,
+/// 2026-10-24: "remove these 'sent' items, just use coloring"): the bubble's
+/// opacity does — see [`Delivery::opacity`] and docs/mac-design-rules.md.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ReceiptStatus {
+pub enum Delivery {
+    /// Not yet acknowledged by the relay.
+    Pending,
+    /// The relay refused it; a red glyph marks it beside the bubble.
+    Failed,
+    /// Acknowledged, nobody has opened past it yet.
     Sent,
+    /// A peer's read watermark covers it, an agent answered after it, or read
+    /// receipts are off (nothing to wait for).
     Seen,
 }
 
-impl ReceiptStatus {
-    fn label(self) -> &'static str {
+/// Whole-bubble opacity of a sent-but-unseen bubble. Measured on both themes
+/// (white text, bubble `#5c5c5c` on `#141414` / `#111111` on `#fcfcfc`): the
+/// composited text keeps a 4.9 : 1 (dark) and 7.7 : 1 (light) contrast on its
+/// fill, while the fill drops to L* 30 from 39 (dark) and to `#535353` from
+/// `#111111` (light) — visibly lighter next to a seen bubble, still readable.
+pub const BUBBLE_ALPHA_SENT: f32 = 0.72;
+/// A pending bubble sits below a sent one (3.4 : 1 / 3.6 : 1 text contrast —
+/// transient, it lasts until the relay's ACK).
+pub const BUBBLE_ALPHA_PENDING: f32 = 0.5;
+
+impl Delivery {
+    pub fn opacity(self) -> f32 {
         match self {
-            ReceiptStatus::Sent => "sent",
-            ReceiptStatus::Seen => "seen",
+            Delivery::Pending => BUBBLE_ALPHA_PENDING,
+            Delivery::Sent => BUBBLE_ALPHA_SENT,
+            Delivery::Failed | Delivery::Seen => 1.0,
         }
     }
 }
@@ -331,7 +351,6 @@ pub fn quote_text(message: &Message) -> String {
 pub enum RowKind {
     User {
         text: String,
-        pending: bool,
         /// Caption for prompts not typed by the user (a routine, another project).
         sender_label: Option<String>,
         /// Another person's bubble carries their name inside it, at the top, when
@@ -343,9 +362,10 @@ pub enum RowKind {
         from: Option<Person>,
         /// "9:41 PM", revealed at the bubble's outer edge on hover only.
         time: Option<String>,
-        /// My own messages: "sent" after the relay ACKs, "seen" when a peer
-        /// opened the chat (or an agent answered). Never set on others' bubbles.
-        receipt: Option<ReceiptStatus>,
+        /// My own messages: pending → failed / sent → seen, shown as the
+        /// bubble's opacity (plus a red glyph when failed). `None` on others'
+        /// bubbles.
+        delivery: Option<Delivery>,
         /// Set when this message replies to another: Grok's quote header
         /// sits inside the bubble above the text.
         quote: Option<Quote>,
@@ -588,6 +608,8 @@ pub struct Transcript {
     multi_party: bool,
     /// Message whose hover copy glyph is showing a checkmark, and when it started.
     copied_feedback: Option<(Id, Instant)>,
+    /// The code card Copy pill reading "Copied" right now (its id, when).
+    code_copied: Option<(SharedString, Instant)>,
     /// `ARBOS_RIG_SELECT=all|<from>..<to>|word@<i>|para@<i>` (screenshot rig):
     /// once the open chat shows a settled agent bubble, select that much of
     /// the newest one — the drag / double-click / triple-click the EC2 Mac's
@@ -640,6 +662,7 @@ impl Transcript {
             turn_starts: HashSet::new(),
             multi_party: false,
             copied_feedback: None,
+            code_copied: None,
             rig_select: std::env::var("ARBOS_RIG_SELECT").ok().map(|spec| {
                 let after = std::env::var("ARBOS_RIG_SELECT_AFTER_MS")
                     .ok()
@@ -1211,6 +1234,38 @@ impl Transcript {
         }
     }
 
+    /// A code card's Copy pill: the block's text to the clipboard and the pill
+    /// reads "Copied" for [`CODE_COPY_FEEDBACK_MS`].
+    pub(crate) fn copy_code(&mut self, pill: SharedString, code: String, cx: &mut Context<Self>) {
+        copy_code_to_clipboard(&mut self.code_copied, pill, code, cx);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(CODE_COPY_FEEDBACK_MS))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.code_copied.as_ref().is_some_and(|(_, at)| {
+                    at.elapsed() >= Duration::from_millis(CODE_COPY_FEEDBACK_MS)
+                }) {
+                    this.code_copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The code cards' Copy wiring for this frame.
+    fn code_copy(&self, cx: &Context<Self>) -> CodeCopy {
+        let this = cx.entity().downgrade();
+        CodeCopy {
+            copied: copied_pill(&self.code_copied, Instant::now()),
+            on_copy: Some(Rc::new(move |id, code, _, cx| {
+                let _ = this.update(cx, |t, cx| t.copy_code(id, code, cx));
+            })),
+        }
+    }
+
     /// Right-click → the message menu (Copy / Reply / Delete, `message_menu`).
     /// Control-click → copy the message text.
     fn menu_target(
@@ -1656,6 +1711,7 @@ impl Transcript {
                     now,
                     theme,
                     &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
+                    &self.code_copy(cx),
                 ),
             ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
@@ -1736,12 +1792,11 @@ impl Transcript {
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
-                pending,
                 sender_label,
                 from,
                 named,
                 time,
-                receipt,
+                delivery,
                 quote,
                 forwarded_from,
             } => {
@@ -1755,11 +1810,6 @@ impl Transcript {
                         selectable.with_color(Theme::with_alpha(theme.accent, 0.45)),
                     )
                 };
-                let meta_color = if from.is_some() {
-                    theme.text_muted
-                } else {
-                    Theme::with_alpha(theme.bubble_text(), 0.55)
-                };
                 // A forward carries its "Forwarded from" header where a reply
                 // would carry its quote (a forward never quotes).
                 let quote_header = match forwarded_from {
@@ -1769,8 +1819,14 @@ impl Transcript {
                 // Triple-backtick fences render as code cards (same as agent
                 // replies); other text stays plain so "# heading" is still literal.
                 // Bare `http(s)://…` URLs are still accented and clickable.
-                let body =
-                    user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
+                let body = user_message_body(
+                    &row.id,
+                    &text,
+                    text_color,
+                    &theme,
+                    &bubble_selectable,
+                    &self.code_copy(cx),
+                );
                 // Someone else's bubble in a group / channel: their name inside
                 // it (their colour); the time is hover-only; my own bubble carries
                 // its sent/seen label in the footer.
@@ -1832,8 +1888,7 @@ impl Transcript {
                         name_el,
                         quote_header.map(|q| q.into_any_element()),
                         body,
-                    ))
-                    .children(bubble_footer(receipt, meta_color));
+                    ));
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar beside the bubble on
                     // the avatar column. A small coloured left-edge sliver marks a
@@ -1877,8 +1932,7 @@ impl Transcript {
                                                 .bg(theme.bubble_assistant)
                                                 .text_color(theme.text)
                                                 .border_l_2()
-                                                .border_color(Theme::with_alpha(color, 0.7))
-                                                .when(pending, |el| el.opacity(0.6)),
+                                                .border_color(Theme::with_alpha(color, 0.7)),
                                         )
                                         .child(actions.ml(px(6.0)))
                                         .children(
@@ -1906,15 +1960,19 @@ impl Transcript {
                         })
                         .child({
                             // My bubble sits right, so its outer edge (and the
-                            // hover-only time) is on the left; sent/seen lives inside it.
+                            // hover-only time) is on the left. Its delivery state is
+                            // its opacity: pending < sent < seen; failed is full with
+                            // a red glyph at the outer edge (no captions).
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
+                            let delivery = delivery.unwrap_or(Delivery::Seen);
                             row_el
                                 .justify_end()
                                 .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
-                                .child(bubble.when(pending, |el| el.opacity(0.6)))
+                                .children(failed_glyph(delivery, &theme).map(|g| g.mr(px(8.0))))
+                                .child(own_bubble(bubble, delivery))
                         })
                         .into_any_element()
                 }
@@ -2603,24 +2661,31 @@ fn clock_label(ms: u64) -> Option<String> {
         .map(|t| t.format("%-I:%M %p").to_string())
 }
 
-/// My own bubble's sent/seen label. Pending sends have none; after ACK we show
-/// "sent", then "seen" when read receipts are on and a peer opened past this
-/// message (or an agent answered after it).
-fn receipt_status(
+/// Where my own bubble is: pending until the relay ACKs, failed when it
+/// refused, then sent until a peer opened past it (or an agent answered after
+/// it). With read receipts off there is nothing to wait for, so an ACKed
+/// bubble is `Seen` (full opacity) at once. `None` for someone else's bubble.
+pub fn delivery_state(
     message: &Message,
     messages: &[Message],
     mix: usize,
     is_mine: bool,
     receipts: Option<&HashMap<String, Id>>,
     read_receipts: bool,
-) -> Option<ReceiptStatus> {
-    if !is_mine || message.pending {
+) -> Option<Delivery> {
+    if !is_mine {
         return None;
     }
-    if read_receipts && message_is_seen(message, messages, mix, receipts) {
-        return Some(ReceiptStatus::Seen);
+    if message.pending {
+        return Some(Delivery::Pending);
     }
-    Some(ReceiptStatus::Sent)
+    if message.status == MessageStatus::Error {
+        return Some(Delivery::Failed);
+    }
+    if !read_receipts || message_is_seen(message, messages, mix, receipts) {
+        return Some(Delivery::Seen);
+    }
+    Some(Delivery::Sent)
 }
 
 /// True when a peer's read watermark covers this message, or an agent/project
@@ -2669,26 +2734,38 @@ fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> 
     })
 }
 
-/// My own bubble's sent/seen label at the bottom-right inside it. The time
-/// never sits here (see [`hover_time`]).
-fn bubble_footer(receipt: Option<ReceiptStatus>, color: gpui::Hsla) -> Option<Div> {
-    receipt.map(|r| {
+/// My own bubble at its delivery opacity (see [`Delivery::opacity`]). One
+/// wrapper for every own bubble so the layout tests can read the state back.
+fn own_bubble(bubble: impl IntoElement, delivery: Delivery) -> Div {
+    div()
+        .max_w_full()
+        .min_w_0()
+        .debug_selector(|| {
+            match delivery {
+                Delivery::Pending => "own-bubble-pending",
+                Delivery::Failed => "own-bubble-failed",
+                Delivery::Sent => "own-bubble-sent",
+                Delivery::Seen => "own-bubble-seen",
+            }
+            .into()
+        })
+        .opacity(delivery.opacity())
+        .child(bubble)
+}
+
+/// The red mark beside a bubble the relay refused: always visible, outside
+/// the bubble on its outer edge. (There is no resend yet — the composer keeps
+/// the text, the mark says the row is not on the relay.)
+fn failed_glyph(delivery: Delivery, theme: &Theme) -> Option<Div> {
+    (delivery == Delivery::Failed).then(|| {
         div()
-            .w_full()
+            .flex_shrink_0()
+            .size(px(RAIL_GLYPH))
             .flex()
-            .justify_end()
             .items_center()
-            .pt(px(4.0))
-            .text_size(px(11.0))
-            .line_height(px(14.0))
-            .text_color(color)
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .debug_selector(|| "bubble-receipt".into())
-                    .child(r.label()),
-            )
+            .justify_center()
+            .debug_selector(|| "own-bubble-failed-glyph".into())
+            .child(icon("exclamation", RAIL_GLYPH, theme.danger))
     })
 }
 
@@ -2854,8 +2931,8 @@ pub fn build_rows(
                         .as_deref()
                         .filter(|id| !id.is_empty())
                         .map(|id| Quote::for_reply(id, messages));
-                    let receipt =
-                        receipt_status(message, messages, mix, is_mine, receipts, read_receipts);
+                    let delivery =
+                        delivery_state(message, messages, mix, is_mine, receipts, read_receipts);
                     let forwarded_from = message
                         .forwarded_from
                         .as_deref()
@@ -2866,11 +2943,10 @@ pub fn build_rows(
                         version: hash_version(
                             &(
                                 &text,
-                                message.pending,
                                 &sender_label,
                                 from.as_ref().map(|p| &p.handle),
                                 &quote,
-                                receipt,
+                                delivery,
                                 &forwarded_from,
                             ),
                             false,
@@ -2879,12 +2955,11 @@ pub fn build_rows(
                         message_id: message.id.clone(),
                         kind: RowKind::User {
                             text,
-                            pending: message.pending,
                             sender_label,
                             from,
                             named,
                             time: clock_label(message.created_at),
-                            receipt,
+                            delivery,
                             quote,
                             forwarded_from,
                         },
@@ -3604,6 +3679,7 @@ fn user_message_body(
     color: gpui::Hsla,
     theme: &Theme,
     selectable: &Selectable,
+    copy: &CodeCopy,
 ) -> AnyElement {
     let key = format!("{row_id}.u");
     if !has_fenced_code(text) {
@@ -3630,6 +3706,7 @@ fn user_message_body(
                 at,
                 None,
                 Instant::now(),
+                copy,
             )),
             // Prose, lists and tables stay literal in a typed bubble (a
             // "# heading" is still a "# heading"); one element per block.
@@ -3772,6 +3849,7 @@ fn apply_veil(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_block(
     row_id: &str,
     block: &Block,
@@ -3780,6 +3858,7 @@ fn render_block(
     now: Instant,
     theme: &Theme,
     bubble: &BubbleSelectable,
+    copy: &CodeCopy,
 ) -> AnyElement {
     // No `min_w_0` here. Inside a flex-column bubble (a quote header stacked
     // over the text, #1447) taffy sizes the column from its items, and an
@@ -3923,9 +4002,70 @@ fn render_block(
             table.into_any_element()
         }
         Block::Code { lang, code } => code_fence_card(
-            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now,
+            row_id, lang, code, theme.text, theme, bubble, starts[0], veil, now, copy,
         ),
     }
+}
+
+/// The code card's Copy pill, wired to its owner (Jacob 2026-10-24 22:22:
+/// the pill showed no click effect). `on_copy` puts the code on the
+/// clipboard and starts the "Copied" feedback for pill `id`; `copied` is the
+/// pill showing it right now.
+#[derive(Clone, Default)]
+pub struct CodeCopy {
+    pub copied: Option<SharedString>,
+    #[allow(clippy::type_complexity)]
+    pub on_copy: Option<Rc<dyn Fn(SharedString, String, &mut Window, &mut App)>>,
+}
+
+/// How long the Copy pill reads "Copied" (Jacob: ~1.5 s).
+pub const CODE_COPY_FEEDBACK_MS: u64 = 1_500;
+
+/// The block's text to the clipboard; `slot` remembers which pill to show
+/// "Copied" on and since when.
+fn copy_code_to_clipboard(
+    slot: &mut Option<(SharedString, Instant)>,
+    pill: SharedString,
+    code: String,
+    cx: &mut App,
+) {
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code));
+    *slot = Some((pill, Instant::now()));
+}
+
+/// The pill still inside its "Copied" window at `now`, if any.
+fn copied_pill(slot: &Option<(SharedString, Instant)>, now: Instant) -> Option<SharedString> {
+    slot.as_ref()
+        .filter(|(_, at)| {
+            now.saturating_duration_since(*at) < Duration::from_millis(CODE_COPY_FEEDBACK_MS)
+        })
+        .map(|(id, _)| id.clone())
+}
+
+/// The Copy pill's (background, text) at rest, under the pointer, while the
+/// button is down (the chips' pressed tint, #1636) and while it says
+/// "Copied" (the rail's check colour).
+pub fn copy_pill_colors(theme: &Theme, state: CopyPillState) -> (gpui::Hsla, gpui::Hsla) {
+    match state {
+        CopyPillState::Rest => (gpui::transparent_black(), theme.text_faint),
+        CopyPillState::Hover => (theme.surface_2, theme.text),
+        CopyPillState::Pressed => (
+            mention::pill_color(theme.accent, mention::PILL_ALPHA_PRESSED),
+            theme.accent,
+        ),
+        CopyPillState::Copied => (
+            Theme::with_alpha(theme.online, mention::PILL_ALPHA),
+            theme.online,
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyPillState {
+    Rest,
+    Hover,
+    Pressed,
+    Copied,
 }
 
 /// Fenced ``` block: lang label, Copy, mono body on `code_bg` (Grok's code card).
@@ -3940,6 +4080,7 @@ fn code_fence_card(
     at: usize,
     veil: Option<&Veil>,
     now: Instant,
+    copy: &CodeCopy,
 ) -> AnyElement {
     let mut card = div()
         .flex()
@@ -3965,21 +4106,7 @@ fn code_fence_card(
             } else {
                 lang.to_string()
             })
-            .child({
-                // Copies the block (Grok's code header); the label is the hit target.
-                let source = code.to_string();
-                div()
-                    .id(SharedString::from(format!("{row_id}#copy")))
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(5.0))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.surface_2).text_color(theme.text))
-                    .child("Copy")
-                    .on_click(move |_, _, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.clone()));
-                    })
-            }),
+            .child(copy_pill(row_id, code, theme, copy)),
     );
     let mono = gpui::Font {
         family: theme.font_mono.into(),
@@ -4009,6 +4136,63 @@ fn code_fence_card(
             .child(bubble.text(at, code.to_string(), runs)),
     );
     card.into_any_element()
+}
+
+/// The code card's Copy pill (Grok's code header): the label is the hit
+/// target. It answers the pointer — hover, a pressed tint while the button is
+/// down — and reads "✓ Copied" for [`CODE_COPY_FEEDBACK_MS`] after a click.
+fn copy_pill(row_id: &str, code: &str, theme: &Theme, copy: &CodeCopy) -> AnyElement {
+    let id = SharedString::from(format!("{row_id}#copy"));
+    let rig = rig_copy_pill();
+    let copied = copy.copied.as_ref() == Some(&id) || rig == Some(CopyPillState::Copied);
+    let state = match rig {
+        Some(state) if !copied => state,
+        _ if copied => CopyPillState::Copied,
+        _ => CopyPillState::Rest,
+    };
+    let (bg, fg) = copy_pill_colors(theme, state);
+    let (hover_bg, hover_fg) = copy_pill_colors(theme, CopyPillState::Hover);
+    let (down_bg, down_fg) = copy_pill_colors(theme, CopyPillState::Pressed);
+    let source = code.to_string();
+    let on_copy = copy.on_copy.clone();
+    let pill_id = id.clone();
+    div()
+        .id(id)
+        .debug_selector(move || format!("{row_id}#copy-pill"))
+        .flex()
+        .items_center()
+        .gap(px(3.0))
+        .px(px(6.0))
+        .py(px(2.0))
+        .rounded(px(5.0))
+        .cursor_pointer()
+        .bg(bg)
+        .text_color(fg)
+        .when(!copied, |el| {
+            el.hover(move |s| s.bg(hover_bg).text_color(hover_fg))
+                .active(move |s| s.bg(down_bg).text_color(down_fg))
+        })
+        .when(copied, |el| el.child(icon("check", 11.0, fg)))
+        .child(if copied { "Copied" } else { "Copy" })
+        .on_click(move |_, window, cx| {
+            if let Some(on_copy) = &on_copy {
+                on_copy(pill_id.clone(), source.clone(), window, cx);
+            }
+        })
+        .into_any_element()
+}
+
+/// Screenshot rig (`ARBOS_RIG_CODE_COPY=hover|pressed|copied`): every Copy
+/// pill paints in that state — the EC2 Mac's VNC session cannot hold a
+/// button through a capture, and "Copied" lasts 1.5 s.
+fn rig_copy_pill() -> Option<CopyPillState> {
+    static RIG: std::sync::OnceLock<Option<CopyPillState>> = std::sync::OnceLock::new();
+    *RIG.get_or_init(|| match std::env::var("ARBOS_RIG_CODE_COPY").ok()?.trim() {
+        "hover" => Some(CopyPillState::Hover),
+        "pressed" => Some(CopyPillState::Pressed),
+        "copied" => Some(CopyPillState::Copied),
+        _ => None,
+    })
 }
 
 /// Gap from the sender's name to the text (Jacob's reference: tight) and from
@@ -4230,6 +4414,7 @@ mod selection_tests {
                             Instant::now(),
                             &theme,
                             &bubble,
+                            &CodeCopy::default(),
                         )),
                 );
             }
@@ -4270,6 +4455,126 @@ mod selection_tests {
             assert!(f32::from(b.size.height) > 0.0, "block {i} has height");
             bottom = f32::from(b.origin.y + b.size.height);
         }
+    }
+
+    /// A code card on its own, with the Copy pill wired the way the
+    /// transcript wires it (Jacob 2026-10-24 22:22).
+    struct CodeCard {
+        selection: Entity<TextSelection>,
+        code_copied: Option<(SharedString, Instant)>,
+    }
+
+    const SNIPPET: &str = "fn main() {\n    println!(\"hi\");\n}";
+
+    impl gpui::Render for CodeCard {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::of(cx).clone();
+            let block = Block::Code {
+                lang: "rust".into(),
+                code: SNIPPET.into(),
+            };
+            let texts = BubbleText::for_blocks(std::slice::from_ref(&block), false);
+            let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
+            let bubble = selectable.bubble("m1#text", texts[0].text.clone());
+            let this = cx.entity().downgrade();
+            let copy = CodeCopy {
+                copied: copied_pill(&self.code_copied, Instant::now()),
+                on_copy: Some(Rc::new(move |id, code, _, cx| {
+                    let _ = this.update(cx, |v, cx| {
+                        copy_code_to_clipboard(&mut v.code_copied, id, code, cx);
+                        cx.notify();
+                    });
+                })),
+            };
+            div().w(px(600.0)).child(render_block(
+                "m1#t.0",
+                &block,
+                texts[0].at,
+                None,
+                Instant::now(),
+                &theme,
+                &bubble,
+                &copy,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn the_copy_pill_puts_the_code_on_the_clipboard_and_says_copied(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let theme = crate::ui::theme::Theme::for_pref(
+                crate::ui::theme::AppearancePref::Dark,
+                crate::ui::theme::Surface::Matte,
+                cx,
+            );
+            cx.set_global(theme);
+        });
+        let (view, vcx) = cx.add_window_view(|_, cx| CodeCard {
+            selection: cx.new(TextSelection::new),
+            code_copied: None,
+        });
+        vcx.run_until_parked();
+        let pill = vcx
+            .debug_bounds("m1#t.0#copy-pill")
+            .expect("Copy pill drawn");
+        let before = pill.size.width;
+        vcx.simulate_click(pill.center(), gpui::Modifiers::default());
+        vcx.run_until_parked();
+        let clipboard = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(
+            clipboard.as_deref(),
+            Some(SNIPPET),
+            "the block's text, verbatim"
+        );
+        view.read_with(vcx, |v, _| {
+            assert_eq!(
+                copied_pill(&v.code_copied, Instant::now()).as_deref(),
+                Some("m1#t.0#copy"),
+                "the pill says Copied"
+            );
+            assert_eq!(
+                copied_pill(
+                    &v.code_copied,
+                    Instant::now() + Duration::from_millis(CODE_COPY_FEEDBACK_MS)
+                ),
+                None,
+                "and reads Copy again after the window"
+            );
+        });
+        // "✓ Copied" is wider than "Copy": the swap really painted.
+        let pill = vcx
+            .debug_bounds("m1#t.0#copy-pill")
+            .expect("pill still drawn");
+        assert!(
+            pill.size.width > before + px(10.0),
+            "{} vs {before}",
+            pill.size.width
+        );
+    }
+
+    #[test]
+    fn the_copy_pill_has_a_pressed_and_a_copied_look() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let (rest_bg, rest_fg) = copy_pill_colors(&theme, CopyPillState::Rest);
+        let (hover_bg, _) = copy_pill_colors(&theme, CopyPillState::Hover);
+        let (down_bg, down_fg) = copy_pill_colors(&theme, CopyPillState::Pressed);
+        let (done_bg, done_fg) = copy_pill_colors(&theme, CopyPillState::Copied);
+        assert_eq!(rest_bg.a, 0.0, "nothing behind the label at rest");
+        assert_ne!(hover_bg, rest_bg);
+        assert_eq!(
+            down_bg.a,
+            mention::PILL_ALPHA_PRESSED,
+            "the chips' pressed tint"
+        );
+        assert_eq!(down_fg, theme.accent);
+        assert_ne!(down_bg, hover_bg, "pressed is not just hover");
+        assert_eq!(done_fg, theme.online);
+        assert_eq!(done_bg.a, mention::PILL_ALPHA);
+        assert_ne!(rest_fg, down_fg);
     }
 
     /// Triple-click on the second paragraph takes that paragraph only; a
@@ -4879,6 +5184,7 @@ mod layout_tests {
                         Instant::now(),
                         &theme,
                         &bubble_sel,
+                        &CodeCopy::default(),
                     ),
                 ));
             let row = div()
@@ -5023,6 +5329,7 @@ mod layout_tests {
                                 Instant::now(),
                                 &theme,
                                 &bubble_sel,
+                                &CodeCopy::default(),
                             ),
                         ))
                         // The rail (glyphs · time) out of the flow, as `markdown_bubble` does.
@@ -5048,8 +5355,14 @@ mod layout_tests {
                         .child(assistant_slot(bubble))
                 }
                 Who::Mine | Who::Other => {
-                    let body =
-                        user_message_body("u", self.text, theme.bubble_text(), &theme, &selectable);
+                    let body = user_message_body(
+                        "u",
+                        self.text,
+                        theme.bubble_text(),
+                        &theme,
+                        &selectable,
+                        &CodeCopy::default(),
+                    );
                     let other = matches!(self.who, Who::Other);
                     let bubble = div()
                         .debug_selector(|| "test-bubble".into())
@@ -5815,6 +6128,240 @@ mod presence_rows_tests {
                 .count(),
             1,
             "one name, inside the first bubble"
+        );
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    //! Jacob, 2026-10-24 ("remove these 'sent' items, just use coloring, make the
+    //! bubble less opaque"): no caption on my bubbles; a sent-but-unseen bubble is
+    //! lighter, a seen one is full; pending sits lower still and a failed one is
+    //! full with a red mark. Rule: docs/mac-design-rules.md.
+    use std::collections::{HashMap, HashSet};
+
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    fn message(
+        id: &str,
+        role: &str,
+        sender: &str,
+        status: &str,
+        pending: bool,
+        at: u64,
+    ) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "chatId": "chat_dm",
+            "role": role,
+            "sender": sender,
+            "senderHandle": if sender.starts_with("user:") { "sam" } else { "" },
+            "status": status,
+            "pending": pending,
+            "createdAt": at,
+            "parts": [{ "id": format!("p-{id}"), "kind": "text", "text": "fish?" }],
+        }))
+        .expect("message")
+    }
+
+    fn mine(id: &str, at: u64) -> Message {
+        message(id, "user", "user:gh_me", "done", false, at)
+    }
+
+    #[test]
+    fn opacity_is_the_state() {
+        assert_eq!(Delivery::Seen.opacity(), 1.0);
+        assert_eq!(Delivery::Failed.opacity(), 1.0);
+        assert_eq!(Delivery::Sent.opacity(), BUBBLE_ALPHA_SENT);
+        assert_eq!(Delivery::Pending.opacity(), BUBBLE_ALPHA_PENDING);
+        let order = [Delivery::Pending, Delivery::Sent, Delivery::Seen].map(Delivery::opacity);
+        assert!(
+            order.windows(2).all(|w| w[0] < w[1]),
+            "pending < sent < seen: {order:?}"
+        );
+    }
+
+    #[test]
+    fn unseen_is_sent_and_a_watermark_or_a_reply_makes_it_seen() {
+        let t = 1_700_000_000_000u64;
+        let messages = vec![mine("a", t), mine("b", t + 1_000), mine("c", t + 2_000)];
+        let no_receipts: HashMap<String, Id> = HashMap::new();
+        for ix in 0..3 {
+            assert_eq!(
+                delivery_state(&messages[ix], &messages, ix, true, Some(&no_receipts), true),
+                Some(Delivery::Sent),
+                "nobody opened the chat: lighter"
+            );
+        }
+        // Sam's watermark is "b": a and b are seen, c is still only sent.
+        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "b".to_owned())]);
+        let got: Vec<_> = (0..3)
+            .map(|ix| delivery_state(&messages[ix], &messages, ix, true, Some(&receipts), true))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Some(Delivery::Seen),
+                Some(Delivery::Seen),
+                Some(Delivery::Sent)
+            ]
+        );
+        // An agent's answer after my message is the "opened" signal in agent chats.
+        let with_reply = vec![
+            mine("a", t),
+            message("r", "assistant", "agent:arbos", "done", false, t + 500),
+            mine("b", t + 1_000),
+        ];
+        assert_eq!(
+            delivery_state(&with_reply[0], &with_reply, 0, true, None, true),
+            Some(Delivery::Seen)
+        );
+        assert_eq!(
+            delivery_state(&with_reply[2], &with_reply, 2, true, None, true),
+            Some(Delivery::Sent)
+        );
+    }
+
+    #[test]
+    fn pending_failed_and_receipts_off_are_unchanged_states() {
+        let t = 1_700_000_000_000u64;
+        let pending = message("p", "user", "user:gh_me", "queued", true, t);
+        let failed = message("f", "user", "user:gh_me", "error", false, t + 1);
+        let sent = mine("s", t + 2);
+        let messages = vec![pending.clone(), failed.clone(), sent.clone()];
+        assert_eq!(
+            delivery_state(&pending, &messages, 0, true, None, true),
+            Some(Delivery::Pending)
+        );
+        assert_eq!(
+            delivery_state(&failed, &messages, 1, true, None, true),
+            Some(Delivery::Failed)
+        );
+        // Read receipts off: nothing to wait for, an ACKed bubble is full at once.
+        assert_eq!(
+            delivery_state(&sent, &messages, 2, true, None, false),
+            Some(Delivery::Seen)
+        );
+        // Someone else's bubble carries no delivery state at all.
+        assert_eq!(delivery_state(&sent, &messages, 2, false, None, true), None);
+    }
+
+    #[test]
+    fn build_rows_puts_the_state_on_my_bubbles_only() {
+        let t = 1_700_000_000_000u64;
+        let messages = vec![
+            mine("a", t),
+            message("o", "user", "user:gh_sam", "done", false, t + 1_000),
+            mine("b", t + 2_000),
+        ];
+        let spoken = HashSet::new();
+        let failed = HashMap::new();
+        let speech = SpeechRows {
+            enabled: false,
+            spoken: &spoken,
+            failed: &failed,
+            voice_mode: false,
+        };
+        let receipts: HashMap<String, Id> = HashMap::from([("sam".to_owned(), "a".to_owned())]);
+        let rows = build_rows(
+            &messages,
+            false,
+            speech,
+            "gh_me",
+            &HashSet::new(),
+            &Mentions::empty(),
+            false,
+            Some(&receipts),
+            true,
+        );
+        let states: Vec<Option<Delivery>> = rows
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RowKind::User { delivery, .. } => Some(*delivery),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![Some(Delivery::Seen), None, Some(Delivery::Sent)],
+            "mine: seen up to Sam's watermark, then sent; Sam's bubble: no state"
+        );
+    }
+
+    /// The four states as the row draws them: one wrapper per own bubble named by
+    /// state, no caption anywhere, and the red mark only beside a failed bubble.
+    struct OwnBubbles;
+
+    impl gpui::Render for OwnBubbles {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+            let bubble = |text: &'static str| {
+                div()
+                    .px(px(BUBBLE_PAD_X))
+                    .py(px(BUBBLE_PAD_Y))
+                    .rounded(px(BUBBLE_RADIUS))
+                    .bg(theme.bubble)
+                    .text_color(theme.bubble_text())
+                    .child(text)
+            };
+            div()
+                .w(px(600.0))
+                .h(px(400.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .children(
+                    [
+                        Delivery::Pending,
+                        Delivery::Failed,
+                        Delivery::Sent,
+                        Delivery::Seen,
+                    ]
+                    .into_iter()
+                    .map(|d| {
+                        div()
+                            .flex()
+                            .justify_end()
+                            .items_center()
+                            .children(failed_glyph(d, &theme).map(|g| g.mr(px(8.0))))
+                            .child(own_bubble(bubble("fish?"), d))
+                    }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn every_state_draws_a_bubble_and_only_failed_gets_the_mark(cx: &mut TestAppContext) {
+        let (_view, vcx) = cx.add_window_view(|_, _| OwnBubbles);
+        vcx.run_until_parked();
+        for sel in [
+            "own-bubble-pending",
+            "own-bubble-failed",
+            "own-bubble-sent",
+            "own-bubble-seen",
+        ] {
+            vcx.debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} drawn"));
+        }
+        assert!(
+            vcx.debug_bounds("bubble-receipt").is_none(),
+            "no sent/seen caption anywhere"
+        );
+        let glyph = vcx
+            .debug_bounds("own-bubble-failed-glyph")
+            .expect("red mark beside the failed bubble");
+        let failed = vcx
+            .debug_bounds("own-bubble-failed")
+            .expect("failed bubble");
+        assert!(
+            f32::from(glyph.origin.x + glyph.size.width) <= f32::from(failed.origin.x),
+            "the mark sits outside the bubble, on its outer edge"
         );
     }
 }

@@ -295,8 +295,22 @@ extension AppModel {
                     subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 7 * 60_000, completedAt: nil, pending: false,
                     parts: [.text(id: "d3t", text: "Sending in a sec. Also: can we add your Arbos agent here so it can pull the numbers while we talk?")], hiddenCount: 0,
                     senderHandle: "unconst", senderName: "Unconst"),
+            // A second line of mine after unconst's last one: with `ARBOS_FIXTURE_SEEN=unconst:d2`
+            // (rig, sent-state-opacity-2026-10-24) d2 is seen (full) and this one is still only sent (lighter).
+            Message(id: "d4", chatId: "fx-dm-unconst", role: .user, sender: "user:fx-me", status: .done, turn: nil, decision: nil, subagentId: nil,
+                    subagentName: nil, inReplyTo: nil, usage: [:], model: nil, createdAt: now - 6 * 60_000, completedAt: nil, pending: false,
+                    parts: [.text(id: "d4t", text: "Sure — add it, and send the copy whenever you're ready.")], hiddenCount: 0, senderHandle: "jacob", senderName: "Jacob Steeves"),
         ]
         caughtUp.insert("fx-dm-unconst")
+        // `ARBOS_FIXTURE_SEEN=<handle>:<messageId>[,…]` seeds peers' read watermarks for the DM
+        // (what a presence frame with `seen` would do), so a rig can show seen next to sent.
+        if let seeds = DebugHooks.fixtureSeen {
+            for pair in seeds.split(separator: ",") {
+                let bits = pair.split(separator: ":", maxSplits: 1).map(String.init)
+                guard bits.count == 2 else { continue }
+                ReadReceipts.shared.note(["handle": bits[0], "seen": bits[1]], chatId: "fx-dm-unconst")
+            }
+        }
         directory = [
             Person(id: "fx-u1", handle: "alex-rivera", avatarUrl: nil, name: "Alex Rivera", status: "member"),
             Person(id: "fx-u2", handle: "jen", avatarUrl: nil, name: "Jen Park", status: "member"),
@@ -469,6 +483,18 @@ extension AppModel {
         }
         messages[chatId] = list
     }
+
+    /// Rig (`ARBOS_SHOW=code-block`): the Mac fixture's `REPLY_CODE` reply.
+    static let codeReply = """
+    The transcript is a bottom-aligned list with one row per markdown block:
+
+    ```rust
+    let list = ListState::new(0, ListAlignment::Bottom, px(320.0));
+    list(list.clone(), cx.processor(Self::render_row))
+    ```
+
+    Rows are keyed by `{msg}#{part}.{block}` and re-spliced only when their bytes change.
+    """
 
     /// The shape of Jacob's Oct 23 screenshot — a heading, bold labels and bullets over
     /// twenty-odd lines (the Mac fixture's `ARBOS_FIXTURE_REPLY=long` carries the same text).

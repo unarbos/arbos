@@ -4849,6 +4849,8 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
         // `ARBOS_FIXTURE_REPLY=1` (screenshot rig): one reply bubble quoting that answer.
         // `ARBOS_FIXTURE_REPLY=long`: a multi-paragraph markdown review as the last
         // message, so `ARBOS_REPLY_TO=1` arms the composer's reply preview on it.
+        // `ARBOS_FIXTURE_REPLY=code`: the `REPLY_CODE` reply (a ```rust card) as
+        // the last message, for the code card's Copy pill shots.
         match std::env::var("ARBOS_FIXTURE_REPLY").as_deref() {
             Ok("1") => {
                 s.user_replying_to("Which tabs do you mean here?", &last);
@@ -4859,6 +4861,14 @@ fn seed_chat_docs() -> Vec<ChatDoc> {
                     TurnKind::Reply,
                     MessageStatus::Done,
                     vec![text(LONG_REVIEW)],
+                );
+            }
+            Ok("code") => {
+                s.user("How is the transcript list built?");
+                s.assistant(
+                    TurnKind::Reply,
+                    MessageStatus::Done,
+                    vec![text(&REPLY_CODE.join("\n\n"))],
                 );
             }
             _ => {}
