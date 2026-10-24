@@ -5146,7 +5146,7 @@ impl Agent {
                     &name,
                     &purpose,
                     &brief,
-                    Some(Harness::Pi),
+                    None,
                     false,
                     false,
                 )
@@ -5154,6 +5154,17 @@ impl Agent {
             me.jobs_running.fetch_sub(1, Ordering::SeqCst);
             if let Err(e) = r {
                 tracing::warn!(chat_id = %chat, error = %e, "job failed");
+                // `write_job_result` already told the user when the job ran; only a start
+                // failure (no result row at all) needs a line here.
+                let has_row = host2.lock().await.doc.messages().iter().any(|m| {
+                    m.role == "assistant"
+                        && m.rest.get("inReplyTo").and_then(Value::as_str)
+                            == Some(user_msg_id.as_str())
+                        && !m.text().trim().is_empty()
+                });
+                if has_row {
+                    return;
+                }
                 let h = host2.lock().await;
                 let id = ulid();
                 h.doc
@@ -5716,6 +5727,22 @@ impl Agent {
             Some(c) => format!("{text}\n\nParsed return contract:\n{c}"),
             None => text.clone(),
         };
+        // A job (an ask run beside the main turn, `start_job_for_send`) must not wait for the
+        // main session's lock to be relayed — that would land its answer only after the long
+        // turn. Its prose comes from a direct model call and is written as the one bubble.
+        if is_job_name(&sub_name) {
+            return self
+                .write_job_result(
+                    chat_id,
+                    host,
+                    in_reply_to,
+                    &sub_name,
+                    &status,
+                    &result_text,
+                    done_err.as_deref(),
+                )
+                .await;
+        }
         self.run_result_turn(
             chat_id,
             host,
@@ -5728,6 +5755,111 @@ impl Agent {
             done_err.as_deref(),
         )
         .await
+    }
+
+    /// The one answer bubble of a job: the subagent's raw output turned into the agent's own
+    /// prose by a direct model call (talking model, no main-session lock), written in reply to
+    /// the ask with the chat's attribution. Empty or failed → one plain line, never nothing.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_job_result(
+        self: &Arc<Self>,
+        chat_id: &str,
+        host: &SharedHost,
+        in_reply_to: &str,
+        name: &str,
+        status: &str,
+        raw: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let ask = {
+            let h = host.lock().await;
+            h.doc
+                .message(in_reply_to)
+                .map(|m| m.text())
+                .unwrap_or_default()
+        };
+        let address = self.owner_address_note(chat_id, host, in_reply_to).await;
+        let (talking_model, _) = self.live_models().await;
+        let system = format!(
+            "{} You answer a message the user sent while you were busy with something else; the work for it is done (notes below). Write the answer the user should read, like a colleague in chat: what they asked for, what came out, what is open. First person, plain prose, two to five sentences at most, shorter when the answer is short. Never mention a side task, helper, subagent, tool, command, model or that you were busy. If the notes hold no answer, say plainly what you could not do.{}",
+            if self.cfg.project_name.trim().is_empty() {
+                "You are this user's agent in Arbos.".to_owned()
+            } else {
+                format!("You are {}, this user's agent in Arbos.", self.cfg.project_name.trim())
+            },
+            address.map(|n| format!("\n{}", n.trim())).unwrap_or_default()
+        );
+        let raw_trim: String = raw.chars().take(7000).collect();
+        let user = format!(
+            "The user's message: {}\n\nStatus of the work: {status}{}\n\nNotes from the work (for you only):\n<<<\n{}\n>>>",
+            if ask.trim().is_empty() { "(see the notes)" } else { ask.trim() },
+            error.map(|e| format!("\nIt ended with an error: {e}")).unwrap_or_default(),
+            if raw_trim.trim().is_empty() { "(nothing was written)" } else { raw_trim.trim() }
+        );
+        let llm = self.llm.with_purpose("job-result");
+        let text = match tokio::time::timeout(
+            Duration::from_secs(30),
+            llm.complete(&talking_model, &system, &user, 400),
+        )
+        .await
+        {
+            Ok(Ok((t, ms))) if !t.trim().is_empty() => {
+                tracing::info!(chat_id, name, ms, "job result written");
+                ProseFilter::clean_prose(t.trim())
+            }
+            other => {
+                tracing::warn!(
+                    chat_id,
+                    name,
+                    ?status,
+                    "job result call gave nothing; plain line"
+                );
+                let _ = other;
+                if status == "done" && !raw_trim.trim().is_empty() {
+                    ProseFilter::clean_prose(raw_trim.trim())
+                } else {
+                    "I couldn't finish that one. Ask me again in a moment.".to_owned()
+                }
+            }
+        };
+        let text = crate::store::redact(&text);
+        let row_id = ulid();
+        let room = {
+            let h = host.lock().await;
+            h.doc
+                .start_assistant_message(&row_id, in_reply_to, &self.cfg.device_id);
+            if let Some(attr) = self.people_reply_fields(chat_id) {
+                h.doc.set_message_fields(&row_id, &attr.fields);
+            }
+            if let Some(p) = h.doc.add_text_part(&row_id, "text") {
+                h.doc.append_text(&row_id, &p, &text);
+            }
+            h.doc.set_message_fields(
+                &row_id,
+                &[
+                    ("turnRole", json!("result")),
+                    ("decision", json!("job")),
+                    ("turn", json!({ "kind": "job", "status": status })),
+                    ("model", json!(talking_model)),
+                ],
+            );
+            h.doc.finish_message(&row_id, MessageStatus::Done);
+            h.room.clone()
+        };
+        self.announce_reply(&room, &row_id, &text);
+        let _ = self.store.t3_append(
+            chat_id,
+            None,
+            Some(chat_id),
+            "assistant",
+            Some("assistant"),
+            &text,
+            Some(&json!({ "message_id": row_id, "job": name, "status": status })),
+        );
+        if error.is_some() {
+            return Err(anyhow!("job {name} ended with an error"));
+        }
+        Ok(())
     }
 
     /// Tail the subagent's session JSONL into T3 (pre-compaction entries included).
@@ -5987,6 +6119,11 @@ pub(crate) fn subagent_start_failure_line(err: &str) -> String {
     } else {
         "I couldn't start the helper for this step.".to_owned()
     }
+}
+
+/// Subagents started by `start_job_for_send` are named `ask-…`; they answer directly.
+fn is_job_name(name: &str) -> bool {
+    name.starts_with("ask-")
 }
 
 /// Concurrent asks per workspace (design note `agent-async-jobs.md`: 3; `ARBOS_JOB_MAX_PER_WORKSPACE`).
