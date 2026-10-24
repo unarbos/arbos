@@ -16,7 +16,7 @@
       "reply_regex": "lane-b",
       "reply_regex_not": "I can't check|no way to|not able to see",
       "rubric": {
-        "criteria": "The agent relays lane-b's confirmation (or says plainly it has not answered yet); it does not invent one and does not say it cannot know.",
+        "criteria": "Judge the reply only; lane-b's real answer is checked programmatically on lane-b's side. Pass if the agent relays that lane-b confirmed (paraphrase allowed, extra detail from lane-b's reply is fine) or says plainly it has not answered yet; fail only if it invents a confirmation when none exists or says it cannot know.",
         "min": 4
       },
       "timeout_s": 180

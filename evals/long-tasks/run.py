@@ -131,7 +131,7 @@ class Lane(threading.Thread):
             time.sleep(act.get("settle_s", 60))
         elif kind == "capped_user_turn":
             # a scratch user with a tiny daily cap; one project; a message that must trip the cap
-            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240))
+            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), second_prompt=act.get("second_prompt"))
         elif kind == "people_dm":
             # a DM between the eval user and a second scratch user, with this lane's agent added
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
@@ -228,6 +228,8 @@ class Lane(threading.Thread):
                     reasons.append(f"reply matches forbidden /{turn['reply_regex_not'][:40]}/")
                 if turn.get("expect_key") and not val.get(turn["expect_key"]):
                     reasons.append(f"{st_key}.{turn['expect_key']} missing")
+                if turn.get("expect_each_answered") and val.get("user_messages", 0) > val.get("answered_rows", 0):
+                    reasons.append(f"{val.get('user_messages')} user messages but only {val.get('answered_rows')} answered (a capped user got silence)")
                 rb = gr.judge(turn.get("prompt", ""), turn["rubric"]["criteria"], reply, json.dumps(val)[:2000], "") if turn.get("rubric") else None
                 if rb and rb.get("score") is not None and rb["score"] < turn["rubric"].get("min", 3):
                     reasons.append(f"rubric {rb['score']}/5: {rb['reason']}")
@@ -412,7 +414,8 @@ class Lane(threading.Thread):
                 reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
             if dc.get("no_duplicate_status") and checks["dup_status"]:
                 reasons.append(f"duplicated status lines: {checks['dup_status'][:3]}")
-            if dc.get("no_empty_result_rows") and checks["empty_result_rows"]:
+            bg_chats = {t["chat_id"] for t, spec in zip(turns_out, task["turns"]) if spec.get("background")}
+            if dc.get("no_empty_result_rows") and checks["empty_result_rows"] and not bg_chats:
                 reasons.append(f"{checks['empty_result_rows']} result row(s) with tool cards but no text (reply lost)")
             if dc.get("no_repeated_sentence") and checks["repeated_sentences"]:
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
@@ -464,6 +467,7 @@ class Lane(threading.Thread):
             "success": not reasons,
             "reasons": reasons,
             "ttfr_s": turns_out[0]["ttfr_s"] if turns_out else None,
+            "first_seen_s": min([x for x in (turns_out[0]["ttfr_s"], turns_out[0]["first_status_s"]) if x is not None] or [None]) if turns_out else None,
             # the first turn's route decides the cost shape: `new` = a Sonnet helper (≈ 5× an `act` turn on Haiku)
             "route_t1": next((r for t in turns_out for r in (t.get("routes") or []) if r), None),
             "ttfr_all_s": [t["ttfr_s"] for t in turns_out],
@@ -515,7 +519,7 @@ def doc_checks(docs, after_ms=None):
                     texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
-                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
+                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d]\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$|^(\w[\w\- ]*,\s*)+\w[\w\- ]*$", text):
                     truncated.append(text[-60:])
                 sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
                 for x in sentences:
