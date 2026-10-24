@@ -3029,6 +3029,11 @@ private struct AwayFromBottomReporter: ViewModifier {
                     distance: g.contentSize.height - g.contentOffset.y - g.containerSize.height
                 )
             } action: { old, new in
+                #if DEBUG
+                if DebugHooks.perfLog, abs(new.distance - old.distance) > 2 {
+                    PerfLog.mark("scroll dist=\(Int(new.distance))", ms: 0)
+                }
+                #endif
                 let grew = new.height > old.height + 0.5
                 if grew {
                     if pinned {
