@@ -706,7 +706,8 @@ impl Shell {
         // Rig: `ARBOS_SEARCH=<text>` opens the command palette with that query
         // (synthetic key events do not reach the GPUI field on the shared
         // display); `ARBOS_PALETTE=1` opens it empty (recents);
-        // `ARBOS_PALETTE_SELECT=<n>` highlights row n.
+        // `ARBOS_PALETTE_SELECT=<n>` highlights row n; `ARBOS_PALETTE_OPEN=1`
+        // opens that row once the rows are there (the jump-to-message shot).
         let search_query = std::env::var("ARBOS_SEARCH")
             .ok()
             .filter(|q| !q.trim().is_empty());
@@ -721,6 +722,7 @@ impl Shell {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0),
             },
+            open_on_rows: std::env::var("ARBOS_PALETTE_OPEN").is_ok_and(|v| v == "1"),
             ..Default::default()
         };
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {

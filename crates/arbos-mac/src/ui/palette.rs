@@ -7,6 +7,11 @@
 //! [`crate::ui::modal`] backdrop, so the chat behind it gets no wheel, no
 //! click and no key (the field owns the keyboard through `Shell::modal_focus`).
 //!
+//! App-wide ([feedback search-palette-app-wide-2026-10-24]): the rows come from
+//! `AppState::palette_entries` — every chat, person, server, channel, agent,
+//! and from the local `crate::search_index` every message, file and link on
+//! this Mac, whatever chat is open.
+//!
 //! Geometry from `ref-grok-command-palette.png` (2 px/pt): panel 1116 px wide
 //! → 558; field row 98 → 49 with a 17 pt "Search"; rows 98 tall, 4 apart,
 //! inset 20 from the panel → 49 / 2 / 10, radius 24 → 12; avatar 44–48 →
@@ -88,6 +93,9 @@ pub struct PaletteState {
     /// rig): two, because GPUI clamps a scroll offset against the previous
     /// frame's content size, so the first attempt after rows appear is lost.
     pub reveal: u8,
+    /// Rig (`ARBOS_PALETTE_OPEN=1`): open the highlighted row as soon as the
+    /// rows are there — the "a message hit jumps to its chat" shot.
+    pub open_on_rows: bool,
 }
 
 /// ⌘1–⌘9 → row index.
@@ -113,7 +121,7 @@ pub(crate) fn rows_for(shell: &Shell, typed: &str, cx: &Context<Shell>) -> Vec<E
 pub fn overlay(
     shell: &mut Shell,
     scroll: &ScrollHandle,
-    window: &Window,
+    window: &mut Window,
     cx: &mut Context<Shell>,
 ) -> Option<AnyElement> {
     if !shell.palette.open {
@@ -150,6 +158,13 @@ pub fn overlay(
         if shell.palette.reveal > 0 {
             cx.notify();
         }
+    }
+    if shell.palette.open_on_rows && !rows.is_empty() {
+        shell.palette.open_on_rows = false;
+        let weak = cx.weak_entity();
+        window.defer(cx, move |window, cx| {
+            let _ = weak.update(cx, |this, cx| this.palette_open_selected(window, cx));
+        });
     }
 
     let field = div()
@@ -470,6 +485,25 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
                     "doc"
                 })
                 .into_any_element(),
+            }
+        }
+        Target::ChannelMessage { .. } => tile("hash").into_any_element(),
+        Target::Person(handle) => {
+            // A person met in a group or the directory: their photo / initials
+            // disc, as the member list draws it.
+            let person = state
+                .projects
+                .iter()
+                .flat_map(|p| p.people.iter().chain(p.owner_person.iter()))
+                .chain(state.people_results.iter())
+                .find(|p| &p.handle == handle)
+                .cloned();
+            match person {
+                Some(p) => {
+                    let image = state.avatar(&p.avatar_url);
+                    people::avatar(image, &p, AVATAR, theme).into_any_element()
+                }
+                None => tile("person").into_any_element(),
             }
         }
         Target::Link(_) => tile("link").into_any_element(),
