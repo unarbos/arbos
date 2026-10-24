@@ -63,3 +63,16 @@ open: the query narrows the list, the segment still scopes it.
 
 Server rows draw their picture as a rounded square (corner 11/36 of the size,
 `SERVER_PICTURE_CORNER`) so servers read apart from the agent and people discs.
+
+## Chat header (Jacob 2026-10-20, `topbar-unify`; #1130, #1336)
+
+**Chat header: one centred pill (avatar + name) for every chat kind — #1130/#1336;
+tester preference does not override.** The pill sits on the chat column's
+centre line, its top 7 pt under the window edge, 34 pt tall, picture 22 pt
+(`AVATAR_HEADER`), name 13 pt semibold (`TEXT_SMALL`); the only other things
+in the bar are the sidebar expand disc (folded sidebar) and the connection
+capsule under the pill. #1493 moved it top-left on a tester's "personal
+preference" and was reverted by Jacob ([feedback header-pill-restore-2026-10-24]).
+
+Code: `header::bar_frame` (equal side slots, `justify_center`) and
+`header::metrics`; pinned by `header_tests::the_pill_is_centred_not_parked_at_the_left_edge`.

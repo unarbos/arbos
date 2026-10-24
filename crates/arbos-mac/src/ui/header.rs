@@ -96,11 +96,10 @@ pub fn render(
             }),
         );
 
-    // Semibold name: a notch above the old 13 pt so it matches the larger
-    // picture ([feedback app-01M5MX8XS2BS7KZCNAS12BXNKD]).
+    // Grok Mac's title: 13 pt semibold (ref 57) — the topbar-unify mock's size too.
     let name_label = |text: String, theme: &Theme| {
         div()
-            .text_size(px(TEXT_BODY))
+            .text_size(px(TEXT_SMALL))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(theme.text)
             .truncate()
@@ -161,13 +160,13 @@ pub fn render(
             div()
                 .id("header-rename")
                 .w(px(160.0))
-                .h(px(AVATAR_HEADER))
+                .h(px(22.0))
                 .px(px(6.0))
                 .rounded(px(6.0))
                 .bg(theme.field)
                 .border_1()
                 .border_color(theme.field_border)
-                .text_size(px(TEXT_BODY))
+                .text_size(px(TEXT_SMALL))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(shell.agent_name_input.clone())
@@ -370,11 +369,12 @@ pub mod metrics {
     /// The bar's content box is centred on the traffic lights' line (20.75 pt
     /// in this window): 2 pt off the bottom.
     pub const BOTTOM_PAD: f32 = 2.0;
-    /// The pill: 34 pt tall. Top inset is a few points below the window edge
-    /// so the name and picture breathe ([feedback
-    /// app-01M5MX8XS2BS7KZCNAS12BXNKD]; was 7 pt).
+    /// The pill: 34 pt tall, its top 7 pt under the window edge (Grok, Jacob's
+    /// reference at 2 px/pt). Centred in the bar — Jacob's rule (#1130, #1336;
+    /// `docs/mac-design-rules.md`), restored by [feedback
+    /// header-pill-restore-2026-10-24] after #1493 moved it top-left.
     pub const PILL_HEIGHT: f32 = 34.0;
-    pub const PILL_TOP: f32 = 10.0;
+    pub const PILL_TOP: f32 = 7.0;
     /// Top margin inside the bar that lands the pill at `PILL_TOP`. The bar
     /// packs from the top (`items_start`): a centred cross-axis would drop the
     /// pill mid-pane if the floating overlay ever stretched taller than
@@ -390,14 +390,11 @@ pub mod metrics {
     /// child of the pill slot and takes no room in the bar.
     pub const LINK_PILL_HEIGHT: f32 = 22.0;
     pub const LINK_PILL_GAP: f32 = 3.0;
-    /// Leading inset before the pill when the sidebar toggle is absent
-    /// (sidebar open): the chat pane's left pad.
-    pub const PILL_LEADING: f32 = 12.0;
 }
 
 /// The frame of every chat header — agent, DM, group, server channel: 44 pt,
 /// equal side slots (the sidebar toggle left when the sidebar is hidden), the
-/// pill centred with a little air under the window edge, the whole bar a
+/// pill centred with its top 7 pt under the window edge, the whole bar a
 /// window-drag region (the pill and the toggle stop the drag themselves). The
 /// list runs under it and fades (`metrics::FADE_BAND`), so there is no hairline.
 pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
@@ -416,15 +413,16 @@ pub(crate) fn bar_frame(left: Option<AnyElement>, pill: AnyElement) -> Div {
         .items_start()
         .justify_between()
         .gap(px(10.0))
-        .pl(px(metrics::PILL_LEADING))
+        .pl(px(12.0))
         .pr(px(10.0))
         .pb(px(metrics::BOTTOM_PAD))
         .overflow_hidden()
         .window_drag()
         .debug_selector(|| "chat-header-bar".into())
-        // Always reserve the left slot so the pill stays centred whether the
-        // sidebar toggle is present or not ([feedback
-        // app-01M5Q1CQZ5JBNY33WCKPN0Y8G9]).
+        // The left slot is always there (empty when the sidebar is open) so the
+        // two side slots match and the pill sits on the bar's centre line
+        // ([feedback app-01M5Q1CQZ5JBNY33WCKPN0Y8G9], [feedback
+        // header-pill-restore-2026-10-24]).
         .child(
             div()
                 .w(side)
@@ -1086,6 +1084,15 @@ mod header_tests {
         vcx.update(|_, cx| cx.default_global::<WindowDragPress>().moves)
     }
 
+    fn pill_w(kind: Kind) -> f32 {
+        match kind {
+            Kind::Agent => 150.0,
+            Kind::Dm => 110.0,
+            Kind::Group => 130.0,
+            Kind::Channel => 170.0,
+        }
+    }
+
     #[gpui::test]
     fn every_kind_has_the_same_bar_height_and_pill_position(cx: &mut TestAppContext) {
         for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
@@ -1105,6 +1112,42 @@ mod header_tests {
                 assert!(
                     (cx_pill - cx_bar).abs() <= 1.0,
                     "pill centred, folded={folded}"
+                );
+            }
+        }
+    }
+
+    /// Jacob's rule (#1130, #1336; `docs/mac-design-rules.md`): the pill sits
+    /// on the bar's centre line, 7 pt under the window edge, picture 22 pt —
+    /// for every chat kind, sidebar open or folded. #1493 moved it to the left
+    /// edge on a tester's "personal preference"; [feedback
+    /// header-pill-restore-2026-10-24] put it back. This pins the geometry so
+    /// the next drift fails here.
+    #[gpui::test]
+    fn the_pill_is_centred_not_parked_at_the_left_edge(cx: &mut TestAppContext) {
+        assert_eq!(metrics::PILL_TOP, 7.0, "pill top");
+        assert_eq!(AVATAR_HEADER, 22.0, "header picture");
+        for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
+            for folded in [false, true] {
+                let (_view, vcx) = cx.add_window_view(|_, _| Bar { kind, folded });
+                vcx.run_until_parked();
+                let bar = vcx.debug_bounds("chat-header-bar").expect("bar drawn");
+                let pill = vcx.debug_bounds("chat-header-pill").expect("pill drawn");
+                let left: f32 = (pill.origin.x - bar.origin.x).into();
+                let right: f32 =
+                    ((bar.origin.x + bar.size.width) - (pill.origin.x + pill.size.width)).into();
+                let w: f32 = pill.size.width.into();
+                assert_eq!(w, pill_w(kind), "pill keeps its own width, folded={folded}");
+                // Equal air either side (the bar pads 12 left / 10 right, so
+                // the margins differ by those 2 pt): not hugging the leading
+                // pad, not the trailing one.
+                assert!(
+                    (left - right).abs() <= 2.0,
+                    "equal margins, folded={folded}: left={left} right={right}"
+                );
+                assert!(
+                    left > 100.0,
+                    "pill is not at the left edge, folded={folded}: left={left}"
                 );
             }
         }
@@ -1175,7 +1218,7 @@ mod header_tests {
     #[gpui::test]
     fn the_empty_band_drags_for_every_kind_and_the_pill_does_not(cx: &mut TestAppContext) {
         for kind in [Kind::Agent, Kind::Dm, Kind::Group, Kind::Channel] {
-            // Left of the pill, right of the side slot.
+            // Left of the centred pill, right of the side slot.
             assert_eq!(moves_after(cx, kind, false, 120.0), 1, "band drags");
             assert_eq!(
                 moves_after(cx, kind, true, 72.0 + 60.0),
@@ -1190,7 +1233,7 @@ mod header_tests {
             );
             // The toggle.
             assert_eq!(
-                moves_after(cx, kind, true, 72.0 + metrics::PILL_LEADING + 14.0),
+                moves_after(cx, kind, true, 72.0 + 12.0 + 14.0),
                 0,
                 "toggle is a control"
             );
@@ -1214,8 +1257,9 @@ mod header_tests {
         assert_eq!(overhang, 24.0);
         assert_eq!(
             pill_top + pill_h,
-            height,
-            "the pill sits with more top air and meets the bar's bottom edge"
+            41.0,
+            "the pill ends 3 pt above the bar's edge"
         );
+        assert!(height > pill_top + pill_h);
     }
 }
