@@ -9,6 +9,7 @@ mod model;
 mod onboarding;
 mod palette;
 mod search;
+mod search_index;
 mod sign_in;
 mod sync;
 mod ui;
