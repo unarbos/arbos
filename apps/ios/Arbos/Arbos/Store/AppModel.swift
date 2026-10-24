@@ -3209,6 +3209,24 @@ final class AppModel: ObservableObject {
         return try await api.generateProjectAvatar(projectId, prompt: prompt)
     }
 
+    /// The same for a people group's picture (any member) — the key lands in `people:{chat}`.
+    func generateGroupAvatar(chatId: String, prompt: String) async throws -> String {
+        if isFixture {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            return "fixture-gen-\(prompt.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        }
+        return try await api.generateGroupAvatar(chatId, prompt: prompt)
+    }
+
+    /// Set a group picture from a key the relay already holds (the Generate tab's answer).
+    func setGroupImageKey(chatId: String, key: String) async -> Bool {
+        if isFixture {
+            if let i = peopleChats.firstIndex(where: { $0.id == chatId }) { peopleChats[i].imageKey = key }
+            return true
+        }
+        return await patchPeopleChat(chatId, imageKey: key)
+    }
+
     /// D92 amendment: a group's leaf picture (nil = initials); drops the uploaded picture.
     func setGroupLeaf(chatId: String, pick: LeafPick?) async -> Bool {
         if let i = peopleChats.firstIndex(where: { $0.id == chatId }) {

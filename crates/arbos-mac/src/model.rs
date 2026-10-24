@@ -2956,6 +2956,10 @@ pub struct ServerInfo {
     pub name: String,
     #[serde(default)]
     pub image_key: Option<String>,
+    /// `image_key` as the avatar loader fetches it (`/blob/servers:{id}/{key}?token=…`), filled in
+    /// by the relay client; not on the wire.
+    #[serde(skip)]
+    pub image_url: Option<String>,
     /// D92 amendment: the leaf picture from the Create screen; `None` = initials.
     #[serde(default)]
     pub avatar_leaf: Option<u8>,

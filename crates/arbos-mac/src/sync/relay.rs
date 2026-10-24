@@ -49,7 +49,7 @@ use super::dto::{
     transcript_text, voices_from_dto,
 };
 use super::store::{self, Store};
-use super::{ClientCommand, PictureSource, SyncEvent, SyncSource};
+use super::{ClientCommand, PictureSource, PictureTarget, SyncEvent, SyncSource};
 use crate::model::{
     new_id, now_ms, AccountView, Attachment, AttachmentKind, BoxState, Call, CallEnded, CallLeft,
     CallMissed, ChannelBinding, ChannelPairing, ChannelPlatform, ChannelsView, Chat, Effort, Id,
@@ -1478,6 +1478,10 @@ async fn refresh_servers_list(shared: &Arc<Shared>) {
                         .collect()
                 })
                 .unwrap_or_default();
+            let servers = servers
+                .into_iter()
+                .map(|s| with_server_picture(shared, s))
+                .collect();
             let _ = shared.events.send(SyncEvent::Servers(servers));
         }
         Err(err) => {
@@ -1555,7 +1559,11 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .and_then(parse_server)
                 {
                     Ok(server) => {
-                        let _ = shared.events.send(SyncEvent::ServerOpened(server));
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::ServerOpened(with_server_picture(
+                                &shared, server,
+                            )));
                         refresh_servers_list(&shared).await;
                     }
                     Err(err) => server_error(&shared, &err),
@@ -1572,7 +1580,11 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .and_then(parse_server)
                 {
                     Ok(server) => {
-                        let _ = shared.events.send(SyncEvent::ServerOpened(server));
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::ServerOpened(with_server_picture(
+                                &shared, server,
+                            )));
                         refresh_servers_list(&shared).await;
                     }
                     Err(err) => server_error(&shared, &err),
@@ -1585,7 +1597,11 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             tokio::spawn(async move {
                 match shared.get_json(&path).await.and_then(parse_server) {
                     Ok(server) => {
-                        let _ = shared.events.send(SyncEvent::ServerDetail(server));
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::ServerDetail(with_server_picture(
+                                &shared, server,
+                            )));
                     }
                     Err(err) => shared.diagnostic("server-detail", format!("{err:#}")),
                 }
@@ -1602,7 +1618,11 @@ fn handle_server_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
                     .and_then(parse_server)
                 {
                     Ok(server) => {
-                        let _ = shared.events.send(SyncEvent::ServerDetail(server));
+                        let _ = shared
+                            .events
+                            .send(SyncEvent::ServerDetail(with_server_picture(
+                                &shared, server,
+                            )));
                     }
                     Err(err) => server_error(&shared, &err),
                 }
@@ -1911,7 +1931,9 @@ async fn fetch_server_detail(shared: &Arc<Shared>, server_id: &str) {
         .and_then(parse_server)
     {
         Ok(server) => {
-            let _ = shared.events.send(SyncEvent::ServerDetail(server));
+            let _ = shared
+                .events
+                .send(SyncEvent::ServerDetail(with_server_picture(shared, server)));
         }
         Err(err) => shared.diagnostic("server-detail", format!("{err:#}")),
     }
@@ -3476,6 +3498,31 @@ fn send_wake(shared: &Arc<Shared>, project_id: &str, reason: &'static str) {
 /// here; HEIC (Photos exports, iPhone shots) goes through macOS's own `sips` first, since
 /// the `image` crate has no HEIF decoder. Anything that is not an image is an error with a
 /// plain message.
+/// A picker target's picture as the avatar loader fetches it: the blob in its own slot.
+fn picture_url(shared: &Shared, target: &PictureTarget, key: Option<&str>) -> Option<String> {
+    let key = key.map(str::trim).filter(|k| !k.is_empty())?;
+    let slot = match target {
+        PictureTarget::Agent(id) => id.clone(),
+        PictureTarget::Group(id) => format!("people:{id}"),
+        PictureTarget::Server(id) => format!("servers:{id}"),
+    };
+    Some(format!(
+        "{}/blob/{slot}/{key}?token={}",
+        shared.http_url,
+        shared.token()
+    ))
+}
+
+/// A server's `image_key` → `image_url` on every `ServerInfo` the relay client hands out.
+fn with_server_picture(shared: &Shared, mut server: ServerInfo) -> ServerInfo {
+    server.image_url = picture_url(
+        shared,
+        &PictureTarget::Server(server.id.clone()),
+        server.image_key.as_deref(),
+    );
+    server
+}
+
 /// An agent's picture as the avatar loader fetches it: the blob in the project's own slot.
 fn project_image_url(
     http_url: &str,
@@ -5563,15 +5610,15 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
-        ClientCommand::GenerateProjectImage { project_id, prompt } => {
+        ClientCommand::GenerateImage { target, prompt } => {
             let shared = shared.clone();
             tokio::spawn(async move {
-                let result = shared
-                    .post_json(
-                        &format!("/projects/{project_id}/avatar/generate"),
-                        json!({ "prompt": prompt }),
-                    )
-                    .await;
+                let path = match &target {
+                    PictureTarget::Agent(id) => format!("/projects/{id}/avatar/generate"),
+                    PictureTarget::Group(id) => format!("/chats/{id}/avatar/generate"),
+                    PictureTarget::Server(id) => format!("/servers/{id}/avatar/generate"),
+                };
+                let result = shared.post_json(&path, json!({ "prompt": prompt })).await;
                 let event = match result {
                     Ok(v) => {
                         let key = v
@@ -5579,33 +5626,133 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                             .and_then(Value::as_str)
                             .map(str::to_owned);
                         match key {
-                            Some(key) => SyncEvent::ProjectImageGenerated {
-                                project_id: project_id.clone(),
-                                url: project_image_url(
-                                    &shared.http_url,
-                                    &shared.token(),
-                                    &project_id,
-                                    Some(&key),
-                                ),
+                            Some(key) => SyncEvent::ImageGenerated {
+                                url: picture_url(&shared, &target, Some(&key)),
+                                target,
                                 image_key: Some(key),
                                 error: None,
                             },
-                            None => SyncEvent::ProjectImageGenerated {
-                                project_id,
+                            None => SyncEvent::ImageGenerated {
+                                target,
                                 image_key: None,
                                 url: None,
                                 error: Some("The relay sent no picture".to_owned()),
                             },
                         }
                     }
-                    Err(err) => SyncEvent::ProjectImageGenerated {
-                        project_id,
+                    Err(err) => SyncEvent::ImageGenerated {
+                        target,
                         image_key: None,
                         url: None,
                         error: Some(people_error(&err)),
                     },
                 };
                 let _ = shared.events.send(event);
+            });
+        }
+        ClientCommand::SetGroupImageKey { chat_id, key } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                match shared
+                    .patch_json(&format!("/chats/{chat_id}"), json!({ "image_key": key }))
+                    .await
+                {
+                    Ok(v) => {
+                        if let Ok(dto) = serde_json::from_value::<PeopleChatDto>(v) {
+                            let (space, _) = people_space_from(
+                                &dto,
+                                &shared.me_id(),
+                                &shared.me_handle(),
+                                &shared.http_url,
+                                &shared.token(),
+                            );
+                            let mut projects = shared.projects.lock().unwrap();
+                            if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
+                                p.image_url = space.image_url;
+                            }
+                            let snapshot = projects.clone();
+                            drop(projects);
+                            let _ = shared.events.send(SyncEvent::Projects(snapshot));
+                        }
+                    }
+                    Err(err) => {
+                        shared.notice(format!("Group picture not saved: {}", people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::SetServerImage { server_id, source } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let key = match source {
+                    PictureSource::Key(key) => key,
+                    PictureSource::File(path) => {
+                        let jpeg =
+                            match tokio::task::spawn_blocking(move || picture_jpeg(&path)).await {
+                                Ok(Ok(j)) => j,
+                                Ok(Err(err)) => {
+                                    shared.notice(format!("Picture not uploaded: {err:#}"));
+                                    return;
+                                }
+                                Err(_) => return,
+                            };
+                        let key = format!("server-{}.jpg", new_id().to_lowercase());
+                        let put = shared
+                            .http
+                            .put(format!(
+                                "{}/blob/servers:{}/{}",
+                                shared.http_url, server_id, key
+                            ))
+                            .bearer_auth(shared.token())
+                            .header("content-type", "image/jpeg")
+                            .body(jpeg)
+                            .send()
+                            .await;
+                        match put {
+                            Ok(r) if r.status().is_success() => key,
+                            Ok(r) => {
+                                shared
+                                    .notice(format!("Picture upload failed: HTTP {}", r.status()));
+                                return;
+                            }
+                            Err(err) => {
+                                shared.notice(format!("Picture upload failed: {err}"));
+                                return;
+                            }
+                        }
+                    }
+                };
+                match shared
+                    .patch_json(
+                        &format!("/servers/{server_id}"),
+                        json!({ "image_key": key }),
+                    )
+                    .await
+                {
+                    Ok(_) => refresh_servers_list(&shared).await,
+                    Err(err) => {
+                        shared.notice(format!("Server picture not saved: {}", people_error(&err)));
+                    }
+                }
+            });
+        }
+        ClientCommand::SetServerLeaf { server_id, pick } => {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let body = json!({
+                    "avatar_leaf": pick.map(|l| l.leaf),
+                    "avatar_leaf_color": pick.map(|l| l.color),
+                    "image_key": null,
+                });
+                match shared
+                    .patch_json(&format!("/servers/{server_id}"), body)
+                    .await
+                {
+                    Ok(_) => refresh_servers_list(&shared).await,
+                    Err(err) => {
+                        shared.notice(format!("Server picture not saved: {}", people_error(&err)));
+                    }
+                }
             });
         }
         ClientCommand::SetMyAvatar { path } => {

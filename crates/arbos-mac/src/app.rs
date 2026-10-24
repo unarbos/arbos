@@ -376,7 +376,7 @@ const CHANNEL_PAGE: usize = 50;
 /// The relay's answer to the avatar picker's Generate tab.
 #[derive(Clone, Debug)]
 pub struct AvatarGenerated {
-    pub project_id: Id,
+    pub target: crate::sync::PictureTarget,
     pub image_key: Option<String>,
     pub url: Option<String>,
     pub error: Option<String>,
@@ -1418,8 +1418,8 @@ impl AppState {
                 }
                 cx.notify();
             }
-            SyncEvent::ProjectImageGenerated {
-                project_id,
+            SyncEvent::ImageGenerated {
+                target,
                 image_key,
                 url,
                 error,
@@ -1428,7 +1428,7 @@ impl AppState {
                     self.want_avatar(u);
                 }
                 self.avatar_generated = Some(AvatarGenerated {
-                    project_id,
+                    target,
                     image_key,
                     url,
                     error,
@@ -1830,6 +1830,16 @@ impl AppState {
                             );
                             if rest == ":library" {
                                 self.set_profile_tab(1, cx);
+                            } else if let Some(tab) = rest.strip_prefix(":avatar") {
+                                // `group:avatar[:generate|:upload]` — the avatar picker (D92
+                                // amendment) for the group's picture.
+                                use crate::ui::avatar_picker::{Tab, Target};
+                                let tab = match tab {
+                                    ":generate" => Tab::Generate,
+                                    ":upload" => Tab::Upload,
+                                    _ => Tab::Bot,
+                                };
+                                self.open_avatar_picker(Target::Group(project_id), tab, cx);
                             } else if rest == ":add-members" {
                                 // The pane's Add members sheet over the Members tab.
                                 self.open_add_members(project_id, cx);
@@ -4169,6 +4179,9 @@ impl AppState {
             .filter(|o| !merged.iter().any(|s| s.id == o.id))
             .map(|o| o.id.clone())
             .collect();
+        for url in merged.iter().filter_map(|s| s.image_url.clone()) {
+            self.want_avatar(url);
+        }
         self.servers = merged;
         for id in gone {
             self.drop_server(&id, cx);
@@ -4254,6 +4267,9 @@ impl AppState {
         if self.server_sheet.is_some() {
             // A channel was created: the sheet is done.
             self.server_sheet = None;
+        }
+        if let Some(url) = server.image_url.clone() {
+            self.want_avatar(url);
         }
         match self.servers.iter_mut().find(|s| s.id == server.id) {
             Some(slot) => *slot = server,
@@ -4940,13 +4956,47 @@ impl AppState {
     }
 
     /// Generate tab: ask the relay for a picture; the answer lands in `avatar_generated`.
-    pub fn generate_project_image(
+    pub fn generate_image(
         &mut self,
-        project_id: Id,
+        target: crate::sync::PictureTarget,
         prompt: String,
         cx: &mut Context<Self>,
     ) {
-        self.command(ClientCommand::GenerateProjectImage { project_id, prompt });
+        self.command(ClientCommand::GenerateImage { target, prompt });
+        cx.notify();
+    }
+
+    /// A people group's picture from a key the relay already holds (the Generate tab's answer).
+    pub fn set_group_image_key(&mut self, chat_id: Id, key: String, cx: &mut Context<Self>) {
+        self.command(ClientCommand::SetGroupImageKey { chat_id, key });
+        cx.notify();
+    }
+
+    /// A server's picture from the avatar picker (owner / admins).
+    pub fn set_server_image(
+        &mut self,
+        server_id: Id,
+        source: crate::sync::PictureSource,
+        cx: &mut Context<Self>,
+    ) {
+        self.command(ClientCommand::SetServerImage { server_id, source });
+        cx.notify();
+    }
+
+    /// A server's leaf picture (`None` = initials; drops the uploaded picture).
+    pub fn set_server_leaf(
+        &mut self,
+        server_id: Id,
+        pick: Option<crate::ui::avatars::LeafPick>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(s) = self.servers.iter_mut().find(|s| s.id == server_id) {
+            s.avatar_leaf = pick.map(|l| l.leaf);
+            s.avatar_leaf_color = pick.map(|l| l.color);
+            s.image_key = None;
+            s.image_url = None;
+        }
+        self.command(ClientCommand::SetServerLeaf { server_id, pick });
         cx.notify();
     }
 

@@ -326,6 +326,21 @@ impl AppState {
         if let Some(chat_id) = project_id.strip_prefix(crate::people::PEOPLE_ACL_PREFIX) {
             return crate::people::room_access(self, principal, chat_id);
         }
+        // A server's picture slot (`servers:{id}`): its non-banned members read it and may
+        // upload into it; `PATCH /servers/{id} {image_key}` (admins) is what sets the picture.
+        if let Some(server_id) = project_id.strip_prefix(crate::matrix::servers::SERVER_BLOB_PREFIX)
+        {
+            return match principal {
+                crate::auth::Principal::Device { user_id, .. } => self
+                    .db
+                    .server_member(server_id, user_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.banned_at.is_none()),
+                crate::auth::Principal::Admin => true,
+                crate::auth::Principal::Box { .. } => false,
+            };
+        }
         match self.user_of(project_id) {
             Some(u) if principal.can_access_project(&u) => true,
             // Projects together (D72 step 3): a person the owner invited drives the project too.

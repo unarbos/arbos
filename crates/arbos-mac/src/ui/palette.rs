@@ -429,7 +429,7 @@ fn picture(shell: &Shell, entry: &Entry, theme: &Theme, cx: &Context<Shell>) -> 
             if entry.kind == Kind::Channel {
                 tile("hash").into_any_element()
             } else {
-                sidebar::server_picture(server, AVATAR, theme).into_any_element()
+                sidebar::server_picture(server, state, AVATAR, theme).into_any_element()
             }
         }
         Target::Media {

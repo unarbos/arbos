@@ -74,10 +74,20 @@ pub(super) fn page(
     let leave_armed = shell.server_leave_armed;
 
     // ----- hero: the disc, the name as an inline field for admins ---------------
-    // The picture stays as it is: the relay's blob slot for server images is not
-    // open to the apps yet, so there is no crayon here.
-    let picture = server_picture(&server, HERO_AVATAR, &theme).into_any_element();
-    let avatar = editable_picture("profile-avatar", picture, None).into_any_element();
+    // D92 amendment: owners / admins get the avatar picker (Bot | Generate | Upload) on the
+    // picture, like an agent's.
+    let picture = server_picture(&server, state, HERO_AVATAR, &theme).into_any_element();
+    let sid_pic = server.id.clone();
+    let pic_click = can_admin.then(|| {
+        let f = cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+            this.open_avatar_picker(
+                crate::ui::avatar_picker::Target::Server(sid_pic.clone()),
+                cx,
+            );
+        });
+        Box::new(f) as HeroClick
+    });
+    let avatar = editable_picture("profile-avatar", picture, pic_click).into_any_element();
     let sid_name = server.id.clone();
     let name_click = can_admin.then(|| {
         let f = cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {

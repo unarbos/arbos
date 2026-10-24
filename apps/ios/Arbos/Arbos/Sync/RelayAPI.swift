@@ -768,6 +768,17 @@ final class RelayAPI {
         _ = try await request("PATCH", "/servers/\(id)", body: body)
     }
 
+    /// D92 amendment: a server's leaf picture — `PATCH /servers/{id} {avatar_leaf,
+    /// avatar_leaf_color, image_key: null}` (nil = back to initials; the picture goes with it).
+    func setServerLeaf(_ id: String, pick: LeafPick?) async throws {
+        let body: [String: Any] = [
+            "avatar_leaf": pick.map { Int($0.leaf) as Any } ?? NSNull(),
+            "avatar_leaf_color": pick.map { Int($0.color) as Any } ?? NSNull(),
+            "image_key": NSNull(),
+        ]
+        _ = try await request("PATCH", "/servers/\(id)", body: body)
+    }
+
     /// `GET /servers/search?q=` → open servers by name (join without an invite).
     func searchOpenServers(_ q: String) async throws -> [Server] {
         let enc = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
@@ -906,7 +917,21 @@ final class RelayAPI {
     /// D92 amendment: `POST /projects/{id}/avatar/generate {prompt}` → the stored picture's key
     /// (not yet set; "Set avatar" sends it through `setProjectImageKey`).
     func generateProjectAvatar(_ projectId: Id, prompt: String) async throws -> String {
-        let v = try await json("POST", "/projects/\(projectId)/avatar/generate", body: ["prompt": prompt])
+        try await generateAvatar(path: "/projects/\(projectId)/avatar/generate", prompt: prompt)
+    }
+
+    /// The same for a people group (`POST /chats/{id}/avatar/generate`) and a server
+    /// (`POST /servers/{id}/avatar/generate`); the key lands in their own blob slot.
+    func generateGroupAvatar(_ chatId: String, prompt: String) async throws -> String {
+        try await generateAvatar(path: "/chats/\(chatId)/avatar/generate", prompt: prompt)
+    }
+
+    func generateServerAvatar(_ serverId: String, prompt: String) async throws -> String {
+        try await generateAvatar(path: "/servers/\(serverId)/avatar/generate", prompt: prompt)
+    }
+
+    private func generateAvatar(path: String, prompt: String) async throws -> String {
+        let v = try await json("POST", path, body: ["prompt": prompt])
         guard let d = v as? [String: Any], let key = d["image_key"] as? String, !key.isEmpty else {
             throw RelayError(status: 0, message: "The relay sent no picture")
         }

@@ -78,7 +78,9 @@ pub(super) fn page(
     };
 
     let body = match tab {
-        0 => profile_tab(&server, &channel, restricted, muted, count, &theme, cx),
+        0 => profile_tab(
+            &server, &channel, restricted, muted, count, shell, &theme, cx,
+        ),
         _ => settings_tab(
             &server,
             &channel,
@@ -138,13 +140,20 @@ fn topic_row(topic: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn server_row(server: &ServerInfo, theme: &Theme, cx: &mut Context<Shell>) -> AnyElement {
+fn server_row(
+    server: &ServerInfo,
+    shell: &Shell,
+    theme: &Theme,
+    cx: &mut Context<Shell>,
+) -> AnyElement {
     let page = ProfilePage::Server {
         server_id: server.id.clone(),
     };
+    let picture =
+        server_picture(server, shell.state.read(cx), kit::AVATAR, theme).into_any_element();
     kit::row(
         "channel-server",
-        kit::Leading::Avatar(server_picture(server, kit::AVATAR, theme).into_any_element()),
+        kit::Leading::Avatar(picture),
         server.name.clone(),
         Some("Server".into()),
         None,
@@ -194,12 +203,14 @@ fn privacy_label(restricted: bool) -> &'static str {
 }
 
 /// Profile: what the channel is, who is in it, how it is set up — read-only, plus mute.
+#[allow(clippy::too_many_arguments)]
 fn profile_tab(
     server: &ServerInfo,
     channel: &ServerChannel,
     restricted: bool,
     muted: bool,
     count: u64,
+    shell: &Shell,
     theme: &Theme,
     cx: &mut Context<Shell>,
 ) -> Vec<Section> {
@@ -255,7 +266,7 @@ fn profile_tab(
     let cid = channel.id.clone();
     vec![
         Section::Card(about),
-        Section::Card(vec![server_row(server, theme, cx)]),
+        Section::Card(vec![server_row(server, shell, theme, cx)]),
         Section::Card(vec![toggle_row(
             "channel-mute",
             "Mute channel",
@@ -431,7 +442,7 @@ fn settings_tab(
     let mut out = vec![
         Section::Card(identity),
         Section::Card(behaviour),
-        Section::Card(vec![server_row(server, theme, cx)]),
+        Section::Card(vec![server_row(server, shell, theme, cx)]),
     ];
     if can_admin {
         out.push(Section::Footnote(

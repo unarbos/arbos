@@ -770,6 +770,8 @@ struct GroupProfileView: View {
     @State private var projectMembers: [ProjectMember] = []
     @State private var showAdd = false
     @State private var showEdit = false
+    /// Rig only: the avatar picker opened straight from the pane (users go through Edit group).
+    @State private var showAvatarPicker: AvatarPickerTab? = nil
     @State private var showActivity = false
     @State private var pendingRemoveId: String?
     @State private var pendingRemoveName: String?
@@ -1096,7 +1098,16 @@ struct GroupProfileView: View {
             if DebugHooks.show == "addmembers", project == nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { showAdd = true }
             }
+            // Rig: `ARBOS_SHOW=groupavatar[-generate|-upload]` opens the avatar picker on that tab.
+            if let show = DebugHooks.show, show.hasPrefix("groupavatar"), project == nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    showAvatarPicker = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                }
+            }
             if let t = DebugHooks.panelTab, PaneKinds.group.contains(t) { tab = t }
+        }
+        .sheet(item: $showAvatarPicker) { initial in
+            AvatarPickerSheet(target: .group(chatId), initialTab: initial).environmentObject(model).environment(\.theme, theme)
         }
     }
 
@@ -1705,6 +1716,8 @@ struct ServerProfileView: View {
     @State private var tab = "Channels"
     @State private var showRename = false
     @State private var renameDraft = ""
+    @State private var showAvatarPicker = false
+    @State private var avatarPickerTab: AvatarPickerTab = .bot
     @State private var showNewChannel = false
     @State private var renamingChannel: ServerChannel?
     @State private var channelDraft = ""
@@ -1791,16 +1804,15 @@ struct ServerProfileView: View {
     private func heroPicture(_ server: Server) -> some View {
         Group {
             if isAdmin {
-                Button {
-                    renameDraft = server.name
-                    showRename = true
-                } label: {
+                // D92 amendment: the avatar picker (Bot | Generate | Upload) for the server's
+                // picture; Rename lives on the Settings tab.
+                Button { showAvatarPicker = true } label: {
                     ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
                         .paneCrayon()
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Rename server")
+                .accessibilityLabel("Change server picture")
             } else {
                 ServerAvatar(server: server, size: PaneHeader<EmptyView>.avatarSize)
             }
@@ -1905,6 +1917,16 @@ struct ServerProfileView: View {
 
     private func channelDialogs<V: View>(_ v: V) -> some View {
         v
+            .sheet(isPresented: $showAvatarPicker) {
+                AvatarPickerSheet(target: .server(serverId), initialTab: avatarPickerTab).environmentObject(model).environment(\.theme, theme)
+            }
+            .onAppear {
+                // Rig: `ARBOS_SHOW=serveravatar[-generate|-upload]` opens the avatar picker on that tab.
+                if let show = DebugHooks.show, show.hasPrefix("serveravatar") {
+                    avatarPickerTab = show.hasSuffix("generate") ? .generate : (show.hasSuffix("upload") ? .upload : .bot)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { showAvatarPicker = true }
+                }
+            }
             .alert("Rename server", isPresented: $showRename) {
                 TextField("Server name", text: $renameDraft)
                 Button("Save") { Task { await model.renameServer(serverId, name: renameDraft) } }

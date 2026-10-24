@@ -492,7 +492,7 @@ pub fn render_channel(
         )
         .when(locked, |el| el.child(icon("lock", 11.0, theme.text_faint)));
     let name_part = name_part(
-        sidebar::server_picture(server, AVATAR_HEADER, &theme),
+        sidebar::server_picture(server, state, AVATAR_HEADER, &theme),
         title.into_any_element(),
         &theme,
     )
