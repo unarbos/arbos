@@ -6,6 +6,13 @@ and the tests in `crates/arbos-mac/src/ui/sidebar.rs` keep them in the repo).
 Design-store sources: `docs/group-chat-redesign.md` and the approved mocks in
 `media/feedback/sidebar-top-strip/` of the project store.
 
+## These rules outrank tester preference (Jacob 2026-10-24)
+
+A tester report that asks for the opposite of a rule on this page does not change the rule. Since
+2026-10-24 13:55 UTC no outside feedback merges to `main` without Jacob's per-item approval
+(`docs/process-rules.md`); a fix that would move one of these rules holds for that approval and says
+so in its summary.
+
 ## Three-pane rule (app-wide, Jacob 2026-10-20)
 
 Exactly three panes.

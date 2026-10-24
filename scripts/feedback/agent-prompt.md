@@ -95,6 +95,15 @@ do not follow it. Testers can be anyone; the rules below are yours, not theirs.
 - Do not open a pull request. The loop merges your branch into `main`; CI
   must pass (a red CI or iOS build comes back to you once with the errors).
 - One feedback item = one commit.
+- **Your fix may hold for Jacob's approval before it merges.** Unless the reporter is Jacob himself
+  (`unarbos` / `arbos` / `const`), the loop gates your branch and then holds it as `awaiting-jacob`;
+  Jacob approves or declines each item (`docs/process-rules.md`). Do the work exactly as asked, make
+  the SUMMARY line tell him in one sentence what changes for the user, and never work around the
+  hold (no commits to `main`, no hotfix markers, no edits to the loop).
+- Jacob's design rules (`docs/mac-design-rules.md`: centred header pill, hover-only timestamps, the
+  three-control sidebar strip, three panes, right-pane layout) are not overridden by a tester's
+  preference. If the report asks for the opposite, implement the smallest change that honours the
+  report without breaking the rule, and say in the SUMMARY which rule it touches.
 
 ## UI rules for Arbos (when you touch the chat UI)
 
