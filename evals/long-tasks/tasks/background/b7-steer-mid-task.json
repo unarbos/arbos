@@ -35,5 +35,5 @@
     "no_truncated_reply": true,
     "no_repeated_sentence": true
   },
-  "regression": "steer path: Steering: … on the working row within 5 s of a guide steer into a running turn (#1657); result applied"
+  "regression": "regression case for #1657 (guide steers regardless of sentence-end; project.activity kept across unlabelled tool starts; fixed main eaacda55, image 0.1.118): Steering: … on the working row within 5 s, result applied"
 }
