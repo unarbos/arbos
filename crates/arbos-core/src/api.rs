@@ -278,6 +278,10 @@ pub struct PeopleChatDto {
     #[serde(default)]
     #[typeshare(serialized_as = "Option<I54>")]
     pub avatar_leaf_color: Option<i64>,
+    /// Group policy: when false, members (non-owner/admin) do not see who has
+    /// read messages. Owners and admins still can. Absent → on (default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members_see_reads: Option<bool>,
     pub pending: bool,
     pub members: Vec<ChatMemberDto>,
     pub room: String,

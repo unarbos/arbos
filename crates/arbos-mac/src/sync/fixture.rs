@@ -498,6 +498,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
         | ClientCommand::DeleteProject { .. }
         | ClientCommand::DeletePeopleChat { .. }
         | ClientCommand::RenameGroup { .. }
+        | ClientCommand::SetMembersSeeReads { .. }
         | ClientCommand::SetGroupImage { .. }
         | ClientCommand::SetGroupLeaf { .. }
         | ClientCommand::SetProjectImage { .. }
@@ -1164,6 +1165,7 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 avatar_leaf_color: leaf.map(|l| l.color),
                 image_url: None,
                 message_grants: Vec::new(),
+                members_see_reads: true,
             });
             let chat_id = new_id();
             shared.chats.lock().unwrap().push(Chat {
@@ -3987,6 +3989,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf_color: None,
             image_url: None,
             message_grants: Vec::new(),
+            members_see_reads: true,
         },
         Project {
             id: PROJECT_COMMS.into(),
@@ -4022,6 +4025,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf_color: None,
             image_url: None,
             message_grants: Vec::new(),
+            members_see_reads: true,
         },
         Project {
             id: PROJECT_ARBOS.into(),
@@ -4057,6 +4061,7 @@ fn seed_projects() -> Vec<Project> {
             avatar_leaf_color: None,
             image_url: None,
             message_grants: Vec::new(),
+            members_see_reads: true,
         },
     ]
 }
@@ -5108,6 +5113,7 @@ fn people_space(id: &str, other: Person, agents: Vec<AgentMember>) -> Project {
         avatar_leaf_color: None,
         image_url: None,
         message_grants: Vec::new(),
+        members_see_reads: true,
     }
 }
 
@@ -5210,6 +5216,7 @@ fn seed_people_projects() -> Vec<Project> {
             avatar_leaf_color: None,
             image_url: None,
             message_grants: Vec::new(),
+            members_see_reads: true,
         },
     ]
 }
@@ -6231,6 +6238,16 @@ fn handle_people_command(shared: &Arc<Shared>, cmd: &ClientCommand) -> bool {
             }
             emit_projects(shared);
             emit_chats(shared);
+            true
+        }
+        ClientCommand::SetMembersSeeReads { chat_id, enabled } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == *chat_id) {
+                    p.members_see_reads = *enabled;
+                }
+            }
+            emit_projects(shared);
             true
         }
         ClientCommand::SetGroupImage { chat_id, path } => {

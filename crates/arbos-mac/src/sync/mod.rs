@@ -574,6 +574,12 @@ pub enum ClientCommand {
         chat_id: Id,
         title: String,
     },
+    /// Owner/admin: whether members can see who has read messages
+    /// (`PATCH /chats/{id} {members_see_reads}`).
+    SetMembersSeeReads {
+        chat_id: Id,
+        enabled: bool,
+    },
     /// A group's leaf picture from the avatar picker: `PATCH /chats/{id} {avatar_leaf,
     /// avatar_leaf_color, image_key: null}` (`None` = initials).
     SetGroupLeaf {

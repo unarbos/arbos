@@ -15,6 +15,7 @@ use gpui::{
 use crate::app::{AppState, ProfilePage};
 use crate::model::{Person, Project};
 use crate::ui::avatars;
+use crate::ui::glass;
 use crate::ui::groups;
 use crate::ui::icons::icon;
 use crate::ui::people;
@@ -341,6 +342,28 @@ pub(super) fn page(
                 );
             }
             let mut out = Vec::new();
+            // Owner: whether members can see who has read messages (iPhone twin).
+            if is_people && i_own_group {
+                let sid = space.id.clone();
+                let on = space.members_see_reads;
+                out.push(Section::Card(vec![kit::row(
+                    "group-members-see-reads",
+                    kit::Leading::None,
+                    "Read receipts",
+                    Some(SharedString::from("Members can see who has read messages")),
+                    None,
+                    Some(glass::switch(on, &theme).into_any_element()),
+                    false,
+                    &theme,
+                )
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let sid = sid.clone();
+                    this.state
+                        .update(cx, |s, cx| s.set_members_see_reads(sid, !on, cx));
+                }))
+                .into_any_element()]));
+            }
             if let Some(row) = add {
                 out.push(Section::Card(vec![row.into_any_element()]));
             }

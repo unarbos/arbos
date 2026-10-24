@@ -515,6 +515,7 @@ pub fn people_chat_dto(
         image_key: cm.chat.image_key.clone(),
         avatar_leaf: cm.chat.avatar_leaf,
         avatar_leaf_color: cm.chat.avatar_leaf_color,
+        members_see_reads: Some(cm.chat.members_see_reads),
         pending,
         members,
         room: format!("/room/{PEOPLE_PROJECT}/{}", cm.chat.id),
@@ -854,6 +855,7 @@ pub async fn chats_create_group(
         image_key: None,
         avatar_leaf: leaf.map(|l| l.0),
         avatar_leaf_color: leaf.map(|l| l.1),
+        members_see_reads: true,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -978,6 +980,7 @@ pub async fn dm_create(
         image_key: None,
         avatar_leaf: None,
         avatar_leaf_color: None,
+        members_see_reads: true,
     };
     if let Err(e) = state.db.insert_people_chat(&chat) {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -1066,6 +1069,9 @@ pub struct PatchChatBody {
         deserialize_with = "crate::api::deserialize_double_option_i64"
     )]
     pub avatar_leaf_color: Option<Option<i64>>,
+    /// Owner/admin: whether members can see who has read messages in this group.
+    #[serde(default)]
+    pub members_see_reads: Option<bool>,
 }
 
 /// `None` = untouched, `Some(None)` = clear, `Some(Some((leaf, colour)))` = set.
@@ -1097,8 +1103,9 @@ fn safe_image_key(k: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == ':')
 }
 
-/// `PATCH /chats/{id} {"title"?, "image_key"?}` — any human member can name the group
-/// and set an optional picture (uploaded first via `PUT /blob/people:{id}/…`).
+/// `PATCH /chats/{id} {"title"?, "image_key"?, "members_see_reads"?}` — any human
+/// member can name the group and set an optional picture (uploaded first via
+/// `PUT /blob/people:{id}/…`). `members_see_reads` is owner/admin only.
 pub async fn chat_patch(
     State(state): State<AppState>,
     principal: Principal,
@@ -1113,8 +1120,22 @@ pub async fn chat_patch(
         Ok(l) => l,
         Err((st, msg)) => return api_error(st, "bad_leaf", msg),
     };
-    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() {
+    if b.title.is_none() && b.image_key.is_none() && leaf.is_none() && b.members_see_reads.is_none()
+    {
         return Json(chat_json(&state, &cm, &me, &device_of(&principal))).into_response();
+    }
+    if b.members_see_reads.is_some() {
+        let can = cm
+            .members
+            .iter()
+            .any(|m| m.user_id() == Some(me.as_str()) && (m.role == "owner" || m.role == "admin"));
+        if !can {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "admin_only",
+                "only an owner or admin can change who sees read receipts",
+            );
+        }
     }
     let title = b.title.as_ref().map(|t| {
         let trimmed = t.trim();
@@ -1148,9 +1169,10 @@ pub async fn chat_patch(
     }
     let title_ref = title.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
     let image_ref = image_key.as_ref().map(|o| o.as_ref().map(|s| s.as_str()));
-    if let Err(e) = state
-        .db
-        .update_people_chat_profile(&id, title_ref, image_ref, leaf)
+    if let Err(e) =
+        state
+            .db
+            .update_people_chat_profile(&id, title_ref, image_ref, leaf, b.members_see_reads)
     {
         return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
     }
@@ -2422,6 +2444,7 @@ pub async fn invite_create(
                     image_key: None,
                     avatar_leaf: None,
                     avatar_leaf_color: None,
+                    members_see_reads: true,
                 };
                 if let Err(e) = state.db.insert_people_chat(&chat) {
                     return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db", e.to_string());
@@ -3715,6 +3738,7 @@ pub(crate) mod tests_support {
             image_key: None,
             avatar_leaf: None,
             avatar_leaf_color: None,
+            members_see_reads: true,
         };
         state.db.insert_people_chat(&chat).expect("chat");
         for u in [a, b] {
@@ -3819,6 +3843,7 @@ mod picture_tests {
                 image_key: Some(key.to_owned()),
                 avatar_leaf: None,
                 avatar_leaf_color: None,
+                members_see_reads: None,
             }),
         )
         .await
@@ -3939,5 +3964,111 @@ mod picture_tests {
             StatusCode::OK
         );
         assert_eq!(picture_of(&state, &chat), None);
+    }
+}
+
+#[cfg(test)]
+mod members_see_reads_tests {
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+
+    use super::tests_support::person;
+    use super::*;
+    use crate::state::test_support::test_state;
+    use crate::state::AuthMode;
+
+    #[tokio::test]
+    async fn owner_sets_members_see_reads_member_cannot() {
+        let state = test_state(AuthMode::Github);
+        let (alice, alice_dev) = person(&state, 41);
+        let (_bob, bob_dev) = person(&state, 42);
+        // A real group: alice owns, bob is a member.
+        let r = chats_create_group(
+            State(state.clone()),
+            alice_dev.clone(),
+            Json(CreateGroupBody {
+                kind: "group".into(),
+                members: vec!["user42".into()],
+                agent_ids: vec![],
+                title: Some("Reads".into()),
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let chat = state
+            .db
+            .chats_of_member(&format!("user:{alice}"))
+            .unwrap()
+            .into_iter()
+            .find(|cm| cm.chat.kind == "group")
+            .unwrap()
+            .chat
+            .id;
+
+        assert!(
+            state
+                .db
+                .people_chat(&chat)
+                .unwrap()
+                .unwrap()
+                .members_see_reads,
+            "default on"
+        );
+
+        let r = chat_patch(
+            State(state.clone()),
+            bob_dev,
+            Path(chat.clone()),
+            Json(PatchChatBody {
+                title: None,
+                image_key: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                members_see_reads: Some(false),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "member cannot flip it");
+        assert!(
+            state
+                .db
+                .people_chat(&chat)
+                .unwrap()
+                .unwrap()
+                .members_see_reads
+        );
+
+        let r = chat_patch(
+            State(state.clone()),
+            alice_dev.clone(),
+            Path(chat.clone()),
+            Json(PatchChatBody {
+                title: None,
+                image_key: None,
+                avatar_leaf: None,
+                avatar_leaf_color: None,
+                members_see_reads: Some(false),
+            }),
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+        assert!(
+            !state
+                .db
+                .people_chat(&chat)
+                .unwrap()
+                .unwrap()
+                .members_see_reads
+        );
+        let dto = people_chat_dto(
+            &state,
+            &load_chat(&state, &chat).unwrap(),
+            &alice,
+            &device_of(&alice_dev),
+        );
+        assert_eq!(dto.members_see_reads, Some(false));
     }
 }

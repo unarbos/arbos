@@ -180,6 +180,8 @@ struct PeopleChat: Identifiable, Equatable {
     var muted: Bool
     /// Per-user sidebar archive (`archived_at` on the relay); nil = in the list.
     var archivedAt: Int64? = nil
+    /// Group policy: members may see who has read messages (owner/admin toggle). Default on.
+    var membersSeeReads: Bool = true
 
     var humans: [ChatMember] { members.filter { !$0.isAgent } }
     var agents: [ChatMember] { members.filter { $0.isAgent } }
@@ -219,6 +221,7 @@ extension PeopleChat {
         self.myRole = dto.me.role.flatMap { $0 } ?? "member"
         self.muted = dto.me.muted ?? false
         self.archivedAt = dto.archived_at.flatMap { $0 > 0 ? $0 : nil }
+        self.membersSeeReads = dto.members_see_reads ?? true
     }
 
     /// Is this person already in the chat? Me (`meId`) counts as in. A handle

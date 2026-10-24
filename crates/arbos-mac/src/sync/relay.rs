@@ -5046,6 +5046,32 @@ fn handle_command(shared: &Arc<Shared>, cmd: ClientCommand) {
                 }
             });
         }
+        ClientCommand::SetMembersSeeReads { chat_id, enabled } => {
+            {
+                let mut projects = shared.projects.lock().unwrap();
+                if let Some(p) = projects.iter_mut().find(|p| p.id == chat_id) {
+                    p.members_see_reads = enabled;
+                }
+                let snapshot = projects.clone();
+                drop(projects);
+                let _ = shared.events.send(SyncEvent::Projects(snapshot));
+            }
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                if let Err(err) = shared
+                    .patch_json(
+                        &format!("/chats/{chat_id}"),
+                        json!({ "members_see_reads": enabled }),
+                    )
+                    .await
+                {
+                    shared.notice(format!(
+                        "Read receipts setting not saved: {}",
+                        people_error(&err)
+                    ));
+                }
+            });
+        }
         ClientCommand::SetGroupLeaf { chat_id, pick } => {
             {
                 let mut projects = shared.projects.lock().unwrap();

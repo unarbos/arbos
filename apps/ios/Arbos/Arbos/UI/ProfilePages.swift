@@ -989,6 +989,7 @@ struct GroupProfileView: View {
 
     /// Members: Add members, then every person (name, @handle) and agent
     /// ("Agent · run by …") as kit rows — the Mac group pane's list.
+    /// Owners/admins also get a read-receipts policy card (members see who read).
     private var membersSections: [PaneSection] {
         var list: [AnyView] = [
             AnyView(Button { showAdd = true } label: {
@@ -997,7 +998,20 @@ struct GroupProfileView: View {
             .buttonStyle(.plain)),
         ]
         list += rows.map { r in AnyView(memberRow(r)) }
-        return [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
+        var out: [PaneSection] = [.card(list, separatorInset: PaneKit.separatorInset(.glyph("")))]
+        if canManageMembers, people?.isGroup == true {
+            out.insert(.card([AnyView(PaneRow(
+                title: "Read receipts",
+                subtitle: "Members can see who has read messages",
+                trailing: AnyView(
+                    Toggle("", isOn: Binding(
+                        get: { people?.membersSeeReads ?? true },
+                        set: { v in Task { await model.setMembersSeeReads(chatId, v) } }
+                    )).labelsHidden().tint(theme.online)
+                )
+            ))]), at: 0)
+        }
+        return out
     }
 
     private func memberSubtitle(_ r: Row) -> String {

@@ -3155,12 +3155,25 @@ pub fn build_rows(
 
 /// "Seen" when at least one peer's Presence `seen` covers my last outbound
 /// message in this chat (Settings → Notifications read receipts on).
+/// Group policy `members_see_reads` hides it for non-owner members.
 fn seen_label_for(
     state: &AppState,
     chat_id: &str,
     messages: &[Message],
     me_id: &str,
 ) -> Option<String> {
+    if let Some(space) = state.project(chat_id) {
+        if space.is_people_group() && !space.members_see_reads {
+            let me_handle = state.me_handle();
+            let i_own = space
+                .owner_handle
+                .as_deref()
+                .is_some_and(|o| o == me_handle);
+            if !i_own {
+                return None;
+            }
+        }
+    }
     let mine = |m: &Message| {
         m.sender == "user" || m.sender.is_empty() || m.sender == format!("user:{me_id}")
     };
