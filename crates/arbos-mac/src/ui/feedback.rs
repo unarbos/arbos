@@ -1,4 +1,4 @@
-//! "Send feedback" (⌘⇧F, the ✎ rail button, Help → Send Feedback…): the Mac twin of
+//! "Send feedback" (⌘⌥F, the ✎ rail button, Help → Send Feedback…): the Mac twin of
 //! TestFlight's screenshot feedback. Opening the sheet grabs the Arbos window as a PNG;
 //! the user can grab it again, clear it, drag a region, or pick an image file, add a
 //! note, and send (Enter / ⌘⏎). A note alone is enough when they skip the picture.
@@ -106,7 +106,7 @@ impl FeedbackSheet {
         self.open
     }
 
-    /// ⌘⇧F / rail / menu: grab the window first (the sheet must not be in the picture), then show.
+    /// ⌘⌥F / rail / menu: grab the window first (the sheet must not be in the picture), then show.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.open {
             self.close(cx);
@@ -516,7 +516,7 @@ impl Render for FeedbackSheet {
                         div()
                             .text_size(px(11.0))
                             .text_color(theme.text_faint)
-                            .child("⌘⇧F · ⏎ send"),
+                            .child("⌘⌥F · ⏎ send"),
                     ),
             )
             .child(

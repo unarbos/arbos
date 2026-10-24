@@ -504,7 +504,7 @@ fn sender_label(state: &AppState, m: &Message) -> String {
 }
 
 /// `http(s)://…` tokens, trailing punctuation trimmed, in order of appearance.
-pub(super) fn urls_in(text: &str) -> Vec<String> {
+pub(crate) fn urls_in(text: &str) -> Vec<String> {
     text.split(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '(' || c == ')')
         .filter(|t| t.starts_with("http://") || t.starts_with("https://"))
         .map(|t| {

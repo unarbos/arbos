@@ -38,6 +38,7 @@ use crate::ui::message_menu;
 use crate::ui::modal;
 use crate::ui::motion::{ease_out_cubic, PulseClock, COMPOSER_DROP_MS, SHAKE_MS};
 use crate::ui::onboarding;
+use crate::ui::palette;
 use crate::ui::people;
 use crate::ui::profiles;
 use crate::ui::reactions;
@@ -63,7 +64,7 @@ actions!(
         PrevTab,
         NextTab,
         ToggleRail,
-        FocusSearch,
+        OpenPalette,
         Escape,
         Quit
     ]
@@ -200,8 +201,13 @@ pub struct Shell {
     pub(crate) avatar_picker: Option<avatar_picker::Picker>,
     /// The Generate tab's prompt.
     pub(crate) avatar_prompt_input: Entity<ComposerInput>,
-    /// Sidebar search field.
+    /// The command palette's search field (⌘⇧F / ⌘K / the sidebar's Search
+    /// disc; [feedback search-palette-2026-10-24]).
     pub(crate) search_input: Entity<ComposerInput>,
+    /// The palette: open/closed, highlighted row, rows drawn last frame.
+    pub(crate) palette: palette::PaletteState,
+    /// The palette's result list scroll (keeps the highlight in view).
+    palette_scroll: ScrollHandle,
     /// The media viewer's Forward picker search field (feedback media-viewer-2026-10-23).
     pub(crate) viewer_search: Entity<ComposerInput>,
     /// Keyboard focus while the media viewer is up (← → page, Esc closes).
@@ -268,11 +274,8 @@ pub struct Shell {
     /// app-01M5ATBWSY9E1HHBKH2QQVDEZX). Nothing renders it; escapes and
     /// click-outside still clear it so leftover true never sticks.
     pub(crate) menu_open: bool,
-    /// The chat list's top strip: whether the round search button has
-    /// expanded into its field (click or ⌘F), and which segment of the
-    /// All · Agents · People · Servers filter is selected
-    /// ([feedback sidebar-strip-filter-2026-10-24]).
-    pub(crate) search_strip: sidebar::SearchStrip,
+    /// Which segment of the chat list's All · Agents · People · Servers
+    /// filter is selected ([feedback sidebar-strip-filter-2026-10-24]).
     pub(crate) list_filter: sidebar::ListFilter,
     /// Sidebar: the "Hidden chats" list is showing instead of the chat list
     /// (Jacob 2026-10-23; the footer opens it, ‹ back returns).
@@ -366,7 +369,7 @@ pub struct Shell {
     /// (mouse start, offset start, moved past the click threshold).
     pub(crate) pip_offset: (f32, f32),
     pub(crate) pip_drag: Option<(gpui::Point<gpui::Pixels>, (f32, f32), bool)>,
-    /// ⌘⇧F "Send feedback" sheet (self-contained in `ui::feedback`).
+    /// ⌘⌥F "Send feedback" sheet (self-contained in `ui::feedback`).
     feedback: Entity<FeedbackSheet>,
 }
 
@@ -568,7 +571,21 @@ impl Shell {
         cx.observe(&avatar_prompt_input, |_, _, cx| cx.notify())
             .detach();
         let search_input = cx.new(ComposerInput::new);
-        search_input.update(cx, |input, _| input.set_placeholder("Search"));
+        {
+            let weak = cx.weak_entity();
+            let weak_arrow = cx.weak_entity();
+            search_input.update(cx, |input, _| {
+                input.set_placeholder("Search");
+                input.set_font_size(palette::FIELD_FONT);
+                // Return opens the highlighted row; ↑ ↓ move the highlight.
+                input.on_submit = Some(Rc::new(move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| this.palette_open_selected(window, cx));
+                }));
+                input.on_arrow = Some(Rc::new(move |delta, cx| {
+                    let _ = weak_arrow.update(cx, |this, cx| this.palette_step(delta, cx));
+                }));
+            });
+        }
         let viewer_search = cx.new(ComposerInput::new);
         viewer_search.update(cx, |input, _| {
             input.set_placeholder("Search");
@@ -692,14 +709,26 @@ impl Shell {
         if std::env::var("ARBOS_OPEN_NEW_CHAT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| s.open_new_chat(cx));
         }
-        // Rig: `ARBOS_SEARCH=<text>` opens the sidebar search with that query
-        // (synthetic key events do not reach the GPUI field on the shared display).
+        // Rig: `ARBOS_SEARCH=<text>` opens the command palette with that query
+        // (synthetic key events do not reach the GPUI field on the shared
+        // display); `ARBOS_PALETTE=1` opens it empty (recents);
+        // `ARBOS_PALETTE_SELECT=<n>` highlights row n.
         let search_query = std::env::var("ARBOS_SEARCH")
             .ok()
             .filter(|q| !q.trim().is_empty());
         if let Some(q) = &search_query {
             search_input.update(cx, |input, cx| input.set_text(q.clone(), cx));
         }
+        let palette = palette::PaletteState {
+            open: search_query.is_some() || std::env::var("ARBOS_PALETTE").is_ok_and(|v| v == "1"),
+            cursor: crate::palette::Cursor {
+                selected: std::env::var("ARBOS_PALETTE_SELECT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            },
+            ..Default::default()
+        };
         if std::env::var("ARBOS_OPEN_NEW_AGENT").is_ok_and(|v| v == "1") {
             state.update(cx, |s, cx| {
                 s.open_new_chat(cx);
@@ -825,6 +854,8 @@ impl Shell {
             avatar_picker: None,
             avatar_prompt_input,
             search_input,
+            palette,
+            palette_scroll: ScrollHandle::new(),
             viewer_search,
             viewer_focus: cx.focus_handle(),
             viewer_focused_generation: 0,
@@ -887,11 +918,6 @@ impl Shell {
             fixture_drag_over: std::env::var("ARBOS_FIXTURE_DRAG_OVER").is_ok_and(|v| v == "1"),
             signing_in: false,
             menu_open: false,
-            // A rig query (`ARBOS_SEARCH`) shows the field open, as a typed one would.
-            search_strip: sidebar::SearchStrip {
-                open: search_query.is_some()
-                    || std::env::var("ARBOS_SEARCH_OPEN").is_ok_and(|v| v == "1"),
-            },
             // Rig: `ARBOS_SIDEBAR_FILTER=all|agents|people|servers` selects a segment at launch.
             list_filter: std::env::var("ARBOS_SIDEBAR_FILTER")
                 .ok()
@@ -1032,6 +1058,9 @@ impl Shell {
     /// else — `render` moves focus back every frame, so the composer behind a
     /// sheet never types (Jacob, feedback forward-sheet-focus-2026-10-24).
     pub(crate) fn modal_focus(&self, cx: &App) -> Option<FocusHandle> {
+        if self.palette.open {
+            return Some(self.search_input.read(cx).focus_handle(cx));
+        }
         let state = self.state.read(cx);
         if state.forward_message.is_some() {
             return Some(self.viewer_search.read(cx).focus_handle(cx));
@@ -2000,32 +2029,107 @@ impl Shell {
         });
     }
 
-    /// ⌘F: the round search button in the chat list's strip expands into its
-    /// field and takes focus ([feedback sidebar-strip-filter-2026-10-24]).
-    fn focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_search(window, cx);
+    /// ⌘⇧F / ⌘K, or the sidebar's Search disc: the command palette opens
+    /// centred over the window ([feedback search-palette-2026-10-24]). ⌘F is
+    /// not bound here — Jacob keeps it for in-chat search, which does not
+    /// exist yet.
+    fn open_palette_action(
+        &mut self,
+        _: &OpenPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_palette(window, cx);
     }
 
-    pub(crate) fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_open = false;
-        self.search_strip.focus();
+        self.close_popovers(cx);
+        if !self.palette.open {
+            self.search_input.update(cx, |i, cx| i.clear(cx));
+            self.palette = palette::PaletteState {
+                open: true,
+                ..Default::default()
+            };
+            self.palette_scroll.set_offset(gpui::Point::default());
+        }
         let handle = self.search_input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
     }
 
-    /// The search field folds back into its round button; a typed query is
-    /// dropped and the composer takes focus again.
-    pub(crate) fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.search_strip.fold();
+    /// Esc, a click outside, or an opened row: the palette goes away, its
+    /// query is dropped and the composer takes the keyboard again.
+    pub(crate) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette.open {
+            return;
+        }
+        self.palette = palette::PaletteState::default();
         self.search_input.update(cx, |i, cx| i.clear(cx));
         Composer::focus(&self.composer, window, cx);
         cx.notify();
     }
 
+    /// ↑ / ↓ in the palette field (`ComposerInput::on_arrow`).
+    pub(crate) fn palette_step(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if !self.palette.open {
+            return;
+        }
+        let len = self.palette.len;
+        self.palette.cursor.step(delta, len);
+        // The list scrolls the highlight into view on the next frame.
+        self.palette.reveal = 2;
+        cx.notify();
+    }
+
+    /// Return in the palette field: open the highlighted row.
+    pub(crate) fn palette_open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette.open {
+            return;
+        }
+        let typed = self.search_input.read(cx).text().to_string();
+        let rows = palette::rows_for(self, &typed, cx);
+        if let Some(row) = rows.get(self.palette.cursor.selected) {
+            self.palette_open_target(row.target.clone(), window, cx);
+        }
+    }
+
+    /// ⌘1–⌘9 while the palette is up: open that row.
+    pub(crate) fn palette_pick_action(
+        &mut self,
+        action: &dyn gpui::Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = palette::pick_index(action) else {
+            return;
+        };
+        let typed = self.search_input.read(cx).text().to_string();
+        let rows = palette::rows_for(self, &typed, cx);
+        if let Some(row) = rows.get(index) {
+            self.palette_open_target(row.target.clone(), window, cx);
+        }
+    }
+
+    pub(crate) fn palette_open_target(
+        &mut self,
+        target: crate::palette::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_palette(window, cx);
+        self.hidden_open = false;
+        self.state
+            .update(cx, |s, cx| s.open_palette_target(target, cx));
+    }
+
     /// Escape stops a recording memo (keeping its transcript), then closes
     /// whatever floats: menus, then sheets.
     fn escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.open {
+            self.close_palette(window, cx);
+            return;
+        }
         if self.state.read(cx).forward_message.is_some() {
             self.state.update(cx, |s, cx| s.close_forward_message(cx));
             Composer::focus(&self.composer, window, cx);
@@ -2074,17 +2178,6 @@ impl Shell {
             self.server_member_armed = None;
             self.server_leave_armed = false;
             cx.notify();
-            return;
-        }
-        if self
-            .search_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window)
-        {
-            // Escape in the Search field clears it, folds it back into its
-            // round button and returns to the composer.
-            self.close_search(window, cx);
             return;
         }
         let editing_agent = {
@@ -3707,7 +3800,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::prev_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::toggle_rail))
-            .on_action(cx.listener(Self::focus_search))
+            .on_action(cx.listener(Self::open_palette_action))
             .on_action(cx.listener(Self::escape))
             .on_action(cx.listener(Self::send_feedback))
             .on_action(cx.listener(Self::paste_into_chat))
@@ -4061,6 +4154,11 @@ impl Render for Shell {
             // Closed by × / the backdrop / Forward: typing goes back to the
             // composer (unless the bubble menu's picker owns the field now).
             Composer::focus(&self.composer, window, cx);
+        }
+        // The command palette: the topmost modal (over sheets and the viewer).
+        let palette_scroll = self.palette_scroll.clone();
+        if let Some(overlay) = palette::overlay(self, &palette_scroll, window, cx) {
+            root = root.child(overlay);
         }
         self.enforce_modal_focus(window, cx);
         // Collapsed video call: the camera keeps showing in a draggable tile.

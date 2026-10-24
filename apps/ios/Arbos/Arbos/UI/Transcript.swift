@@ -109,15 +109,16 @@ enum RowKind: Equatable {
     /// Another person's message in a people chat: left bubble with avatar; the name above
     /// only when the sender changed (`named`, Grok Bot's group style) and the chat names its
     /// senders at all (group / channel, `rows(multiParty:)`); the name sits inside the bubble
-    /// and `time` follows the text (Jacob, 2026-10-23).
-    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?, time: String?)
+    /// (Jacob, 2026-10-23). No time inside any bubble: the time is the transcript's
+    /// drag-to-reveal only (Jacob, 2026-10-24, docs/mac-design-rules.md).
+    case other(text: String, handle: String, avatar: String?, named: Bool, quote: Quote?)
     case assistant(blocks: [Block], live: Bool, caption: String?, quote: Quote? = nil)
     /// Shared agent in a people chat: same shape as `.other` (avatar + bubble, name on each
     /// reply — consecutive answers from the same agent must not merge, #1447). No
     /// "answering @x · owned by @y" meta — ownership lives in the profile pane
     /// (Jacob, 2026-10-22). `agentId` opens that pane from the avatar / name.
     /// `quote` is the user message this answers (`inReplyTo`).
-    case member(blocks: [Block], live: Bool, handle: String, name: String?, avatar: String?, named: Bool, agentId: String?, quote: Quote?, time: String?)
+    case member(blocks: [Block], live: Bool, handle: String, name: String?, avatar: String?, named: Bool, agentId: String?, quote: Quote?)
     /// Centred muted line: hand-offs ("Messaged ◉ Affine"), stops, dates.
     case system(icon: String?, text: String, avatarProject: Id?)
     /// Grok Bot question card: bold question, × top-right, lettered answer rows.
@@ -201,7 +202,6 @@ enum Transcript {
             // row from the same agent must not look like one run.
             let agentInPeople = people && (message.role == .assistant || message.role == .project)
             let named = multiParty && (dateBreak || prevSender != message.sender || agentInPeople)
-            let inlineTime = multiParty ? Self.clockLabel(message.createdAt) : nil
             switch message.role {
             case .user:
                 var hasImage = false
@@ -256,7 +256,7 @@ enum Transcript {
                                          kind: .user(text: text, pending: message.pending, quote: quote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#other", messageId: message.id, role: .project,
-                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote, time: inlineTime)))
+                                         kind: .other(text: text, handle: message.senderHandle ?? "someone", avatar: message.senderAvatar, named: named, quote: quote)))
                     }
                 }
             case .system:
@@ -306,15 +306,14 @@ enum Transcript {
                                              kind: .member(blocks: blocks, live: live, handle: h, name: message.senderName,
                                                            avatar: message.senderAvatar, named: named && pix == firstTextPart,
                                                            agentId: agentId,
-                                                           quote: pix == firstTextPart ? replyQuote : nil,
-                                                           time: pix == lastTextPart ? inlineTime : nil)))
+                                                           quote: pix == firstTextPart ? replyQuote : nil)))
                         } else if message.role == .project, let from = Self.projectSender(message) {
                             // Another agent wrote into this chat (agent-to-agent messaging):
                             // the group member bubble — its avatar, its colour, its name above.
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .member(blocks: blocks, live: live, handle: from.handle, name: message.senderName,
                                                            avatar: nil, named: pix == firstTextPart, agentId: from.projectId,
-                                                           quote: nil, time: pix == lastTextPart ? inlineTime : nil)))
+                                                           quote: nil)))
                         } else {
                             chunk.append(Row(id: "\(message.id)#\(id)", messageId: message.id, role: .assistant,
                                              kind: .assistant(blocks: blocks, live: live, caption: nil,
@@ -384,7 +383,7 @@ enum Transcript {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .member(blocks: blocks, live: false, handle: h, name: message.senderName,
                                                        avatar: message.senderAvatar, named: named, agentId: agentId,
-                                                       quote: replyQuote, time: inlineTime)))
+                                                       quote: replyQuote)))
                     } else {
                         chunk.append(Row(id: "\(message.id)#failed", messageId: message.id, role: .assistant,
                                          kind: .assistant(blocks: blocks, live: false, caption: nil)))
@@ -494,31 +493,6 @@ enum Transcript {
     /// Blocks for one text part — polished, split, JSON dropped. Cached by text: a rebuild
     /// runs for every streaming delta, and re-parsing every finished answer in a long group
     /// on each one kept the main thread busy. Only the streaming part misses the cache.
-    /// "8:05 AM" for the time after a group / channel bubble's text.
-    static func clockLabel(_ ms: Int64) -> String? {
-        guard ms > 0 else { return nil }
-        // One label per minute, through a reused formatter: `Date.formatted` per row made
-        // every rebuild of a long group cost ~50 µs × rows (5 000 rows: 14 s in Debug).
-        let minute = ms / 60_000
-        if let hit = clockLabels.object(forKey: NSNumber(value: minute)) { return hit as String }
-        let label = clockFormatter.string(from: Date(timeIntervalSince1970: Double(minute * 60)))
-        clockLabels.setObject(label as NSString, forKey: NSNumber(value: minute))
-        return label
-    }
-
-    private static let clockFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .none
-        f.timeStyle = .short
-        return f
-    }()
-
-    private static let clockLabels: NSCache<NSNumber, NSString> = {
-        let cache = NSCache<NSNumber, NSString>()
-        cache.countLimit = 20_000
-        return cache
-    }()
-
     static func proseBlocks(_ text: String, people: Bool) -> [Block] {
         let key = (people ? "p\u{1}" : "a\u{1}") + text
         if let hit = blockCache.object(forKey: key as NSString) { return hit.blocks }
@@ -1107,7 +1081,7 @@ struct RowView: View, Equatable {
                 .frame(maxWidth: maxBubble, alignment: .trailing)
                 .opacity(pending ? 0.6 : 1)
             }
-        case .other(let text, let handle, let avatar, let named, let quote, let time):
+        case .other(let text, let handle, let avatar, let named, let quote):
             let openPerson = { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openPerson) {
@@ -1117,7 +1091,7 @@ struct RowView: View, Equatable {
                 .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
                 .accessibilityLabel("@\(handle), profile")
                 // Group / channel: the name inside the bubble, in the sender's colour,
-                // then the reply quote, then the text with the time after it.
+                // then the reply quote, then the text. No time in the bubble (drag to reveal).
                 VStack(alignment: .leading, spacing: 0) {
                     if named {
                         Button(action: openPerson) {
@@ -1132,7 +1106,7 @@ struct RowView: View, Equatable {
                         quoteHeader(quote, color: theme.text)
                             .padding(.bottom, Self.quoteToTextGap)
                     }
-                    inlineText(Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions), time: time)
+                    Markdown.inlineText(text, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions)
                         .font(theme.font(Theme.body))
                         .lineSpacing(Theme.bodyLineSpacing)
                         .tint(theme.accent)
@@ -1147,7 +1121,7 @@ struct RowView: View, Equatable {
                 Spacer(minLength: 0)
             }
             .task(id: avatar) { SenderAccents.shared.load(url: avatar) }
-        case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote, let time):
+        case .member(let blocks, let live, let handle, let name, let avatar, let named, let agentId, let quote):
             let openMember = {
                 if let agentId { model.showProfile(.agent(projectId: agentId)) }
                 else { model.openPersonProfile(handle: handle, avatarUrl: avatar, chatId: chatId) }
@@ -1155,12 +1129,6 @@ struct RowView: View, Equatable {
             // One identity for the disc, the caption and the bar (#1592): the same resolver
             // the presence row asks, with the same row fields.
             let agent = model.agent(sender: agentId ?? "", handle: handle, name: name, chatId: chatId)
-            // The time rides the last paragraph's line; any other last block gets it on
-            // a line of its own, right-aligned.
-            let lastParagraph: String? = {
-                if !live, case .paragraph(let t)? = blocks.last { return t }
-                return nil
-            }()
             HStack(alignment: .bottom, spacing: Theme.memberAvatarGap) {
                 Button(action: openMember) { memberAvatar(agent) }
                     .padding(.leading, Theme.avatarColumnInset(composerInset: composerInset))
@@ -1183,18 +1151,7 @@ struct RowView: View, Equatable {
                         }
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(Array(blocks.enumerated()), id: \.offset) { i, block in
-                                if i == blocks.count - 1, let lastParagraph, time != nil {
-                                    inlineText(Markdown.inlineText(lastParagraph, color: theme.text, link: theme.accent, codeChip: theme.codeChip, mentions: mentions), time: time)
-                                        .font(theme.font(Theme.body))
-                                        .lineSpacing(Theme.bodyLineSpacing)
-                                        .tint(theme.accent)
-                                        .textSelection(.enabled)
-                                } else {
-                                    BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
-                                }
-                            }
-                            if let time, lastParagraph == nil {
-                                HStack { Spacer(minLength: 0); timeLabel(time) }
+                                BlockView(block: block, live: live && i == blocks.count - 1, mentions: mentions)
                             }
                         }
                     }
@@ -1382,16 +1339,6 @@ struct RowView: View, Equatable {
         } else {
             LiveSenderName(name: agent.name, url: nil, seed: agent.id, override: agent.effectiveAvatarColorIndex, agent: true)
         }
-    }
-
-    /// The text with the time after its last word ("… Discord.  8:05 AM"), muted and small.
-    private func inlineText(_ text: Text, time: String?) -> Text {
-        guard let time else { return text }
-        return text + Text("  ") + Text(time).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
-    }
-
-    private func timeLabel(_ time: String) -> some View {
-        Text(time).font(theme.font(Theme.tiny)).foregroundStyle(theme.muted)
     }
 
     /// Mac parity: an agent's bubbles in a people chat carry its disc colour

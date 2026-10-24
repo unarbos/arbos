@@ -70,9 +70,10 @@ pub const COLUMN_MAX_WIDTH: f32 = COMPOSER_WIDTH + 2.0 * PLUS_BUTTON;
 /// Agent bubble cap, measured from Grok Mac on two pane widths (ref 57:
 /// 728 pt pane, 612 pt bubble; ref 58: 424 pt pane, 310 pt bubble): the
 /// bubble ends a fixed 84 pt before the column's right edge (100 pt from
-/// the pane), not at a fixed width. The hover rail (reply · copy · react)
-/// lives in that gap, so hovering never re-wraps the text. Time and
-/// sent/seen sit inside the bubble.
+/// the pane), not at a fixed width. The hover rail (reply · copy · react ·
+/// time) lives in that gap, so hovering never re-wraps the text. Only the
+/// sent/seen label sits inside the bubble; the time is hover-only
+/// (docs/mac-design-rules.md).
 pub const ASSISTANT_RIGHT_GAP: f32 = 84.0;
 /// A new time stamp line whenever messages are this far apart.
 const STAMP_GAP_MS: u64 = 60 * 60 * 1000;
@@ -340,7 +341,7 @@ pub enum RowKind {
         /// Another person in a people chat (D72): left bubble with their
         /// avatar and handle instead of my right bubble.
         from: Option<Person>,
-        /// "9:41 PM" at the bottom-right inside the bubble (always visible).
+        /// "9:41 PM", revealed at the bubble's outer edge on hover only.
         time: Option<String>,
         /// My own messages: "sent" after the relay ACKs, "seen" when a peer
         /// opened the chat (or an agent answered). Never set on others' bubbles.
@@ -365,7 +366,7 @@ pub enum RowKind {
         first: bool,
         last: bool,
         fill: bool,
-        /// "9:41 PM" at the bottom-right inside the last block (always visible).
+        /// "9:41 PM", revealed in the hover rail of the last block on hover only.
         time: Option<String>,
         /// In a people chat the message has a sender row above it: every block
         /// leaves the avatar lane free and the last one draws the sender's disc
@@ -1592,8 +1593,7 @@ impl Transcript {
             .as_ref()
             .map(|a| avatars::agent_accent(&a.seed, a.color_index, a.leaf.0, a.leaf.1, theme));
         // Group / channel: the agent's name inside its first bubble, in its
-        // colour, with the `agent` tag; the time at the bottom-right of the
-        // last block (always visible — not on hover).
+        // colour, with the `agent` tag; the time only appears in the hover rail.
         let name_el = match (&identity, agent_accent) {
             (Some(a), Some(color)) if named => {
                 let open_state = self.state.clone();
@@ -1657,20 +1657,18 @@ impl Transcript {
                     theme,
                     &selectable.bubble(format!("{message_id}#text"), bubble_text.text),
                 ),
-                None,
-            ))
-            // Timestamp stays inside the last finished block at the bottom-right.
-            .when(last && !live, |el| {
-                el.children(bubble_footer(time, None, theme.text_muted))
-            });
+            ));
         let (row_el, reveal) = self.hover_row(row_id, now, window, cx);
-        // Hover: the rail (smiley · reply · ⋯) on the last block of a finished reply.
-        // Time lives inside the bubble now.
+        // Hover: the rail (smiley · reply · ⋯) and the bubble's time on the last
+        // block of a finished reply. Nothing of it exists at rest.
         let hover_actions =
             (last && !live).then(|| self.hover_rail(row_id, message_id, reveal, theme, cx));
+        let hover_time = (last && !live)
+            .then(|| hover_time(time, reveal, theme).map(|t| t.ml(px(8.0))))
+            .flatten();
         // The rail hangs off the bubble's right edge, out of the flow: it
         // lives in the column's 84 pt gap and never narrows the bubble.
-        let hover_rail = hover_actions.map(|actions| {
+        let hover_rail = (hover_actions.is_some() || hover_time.is_some()).then(|| {
             div()
                 .absolute()
                 .left(relative_width(1.0))
@@ -1679,7 +1677,8 @@ impl Transcript {
                 .pl(px(6.0))
                 .flex()
                 .items_center()
-                .child(actions)
+                .children(hover_actions)
+                .children(hover_time)
         });
         let bubble = bubble.children(hover_rail);
         // People chats: the sender's disc at the bubble's bottom-left on
@@ -1732,11 +1731,8 @@ impl Transcript {
         let can_reply = Self::can_reply_row(&row.kind) && !row.message_id.is_empty();
         let swipe_row_id = row.id.clone();
         let swipe_message_id = row.message_id.clone();
-        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx).with_mentions(
-            self.mentions.clone(),
-            theme.accent,
-            Theme::with_alpha(theme.accent, 0.14),
-        );
+        let selectable = Selectable::new(&self.selection, theme.accent_soft, cx)
+            .with_mentions(self.mentions.clone(), theme.accent);
         let inner: AnyElement = match row.kind {
             RowKind::User {
                 text,
@@ -1776,7 +1772,8 @@ impl Transcript {
                 let body =
                     user_message_body(&row.id, &text, text_color, &theme, &bubble_selectable);
                 // Someone else's bubble in a group / channel: their name inside
-                // it (their colour); time and sent/seen sit in the bubble footer.
+                // it (their colour); the time is hover-only; my own bubble carries
+                // its sent/seen label in the footer.
                 let (image, color) = match &from {
                     Some(person) => {
                         let state = self.state.read(cx);
@@ -1835,9 +1832,8 @@ impl Transcript {
                         name_el,
                         quote_header.map(|q| q.into_any_element()),
                         body,
-                        None,
                     ))
-                    .children(bubble_footer(time, receipt, meta_color));
+                    .children(bubble_footer(receipt, meta_color));
                 if let Some(person) = from {
                     // Someone else: left-aligned, their avatar beside the bubble on
                     // the avatar column. A small coloured left-edge sliver marks a
@@ -1884,7 +1880,10 @@ impl Transcript {
                                                 .border_color(Theme::with_alpha(color, 0.7))
                                                 .when(pending, |el| el.opacity(0.6)),
                                         )
-                                        .child(actions.ml(px(6.0))),
+                                        .child(actions.ml(px(6.0)))
+                                        .children(
+                                            hover_time(time, reveal, &theme).map(|t| t.ml(px(8.0))),
+                                        ),
                                 )
                         })
                         .into_any_element()
@@ -1906,12 +1905,14 @@ impl Transcript {
                             )
                         })
                         .child({
-                            // My bubble sits right; time and sent/seen live inside it.
+                            // My bubble sits right, so its outer edge (and the
+                            // hover-only time) is on the left; sent/seen lives inside it.
                             let (row_el, reveal) = self.hover_row(&row.id, now, window, cx);
                             let actions =
                                 self.hover_rail(&row.id, &row.message_id, reveal, &theme, cx);
                             row_el
                                 .justify_end()
+                                .children(hover_time(time, reveal, &theme).map(|t| t.mr(px(8.0))))
                                 .child(actions.mr(px(6.0)))
                                 .child(bubble.when(pending, |el| el.opacity(0.6)))
                         })
@@ -2649,41 +2650,46 @@ fn message_is_seen(
         .any(|m| matches!(m.role, Role::Assistant | Role::Project))
 }
 
-/// Timestamp and optional sent/seen label at the bottom-right inside a bubble.
-fn bubble_footer(
-    time: Option<String>,
-    receipt: Option<ReceiptStatus>,
-    color: gpui::Hsla,
-) -> Option<Div> {
-    if time.is_none() && receipt.is_none() {
+/// The 11 pt muted time beside a bubble at the row's current hover opacity.
+/// Nothing is rendered at rest: the time exists only while the row is hovered
+/// or fading out (docs/mac-design-rules.md: timestamps are never always-on).
+fn hover_time(time: Option<String>, opacity: f32, theme: &Theme) -> Option<Div> {
+    if opacity <= 0.0 {
         return None;
     }
-    Some(
+    time.map(|label| {
+        div()
+            .flex_shrink_0()
+            .whitespace_nowrap()
+            .text_size(px(11.0))
+            .text_color(theme.text_muted)
+            .opacity(opacity)
+            .debug_selector(|| "bubble-time".into())
+            .child(label)
+    })
+}
+
+/// My own bubble's sent/seen label at the bottom-right inside it. The time
+/// never sits here (see [`hover_time`]).
+fn bubble_footer(receipt: Option<ReceiptStatus>, color: gpui::Hsla) -> Option<Div> {
+    receipt.map(|r| {
         div()
             .w_full()
             .flex()
             .justify_end()
             .items_center()
-            .gap(px(6.0))
             .pt(px(4.0))
             .text_size(px(11.0))
             .line_height(px(14.0))
             .text_color(color)
-            .children(time.map(|label| {
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .debug_selector(|| "bubble-time".into())
-                    .child(label)
-            }))
-            .children(receipt.map(|r| {
+            .child(
                 div()
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .debug_selector(|| "bubble-receipt".into())
-                    .child(r.label())
-            })),
-    )
+                    .child(r.label()),
+            )
+    })
 }
 
 /// A text block that is really machine output (a JSON object/array) is not
@@ -4011,34 +4017,31 @@ const NAME_TO_TEXT_GAP: f32 = 2.0;
 const QUOTE_TO_TEXT_GAP: f32 = 6.0;
 
 /// The inside of a bubble, in this order: sender name (group / channel,
-/// someone else) → reply quote header → the text, with the time after it.
-/// A short text keeps the time on its line; a wrapped one pushes it to the
-/// right of the next line.
+/// someone else) → reply quote header → the text. The time is never part of
+/// the bubble (hover-only, see [`hover_time`]; timestamps-hover-only-2026-10-24).
 ///
 /// Width rules:
-/// - The column and the text+time row are `w_full` so they take the bubble's
+/// - The column and the text row are `w_full` so they take the bubble's
 ///   content box when the bubble is capped — the body can wrap at that edge.
-/// - No `min_w_0` on the column or the text+time row: taffy sizes a flex
+/// - No `min_w_0` on the column or the text row: taffy sizes a flex
 ///   column from its items, and an item with `min-width: 0` contributes
 ///   nothing, so the bubble would take the name's or the quote's width and
 ///   wrap the body one word per line (bubble-quote-width-2026-10-23).
-/// - The text wrapper alone keeps `min_w_0`. The text+time line is a flex
-///   *row*, and there the rule is the opposite of the column: GPUI measures
-///   a text's min-content width as its unwrapped width
+/// - The text wrapper alone keeps `min_w_0`. The text line is a flex *row*,
+///   and there the rule is the opposite of the column: GPUI measures a
+///   text's min-content width as its unwrapped width
 ///   (`AvailableSpace::MinContent` → no wrap width), so without `min_w_0`
 ///   the item's automatic minimum is the whole line, it cannot shrink to
-///   the bubble, and the text runs out of the bubble's right edge while the
-///   time drops to a line of its own (Jacob, 2026-10-23, v0.6.184 / 0.6.185:
-///   bubble-overflow-hotfix-2026-10-23, app-01M5N8R9VYF64GWW8TVXW8HFX9).
-///   With `min_w_0` the row still reports the unwrapped width as its
-///   max-content size (a flex item's basis is its content; the minimum only
-///   matters when shrinking), so a short bubble is still content-sized, and
-///   a long one wraps at the bubble's width.
+///   the bubble, and the text runs out of the bubble's right edge (Jacob,
+///   2026-10-23, v0.6.184 / 0.6.185: bubble-overflow-hotfix-2026-10-23,
+///   app-01M5N8R9VYF64GWW8TVXW8HFX9). With `min_w_0` the row still reports
+///   the unwrapped width as its max-content size (a flex item's basis is its
+///   content; the minimum only matters when shrinking), so a short bubble is
+///   still content-sized, and a long one wraps at the bubble's width.
 fn sender_bubble_column(
     name: Option<AnyElement>,
     quote: Option<AnyElement>,
     body: AnyElement,
-    time: Option<AnyElement>,
 ) -> Div {
     div()
         .flex()
@@ -4057,37 +4060,13 @@ fn sender_bubble_column(
                 .child(q)
         }))
         .child(
-            div()
-                .flex()
-                .flex_wrap()
-                .items_end()
-                .w_full()
-                .child(
-                    div()
-                        .min_w_0()
-                        .debug_selector(|| "bubble-text".into())
-                        .child(body),
-                )
-                .children(time.map(|t| {
-                    div()
-                        .ml_auto()
-                        .pl(px(8.0))
-                        .debug_selector(|| "bubble-time".into())
-                        .child(t)
-                })),
+            div().flex().flex_wrap().items_end().w_full().child(
+                div()
+                    .min_w_0()
+                    .debug_selector(|| "bubble-text".into())
+                    .child(body),
+            ),
         )
-}
-
-/// "8:05 AM" after a group / channel bubble's text. Layout tests still
-/// exercise this inline placement; the live transcript uses [`bubble_footer`].
-#[cfg(test)]
-fn inline_time_label(time: String, theme: &Theme) -> Div {
-    div()
-        .text_size(px(TEXT_TINY))
-        .line_height(px(CHAT_LINE_HEIGHT))
-        .text_color(theme.text_faint)
-        .whitespace_nowrap()
-        .child(time)
 }
 
 /// Whether the open chat shows who sent each bubble (Jacob, 2026-10-23):
@@ -4810,7 +4789,6 @@ mod layout_tests {
                         Some(line(CHAT_LINE_HEIGHT).into_any_element()),
                         Some(line(32.0).into_any_element()),
                         line(CHAT_LINE_HEIGHT).into_any_element(),
-                        Some(div().w(px(40.0)).h(px(CHAT_LINE_HEIGHT)).into_any_element()),
                     )),
             )
         }
@@ -4818,15 +4796,19 @@ mod layout_tests {
 
     /// Jacob, 2026-10-23 (Discord-style reference): inside a group / channel
     /// bubble the order is name → reply quote → text, 2 pt from the name to
-    /// what follows, 6 from the quote; the time sits after the text.
+    /// what follows, 6 from the quote. No time inside the bubble (Jacob,
+    /// 2026-10-24: timestamps are hover-only).
     #[gpui::test]
-    fn a_named_bubble_stacks_name_quote_text_and_puts_the_time_after(cx: &mut TestAppContext) {
+    fn a_named_bubble_stacks_name_quote_text_without_a_time(cx: &mut TestAppContext) {
         let (_view, vcx) = cx.add_window_view(|_, _| NamedBubble);
         vcx.run_until_parked();
         let name = vcx.debug_bounds("bubble-name").expect("name drawn");
         let quote = vcx.debug_bounds("bubble-quote").expect("quote drawn");
         let text = vcx.debug_bounds("bubble-text").expect("text drawn");
-        let time = vcx.debug_bounds("bubble-time").expect("time drawn");
+        assert!(
+            vcx.debug_bounds("bubble-time").is_none(),
+            "a bubble never carries its time"
+        );
         let bottom = |b: gpui::Bounds<gpui::Pixels>| f32::from(b.origin.y + b.size.height);
         let top = |b: gpui::Bounds<gpui::Pixels>| f32::from(b.origin.y);
         assert_eq!(
@@ -4844,11 +4826,6 @@ mod layout_tests {
             bottom(quote) - top(quote),
             32.0 + QUOTE_TO_TEXT_GAP,
             "quote box = its height + the 6 pt gap"
-        );
-        assert_eq!(top(time), top(text), "the time shares the text's line");
-        assert!(
-            f32::from(time.origin.x) >= f32::from(text.origin.x + text.size.width) + 8.0,
-            "the time follows the text"
         );
     }
 
@@ -4903,7 +4880,6 @@ mod layout_tests {
                         &theme,
                         &bubble_sel,
                     ),
-                    None,
                 ));
             let row = div()
                 .w_full()
@@ -4978,9 +4954,10 @@ mod layout_tests {
     }
 
     /// Which bubble a [`BubbleRow`] draws: my own (right, `RowKind::User`
-    /// without `from`), another person's in a group (left, name + inline
-    /// time, `RowKind::User` with `from`), or an agent's (`markdown_bubble`
-    /// with a lane and the inline time).
+    /// without `from`), another person's in a group (left, with the name,
+    /// `RowKind::User` with `from`), or an agent's (`markdown_bubble` with a
+    /// lane). The time is hover-only, so it is drawn at `hover` opacity beside
+    /// the bubble through the real [`hover_time`], never inside it.
     #[derive(Clone, Copy, Debug)]
     enum Who {
         Mine,
@@ -4990,12 +4967,13 @@ mod layout_tests {
 
     /// One transcript row built from the same pieces the real rows use
     /// (`sender_bubble_column`, `user_message_body` / `render_block`,
-    /// `inline_time_label`, `assistant_slot`, `column_row`) in a pane of
-    /// `pane` pt.
+    /// `hover_time`, `assistant_slot`, `column_row`) in a pane of `pane` pt.
     struct BubbleRow {
         pane: f32,
         who: Who,
         text: &'static str,
+        /// The row's hover opacity this frame (0 = at rest, 1 = hovered).
+        hover: f32,
         selection: Entity<TextSelection>,
     }
 
@@ -5014,7 +4992,7 @@ mod layout_tests {
         ) -> impl IntoElement {
             let theme = Theme::dark(crate::ui::theme::Surface::Matte);
             let selectable = Selectable::new(&self.selection, theme.accent_soft, cx);
-            let time = Some(inline_time_label("1:52 PM".to_string(), &theme).into_any_element());
+            let time = || hover_time(Some("1:52 PM".to_string()), self.hover, &theme);
             let name = |name: &'static str| {
                 div()
                     .text_size(px(CHAT_BODY))
@@ -5046,8 +5024,20 @@ mod layout_tests {
                                 &theme,
                                 &bubble_sel,
                             ),
-                            time,
-                        ));
+                        ))
+                        // The rail (glyphs · time) out of the flow, as `markdown_bubble` does.
+                        .child(
+                            div()
+                                .absolute()
+                                .left(relative_width(1.0))
+                                .top_0()
+                                .bottom_0()
+                                .pl(px(6.0))
+                                .flex()
+                                .items_center()
+                                .child(div().size(px(16.0)))
+                                .children(time().map(|t| t.ml(px(8.0)))),
+                        );
                     div()
                         .w_full()
                         .flex()
@@ -5070,7 +5060,6 @@ mod layout_tests {
                             other.then(|| name("Samir Haddad")),
                             None,
                             body,
-                            other.then_some(time).flatten(),
                         ));
                     if other {
                         div()
@@ -5088,7 +5077,8 @@ mod layout_tests {
                                     .items_center()
                                     .debug_selector(|| "test-bubble-parent".into())
                                     .child(bubble)
-                                    .child(div().size(px(16.0)).ml(px(6.0))),
+                                    .child(div().size(px(16.0)).ml(px(6.0)))
+                                    .children(time().map(|t| t.ml(px(8.0)))),
                             )
                     } else {
                         div()
@@ -5097,6 +5087,7 @@ mod layout_tests {
                             .items_end()
                             .justify_end()
                             .debug_selector(|| "test-bubble-parent".into())
+                            .children(time().map(|t| t.mr(px(8.0))))
                             .child(div().size(px(16.0)).mr(px(6.0)))
                             .child(bubble)
                     }
@@ -5147,6 +5138,7 @@ mod layout_tests {
                     pane,
                     who,
                     text: OVERFLOWING_LINE,
+                    hover: 0.0,
                     selection: cx.new(TextSelection::new),
                 });
                 vcx.run_until_parked();
@@ -5191,7 +5183,7 @@ mod layout_tests {
     }
 
     /// A one-line bubble stays content-sized: no slack after a short text
-    /// (the row's max-content width is the text plus the time, never the cap).
+    /// (the row's max-content width is the text, never the cap).
     #[gpui::test]
     fn a_short_bubble_is_as_wide_as_its_text(cx: &mut TestAppContext) {
         for who in [Who::Mine, Who::Other, Who::Agent] {
@@ -5199,6 +5191,7 @@ mod layout_tests {
                 pane: REFERENCE_PANE,
                 who,
                 text: SHORT_LINE,
+                hover: 0.0,
                 selection: cx.new(TextSelection::new),
             });
             vcx.run_until_parked();
@@ -5216,21 +5209,86 @@ mod layout_tests {
                 bw < cap - 60.0,
                 "{who:?}: short bubble {bw} pt is at its cap ({cap})"
             );
-            // The bubble is the text, the pads, and (groups) the time after it.
-            let time_w = match who {
-                Who::Mine => 0.0,
-                Who::Other | Who::Agent => f32::from(
-                    vcx.debug_bounds("bubble-time")
-                        .expect("time drawn")
-                        .size
-                        .width,
-                ),
-            };
+            // The bubble is the text and the pads; the time is never inside it.
             assert!(
-                (bw - (tw + time_w + 2.0 * BUBBLE_PAD_X)).abs() <= 2.0,
-                "{who:?}: bubble {bw} ≠ text {tw} + time {time_w} + pads"
+                (bw - (tw + 2.0 * BUBBLE_PAD_X)).abs() <= 2.0,
+                "{who:?}: bubble {bw} ≠ text {tw} + pads"
             );
         }
+    }
+
+    /// Jacob, 2026-10-24 ("remove the always-on message timer. Only have that
+    /// on hover"): at rest no bubble — mine, another person's, an agent's —
+    /// draws a time anywhere; while the row is hovered the time appears beside
+    /// the bubble, outside it, on the bubble's line. Reverts v0.6.203
+    /// (#1496, always-visible footer time) and v0.6.183's group inline time
+    /// (#1437) on the Mac. Rule: docs/mac-design-rules.md.
+    #[gpui::test]
+    fn the_time_is_hidden_at_rest_and_beside_the_bubble_on_hover(cx: &mut TestAppContext) {
+        for who in [Who::Mine, Who::Other, Who::Agent] {
+            let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                pane: REFERENCE_PANE,
+                who,
+                text: SHORT_LINE,
+                hover: 0.0,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            assert!(
+                vcx.debug_bounds("bubble-time").is_none(),
+                "{who:?}: a time is drawn at rest"
+            );
+
+            let (_view, vcx) = cx.add_window_view(|_, cx| BubbleRow {
+                pane: REFERENCE_PANE,
+                who,
+                text: SHORT_LINE,
+                hover: 1.0,
+                selection: cx.new(TextSelection::new),
+            });
+            vcx.run_until_parked();
+            let bubble = vcx.debug_bounds("test-bubble").expect("bubble drawn");
+            let time = vcx
+                .debug_bounds("bubble-time")
+                .unwrap_or_else(|| panic!("{who:?}: no time on hover"));
+            let left = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x);
+            let right = |b: gpui::Bounds<Pixels>| f32::from(b.origin.x + b.size.width);
+            let outside = match who {
+                // My bubble sits right: the time is on its outer (left) edge.
+                Who::Mine => right(time) <= left(bubble),
+                // Others' bubbles sit left: the time follows the rail on the right.
+                Who::Other | Who::Agent => left(time) >= right(bubble),
+            };
+            assert!(
+                outside,
+                "{who:?}: the time {}..{} overlaps the bubble {}..{}",
+                left(time),
+                right(time),
+                left(bubble),
+                right(bubble)
+            );
+            assert!(
+                f32::from(time.origin.y) >= f32::from(bubble.origin.y)
+                    && f32::from(time.origin.y + time.size.height)
+                        <= f32::from(bubble.origin.y + bubble.size.height),
+                "{who:?}: the time is not on the bubble's line"
+            );
+        }
+    }
+
+    /// The fade is the only gate: `hover_time` yields nothing at opacity 0 and
+    /// an element at any positive opacity, so a row that was never hovered
+    /// (`HoverFade::default()`) draws no time at all.
+    #[test]
+    fn hover_time_renders_nothing_at_rest() {
+        let theme = Theme::dark(crate::ui::theme::Surface::Matte);
+        let fade = HoverFade::default();
+        let (opacity, _) = fade.opacity("m1", Instant::now());
+        assert_eq!(opacity, 0.0);
+        assert!(hover_time(Some("1:52 PM".into()), opacity, &theme).is_none());
+        assert!(hover_time(Some("1:52 PM".into()), 0.3, &theme).is_some());
+        assert!(hover_time(None, 1.0, &theme).is_none());
     }
 
     #[test]

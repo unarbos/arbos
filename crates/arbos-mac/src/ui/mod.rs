@@ -30,6 +30,7 @@ pub mod modal;
 pub mod motion;
 pub mod notify;
 pub mod onboarding;
+pub mod palette;
 pub mod people;
 pub mod presence;
 pub mod profiles;

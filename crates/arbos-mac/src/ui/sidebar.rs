@@ -1,7 +1,7 @@
 //! The chat list: the iPhone home screen as a Mac sidebar. The top strip holds
-//! three round buttons on the right — search (a closed button that expands
-//! into its field on click / ⌘F), "+", and the collapse toggle — then the
-//! iPhone home's All · Agents · People · Servers filter, then every agent,
+//! three round buttons on the right — search (opens the command palette,
+//! `ui::palette`; ⌘⇧F / ⌘K do the same), "+", and the collapse toggle — then
+//! the iPhone home's All · Agents · People · Servers filter, then every agent,
 //! person and server as one row — avatar, name, time, last line. The account
 //! circle (its dot is the machine state) sits at the bottom; the Update pill
 //! only while a newer build exists.
@@ -16,6 +16,9 @@
 //! composition is pinned by [`strip_controls`] and its tests; #1491 replaced
 //! the buttons with an always-open Search pill, and Jacob asked for the
 //! compact round buttons back ([feedback sidebar-strip-filter-2026-10-24]).
+//! The buttons are Grok Bot's size — `theme::CONTROL` 36, glyph 19, 8 apart —
+//! and Search opens the centred palette instead of an inline field
+//! ([feedback search-palette-2026-10-24]).
 
 use std::sync::Arc;
 
@@ -38,8 +41,8 @@ use crate::ui::motion::PulseClock;
 use crate::ui::people;
 use crate::ui::shell::{Shell, TRAFFIC_LIGHTS_INSET};
 use crate::ui::theme::{
-    Theme, AVATAR_ROW, CONTROL, HEADER_HEIGHT, PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY,
-    TEXT_SMALL, TEXT_TINY,
+    Theme, AVATAR_ROW, CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE, HEADER_HEIGHT,
+    PANEL_RADIUS, SIDEBAR_RESIZE_HANDLE, TEXT_BODY, TEXT_SMALL, TEXT_TINY,
 };
 
 /// Drag payload for the chat-list column's right-edge resize handle.
@@ -69,12 +72,14 @@ fn top_strip() -> f32 {
     }
 }
 
-/// Disc size of the strip's three round buttons (the #1134 redesign's compact
-/// buttons; measured 32 pt on the approved mock).
+/// Disc size of the strip's three round buttons: the button family's
+/// [`CONTROL`] — Grok Bot's 36 pt ([feedback search-palette-2026-10-24]; the
+/// #1134 mock's 32 before).
 pub(crate) const STRIP_BUTTON: f32 = CONTROL;
-/// Space between two strip buttons.
-pub(crate) const STRIP_GAP: f32 = 10.0;
-/// The strip's right inset (the buttons end here) and the search field's left edge.
+/// Space between two strip buttons (Grok: 8).
+pub(crate) const STRIP_GAP: f32 = CONTROL_GAP;
+/// The strip's right inset: the discs end 4 pt past the rows' card edge, as
+/// Grok's do (rows are inset 8; 12 − 8).
 pub(crate) const STRIP_INSET: f32 = 12.0;
 /// The filter capsules under the strip: the iPhone `PaneTabs` geometry (32 pt
 /// capsule, 4 pt gap) with 10 pt side padding instead of the iPhone's 16 —
@@ -89,58 +94,39 @@ pub(crate) const SERVER_PICTURE_CORNER: f32 = 11.0 / 36.0;
 /// One control of the top strip, left to right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StripControl {
-    /// The round search button (closed).
+    /// The round search button: opens the command palette.
     Search,
-    /// The search button expanded into its field (click or ⌘F); it stays
-    /// open while a query is typed.
-    SearchField,
     /// The round "+" (new chat / new channel inside a server).
     New,
     /// The round collapse toggle: folds the pane.
     Collapse,
 }
 
-/// Open/closed state of the strip's search button. The field shows while the
-/// button was clicked (or ⌘F pressed) or while a query is typed; Escape and
-/// the clear dot fold it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SearchStrip {
-    pub(crate) open: bool,
-}
-
-impl SearchStrip {
-    /// The search button was clicked or ⌘F was pressed.
-    pub(crate) fn focus(&mut self) {
-        self.open = true;
+impl StripControl {
+    /// Every control is one [`STRIP_BUTTON`] disc — the button family's size.
+    pub(crate) fn size(self) -> f32 {
+        STRIP_BUTTON
     }
 
-    /// Escape, or the clear dot: back to the round button.
-    pub(crate) fn fold(&mut self) {
-        self.open = false;
-    }
-
-    /// Whether the field (not the round button) is drawn for `query`.
-    pub(crate) fn shown(&self, query: &str) -> bool {
-        self.open || !query.trim().is_empty()
+    /// The glyph inside the disc: the plus and the magnifier draw Grok's
+    /// 13–14 pt marks at [`CONTROL_GLYPH`]; the collapse rect is a wider
+    /// icon and takes [`CONTROL_GLYPH_WIDE`] for the same visible box.
+    pub(crate) fn glyph(self) -> (&'static str, f32) {
+        match self {
+            StripControl::Search => ("search", CONTROL_GLYPH),
+            StripControl::New => ("plus", CONTROL_GLYPH),
+            StripControl::Collapse => ("sidebar-left", CONTROL_GLYPH_WIDE),
+        }
     }
 }
 
 /// What the strip holds, left to right (three-pane rule: exactly +, search,
 /// minimize — nothing else). `show_plus` is false for a server member who
 /// cannot add channels; the search is a spacer inside a server.
-pub(crate) fn strip_controls(
-    search: SearchStrip,
-    query: &str,
-    in_server: bool,
-    show_plus: bool,
-) -> Vec<StripControl> {
+pub(crate) fn strip_controls(in_server: bool, show_plus: bool) -> Vec<StripControl> {
     let mut controls = Vec::with_capacity(3);
     if !in_server {
-        controls.push(if search.shown(query) {
-            StripControl::SearchField
-        } else {
-            StripControl::Search
-        });
+        controls.push(StripControl::Search);
     }
     if show_plus {
         controls.push(StripControl::New);
@@ -149,9 +135,8 @@ pub(crate) fn strip_controls(
     controls
 }
 
-/// The filter row is drawn under the strip whenever the chat list is — with
-/// the search field open or closed — and never inside a server (the channel
-/// list has nothing to scope).
+/// The filter row is drawn under the strip whenever the chat list is, and
+/// never inside a server (the channel list has nothing to scope).
 pub(crate) fn filter_shown(in_server: bool) -> bool {
     !in_server
 }
@@ -415,9 +400,8 @@ fn channel_last_line(row: &arbos_matrix::ChannelRow) -> String {
     }
 }
 
-/// Sort key of a search result: the kind of hit first (people, titles,
-/// members, messages — `search::HitKind` order), newest activity inside a kind.
-/// Without a query every row is a `Title` hit, so the list is by activity.
+/// Sort key of a row: the kind of hit (always `Title` now that the list is
+/// not text-filtered), newest activity first.
 type RowKey = (search::HitKind, std::cmp::Reverse<u64>);
 
 /// The chats list's top and bottom fade (Jacob likes it, Oct 23). The band
@@ -447,8 +431,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let theme = Theme::of(cx).clone();
     let state = shell.state.read(cx);
     let selected = state.selected_project.clone();
-    let typed = shell.search_input.read(cx).text().trim().to_string();
-    let query = search::normalize_query(&typed);
     let machine = state.machine.shown_state();
     let sidebar_width = state.sidebar_width;
     // Inside a server the left pane shows its channels (D88 rule 2).
@@ -457,19 +439,22 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let waitlist_position = state.machine.waitlist_position;
 
     // Sidebar archive (Jacob 2026-10-23): archived spaces leave the list and
-    // sit behind the "Hidden chats · N" footer; a search still finds them.
-    let hidden_mode = shell.hidden_open && query.is_empty();
+    // sit behind the "Hidden chats · N" footer; the command palette still
+    // finds them. The list itself is never filtered by text any more
+    // ([feedback search-palette-2026-10-24]): every row is a plain `Title`
+    // hit, ordered by activity.
+    let hidden_mode = shell.hidden_open;
     let hidden_count = state.archived_space_count();
-    let shows = |archived: bool| hidden_mode == archived || !query.is_empty();
-    // The All · Agents · People · Servers segment scopes the list — with and
-    // without a query, like the iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
+    let shows = |archived: bool| hidden_mode == archived;
+    // The All · Agents · People · Servers segment scopes the list, like the
+    // iPhone home ([feedback sidebar-strip-filter-2026-10-24]).
     let filter = shell.list_filter;
     let mut rows: Vec<(RowKey, ListEntry)> = Vec::new();
     for s in state.servers.iter() {
         if !filter.admits_servers() {
             break;
         }
-        let Some(hit) = search::server_hit(s, &query) else {
+        let Some(hit) = search::server_hit(s, "") else {
             continue;
         };
         if !shows(s.archived_at.is_some()) {
@@ -496,10 +481,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
         if !filter.admits_space(p) {
             continue;
         }
-        // Display name / @handle, title, a member, a chat title, or a loaded
-        // message — ranked in that order; a hit beyond the row's own name is
-        // explained on the second line.
-        let Some(hit) = state.space_search_hit(p, &query) else {
+        let Some(hit) = state.space_search_hit(p, "") else {
             continue;
         };
         if !shows(p.archived_at.is_some()) {
@@ -551,11 +533,12 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     // pane is intuitive (#1491). When the rail is hidden the header still shows
     // an expand control so the list can come back.
     let show_plus = open_server.is_none() || open_server_admin;
-    let controls = strip_controls(shell.search_strip, &query, open_server.is_some(), show_plus);
-    let round = |id: &'static str, theme: &Theme| {
+    let controls = strip_controls(open_server.is_some(), show_plus);
+    let round = |id: &'static str, control: StripControl, theme: &Theme| {
+        let (glyph, size) = control.glyph();
         div()
             .id(id)
-            .size(px(STRIP_BUTTON))
+            .size(px(control.size()))
             .flex_shrink_0()
             .rounded_full()
             .flex()
@@ -565,10 +548,11 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             .bg(theme.surface_2)
             .hover(|s| s.bg(Theme::with_alpha(theme.text, 0.14)))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(icon(glyph, size, theme.text))
     };
     let collapse = |cx: &mut Context<Shell>| {
-        round("sidebar-collapse", &theme)
-            .child(icon("sidebar-left", 16.0, theme.text))
+        round("sidebar-collapse", StripControl::Collapse, &theme)
+            .debug_selector(|| "sidebar-collapse".into())
             .on_click(cx.listener(|this, _, window, cx| {
                 this.menu_open = false;
                 let width: f32 = window.viewport_size().width.into();
@@ -579,8 +563,8 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             }))
     };
     let plus = |cx: &mut Context<Shell>| {
-        round("sidebar-new", &theme)
-            .child(icon("plus", 16.0, theme.text))
+        round("sidebar-new", StripControl::New, &theme)
+            .debug_selector(|| "sidebar-new".into())
             .on_click({
                 let in_server = open_server.as_ref().map(|s| s.id.clone());
                 cx.listener(move |this, _, window, cx| {
@@ -605,60 +589,11 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 })
             })
     };
-    // The closed search button: a click expands it into the field (⌘F does the same).
+    // The search disc opens the command palette (⌘⇧F / ⌘K do the same).
     let search_button = |cx: &mut Context<Shell>| {
-        round("sidebar-search-toggle", &theme)
-            .child(icon("search", 15.0, theme.text))
-            .on_click(cx.listener(|this, _, window, cx| this.open_search(window, cx)))
-    };
-    // The expanded field: a capsule from the strip's left edge to the "+"
-    // (magnifier, the typed query, a clear dot). Escape or the dot fold it.
-    let search_field = |cx: &mut Context<Shell>| {
-        div()
-            .id("sidebar-search")
-            .flex_1()
-            .min_w_0()
-            .h(px(STRIP_BUTTON))
-            .pl(px(STRIP_INSET))
-            .pr(px(8.0))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .rounded_full()
-            .bg(theme.surface_2)
-            .cursor_text()
-            .child(icon("search", 13.0, theme.text_muted))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .flex()
-                    .items_center()
-                    .child(shell.search_input.clone()),
-            )
-            .child(
-                div()
-                    .id("sidebar-search-clear")
-                    .size(px(16.0))
-                    .rounded_full()
-                    .bg(theme.text_faint)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .child(icon("xmark", 8.0, theme.bg))
-                    .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx))),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    this.menu_open = false;
-                    let handle = this.search_input.read(cx).focus_handle(cx);
-                    window.focus(&handle, cx);
-                    cx.stop_propagation();
-                }),
-            )
+        round("sidebar-search-toggle", StripControl::Search, &theme)
+            .debug_selector(|| "sidebar-search".into())
+            .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
     };
     let mut strip = div()
         .h(px(top_strip()))
@@ -674,7 +609,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     for control in controls {
         strip = match control {
             StripControl::Search => strip.child(search_button(cx)),
-            StripControl::SearchField => strip.child(search_field(cx)),
             StripControl::New => strip.child(plus(cx)),
             StripControl::Collapse => strip.child(collapse(cx)),
         };
@@ -682,8 +616,6 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
     let strip = strip.window_drag();
     // ----- filter: All · Agents · People · Servers (the iPhone home's PaneTabs) --
     // Bare labels, the selected one on a capsule, centred; no track, no border.
-    // It stays while the search field is open: the query narrows the list and
-    // the segment still scopes it.
     let filter_bar = div()
         .id("sidebar-filter")
         .flex_shrink_0()
@@ -820,7 +752,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 ),
         );
     } else if rows.is_empty() && !hidden_mode {
-        // Nothing under this segment (or for this query) — the iPhone's copy.
+        // Nothing under this segment — the iPhone's copy.
         list = list.child(
             div()
                 .id("sidebar-filter-empty")
@@ -828,11 +760,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
                 .text_center()
                 .text_size(px(TEXT_SMALL))
                 .text_color(theme.text_muted)
-                .child(if query.is_empty() {
-                    filter.empty_copy().to_string()
-                } else {
-                    format!("Nothing matches “{typed}”.")
-                }),
+                .child(filter.empty_copy()),
         );
     }
     if hidden_mode {
@@ -879,7 +807,7 @@ pub fn render(shell: &Shell, cx: &mut Context<Shell>) -> Div {
             ListEntry::Server(row) => list.child(render_server_row(*row, &theme, cx)),
         };
     }
-    if !hidden_mode && query.is_empty() && hidden_count > 0 {
+    if !hidden_mode && hidden_count > 0 {
         // Grok Bot's footer: muted "Hidden chats · N ›" under the list.
         list = list.child(
             div()
@@ -2306,15 +2234,17 @@ pub fn chat_menu(
 
 #[cfg(test)]
 mod strip_tests {
-    use super::{strip_controls, ListFilter, SearchStrip, StripControl};
+    use super::{strip_controls, ListFilter, StripControl, STRIP_BUTTON, STRIP_GAP, STRIP_INSET};
     use crate::model::{Project, SpaceKind};
+    use crate::ui::theme::{CONTROL, CONTROL_GAP, CONTROL_GLYPH, CONTROL_GLYPH_WIDE};
 
     /// Three-pane rule: the chat list's strip holds exactly three controls —
     /// search, +, collapse, in that order — and nothing else (#1134; the
-    /// always-open pill of #1491 is gone).
+    /// always-open pill of #1491 is gone, and so is the #1606 inline field:
+    /// search opens the palette, [feedback search-palette-2026-10-24]).
     #[test]
     fn the_strip_holds_exactly_search_plus_collapse() {
-        let controls = strip_controls(SearchStrip::default(), "", false, true);
+        let controls = strip_controls(false, true);
         assert_eq!(
             controls,
             vec![
@@ -2326,34 +2256,37 @@ mod strip_tests {
         assert_eq!(controls.len(), 3, "exactly three controls");
     }
 
-    /// ⌘F (or a click on the round button) expands the search into its field;
-    /// the other two buttons stay. Escape folds it back to the button.
+    /// Jacob (2026-10-24): the three discs are EXACTLY Grok Bot's size, one
+    /// family. Measured on `ref-grok-round-search-plus.png` at 2 px/pt: disc
+    /// 72 px, glyph boxes 28 / 26 px at a 3 px stroke, 16 px between discs.
     #[test]
-    fn cmd_f_expands_the_search_and_escape_folds_it() {
-        let mut search = SearchStrip::default();
-        search.focus();
+    fn the_three_discs_are_groks_size() {
+        for control in strip_controls(false, true) {
+            assert_eq!(control.size(), CONTROL, "{control:?} disc");
+            assert_eq!(control.size(), 36.0, "{control:?}: Grok's 72 px / 2");
+        }
+        assert_eq!(STRIP_BUTTON, CONTROL);
+        assert_eq!(STRIP_GAP, CONTROL_GAP);
+        assert_eq!(STRIP_GAP, 8.0, "Grok's 16 px / 2 between discs");
+        assert_eq!(STRIP_INSET, 12.0);
+        // The 24-grid icons: search and plus at CONTROL_GLYPH draw Grok's
+        // 14 / 13 pt marks within 1 px (0.75 × 19 = 14.25, 0.667 × 19 = 12.7);
+        // the collapse rect (20/24 of the grid) takes the narrower size for
+        // the same 14 pt box (0.833 × 17 = 14.2).
+        assert_eq!(StripControl::Search.glyph(), ("search", CONTROL_GLYPH));
+        assert_eq!(StripControl::New.glyph(), ("plus", CONTROL_GLYPH));
         assert_eq!(
-            strip_controls(search, "", false, true),
-            vec![
-                StripControl::SearchField,
-                StripControl::New,
-                StripControl::Collapse
-            ]
+            StripControl::Collapse.glyph(),
+            ("sidebar-left", CONTROL_GLYPH_WIDE)
         );
-        search.fold();
-        assert_eq!(
-            strip_controls(search, "", false, true)[0],
-            StripControl::Search
-        );
-    }
-
-    /// A typed query keeps the field open even after the button state folded
-    /// (the clear dot empties the query first, so both go together).
-    #[test]
-    fn a_typed_query_keeps_the_field_open() {
-        let search = SearchStrip::default();
-        assert!(search.shown("sam"));
-        assert!(!search.shown("   "));
+        let magnifier = 0.75 * CONTROL_GLYPH;
+        let plus = (16.0 / 24.0) * CONTROL_GLYPH;
+        let collapse = (20.0 / 24.0) * CONTROL_GLYPH_WIDE;
+        assert!((magnifier - 14.0).abs() <= 0.5, "magnifier box {magnifier}");
+        assert!((plus - 13.0).abs() <= 0.5, "plus box {plus}");
+        assert!((collapse - 14.0).abs() <= 0.5, "collapse box {collapse}");
+        let stroke = 2.0 / 24.0 * CONTROL_GLYPH;
+        assert!((stroke - 1.5).abs() <= 0.25, "stroke {stroke} (Grok 1.5)");
     }
 
     /// Inside a server there is no search; a member without admin rights has
@@ -2361,13 +2294,10 @@ mod strip_tests {
     #[test]
     fn a_server_drops_the_search_and_members_drop_the_plus() {
         assert_eq!(
-            strip_controls(SearchStrip::default(), "", true, true),
+            strip_controls(true, true),
             vec![StripControl::New, StripControl::Collapse]
         );
-        assert_eq!(
-            strip_controls(SearchStrip::default(), "", true, false),
-            vec![StripControl::Collapse]
-        );
+        assert_eq!(strip_controls(true, false), vec![StripControl::Collapse]);
     }
 
     fn agent(shared: bool) -> Project {
@@ -2429,18 +2359,13 @@ mod strip_tests {
         assert_eq!(ListFilter::default(), ListFilter::All);
     }
 
-    /// The search field open does not hide the filter: both scope the one list.
+    /// The filter stays in the sidebar unchanged (Jacob, search-palette item
+    /// point 4): drawn whenever the chat list is, never inside a server.
     #[test]
-    fn search_open_keeps_the_filter() {
-        let mut search = SearchStrip::default();
-        search.focus();
-        // The filter row is drawn whenever the chat list is (not inside a
-        // server); the strip's state has no say in it.
-        let controls = strip_controls(search, "sam", false, true);
-        assert_eq!(controls[0], StripControl::SearchField);
+    fn the_filter_stays_under_the_strip() {
         assert!(
             super::filter_shown(false),
-            "filter drawn with the field open"
+            "filter drawn with the chat list"
         );
         assert!(!super::filter_shown(true), "no filter inside a server");
     }

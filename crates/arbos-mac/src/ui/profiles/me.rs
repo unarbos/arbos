@@ -1161,7 +1161,7 @@ impl Shell {
                     "settings-feedback",
                     "square-pencil",
                     "Send feedback",
-                    Some("⌘⇧F".into()),
+                    Some("⌘⌥F".into()),
                     &theme,
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.open_feedback(window, cx)))

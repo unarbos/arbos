@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{App, Entity, Hsla, RenderImage};
 
@@ -42,6 +43,191 @@ pub const PICTURE_GAP: f32 = 3.0;
 /// a smaller disc at smaller sizes. Copies carry it as a thin space; `find`
 /// expects it.
 pub const CELL: &str = "@\u{2004}";
+
+/// The pill's accent alpha at rest, under the pointer and while pressed
+/// (Jacob, Oct 24: a chip must look clickable — brighter under the hand,
+/// brighter still while the button is down).
+pub const PILL_ALPHA: f32 = 0.14;
+pub const PILL_ALPHA_HOVER: f32 = 0.22;
+pub const PILL_ALPHA_PRESSED: f32 = 0.30;
+/// How long the pill takes to fade between those (ease-out).
+pub const PILL_FADE: Duration = Duration::from_millis(120);
+
+/// A chip's pill colour: the accent at `alpha`.
+pub fn pill_color(accent: Hsla, alpha: f32) -> Hsla {
+    Theme::with_alpha(accent, alpha)
+}
+
+/// What the pointer is doing to a chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChipState {
+    Rest,
+    Hover,
+    Pressed,
+}
+
+impl ChipState {
+    pub fn alpha(self) -> f32 {
+        match self {
+            ChipState::Rest => PILL_ALPHA,
+            ChipState::Hover => PILL_ALPHA_HOVER,
+            ChipState::Pressed => PILL_ALPHA_PRESSED,
+        }
+    }
+}
+
+/// The pill alpha `elapsed` into a fade from `from` toward `to` — ease-out,
+/// done after [`PILL_FADE`].
+pub fn pill_alpha(from: f32, to: ChipState, elapsed: Duration) -> f32 {
+    let t = (elapsed.as_secs_f32() / PILL_FADE.as_secs_f32()).clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - t) * (1.0 - t);
+    from + (to.alpha() - from) * eased
+}
+
+/// One chip the pointer touched: its key, the state it is fading toward,
+/// and where the fade started.
+#[derive(Clone, Debug)]
+struct Touched<K> {
+    key: K,
+    state: ChipState,
+    from: f32,
+    since: Instant,
+}
+
+impl<K> Touched<K> {
+    fn alpha(&self, now: Instant) -> f32 {
+        pill_alpha(
+            self.from,
+            self.state,
+            now.saturating_duration_since(self.since),
+        )
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.since) >= PILL_FADE
+    }
+}
+
+/// The pointer over one surface's chips (a transcript's bubbles, the
+/// composer): at most one chip is hot (hovered or pressed) and at most one is
+/// cooling back to rest. `K` names a chip stably across frames. Every change
+/// reports `true` so the caller can ask for a repaint; the surface reads the
+/// alpha for each chip it paints with [`ChipPointer::alpha`].
+#[derive(Clone, Debug)]
+pub struct ChipPointer<K> {
+    hot: Option<Touched<K>>,
+    cooling: Option<Touched<K>>,
+}
+
+impl<K> Default for ChipPointer<K> {
+    fn default() -> Self {
+        Self {
+            hot: None,
+            cooling: None,
+        }
+    }
+}
+
+impl<K: Clone + PartialEq> ChipPointer<K> {
+    /// The pointer is over `key` (or over no chip). A pressed chip stays
+    /// pressed while the pointer is still on it.
+    pub fn hover(&mut self, key: Option<K>, now: Instant) -> bool {
+        if self.hot.as_ref().map(|t| &t.key) == key.as_ref() {
+            return false;
+        }
+        if let Some(t) = self.hot.take() {
+            self.cooling = Some(Touched {
+                from: t.alpha(now),
+                state: ChipState::Rest,
+                since: now,
+                key: t.key,
+            });
+        }
+        if let Some(key) = key {
+            // Back onto a chip still cooling: pick the fade up where it is.
+            let from = match self.cooling.take_if(|c| c.key == key) {
+                Some(c) => c.alpha(now),
+                None => PILL_ALPHA,
+            };
+            self.hot = Some(Touched {
+                key,
+                state: ChipState::Hover,
+                from,
+                since: now,
+            });
+        }
+        true
+    }
+
+    /// The button went down on `key`.
+    pub fn press(&mut self, key: K, now: Instant) -> bool {
+        self.hover(Some(key), now);
+        self.set_hot_state(ChipState::Pressed, now)
+    }
+
+    /// The button came up: a pressed chip goes back to hover. Returns the
+    /// key that was pressed, if any.
+    pub fn release(&mut self, now: Instant) -> Option<K> {
+        let pressed = self.pressed().cloned();
+        self.set_hot_state(ChipState::Hover, now);
+        pressed
+    }
+
+    fn set_hot_state(&mut self, state: ChipState, now: Instant) -> bool {
+        let Some(hot) = self.hot.as_mut() else {
+            return false;
+        };
+        if hot.state == state {
+            return false;
+        }
+        hot.from = hot.alpha(now);
+        hot.state = state;
+        hot.since = now;
+        true
+    }
+
+    /// The chip under the pointer, if any.
+    pub fn hot(&self) -> Option<&K> {
+        self.hot.as_ref().map(|t| &t.key)
+    }
+
+    /// The chip the button is down on, if any.
+    pub fn pressed(&self) -> Option<&K> {
+        self.hot
+            .as_ref()
+            .filter(|t| t.state == ChipState::Pressed)
+            .map(|t| &t.key)
+    }
+
+    /// `key`'s state right now.
+    #[cfg(test)]
+    pub fn state(&self, key: &K) -> ChipState {
+        match &self.hot {
+            Some(t) if t.key == *key => t.state,
+            _ => ChipState::Rest,
+        }
+    }
+
+    /// `key`'s pill alpha at `now` and whether it is still fading (the
+    /// caller should paint again next frame). `snap` skips the fade (reduced
+    /// motion).
+    pub fn alpha(&self, key: &K, now: Instant, snap: bool) -> (f32, bool) {
+        let touched = [self.hot.as_ref(), self.cooling.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|t| t.key == *key);
+        match touched {
+            None => (PILL_ALPHA, false),
+            Some(t) if snap || t.settled(now) => (t.state.alpha(), false),
+            Some(t) => (t.alpha(now), true),
+        }
+    }
+
+    /// Drop a cooling chip once it has settled; call before painting a frame.
+    pub fn tidy(&mut self, now: Instant) {
+        self.cooling.take_if(|c| c.settled(now));
+    }
+}
 
 /// What the chip paints in the `@` cell.
 #[derive(Clone, Debug)]
@@ -301,15 +487,14 @@ impl Mentions {
         self.ambiguous.contains(&handle.to_lowercase())
     }
 
-    /// The picture a composer token paints: by id first (exact entity), else
-    /// by handle.
-    pub fn picture_for(&self, token: &MentionToken) -> Option<&Picture> {
+    /// The entity a composer token stands for (its picture, its page): by id
+    /// first (exact entity), else by handle.
+    pub fn mention_for(&self, token: &MentionToken) -> Option<&Rc<Mention>> {
         token
             .id
             .as_deref()
             .and_then(|id| self.by_id(id))
             .or_else(|| self.by_handle(&token.handle))
-            .map(|m| &m.picture)
     }
 
     /// `@handle` → `@Display Name` for every handle we know; anything else is
@@ -792,11 +977,92 @@ pub(crate) mod tests {
             name: "Jacob".into(),
             id: Some("user:gh_arbos".into()),
         };
-        assert!(matches!(
-            m.picture_for(&token),
-            Some(Picture::Initials { .. })
-        ));
+        assert_eq!(m.mention_for(&token).unwrap().name, "Jacob");
         assert_eq!(token.plain(), "@arbos");
+    }
+
+    #[test]
+    fn the_pointer_fades_a_chip_between_rest_hover_and_pressed() {
+        let t0 = Instant::now();
+        let half = PILL_FADE / 2;
+        let mut p: ChipPointer<u8> = ChipPointer::default();
+        assert_eq!(p.alpha(&1, t0, false), (PILL_ALPHA, false));
+        assert!(!p.hover(None, t0), "nothing to nothing is no change");
+
+        assert!(p.hover(Some(1), t0));
+        assert!(!p.hover(Some(1), t0), "staying put is no change");
+        assert_eq!(p.state(&1), ChipState::Hover);
+        let (mid, fading) = p.alpha(&1, t0 + half, false);
+        assert!(
+            fading && mid > PILL_ALPHA && mid < PILL_ALPHA_HOVER,
+            "{mid}"
+        );
+        assert_eq!(
+            p.alpha(&1, t0 + PILL_FADE, false),
+            (PILL_ALPHA_HOVER, false)
+        );
+        assert_eq!(
+            p.alpha(&1, t0, true),
+            (PILL_ALPHA_HOVER, false),
+            "reduced motion: no fade"
+        );
+        assert_eq!(
+            p.alpha(&2, t0 + half, false),
+            (PILL_ALPHA, false),
+            "others rest"
+        );
+
+        assert!(p.press(1, t0 + PILL_FADE));
+        assert_eq!(p.state(&1), ChipState::Pressed);
+        assert_eq!(p.pressed(), Some(&1));
+        assert_eq!(
+            p.alpha(&1, t0 + PILL_FADE * 2, false),
+            (PILL_ALPHA_PRESSED, false)
+        );
+        assert_eq!(p.release(t0 + PILL_FADE * 2), Some(1));
+        assert_eq!(p.state(&1), ChipState::Hover);
+        assert_eq!(p.release(t0 + PILL_FADE * 2), None, "nothing pressed now");
+
+        // Leaving: the chip cools from where it was back to rest.
+        let t1 = t0 + PILL_FADE * 3;
+        assert!(p.hover(None, t1));
+        assert_eq!(p.hot(), None);
+        assert_eq!(p.state(&1), ChipState::Rest);
+        let (cooling, fading) = p.alpha(&1, t1 + half, false);
+        assert!(fading && cooling > PILL_ALPHA && cooling < PILL_ALPHA_HOVER);
+        // Back on it mid-fade: picks up from the cooling alpha, no jump.
+        assert!(p.hover(Some(1), t1 + half));
+        let (resumed, _) = p.alpha(&1, t1 + half, false);
+        assert!((resumed - cooling).abs() < 1e-5, "{resumed} vs {cooling}");
+        assert!(p.hover(None, t1 + PILL_FADE * 2));
+        p.tidy(t1 + PILL_FADE * 4);
+        assert_eq!(p.alpha(&1, t1 + PILL_FADE * 4, false), (PILL_ALPHA, false));
+
+        // Hopping chip to chip: the old one cools while the new one warms.
+        assert!(p.hover(Some(1), t1));
+        assert!(p.hover(Some(2), t1 + PILL_FADE));
+        assert_eq!(p.state(&2), ChipState::Hover);
+        assert!(p.alpha(&1, t1 + PILL_FADE + half, false).1, "1 is cooling");
+        assert!(p.alpha(&2, t1 + PILL_FADE + half, false).1, "2 is warming");
+    }
+
+    #[test]
+    fn pill_alpha_eases_out() {
+        assert_eq!(
+            pill_alpha(PILL_ALPHA, ChipState::Hover, Duration::ZERO),
+            PILL_ALPHA
+        );
+        assert_eq!(
+            pill_alpha(PILL_ALPHA, ChipState::Hover, PILL_FADE * 2),
+            PILL_ALPHA_HOVER
+        );
+        let mid = pill_alpha(PILL_ALPHA, ChipState::Hover, PILL_FADE / 2);
+        let linear = (PILL_ALPHA + PILL_ALPHA_HOVER) / 2.0;
+        assert!(mid > linear, "ease-out is ahead of linear at the midpoint");
+        assert_eq!(
+            pill_color(Hsla::default(), 0.3),
+            Theme::with_alpha(Hsla::default(), 0.3)
+        );
     }
 
     #[test]

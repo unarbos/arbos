@@ -13,6 +13,7 @@
 
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui::{
     linear_color_stop, linear_gradient, point, px, size, App, Bounds, Context, Corners,
@@ -72,13 +73,26 @@ impl Active {
 pub struct TextSelection {
     pub focus_handle: FocusHandle,
     model: Model,
+    /// The pointer over the transcript's mention chips (hover / pressed), by
+    /// bubble key and the chip's byte range in that bubble's plain text.
+    pub chips: mention::ChipPointer<ChipKey>,
+    /// The cursor the last painted bubble text asked for (tests).
+    #[cfg(test)]
+    pub(crate) cursor: CursorStyle,
 }
+
+/// Names one chip across frames: the bubble and the chip's range in the
+/// bubble's plain text.
+pub type ChipKey = (SharedString, Range<usize>);
 
 impl TextSelection {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             model: Model::default(),
+            chips: mention::ChipPointer::default(),
+            #[cfg(test)]
+            cursor: CursorStyle::Arrow,
         }
     }
 
@@ -269,9 +283,11 @@ pub struct Selectable {
     entity: Entity<TextSelection>,
     current: Option<(SharedString, SharedString, Range<usize>)>,
     color: Hsla,
-    /// Who `@name` runs resolve to, and the chip colours (accent text, pill).
+    /// Who `@name` runs resolve to, and the accent the chips take (name
+    /// text; the pill is the accent at `mention::PILL_ALPHA`, brighter under
+    /// the pointer).
     mentions: Rc<Mentions>,
-    chip_colors: (Hsla, Hsla),
+    chip_accent: Hsla,
 }
 
 impl Selectable {
@@ -285,15 +301,15 @@ impl Selectable {
             current,
             color,
             mentions: Mentions::empty(),
-            chip_colors: (Hsla::default(), Hsla::default()),
+            chip_accent: Hsla::default(),
         }
     }
 
     /// Mention chips: `@Name` runs of a known entity draw as a chip (`accent`
-    /// text on a `pill`) and open its page on click.
-    pub fn with_mentions(mut self, mentions: Rc<Mentions>, accent: Hsla, pill: Hsla) -> Self {
+    /// text on an accent pill) and open its page on click.
+    pub fn with_mentions(mut self, mentions: Rc<Mentions>, accent: Hsla) -> Self {
         self.mentions = mentions;
-        self.chip_colors = (accent, pill);
+        self.chip_accent = accent;
         self
     }
 
@@ -326,7 +342,7 @@ impl Selectable {
             range,
             color: self.color,
             mentions: self.mentions.clone(),
-            chip_colors: self.chip_colors,
+            chip_accent: self.chip_accent,
         }
     }
 }
@@ -341,7 +357,7 @@ pub struct BubbleSelectable {
     range: Option<Range<usize>>,
     color: Hsla,
     mentions: Rc<Mentions>,
-    chip_colors: (Hsla, Hsla),
+    chip_accent: Hsla,
 }
 
 /// One mention chip inside a [`SelectableText`]: the `@Name` run (element-local
@@ -352,7 +368,18 @@ pub struct Chip {
     pub cell: usize,
     pub mention: Rc<Mention>,
     pub mentions: Rc<Mentions>,
-    pub pill: Hsla,
+    /// The accent the pill is tinted with (see [`mention::pill_color`]).
+    pub accent: Hsla,
+    /// The chip's name across frames (bubble, range in the bubble's text).
+    pub key: ChipKey,
+}
+
+impl Chip {
+    /// A chip whose click opens a page. Collective `@here` / `@agents` have
+    /// none and stay still under the pointer.
+    fn clickable(&self) -> bool {
+        self.mention.page.is_some()
+    }
 }
 
 impl BubbleSelectable {
@@ -375,7 +402,7 @@ impl BubbleSelectable {
         // the picture), the name takes the accent; the selection highlight
         // then splits those runs like any other.
         let found = self.mentions.find(&text);
-        let (accent, pill) = self.chip_colors;
+        let accent = self.chip_accent;
         let mut chips = Vec::with_capacity(found.len());
         let mut runs = runs;
         for (range, mention) in found {
@@ -386,11 +413,12 @@ impl BubbleSelectable {
             };
             runs = chip_runs(runs, range.clone(), cell, accent);
             chips.push(Chip {
+                key: (self.key.clone(), at + range.start..at + range.end),
                 range,
                 cell,
                 mention,
                 mentions: self.mentions.clone(),
-                pill,
+                accent,
             });
         }
         let runs = match &self.range {
@@ -671,8 +699,23 @@ impl Element for SelectableText {
     ) {
         let layout = self.styled.layout().clone();
         let chips: Rc<Vec<Chip>> = Rc::new(std::mem::take(&mut self.chips));
+        let selection = self.selection.clone();
+        let now = Instant::now();
+        let snap = cx.reduce_motion();
+        let mut fading = false;
+        selection.update(cx, |s, _| s.chips.tidy(now));
         for chip in chips.iter() {
-            paint_chip_pill(&layout, chip, window);
+            let (alpha, still) = selection.read(cx).chips.alpha(&chip.key, now, snap);
+            fading |= still;
+            paint_chip_pill(
+                &layout,
+                chip,
+                mention::pill_color(chip.accent, alpha),
+                window,
+            );
+        }
+        if fading {
+            window.request_animation_frame();
         }
         self.styled
             .paint(None, inspector_id, bounds, state, &mut (), window, cx);
@@ -680,7 +723,6 @@ impl Element for SelectableText {
             paint_chip_picture(&layout, chip, window, cx);
         }
         let links = std::mem::take(&mut self.links);
-        let selection = self.selection.clone();
         let focus_handle = selection.read(cx).focus_handle.clone();
         let (key, bubble_text, at) = (self.key.clone(), self.bubble_text.clone(), self.at);
 
@@ -689,16 +731,54 @@ impl Element for SelectableText {
                 .index_for_position(window.mouse_position())
                 .is_ok_and(|ix| {
                     links.iter().any(|(r, _)| r.contains(&ix))
-                        || chips.iter().any(|c| c.range.contains(&ix))
+                        || chips.iter().any(|c| c.clickable() && c.range.contains(&ix))
                 });
-        window.set_cursor_style(
-            if over_link {
-                CursorStyle::PointingHand
-            } else {
-                CursorStyle::IBeam
-            },
-            hitbox,
-        );
+        let cursor = if over_link {
+            CursorStyle::PointingHand
+        } else {
+            CursorStyle::IBeam
+        };
+        window.set_cursor_style(cursor, hitbox);
+        #[cfg(test)]
+        if hitbox.is_hovered(window) {
+            selection.update(cx, |s, _| s.cursor = cursor);
+        }
+
+        // Hover: the chip under the pointer brightens (and the one it left
+        // fades back). Only this element's chips are touched, so a bubble the
+        // pointer is not over never clears a neighbour's hover.
+        window.on_mouse_event({
+            let (hitbox, layout, selection, chips) = (
+                hitbox.clone(),
+                layout.clone(),
+                selection.clone(),
+                chips.clone(),
+            );
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if phase != DispatchPhase::Bubble {
+                    return;
+                }
+                // A drag that began off a chip selects text; chips it
+                // crosses stay at rest.
+                let dragging_text = event.pressed_button == Some(MouseButton::Left)
+                    && selection.read(cx).chips.pressed().is_none();
+                let over = (hitbox.is_hovered(window) && !dragging_text)
+                    .then(|| chip_at(&chips, &layout, event.position))
+                    .flatten()
+                    .map(|c| c.key.clone());
+                let mine = selection
+                    .read(cx)
+                    .chips
+                    .hot()
+                    .is_some_and(|k| chips.iter().any(|c| c.key == *k));
+                if over.is_none() && !mine {
+                    return;
+                }
+                if selection.update(cx, |s, _| s.chips.hover(over, Instant::now())) {
+                    window.refresh();
+                }
+            }
+        });
 
         // Press origin for axis lock: a vertical pan with no range yet yields
         // to transcript drag-scroll instead of selecting across lines.
@@ -711,7 +791,7 @@ impl Element for SelectableText {
                 selection.clone(),
                 focus_handle.clone(),
             );
-            let (key, bubble_text) = (key.clone(), bubble_text.clone());
+            let (key, bubble_text, chips) = (key.clone(), bubble_text.clone(), chips.clone());
             let press_at = press_at.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
                 // Control-click is the bubble's copy; right-click its menu.
@@ -724,6 +804,12 @@ impl Element for SelectableText {
                 }
                 press_at.set(event.position);
                 let index = at + closest_index(&layout, event.position);
+                if let Some(chip) = chip_at(&chips, &layout, event.position) {
+                    if selection.update(cx, |s, _| s.chips.press(chip.key.clone(), Instant::now()))
+                    {
+                        window.refresh();
+                    }
+                }
                 let selected = selection.update(cx, |s, cx| {
                     s.model.begin(
                         key.clone(),
@@ -806,17 +892,21 @@ impl Element for SelectableText {
                 }
                 let plain_click = selection.update(cx, |s, cx| {
                     let plain = s.model.finish_drag();
+                    if s.chips.release(Instant::now()).is_some() {
+                        window.refresh();
+                    }
                     cx.notify();
                     plain
                 });
                 if plain_click && event.click_count == 1 && hitbox.is_hovered(window) {
-                    if let Ok(ix) = layout.index_for_position(event.position) {
-                        if let Some(chip) = chips.iter().find(|c| c.range.contains(&ix)) {
-                            chip.mentions.open(&chip.mention, cx);
-                        } else if let Some((_, href)) = links.iter().find(|(r, _)| r.contains(&ix))
-                        {
-                            cx.open_url(href);
-                        }
+                    if let Some(chip) = chip_at(&chips, &layout, event.position) {
+                        chip.mentions.open(&chip.mention, cx);
+                    } else if let Some((_, href)) = layout
+                        .index_for_position(event.position)
+                        .ok()
+                        .and_then(|ix| links.iter().find(|(r, _)| r.contains(&ix)))
+                    {
+                        cx.open_url(href);
                     }
                 }
             }
@@ -824,10 +914,22 @@ impl Element for SelectableText {
     }
 }
 
+/// The clickable chip under `position`, if the pointer is on one of its glyphs.
+fn chip_at<'a>(
+    chips: &'a [Chip],
+    layout: &TextLayout,
+    position: Point<Pixels>,
+) -> Option<&'a Chip> {
+    let ix = layout.index_for_position(position).ok()?;
+    chips
+        .iter()
+        .find(|c| c.clickable() && c.range.contains(&ix))
+}
+
 /// The chip's pill: one rounded quad per line fragment the `@Name` run
 /// occupies, `PILL_PAD_X` wider than the glyphs on each side and
 /// `PILL_PAD_Y` taller above and below the line box. Painted before the text.
-fn paint_chip_pill(layout: &TextLayout, chip: &Chip, window: &mut Window) {
+fn paint_chip_pill(layout: &TextLayout, chip: &Chip, color: Hsla, window: &mut Window) {
     for (start, end, top) in chip_fragments(layout, &chip.range) {
         let line_h = layout.line_height();
         let bounds = Bounds::new(
@@ -843,7 +945,7 @@ fn paint_chip_pill(layout: &TextLayout, chip: &Chip, window: &mut Window) {
         window.paint_quad(gpui::quad(
             bounds,
             Corners::all(px(mention::PILL_RADIUS)),
-            chip.pill,
+            color,
             gpui::Edges::all(px(0.0)),
             gpui::transparent_black(),
             gpui::BorderStyle::default(),
@@ -1196,10 +1298,34 @@ mod tests {
         });
     }
 
-    /// A bubble whose text starts with a chip: `@Comms says hi`.
+    /// A bubble whose `text` starts with a chip, e.g. `@Comms says hi`.
     struct ChipBubble {
         selection: Entity<TextSelection>,
         mentions: Rc<Mentions>,
+        text: SharedString,
+    }
+
+    /// Comms (an agent with a page) and the collective `here` (no page).
+    fn chip_table(opened: &Rc<std::cell::RefCell<Vec<crate::app::ProfilePage>>>) -> Rc<Mentions> {
+        use crate::app::ProfilePage;
+        let record = opened.clone();
+        let mut here = crate::ui::mention::tests::stub("here", ProfilePage::Me);
+        here.page = None;
+        Mentions::with_table(
+            vec![
+                (
+                    "comms",
+                    crate::ui::mention::tests::stub(
+                        "Comms",
+                        ProfilePage::Agent {
+                            project_id: "p-comms".into(),
+                        },
+                    ),
+                ),
+                ("here", here),
+            ],
+            move |page, _| record.borrow_mut().push(page.clone()),
+        )
     }
 
     impl gpui::Render for ChipBubble {
@@ -1209,12 +1335,9 @@ mod tests {
             cx: &mut gpui::Context<Self>,
         ) -> impl gpui::IntoElement {
             use gpui::{div, InteractiveElement as _, ParentElement as _, Styled as _};
-            let text: SharedString = "@Comms says hi".into();
-            let selectable = Selectable::new(&self.selection, Hsla::default(), cx).with_mentions(
-                self.mentions.clone(),
-                gpui::blue(),
-                gpui::transparent_black(),
-            );
+            let text = self.text.clone();
+            let selectable = Selectable::new(&self.selection, Hsla::default(), cx)
+                .with_mentions(self.mentions.clone(), gpui::blue());
             let bubble = selectable.bubble("m1", text.clone());
             div()
                 .w(px(400.0))
@@ -1236,22 +1359,11 @@ mod tests {
         use crate::app::ProfilePage;
         use std::cell::RefCell;
         let opened: Rc<RefCell<Vec<ProfilePage>>> = Rc::new(RefCell::new(Vec::new()));
-        let record = opened.clone();
-        let mentions = Mentions::with_table(
-            vec![(
-                "comms",
-                crate::ui::mention::tests::stub(
-                    "Comms",
-                    ProfilePage::Agent {
-                        project_id: "p-comms".into(),
-                    },
-                ),
-            )],
-            move |page, _| record.borrow_mut().push(page.clone()),
-        );
+        let mentions = chip_table(&opened);
         let (_view, vcx) = cx.add_window_view(|_, cx| ChipBubble {
             selection: cx.new(TextSelection::new),
             mentions,
+            text: "@Comms says hi".into(),
         });
         vcx.run_until_parked();
         let bounds = vcx.debug_bounds("chip-text").expect("text drawn");
@@ -1274,6 +1386,114 @@ mod tests {
             1,
             "a click past the chip opens nothing"
         );
+    }
+
+    /// Jacob (Oct 24): a chip must look clickable — pointing hand and a
+    /// brighter pill under the pointer, brighter still while pressed; a chip
+    /// with no page (`@here`) and plain text (`@nobody`) stay as they are.
+    #[gpui::test]
+    fn a_chip_brightens_under_the_pointer_and_while_pressed(cx: &mut gpui::TestAppContext) {
+        use crate::ui::mention::{ChipState, PILL_ALPHA, PILL_ALPHA_HOVER, PILL_ALPHA_PRESSED};
+        use std::cell::RefCell;
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let mentions = chip_table(&opened);
+        let selection = cx.update(|cx| cx.new(TextSelection::new));
+        let (view, vcx) = cx.add_window_view(|_, _| ChipBubble {
+            selection: selection.clone(),
+            mentions,
+            text: "@Comms says hi".into(),
+        });
+        vcx.run_until_parked();
+        let bounds = vcx.debug_bounds("chip-text").expect("text drawn");
+        let y = bounds.origin.y + bounds.size.height / 2.0;
+        let on_chip = point(bounds.origin.x + px(12.0), y);
+        let on_text = point(bounds.right() - px(4.0), y);
+        let key: ChipKey = ("m1".into(), 0..6);
+        let none = gpui::Modifiers::default();
+        let settled = |s: &TextSelection, snap: bool| {
+            s.chips
+                .alpha(&key, Instant::now() + mention::PILL_FADE, snap)
+                .0
+        };
+
+        // Plain text first: nothing hot, an I-beam. (The real cursor follows
+        // the pointer without a repaint; the test's record needs one.)
+        vcx.simulate_mouse_move(on_text, None, none);
+        view.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(s.chips.hot(), None);
+            assert_eq!(s.cursor, CursorStyle::IBeam);
+            assert_eq!(settled(s, true), PILL_ALPHA);
+        });
+
+        vcx.simulate_mouse_move(on_chip, None, none);
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(s.chips.state(&key), ChipState::Hover);
+            assert_eq!(s.cursor, CursorStyle::PointingHand, "a hand over the chip");
+            assert_eq!(settled(s, false), PILL_ALPHA_HOVER);
+            assert_eq!(settled(s, true), PILL_ALPHA_HOVER, "reduced motion snaps");
+        });
+
+        vcx.simulate_mouse_down(on_chip, MouseButton::Left, none);
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(s.chips.state(&key), ChipState::Pressed);
+            assert_eq!(settled(s, false), PILL_ALPHA_PRESSED);
+        });
+
+        vcx.simulate_mouse_up(on_chip, MouseButton::Left, none);
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(
+                s.chips.state(&key),
+                ChipState::Hover,
+                "released: back to hover"
+            );
+            assert_eq!(settled(s, false), PILL_ALPHA_HOVER);
+        });
+        assert_eq!(
+            opened.borrow().len(),
+            1,
+            "the press-and-release opened the page"
+        );
+
+        vcx.simulate_mouse_move(on_text, None, none);
+        vcx.run_until_parked();
+        selection.read_with(&*vcx, |s, _| {
+            assert_eq!(s.chips.state(&key), ChipState::Rest);
+            assert_eq!(s.cursor, CursorStyle::IBeam);
+            assert_eq!(settled(s, false), PILL_ALPHA, "fades back to rest");
+        });
+    }
+
+    #[gpui::test]
+    fn chips_without_a_page_and_unknown_handles_stay_still(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        for text in ["@here says hi", "@nobody says hi"] {
+            let opened = Rc::new(RefCell::new(Vec::new()));
+            let mentions = chip_table(&opened);
+            let selection = cx.update(|cx| cx.new(TextSelection::new));
+            let (view, vcx) = cx.add_window_view(|_, _| ChipBubble {
+                selection: selection.clone(),
+                mentions,
+                text: text.into(),
+            });
+            vcx.run_until_parked();
+            let bounds = vcx.debug_bounds("chip-text").expect("text drawn");
+            let y = bounds.origin.y + bounds.size.height / 2.0;
+            let on_at = point(bounds.origin.x + px(12.0), y);
+            vcx.simulate_mouse_move(on_at, None, gpui::Modifiers::default());
+            vcx.simulate_click(on_at, gpui::Modifiers::default());
+            view.update(vcx, |_, cx| cx.notify());
+            vcx.run_until_parked();
+            selection.read_with(&*vcx, |s, _| {
+                assert_eq!(s.chips.hot(), None, "{text}: nothing lights up");
+                assert_eq!(s.cursor, CursorStyle::IBeam, "{text}: no hand");
+            });
+            assert!(opened.borrow().is_empty(), "{text}: nothing opens");
+        }
     }
 
     #[test]

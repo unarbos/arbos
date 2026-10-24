@@ -79,8 +79,22 @@ pub const COMPOSER_BOTTOM: f32 = 16.0;
 pub const COLUMN_MARGIN: f32 = COMPOSER_MARGIN;
 pub const PLUS_BUTTON: f32 = 28.0;
 pub const SEND_BUTTON: f32 = 28.0;
-/// Icon buttons in the header and sheet corners.
-pub const CONTROL: f32 = 32.0;
+/// The round-button family: the sidebar strip's search · + · collapse discs,
+/// the chat header's sidebar toggle and the header pill's height — one size
+/// for all of them, Grok Bot's. Measured on `ref-grok-round-search-plus.png`
+/// (2 px/pt): disc 72 px = **36 pt**, glyph stroke 3 px = 1.5 pt, search
+/// glyph box 28 px = 14 pt, plus 26 px = 13 pt, discs 16 px = 8 pt apart
+/// ([feedback search-palette-2026-10-24]; was 32).
+pub const CONTROL: f32 = 36.0;
+/// Glyph size inside a [`CONTROL`] disc for the 24-grid icons whose strokes
+/// fill ~16–18 of the grid (search, plus): 19 pt draws a 14.3 pt magnifier
+/// and a 12.7 pt plus at a 1.6 pt stroke — Grok's 14 / 13 / 1.5 within 1 px.
+pub const CONTROL_GLYPH: f32 = 19.0;
+/// Glyph size for the wide 24-grid icons (the collapse `sidebar-left` rect
+/// fills 20 of 24): 17 pt draws a 14.2 pt box, the magnifier's.
+pub const CONTROL_GLYPH_WIDE: f32 = 17.0;
+/// Gap between two discs of the family (Grok: 16 px = 8 pt).
+pub const CONTROL_GAP: f32 = 8.0;
 /// Bubble corners (Grok Mac, measured: 12 pt; the iPhone uses 20).
 pub const BUBBLE_RADIUS: f32 = 12.0;
 /// Chat bubbles: Grok Mac's body is 13.5 pt on a 20 pt pitch with 15 pt
@@ -118,7 +132,11 @@ pub const TEXT_TINY: f32 = 11.5;
 pub const LINE_HEIGHT: f32 = 21.0;
 /// Avatar sizes: list row (Grok Mac: 33 pt blobs in a 58 pt row), header, inline sender.
 pub const AVATAR_ROW: f32 = 36.0;
-pub const AVATAR_HEADER: f32 = 22.0;
+/// Chat header pill picture: the pill is a [`CONTROL`] tall (the strip's
+/// button family, Jacob 2026-10-24) and the picture sits 4 pt inside it
+/// ([feedback search-palette-2026-10-24]; was 26 in a 34 pt pill, [feedback
+/// app-01M5MX8XS2BS7KZCNAS12BXNKD]).
+pub const AVATAR_HEADER: f32 = CONTROL - 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {

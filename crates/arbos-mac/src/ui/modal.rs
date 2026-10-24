@@ -24,14 +24,39 @@ pub fn modal_overlay(
     dismiss: impl Fn(&mut Window, &mut App) + 'static,
     card: impl IntoElement,
 ) -> Stateful<Div> {
+    overlay_at(id, dismiss, card, None)
+}
+
+/// The same backdrop with `card` hung `top` points under the window's top
+/// edge instead of centred — Spotlight's shape, for the command palette
+/// ([feedback search-palette-2026-10-24]).
+pub fn modal_overlay_top(
+    id: impl Into<ElementId>,
+    dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    top: f32,
+    card: impl IntoElement,
+) -> Stateful<Div> {
+    overlay_at(id, dismiss, card, Some(top))
+}
+
+fn overlay_at(
+    id: impl Into<ElementId>,
+    dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    card: impl IntoElement,
+    top: Option<f32>,
+) -> Stateful<Div> {
     div()
         .id(id)
         .absolute()
         .inset_0()
         .occlude()
         .flex()
+        .flex_col()
         .items_center()
-        .justify_center()
+        .map(|el| match top {
+            Some(top) => el.justify_start().pt(gpui::px(top)),
+            None => el.justify_center(),
+        })
         .bg(Theme::with_alpha(gpui::black(), BACKDROP_ALPHA))
         // Wheel / trackpad scrolling over the sheet — list or backdrop — ends
         // here; the transcript underneath stays still.
