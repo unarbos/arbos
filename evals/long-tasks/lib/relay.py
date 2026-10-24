@@ -292,7 +292,7 @@ def people_send_as(peer, chat_id, text):
     return p.returncode
 
 
-def capped_user_turn(handle, cap_usd, prompt, timeout_s=240):
+def capped_user_turn(handle, cap_usd, prompt, timeout_s=240, second_prompt=None):
     """Create (once) a scratch user with a tiny daily cap, one project, send one message as them
     and return what the chat showed. Lets the suite see the cap behaviour without capping lt-eval."""
     st, users = admin("GET", "/admin/users")
@@ -333,6 +333,11 @@ def capped_user_turn(handle, cap_usd, prompt, timeout_s=240):
     t0 = time.time()
     p = subprocess.run([ARBOSCTL, "chat", "send", pid, chat_id, prompt, "--stream", "--timeout", str(timeout_s)], capture_output=True, text=True, timeout=timeout_s + 60, env=env)
     out = p.stdout + "\n" + p.stderr
+    if second_prompt:
+        # the cap is judged on debits: the first message spends, the second must be refused plainly
+        time.sleep(5)
+        p = subprocess.run([ARBOSCTL, "chat", "send", pid, chat_id, second_prompt, "--stream", "--timeout", str(timeout_s)], capture_output=True, text=True, timeout=timeout_s + 60, env=env)
+        out += "\n" + p.stdout + "\n" + p.stderr
     p2 = subprocess.run([ARBOSCTL, "chat", "dump", pid, chat_id], capture_output=True, text=True, timeout=60, env=env)
     s = p2.stdout
     doc = json.loads(s[s.find("{"):]) if "{" in s else {"messages": []}

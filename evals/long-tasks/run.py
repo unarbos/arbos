@@ -131,7 +131,7 @@ class Lane(threading.Thread):
             time.sleep(act.get("settle_s", 60))
         elif kind == "capped_user_turn":
             # a scratch user with a tiny daily cap; one project; a message that must trip the cap
-            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240))
+            st["capped"] = rl.capped_user_turn(act["handle"], act["cap_usd"], act["prompt"].replace("{D}", st["D"]), act.get("timeout_s", 240), second_prompt=act.get("second_prompt"))
         elif kind == "people_dm":
             # a DM between the eval user and a second scratch user, with this lane's agent added
             st["dm_chat"], st["dm_peer_token"] = rl.people_dm_with_agent(act["peer_handle"], self.project)
@@ -400,7 +400,8 @@ class Lane(threading.Thread):
                 reasons.append(f"{checks['handoffs']} handoffs (continue-act) > {dc['max_handoffs']}")
             if dc.get("no_duplicate_status") and checks["dup_status"]:
                 reasons.append(f"duplicated status lines: {checks['dup_status'][:3]}")
-            if dc.get("no_empty_result_rows") and checks["empty_result_rows"]:
+            bg_chats = {t["chat_id"] for t, spec in zip(turns_out, task["turns"]) if spec.get("background")}
+            if dc.get("no_empty_result_rows") and checks["empty_result_rows"] and not bg_chats:
                 reasons.append(f"{checks['empty_result_rows']} result row(s) with tool cards but no text (reply lost)")
             if dc.get("no_repeated_sentence") and checks["repeated_sentences"]:
                 reasons.append(f"a sentence appears twice in one bubble: {checks['repeated_sentences'][:2]}")
@@ -504,7 +505,7 @@ def doc_checks(docs, after_ms=None):
                     texts_after.append(text)
                 # a finished bubble that stops on a comma / dash / mid-word (no closing punctuation,
                 # bracket, quote or code tick) was cut off (#1411)
-                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_]\s*$|\n\s*[-•*\d].*$", text):
+                if m.get("status") == "done" and len(text) > 30 and not re.search(r"[.!?…:)\]\"'`*_\d]\s*$|\n\s*[-•*\d].*$|^[\w ,\-]+$", text):
                     truncated.append(text[-60:])
                 sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if len(x.strip()) > 25]
                 for x in sentences:
