@@ -6,8 +6,48 @@ use serde_json::Value;
 
 const MAX_CHARS: usize = 48;
 
+/// `mcp__arbos__web_search` → `web_search`: project tools reach pi under the MCP server prefix.
+fn bare_tool_name(tool_name: &str) -> &str {
+    tool_name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map(|(_, name)| name)
+        .unwrap_or(tool_name)
+}
+
+/// A search query as the user would read it in the status line: quotes and operators dropped,
+/// cut at a word boundary. "surf schools Santa Teresa prices" → "Searching for surf schools…".
+fn query_label(verb: &str, q: &str) -> String {
+    let cleaned: String = q
+        .split_whitespace()
+        .filter(|w| !w.contains(':') || w.len() > 24)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(['"', '\''], "");
+    let cleaned = cleaned.trim().trim_end_matches(['.', '?']);
+    if cleaned.is_empty() {
+        return format!("{verb} the web");
+    }
+    let room = MAX_CHARS.saturating_sub(verb.len() + 5);
+    let mut out = String::new();
+    for w in cleaned.split_whitespace() {
+        if !out.is_empty() && out.len() + 1 + w.len() > room {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(w);
+    }
+    if out.is_empty() {
+        out = cleaned.chars().take(room).collect();
+    }
+    format!("{verb} for {out}")
+}
+
 /// Label for a tool call, or `None`.
 pub fn label(tool_name: &str, args: &Value) -> Option<String> {
+    let tool_name = bare_tool_name(tool_name);
     let s = |keys: &[&str]| -> Option<&str> {
         keys.iter()
             .find_map(|k| args.get(k).and_then(Value::as_str))
@@ -28,14 +68,30 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
             "Editing {}",
             short_path(s(&["path", "file_path"])?)
         )),
-        "glob" | "grep" | "find" | "search" | "ls" | "list" => Some("Searching the project".into()),
+        "grep" | "search" => Some(match s(&["pattern", "query"]) {
+            Some(q) if !q.trim().is_empty() => query_label("Searching the code", q),
+            _ => "Searching the project".into(),
+        }),
+        "glob" | "find" | "ls" | "list" => Some("Searching the project".into()),
         "web_fetch" | "fetch" | "fetch_url" | "browse" | "browser_navigate" | "browser_open" => {
             Some(match s(&["url"]).and_then(host_of) {
                 Some(h) => format!("Reading {h}"),
                 None => "Reading a web page".into(),
             })
         }
-        "web_search" | "search_web" => Some("Searching the web".into()),
+        "web_search" | "search_web" => Some(match s(&["query", "q"]) {
+            Some(q) => query_label("Searching", q),
+            None => "Searching the web".into(),
+        }),
+        "context_search" | "history_search" | "memory_search" => {
+            Some("Looking back through the chat".into())
+        }
+        "secrets_list" | "secrets_request" | "vault_list" | "vault_request" | "egress"
+        | "browser_fill" => Some("Using your secrets".into()),
+        "routines_create" | "routines_update" | "routines_delete" | "routines_list" => {
+            Some("Setting the schedule".into())
+        }
+        "ask_user" => Some("Waiting for your answer".into()),
         "generate_image" => Some("Making the image".into()),
         "deliver_file" => Some("Sending the file".into()),
         "submit_feedback" => Some("Filing your feedback".into()),
@@ -52,7 +108,7 @@ pub fn label(tool_name: &str, args: &Value) -> Option<String> {
 /// The line when nothing concrete fits but the agent is at work (never leave the presence row
 /// empty mid-turn, #1657).
 pub fn generic_label(tool_name: &str) -> String {
-    match tool_name {
+    match bare_tool_name(tool_name) {
         "bash" | "shell" | "execute" | "run_command" | "execute_command" | "codemode" => {
             "Running a command".to_owned()
         }
@@ -253,11 +309,21 @@ fn step_label(step: &str) -> Option<String> {
 
 /// `codemode` JavaScript snippets name the arbos tool they call: `arbos.history_search(...)`.
 fn code_label(code: &str) -> Option<String> {
-    let after = code.split("arbos.").nth(1)?;
+    // `tools.mcp__arbos__web_search({query: "…"})` / `arbos.web_search(...)`: the first project
+    // tool the script calls names the activity; a search query makes it concrete.
+    let after = code
+        .split("mcp__arbos__")
+        .nth(1)
+        .or_else(|| code.split("arbos.").nth(1))?;
     let name: String = after
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
+    if name == "web_search" {
+        if let Some(q) = first_string_arg(after, &["query", "q"]) {
+            return Some(query_label("Searching", &q));
+        }
+    }
     let l = match name.as_str() {
         "history_search" | "history_read" | "threads" | "thread_read" => {
             "Looking back through the chat"
@@ -278,7 +344,7 @@ fn code_label(code: &str) -> Option<String> {
         | "browser_fill" => "Using your secrets",
         "connector_call" | "connectors_list" => "Checking your connected accounts",
         "web_search" => "Searching the web",
-        "web_fetch" => "Reading the docs",
+        "web_fetch" => "Reading a web page",
         "submit_feedback" => "Filing your feedback",
         _ => return None,
     };
@@ -337,4 +403,90 @@ fn trim_to(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max - 1).collect();
     out.push('…');
     out
+}
+
+/// `{query: "surf schools"}` / `{ "query": 'x' }` → the first string value of one of `keys` in
+/// the call's argument object, plain text only.
+fn first_string_arg(call: &str, keys: &[&str]) -> Option<String> {
+    let args = &call[..call.find(')').unwrap_or(call.len())];
+    for k in keys {
+        for pat in [format!("{k}:"), format!("\"{k}\":"), format!("'{k}':")] {
+            if let Some(i) = args.find(&pat) {
+                let rest = args[i + pat.len()..].trim_start();
+                let quote = rest.chars().next()?;
+                if !matches!(quote, '"' | '\'' | '`') {
+                    continue;
+                }
+                let body = &rest[1..];
+                let end = body.find(quote)?;
+                let v = body[..end].trim();
+                if !v.is_empty() {
+                    return Some(v.to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Grok parity (traits 14): the status line names the search ("Searching for surf schools
+    /// near Santa Teresa"), also when the tool arrives under its MCP prefix or inside a script.
+    #[test]
+    fn searches_are_described_from_their_query() {
+        assert_eq!(
+            label(
+                "mcp__arbos__web_search",
+                &json!({ "query": "best reviewed surf schools near Santa Teresa prices" })
+            )
+            .as_deref(),
+            Some("Searching for best reviewed surf schools near")
+        );
+        assert_eq!(
+            label(
+                "web_search",
+                &json!({ "query": "\"Del Soul\" surf school site:tripadvisor.com" })
+            )
+            .as_deref(),
+            Some("Searching for Del Soul surf school")
+        );
+        assert_eq!(
+            label(
+                "mcp__arbos__web_fetch",
+                &json!({ "url": "https://www.tripadvisor.com/x" })
+            )
+            .as_deref(),
+            Some("Reading tripadvisor.com")
+        );
+        assert_eq!(
+            label("grep", &json!({ "pattern": "spend_cap" })).as_deref(),
+            Some("Searching the code for spend_cap")
+        );
+        assert_eq!(
+            label(
+                "codemode",
+                &json!({ "code": "const r = await tools.mcp__arbos__web_search({query: \"surf schools Santa Teresa\"}); return r;" })
+            )
+            .as_deref(),
+            Some("Searching for surf schools Santa Teresa")
+        );
+        assert_eq!(
+            label(
+                "codemode",
+                &json!({ "code": "await tools.mcp__arbos__routines_create({name: 'x'})" })
+            )
+            .as_deref(),
+            Some("Setting the schedule")
+        );
+        assert_eq!(
+            label("mcp__arbos__ask_user", &json!({})).as_deref(),
+            Some("Waiting for your answer")
+        );
+        assert_eq!(generic_label("mcp__arbos__codemode"), "Running a command");
+        assert!(label("web_search", &json!({})).unwrap().len() <= MAX_CHARS);
+    }
 }
