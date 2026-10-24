@@ -65,11 +65,13 @@ enum ProfileTarget: Identifiable, Equatable, Hashable {
 struct ProfileTopBar<Trailing: View>: View {
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
+    /// Override for hosts that are not a sheet (e.g. Settings as a root tab).
+    var onBack: (() -> Void)? = nil
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack {
-            Button { dismiss() } label: {
+            Button { (onBack ?? { dismiss() })() } label: {
                 GlassCircle { Image(systemName: "chevron.left").font(.system(size: 17, weight: .semibold)).foregroundStyle(theme.text) }
             }
             .buttonStyle(.plain)

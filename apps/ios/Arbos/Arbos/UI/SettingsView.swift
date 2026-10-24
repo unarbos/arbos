@@ -75,7 +75,9 @@ struct SettingsView: View {
                     }
                 }
                 .scrollIndicators(.visible)
-                ProfileTopBar { EmptyView() }
+                // Tab root: dismiss() is a no-op — return to the tab we came from.
+                // Sheet (e.g. from a chat): mainTab is not .settings, so dismiss closes it.
+                ProfileTopBar(onBack: leaveSettings) { EmptyView() }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationBarBackButtonHidden(true)
@@ -177,6 +179,15 @@ struct SettingsView: View {
     /// "@login", or where we are pointed when not signed in.
     private var who: String {
         model.user.map { "@\($0.login)" } ?? (model.relayUrl.isEmpty ? "Not signed in" : model.relayUrl)
+    }
+
+    /// Back chevron: leave the Settings tab for the tab we came from, or dismiss a sheet.
+    private func leaveSettings() {
+        if model.mainTab == .settings {
+            model.mainTab = model.tabBeforeSettings
+        } else {
+            dismiss()
+        }
     }
 
     /// Settings: the grouped cards (the Mac me pane's Settings tab).

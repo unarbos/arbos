@@ -340,7 +340,17 @@ final class AppModel: ObservableObject {
     }
     /// Telegram-style root tab (Contacts · Calls · Chats · Settings). Opening a
     /// chat from Contacts/Calls switches to Chats so `path` lands on HomeView's stack.
-    @Published var mainTab: MainTab = .chats
+    @Published var mainTab: MainTab = .chats {
+        didSet {
+            // Own profile (Settings tab) shows a back chevron; remember where to
+            // return when it is tapped (avatar on Chats, or another root tab).
+            if mainTab == .settings, oldValue != .settings {
+                tabBeforeSettings = oldValue
+            }
+        }
+    }
+    /// Tab to restore when Settings' back chevron is tapped while Settings is the root tab.
+    private(set) var tabBeforeSettings: MainTab = .chats
     /// True when the Debug fixture replaced the relay (screenshots).
     var isFixture = false
     /// Debug demo tours run once per process, whichever view instance starts them.
