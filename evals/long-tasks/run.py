@@ -452,6 +452,7 @@ class Lane(threading.Thread):
             "success": not reasons,
             "reasons": reasons,
             "ttfr_s": turns_out[0]["ttfr_s"] if turns_out else None,
+            "first_seen_s": min([x for x in (turns_out[0]["ttfr_s"], turns_out[0]["first_status_s"]) if x is not None] or [None]) if turns_out else None,
             # the first turn's route decides the cost shape: `new` = a Sonnet helper (≈ 5× an `act` turn on Haiku)
             "route_t1": next((r for t in turns_out for r in (t.get("routes") or []) if r), None),
             "ttfr_all_s": [t["ttfr_s"] for t in turns_out],
