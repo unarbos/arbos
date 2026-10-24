@@ -14,10 +14,10 @@
     {
       "prompt": "Change of plan: stop at 20, not 40. Please apply that to the run that is going now.",
       "pre_wait_s": 15,
-      "latency_max_s": 8,
+      "latency_max_s": 10,
       "background": true,
       "rubric": {
-        "criteria": "Judge the reply only: the agent acknowledges the change (stop at 20) and says it applies to the running job, without claiming it is already done.",
+        "criteria": "Judge the reply only. Pass if the agent takes the change (stop at 20) into the running job and says so — whether as an acknowledgement or, when it already acted, as the outcome (stopped at 20). Fail if it ignores the steer, says it cannot change a running job, or claims a result that is not stated.",
         "min": 3
       },
       "timeout_s": 60
