@@ -24,7 +24,6 @@ use std::rc::Rc;
 
 use crate::app::AppState;
 use crate::ui::composer;
-use crate::ui::delete_confirm;
 use crate::ui::feedback;
 use crate::ui::media_viewer;
 use crate::ui::motion::{self, PulseClock};
@@ -308,12 +307,6 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-8", palette_ui::Pick8, Some("Palette")),
         KeyBinding::new("cmd-9", palette_ui::Pick9, Some("Palette")),
         KeyBinding::new("escape", shell::Escape, None),
-        // "Delete message?": Return confirms (Esc cancels via the shell).
-        KeyBinding::new(
-            "enter",
-            delete_confirm::ConfirmDelete,
-            Some("DeleteConfirm"),
-        ),
         // Media viewer: ← → page through the album (Esc closes via the shell).
         KeyBinding::new("left", media_viewer::Prev, Some("MediaViewer")),
         KeyBinding::new("right", media_viewer::Next, Some("MediaViewer")),

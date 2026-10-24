@@ -108,20 +108,6 @@ struct MessageMenuContent: View {
     }
 }
 
-/// "Delete message?" — what the confirm says before a bubble is deleted
-/// (feedback app-01M5MXQ90MEEWF6C8W090VCZHF). Delete is always for everyone:
-/// the menu only offered it where `MessageDeleteRule` holds. A moderator
-/// deleting someone else's message sees whose it is in the title.
-enum MessageDeleteCopy {
-    static let body = "This removes it from the chat for everyone. This can’t be undone."
-
-    static func title(mine: Bool, sender: String) -> String {
-        let name = sender.trimmingCharacters(in: .whitespacesAndNewlines)
-        if mine || name.isEmpty { return "Delete message?" }
-        return "Delete \(name)’s message?"
-    }
-}
-
 /// Long-press → View thread: the held message and every reply in its chain.
 struct MessageThreadSheet: View {
     @Environment(\.theme) private var theme

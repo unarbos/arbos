@@ -8,7 +8,6 @@ pub mod channels;
 pub mod composer;
 pub mod connectors;
 pub mod create_entity;
-pub mod delete_confirm;
 pub mod devices;
 pub mod dropzone;
 pub mod feedback;

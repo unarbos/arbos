@@ -179,3 +179,22 @@ slide-in bar, so in full screen the shell paints its own three lights
 keeps clear for them (`TRAFFIC_LIGHTS_INSET`), wired to close / leave full
 screen (minimise is disabled in full screen, as AppKit disables it). Pinned by
 `traffic_lights::tests` (`full_screen_adds_no_band_above_the_strip`).
+
+## Delete is immediate — no confirm (Jacob 2026-10-24, [feedback remove-delete-confirms-2026-10-24])
+
+**Delete in the message menu and Delete in the chat-list row menu act at
+once; neither opens a "Delete …?" card, sheet or inline Cancel / Delete
+step.** The guard is *who sees the item*, not a second click: a bubble's
+Delete appears only on your own messages or where you moderate (#1526's
+relay rule, `model::may_delete_message`), and still deletes for everyone;
+a row's Delete removes a DM or an agent (with its chats) from your list,
+deletes a group you own for everyone, and leaves a group you do not own.
+The "Delete message?" card from #1502 and the row menu's "Delete “Name”?"
+prompt (#1532) were removed on Jacob's ask; the iPhone's long-press Delete
+and home-list Delete behave the same. Other sheets keep the shared modal
+layer (`ui::modal`) — this rule is about these two deletes only.
+
+Code: `message_menu::run` (Delete → `AppState::delete_message`),
+`sidebar::row_menu` (Delete → `delete_project` / `delete_people_chat` /
+`leave_group`); pinned by `message_menu::tests::delete_is_offered_only_when_allowed`
+and `sidebar::row_menu_tests::delete_fires_at_once`.

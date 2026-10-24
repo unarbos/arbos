@@ -213,10 +213,12 @@ fn run(
                 .update(cx, |s, cx| s.open_forward_message(chat_id, message_id, cx));
         }
         MessageMenuItem::Delete => {
-            // Asks first ("Delete message?", `delete_confirm`); nothing is deleted yet.
+            // Deletes at once, for everyone (Jacob, feedback
+            // remove-delete-confirms-2026-10-24: no "Delete message?" card). The
+            // menu only offers Delete where #1526's rule holds.
             shell
                 .state
-                .update(cx, |s, cx| s.open_delete_confirm(chat_id, message_id, cx));
+                .update(cx, |s, cx| s.delete_message(chat_id, message_id, cx));
         }
     }
 }

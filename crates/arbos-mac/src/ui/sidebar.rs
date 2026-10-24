@@ -1117,7 +1117,6 @@ fn render_server_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((menu_id.clone(), event.position));
-                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -1131,7 +1130,6 @@ fn render_server_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((ctrl_menu_id.clone(), event.position));
-                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -1716,7 +1714,6 @@ fn render_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((menu_id.clone(), event.position));
-                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -1730,7 +1727,6 @@ fn render_row(
                 this.menu_open = false;
                 this.chat_menu = None;
                 this.row_menu = Some((ctrl_menu_id.clone(), event.position));
-                this.row_delete_armed = false;
                 cx.notify();
             }),
         )
@@ -1835,6 +1831,42 @@ fn render_row(
 /// row (Jacob, #1258): Mute, Fork, a divider, Delete — nothing else; its
 /// settings live on the agent pane. A people row: Profile, Mute, Delete; a
 /// group row: Delete group.
+/// What the chat-list row menu's Delete does — at once, with no "Delete …?"
+/// step (Jacob, feedback remove-delete-confirms-2026-10-24; the guard is who
+/// sees the item, not a second click).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowDelete {
+    /// An agent and its chats leave your list.
+    Agent,
+    /// A DM leaves your list; a group you own is deleted for everyone.
+    PeopleChat,
+    /// A group you do not own: you leave it, it stays for the others.
+    LeaveGroup,
+}
+
+pub fn row_delete(space: &crate::model::Project, me_handle: &str) -> RowDelete {
+    if space.is_people_group() && !space.owner_handle.as_deref().is_none_or(|o| o == me_handle) {
+        RowDelete::LeaveGroup
+    } else if space.is_people() {
+        RowDelete::PeopleChat
+    } else {
+        RowDelete::Agent
+    }
+}
+
+fn run_row_delete(
+    state: &mut crate::app::AppState,
+    action: RowDelete,
+    id: crate::model::Id,
+    cx: &mut Context<crate::app::AppState>,
+) {
+    match action {
+        RowDelete::Agent => state.delete_project(id, cx),
+        RowDelete::PeopleChat => state.delete_people_chat(id, cx),
+        RowDelete::LeaveGroup => state.leave_group(id, cx),
+    }
+}
+
 pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let (space_id, at) = shell.row_menu.clone()?;
     let theme = Theme::of(cx).clone();
@@ -1902,95 +1934,10 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     let mute_id = space.id.clone();
     let fork_id = space.id.clone();
     let delete_id = space.id.clone();
-    let delete_people = is_people;
     // A group (redesign 2026-10-20): one item, "Delete group". The owner
     // deletes it for everyone; a member leaves and the group stays.
     let is_group = space.is_people_group();
-    let me_handle = state.me_handle();
-    let owns_group = is_group && space.owner_handle.as_deref().is_none_or(|o| o == me_handle);
-    let leave_instead = is_group && !owns_group;
-
-    // Delete is destructive: the first click swaps the menu for an iPhone-style
-    // "Delete “Name”?" with Cancel / Delete; Esc or a click elsewhere cancels.
-    if shell.row_delete_armed && can_delete {
-        let title = if is_people {
-            space
-                .person()
-                .filter(|_| !space.is_people_group())
-                .map(|p| p.display_name())
-                .unwrap_or_else(|| space.name.clone())
-        } else {
-            space.name.clone()
-        };
-        let note = if leave_instead {
-            "You leave the group. It stays for everyone else."
-        } else if is_group {
-            "Deletes the group for everyone in it."
-        } else if is_people {
-            "Removes this chat from your list."
-        } else {
-            "Removes this agent and its chats from your list."
-        };
-        let body = div()
-            .flex()
-            .flex_col()
-            .gap(px(10.0))
-            .p(px(8.0))
-            .child(
-                div()
-                    .text_size(px(TEXT_SMALL))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(format!("Delete “{title}”?")),
-            )
-            .child(
-                div()
-                    .text_size(px(TEXT_TINY))
-                    .text_color(theme.text_muted)
-                    .child(note),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .gap(px(6.0))
-                    .child(
-                        confirm_button("row-menu-delete-cancel", "Cancel", false, &theme).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.row_menu = None;
-                                this.row_delete_armed = false;
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                    .child(
-                        confirm_button("row-menu-delete-go", "Delete", true, &theme).on_click(
-                            cx.listener(move |this, _, _, cx| {
-                                this.row_menu = None;
-                                this.row_delete_armed = false;
-                                let id = delete_id.clone();
-                                this.state.update(cx, |s, cx| {
-                                    if leave_instead {
-                                        s.leave_group(id, cx);
-                                    } else if delete_people {
-                                        s.delete_people_chat(id, cx);
-                                    } else {
-                                        s.delete_project(id, cx);
-                                    }
-                                });
-                            }),
-                        ),
-                    ),
-            );
-        return Some(
-            div()
-                .absolute()
-                .left(at.x)
-                .top(at.y)
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(glass::frosted_menu(240.0, &theme, body)),
-        );
-    }
+    let delete_action = row_delete(&space, &state.me_handle());
 
     let mut body = div().flex().flex_col().gap(px(1.0));
     if is_group {
@@ -1998,11 +1945,17 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
         body = body
             .child(archive_row(&theme, cx))
             .child(glass::menu_divider(&theme));
+        // Jacob (feedback remove-delete-confirms-2026-10-24): no "Delete …?"
+        // step — the owner deletes the group for everyone at once, a member
+        // leaves it at once.
+        let group_id = delete_id.clone();
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete group", true, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.row_delete_armed = true;
-                    cx.notify();
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let id = group_id.clone();
+                    this.state
+                        .update(cx, |s, cx| run_row_delete(s, delete_action, id, cx));
                 }),
             ),
         );
@@ -2061,11 +2014,15 @@ pub fn row_menu(shell: &Shell, cx: &mut Context<Shell>) -> Option<Div> {
     body = body.child(archive_row(&theme, cx));
     if can_delete {
         body = body.child(glass::menu_divider(&theme));
+        // Deletes at once (Jacob, feedback remove-delete-confirms-2026-10-24):
+        // a DM leaves the list, an agent goes with its chats; no "Delete …?" step.
         body = body.child(
             glass::menu_row("row-menu-delete", "trash", "Delete", true, &theme).on_click(
-                cx.listener(|this, _, _, cx| {
-                    this.row_delete_armed = true;
-                    cx.notify();
+                cx.listener(move |this, _, _, cx| {
+                    this.row_menu = None;
+                    let id = delete_id.clone();
+                    this.state
+                        .update(cx, |s, cx| run_row_delete(s, delete_action, id, cx));
                 }),
             ),
         );
@@ -2255,6 +2212,47 @@ pub fn chat_menu(
         return None;
     }
     Some(glass::frosted_menu(CHAT_MENU_WIDTH, &theme, body).into_any_element())
+}
+
+#[cfg(test)]
+mod row_menu_tests {
+    use super::{row_delete, RowDelete};
+    use crate::model::{Project, SpaceKind};
+
+    fn space(kind: SpaceKind, owner: Option<&str>) -> Project {
+        Project {
+            id: "s1".into(),
+            name: "Agrippa".into(),
+            kind,
+            owner_handle: owner.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    /// Jacob (feedback remove-delete-confirms-2026-10-24): the row menu's
+    /// Delete maps straight to one action — there is no armed / confirm state
+    /// between the click and the delete.
+    #[test]
+    fn delete_fires_at_once() {
+        assert_eq!(
+            row_delete(&space(SpaceKind::Project, None), "me"),
+            RowDelete::Agent
+        );
+        assert_eq!(
+            row_delete(&space(SpaceKind::Dm, None), "me"),
+            RowDelete::PeopleChat
+        );
+        assert_eq!(
+            row_delete(&space(SpaceKind::Group, Some("me")), "me"),
+            RowDelete::PeopleChat,
+            "the owner deletes the group for everyone"
+        );
+        assert_eq!(
+            row_delete(&space(SpaceKind::Group, Some("sam")), "me"),
+            RowDelete::LeaveGroup,
+            "a member leaves instead"
+        );
+    }
 }
 
 #[cfg(test)]

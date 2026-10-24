@@ -51,9 +51,7 @@ struct HomeView: View {
     @State private var offlineHint = false
     /// Own-agent Share sheet from the home long-press menu.
     /// Own-agent delete confirmation from the home long-press / swipe menu.
-    @State private var deleteProject: Project? = nil
     /// People chat delete confirmation from the home long-press / swipe menu.
-    @State private var deletePeople: PeopleChat? = nil
     /// "Hidden chats N ›" footer → the list of archived agents and people chats.
     @State private var showHidden = false
     /// Goals list (long-running objectives) from the home sidebar section.
@@ -193,7 +191,7 @@ struct HomeView: View {
                                     }
                                     if !project.shared {
                                         Divider()
-                                        Button(role: .destructive) { deleteProject = project } label: {
+                                        Button(role: .destructive) { model.deleteProject(project.id) } label: {
                                             Label("Delete", systemImage: "trash")
                                         }
                                     }
@@ -290,7 +288,7 @@ struct HomeView: View {
                                     } else {
                                         Button { model.showProfile(.group(chatId: chat.id, projectId: nil)) } label: { Label("Group info", systemImage: "person.2") }
                                     }
-                                    Button(role: .destructive) { deletePeople = chat } label: {
+                                    Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
                                         Label("Delete", systemImage: "trash")
                                     }
                                 }
@@ -417,38 +415,6 @@ struct HomeView: View {
             .sheet(isPresented: $showNewChat) {
                 NewChatSheet().environmentObject(model).environment(\.theme, theme)
             }
-            .confirmationDialog(
-                "Delete \(deleteProject?.name ?? "this agent")?",
-                isPresented: Binding(
-                    get: { deleteProject != nil },
-                    set: { if !$0 { deleteProject = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button("Delete", role: .destructive) {
-                    if let p = deleteProject { model.deleteProject(p.id) }
-                    deleteProject = nil
-                }
-                Button("Cancel", role: .cancel) { deleteProject = nil }
-            } message: {
-                Text("Removes this agent and its chats from your list. Hide it with Archive if you may need it later.")
-            }
-            .confirmationDialog(
-                "Delete \(deletePeopleTitle)?",
-                isPresented: Binding(
-                    get: { deletePeople != nil },
-                    set: { if !$0 { deletePeople = nil } }
-                ),
-                titleVisibility: .visible
-            ) {
-                Button(deletePeopleLeaves ? "Leave" : "Delete", role: .destructive) {
-                    if let c = deletePeople { model.deleteOrLeavePeopleChat(c) }
-                    deletePeople = nil
-                }
-                Button("Cancel", role: .cancel) { deletePeople = nil }
-            } message: {
-                Text(deletePeopleNote)
-            }
         }
         .task {
             if DebugHooks.demo, model.isFixture {
@@ -518,21 +484,6 @@ struct HomeView: View {
 
     // MARK: Top bar
 
-    /// Title used in the people-chat delete confirm (DM name or group title).
-    private var deletePeopleTitle: String {
-        guard let c = deletePeople else { return "this chat" }
-        if c.isGroup { return c.title.isEmpty ? "this group" : c.title }
-        return c.counterpart(me: model.user?.id)?.displayName ?? c.title
-    }
-
-    /// A member of someone else's group leaves it; the owner deletes it (the Mac's rule).
-    private var deletePeopleLeaves: Bool { deletePeople.map { !model.ownsGroup($0) } ?? false }
-    private var deletePeopleNote: String {
-        guard let c = deletePeople else { return "Removes this chat from your list." }
-        if deletePeopleLeaves { return "You leave the group. It stays for everyone else." }
-        if c.isGroup { return "Deletes the group for everyone in it." }
-        return "Removes this chat from your list."
-    }
 
     /// One planned task on Home: an agent's unfinished plan step (or next step / goal title).
     private struct PlannedTask: Identifiable {
@@ -1077,8 +1028,6 @@ struct HiddenChatsView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.theme) private var theme
     @Environment(\.dismiss) private var dismiss
-    @State private var deleteProject: Project? = nil
-    @State private var deletePeople: PeopleChat? = nil
 
     private enum HiddenRow: Identifiable {
         case project(Project)
@@ -1138,7 +1087,7 @@ struct HiddenChatsView: View {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             if !project.shared {
-                                Button(role: .destructive) { deleteProject = project } label: {
+                                Button(role: .destructive) { model.deleteProject(project.id) } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
@@ -1153,7 +1102,7 @@ struct HiddenChatsView: View {
                             }
                             .tint(theme.unread)
                             if !project.shared {
-                                Button(role: .destructive) { deleteProject = project } label: {
+                                Button(role: .destructive) { model.deleteProject(project.id) } label: {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
@@ -1168,7 +1117,7 @@ struct HiddenChatsView: View {
                             Button { withAnimation { model.unarchive(peopleChatId: chat.id) } } label: {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
-                            Button(role: .destructive) { deletePeople = chat } label: {
+                            Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
@@ -1181,7 +1130,7 @@ struct HiddenChatsView: View {
                                 Label("Unarchive", systemImage: "tray.and.arrow.up")
                             }
                             .tint(theme.unread)
-                            Button(role: .destructive) { deletePeople = chat } label: {
+                            Button(role: .destructive) { model.deleteOrLeavePeopleChat(chat) } label: {
                                 Label("Delete", systemImage: "trash")
                             }
                         }
@@ -1237,53 +1186,8 @@ struct HiddenChatsView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .confirmationDialog(
-            "Delete \(deleteProject?.name ?? "this agent")?",
-            isPresented: Binding(
-                get: { deleteProject != nil },
-                set: { if !$0 { deleteProject = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("Delete", role: .destructive) {
-                if let p = deleteProject { model.deleteProject(p.id) }
-                deleteProject = nil
-            }
-            Button("Cancel", role: .cancel) { deleteProject = nil }
-        } message: {
-            Text("Removes this agent and its chats from your list.")
-        }
-        .confirmationDialog(
-            "Delete \(deletePeopleTitle)?",
-            isPresented: Binding(
-                get: { deletePeople != nil },
-                set: { if !$0 { deletePeople = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button(deletePeopleLeaves ? "Leave" : "Delete", role: .destructive) {
-                if let c = deletePeople { model.deleteOrLeavePeopleChat(c) }
-                deletePeople = nil
-            }
-            Button("Cancel", role: .cancel) { deletePeople = nil }
-        } message: {
-            Text(deletePeopleNote)
-        }
     }
 
-    private var deletePeopleTitle: String {
-        guard let c = deletePeople else { return "this chat" }
-        return peopleTitle(c)
-    }
-
-    /// A member of someone else's group leaves it; the owner deletes it (the Mac's rule).
-    private var deletePeopleLeaves: Bool { deletePeople.map { !model.ownsGroup($0) } ?? false }
-    private var deletePeopleNote: String {
-        guard let c = deletePeople else { return "Removes this chat from your list." }
-        if deletePeopleLeaves { return "You leave the group. It stays for everyone else." }
-        if c.isGroup { return "Deletes the group for everyone in it." }
-        return "Removes this chat from your list."
-    }
 
     private func peopleTitle(_ c: PeopleChat) -> String {
         if c.isGroup { return c.title.isEmpty ? "Group" : c.title }

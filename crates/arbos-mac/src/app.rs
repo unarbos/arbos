@@ -317,14 +317,6 @@ pub struct ForwardMessage {
     pub by: String,
 }
 
-/// Bubble menu → Delete (feedback app-01M5MXQ90MEEWF6C8W090VCZHF): the message
-/// the "Delete message?" confirm is open for.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeleteConfirm {
-    pub chat_id: Id,
-    pub message_id: Id,
-}
-
 /// The text line a forwarded attachment travels with (every client renders
 /// it as the card's hint, not a bubble; agents read it as prose).
 pub fn forwarded_from_text(by: &str) -> String {
@@ -517,8 +509,6 @@ pub struct AppState {
     pub media_viewer_generation: u64,
     /// Bubble menu → Forward: the message the "Forward to" picker is open for.
     pub forward_message: Option<ForwardMessage>,
-    /// Bubble menu → Delete: the "Delete message?" confirm, when open.
-    pub delete_confirm: Option<DeleteConfirm>,
     pub new_project_open: bool,
     /// Debug: per-message "Show details" disclosures in the transcript.
     pub show_details: bool,
@@ -880,7 +870,6 @@ impl AppState {
             media_viewer: None,
             media_viewer_generation: 0,
             forward_message: None,
-            delete_confirm: None,
             new_project_open: false,
             show_details: false,
             machine: Machine::default(),
@@ -4631,34 +4620,6 @@ impl AppState {
             message_id,
         });
         cx.notify();
-    }
-
-    /// Bubble menu → Delete: ask first (feedback app-01M5MXQ90MEEWF6C8W090VCZHF).
-    /// The menu only offers Delete where `may_delete_message` holds, so the
-    /// confirm's one action is always "delete for everyone".
-    pub fn open_delete_confirm(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
-        if message_id.is_empty() {
-            return;
-        }
-        self.delete_confirm = Some(DeleteConfirm {
-            chat_id,
-            message_id,
-        });
-        cx.notify();
-    }
-
-    pub fn close_delete_confirm(&mut self, cx: &mut Context<Self>) {
-        if self.delete_confirm.take().is_some() {
-            cx.notify();
-        }
-    }
-
-    /// The confirm's Delete (click or Return): delete and close.
-    pub fn confirm_delete(&mut self, cx: &mut Context<Self>) {
-        let Some(confirm) = self.delete_confirm.take() else {
-            return;
-        };
-        self.delete_message(confirm.chat_id, confirm.message_id, cx);
     }
 
     pub fn retry(&mut self, chat_id: Id, message_id: Id, cx: &mut Context<Self>) {
